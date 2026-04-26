@@ -23,7 +23,7 @@
 
 TrueAsync Server is a native PHP extension that runs a high-performance web server **directly inside PHP** — no separate process, no reverse proxy, no external daemon.
 
-The defining characteristic is **multi-protocol in a single server**: HTTP/1.1, HTTP/2, HTTP/3, WebSocket, SSE, and gRPC all share the same port and the same event loop. The protocol is selected per connection via **ALPN negotiation** (for TLS) or **HTTP Upgrade**, so clients speak whichever version they support without any router or gateway in between.
+The defining characteristic is **multi-protocol in a single server**: HTTP/1.1, HTTP/2, WebSocket, SSE, and gRPC share the same TCP port and the same event loop — protocol selection happens via **ALPN negotiation** (for TLS) or **HTTP Upgrade**. HTTP/3 runs on the same UDP port (QUIC), advertised to clients through an `Alt-Svc` response header, so they transparently upgrade on subsequent requests.
 
 This means you can serve a REST API over HTTP/2, push real-time events over Server-Sent Events, handle long-lived connections over WebSocket, and expose a gRPC endpoint — all from a single `$server->start()` call.
 
