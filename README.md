@@ -1,12 +1,25 @@
-# TrueAsync Server
-
 <p align="center">
   <img src="logo.jpg" alt="TrueAsync Server" width="250"/>
 </p>
 
-High-performance HTTP/1.1, HTTP/2, and HTTP/3 server implemented as a native PHP extension,
-built on top of the [TrueAsync](https://github.com/true-async) event loop.
-Supports WebSocket and gRPC protocols out of the box.
+<h1 align="center">TrueAsync Server</h1>
+
+<p align="center">
+  High-performance HTTP/1.1, HTTP/2, and HTTP/3 server as a native PHP extension,<br/>
+  built on the <a href="https://github.com/true-async">TrueAsync</a> event loop.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"/></a>
+  <img src="https://img.shields.io/badge/PHP-8.6%2B-blue.svg" alt="PHP 8.6+"/>
+  <img src="https://img.shields.io/badge/HTTP-1.1%20%7C%202%20%7C%203-green.svg" alt="HTTP 1.1 | 2 | 3"/>
+  <img src="https://img.shields.io/badge/TLS-1.2%20%7C%201.3-green.svg" alt="TLS 1.2 | 1.3"/>
+  <img src="https://img.shields.io/badge/WebSocket-RFC%206455-orange.svg" alt="WebSocket"/>
+  <img src="https://img.shields.io/badge/gRPC-supported-orange.svg" alt="gRPC"/>
+  <img src="https://img.shields.io/badge/security-audited-brightgreen.svg" alt="Security Audited"/>
+</p>
+
+---
 
 ## Features
 
@@ -24,7 +37,7 @@ Supports WebSocket and gRPC protocols out of the box.
 | 📋 Planned | **SSE (Server-Sent Events)** | RFC 8895, server-to-client event streaming |
 | 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |
 
-### Overall Progress
+### Development Progress
 
 ```
 HTTP/1.1   ████████████████████  100%
@@ -35,6 +48,8 @@ WebSocket  ██████░░░░░░░░░░░░░░   30%
 SSE        ░░░░░░░░░░░░░░░░░░░░    0%
 gRPC       ░░░░░░░░░░░░░░░░░░░░    0%
 ```
+
+---
 
 ## Architecture
 
@@ -69,6 +84,21 @@ own fully independent event loop — no shared state, no global locks.
 
 This model delivers predictable latency, low memory footprint under high concurrency, and
 near-linear horizontal scaling.
+
+---
+
+## Security
+
+Security is a first-class concern in TrueAsync Server.
+
+- **Security audit** — the codebase has undergone a dedicated security analysis covering HTTP parsing edge cases, TLS configuration, memory safety, and protocol-level attack vectors (HTTP request smuggling, HPACK bombing, QUIC amplification)
+- **Memory safety** — all hot paths are tested with AddressSanitizer and Valgrind; zero memory leaks policy enforced in CI
+- **TLS hardened** — TLS 1.2/1.3 only, weak cipher suites disabled, stateless session tickets, safe renegotiation disabled
+- **HTTP/3 security** — QUIC amplification limits and connection ID rotation implemented per RFC 9000 recommendations
+
+If you discover a security vulnerability, please report it privately via GitHub Security Advisories.
+
+---
 
 ## Requirements
 
@@ -107,6 +137,8 @@ $server->onRequest(function ($request, $response) {
 
 $server->start();
 ```
+
+---
 
 ## License
 
