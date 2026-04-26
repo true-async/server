@@ -10,17 +10,31 @@ Supports WebSocket and gRPC protocols out of the box.
 
 ## Features
 
-- **HTTP/1.1** — full RFC 9112 compliance, keep-alive, pipelining
-- **HTTP/2** — multiplexing, server push (via nghttp2)
-- **HTTP/3 / QUIC** — UDP-based transport (via ngtcp2 + nghttp3)
-- **TLS 1.2 / 1.3** — OpenSSL 3.x, ALPN negotiation
-- **Multipart / file uploads** — streaming zero-copy parser
-- **Backpressure** — CoDel (RFC 8289) adaptive pausing
-- **Native coroutines** — deep integration with TrueAsync async API
-- **WebSocket** — RFC 6455 compliant, upgrade from HTTP/1.1 and HTTP/2, full duplex messaging
-- **SSE (Server-Sent Events)** — RFC 8895, lightweight one-way server-to-client event streaming over HTTP
-- **gRPC** — built on HTTP/2, unary and streaming RPC (server/client/bidirectional)
-- **Zero-copy architecture** — minimal allocations on hot paths
+| Status | Feature | Details |
+|--------|---------|---------|
+| ✅ Ready | **HTTP/1.1** | Full RFC 9112 compliance, keep-alive, pipelining |
+| ✅ Ready | **TLS 1.2 / 1.3** | OpenSSL 3.x, ALPN negotiation |
+| ✅ Ready | **Multipart / file uploads** | Streaming zero-copy parser |
+| ✅ Ready | **Backpressure** | CoDel (RFC 8289) adaptive pausing |
+| ✅ Ready | **Native coroutines** | Deep integration with TrueAsync async API |
+| ✅ Ready | **Zero-copy architecture** | Minimal allocations on hot paths |
+| 🔄 In progress | **HTTP/2** | Multiplexing, server push (via nghttp2) |
+| 🔄 In progress | **HTTP/3 / QUIC** | UDP-based transport (via ngtcp2 + nghttp3) |
+| 🔄 In progress | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2, full duplex |
+| 📋 Planned | **SSE (Server-Sent Events)** | RFC 8895, server-to-client event streaming |
+| 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |
+
+### Overall Progress
+
+```
+HTTP/1.1   ████████████████████  100%
+TLS        ████████████████████  100%
+HTTP/2     ████████████░░░░░░░░   60%
+HTTP/3     ████████░░░░░░░░░░░░   40%
+WebSocket  ██████░░░░░░░░░░░░░░   30%
+SSE        ░░░░░░░░░░░░░░░░░░░░    0%
+gRPC       ░░░░░░░░░░░░░░░░░░░░    0%
+```
 
 ## Architecture
 
