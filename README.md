@@ -31,7 +31,7 @@
 | ✅ Ready | **Backpressure** | CoDel (RFC 8289) adaptive pausing |
 | ✅ Ready | **Native coroutines** | Deep integration with TrueAsync async API |
 | ✅ Ready | **Zero-copy architecture** | Minimal allocations on hot paths |
-| 🔄 In progress | **HTTP/2** | Multiplexing, server push (via nghttp2) |
+| ✅ Ready | **HTTP/2** | Multiplexing, server push (via nghttp2) |
 | 🔄 In progress | **HTTP/3 / QUIC** | UDP-based transport (via ngtcp2 + nghttp3) |
 | 🔄 In progress | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2, full duplex |
 | 📋 Planned | **SSE (Server-Sent Events)** | RFC 8895, server-to-client event streaming |
@@ -42,7 +42,7 @@
 ```
 HTTP/1.1   ████████████████████  100%
 TLS        ████████████████████  100%
-HTTP/2     ████████████░░░░░░░░   60%
+HTTP/2     ████████████████████  100%
 HTTP/3     ████████░░░░░░░░░░░░   40%
 WebSocket  ██████░░░░░░░░░░░░░░   30%
 SSE        ░░░░░░░░░░░░░░░░░░░░    0%
