@@ -1,6 +1,6 @@
 # TrueAsync Server
 
-![TrueAsync Server](logo.jpg)
+<img src="logo.jpg" alt="TrueAsync Server" width="250"/>
 
 High-performance HTTP/1.1, HTTP/2, and HTTP/3 server implemented as a native PHP extension,
 built on top of the [TrueAsync](https://github.com/true-async) event loop.
