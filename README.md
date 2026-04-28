@@ -17,6 +17,7 @@
   <img src="https://img.shields.io/badge/WebSocket-RFC%206455-orange.svg" alt="WebSocket"/>
   <img src="https://img.shields.io/badge/gRPC-supported-orange.svg" alt="gRPC"/>
   <img src="https://img.shields.io/badge/security-audited-brightgreen.svg" alt="Security Audited"/>
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg" alt="Platform: Linux | macOS | Windows"/>
 </p>
 
 ---
