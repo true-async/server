@@ -19,7 +19,6 @@
 #include "http_known_strings.h"
 #include "log/http_log.h"
 
-#include <uv.h>
 #ifdef HAVE_HTTP2
 # include <nghttp2/nghttp2.h>
 #endif
@@ -242,7 +241,6 @@ PHP_MINFO_FUNCTION(http_server)
 
 	php_info_print_table_start();
 	php_info_print_table_header(2, "Library", "Version");
-	php_info_print_table_row(2, "libuv", uv_version_string());
 #ifdef HAVE_OPENSSL
 	php_info_print_table_row(2, "OpenSSL", OpenSSL_version(OPENSSL_VERSION));
 #endif
