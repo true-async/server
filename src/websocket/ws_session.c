@@ -183,16 +183,25 @@ ws_session_t *ws_session_init(http_connection_t *conn)
         return NULL;
     }
 
-    /* Defence against unbounded message growth — wslay's default is
-     * no cap, which is a memory-exhaustion footgun for a public WS
-     * server. 1 MiB matches the value documented in
-     * docs/PLAN_WEBSOCKET.md §5 and what amphp / Python websockets
-     * use as their default. The HttpServerConfig-driven override
-     * (ws_max_message_size) lands in a follow-up commit. Oversize
-     * messages cause wslay to fail the recv with WSLAY_ERR_PROTO,
-     * and the connection is torn down — RFC 6455 §7.4.1 calls
-     * exactly this scenario "1009 Message Too Big". */
-    wslay_event_config_set_max_recv_msg_length(s->ctx, 1024 * 1024);
+    /* Pull the configured cap from the owning server's frozen config
+     * (the values were validated by the HttpServerConfig::setWs*
+     * setters). Falls back to the documented 1 MiB default when this
+     * connection has no owning server (unsupervised conn in tests).
+     * Oversize messages cause wslay to fail the recv with
+     * WSLAY_ERR_PROTO; the connection is then torn down — RFC 6455
+     * §7.4.1 calls this "1009 Message Too Big". */
+    uint64_t max_msg = 1024 * 1024;
+    if (conn != NULL && conn->server != NULL) {
+        zval *config_zv = http_server_get_config_zv(conn->server);
+        if (config_zv != NULL && Z_TYPE_P(config_zv) == IS_OBJECT) {
+            http_server_config_t *cfg =
+                http_server_config_from_obj(Z_OBJ_P(config_zv));
+            if (cfg->ws_max_message_size > 0) {
+                max_msg = cfg->ws_max_message_size;
+            }
+        }
+    }
+    wslay_event_config_set_max_recv_msg_length(s->ctx, max_msg);
 
     return s;
 }

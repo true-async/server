@@ -421,6 +421,7 @@ void http_server_on_parse_error(http_server_object *server, int status_code);
  * src/http3/ where http_server_object's layout is opaque. Two pinpoint
  * getters are clearer than exposing the whole struct. */
 HashTable          *http_server_get_protocol_handlers(http_server_object *server);
+zval               *http_server_get_config_zv(http_server_object *server);
 zend_async_scope_t *http_server_get_scope            (http_server_object *server);
 
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures

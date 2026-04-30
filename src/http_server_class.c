@@ -568,6 +568,15 @@ const http_server_view_t *http_server_view(const http_server_object *const serve
     return server != NULL ? &server->view : &http_server_view_default;
 }
 
+/* Public accessor — returns the live HttpServerConfig zval owned by
+ * the server. Cross-TU callers (websocket session init) read knobs
+ * directly off the config struct via http_server_config_from_obj.
+ * Layout of the server is private to this TU, hence the helper. */
+zval *http_server_get_config_zv(http_server_object *server)
+{
+    return server != NULL ? &server->config : NULL;
+}
+
 HashTable *http_server_get_protocol_handlers(http_server_object *server)
 {
     return server != NULL ? &server->protocol_handlers : NULL;
