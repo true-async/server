@@ -50,7 +50,7 @@ if (PHP_HTTP_SERVER == "yes") {
         "api.c " +
         "http.c ";
 
-    EXTENSION("true_async_server", "");
+    EXTENSION("true_async_server", "", true);
     ADD_SOURCES(configure_module_dirname + "/src",         http_server_sources, "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/src/core",    http_server_core,    "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/src/http1",   http_server_http1,   "true_async_server");
