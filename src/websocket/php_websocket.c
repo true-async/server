@@ -453,8 +453,65 @@ ZEND_METHOD(TrueAsync_WebSocket, close)
         Z_PARAM_STR(reason)
     ZEND_PARSE_PARAMETERS_END();
 
-    (void)code; (void)reason;
-    ws_throw_unimplemented("close");
+    websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    /* Idempotent — second close() is a no-op (RFC 6455 §5.5.1: a
+     * peer should not respond with a duplicate close frame). */
+    if (w->closed || w->session == NULL) {
+        return;
+    }
+
+    /* Resolve the close code from the union argument. The
+     * WebSocketCloseCode enum carries the value as a long property;
+     * raw int is accepted for application-specific 4000-4999 codes
+     * (RFC 6455 §7.4.2). Default = 1000 Normal. */
+    zend_long status = 1000;
+    if (code != NULL && Z_TYPE_P(code) != IS_NULL) {
+        if (Z_TYPE_P(code) == IS_OBJECT &&
+            instanceof_function(Z_OBJCE_P(code), websocket_close_code_ce)) {
+            zval *case_value = zend_enum_fetch_case_value(Z_OBJ_P(code));
+            if (case_value != NULL && Z_TYPE_P(case_value) == IS_LONG) {
+                status = Z_LVAL_P(case_value);
+            }
+        } else if (Z_TYPE_P(code) == IS_LONG) {
+            status = Z_LVAL_P(code);
+        } else {
+            zend_argument_type_error(1,
+                "must be of type TrueAsync\\WebSocketCloseCode|int");
+            RETURN_THROWS();
+        }
+    }
+
+    /* RFC 6455 §5.5.1: close-frame payload is a 2-byte status code
+     * + optional UTF-8 reason. Total payload <= 125 bytes (control-
+     * frame limit), so reason is capped at 123 bytes. */
+    const char *reason_ptr = NULL;
+    size_t      reason_len = 0;
+    if (reason != NULL) {
+        reason_ptr = ZSTR_VAL(reason);
+        reason_len = ZSTR_LEN(reason);
+        if (reason_len > 123) {
+            reason_len = 123;
+        }
+    }
+
+    ws_session_t *const s = w->session;
+    int rc = wslay_event_queue_close(s->ctx, (uint16_t)status,
+                                     (const uint8_t *)reason_ptr, reason_len);
+
+    /* Drive wslay_event_send to push the close frame onto the wire,
+     * subject to the same flusher discipline as ordinary send(). */
+    if (rc == 0 && !s->flushing) {
+        s->flushing = 1;
+        wslay_event_send(s->ctx);
+        s->flushing = 0;
+    }
+
+    /* Mark closed regardless of queue/send outcome — once close()
+     * has been called, no further send/recv should succeed.
+     * Subsequent recv() returns null after the FIFO drains
+     * (peer_closed will fire from the read-side teardown). */
+    w->closed = true;
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, isClosed)
