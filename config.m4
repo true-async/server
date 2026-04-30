@@ -20,6 +20,13 @@ PHP_ARG_ENABLE([http3],
   [yes],
   [no])
 
+PHP_ARG_ENABLE([websocket],
+  [whether to enable WebSocket support],
+  [AS_HELP_STRING([--enable-websocket],
+    [Enable WebSocket (RFC 6455) support; uses bundled wslay (default: enabled)])],
+  [yes],
+  [no])
+
 PHP_ARG_WITH([openssl],
   [for OpenSSL TLS support],
   [AS_HELP_STRING([--with-openssl@<:@=DIR@:>@],
@@ -72,6 +79,17 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   PHP_ADD_INCLUDE([$ext_srcdir/deps/llhttp/include])
   PHP_ADD_INCLUDE([$ext_builddir/deps/llhttp/include])
   AC_DEFINE([HAVE_LLHTTP], [1], [Whether llhttp is available])
+
+  dnl Bundled wslay (RFC 6455 frame parser). Gated by --enable-websocket.
+  dnl PHP_ADD_INCLUDE for wslay is intentionally deferred until after
+  dnl PHP_NEW_EXTENSION runs (see the include-path block at the bottom
+  dnl of this file) — $ext_srcdir is empty before that macro fires.
+  if test "$PHP_WEBSOCKET" = "yes"; then
+    AC_MSG_CHECKING([for wslay])
+    AC_MSG_RESULT([using bundled wslay])
+    AC_DEFINE([HAVE_WSLAY], [1], [Whether bundled wslay is available])
+    AC_DEFINE([HAVE_HTTP_SERVER_WEBSOCKET], [1], [Whether WebSocket support is enabled])
+  fi
 
   dnl Macro for checking library with pkg-config
   AC_DEFUN([PHP_CHECK_LIBRARY_PKG_CONFIG], [
@@ -371,6 +389,19 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     "
   fi
 
+  dnl WebSocket — bundled wslay sources gated on --enable-websocket.
+  dnl The strategy / public PHP API land in a follow-up commit; this
+  dnl block exists now so the dependency builds and links cleanly.
+  if test "$PHP_WEBSOCKET" = "yes"; then
+    http_server_sources="$http_server_sources
+      deps/wslay/lib/wslay_event.c
+      deps/wslay/lib/wslay_frame.c
+      deps/wslay/lib/wslay_net.c
+      deps/wslay/lib/wslay_queue.c
+      deps/wslay/lib/wslay_stack.c
+    "
+  fi
+
   dnl HTTP/3 sources — gated by the same PHP_HTTP3=yes set by the detection
   dnl block above. Files appear in the build only when H3 detection
   dnl succeeded; no internal #ifdef wrap is needed.
@@ -425,6 +456,14 @@ if test "$PHP_HTTP_SERVER" != "no"; then
 
   if test "$PHP_HTTP2" = "yes"; then
     PHP_ADD_BUILD_DIR([$ext_builddir/src/http2])
+  fi
+
+  if test "$PHP_WEBSOCKET" = "yes"; then
+    PHP_ADD_BUILD_DIR([$ext_builddir/deps/wslay/lib])
+    dnl wslay's own headers do #include <wslay/wslay.h>, so the include
+    dnl path is mandatory (unlike llhttp, which is only ever included
+    dnl via the relative "../deps/llhttp/..." path from src/).
+    PHP_ADD_INCLUDE([$ext_srcdir/deps/wslay/includes])
   fi
 
   if test "$PHP_HTTP3" = "yes"; then
