@@ -59,6 +59,26 @@ typedef struct {
     zend_string    *subprotocol;      /* selected subprotocol (NULL = none); owned */
     zend_string    *remote_address;   /* lazily computed; owned; NULL until first read */
     bool            closed;           /* close() has been called or peer CLOSE seen */
+
+    /* Pre-commit upgrade state. The handler runs BEFORE the 101
+     * response is sent so it can reject / set subprotocol via the
+     * WebSocketUpgrade handle. The first WS I/O method (recv / send
+     * / close) auto-commits: ws_commit_upgrade flushes 101, installs
+     * the WS strategy, creates the wslay session. After commit the
+     * fields below are inert.
+     *
+     * `accept_value` is computed at try_upgrade time (no I/O risk —
+     * SHA1+base64 is pure CPU) so the commit step does not need the
+     * raw client key any more.
+     *
+     * `upgrade_zv` holds a strong ref to the WebSocketUpgrade object
+     * so the handler's early WebSocketUpgrade calls (reject /
+     * setSubprotocol) write into the same struct that commit reads.
+     */
+    bool            committed;        /* 101 sent + strategy installed */
+    char            accept_value[28]; /* WS_ACCEPT_LEN; pre-computed */
+    zval            upgrade_zv;       /* IS_OBJECT WebSocketUpgrade; cleared on dispose */
+    http_connection_t *conn;          /* borrowed; needed for commit-time I/O */
     zend_object     std;
 } websocket_object;
 
@@ -83,6 +103,7 @@ typedef struct {
     zend_string       *subprotocol;   /* selected by setSubprotocol; owned */
     int                reject_status; /* 0 = accept, 4xx/5xx = reject */
     zend_string       *reject_reason; /* owned; NULL when not rejecting */
+    zend_object       *ws;            /* borrowed back-pointer to the WebSocket */
     bool               committed;     /* upgrade dispatched — further mutation throws */
     zend_object        std;
 } websocket_upgrade_object;
@@ -105,13 +126,25 @@ websocket_upgrade_from_obj(zend_object *obj) {
 #define Z_WEBSOCKET_UPGRADE_P(zv) websocket_upgrade_from_obj(Z_OBJ_P(zv))
 
 /*
- * Factory: build a freshly-initialised PHP WebSocket object backed
- * by the given session. The returned object's refcount is 1 — the
- * caller is responsible for placing it in the zval that goes to the
- * handler. Subsequent method calls reach the session via
- * Z_WEBSOCKET_P(zv)->session.
+ * Factory: build a freshly-initialised PHP WebSocket object in the
+ * pre-commit state. `accept_value` is the 28-char Sec-WebSocket-Accept
+ * computed at validation time. The session pointer stays NULL until
+ * ws_commit_upgrade() flushes the 101 and installs the WS strategy.
  */
-zend_object *websocket_object_create_for_session(ws_session_t *session);
+zend_object *websocket_object_create_pre_commit(http_connection_t *conn,
+                                                const char *accept_value);
+
+/*
+ * Drive the deferred upgrade through to completion. Invoked from the
+ * prologue of every WS I/O method (recv / send / close) when
+ * !w->committed, and as the auto-commit step in handler dispose.
+ *
+ * Returns true on a successful 101 flush + strategy install (caller
+ * proceeds). Returns false when the WebSocketUpgrade was rejected —
+ * caller should abort (an exception is set). Suspends the calling
+ * coroutine on the 101 socket write.
+ */
+bool ws_commit_upgrade(websocket_object *w);
 
 /*
  * Factory: build a WebSocketMessage from the assembled payload

@@ -16,6 +16,13 @@
 #include "Zend/zend_async_API.h"
 #include "websocket/php_websocket.h"
 #include "websocket/ws_session.h"
+#include "websocket/ws_handshake.h"
+#include "websocket/websocket_strategy.h"
+#include "core/http_connection.h"
+#include "core/http_protocol_strategy.h"
+#include "http1/http_parser.h"   /* full http_request_t for u->req->headers */
+
+#include <string.h>
 
 /*
  * SCAFFOLD ONLY.
@@ -67,6 +74,10 @@ static zend_object *websocket_create(zend_class_entry *ce)
     obj->subprotocol    = NULL;
     obj->remote_address = NULL;
     obj->closed         = true;   /* default-closed; the factory clears this */
+    obj->committed      = false;
+    obj->conn           = NULL;
+    ZVAL_UNDEF(&obj->upgrade_zv);
+    memset(obj->accept_value, 0, sizeof(obj->accept_value));
 
     zend_object_std_init(&obj->std, ce);
     object_properties_init(&obj->std, ce);
@@ -87,6 +98,9 @@ static void websocket_free(zend_object *obj)
     }
     if (w->remote_address) {
         zend_string_release(w->remote_address);
+    }
+    if (Z_TYPE(w->upgrade_zv) != IS_UNDEF) {
+        zval_ptr_dtor(&w->upgrade_zv);
     }
 
     zend_object_std_dtor(&w->std);
@@ -151,13 +165,17 @@ static void websocket_upgrade_free(zend_object *obj)
 /* }}} */
 
 /* {{{ Public factories — called from the handshake path */
-zend_object *websocket_object_create_for_session(ws_session_t *session)
+zend_object *websocket_object_create_pre_commit(http_connection_t *conn,
+                                                const char *accept_value)
 {
     zend_object *obj = websocket_create(websocket_ce);
     websocket_object *w = websocket_from_obj(obj);
 
-    w->session = session;
-    w->closed  = false;     /* fresh session — open until close() / peer FIN */
+    w->session   = NULL;          /* created by commit_upgrade */
+    w->closed    = false;         /* open from the handler's perspective */
+    w->committed = false;         /* not yet — handler runs first */
+    w->conn      = conn;
+    memcpy(w->accept_value, accept_value, sizeof(w->accept_value));
 
     return obj;
 }
@@ -204,6 +222,135 @@ zend_object *websocket_upgrade_object_create(http_connection_t *conn,
 }
 /* }}} */
 
+/* {{{ ws_commit_upgrade
+ *
+ * Drive the deferred 101 Switching Protocols send and bring the WS
+ * session online. Called from the prologue of every WS I/O method
+ * (recv / send / close) when w->committed is false, and from the
+ * handler dispose path when the handler exited without doing any
+ * WS I/O at all.
+ *
+ * Resolves whatever subprotocol setSubprotocol() picked (read from
+ * the WebSocketUpgrade object held in w->upgrade_zv), formats the
+ * 101 response, sends it via http_connection_send (suspending — we
+ * are by definition in a handler coroutine), then installs the WS
+ * strategy and creates the wslay session bound to it.
+ *
+ * On reject (WebSocketUpgrade::reject was called BEFORE any WS I/O),
+ * sets the appropriate exception and returns false. Caller propagates.
+ */
+bool ws_commit_upgrade(websocket_object *w)
+{
+    if (w->committed) {
+        return true;
+    }
+    if (w->conn == NULL) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket has no connection");
+        return false;
+    }
+
+    /* If reject() was called early, surface a closed-exception and
+     * leave it to dispose to actually emit the 4xx response. We do
+     * not send the 4xx here — we are inside an I/O method invoked
+     * by the handler, and the canonical exit is throw → unwind to
+     * handler exit → dispose path. */
+    if (Z_TYPE(w->upgrade_zv) == IS_OBJECT) {
+        websocket_upgrade_object *u =
+            websocket_upgrade_from_obj(Z_OBJ(w->upgrade_zv));
+        if (u->reject_status != 0) {
+            zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+                "WebSocket upgrade was rejected (%d)", u->reject_status);
+            return false;
+        }
+    }
+
+    /* Build the 101 with whatever subprotocol setSubprotocol picked
+     * (NULL = none). Subprotocol comes from the upgrade-object slot
+     * if a third-arg handler set it; otherwise the field stays NULL
+     * and Sec-WebSocket-Protocol is omitted. */
+    const char *subprotocol = NULL;
+    if (Z_TYPE(w->upgrade_zv) == IS_OBJECT) {
+        websocket_upgrade_object *u =
+            websocket_upgrade_from_obj(Z_OBJ(w->upgrade_zv));
+        if (u->subprotocol != NULL) {
+            subprotocol = ZSTR_VAL(u->subprotocol);
+            /* Mirror the selected subprotocol onto the WebSocket
+             * object so getSubprotocol() can serve it without
+             * reaching back through the upgrade handle (which may
+             * be cleared). */
+            w->subprotocol = zend_string_copy(u->subprotocol);
+        }
+    }
+
+    zend_string *resp = ws_handshake_build_101_response(w->accept_value,
+                                                        subprotocol);
+    if (resp == NULL) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket: out of memory building 101 response");
+        return false;
+    }
+
+    /* Suspending send — we are in coroutine context (handler called
+     * us) so this is the canonical use of http_connection_send. */
+    bool ok = http_connection_send(w->conn,
+                                   ZSTR_VAL(resp), ZSTR_LEN(resp));
+    zend_string_release(resp);
+
+    if (!ok) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket: peer closed before 101 could be flushed");
+        w->closed = true;
+        return false;
+    }
+
+    /* 101 is on the wire. Install the WS strategy + create session.
+     * After this, future read callbacks route bytes into ws_session
+     * and the recv/send/close paths can do their thing. */
+    http_connection_t *conn = w->conn;
+    if (conn->strategy != NULL) {
+        if (conn->strategy->cleanup) {
+            conn->strategy->cleanup(conn);
+        }
+        http_protocol_strategy_destroy(conn->strategy);
+        conn->strategy = NULL;
+    }
+    if (conn->parser != NULL) {
+        parser_pool_return(conn->parser);
+        conn->parser = NULL;
+    }
+    conn->current_request = NULL;
+
+    conn->strategy      = http_protocol_strategy_websocket_create();
+    conn->protocol_type = HTTP_PROTOCOL_WEBSOCKET;
+    if (conn->strategy == NULL) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket: out of memory installing strategy");
+        w->closed = true;
+        return false;
+    }
+
+    ws_session_t *session = ws_strategy_ensure_session(conn->strategy, conn);
+    if (session == NULL) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket: out of memory creating session");
+        w->closed = true;
+        return false;
+    }
+    w->session   = session;
+    w->committed = true;
+
+    /* Re-arm the connection's read loop. The earlier read callback
+     * (under the H1 strategy) returned false from
+     * handle_read_completion (parser_is_complete was true for the
+     * upgrade GET) which stopped the multishot read; the new WS
+     * strategy needs its own read subscription. */
+    http_connection_read(conn);
+
+    return true;
+}
+/* }}} */
+
 #include "../../stubs/WebSocketCloseCode.php_arginfo.h"
 #include "../../stubs/WebSocketMessage.php_arginfo.h"
 #include "../../stubs/WebSocketUpgrade.php_arginfo.h"
@@ -247,8 +394,26 @@ ZEND_METHOD(TrueAsync_WebSocketUpgrade, reject)
         Z_PARAM_STR(reason)
     ZEND_PARSE_PARAMETERS_END();
 
-    (void)status; (void)reason;
-    ws_throw_unimplemented("upgrade reject");
+    websocket_upgrade_object *const u = Z_WEBSOCKET_UPGRADE_P(ZEND_THIS);
+    if (u->committed) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "WebSocketUpgrade: upgrade already committed; "
+            "reject() must be called before any WebSocket I/O");
+        RETURN_THROWS();
+    }
+    if (status < 400 || status > 599) {
+        zend_argument_value_error(1,
+            "must be a 4xx or 5xx HTTP status code");
+        RETURN_THROWS();
+    }
+    if (u->reject_reason) {
+        zend_string_release(u->reject_reason);
+        u->reject_reason = NULL;
+    }
+    u->reject_status = (int)status;
+    if (reason != NULL && ZSTR_LEN(reason) > 0) {
+        u->reject_reason = zend_string_copy(reason);
+    }
 }
 
 ZEND_METHOD(TrueAsync_WebSocketUpgrade, setSubprotocol)
@@ -257,20 +422,74 @@ ZEND_METHOD(TrueAsync_WebSocketUpgrade, setSubprotocol)
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(name)
     ZEND_PARSE_PARAMETERS_END();
-    (void)name;
-    ws_throw_unimplemented("setSubprotocol");
+
+    websocket_upgrade_object *const u = Z_WEBSOCKET_UPGRADE_P(ZEND_THIS);
+    if (u->committed) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "WebSocketUpgrade: upgrade already committed; "
+            "setSubprotocol() must be called before any WebSocket I/O");
+        RETURN_THROWS();
+    }
+    if (ZSTR_LEN(name) == 0) {
+        zend_argument_value_error(1, "must not be empty");
+        RETURN_THROWS();
+    }
+    if (u->subprotocol) {
+        zend_string_release(u->subprotocol);
+    }
+    u->subprotocol = zend_string_copy(name);
+}
+
+/* Parse a comma-separated header value into individual tokens (trimmed),
+ * appending each as a string element of `arr`. Used by
+ * getOfferedSubprotocols / getOfferedExtensions; both header values
+ * follow the comma-separated-list grammar of RFC 7230 §3.2. */
+static void parse_header_token_list(HashTable *headers,
+                                    const char *name, size_t name_len,
+                                    zval *arr)
+{
+    if (headers == NULL) return;
+    zval *val = zend_hash_str_find(headers, name, name_len);
+    if (val == NULL || Z_TYPE_P(val) != IS_STRING) return;
+
+    const char *s = Z_STRVAL_P(val);
+    size_t len = Z_STRLEN_P(val), i = 0;
+    while (i < len) {
+        while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == ',')) i++;
+        size_t start = i;
+        while (i < len && s[i] != ',') i++;
+        size_t end = i;
+        while (end > start && (s[end - 1] == ' ' || s[end - 1] == '\t')) end--;
+        if (end > start) {
+            zval token;
+            ZVAL_STRINGL(&token, s + start, end - start);
+            add_next_index_zval(arr, &token);
+        }
+    }
 }
 
 ZEND_METHOD(TrueAsync_WebSocketUpgrade, getOfferedSubprotocols)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     array_init(return_value);
+    websocket_upgrade_object *const u = Z_WEBSOCKET_UPGRADE_P(ZEND_THIS);
+    if (u->req != NULL) {
+        parse_header_token_list(u->req->headers,
+            "sec-websocket-protocol", sizeof("sec-websocket-protocol") - 1,
+            return_value);
+    }
 }
 
 ZEND_METHOD(TrueAsync_WebSocketUpgrade, getOfferedExtensions)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     array_init(return_value);
+    websocket_upgrade_object *const u = Z_WEBSOCKET_UPGRADE_P(ZEND_THIS);
+    if (u->req != NULL) {
+        parse_header_token_list(u->req->headers,
+            "sec-websocket-extensions", sizeof("sec-websocket-extensions") - 1,
+            return_value);
+    }
 }
 /* }}} */
 
@@ -285,6 +504,12 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
     ZEND_PARSE_PARAMETERS_NONE();
 
     websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    /* Auto-commit on first WS I/O. If reject() was called, this
+     * throws WebSocketClosedException and recv() propagates. */
+    if (!w->committed && !ws_commit_upgrade(w)) {
+        RETURN_THROWS();
+    }
     ws_session_t *const session = w->session;
 
     if (session == NULL || w->closed) {
@@ -374,6 +599,10 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
 static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
 {
     websocket_object *const w = Z_WEBSOCKET_P(zv_this);
+
+    if (!w->committed && !ws_commit_upgrade(w)) {
+        return;   /* exception already set */
+    }
     if (w->session == NULL || w->closed) {
         zend_throw_exception_ex(websocket_closed_exception_ce, 0,
             "Cannot send on a closed WebSocket");
@@ -457,7 +686,15 @@ ZEND_METHOD(TrueAsync_WebSocket, close)
 
     /* Idempotent — second close() is a no-op (RFC 6455 §5.5.1: a
      * peer should not respond with a duplicate close frame). */
-    if (w->closed || w->session == NULL) {
+    if (w->closed) {
+        return;
+    }
+    /* close() before any other WS I/O still triggers the upgrade
+     * commit — we need the session up to send a CLOSE frame. */
+    if (!w->committed && !ws_commit_upgrade(w)) {
+        return;   /* exception already set; the upgrade was rejected */
+    }
+    if (w->session == NULL) {
         return;
     }
 

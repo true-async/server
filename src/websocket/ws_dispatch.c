@@ -29,46 +29,29 @@
 
 extern zval *http_request_create_from_parsed(http_request_t *req);
 
-/* Per-handler-coroutine context. Mirrors http1_request_ctx_t, minus
- * the response zval — WebSocket has no HTTP response after 101. */
+/*
+ * Per-handler-coroutine context.
+ *
+ * The new (deferred-101) flow: try_upgrade spawns this coroutine
+ * immediately, BEFORE any 101 has been sent. The handler may run
+ * arbitrary code, possibly mutating the WebSocketUpgrade object
+ * (reject / setSubprotocol). The first WS I/O method (recv / send
+ * / close) auto-commits via ws_commit_upgrade — that is where the
+ * 101 actually goes on the wire and the WS strategy installs.
+ *
+ * Holds three zvals: the WebSocket the handler operates on, the
+ * upgrade HttpRequest passed as the second argument, and the
+ * WebSocketUpgrade passed as the (optional, ignored on 2-arg
+ * handlers) third argument. PHP's closures silently drop excess
+ * positional args, so we always pass three — no Reflection arity
+ * dance required.
+ */
 typedef struct {
     http_connection_t *conn;
     zval               request_zv;
     zval               websocket_zv;
+    zval               upgrade_zv;
 } ws_handler_ctx_t;
-
-/* Pending-write context attached to conn->io->event as a callback.
- *
- * Why this exists: we are called from on_request_ready, which runs
- * inside the read-callback on the event loop — NOT in a coroutine.
- * The project's suspending I/O helper (async_io_req_await) requires
- * coroutine context; calling it here throws "coroutine cannot be
- * stopped from Scheduler context". The framework convention here is
- * non-suspending writes via ZEND_ASYNC_IO_WRITE plus a completion
- * callback attached to io->event — same pattern http_log uses for
- * its writer (see src/log/http_log.c writer_complete_cb).
- *
- * Lifecycle:
- *   - try_upgrade allocates this struct, fills it in, submits the
- *     write, and attaches itself to io->event. Returns true; never
- *     blocks.
- *   - When the write completes, libuv NOTIFYs every callback on
- *     io->event. Our handler filters by req identity (the same
- *     defensive check writer_complete_cb does).
- *   - On match: detach from io->event, free buffer, dispose req,
- *     and either install the WS strategy + spawn the handler
- *     coroutine (accept path) or just tear down (reject path).
- *   - struct itself is efree'd at the end of the completion handler.
- */
-typedef struct {
-    zend_async_event_callback_t base;
-    http_connection_t          *conn;
-    http_request_t             *req;          /* borrowed; owned by parser pool */
-    zend_fcall_t               *handler;      /* borrowed; owned by server */
-    zend_async_io_req_t        *active_req;   /* identity for filter match */
-    char                       *buf;          /* owned heap copy of response bytes */
-    bool                        accept;       /* true → post-101 install WS + spawn */
-} ws_pending_write_t;
 
 /* {{{ Forward decls */
 static void ws_handler_coroutine_entry(void);
@@ -81,20 +64,22 @@ static void ws_pending_write_complete_cb(zend_async_event_t *event,
 static void ws_pending_write_dispose(zend_async_event_callback_t *callback,
                                      zend_async_event_t *event);
 
-static bool ws_submit_write(http_connection_t *conn,
-                            http_request_t    *req,
-                            zend_fcall_t      *handler,
-                            char              *buf,        /* takes ownership */
-                            size_t             len,
-                            bool               accept);
+static bool ws_submit_reject_write(http_connection_t *conn,
+                                   char *buf, size_t len);
 
 static zend_string *build_error_response(int status, const char *extra_header);
-
-static void ws_install_strategy(http_connection_t *conn);
-static void ws_spawn_handler_coroutine(http_connection_t *conn,
-                                       http_request_t *req,
-                                       zend_fcall_t *handler);
 /* }}} */
+
+/* Reject-path async write context. The reject flow lives entirely
+ * in event-loop context: ws_dispatch_try_upgrade builds a 4xx,
+ * submits an async write, and this callback frees the buffer when
+ * the write completes. No coroutine ever runs on the reject path. */
+typedef struct {
+    zend_async_event_callback_t base;
+    http_connection_t          *conn;
+    zend_async_io_req_t        *active_req;
+    char                       *buf;
+} ws_pending_write_t;
 
 bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
 {
@@ -105,11 +90,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
     }
 
     /* TLS WS (wss://) routes through tls_push_and_maybe_flush instead
-     * of raw IO_WRITE; that path lands with the WSS commit. For now,
-     * decline to handle WS upgrade attempts on TLS connections — the
-     * H1 dispatch will return whatever the user's HTTP handler does
-     * (typically 404), which is correct for a server that hasn't yet
-     * advertised wss://. */
+     * of raw IO_WRITE; that path lands with the WSS commit. */
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
         return false;
@@ -122,21 +103,18 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_WEBSOCKET)
         : NULL;
 
-    /* No WS handler registered → respond 426 so the client knows
-     * upgrade is not supported. Also covers the case of a malformed
-     * upgrade reaching a server with no WS handler at all. */
+    /* No WS handler registered → 426. */
     if (handler == NULL) {
         zend_string *resp = build_error_response(426,
             "Sec-WebSocket-Version: 13\r\n");
-        if (resp == NULL) {
-            conn->keep_alive = false;
-            return true;
-        }
+        if (resp == NULL) { conn->keep_alive = false; return true; }
         char *buf = emalloc(ZSTR_LEN(resp));
         memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
         size_t len = ZSTR_LEN(resp);
         zend_string_release(resp);
-        ws_submit_write(conn, req, NULL, buf, len, /*accept=*/false);
+        if (!ws_submit_reject_write(conn, buf, len)) {
+            conn->keep_alive = false;
+        }
         return true;
     }
 
@@ -151,27 +129,26 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
             default:                              status = 400; extra = NULL; break;
         }
         zend_string *resp = build_error_response(status, extra);
-        if (resp == NULL) {
-            conn->keep_alive = false;
-            return true;
-        }
+        if (resp == NULL) { conn->keep_alive = false; return true; }
         char *buf = emalloc(ZSTR_LEN(resp));
         memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
         size_t len = ZSTR_LEN(resp);
         zend_string_release(resp);
-        ws_submit_write(conn, req, NULL, buf, len, /*accept=*/false);
+        if (!ws_submit_reject_write(conn, buf, len)) {
+            conn->keep_alive = false;
+        }
         return true;
     }
 
-    /* Accept path. ws_handshake_validate already verified the key
-     * header is present and well-formed; pull the value. */
+    /* Accept path — pre-compute Sec-WebSocket-Accept now (pure CPU,
+     * no I/O) so the deferred commit step doesn't need to keep the
+     * raw client-key around. */
     zval *const key_zv = zend_hash_str_find(req->headers,
         "sec-websocket-key", sizeof("sec-websocket-key") - 1);
     if (UNEXPECTED(key_zv == NULL || Z_TYPE_P(key_zv) != IS_STRING)) {
         conn->keep_alive = false;
         return true;
     }
-
     char accept_value[WS_ACCEPT_LEN];
     if (ws_handshake_compute_accept(Z_STRVAL_P(key_zv), Z_STRLEN_P(key_zv),
                                     accept_value) != 0) {
@@ -179,38 +156,62 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         return true;
     }
 
-    /* Subprotocol selection lands with the WebSocketUpgrade-driven
-     * commit; we do not echo Sec-WebSocket-Protocol here. */
-    zend_string *resp = ws_handshake_build_101_response(accept_value, NULL);
-    if (resp == NULL) {
+    /* Build the PHP objects the handler will see and spawn the
+     * coroutine. The WebSocket starts in pre-commit state — its
+     * recv/send/close prologue calls ws_commit_upgrade on first use,
+     * which is when the 101 actually goes on the wire. */
+    ws_handler_ctx_t *ctx = ecalloc(1, sizeof(*ctx));
+    ctx->conn = conn;
+
+    zval *req_obj = http_request_create_from_parsed(req);
+    ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
+    efree(req_obj);
+
+    zend_object *ws_obj  = websocket_object_create_pre_commit(conn,
+                                                              accept_value);
+    ZVAL_OBJ(&ctx->websocket_zv, ws_obj);
+
+    zend_object *up_obj  = websocket_upgrade_object_create(conn, req);
+    ZVAL_OBJ(&ctx->upgrade_zv, up_obj);
+
+    /* Cross-link: the WebSocket needs to read the upgrade's
+     * subprotocol/reject decision at commit time, and the upgrade
+     * object holds a back-pointer to the WebSocket so reject() can
+     * mark it. The websocket holds an owning ref (addref). */
+    websocket_object *w = websocket_from_obj(ws_obj);
+    Z_ADDREF(ctx->upgrade_zv);
+    ZVAL_COPY_VALUE(&w->upgrade_zv, &ctx->upgrade_zv);
+    websocket_upgrade_from_obj(up_obj)->ws = ws_obj;
+
+    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+    if (coroutine == NULL) {
+        zval_ptr_dtor(&ctx->request_zv);
+        zval_ptr_dtor(&ctx->websocket_zv);
+        zval_ptr_dtor(&ctx->upgrade_zv);
+        efree(ctx);
         conn->keep_alive = false;
         return true;
     }
-    char *buf = emalloc(ZSTR_LEN(resp));
-    memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
-    size_t len = ZSTR_LEN(resp);
-    zend_string_release(resp);
 
-    /* Submit the 101 write. The completion callback is what installs
-     * the WS strategy and spawns the handler coroutine — doing it
-     * BEFORE the 101 hits the wire would race the strategy swap
-     * against any pipelined frames the client may already be
-     * sending, and risks the user handler running before the client
-     * has confirmation that the upgrade succeeded. */
-    if (!ws_submit_write(conn, req, handler, buf, len, /*accept=*/true)) {
-        conn->keep_alive = false;
-        return true;
-    }
+    coroutine->internal_entry   = ws_handler_coroutine_entry;
+    coroutine->extended_data    = ctx;
+    coroutine->extended_dispose = ws_handler_coroutine_dispose;
 
+    conn->handler = handler;
+    conn->handler_refcount++;
+
+    ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
     return true;
 }
 
-/* {{{ build_error_response — helper for 4xx/5xx; returns owned zend_string */
+/* {{{ build_error_response */
 static zend_string *build_error_response(int status, const char *extra_header)
 {
     const char *reason;
     switch (status) {
         case 400: reason = "Bad Request";        break;
+        case 401: reason = "Unauthorized";       break;
+        case 403: reason = "Forbidden";          break;
         case 405: reason = "Method Not Allowed"; break;
         case 426: reason = "Upgrade Required";   break;
         default:  reason = "Bad Request";        break;
@@ -241,22 +242,14 @@ static zend_string *build_error_response(int status, const char *extra_header)
 }
 /* }}} */
 
-/* {{{ ws_submit_write
+/* {{{ ws_submit_reject_write
  *
- * Build a ws_pending_write_t, kick off the non-blocking write, and
- * register the completion callback on conn->io->event. Takes
- * ownership of `buf` (always — even on failure, frees it).
- *
- * Returns false only if the request submit / callback attach fails;
- * in that case the caller must mark the connection as keep_alive=false
- * (no completion will fire, so no further bookkeeping happens).
+ * Queue a 4xx write from event-loop context (no coroutine). Used by
+ * try_upgrade for the immediate-reject paths and by handler dispose
+ * for the upgrade-was-rejected path. Takes ownership of `buf`.
  */
-static bool ws_submit_write(http_connection_t *conn,
-                            http_request_t    *req,
-                            zend_fcall_t      *handler,
-                            char              *buf,
-                            size_t             len,
-                            bool               accept)
+static bool ws_submit_reject_write(http_connection_t *conn,
+                                   char *buf, size_t len)
 {
     ws_pending_write_t *pw = (ws_pending_write_t *)
         ZEND_ASYNC_EVENT_CALLBACK_EX(ws_pending_write_complete_cb,
@@ -267,38 +260,20 @@ static bool ws_submit_write(http_connection_t *conn,
     }
     pw->base.dispose = ws_pending_write_dispose;
     pw->conn         = conn;
-    pw->req          = req;
-    pw->handler      = handler;
     pw->buf          = buf;
-    pw->accept       = accept;
     pw->active_req   = ZEND_ASYNC_IO_WRITE(conn->io, buf, len);
     if (pw->active_req == NULL) {
-        efree(pw);
-        efree(buf);
-        return false;
+        efree(pw); efree(buf); return false;
     }
-
     if (!conn->io->event.add_callback(&conn->io->event, &pw->base)) {
-        /* libuv has the req queued — we cannot cancel it cleanly here.
-         * Best we can do is leave the buffer alive until the reactor
-         * drops the req on connection close. Mark the conn so the
-         * read loop doesn't dispatch into stale state. */
         pw->active_req->dispose(pw->active_req);
-        efree(pw);
-        efree(buf);
+        efree(pw); efree(buf);
         return false;
     }
-
     return true;
 }
 /* }}} */
 
-/* {{{ ws_pending_write_complete_cb
- *
- * io->event NOTIFY broadcasts to every callback (read AND write
- * completions on the same handle), so we filter by req identity —
- * same defensive check writer_complete_cb does.
- */
 static void ws_pending_write_complete_cb(
     zend_async_event_t *event,
     zend_async_event_callback_t *callback,
@@ -307,163 +282,43 @@ static void ws_pending_write_complete_cb(
 {
     (void)event;
     ws_pending_write_t *pw = (ws_pending_write_t *)callback;
-
-    /* Not our completion — leave it for whoever it belongs to. */
     if (pw->active_req == NULL || result != pw->active_req) {
         return;
     }
-
     http_connection_t *conn = pw->conn;
     zend_async_io_req_t *req_io = pw->active_req;
     pw->active_req = NULL;
 
-    /* One-shot — detach from io->event before doing any further work
-     * so a re-entrant NOTIFY (e.g. caused by spawning a coroutine
-     * that itself touches io) cannot land here twice. */
     (void)conn->io->event.del_callback(&conn->io->event, &pw->base);
 
-    const bool wrote_ok = (exception == NULL && req_io->exception == NULL);
     if (req_io->exception != NULL) {
         OBJ_RELEASE(req_io->exception);
         req_io->exception = NULL;
     }
     req_io->dispose(req_io);
+    if (pw->buf) { efree(pw->buf); pw->buf = NULL; }
 
-    /* Buffer freed unconditionally — libuv has either flushed it to
-     * the kernel or the connection is going away; either way we own
-     * it again at this point. */
-    efree(pw->buf);
-    pw->buf = NULL;
-
-    const bool accept       = pw->accept;
-    http_request_t *const req = pw->req;
-    zend_fcall_t   *const hnd = pw->handler;
+    /* Reject path always closes. */
+    conn->keep_alive = false;
 
     efree(pw);
-
-    if (!wrote_ok) {
-        /* Write failed — connection is effectively dead. The next
-         * read attempt will fail and trigger the natural teardown
-         * path; we just clear keep_alive to be explicit. */
-        conn->keep_alive = false;
-        return;
-    }
-
-    if (accept) {
-        /* 101 is on the wire. Swap strategies — any further bytes
-         * arriving on this connection now feed into ws_session
-         * via the WS strategy. Then spawn the user handler. */
-        ws_install_strategy(conn);
-        ws_spawn_handler_coroutine(conn, req, hnd);
-    } else {
-        /* Reject path — error response delivered, close. */
-        conn->keep_alive = false;
-    }
+    (void)exception;
 }
-/* }}} */
 
 static void ws_pending_write_dispose(
     zend_async_event_callback_t *callback, zend_async_event_t *event)
 {
-    /* Memory is freed inside the completion handler. Nothing to do
-     * here. */
-    (void)callback;
-    (void)event;
+    (void)callback; (void)event;
 }
-
-/* {{{ ws_install_strategy
- *
- * Tear down the H1 strategy and install the WS one. After this call
- * conn->strategy->feed routes incoming bytes into ws_session_feed.
- */
-static void ws_install_strategy(http_connection_t *conn)
-{
-    if (conn->strategy != NULL) {
-        if (conn->strategy->cleanup) {
-            conn->strategy->cleanup(conn);
-        }
-        http_protocol_strategy_destroy(conn->strategy);
-        conn->strategy = NULL;
-    }
-
-    /* Release the H1 parser. The connection's read pipeline checks
-     * `conn->parser && parser_is_complete` to decide whether to keep
-     * reading; for an upgrade GET, llhttp DOES fire on_message_complete
-     * after on_headers_complete (the request has no body, so it's
-     * "complete" by llhttp's reckoning) — request->complete is true,
-     * the read multishot gets stopped, and no further bytes ever
-     * reach this connection. Returning the parser to the pool clears
-     * conn->parser so the same check returns false and the read loop
-     * stays alive for incoming WS frames. */
-    if (conn->parser != NULL) {
-        parser_pool_return(conn->parser);
-        conn->parser = NULL;
-    }
-    /* Same reasoning: the connection's `current_request` was the
-     * upgrade GET, which we have now consumed. Clear it so any
-     * cross-cutting code that walks current_request doesn't trip on
-     * a stale pointer (the request struct itself is owned by the
-     * parser pool and was just released above). */
-    conn->current_request = NULL;
-
-    conn->strategy      = http_protocol_strategy_websocket_create();
-    conn->protocol_type = HTTP_PROTOCOL_WEBSOCKET;
-
-    /* Re-arm the read multishot. The previous read callback returned
-     * false from handle_read_completion (because parser_is_complete
-     * was true under the H1 parser), which stopped the multishot;
-     * now that the parser is gone the WS strategy needs its own read
-     * subscription to receive the first frame. */
-    http_connection_read(conn);
-}
-/* }}} */
-
-/* {{{ ws_spawn_handler_coroutine */
-static void ws_spawn_handler_coroutine(http_connection_t *conn,
-                                       http_request_t *req,
-                                       zend_fcall_t *handler)
-{
-    ws_handler_ctx_t *ctx = ecalloc(1, sizeof(*ctx));
-    ctx->conn = conn;
-
-    zval *req_obj = http_request_create_from_parsed(req);
-    ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
-    efree(req_obj);
-
-    /* Eagerly create the wslay session so it's available the moment
-     * the handler runs — recv() needs to find it without races
-     * against the lazy-init in ws_feed(). */
-    ws_session_t *session = ws_strategy_ensure_session(conn->strategy, conn);
-    zend_object *ws_obj = websocket_object_create_for_session(session);
-    ZVAL_OBJ(&ctx->websocket_zv, ws_obj);
-
-    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
-    if (coroutine == NULL) {
-        zval_ptr_dtor(&ctx->request_zv);
-        zval_ptr_dtor(&ctx->websocket_zv);
-        efree(ctx);
-        conn->keep_alive = false;
-        return;
-    }
-
-    coroutine->internal_entry   = ws_handler_coroutine_entry;
-    coroutine->extended_data    = ctx;
-    coroutine->extended_dispose = ws_handler_coroutine_dispose;
-
-    conn->handler = handler;
-
-    /* Pin conn for the handler — same discipline as the H1/H2 paths. */
-    conn->handler_refcount++;
-
-    ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
-}
-/* }}} */
 
 /* {{{ ws_handler_coroutine_entry
  *
- * Coroutine body: invoke the user PHP handler with (WebSocket,
- * HttpRequest). Three-arg WebSocketUpgrade injection lands in a
- * follow-up commit — for now we always pass two arguments.
+ * Invoke the user PHP handler with three positional args:
+ *   ($ws, $req, $upgrade)
+ * 2-arg closures silently drop $upgrade (PHP closure semantics).
+ * The handler runs entirely BEFORE the 101 has been sent — auto-commit
+ * fires from the prologue of the first WS I/O method (recv/send/close)
+ * the handler invokes.
  */
 static void ws_handler_coroutine_entry(void)
 {
@@ -471,13 +326,14 @@ static void ws_handler_coroutine_entry(void)
     ws_handler_ctx_t *ctx = (ws_handler_ctx_t *)coroutine->extended_data;
     http_connection_t *conn = ctx->conn;
 
-    zval params[2], retval;
+    zval params[3], retval;
     ZVAL_COPY_VALUE(&params[0], &ctx->websocket_zv);
     ZVAL_COPY_VALUE(&params[1], &ctx->request_zv);
+    ZVAL_COPY_VALUE(&params[2], &ctx->upgrade_zv);
     ZVAL_UNDEF(&retval);
 
     call_user_function(NULL, NULL, &conn->handler->fci.function_name,
-                       &retval, 2, params);
+                       &retval, 3, params);
 
     zval_ptr_dtor(&retval);
 }
@@ -485,10 +341,24 @@ static void ws_handler_coroutine_entry(void)
 
 /* {{{ ws_handler_coroutine_dispose
  *
- * Mark the WebSocket closed, release PHP objects, decrement
- * handler_refcount. CLOSE-frame send + FIN land with the
- * close-handshake commit — for now we just flag keep_alive=false
- * and let the read-side natural teardown handle the rest.
+ * End-of-handler bookkeeping. Three paths:
+ *
+ *   1. Handler did some WS I/O → ws_commit_upgrade already fired
+ *      somewhere inside its body. Nothing to do here besides flag
+ *      the connection for close and decrement the pin.
+ *
+ *   2. Handler called WebSocketUpgrade::reject(N) and exited.
+ *      Send the corresponding 4xx response asynchronously (we are
+ *      in coroutine dispose context, but the write itself is
+ *      submitted as a non-blocking IO_WRITE + completion callback —
+ *      no need to suspend the dispose). Then close.
+ *
+ *   3. Handler returned without doing any WS I/O AND without
+ *      rejecting (e.g. an empty 2-arg handler). Auto-commit the
+ *      upgrade: send 101 (suspending — dispose runs in coroutine
+ *      context just like h1 dispose does), then close. The peer
+ *      sees a successful upgrade followed by an immediate close,
+ *      which is well-defined behaviour.
  */
 static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
@@ -499,14 +369,46 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     http_connection_t *conn = ctx->conn;
     coroutine->extended_data = NULL;
 
+    websocket_object         *w = NULL;
+    websocket_upgrade_object *u = NULL;
     if (Z_TYPE(ctx->websocket_zv) == IS_OBJECT) {
-        websocket_object *w = websocket_from_obj(Z_OBJ(ctx->websocket_zv));
+        w = websocket_from_obj(Z_OBJ(ctx->websocket_zv));
+    }
+    if (Z_TYPE(ctx->upgrade_zv) == IS_OBJECT) {
+        u = websocket_upgrade_from_obj(Z_OBJ(ctx->upgrade_zv));
+    }
+
+    /* Case 2: reject was called pre-commit. Send the 4xx async. */
+    if (u != NULL && !w->committed && u->reject_status != 0) {
+        zend_string *resp = build_error_response(u->reject_status, NULL);
+        if (resp != NULL) {
+            char *buf = emalloc(ZSTR_LEN(resp));
+            memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
+            size_t len = ZSTR_LEN(resp);
+            zend_string_release(resp);
+            (void)ws_submit_reject_write(conn, buf, len);
+        }
+    }
+    /* Case 3: nothing happened; auto-commit so the client at least
+     * sees the 101 before close. ws_commit_upgrade is suspending,
+     * which is allowed in dispose (h1 dispose also calls suspending
+     * I/O). */
+    else if (w != NULL && !w->committed) {
+        (void)ws_commit_upgrade(w);
+        if (EG(exception) != NULL) {
+            zend_clear_exception();
+        }
+    }
+
+    /* Mark the WebSocket as closed regardless of path. */
+    if (w != NULL) {
         w->closed  = true;
         w->session = NULL;
     }
 
     zval_ptr_dtor(&ctx->request_zv);
     zval_ptr_dtor(&ctx->websocket_zv);
+    zval_ptr_dtor(&ctx->upgrade_zv);
     efree(ctx);
 
     conn->keep_alive = false;
