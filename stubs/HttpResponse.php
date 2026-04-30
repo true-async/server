@@ -246,6 +246,76 @@ final class HttpResponse
      */
     public function end(?string $data = null): void {}
 
+    // === Server-Sent Events (text/event-stream) ===
+
+    /**
+     * Switch the response into SSE mode and commit headers.
+     *
+     * Sets `Content-Type: text/event-stream`, `Cache-Control: no-cache,
+     * no-transform` and `X-Accel-Buffering: no` (the last one tells nginx
+     * not to buffer the response — without it events stall behind the
+     * proxy buffer until it fills). Then commits the response just like
+     * the first send() would: status + headers go on the wire, no DATA
+     * frame is emitted yet.
+     *
+     * If the handler has already set a Content-Type to anything other
+     * than text/event-stream, throws — sseStart() is an explicit switch
+     * into SSE and a conflicting type indicates a bug.
+     *
+     * After sseStart() the response is in streaming mode; setStatusCode,
+     * setHeader, setBody, write, json, html, redirect all throw.
+     *
+     * @return static
+     */
+    public function sseStart(): static {}
+
+    /**
+     * Format and send one Server-Sent Event.
+     *
+     * Multiline `$data` is split on `\n`/`\r\n`/`\r` and emitted as one
+     * `data:` field per line (per WHATWG §9.2). `$event`, `$id` and
+     * `$retry` are emitted only if non-null. The block is terminated with
+     * a blank line.
+     *
+     * `$event` and `$id` must not contain `\r` or `\n` — the stream parser
+     * would interpret them as field terminators. Throws
+     * InvalidArgumentException if they do.
+     *
+     * Empty `$data === ""` is valid (the browser dispatches an empty
+     * MessageEvent). `null` `$data` is also valid for cases like sending
+     * a `retry:` directive without an accompanying message — note that
+     * an event with neither `data` nor `retry` is dropped by the
+     * EventSource parser.
+     *
+     * @param string|null $data    Message payload. Multiline strings are split.
+     * @param string|null $event   Event name (for addEventListener).
+     * @param string|null $id      Event ID — surfaced by the browser as
+     *                             Last-Event-ID on reconnect.
+     * @param int|null    $retry   Reconnect delay hint, in milliseconds.
+     * @return static
+     */
+    public function sseEvent(
+        ?string $data = null,
+        ?string $event = null,
+        ?string $id = null,
+        ?int $retry = null
+    ): static {}
+
+    /**
+     * Send an SSE comment line (starts with `:`).
+     *
+     * Browsers ignore comments, but they keep the TCP connection alive
+     * past intermediary idle timeouts (nginx's `proxy_read_timeout`,
+     * default 60s). Call periodically as a heartbeat — the canonical
+     * payload is the empty string, which becomes `:\n\n` on the wire.
+     *
+     * Comment text must not contain `\r` or `\n`.
+     *
+     * @param string $text Optional comment payload (informational only).
+     * @return static
+     */
+    public function sseComment(string $text = ""): static {}
+
     // === State methods ===
 
     /**

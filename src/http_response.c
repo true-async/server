@@ -875,6 +875,363 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
+/* -------------------------------------------------------------------------
+ * Server-Sent Events (text/event-stream).
+ *
+ * SSE is not a separate protocol — it's a Content-Type convention plus
+ * a small text format on top of the existing chunked / DATA-framed
+ * streaming pipeline. These helpers exist to (1) ensure the canonical
+ * three headers are set so handlers don't ship a broken stream behind
+ * nginx/CDN, and (2) format event records correctly per WHATWG §9.2 so
+ * handlers don't reinvent the framing.
+ *
+ * Wire commit is lazy: sseStart() sets headers and locks the response
+ * into streaming mode at the PHP boundary, but the actual HEADERS frame
+ * (H2/H3) or status line (H1 chunked) is emitted by the stream_ops on
+ * the first append_chunk. If the handler only calls sseStart() and then
+ * end(), the mark_ended path flushes headers + EOF. ------------------------------------------------------------------------- */
+
+/* SSE field separators: events are delimited by a blank line, fields by
+ * a single LF. WHATWG mandates LF; CR / CRLF are accepted on input but
+ * we always emit LF to keep the parser fast-path happy. */
+
+static inline bool sse_string_has_newline(zend_string *s)
+{
+    if (s == NULL) {
+        return false;
+    }
+    const char *const p = ZSTR_VAL(s);
+    const size_t len = ZSTR_LEN(s);
+    for (size_t i = 0; i < len; i++) {
+        if (p[i] == '\n' || p[i] == '\r') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* If the handler already set Content-Type to anything other than
+ * text/event-stream, throw — sseStart() is an explicit switch and a
+ * conflicting type is a programming bug, not something to paper over. */
+static bool sse_validate_content_type(http_response_object *response)
+{
+    zval *const ct = zend_hash_str_find(
+        response->headers, "content-type", sizeof("content-type") - 1);
+    if (ct == NULL) {
+        return true;
+    }
+    const char *val = NULL;
+    size_t      val_len = 0;
+    if (Z_TYPE_P(ct) == IS_STRING) {
+        val     = Z_STRVAL_P(ct);
+        val_len = Z_STRLEN_P(ct);
+    } else if (Z_TYPE_P(ct) == IS_ARRAY) {
+        zval *const first = zend_hash_index_find(Z_ARRVAL_P(ct), 0);
+        if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
+            val     = Z_STRVAL_P(first);
+            val_len = Z_STRLEN_P(first);
+        }
+    }
+    /* Match a leading "text/event-stream" — the handler is allowed to
+     * append parameters (charset etc.) but the base type must agree. */
+    static const char expected[] = "text/event-stream";
+    static const size_t expected_len = sizeof(expected) - 1;
+    if (val != NULL && val_len >= expected_len &&
+        zend_binary_strcasecmp(val, expected_len, expected, expected_len) == 0) {
+        return true;
+    }
+    zend_throw_exception(http_server_invalid_argument_exception_ce,
+        "sseStart(): response already has a non-SSE Content-Type — "
+        "remove it before switching to SSE", 0);
+    return false;
+}
+
+/* Set one header by literal lowercase name. Replaces any prior value.
+ * Wraps add_header_value to avoid the runtime zend_string round-trip
+ * for these three constants. */
+static void sse_set_header_literal(HashTable *headers,
+                                   const char *name, size_t name_len,
+                                   const char *value, size_t value_len)
+{
+    zend_string *const key = zend_string_init(name, name_len, 0);
+    zval v;
+    ZVAL_STRINGL(&v, value, value_len);
+    zend_hash_update(headers, key, &v);
+    zend_string_release(key);
+}
+
+/* Idempotent SSE init: validate Content-Type, set the three canonical
+ * headers, switch the response into streaming mode at the PHP boundary.
+ * Does NOT emit anything on the wire — the first append_chunk in
+ * sseEvent / sseComment / end() drives the wire commit through the
+ * protocol-specific stream ops. Returns false on error (exception set). */
+static bool sse_ensure_started(http_response_object *response)
+{
+    if (response->streaming) {
+        return true;
+    }
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot start SSE on a closed response", 0);
+        return false;
+    }
+    if (UNEXPECTED(response->stream_ops == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "SSE requires a streaming-capable response (no stream ops "
+            "installed — response is detached from a connection)", 0);
+        return false;
+    }
+    if (!sse_validate_content_type(response)) {
+        return false;
+    }
+
+    sse_set_header_literal(response->headers,
+        "content-type", sizeof("content-type") - 1,
+        "text/event-stream", sizeof("text/event-stream") - 1);
+    sse_set_header_literal(response->headers,
+        "cache-control", sizeof("cache-control") - 1,
+        "no-cache, no-transform", sizeof("no-cache, no-transform") - 1);
+    /* nginx-specific: disables proxy_buffering for this response.
+     * Harmless on protocols / proxies that don't recognise it. */
+    sse_set_header_literal(response->headers,
+        "x-accel-buffering", sizeof("x-accel-buffering") - 1,
+        "no", sizeof("no") - 1);
+
+    response->streaming    = true;
+    response->committed    = true;
+    response->headers_sent = true;
+    return true;
+}
+
+/* Append "<prefix>: <value-up-to-newline-or-eos>\n" for each line of
+ * `value`. Treats CRLF / CR / LF as line separators (WHATWG §9.2 says
+ * input may use any; we emit LF). Used for the data: field which is
+ * the only one that may legally contain multiple lines. */
+static void sse_append_field_multiline(smart_str *out,
+                                       const char *prefix, size_t prefix_len,
+                                       const char *value, size_t value_len)
+{
+    size_t i = 0;
+    while (i <= value_len) {
+        /* Find end of current line (LF / CR / CRLF / EOS). */
+        size_t line_start = i;
+        while (i < value_len && value[i] != '\n' && value[i] != '\r') {
+            i++;
+        }
+        smart_str_appendl(out, prefix, prefix_len);
+        smart_str_appendl(out, ": ", 2);
+        if (i > line_start) {
+            smart_str_appendl(out, value + line_start, i - line_start);
+        }
+        smart_str_appendc(out, '\n');
+        if (i >= value_len) {
+            break;
+        }
+        /* Skip the terminator we found. CRLF counts as one. */
+        if (value[i] == '\r' && i + 1 < value_len && value[i + 1] == '\n') {
+            i += 2;
+        } else {
+            i++;
+        }
+        if (i == value_len) {
+            /* Trailing terminator — emit one final empty data line so
+             * the consumer sees the trailing newline the handler intended. */
+            smart_str_appendl(out, prefix, prefix_len);
+            smart_str_appendl(out, ": \n", 3);
+            break;
+        }
+    }
+}
+
+/* Append "<prefix>: <value>\n". Caller must have already verified
+ * `value` contains no \r / \n. */
+static inline void sse_append_field_single(smart_str *out,
+                                           const char *prefix, size_t prefix_len,
+                                           const char *value, size_t value_len)
+{
+    smart_str_appendl(out, prefix, prefix_len);
+    smart_str_appendl(out, ": ", 2);
+    if (value_len > 0) {
+        smart_str_appendl(out, value, value_len);
+    }
+    smart_str_appendc(out, '\n');
+}
+
+/* Push a finalised event payload through the installed stream ops.
+ * Mirrors HttpResponse::send() — same 499 behaviour on stream-dead. */
+static int sse_dispatch_payload(http_response_object *response,
+                                zend_string *payload)
+{
+    const int rc = response->stream_ops->append_chunk(
+        response->stream_ctx, payload);
+    if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        zend_throw_exception_ex(http_exception_ce, 499,
+            "stream closed by peer");
+    }
+    return rc;
+}
+
+/* {{{ proto HttpResponse::sseStart(): static */
+ZEND_METHOD(TrueAsync_HttpResponse, sseStart)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->streaming) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sseStart(): response is already in streaming mode", 0);
+        return;
+    }
+    if (!sse_ensure_started(response)) {
+        return;
+    }
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::sseEvent(?string $data = null, ?string $event = null,
+ *                                  ?string $id = null, ?int $retry = null): static */
+ZEND_METHOD(TrueAsync_HttpResponse, sseEvent)
+{
+    zend_string *data  = NULL;
+    zend_string *event = NULL;
+    zend_string *id    = NULL;
+    zend_long    retry = 0;
+    bool         retry_is_null = true;
+
+    ZEND_PARSE_PARAMETERS_START(0, 4)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(data)
+        Z_PARAM_STR_OR_NULL(event)
+        Z_PARAM_STR_OR_NULL(id)
+        Z_PARAM_LONG_OR_NULL(retry, retry_is_null)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot sseEvent() on a closed response", 0);
+        return;
+    }
+
+    /* Single-line fields may not contain CR / LF — those are field /
+     * record separators in the SSE grammar and would let an attacker
+     * (or careless code) inject extra fields or terminate the event
+     * early. Throw so the bug surfaces in development. */
+    if (sse_string_has_newline(event)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "sseEvent(): $event must not contain CR or LF", 0);
+        return;
+    }
+    if (sse_string_has_newline(id)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "sseEvent(): $id must not contain CR or LF", 0);
+        return;
+    }
+    /* WHATWG §9.2: the U+0000 NULL byte in `id` causes the entire id
+     * field to be ignored by the parser. Reject up front. */
+    if (id != NULL && memchr(ZSTR_VAL(id), '\0', ZSTR_LEN(id)) != NULL) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "sseEvent(): $id must not contain NUL bytes", 0);
+        return;
+    }
+    if (!retry_is_null && retry < 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "sseEvent(): $retry must be a non-negative integer", 0);
+        return;
+    }
+
+    if (!sse_ensure_started(response)) {
+        return;
+    }
+
+    /* Build the event record. Order doesn't matter to spec-compliant
+     * parsers, but `id` / `event` / `retry` before `data` is the
+     * convention everyone uses. Trailing blank line terminates. */
+    smart_str payload = {0};
+    if (id != NULL) {
+        sse_append_field_single(&payload, "id", 2,
+                                ZSTR_VAL(id), ZSTR_LEN(id));
+    }
+    if (event != NULL) {
+        sse_append_field_single(&payload, "event", 5,
+                                ZSTR_VAL(event), ZSTR_LEN(event));
+    }
+    if (!retry_is_null) {
+        char buf[32];
+        const int n = snprintf(buf, sizeof(buf), ZEND_LONG_FMT, retry);
+        if (n > 0) {
+            sse_append_field_single(&payload, "retry", 5, buf, (size_t)n);
+        }
+    }
+    if (data != NULL) {
+        sse_append_field_multiline(&payload, "data", 4,
+                                   ZSTR_VAL(data), ZSTR_LEN(data));
+    }
+    smart_str_appendc(&payload, '\n');
+    smart_str_0(&payload);
+
+    if (payload.s == NULL) {
+        /* All four arguments were null — nothing to send. Still a
+         * legal call on a started stream; act as a no-op. */
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
+    /* Hand ownership to append_chunk — it takes ownership of the ref. */
+    sse_dispatch_payload(response, payload.s);
+    /* payload.s ref consumed by append_chunk regardless of outcome. */
+    if (EG(exception)) {
+        return;
+    }
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::sseComment(string $text = ""): static */
+ZEND_METHOD(TrueAsync_HttpResponse, sseComment)
+{
+    zend_string *text = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR(text)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot sseComment() on a closed response", 0);
+        return;
+    }
+    if (sse_string_has_newline(text)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "sseComment(): $text must not contain CR or LF", 0);
+        return;
+    }
+    if (!sse_ensure_started(response)) {
+        return;
+    }
+
+    smart_str payload = {0};
+    smart_str_appendc(&payload, ':');
+    if (text != NULL && ZSTR_LEN(text) > 0) {
+        smart_str_appendc(&payload, ' ');
+        smart_str_append(&payload, text);
+    }
+    smart_str_appendl(&payload, "\n\n", 2);
+    smart_str_0(&payload);
+
+    sse_dispatch_payload(response, payload.s);
+    if (EG(exception)) {
+        return;
+    }
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::end(?string $data = null): void */
 ZEND_METHOD(TrueAsync_HttpResponse, end)
 {

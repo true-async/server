@@ -248,6 +248,33 @@ $server->onRequest(function ($request, $response) {
 $server->start();
 ```
 
+### Server-Sent Events
+
+```php
+$server->onRequest(function ($req, $res) {
+    // Optional: resume from where the client left off.
+    $resume = $req->getHeader('Last-Event-ID');
+
+    $res->sseStart();                              // commits SSE headers
+    foreach (eventStream($resume) as $i => $msg) {
+        $res->sseEvent($msg, id: (string) $i);     // dispatched as MessageEvent
+        if ($i % 30 === 0) {
+            $res->sseComment();                    // keep-alive ping
+        }
+    }
+    $res->end();
+});
+```
+
+`sseStart()` sets `Content-Type: text/event-stream`, `Cache-Control:
+no-cache, no-transform`, and `X-Accel-Buffering: no` (the last one
+disables nginx response buffering — without it events stall behind the
+proxy buffer). `sseEvent()` accepts `data`, `event`, `id`, and `retry`
+fields; multiline `data` is split into multiple `data:` records per
+WHATWG. SSE works over HTTP/1.1 (chunked), HTTP/2, and HTTP/3 without
+any protocol-specific code on the handler side — backpressure is
+inherited from the streaming pipeline.
+
 ---
 
 ## License

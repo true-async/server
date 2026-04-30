@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Server-Sent Events (SSE)** — first-class API on `HttpResponse`:
+  `sseStart()`, `sseEvent(?data, ?event, ?id, ?retry)`, and `sseComment()`
+  for keep-alive heartbeats. Built on the existing streaming pipeline
+  (`send()` / `stream_ops` vtable) so HTTP/1.1, HTTP/2, and HTTP/3
+  transports work without protocol-specific changes. `sseStart()` sets
+  the canonical headers (`Content-Type: text/event-stream`,
+  `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`),
+  validates conflicting prior `Content-Type`, and locks the response
+  into streaming mode. `sseEvent()` formats records per WHATWG §9.2 —
+  multiline `data` is split into multiple `data:` fields; `event` and
+  `id` reject embedded CR/LF and `id` rejects NUL bytes. `Last-Event-ID`
+  is surfaced through the existing `HttpRequest::getHeader()` API.
+
 ## [0.1.0] - 2026-04-30
 
 Initial public release of TrueAsync Server — a native PHP extension that runs a

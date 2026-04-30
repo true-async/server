@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: 551944906eac9bec89e41dc304061db9ade9a70d */
+ * Stub hash: 551944906eac9bec89e41dc304061db9ade9b001 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -95,6 +95,19 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_end
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, data, IS_STRING, 1, "null")
 ZEND_END_ARG_INFO()
 
+#define arginfo_class_TrueAsync_HttpResponse_sseStart arginfo_class_TrueAsync_HttpResponse_resetHeaders
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sseEvent, 0, 0, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, data, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, event, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, id, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, retry, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sseComment, 0, 0, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, text, IS_STRING, 0, "\"\"")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_isHeadersSent, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
@@ -131,6 +144,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, json);
 ZEND_METHOD(TrueAsync_HttpResponse, html);
 ZEND_METHOD(TrueAsync_HttpResponse, redirect);
 ZEND_METHOD(TrueAsync_HttpResponse, end);
+ZEND_METHOD(TrueAsync_HttpResponse, sseStart);
+ZEND_METHOD(TrueAsync_HttpResponse, sseEvent);
+ZEND_METHOD(TrueAsync_HttpResponse, sseComment);
 ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent);
 ZEND_METHOD(TrueAsync_HttpResponse, isClosed);
 
@@ -163,6 +179,9 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, html, arginfo_class_TrueAsync_HttpResponse_html, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, redirect, arginfo_class_TrueAsync_HttpResponse_redirect, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, end, arginfo_class_TrueAsync_HttpResponse_end, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, sseStart, arginfo_class_TrueAsync_HttpResponse_sseStart, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, sseEvent, arginfo_class_TrueAsync_HttpResponse_sseEvent, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, sseComment, arginfo_class_TrueAsync_HttpResponse_sseComment, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isHeadersSent, arginfo_class_TrueAsync_HttpResponse_isHeadersSent, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isClosed, arginfo_class_TrueAsync_HttpResponse_isClosed, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
