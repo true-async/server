@@ -913,6 +913,25 @@ static void http_connection_read_callback_fn(
             conn->io->event.stop(&conn->io->event);
             req->dispose(req);
         }
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+        /* On a WS connection a handler coroutine is suspended in
+         * WebSocket::recv() waiting on the session's recv_event.
+         * Tell the session that no more frames will ever arrive so
+         * the suspended recv() resumes and returns NULL (graceful
+         * end-of-stream). The handler then exits naturally and its
+         * dispose drops the handler_refcount, allowing the destroy
+         * scheduled below to actually free the connection (the
+         * destroy_pending path takes care of the ordering). */
+        if (conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET
+            && conn->strategy != NULL) {
+            extern struct ws_session_t *
+                ws_strategy_get_session(http_protocol_strategy_t *);
+            extern void
+                ws_session_mark_peer_closed(struct ws_session_t *);
+            ws_session_mark_peer_closed(
+                ws_strategy_get_session(conn->strategy));
+        }
+#endif
         http_connection_destroy(conn);
         return;
     }

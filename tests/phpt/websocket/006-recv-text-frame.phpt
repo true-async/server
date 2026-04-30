@@ -30,9 +30,9 @@ $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use (&$c
         $captured['msg']    = $msg->data;
         $captured['binary'] = $msg->binary;
     }
-    // Peer-close detection (recv returning null on FIN) lands in a
-    // follow-up commit; for now the handler returns immediately after
-    // the first message and the connection tears down naturally.
+    // Peer closes after sending one frame — recv() must return null
+    // so the handler exits cleanly instead of suspending forever.
+    $captured['second'] = $ws->recv();
 });
 
 $server->addHttpHandler(function ($req, $resp) {
@@ -89,8 +89,13 @@ await($client);
 
 var_dump($captured['msg']);
 var_dump($captured['binary']);
+echo "second slot set: ", array_key_exists('second', $captured) ? 'yes' : 'no', "\n";
+echo "second is null:  ", isset($captured) && array_key_exists('second', $captured)
+                          && $captured['second'] === null ? 'yes' : 'no', "\n";
 echo "Done\n";
 --EXPECT--
 string(12) "hello server"
 bool(false)
+second slot set: yes
+second is null:  yes
 Done
