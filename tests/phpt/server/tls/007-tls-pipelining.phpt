@@ -11,14 +11,14 @@ tls_skipif(['proc_open' => true, 'openssl_cli' => true]);
 --FILE--
 <?php
 require_once __DIR__ . '/_tls_skipif.inc';
-/* Mirror of 014-pipelining but over TLS. The client pipes N full
+/* Mirror of h1/001-pipelining but over TLS. The client pipes N full
  * HTTP/1.1 requests into a single `openssl s_client` invocation —
  * openssl ships them as one TLS write. The server must:
  *   1. decode all N from the TLS stream,
  *   2. answer in order (HTTP/1.1 invariant),
  *   3. preserve URIs (no corruption from the pipelined shift).
  *
- * N values mirror 014-pipelining.phpt (2, 5, 20). */
+ * N values mirror h1/001-pipelining.phpt (2, 5, 20). */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
