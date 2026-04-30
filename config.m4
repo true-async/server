@@ -389,9 +389,10 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     "
   fi
 
-  dnl WebSocket — bundled wslay sources gated on --enable-websocket.
-  dnl The strategy / public PHP API land in a follow-up commit; this
-  dnl block exists now so the dependency builds and links cleanly.
+  dnl WebSocket — bundled wslay + our strategy. Both gated on
+  dnl --enable-websocket. Frame I/O, handshake, and the public PHP
+  dnl API land in follow-up commits; the strategy file is a scaffold
+  dnl at this stage (see src/websocket/websocket_strategy.c).
   if test "$PHP_WEBSOCKET" = "yes"; then
     http_server_sources="$http_server_sources
       deps/wslay/lib/wslay_event.c
@@ -399,6 +400,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       deps/wslay/lib/wslay_net.c
       deps/wslay/lib/wslay_queue.c
       deps/wslay/lib/wslay_stack.c
+      src/websocket/websocket_strategy.c
     "
   fi
 
@@ -460,10 +462,12 @@ if test "$PHP_HTTP_SERVER" != "no"; then
 
   if test "$PHP_WEBSOCKET" = "yes"; then
     PHP_ADD_BUILD_DIR([$ext_builddir/deps/wslay/lib])
+    PHP_ADD_BUILD_DIR([$ext_builddir/src/websocket])
     dnl wslay's own headers do #include <wslay/wslay.h>, so the include
     dnl path is mandatory (unlike llhttp, which is only ever included
     dnl via the relative "../deps/llhttp/..." path from src/).
     PHP_ADD_INCLUDE([$ext_srcdir/deps/wslay/includes])
+    PHP_ADD_INCLUDE([$ext_srcdir/include/websocket])
   fi
 
   if test "$PHP_HTTP3" = "yes"; then
