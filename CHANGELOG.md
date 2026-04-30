@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cross-thread `HttpServer` transfer dropped requests.** When an
+  `HttpServer` was passed into a worker thread (e.g. via `Async\ThreadPool`),
+  `http_server_transfer_obj()` copied the registered handlers into
+  `protocol_handlers` but did not mirror the corresponding
+  `view.protocol_mask` bits. `detect_and_assign_protocol()` consults the mask
+  to dispatch parsed requests, so worker threads bound the listen socket and
+  parsed incoming bytes but silently dropped every request as if no handler
+  were registered. The transfer path now sets the same mask bits that
+  `addHttpHandler` / `addHttp2Handler` / `addWebSocketHandler` /
+  `addGrpcHandler` set at registration time. Regression test:
+  `tests/phpt/server/core/007-server-transfer-handler-dispatch.phpt`.
+
 ## [0.1.0] - 2026-04-30
 
 Initial public release of TrueAsync Server — a native PHP extension that runs a

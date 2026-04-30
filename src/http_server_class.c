@@ -2213,6 +2213,30 @@ static zend_object *http_server_transfer_obj(
             http_protocol_add_handler(&dst_obj->protocol_handlers,
                 transit->entries[i].protocol, fcall);
             zval_ptr_dtor(&closure_zv);
+
+            /* Mirror the protocol_mask bookkeeping that the addXHandler
+             * methods do at registration time. The mask is what
+             * detect_and_assign_protocol() consults to decide whether to
+             * dispatch a parsed request to user code; without this, the
+             * loaded handler sits in the HashTable but plain HTTP/1
+             * requests are silently dropped on each worker thread. */
+            switch (transit->entries[i].protocol) {
+                case HTTP_PROTOCOL_HTTP1:
+                    dst_obj->view.protocol_mask |=
+                        HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2;
+                    break;
+                case HTTP_PROTOCOL_HTTP2:
+                    dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_HTTP2;
+                    break;
+                case HTTP_PROTOCOL_WEBSOCKET:
+                    dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_WS;
+                    break;
+                case HTTP_PROTOCOL_GRPC:
+                    dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_GRPC;
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
