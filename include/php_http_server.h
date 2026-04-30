@@ -207,6 +207,28 @@ struct _http_server_config_t {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
 
+    /* WebSocket knobs (PLAN_WEBSOCKET.md §5).
+     *
+     *   ws_max_message_size  — reassembled-message cap. Frames whose
+     *                          total length crosses this trigger an
+     *                          RFC 6455 §7.4.1 "Message Too Big" close
+     *                          and a connection teardown. Default 1 MiB.
+     *   ws_max_frame_size    — per-frame cap (defence against
+     *                          fragment-flood). Currently informational;
+     *                          wslay enforces only message length. Default
+     *                          1 MiB.
+     *   ws_ping_interval_ms  — server-initiated PING cadence. 0 = no
+     *                          automatic ping (peer-driven keepalive
+     *                          only). Default 30000.
+     *   ws_pong_timeout_ms   — deadline after a server PING for the
+     *                          peer's PONG to land before we treat the
+     *                          connection as dead and close 1001. 0 = no
+     *                          timeout. Default 60000. */
+    uint32_t ws_max_message_size;
+    uint32_t ws_max_frame_size;
+    uint32_t ws_ping_interval_ms;
+    uint32_t ws_pong_timeout_ms;
+
     /* Log + telemetry. log_severity is an http_log_severity_t int value
      * (0/5/9/13/17), set via setLogSeverity(LogSeverity). log_stream is
      * an IS_RESOURCE zval pointing at any

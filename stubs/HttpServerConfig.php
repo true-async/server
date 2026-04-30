@@ -309,6 +309,69 @@ final class HttpServerConfig
     /** @return int */
     public function getMaxBodySize(): int {}
 
+    // === WebSocket knobs (PLAN_WEBSOCKET.md §5) ===
+
+    /**
+     * Maximum reassembled WebSocket message size in bytes. Frames whose
+     * combined payload exceeds this trigger an RFC 6455 §7.4.1
+     * "Message Too Big" close (1009) and connection teardown.
+     *
+     * Default: 1048576 (1 MiB). Valid: 128 .. 268435456 (256 MiB).
+     *
+     * @param int $bytes
+     * @return static
+     */
+    public function setWsMaxMessageSize(int $bytes): static {}
+
+    /** @return int */
+    public function getWsMaxMessageSize(): int {}
+
+    /**
+     * Maximum per-frame payload size. Defends against fragment-flood
+     * attacks where a peer sends millions of tiny fragments.
+     *
+     * Default: 1048576 (1 MiB). Valid range as setWsMaxMessageSize.
+     *
+     * @param int $bytes
+     * @return static
+     */
+    public function setWsMaxFrameSize(int $bytes): static {}
+
+    /** @return int */
+    public function getWsMaxFrameSize(): int {}
+
+    /**
+     * Server-initiated PING cadence in milliseconds. The server sends a
+     * PING this often on otherwise-idle connections; the peer must reply
+     * with PONG within `WsPongTimeoutMs` or the connection is considered
+     * dead and torn down with code 1001 (GoingAway).
+     *
+     * Default: 30000 (30 s). 0 disables automatic ping (peer-driven
+     * keepalive only).
+     *
+     * @param int $ms
+     * @return static
+     */
+    public function setWsPingIntervalMs(int $ms): static {}
+
+    /** @return int */
+    public function getWsPingIntervalMs(): int {}
+
+    /**
+     * Pong deadline in milliseconds — how long the server waits after
+     * sending a PING before declaring the connection dead.
+     *
+     * Default: 60000 (60 s). 0 disables the timeout (PONG never times
+     * out; rely on TCP keepalive / read_timeout for absolute liveness).
+     *
+     * @param int $ms
+     * @return static
+     */
+    public function setWsPongTimeoutMs(int $ms): static {}
+
+    /** @return int */
+    public function getWsPongTimeoutMs(): int {}
+
     // === HTTP/3 production knobs (NEXT_STEPS.md §5) ===
 
     /**
