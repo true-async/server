@@ -1,0 +1,35 @@
+# CMake build directory
+build/
+cmake-build-*/
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Test binaries (these rules are kept narrow — anchored to build/ —
+# so they don't accidentally hide tests/unit/**/test_http2_*.c sources).
+build/test_http1_parser
+build/**/test_http1_parser
+build/**/test_http2_*
+build/**/test_async_*
+
+# Makefile artifacts (legacy)
+unit/test_http_parser
+unit/*.o
+unit/core.[0-9]*
+unit/vgcore.*
+unit/core/test_tls_session
+
+# PHPT test artifacts (created by run-tests.php)
+**/*.diff
+**/*.log
+**/*.exp
+**/*.out
+**/*.mem
+phpt/**/*.php
+phpt/**/*.sh
+e2e/**/*.php
+e2e/**/*.sh

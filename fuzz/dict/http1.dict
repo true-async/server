@@ -1,0 +1,90 @@
+# libFuzzer dictionary for HTTP/1 parser fuzzing.
+# Tokens are inserted into mutations — the fuzzer tries pasting them
+# into random positions instead of only bit-flipping. Dramatically
+# speeds up reaching deep states (e.g. discovering Transfer-Encoding
+# or chunked body handling).
+#
+# Format: one token per line, double-quoted, escape binary with \x.
+
+# Methods
+"GET "
+"POST "
+"PUT "
+"DELETE "
+"HEAD "
+"OPTIONS "
+"PATCH "
+"CONNECT "
+"TRACE "
+
+# Versions
+"HTTP/1.0"
+"HTTP/1.1"
+"HTTP/2.0"
+
+# CRLF and line terminators
+"\x0d\x0a"
+"\x0a\x0a"
+"\x0d\x0a\x0d\x0a"
+
+# Headers — names (with colon+space so mutations only vary the value)
+"Host: "
+"User-Agent: "
+"Content-Length: "
+"Content-Type: "
+"Transfer-Encoding: "
+"Connection: "
+"Upgrade: "
+"Expect: "
+"Cookie: "
+"Authorization: "
+"X-Forwarded-For: "
+"TE: "
+"Accept: "
+"Accept-Encoding: "
+
+# Header values
+"chunked"
+"keep-alive"
+"close"
+"upgrade"
+"100-continue"
+"gzip"
+"deflate"
+"trailers"
+"identity"
+
+# Content types
+"application/json"
+"application/x-www-form-urlencoded"
+"multipart/form-data"
+"multipart/form-data; boundary="
+"text/plain"
+"text/html"
+
+# Chunked encoding helpers
+"0\x0d\x0a\x0d\x0a"
+"1\x0d\x0a"
+"ff\x0d\x0a"
+"100\x0d\x0a"
+"fff\x0d\x0a"
+
+# URI pieces
+"/"
+"/?"
+"?a=1"
+"&b=2"
+"%2F"
+"%00"
+
+# Multipart boundary pieces (multipart tested separately but HTTP/1
+# flow also routes through multipart parser on POST with that CT).
+"------"
+"--\x0d\x0a"
+"Content-Disposition: form-data; name=\""
+
+# Edge/corner tokens
+": "
+" "
+"\x00"
+"\xff"

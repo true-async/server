@@ -1,0 +1,23 @@
+# Git attributes for PIE packaging
+
+# Exclude from git archive (PIE uses git archive for packaging)
+/.github export-ignore
+/docs export-ignore
+/tests export-ignore
+/benchmarks export-ignore
+/build/gen_stub.php export-ignore
+/.clang-format export-ignore
+/.editorconfig export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/scripts export-ignore
+
+# Keep only essential files for distribution
+# - src/ (source code)
+# - include/ (headers)
+# - stubs/ (PHP stubs for arginfo)
+# - composer.json (PIE metadata)
+# - config.m4 (build configuration)
+# - config.w32 (Windows build)
+# - LICENSE
+# - README.md

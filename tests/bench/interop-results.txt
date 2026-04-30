@@ -1,0 +1,60 @@
+Real-client interop matrix — Step 9
+=====================================
+
+Established: 2026-04-21
+
+Protocol clients exercised against the server. Primary coverage is
+the existing phpt suite (tests/phpt/server/07*, 076-085) — this file
+summarises the matrix and documents deferred clients.
+
+Passing
+-------
+
+    curl --http2-prior-knowledge (h2c)     ✔ tests/phpt/server/070-h2c-get.phpt
+                                           ✔ tests/phpt/server/071-h2c-post.phpt
+                                           ✔ tests/phpt/server/072-h2c-trailers.phpt
+                                           ✔ tests/phpt/server/075-h2c-multiplex.phpt
+                                           ✔ tests/phpt/server/076-h2c-peer-reset-cancel.phpt
+                                           ✔ tests/phpt/server/080-drain-*.phpt
+                                           ✔ tests/phpt/server/081-drain-*.phpt
+                                           ✔ tests/phpt/server/082-drain-*.phpt
+
+    curl --http2 (TLS + ALPN)              ✔ tests/phpt/server/073-h2-tls-get.phpt
+                                           ✔ tests/phpt/server/074-h2-tls-fallback.phpt
+
+Flows covered:
+
+    REST GET / POST (body)                 ✔
+    Response trailers (gRPC-status style)  ✔
+    Multiplex (3 concurrent streams)       ✔
+    Peer RST mid-stream → HttpException    ✔
+    Graceful drain via GOAWAY              ✔
+    TLS ALPN negotiation + HTTP/1 fallback ✔
+
+h2spec conformance
+------------------
+
+See h2spec-baseline.txt — 135/147 green (91.8%), remaining 11 are
+documented XFAIL edge cases not exercised by any workload client.
+
+Deferred clients (not blocking Step 9)
+--------------------------------------
+
+    h2load / nghttp      → moved to Step 10 (performance benchmarks).
+                           Installation requires libnghttp2-tools
+                           system package; not critical for
+                           compliance, only for perf baselines.
+
+    grpcurl              → deferred. Response-trailer wire format
+                           is gRPC-compatible (phpt 072 verifies
+                           HEADERS → DATA → trailer-HEADERS
+                           sequence with grpc-status header);
+                           full RPC-level interop testing needs a
+                           grpcurl binary on the CI host.
+
+    grpc-go / grpc-python client libraries → deferred to Step 11
+                           (fuzz + real-client interop matrix from
+                           a CI harness). These are integration
+                           tests against the actual language
+                           bindings, out of scope for the baseline
+                           compliance gate.

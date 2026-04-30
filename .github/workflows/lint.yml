@@ -1,0 +1,48 @@
+name: lint
+
+# Static analysis via clang-tidy on changed C source files.
+#
+# STATUS: manual-dispatch only. The extension requires the TrueAsync
+# fork of PHP to build, and no public container image ships that yet.
+# Until upstream publishes one, this workflow runs only when triggered
+# explicitly from the Actions UI — which assumes a self-hosted runner
+# or a local image tag the operator has built.
+#
+# Local use (no CI needed): tools/lint-changed.sh after `bear -- make`.
+# See docs/PLAN_ATTACK_TESTING.md for the broader CI picture.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Base branch/ref to diff against'
+        required: false
+        default: 'main'
+
+jobs:
+  clang-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install lint deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              bear clang-tidy libnghttp2-dev libssl-dev
+
+      - name: Build (needs TrueAsync PHP on PATH)
+        run: |
+          if ! php -m 2>/dev/null | grep -qi async; then
+              echo "TrueAsync PHP not available on this runner." >&2
+              echo "Install the fork manually or use a pre-built image." >&2
+              exit 78  # GHA 'neutral' — surfaces skip without failure.
+          fi
+          phpize
+          ./configure --enable-http-server
+          bear -- make -j"$(nproc)"
+
+      - name: Run clang-tidy on changed files
+        run: tools/lint-changed.sh "${{ inputs.base_ref || 'origin/main' }}"

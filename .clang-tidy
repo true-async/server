@@ -1,0 +1,68 @@
+# clang-tidy config for the http_server PHP extension.
+#
+# Scope: static analysis for memory safety, integer safety, and UB
+# patterns in our own C code. Tuned to keep noise low while catching
+# real issues — pragmatic, not paranoid.
+#
+# Usage (from repo root, requires compile_commands.json from `bear -- make`):
+#   clang-tidy -p . src/**/*.c
+#
+# CI should invoke this against changed files only to keep the feedback
+# loop under a minute.
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  readability-misleading-indentation,
+  readability-non-const-parameter,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-macro-parentheses,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-narrowing-conversions,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -bugprone-reserved-identifier,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -clang-analyzer-security.insecureAPI.strcpy,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-branch-clone,
+  -clang-diagnostic-incompatible-function-pointer-types,
+
+# Justification per disabled check:
+#  bugprone-easily-swappable-parameters — style-level, triggers on every
+#      (int fd, int len) pair and cannot be reliably suppressed.
+#  bugprone-macro-parentheses — triggers on all Zend/PHP header macros
+#      outside our control.
+#  bugprone-implicit-widening-of-multiplication-result — almost always
+#      fires on sizeof() and static literal arithmetic; extreme noise
+#      vs. near-zero signal for our codebase.
+#  bugprone-narrowing-conversions — most of our narrowings are
+#      RFC-bounded (HTTP/2 stream_id fits in 31 bits by spec); per-site
+#      false-positive rate is very high.
+#  cert-dcl37-c / dcl51-cpp — triggers on identifiers starting with _
+#      which PHP macros expand to constantly.
+#  cert-err33-c — requires every stdlib call to have its return checked;
+#      fine in principle but 500+ false positives on printf/fprintf.
+#  clang-analyzer-optin.core.EnumCastOutOfRange — breaks intentional
+#      sentinel values like HTTP_PROTOCOL_UNSUPPORTED = 0xFF.
+#  clang-analyzer-security.insecureAPI.Deprecated* / strcpy — pushes
+#      C11 Annex K bounds-checking functions (memcpy_s, strcpy_s) which
+#      are not implemented in glibc and not used in PHP mainline.
+#  bugprone-multi-level-implicit-pointer-conversion — triggers on
+#      parser-pool void** patterns (PHP idiom, not a bug).
+#  clang-diagnostic-incompatible-function-pointer-types — triggers on
+#      the standard ZEND_INIT_MODULE_GLOBALS idiom where globals-init
+#      has a typed signature but the slot is void(void*); upstream PHP
+#      extensions all generate this warning.
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '^.*/(src|include)/.*\.h$'
+
+FormatStyle: none

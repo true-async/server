@@ -1,0 +1,880 @@
+name: Linux x64 Build & Test
+
+# CI for php-http-server. Modeled after ext/async build-linux.yml
+# (php-src/ext/async/.github/workflows/build-linux.yml) — same
+# "build the world from source with aggressive caching" pattern.
+#
+# Two-stage layout: a single `deps` job builds the native stack
+# (OpenSSL, nghttp2, nghttp3, ngtcp2, libuv) and saves caches once;
+# the matrix `build` job restores them in parallel. This removes the
+# race where two matrix jobs would simultaneously try to reserve the
+# same cache key and one would lose with "another job may be creating
+# this cache".
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Pinned versions match the locally-known-good stack on the
+  # maintainer's box (pkg-config --modversion). Don't guess —
+  # keep these in sync with reality.
+  OPENSSL_VERSION: 3.5.0
+  CURL_VERSION: 8.12.1
+  NGTCP2_VERSION: 1.22.1
+  NGHTTP3_VERSION: 1.15.0
+  NGHTTP2_VERSION: 1.59.0
+  LIBUV_VERSION: 1.52.1
+  # `true-async` (not -stable) is the branch that has the H3 lifecycle
+  # fixes. Required configure form is the maintainer's config.nice:
+  # --disable-all + a fixed allowlist (matches the modules the H3 tests
+  # expect to be present at runtime).
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+
+jobs:
+  # --------------------------------------------------------------------
+  # Stage 1: build the native dependency stack once and save caches.
+  # --------------------------------------------------------------------
+  deps:
+    name: Native deps
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # actions/cache extracts as the runner user; ensure /usr/local
+      # subdirs aren't root-owned (they are on stock GH images for
+      # /usr/local/include).
+      - name: Make /usr/local writable
+        run: |
+          sudo mkdir -p /usr/local/lib/pkgconfig /usr/local/include /usr/local/bin
+          sudo chown -R "$(id -u):$(id -g)" /usr/local/lib /usr/local/include /usr/local/bin
+
+      # OpenSSL 3.5 ----------------------------------------------------
+      - name: Restore OpenSSL cache
+        id: cache-openssl
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libssl*
+            /usr/local/lib/libcrypto*
+            /usr/local/include/openssl
+            /usr/local/lib/pkgconfig/openssl.pc
+            /usr/local/lib/pkgconfig/libssl.pc
+            /usr/local/lib/pkgconfig/libcrypto.pc
+            /usr/local/bin/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-r4
+
+      - name: Build OpenSSL from source
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz
+          tar -xzf openssl-${OPENSSL_VERSION}.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+          # --openssldir=/etc/ssl makes OpenSSL reuse Ubuntu's CA bundle
+          # so wget/git keep verifying TLS once /usr/local/lib lands in
+          # ldconfig and shadows the system libssl.so.3.
+          ./Configure --prefix=/usr/local --libdir=lib --openssldir=/etc/ssl \
+            enable-tls1_3 shared
+          make -j"$(nproc)"
+          sudo make install_sw
+
+      - name: Save OpenSSL cache
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libssl*
+            /usr/local/lib/libcrypto*
+            /usr/local/include/openssl
+            /usr/local/lib/pkgconfig/openssl.pc
+            /usr/local/lib/pkgconfig/libssl.pc
+            /usr/local/lib/pkgconfig/libcrypto.pc
+            /usr/local/bin/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-r4
+
+      - name: Refresh ldconfig after OpenSSL
+        run: sudo ldconfig
+
+      # nghttp2 --------------------------------------------------------
+      - name: Restore nghttp2 cache
+        id: cache-nghttp2
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp2*
+            /usr/local/include/nghttp2
+            /usr/local/lib/pkgconfig/libnghttp2.pc
+          key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
+
+      - name: Build nghttp2 from source
+        if: steps.cache-nghttp2.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth=1 --branch=v${NGHTTP2_VERSION} \
+            https://github.com/nghttp2/nghttp2.git
+          cd nghttp2
+          autoreconf -i
+          ./configure --prefix=/usr/local --enable-lib-only
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Save nghttp2 cache
+        if: steps.cache-nghttp2.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp2*
+            /usr/local/include/nghttp2
+            /usr/local/lib/pkgconfig/libnghttp2.pc
+          key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
+
+      # nghttp3 --------------------------------------------------------
+      - name: Restore nghttp3 cache
+        id: cache-nghttp3
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp3*
+            /usr/local/include/nghttp3
+            /usr/local/lib/pkgconfig/libnghttp3.pc
+          key: ${{ runner.os }}-nghttp3-${{ env.NGHTTP3_VERSION }}-r4
+
+      - name: Build nghttp3 from source
+        if: steps.cache-nghttp3.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth=1 --branch=v${NGHTTP3_VERSION} --recurse-submodules \
+            https://github.com/ngtcp2/nghttp3.git
+          cd nghttp3
+          autoreconf -i
+          ./configure --prefix=/usr/local --enable-lib-only
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Save nghttp3 cache
+        if: steps.cache-nghttp3.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp3*
+            /usr/local/include/nghttp3
+            /usr/local/lib/pkgconfig/libnghttp3.pc
+          key: ${{ runner.os }}-nghttp3-${{ env.NGHTTP3_VERSION }}-r4
+
+      # ngtcp2 (depends on OpenSSL 3.5) -------------------------------
+      - name: Restore ngtcp2 cache
+        id: cache-ngtcp2
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libngtcp2*
+            /usr/local/include/ngtcp2
+            /usr/local/lib/pkgconfig/libngtcp2.pc
+            /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc
+          key: ${{ runner.os }}-ngtcp2-${{ env.NGTCP2_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r5
+
+      - name: Build ngtcp2 from source
+        if: steps.cache-ngtcp2.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth=1 --branch=v${NGTCP2_VERSION} --recurse-submodules \
+            https://github.com/ngtcp2/ngtcp2.git
+          cd ngtcp2
+          autoreconf -i
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+          ./configure --prefix=/usr/local --with-openssl --enable-lib-only
+          make -j"$(nproc)"
+          sudo make install
+          # http_server's config.m4 looks for libngtcp2_crypto_ossl
+          # specifically (OpenSSL 3.5 native QUIC). Fail loud if the
+          # ngtcp2 build picked a different backend.
+          test -f /usr/local/lib/pkgconfig/libngtcp2_crypto_ossl.pc \
+            || { echo "ERROR: ngtcp2 built without crypto_ossl backend"; \
+                 ls /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc; exit 1; }
+
+      - name: Save ngtcp2 cache
+        if: steps.cache-ngtcp2.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libngtcp2*
+            /usr/local/include/ngtcp2
+            /usr/local/lib/pkgconfig/libngtcp2.pc
+            /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc
+          key: ${{ runner.os }}-ngtcp2-${{ env.NGTCP2_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r5
+
+      # libuv ----------------------------------------------------------
+      - name: Restore libuv cache
+        id: cache-libuv
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libuv*
+            /usr/local/include/uv*
+            /usr/local/lib/pkgconfig/libuv.pc
+          key: ${{ runner.os }}-libuv-${{ env.LIBUV_VERSION }}-r4
+
+      - name: Build libuv from source
+        if: steps.cache-libuv.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+          wget -q https://github.com/libuv/libuv/archive/v${LIBUV_VERSION}.tar.gz
+          tar -xzf v${LIBUV_VERSION}.tar.gz
+          cd libuv-${LIBUV_VERSION}
+          mkdir build && cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          ninja
+          sudo ninja install
+
+      - name: Save libuv cache
+        if: steps.cache-libuv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libuv*
+            /usr/local/include/uv*
+            /usr/local/lib/pkgconfig/libuv.pc
+          key: ${{ runner.os }}-libuv-${{ env.LIBUV_VERSION }}-r4
+
+      # curl (built against OpenSSL 3.5 — Ubuntu 22.04 ships 7.81 which
+      # is below the 7.87 floor TrueAsync requires, and its libcurl is
+      # linked against system OpenSSL 3.0). ----------------------------
+      - name: Restore curl cache
+        id: cache-curl
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libcurl*
+            /usr/local/include/curl
+            /usr/local/lib/pkgconfig/libcurl.pc
+            /usr/local/bin/curl
+          key: ${{ runner.os }}-curl-${{ env.CURL_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r1
+
+      - name: Build curl from source
+        if: steps.cache-curl.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          ver_us=$(echo "${CURL_VERSION}" | tr '.' '_')
+          wget -q https://github.com/curl/curl/releases/download/curl-${ver_us}/curl-${CURL_VERSION}.tar.gz
+          tar -xzf curl-${CURL_VERSION}.tar.gz
+          cd curl-${CURL_VERSION}
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+          ./configure --prefix=/usr/local --with-openssl \
+            --with-nghttp2=/usr/local --enable-shared --disable-static \
+            --without-libpsl
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Save curl cache
+        if: steps.cache-curl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libcurl*
+            /usr/local/include/curl
+            /usr/local/lib/pkgconfig/libcurl.pc
+            /usr/local/bin/curl
+          key: ${{ runner.os }}-curl-${{ env.CURL_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r1
+
+  # --------------------------------------------------------------------
+  # Stage 2: build PHP + ext/async (no http_server yet — added in a
+  # later step once the PHP base build is green).
+  # Restores caches only — never tries to save them, so two matrix
+  # jobs can't race for the same key.
+  # --------------------------------------------------------------------
+  build:
+    needs: deps
+    name: "LINUX_X64_${{ matrix.debug && 'DEBUG' || 'RELEASE' }}_${{ matrix.zts && 'ZTS' || 'NTS' }}"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        debug: [false, true]
+        zts: [true]
+
+    steps:
+      - name: Checkout php-http-server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      # actions/cache restores tarballs as the runner user, so any path
+      # already owned by root (e.g. /usr/local/include) breaks `tar -x`
+      # with "Cannot mkdir: Permission denied". Make /usr/local writable
+      # by the runner before any cache restore step.
+      - name: Make /usr/local writable
+        run: |
+          sudo mkdir -p /usr/local/lib/pkgconfig /usr/local/include /usr/local/bin
+          sudo chown -R "$(id -u):$(id -g)" /usr/local/lib /usr/local/include /usr/local/bin
+
+      - name: Restore OpenSSL cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libssl*
+            /usr/local/lib/libcrypto*
+            /usr/local/include/openssl
+            /usr/local/lib/pkgconfig/openssl.pc
+            /usr/local/lib/pkgconfig/libssl.pc
+            /usr/local/lib/pkgconfig/libcrypto.pc
+            /usr/local/bin/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore nghttp2 cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp2*
+            /usr/local/include/nghttp2
+            /usr/local/lib/pkgconfig/libnghttp2.pc
+          key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore nghttp3 cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp3*
+            /usr/local/include/nghttp3
+            /usr/local/lib/pkgconfig/libnghttp3.pc
+          key: ${{ runner.os }}-nghttp3-${{ env.NGHTTP3_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore ngtcp2 cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libngtcp2*
+            /usr/local/include/ngtcp2
+            /usr/local/lib/pkgconfig/libngtcp2.pc
+            /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc
+          key: ${{ runner.os }}-ngtcp2-${{ env.NGTCP2_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r5
+          fail-on-cache-miss: true
+
+      - name: Restore libuv cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libuv*
+            /usr/local/include/uv*
+            /usr/local/lib/pkgconfig/libuv.pc
+          key: ${{ runner.os }}-libuv-${{ env.LIBUV_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore curl cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libcurl*
+            /usr/local/include/curl
+            /usr/local/lib/pkgconfig/libcurl.pc
+            /usr/local/bin/curl
+          key: ${{ runner.os }}-curl-${{ env.CURL_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r1
+          fail-on-cache-miss: true
+
+      - name: Refresh ldconfig
+        run: sudo ldconfig
+
+      - name: Install PHP build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          # Mirror ext/async/.github/workflows/build-linux.yml apt list,
+          # minus libssl-dev / libcurl4-openssl-dev (we use our own
+          # OpenSSL 3.5 + curl 8.12.1 from /usr/local).
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c \
+            libxml2-dev pkg-config \
+            libargon2-dev libedit-dev \
+            libsodium-dev libsqlite3-dev libonig-dev libzip-dev \
+            libpng-dev libjpeg-dev libwebp-dev libfreetype6-dev \
+            libgmp-dev libldap2-dev libsasl2-dev libpq-dev \
+            libmysqlclient-dev libbz2-dev libenchant-2-dev libffi-dev \
+            libgdbm-dev liblmdb-dev libsnmp-dev libtidy-dev \
+            libxslt1-dev libicu-dev wget ca-certificates
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch=${PHP_SRC_BRANCH} \
+            https://github.com/true-async/php-src.git php-src
+          git clone --depth=1 --branch=${PHP_ASYNC_BRANCH} \
+            https://github.com/true-async/php-async.git php-src/ext/async
+
+      # Mirrors the maintainer's local config.nice (~/php-src):
+      # --disable-all + the allowlist the true-async branch's
+      # internal_functions_cli.c generation expects. http_server is
+      # built separately as a shared extension after install.
+      - name: Configure PHP
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all \
+            --without-pear \
+            --enable-async \
+            --enable-pdo \
+            --with-pdo-mysql \
+            --with-pdo-sqlite \
+            --enable-sockets \
+            --enable-posix \
+            --enable-pcntl \
+            --enable-opcache \
+            --with-openssl \
+            --with-config-file-path=/etc \
+            --with-config-file-scan-dir=/etc/php.d \
+            --${{ matrix.debug && 'enable' || 'disable' }}-debug \
+            --${{ matrix.zts && 'enable' || 'disable' }}-zts
+
+      - name: Build PHP
+        working-directory: php-src
+        run: make -j"$(nproc)" >/dev/null
+
+      - name: Install PHP
+        working-directory: php-src
+        run: |
+          sudo make install
+          sudo mkdir -p /etc/php.d
+          echo "opcache.enable_cli=1" | sudo tee /etc/php.d/opcache.ini
+
+      - name: Show PHP info
+        run: |
+          /usr/local/bin/php -v
+          /usr/local/bin/php -m | grep -iE 'async|openssl|curl' || true
+
+      # ----------------------------------------------------------------
+      # Stage 3: build http_server as a shared extension via phpize
+      # against the PHP we just installed.
+      # ----------------------------------------------------------------
+      - name: phpize http_server
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+
+      - name: Install lcov (release ZTS only — coverage capture)
+        if: matrix.debug == false
+        run: sudo apt-get install -y --no-install-recommends lcov
+
+      - name: Configure http_server
+        working-directory: http-server
+        env:
+          ENABLE_COVERAGE: ${{ matrix.debug == false && '--enable-coverage' || '' }}
+        run: |
+          set -eux
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server \
+            --enable-http2 \
+            --enable-http3 \
+            --with-openssl \
+            --with-nghttp2=/usr/local \
+            --with-nghttp3=/usr/local \
+            --with-ngtcp2=/usr/local \
+            $ENABLE_COVERAGE
+
+      - name: Build http_server
+        working-directory: http-server
+        run: make -j"$(nproc)"
+
+      - name: Install http_server
+        working-directory: http-server
+        run: |
+          sudo make install
+          echo "extension=http_server.so" | sudo tee /etc/php.d/http_server.ini
+
+      - name: Verify http_server loads
+        run: |
+          /usr/local/bin/php -m | grep -i 'http_server'
+          /usr/local/bin/php --ri http_server || true
+
+      - name: Run http_server phpt suite
+        working-directory: http-server
+        run: |
+          /usr/local/bin/php /home/runner/work/php-http-server/php-http-server/php-src/run-tests.php \
+            -P -q -j"$(nproc)" \
+            -g FAIL,BORK,LEAK,XLEAK \
+            --no-progress \
+            --offline \
+            --show-diff \
+            --show-slow 4000 \
+            --set-timeout 120 \
+            tests/phpt
+
+      - name: Upload failing test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phpt-failures-${{ matrix.debug && 'debug' || 'release' }}-${{ github.run_id }}
+          path: |
+            http-server/tests/phpt/**/*.out
+            http-server/tests/phpt/**/*.diff
+            http-server/tests/phpt/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # ----------------------------------------------------------------
+      # Coverage capture — Release ZTS only. Reuses the PHP install
+      # and http_server build from this job (built with --enable-coverage
+      # above), so we don't have to rebuild everything just to collect
+      # gcda. Replaces the old standalone `coverage` job.
+      # ----------------------------------------------------------------
+      - name: Capture lcov + extract JSON
+        if: matrix.debug == false && success()
+        working-directory: http-server
+        run: |
+          set -eux
+          mkdir -p coverage
+          # Initial baseline (so files never executed still appear).
+          lcov --capture --initial \
+               --directory . \
+               --output-file coverage/baseline.info \
+               --rc geninfo_unexecuted_blocks=1 --quiet
+          # Post-run counters (phpt has already run via the previous step).
+          lcov --capture --directory . \
+               --output-file coverage/run.info \
+               --rc geninfo_unexecuted_blocks=1 --quiet
+          lcov --add-tracefile coverage/baseline.info \
+               --add-tracefile coverage/run.info \
+               --output-file  coverage/raw.info --quiet
+          lcov --extract coverage/raw.info "$PWD/src/*" \
+               --output-file coverage/filtered.info --quiet
+          python3 scripts/coverage-report.py \
+            coverage/filtered.info -o coverage/current.json
+          jq '.totals' coverage/current.json
+          # HTML report for the artifact.
+          genhtml coverage/filtered.info \
+                  --output-directory coverage/html \
+                  --title "php-http-server coverage" \
+                  --legend --quiet 2>/dev/null || true
+
+      - name: Compute touched-files list
+        if: matrix.debug == false && github.event_name == 'pull_request'
+        working-directory: http-server
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eux
+          git fetch --no-tags --depth=200 origin "$BASE_SHA" || true
+          git diff --name-only "$BASE_SHA"..."$HEAD_SHA" > /tmp/touched.txt
+          wc -l /tmp/touched.txt
+          head -50 /tmp/touched.txt
+
+      - name: Detect [coverage-drop-ok] override
+        if: matrix.debug == false && github.event_name == 'pull_request'
+        id: override
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY:  ${{ github.event.pull_request.body }}
+        run: |
+          set -eu
+          if git -C http-server log --format=%B "$BASE_SHA".."$HEAD_SHA" \
+               | grep -qF '[coverage-drop-ok]'; then
+            echo "allow=1" >> "$GITHUB_OUTPUT"
+          elif printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" \
+               | grep -qF '[coverage-drop-ok]'; then
+            echo "allow=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "allow=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare vs baseline
+        if: matrix.debug == false && github.event_name == 'pull_request'
+        id: compare
+        working-directory: http-server
+        run: |
+          ARGS=(--baseline docs/coverage-baseline.json
+                --current  coverage/current.json
+                --touched  /tmp/touched.txt
+                --output   /tmp/coverage.md)
+          if [ "${{ steps.override.outputs.allow }}" = "1" ]; then
+            ARGS+=(--allow-drop)
+          fi
+          set +e
+          python3 scripts/coverage-compare.py "${ARGS[@]}"
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage HTML
+        if: matrix.debug == false && success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-html-${{ github.run_id }}
+          path: http-server/coverage/html
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Post coverage comment
+        if: matrix.debug == false && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/coverage.md', 'utf8');
+            const marker = '<!-- coverage-gate -->';
+            const tagged = `${marker}\n${body}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body: tagged });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body: tagged });
+            }
+
+      - name: Fail on coverage regression
+        if: matrix.debug == false && github.event_name == 'pull_request' && steps.compare.outputs.exit != '0'
+        run: |
+          echo "Coverage gate failed (exit=${{ steps.compare.outputs.exit }})." >&2
+          exit 1
+
+      - name: Refresh baseline on main
+        if: matrix.debug == false && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: http-server
+        run: |
+          set -eux
+          cp coverage/current.json docs/coverage-baseline.json
+          if git diff --quiet -- docs/coverage-baseline.json; then
+            echo "Baseline unchanged."
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/coverage-baseline.json
+          git commit -m "ci: refresh coverage baseline [skip ci]"
+          git push origin HEAD:main
+
+  # --------------------------------------------------------------------
+  # Stage 5a: standalone fuzz smoke. Builds the no-PHP multipart
+  # harness and runs it on a 60 s budget. Independent of the deps
+  # stack, runs in parallel with everything.
+  # --------------------------------------------------------------------
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install clang + libFuzzer
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends clang
+
+      - name: Build fuzz_multipart
+        working-directory: fuzz
+        run: make fuzz_multipart
+
+      - name: Run fuzz_multipart 60s
+        working-directory: fuzz
+        env:
+          ASAN_OPTIONS: "abort_on_error=1:print_stacktrace=1"
+        run: |
+          set -eux
+          mkdir -p corpus/multipart
+          ./fuzz_multipart \
+            -max_total_time=60 \
+            -print_final_stats=1 \
+            -timeout=10 \
+            -rss_limit_mb=2048 \
+            corpus/multipart/
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-crash-multipart-${{ github.run_id }}
+          path: |
+            fuzz/crash-*
+            fuzz/leak-*
+            fuzz/oom-*
+            fuzz/timeout-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # --------------------------------------------------------------------
+  # Stage 5b: PHP-embedded fuzz gate. Builds libphp via --enable-embed,
+  # then builds and runs fuzz_http1_parser + fuzz_h2_session for 60 s
+  # each on the seed corpora. ~5–10× slower than the standalone smoke
+  # but covers the production parser wiring (emalloc/zend_string,
+  # llhttp, nghttp2 HPACK).
+  # --------------------------------------------------------------------
+  fuzz-embedded:
+    needs: deps
+    name: Fuzz embedded
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout php-http-server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Make /usr/local writable
+        run: |
+          sudo mkdir -p /usr/local/lib/pkgconfig /usr/local/include /usr/local/bin
+          sudo chown -R "$(id -u):$(id -g)" /usr/local/lib /usr/local/include /usr/local/bin
+
+      - name: Restore OpenSSL cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libssl*
+            /usr/local/lib/libcrypto*
+            /usr/local/include/openssl
+            /usr/local/lib/pkgconfig/openssl.pc
+            /usr/local/lib/pkgconfig/libssl.pc
+            /usr/local/lib/pkgconfig/libcrypto.pc
+            /usr/local/bin/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore nghttp2 cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp2*
+            /usr/local/include/nghttp2
+            /usr/local/lib/pkgconfig/libnghttp2.pc
+          key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore libuv cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libuv*
+            /usr/local/include/uv*
+            /usr/local/lib/pkgconfig/libuv.pc
+          key: ${{ runner.os }}-libuv-${{ env.LIBUV_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Refresh ldconfig
+        run: sudo ldconfig
+
+      - name: Install build deps
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            autoconf bison build-essential clang re2c \
+            libxml2-dev pkg-config libsqlite3-dev libonig-dev \
+            wget ca-certificates
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch=${PHP_SRC_BRANCH} \
+            https://github.com/true-async/php-src.git php-src
+          git clone --depth=1 --branch=${PHP_ASYNC_BRANCH} \
+            https://github.com/true-async/php-async.git php-src/ext/async
+
+      - name: Configure & build PHP with --enable-embed
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all \
+            --without-pear \
+            --enable-async \
+            --enable-embed=shared \
+            --with-openssl \
+            --with-config-file-path=/etc \
+            --disable-debug \
+            --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+          sudo ldconfig
+
+      - name: Build fuzz_http1_parser + fuzz_h2_session
+        working-directory: http-server/fuzz
+        run: |
+          set -eux
+          PATH="/usr/local/bin:$PATH" make fuzz_http1_parser
+          PATH="/usr/local/bin:$PATH" make fuzz_h2_session
+
+      # h2o ships much larger seed corpora than ours (1972 + 1272
+       # vs 3 + 3 committed). Their corpora are raw HTTP/1 & HTTP/2
+       # bytes, so directly compatible. Fetch via sparse shallow clone
+       # — fast (~5 s) and no repo bloat on our side.
+      - name: Fetch h2o seed corpora
+        run: |
+          set -eux
+          git clone --depth=1 --filter=blob:none --no-checkout \
+            https://github.com/h2o/h2o.git /tmp/h2o
+          cd /tmp/h2o
+          git sparse-checkout init --cone
+          git sparse-checkout set fuzz/http1-corpus fuzz/http2-corpus
+          git checkout
+          echo "h2o http1 seeds: $(ls fuzz/http1-corpus | wc -l)"
+          echo "h2o http2 seeds: $(ls fuzz/http2-corpus | wc -l)"
+
+      - name: Run fuzz_http1_parser 60s
+        working-directory: http-server/fuzz
+        env:
+          ASAN_OPTIONS: "abort_on_error=1:print_stacktrace=1:detect_leaks=0"
+          USE_ZEND_ALLOC: "0"
+        run: |
+          set -eux
+          ./fuzz_http1_parser \
+            -max_total_time=60 \
+            -print_final_stats=1 \
+            -timeout=10 \
+            -rss_limit_mb=4096 \
+            corpus/http1/ /tmp/h2o/fuzz/http1-corpus/
+
+      - name: Run fuzz_h2_session 60s
+        working-directory: http-server/fuzz
+        env:
+          ASAN_OPTIONS: "abort_on_error=1:print_stacktrace=1:detect_leaks=0"
+          USE_ZEND_ALLOC: "0"
+        run: |
+          set -eux
+          ./fuzz_h2_session \
+            -max_total_time=60 \
+            -print_final_stats=1 \
+            -timeout=10 \
+            -rss_limit_mb=4096 \
+            corpus/h2/ /tmp/h2o/fuzz/http2-corpus/
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-crash-embedded-${{ github.run_id }}
+          path: |
+            http-server/fuzz/crash-*
+            http-server/fuzz/leak-*
+            http-server/fuzz/oom-*
+            http-server/fuzz/timeout-*
+          if-no-files-found: ignore
+          retention-days: 14

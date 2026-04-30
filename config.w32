@@ -1,0 +1,172 @@
+// vim:ft=javascript
+
+ARG_ENABLE('http-server', 'Enable HTTP Server extension', 'no');
+ARG_ENABLE('http2', 'Enable HTTP/2 in http_server (requires nghttp2)', 'no');
+ARG_ENABLE('http3', 'Enable HTTP/3 in http_server (requires ngtcp2, nghttp3, OpenSSL >= 3.5)', 'no');
+
+if (PHP_HTTP_SERVER == "yes") {
+
+    var http_server_sources =
+        "src/http_server.c " +
+        "src/http_server_exceptions.c " +
+        "src/http_server_config.c " +
+        "src/http_server_class.c " +
+        "src/http_request.c " +
+        "src/http_response.c " +
+        "src/uploaded_file.c ";
+
+    var http_server_core =
+        "http_connection.c " +
+        "http_connection_tls.c " +
+        "http_protocol_handlers.c " +
+        "http_protocol_strategy.c " +
+        "tls_layer.c " +
+        "http_known_strings.c ";
+
+    var http_server_http1 =
+        "http_parser.c " +
+        "http1_stream.c ";
+
+    var http_server_http3 =
+        "http3_listener.c " +
+        "http3_packet.c " +
+        "http3_connection.c " +
+        "http3_io.c " +
+        "http3_callbacks.c " +
+        "http3_dispatch.c " +
+        "http3_stream.c ";
+
+    var http_server_formats =
+        "multipart_parser.c " +
+        "multipart_processor.c ";
+
+    var http_server_log =
+        "http_log.c " +
+        "trace_context.c ";
+
+    // llhttp bundled
+    var http_server_llhttp =
+        "llhttp.c " +
+        "api.c " +
+        "http.c ";
+
+    EXTENSION("http_server", http_server_sources);
+    ADD_SOURCES(configure_module_dirname + "/src/core",    http_server_core,    "http_server");
+    ADD_SOURCES(configure_module_dirname + "/src/http1",   http_server_http1,   "http_server");
+    ADD_SOURCES(configure_module_dirname + "/src/formats", http_server_formats, "http_server");
+    ADD_SOURCES(configure_module_dirname + "/src/log",     http_server_log,     "http_server");
+    ADD_SOURCES(configure_module_dirname + "/deps/llhttp", http_server_llhttp,  "http_server");
+
+    // Include paths
+    ADD_FLAG("CFLAGS_HTTP_SERVER", "/I " + configure_module_dirname + "/include");
+    ADD_FLAG("CFLAGS_HTTP_SERVER", "/I " + configure_module_dirname + "/src");
+    ADD_FLAG("CFLAGS_HTTP_SERVER", "/I " + configure_module_dirname + "/src/core");
+    ADD_FLAG("CFLAGS_HTTP_SERVER", "/I " + configure_module_dirname + "/deps/llhttp/include");
+
+    ADD_FLAG("CFLAGS_HTTP_SERVER", "/D HTTP_SERVER_EXPORTS /D HAVE_LLHTTP=1");
+
+    // Hardening + diagnostic flags (mirrors config.m4 / CMakeLists.txt
+    // hardening block). /GS is on by default in modern MSVC but stating
+    // it explicitly documents intent. /sdl turns warnings about unsafe
+    // C runtime calls into errors. /guard:cf enables Control Flow Guard.
+    // /W4 raises the default warning level from /W3.
+    //
+    // /wd4701 /wd4703 — silence MSVC's "potentially uninitialized" false
+    // positives over PHP's Z_PARAM_*/ZEND_PARSE_PARAMETERS_* macros. The
+    // analyser cannot model that ZEND_PARSE_PARAMETERS_END returns control
+    // only when every Z_PARAM_* slot has been written; under /sdl C4703 is
+    // promoted to an error and the entire ext fails to compile. The Z_PARAM
+    // macros are correct (every slot is assigned before the END marker) so
+    // this is a tooling limitation, not a real bug.
+    ADD_FLAG("CFLAGS_HTTP_SERVER", "/W4 /GS /sdl /guard:cf /wd4701 /wd4703 /std:c11");
+
+    // OpenSSL (required for TLS layer inside the extension — matches config.m4
+    // default of --with-openssl=yes).
+    if (CHECK_HEADER_ADD_INCLUDE("openssl/ssl.h", "CFLAGS_HTTP_SERVER", PHP_PHP_BUILD + "\\include")
+        && CHECK_LIB("libssl.lib", "http_server")
+        && CHECK_LIB("libcrypto.lib", "http_server")) {
+        AC_DEFINE("HAVE_OPENSSL", 1, "Whether OpenSSL TLS support is available");
+    } else {
+        WARNING("OpenSSL not found at '" + PHP_PHP_BUILD + "' — TLS layer will fail to compile. " +
+                "Drop libssl.lib/libcrypto.lib into '" + PHP_PHP_BUILD + "\\lib' and headers into '\\include\\openssl'.");
+    }
+
+    // HTTP/2 (optional)
+    if (PHP_HTTP2 == "yes") {
+        if (CHECK_HEADER_ADD_INCLUDE("nghttp2/nghttp2.h", "CFLAGS_HTTP_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_LIB("nghttp2.lib", "http_server")) {
+            AC_DEFINE("HAVE_HTTP2", 1, "Whether HTTP/2 support is enabled");
+            ADD_SOURCES(configure_module_dirname + "/src/http2",
+                "http2_strategy.c http2_session.c http2_stream.c",
+                "http_server");
+        } else {
+            ERROR("nghttp2 not found. Install headers to '" + PHP_PHP_BUILD + "\\include\\nghttp2' and nghttp2.lib to '\\lib'.");
+        }
+    }
+
+    // HTTP/3 (optional). Mirrors config.m4 §HTTP/3:
+    //   ngtcp2 >= 1.6, nghttp3 >= 1.4, OpenSSL >= 3.5 (QUIC TLS API),
+    //   libngtcp2_crypto_ossl glue. Fail-hard on Windows when --enable-http3
+    //   is asked for: pkg-config-style fail-soft on Linux is meant to keep
+    //   distro builds working when a dep is missing; on Windows the user
+    //   has explicitly opted in by passing --enable-http3, so a clear
+    //   error beats silently skipping the H3 sources.
+    if (PHP_HTTP3 == "yes") {
+        var _h3_ok = true;
+        // OpenSSL version probe — opensslv.h defines OPENSSL_VERSION_STR.
+        // We grep it because configure.js has no semantic version compare.
+        var _ossl_ver_h = PHP_PHP_BUILD + "\\include\\openssl\\opensslv.h";
+        var _ossl_ok = false;
+        if (FSO.FileExists(_ossl_ver_h)) {
+            var f = FSO.OpenTextFile(_ossl_ver_h, 1);
+            var t = f.ReadAll(); f.Close();
+            var m = t.match(/OPENSSL_VERSION_STR\s+"(\d+)\.(\d+)\.(\d+)/);
+            if (m && (parseInt(m[1]) > 3 || (parseInt(m[1]) == 3 && parseInt(m[2]) >= 5))) {
+                _ossl_ok = true;
+            } else if (m) {
+                WARNING("HTTP/3 disabled: OpenSSL " + m[1] + "." + m[2] + "." + m[3] + " < 3.5 (QUIC TLS API required).");
+            }
+        }
+        if (!_ossl_ok) { _h3_ok = false; }
+
+        if (_h3_ok && !(CHECK_HEADER_ADD_INCLUDE("ngtcp2/ngtcp2.h", "CFLAGS_HTTP_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_HEADER_ADD_INCLUDE("ngtcp2/ngtcp2_crypto_ossl.h", "CFLAGS_HTTP_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_LIB("ngtcp2.lib", "http_server")
+            && CHECK_LIB("ngtcp2_crypto_ossl.lib", "http_server"))) {
+            WARNING("HTTP/3 disabled: ngtcp2 + ngtcp2_crypto_ossl not found in '" + PHP_PHP_BUILD + "'.");
+            _h3_ok = false;
+        }
+        if (_h3_ok && !(CHECK_HEADER_ADD_INCLUDE("nghttp3/nghttp3.h", "CFLAGS_HTTP_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_LIB("nghttp3.lib", "http_server"))) {
+            WARNING("HTTP/3 disabled: nghttp3 not found in '" + PHP_PHP_BUILD + "'.");
+            _h3_ok = false;
+        }
+
+        if (_h3_ok) {
+            AC_DEFINE("HAVE_HTTP_SERVER_HTTP3", 1, "Whether HTTP/3 support is enabled");
+            AC_DEFINE("HAVE_NGTCP2", 1, "Whether ngtcp2 is available");
+            AC_DEFINE("HAVE_NGHTTP3", 1, "Whether nghttp3 is available");
+            ADD_SOURCES(configure_module_dirname + "/src/http3", http_server_http3, "http_server");
+            ADD_FLAG("CFLAGS_HTTP_SERVER", "/I " + configure_module_dirname + "/src/http3");
+            ADD_FLAG("CFLAGS_HTTP_SERVER", "/I " + configure_module_dirname + "/include/http3");
+            // Static-link convention on Windows: nghttp3.h / ngtcp2.h gate
+            // their __declspec(dllimport) on these macros — without them,
+            // the linker chases imports against a non-existent .dll. The
+            // PHP-SDK ships nghttp2 the same way for the H/2 build.
+            ADD_FLAG("CFLAGS_HTTP_SERVER", "/D NGTCP2_STATICLIB /D NGHTTP3_STATICLIB");
+            // ngtcp2 + ngtcp2_crypto_ossl pull in OS networking + bcrypt
+            // (RAND, SHA, etc.) via the OpenSSL static glue. ws2_32 +
+            // Mswsock are already in LIBS for the TCP path; bcrypt and
+            // crypt32 are the pieces specific to libcrypto's CNG fallback
+            // and ngtcp2's source-of-randomness probes.
+            ADD_FLAG("LIBS", "bcrypt.lib crypt32.lib");
+        } else {
+            ERROR("HTTP/3 was requested but prerequisites are missing. Install OpenSSL >= 3.5, ngtcp2 >= 1.6, ngtcp2_crypto_ossl, nghttp3 >= 1.4 into '" + PHP_PHP_BUILD + "', or omit --enable-http3.");
+        }
+    }
+
+    // Windows socket libs — http_server does raw accept/socket work.
+    ADD_FLAG("LIBS", "ws2_32.lib Mswsock.lib");
+
+    PHP_INSTALL_HEADERS("ext/http_server/include", "php_http_server.h");
+}

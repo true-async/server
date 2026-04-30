@@ -1,0 +1,52 @@
+# libFuzzer dictionary for HTTP/2 session fuzzing.
+# Tokens include the exact 24-byte connection preface (impossible to
+# guess via random mutations otherwise), common frame-header patterns,
+# and HPACK integer/literal markers.
+
+# ---- Connection preface (RFC 9113 §3.4) ----
+"PRI * HTTP/2.0\x0d\x0a\x0d\x0aSM\x0d\x0a\x0d\x0a"
+
+# ---- Frame headers: length(3) type(1) flags(1) stream_id(4) ----
+# Length 0, SETTINGS (type 4), flags 0, stream 0
+"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+# SETTINGS ACK
+"\x00\x00\x00\x04\x01\x00\x00\x00\x00"
+# Length 8, PING (type 6), flags 0, stream 0
+"\x00\x00\x08\x06\x00\x00\x00\x00\x00"
+# PING ACK
+"\x00\x00\x08\x06\x01\x00\x00\x00\x00"
+# Length 4, WINDOW_UPDATE (type 8)
+"\x00\x00\x04\x08\x00\x00\x00\x00\x00"
+# HEADERS (type 1), flags END_HEADERS|END_STREAM, stream 1
+"\x00\x00\x00\x01\x05\x00\x00\x00\x01"
+# DATA (type 0) stream 1
+"\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+# DATA with END_STREAM
+"\x00\x00\x00\x00\x01\x00\x00\x00\x01"
+# GOAWAY (type 7)
+"\x00\x00\x08\x07\x00\x00\x00\x00\x00"
+# RST_STREAM (type 3)
+"\x00\x00\x04\x03\x00\x00\x00\x00\x01"
+# CONTINUATION (type 9)
+"\x00\x00\x00\x09\x00\x00\x00\x00\x01"
+# PRIORITY (type 2)
+"\x00\x00\x05\x02\x00\x00\x00\x00\x01"
+
+# ---- HPACK ----
+# Static-table entries we hit often
+":method GET"
+":method POST"
+":path /"
+":scheme https"
+":scheme http"
+":authority"
+"content-type"
+"content-length"
+
+# (HPACK byte-level indices removed — libFuzzer dict parser rejects
+#  short escape-only entries; the frame-header entries above already
+#  steer mutations into HPACK territory.)
+
+# (Error-code tokens removed — all-NUL patterns trip libFuzzer's
+#  dict parser; error codes are small enough that random mutation
+#  from frame-header entries reaches them quickly.)

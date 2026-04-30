@@ -1,0 +1,6 @@
+h3_datagram_fuzz
+crash-*
+leak-*
+slow-unit-*
+default*.profraw
+corpus/
