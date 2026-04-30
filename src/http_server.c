@@ -18,6 +18,9 @@
 #include "http1/http_parser.h"
 #include "http_known_strings.h"
 #include "log/http_log.h"
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/php_websocket.h"
+#endif
 
 #include <uv.h>
 #ifdef HAVE_HTTP2
@@ -169,6 +172,12 @@ PHP_MINIT_FUNCTION(http_server)
 	http_server_config_class_register();
 	http_response_class_register();
 	http_server_class_register();
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+	/* Phase 3: WebSocket classes. Must come AFTER http_server_exceptions
+	 * because WebSocketException inherits from HttpServerException. */
+	ws_php_classes_register();
+#endif
 
 	return SUCCESS;
 }
