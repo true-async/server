@@ -402,6 +402,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       deps/wslay/lib/wslay_stack.c
       src/websocket/websocket_strategy.c
       src/websocket/ws_session.c
+      src/websocket/ws_handshake.c
     "
   fi
 
