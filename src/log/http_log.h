@@ -107,15 +107,15 @@ extern http_log_state_t http_log_state_default;
 
 /* Replaces the process-wide writer/formatter. Used by extensions
  * that route emits into their own pipeline (OTel exporter etc.). */
-PHPAPI void http_log_set_writer(http_log_writer_fn fn, void *ud);
-PHPAPI void http_log_set_formatter(http_log_formatter_fn fn, void *ud);
+void http_log_set_writer(http_log_writer_fn fn, void *ud);
+void http_log_set_formatter(http_log_formatter_fn fn, void *ud);
 
 /* The level gate is re-checked inside, so a call site that skips
  * the http_logf_* macro is still correct (just slower). */
-PHPAPI void http_log_emitf(http_log_state_t *state,
-                           http_log_severity_t sev,
-                           const http_log_attr_t *attrs, size_t attrs_n,
-                           const char *tmpl, ...)
+void http_log_emitf(http_log_state_t *state,
+                    http_log_severity_t sev,
+                    const http_log_attr_t *attrs, size_t attrs_n,
+                    const char *tmpl, ...)
     ZEND_ATTRIBUTE_FORMAT(printf, 5, 6);
 
 /* Default formatter: "TS LEVEL body key=val ...\n". */

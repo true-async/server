@@ -335,22 +335,22 @@ static void default_writer(const http_log_record_t *rec, void *ud)
     }
 }
 
-PHPAPI void http_log_set_writer(http_log_writer_fn fn, void *ud)
+void http_log_set_writer(http_log_writer_fn fn, void *ud)
 {
     g_writer = fn;
     g_writer_ud = ud;
 }
 
-PHPAPI void http_log_set_formatter(http_log_formatter_fn fn, void *ud)
+void http_log_set_formatter(http_log_formatter_fn fn, void *ud)
 {
     g_formatter = fn;
     g_formatter_ud = ud;
 }
 
-PHPAPI void http_log_emitf(http_log_state_t *state,
-                           http_log_severity_t sev,
-                           const http_log_attr_t *attrs, size_t attrs_n,
-                           const char *tmpl, ...)
+void http_log_emitf(http_log_state_t *state,
+                    http_log_severity_t sev,
+                    const http_log_attr_t *attrs, size_t attrs_n,
+                    const char *tmpl, ...)
 {
     /* Re-check the gate: callers via the macro have already gated, but
      * direct API users haven't. */
