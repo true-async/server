@@ -357,14 +357,69 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
     }
 }
 
+/* {{{ ws_do_send — internal helper for both send() and sendBinary()
+ *
+ * 1. wslay_event_queue_msg — copies the payload into wslay's outbound
+ *    queue (multi-producer-safe; wslay's queue is just a FIFO of
+ *    message structs, mutated only on the single-threaded scheduler).
+ * 2. Flusher discipline (PLAN_WEBSOCKET.md §2.4): if no other
+ *    coroutine currently holds the flusher role, become one and
+ *    drive wslay_event_send. Otherwise just enqueue and return —
+ *    the active flusher will eventually pick our bytes up.
+ *
+ * Backpressure (queue size cap, suspension on overflow, escape via
+ * WebSocketBackpressureException) is the next commit; for now the
+ * queue is unbounded.
+ */
+static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
+{
+    websocket_object *const w = Z_WEBSOCKET_P(zv_this);
+    if (w->session == NULL || w->closed) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "Cannot send on a closed WebSocket");
+        return;
+    }
+    ws_session_t *const s = w->session;
+
+    const struct wslay_event_msg msg = {
+        .opcode     = opcode,
+        .msg        = (const uint8_t *)ZSTR_VAL(payload),
+        .msg_length = ZSTR_LEN(payload),
+    };
+    if (wslay_event_queue_msg(s->ctx, &msg) != 0) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "WebSocket queue_msg failed (out of memory or session closed)");
+        return;
+    }
+
+    if (s->flushing) {
+        /* Another coroutine already drives the flusher; it'll pick up
+         * the message we just enqueued. */
+        return;
+    }
+
+    s->flushing = 1;
+    const int rc = wslay_event_send(s->ctx);
+    s->flushing = 0;
+
+    if (rc != 0) {
+        /* Sticky write error or session-internal failure. The next
+         * recv()/send() will see write_error and route to a closed
+         * exception; we don't tear the connection down from here
+         * because the read-side teardown owns that path. */
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket send failed (peer closed or write error)");
+    }
+}
+/* }}} */
+
 ZEND_METHOD(TrueAsync_WebSocket, send)
 {
     zend_string *text;
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(text)
     ZEND_PARSE_PARAMETERS_END();
-    (void)text;
-    ws_throw_unimplemented("send");
+    ws_do_send(ZEND_THIS, text, WSLAY_TEXT_FRAME);
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, sendBinary)
@@ -373,8 +428,7 @@ ZEND_METHOD(TrueAsync_WebSocket, sendBinary)
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(data)
     ZEND_PARSE_PARAMETERS_END();
-    (void)data;
-    ws_throw_unimplemented("sendBinary");
+    ws_do_send(ZEND_THIS, data, WSLAY_BINARY_FRAME);
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, ping)

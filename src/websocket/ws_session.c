@@ -53,27 +53,45 @@ static ssize_t ws_session_recv_callback(wslay_event_context_ptr ctx,
 
 /* {{{ ws_session_send_callback
  *
- * wslay pushes serialized frame bytes through this. The actual
- * socket write — including TLS, suspending send_raw, and the
- * flusher-role discipline from PLAN_WEBSOCKET.md §2.4 — lands in a
- * follow-up commit alongside the public send() PHP method.
+ * wslay pushes serialized frame bytes through this. We route them
+ * through http_connection_send — the same public path the H1/H2
+ * pipelines use — so TLS, kernel send-buffer backpressure, and the
+ * per-connection write deadline all keep working without the WS
+ * code reimplementing them.
  *
- * Until then the callback short-circuits with WOULDBLOCK so any
- * accidental wslay_event_send() invocation returns cleanly without
- * tearing the session down. Producers do not yet exist (no PHP API)
- * so this branch is unreachable in practice.
+ * Per docs/PLAN_WEBSOCKET.md §2.4 the flusher discipline is held by
+ * whichever PHP coroutine first picked up the producer role in
+ * WebSocket::send(); other coroutines just enqueue and return. By
+ * the time we get here, we ARE that coroutine, so suspension is
+ * allowed and http_connection_send may suspend the coroutine on
+ * write-readiness.
+ *
+ * On a sticky write error we set the session's write_error flag
+ * (covered in feed-side decisions later) and return -1; wslay tears
+ * the session down on the next wslay_event_send invocation.
  */
 static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
                                         const uint8_t *data, size_t len,
                                         int flags, void *user_data)
 {
-    (void)data;
-    (void)len;
     (void)flags;
-    (void)user_data;
+    ws_session_t *const s = (ws_session_t *)user_data;
 
-    wslay_event_set_error(ctx, WSLAY_ERR_WOULDBLOCK);
-    return -1;
+    if (UNEXPECTED(s->write_error)) {
+        wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
+        return -1;
+    }
+    if (UNEXPECTED(s->conn == NULL)) {
+        wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
+        return -1;
+    }
+
+    if (!http_connection_send(s->conn, (const char *)data, len)) {
+        s->write_error = 1;
+        wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
+        return -1;
+    }
+    return (ssize_t)len;
 }
 /* }}} */
 
