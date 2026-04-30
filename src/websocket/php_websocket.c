@@ -42,6 +42,161 @@ zend_class_entry *websocket_concurrent_read_exception_ce = NULL;
  * Defined in http_server_exceptions.c, registered before us at MINIT. */
 extern zend_class_entry *http_server_exception_ce;
 
+/* Object handlers — one per concrete class. Initialised at MINIT by
+ * memcpy'ing std_object_handlers and overriding offset / free_obj.
+ * Same pattern as http_response_handlers in http_response.c. */
+static zend_object_handlers websocket_handlers;
+static zend_object_handlers websocket_message_handlers;
+static zend_object_handlers websocket_upgrade_handlers;
+
+/* {{{ create / free for WebSocket
+ *
+ * The default-constructed object has no session — the only legitimate
+ * way to get a usable WebSocket is via the internal factory called
+ * from the handshake path. Userland `new` is blocked by the private
+ * constructor, but the create_object handler still has to be wired
+ * because PHP calls it before the constructor visibility check.
+ */
+static zend_object *websocket_create(zend_class_entry *ce)
+{
+    websocket_object *obj = zend_object_alloc(sizeof(*obj), ce);
+
+    obj->session        = NULL;
+    obj->subprotocol    = NULL;
+    obj->remote_address = NULL;
+    obj->closed         = true;   /* default-closed; the factory clears this */
+
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    obj->std.handlers = &websocket_handlers;
+
+    return &obj->std;
+}
+
+static void websocket_free(zend_object *obj)
+{
+    websocket_object *w = websocket_from_obj(obj);
+
+    /* Session is borrowed — the connection layer owns it and may
+     * have already torn it down, in which case w->session is NULL.
+     * We never call ws_session_destroy from here. */
+    if (w->subprotocol) {
+        zend_string_release(w->subprotocol);
+    }
+    if (w->remote_address) {
+        zend_string_release(w->remote_address);
+    }
+
+    zend_object_std_dtor(&w->std);
+}
+/* }}} */
+
+/* {{{ create / free for WebSocketMessage */
+static zend_object *websocket_message_create(zend_class_entry *ce)
+{
+    websocket_message_object *obj = zend_object_alloc(sizeof(*obj), ce);
+
+    obj->data   = NULL;
+    obj->binary = false;
+
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    obj->std.handlers = &websocket_message_handlers;
+
+    return &obj->std;
+}
+
+static void websocket_message_free(zend_object *obj)
+{
+    websocket_message_object *m = websocket_message_from_obj(obj);
+    if (m->data) {
+        zend_string_release(m->data);
+    }
+    zend_object_std_dtor(&m->std);
+}
+/* }}} */
+
+/* {{{ create / free for WebSocketUpgrade */
+static zend_object *websocket_upgrade_create(zend_class_entry *ce)
+{
+    websocket_upgrade_object *obj = zend_object_alloc(sizeof(*obj), ce);
+
+    obj->conn          = NULL;
+    obj->req           = NULL;
+    obj->subprotocol   = NULL;
+    obj->reject_status = 0;
+    obj->reject_reason = NULL;
+    obj->committed     = false;
+
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    obj->std.handlers = &websocket_upgrade_handlers;
+
+    return &obj->std;
+}
+
+static void websocket_upgrade_free(zend_object *obj)
+{
+    websocket_upgrade_object *u = websocket_upgrade_from_obj(obj);
+    if (u->subprotocol) {
+        zend_string_release(u->subprotocol);
+    }
+    if (u->reject_reason) {
+        zend_string_release(u->reject_reason);
+    }
+    zend_object_std_dtor(&u->std);
+}
+/* }}} */
+
+/* {{{ Public factories — called from the handshake path */
+zend_object *websocket_object_create_for_session(ws_session_t *session)
+{
+    zend_object *obj = websocket_create(websocket_ce);
+    websocket_object *w = websocket_from_obj(obj);
+
+    w->session = session;
+    w->closed  = false;     /* fresh session — open until close() / peer FIN */
+
+    return obj;
+}
+
+zend_object *websocket_message_object_create(zend_string *data, bool binary)
+{
+    zend_object *obj = websocket_message_create(websocket_message_ce);
+    websocket_message_object *m = websocket_message_from_obj(obj);
+
+    m->data   = data;       /* takes ownership — caller must have addref'd */
+    m->binary = binary;
+
+    /* Mirror the value into the readonly properties so var_dump and
+     * direct $msg->data / $msg->binary access see the same data.
+     * PHP's readonly enforcement still applies — userland cannot
+     * mutate post-construction. */
+    zval data_zv;
+    ZVAL_STR_COPY(&data_zv, data);
+    zend_update_property(websocket_message_ce, obj, "data", sizeof("data") - 1, &data_zv);
+    zval_ptr_dtor(&data_zv);
+
+    zval binary_zv;
+    ZVAL_BOOL(&binary_zv, binary);
+    zend_update_property(websocket_message_ce, obj, "binary", sizeof("binary") - 1, &binary_zv);
+
+    return obj;
+}
+
+zend_object *websocket_upgrade_object_create(http_connection_t *conn,
+                                             http_request_t *req)
+{
+    zend_object *obj = websocket_upgrade_create(websocket_upgrade_ce);
+    websocket_upgrade_object *u = websocket_upgrade_from_obj(obj);
+
+    u->conn = conn;
+    u->req  = req;
+
+    return obj;
+}
+/* }}} */
+
 #include "../../stubs/WebSocketCloseCode.php_arginfo.h"
 #include "../../stubs/WebSocketMessage.php_arginfo.h"
 #include "../../stubs/WebSocketUpgrade.php_arginfo.h"
@@ -173,21 +328,35 @@ ZEND_METHOD(TrueAsync_WebSocket, close)
 ZEND_METHOD(TrueAsync_WebSocket, isClosed)
 {
     ZEND_PARSE_PARAMETERS_NONE();
-    /* Default-pre-implementation behaviour: report closed so naive
-     * loops `while (!$ws->isClosed())` exit cleanly instead of
-     * spinning when the rest of the API throws. */
-    RETURN_TRUE;
+    websocket_object *w = Z_WEBSOCKET_P(ZEND_THIS);
+    /* `closed` is true after close() lands or peer CLOSE is processed,
+     * and also true on a default-constructed object that was never
+     * bound to a session — which is what the private constructor +
+     * Reflection-instantiation case looks like. */
+    RETURN_BOOL(w->closed || w->session == NULL);
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol)
 {
     ZEND_PARSE_PARAMETERS_NONE();
+    websocket_object *w = Z_WEBSOCKET_P(ZEND_THIS);
+    if (w->subprotocol) {
+        RETURN_STR_COPY(w->subprotocol);
+    }
     RETURN_NULL();
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, getRemoteAddress)
 {
     ZEND_PARSE_PARAMETERS_NONE();
+    websocket_object *w = Z_WEBSOCKET_P(ZEND_THIS);
+    if (w->remote_address) {
+        RETURN_STR_COPY(w->remote_address);
+    }
+    /* Lazy resolution from the connection lands when handshake wiring
+     * commits — for now an unbound or not-yet-resolved object reports
+     * the empty string rather than NULL so the return-type contract
+     * (`: string`) is honoured. */
     RETURN_EMPTY_STRING();
 }
 /* }}} */
@@ -200,6 +369,29 @@ void ws_php_classes_register(void)
     websocket_message_ce    = register_class_TrueAsync_WebSocketMessage();
     websocket_upgrade_ce    = register_class_TrueAsync_WebSocketUpgrade();
     websocket_ce            = register_class_TrueAsync_WebSocket();
+
+    /* Wire object handlers. Same pattern as http_response_handlers —
+     * memcpy std defaults, then override offset (so PHP knows where
+     * the embedded zend_object sits inside our struct) and free_obj
+     * (so our owned strings get released). clone_obj = NULL because
+     * none of these are meaningfully cloneable. */
+    memcpy(&websocket_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+    websocket_handlers.offset    = XtOffsetOf(websocket_object, std);
+    websocket_handlers.free_obj  = websocket_free;
+    websocket_handlers.clone_obj = NULL;
+    websocket_ce->create_object  = websocket_create;
+
+    memcpy(&websocket_message_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+    websocket_message_handlers.offset    = XtOffsetOf(websocket_message_object, std);
+    websocket_message_handlers.free_obj  = websocket_message_free;
+    websocket_message_handlers.clone_obj = NULL;
+    websocket_message_ce->create_object  = websocket_message_create;
+
+    memcpy(&websocket_upgrade_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+    websocket_upgrade_handlers.offset    = XtOffsetOf(websocket_upgrade_object, std);
+    websocket_upgrade_handlers.free_obj  = websocket_upgrade_free;
+    websocket_upgrade_handlers.clone_obj = NULL;
+    websocket_upgrade_ce->create_object  = websocket_upgrade_create;
 
     /* Exceptions inherit from the project base. Register the WS base
      * first so the leaves can chain to it. */
