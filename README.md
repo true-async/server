@@ -122,6 +122,7 @@ If you discover a security vulnerability, please report it privately via GitHub 
 | `libngtcp2` + `libngtcp2_crypto_ossl` | 1.22 | HTTP/3 | must be the OpenSSL crypto backend |
 | `libnghttp3` | 1.15 | HTTP/3 | |
 | `libuv` | bundled via TrueAsync | core | not linked directly by this extension |
+| [`llhttp`](https://github.com/nodejs/llhttp) | 9.3.0 | HTTP/1.1 | vendored under [`deps/llhttp/`](deps/llhttp/UPSTREAM.md) (MIT); same parser used by Node.js |
 
 > Distro packages of OpenSSL/ngtcp2/nghttp3 are usually too old. The recommended path is to build OpenSSL 3.5 + ngtcp2 + nghttp3 from source into `/usr/local` (or `/opt/h3`) and point `PKG_CONFIG_PATH` at that prefix when running `./configure`.
 
