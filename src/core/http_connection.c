@@ -21,6 +21,10 @@
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
 
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/ws_dispatch.h"
+#endif
+
 /* php_network.h (pulled in via http_connection.h) supplies socket
  * types and closesocket on both POSIX and Windows. No direct POSIX
  * headers are needed — the async reactor owns the socket lifecycle. */
@@ -100,6 +104,18 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
      * dispatched. Stamping on req (not conn) so concurrent streams
      * (HTTP/2) don't overwrite each other. */
     req->enqueue_ns = zend_hrtime();
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* WebSocket Upgrade short-circuit. Returns true when the request
+     * carried an Upgrade: websocket header and we either accepted it
+     * (101 sent + WS handler coroutine spawned) or rejected it
+     * (4xx/426 sent + keep_alive cleared). In both cases the H1
+     * dispatch path must not run. Common case (no Upgrade header)
+     * exits cheaply — see ws_handshake_validate. */
+    if (ws_dispatch_try_upgrade(conn, req)) {
+        return;
+    }
+#endif
 
     http_connection_dispatch_request(conn, req);
 }

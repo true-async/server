@@ -403,6 +403,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/websocket/websocket_strategy.c
       src/websocket/ws_session.c
       src/websocket/ws_handshake.c
+      src/websocket/ws_dispatch.c
       src/websocket/php_websocket.c
     "
   fi
