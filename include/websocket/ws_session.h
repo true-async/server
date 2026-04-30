@@ -11,8 +11,21 @@
 
 #include "php.h"
 #include "php_http_server.h"
+#include "Zend/zend_async_API.h"
 
 #include <wslay/wslay.h>
+
+/*
+ * One reassembled WebSocket message waiting in the session FIFO.
+ * Linked-list node — small enough that the per-message allocation
+ * cost is negligible. `data` is owned by this node; `binary` mirrors
+ * the wslay opcode (0x1 = text → false, 0x2 = binary → true).
+ */
+typedef struct ws_pending_message_t {
+    struct ws_pending_message_t *next;
+    zend_string                 *data;
+    bool                         binary;
+} ws_pending_message_t;
 
 /*
  * Per-connection WebSocket runtime state. Allocated when an Upgrade
@@ -26,8 +39,8 @@
  *      ws_session_feed(). wslay_event_recv() then drains them through
  *      ws_session_recv_callback (which copies from recv_buf) and
  *      fires ws_session_on_msg_recv_callback once per assembled
- *      WebSocket message — at which point the message is handed to
- *      the handler coroutine waiting in WebSocket::recv().
+ *      WebSocket message — at which point the message is appended to
+ *      the recv FIFO and any waiter in WebSocket::recv() is woken.
  *
  *   2. Outbound: handler coroutines call wslay_event_queue_msg()
  *      from $ws->send() (any number of producers, multi-safe by
@@ -68,6 +81,30 @@ typedef struct ws_session_t {
      * subsequent send_callback invocations short-circuit with -1
      * so wslay tears the session down on the next wslay_event_send. */
     unsigned write_error : 1;
+
+    /* Set when on_msg_recv_callback sees opcode CLOSE (0x8) OR the
+     * connection layer notifies us of peer FIN. recv() returns NULL
+     * once the FIFO is drained AND this is set — distinguishing
+     * "no message yet" (suspend) from "no more messages ever". */
+    unsigned peer_closed : 1;
+
+    /* Inbound message FIFO. Producer = ws_session_on_msg_recv_callback
+     * (event-loop context), Consumer = WebSocket::recv() (coroutine
+     * context). Single-threaded coroutine model — no atomics needed.
+     * Head is what recv() pops next; tail is where new messages get
+     * appended. */
+    ws_pending_message_t *recv_head;
+    ws_pending_message_t *recv_tail;
+
+    /* Trigger event that wakes a waiter blocked in recv() when a
+     * message lands or the connection closes. Lazy — created on the
+     * first recv() that finds the FIFO empty. */
+    zend_async_trigger_event_t *recv_event;
+
+    /* Single-reader enforcement (docs/PLAN_WEBSOCKET.md §6.9). NULL
+     * when no recv() is suspended; non-NULL while one is. A second
+     * concurrent recv() throws WebSocketConcurrentReadException. */
+    zend_coroutine_t *recv_waiter;
 } ws_session_t;
 
 /*
@@ -97,5 +134,19 @@ void ws_session_destroy(ws_session_t *session);
  * requires connection teardown.
  */
 int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len);
+
+/*
+ * Pop the head message from the recv FIFO. Returns the node (caller
+ * owns it; must zend_string_release(node->data) and efree(node)) or
+ * NULL when the FIFO is empty.
+ */
+ws_pending_message_t *ws_session_recv_pop(ws_session_t *session);
+
+/*
+ * Mark the session as peer-closed (no further messages will arrive).
+ * Idempotent. Wakes any waiter currently suspended in recv() so it
+ * sees the closed state and returns NULL.
+ */
+void ws_session_mark_peer_closed(ws_session_t *session);
 
 #endif /* WS_SESSION_H */

@@ -13,7 +13,9 @@
 #include "php.h"
 #include "zend_exceptions.h"
 #include "zend_enum.h"
+#include "Zend/zend_async_API.h"
 #include "websocket/php_websocket.h"
+#include "websocket/ws_session.h"
 
 /*
  * SCAFFOLD ONLY.
@@ -168,18 +170,23 @@ zend_object *websocket_message_object_create(zend_string *data, bool binary)
     m->data   = data;       /* takes ownership — caller must have addref'd */
     m->binary = binary;
 
-    /* Mirror the value into the readonly properties so var_dump and
-     * direct $msg->data / $msg->binary access see the same data.
-     * PHP's readonly enforcement still applies — userland cannot
-     * mutate post-construction. */
-    zval data_zv;
-    ZVAL_STR_COPY(&data_zv, data);
-    zend_update_property(websocket_message_ce, obj, "data", sizeof("data") - 1, &data_zv);
-    zval_ptr_dtor(&data_zv);
+    /* Initialise the public readonly properties by writing directly
+     * into the property slots — zend_update_property() goes through
+     * the property handler which enforces the readonly invariant
+     * even for internal callers, but this is the original
+     * initialisation, so direct slot write is the documented
+     * extension-author escape hatch (see ext/random for analogous
+     * usage). Property layout matches stub declaration order:
+     *   slot 0 = data (string)
+     *   slot 1 = binary (bool)
+     */
+    zval *prop_data = OBJ_PROP_NUM(obj, 0);
+    zval_ptr_dtor(prop_data);
+    ZVAL_STR_COPY(prop_data, data);
 
-    zval binary_zv;
-    ZVAL_BOOL(&binary_zv, binary);
-    zend_update_property(websocket_message_ce, obj, "binary", sizeof("binary") - 1, &binary_zv);
+    zval *prop_binary = OBJ_PROP_NUM(obj, 1);
+    zval_ptr_dtor(prop_binary);
+    ZVAL_BOOL(prop_binary, binary);
 
     return obj;
 }
@@ -276,7 +283,78 @@ ZEND_METHOD(TrueAsync_WebSocket, __construct)
 ZEND_METHOD(TrueAsync_WebSocket, recv)
 {
     ZEND_PARSE_PARAMETERS_NONE();
-    ws_throw_unimplemented("recv");
+
+    websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+    ws_session_t *const session = w->session;
+
+    if (session == NULL || w->closed) {
+        /* Already closed or never bound to a session — graceful end
+         * of stream from the caller's perspective. */
+        RETURN_NULL();
+    }
+
+    /* Single-reader enforcement (docs/PLAN_WEBSOCKET.md §6.9). The
+     * wire is one byte stream; defining round-robin / fan-out
+     * semantics for multiple readers has no real use case and is
+     * easy to write race-prone code around, so we reject it loudly. */
+    zend_coroutine_t *const me = ZEND_ASYNC_CURRENT_COROUTINE;
+    if (session->recv_waiter != NULL && session->recv_waiter != me) {
+        zend_throw_exception(websocket_concurrent_read_exception_ce,
+            "Another coroutine is already suspended in WebSocket::recv() "
+            "on this connection", 0);
+        RETURN_THROWS();
+    }
+
+    while (1) {
+        /* Fast path: a message is already in the FIFO. Pop it and
+         * hand it back as a fresh WebSocketMessage. */
+        ws_pending_message_t *node = ws_session_recv_pop(session);
+        if (node != NULL) {
+            session->recv_waiter = NULL;
+            zend_object *msg = websocket_message_object_create(node->data,
+                                                               node->binary);
+            efree(node);  /* data ownership transferred to the message obj */
+            RETURN_OBJ(msg);
+        }
+
+        /* Drained — was the connection closed while we waited? */
+        if (session->peer_closed) {
+            session->recv_waiter = NULL;
+            RETURN_NULL();
+        }
+
+        /* Need to suspend until on_msg_recv_callback (or peer FIN)
+         * notifies the recv_event. Lazy-create the trigger event
+         * so connections that never actually call recv() pay no
+         * setup cost. */
+        if (session->recv_event == NULL) {
+            session->recv_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+            if (session->recv_event == NULL) {
+                session->recv_waiter = NULL;
+                RETURN_NULL();
+            }
+        }
+
+        if (ZEND_ASYNC_WAKER_NEW(me) == NULL) {
+            session->recv_waiter = NULL;
+            return;
+        }
+        session->recv_waiter = me;
+
+        zend_async_resume_when(me, &session->recv_event->base, false,
+                               zend_async_waker_callback_resolve, NULL);
+
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(me);
+
+        if (EG(exception) != NULL) {
+            session->recv_waiter = NULL;
+            return;
+        }
+
+        /* Loop and re-check the FIFO — woken either by a message or
+         * by mark_peer_closed. */
+    }
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, send)

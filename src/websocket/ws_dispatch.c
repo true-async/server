@@ -386,8 +386,35 @@ static void ws_install_strategy(http_connection_t *conn)
         conn->strategy = NULL;
     }
 
+    /* Release the H1 parser. The connection's read pipeline checks
+     * `conn->parser && parser_is_complete` to decide whether to keep
+     * reading; for an upgrade GET, llhttp DOES fire on_message_complete
+     * after on_headers_complete (the request has no body, so it's
+     * "complete" by llhttp's reckoning) — request->complete is true,
+     * the read multishot gets stopped, and no further bytes ever
+     * reach this connection. Returning the parser to the pool clears
+     * conn->parser so the same check returns false and the read loop
+     * stays alive for incoming WS frames. */
+    if (conn->parser != NULL) {
+        parser_pool_return(conn->parser);
+        conn->parser = NULL;
+    }
+    /* Same reasoning: the connection's `current_request` was the
+     * upgrade GET, which we have now consumed. Clear it so any
+     * cross-cutting code that walks current_request doesn't trip on
+     * a stale pointer (the request struct itself is owned by the
+     * parser pool and was just released above). */
+    conn->current_request = NULL;
+
     conn->strategy      = http_protocol_strategy_websocket_create();
     conn->protocol_type = HTTP_PROTOCOL_WEBSOCKET;
+
+    /* Re-arm the read multishot. The previous read callback returned
+     * false from handle_read_completion (because parser_is_complete
+     * was true under the H1 parser), which stopped the multishot;
+     * now that the parser is gone the WS strategy needs its own read
+     * subscription to receive the first frame. */
+    http_connection_read(conn);
 }
 /* }}} */
 
@@ -403,11 +430,11 @@ static void ws_spawn_handler_coroutine(http_connection_t *conn,
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
     efree(req_obj);
 
-    /* Session pointer is filled lazily by ws_strategy on first feed();
-     * the WebSocket factory accepts NULL and the recv/send method
-     * bodies (still throw-stubs at this scaffold stage) will resolve
-     * the live session through the strategy when they land. */
-    zend_object *ws_obj = websocket_object_create_for_session(NULL);
+    /* Eagerly create the wslay session so it's available the moment
+     * the handler runs — recv() needs to find it without races
+     * against the lazy-init in ws_feed(). */
+    ws_session_t *session = ws_strategy_ensure_session(conn->strategy, conn);
+    zend_object *ws_obj = websocket_object_create_for_session(session);
     ZVAL_OBJ(&ctx->websocket_zv, ws_obj);
 
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);

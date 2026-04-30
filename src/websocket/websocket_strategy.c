@@ -118,3 +118,25 @@ http_protocol_strategy_t* http_protocol_strategy_websocket_create(void)
 
     return &self->base;
 }
+
+ws_session_t *ws_strategy_ensure_session(http_protocol_strategy_t *strategy,
+                                         http_connection_t *conn)
+{
+    if (strategy == NULL || strategy->protocol_type != HTTP_PROTOCOL_WEBSOCKET) {
+        return NULL;
+    }
+    ws_strategy_t *self = (ws_strategy_t *)strategy;
+    if (self->session == NULL) {
+        self->conn    = conn;
+        self->session = ws_session_init(conn);
+    }
+    return self->session;
+}
+
+ws_session_t *ws_strategy_get_session(http_protocol_strategy_t *strategy)
+{
+    if (strategy == NULL || strategy->protocol_type != HTTP_PROTOCOL_WEBSOCKET) {
+        return NULL;
+    }
+    return ((ws_strategy_t *)strategy)->session;
+}

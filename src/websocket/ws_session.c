@@ -77,26 +77,67 @@ static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
 }
 /* }}} */
 
+/* {{{ ws_notify_recv_waiter
+ *
+ * Wake whoever is suspended in WebSocket::recv() (if anyone). The
+ * trigger event resolves via the standard waker pipeline; the
+ * coroutine resumes inside its own ZEND_ASYNC_SUSPEND() return, then
+ * inspects the FIFO / peer_closed flag to decide what to return.
+ *
+ * No-op when nobody is waiting — recv() will discover the new
+ * message on its next entry via the FIFO check.
+ */
+static void ws_notify_recv_waiter(ws_session_t *s)
+{
+    if (s->recv_event != NULL) {
+        ZEND_ASYNC_CALLBACKS_NOTIFY(&s->recv_event->base, s, NULL);
+    }
+}
+/* }}} */
+
 /* {{{ ws_session_on_msg_recv_callback
  *
  * Fires once per fully-reassembled WebSocket message — text or
- * binary, post-UTF-8-validation, post-defragmentation. Hand-off to
- * the handler coroutine waiting in WebSocket::recv() lands with the
- * PHP API commit; for now the message is dropped silently.
- *
- * Control frames (PING/PONG/CLOSE) are surfaced here too via
- * arg->opcode. PING auto-response and CLOSE-handshake handling will
- * be filtered out in the same future commit so the handler only ever
- * sees data messages.
+ * binary, post-UTF-8-validation, post-defragmentation. Data
+ * messages (text, binary) are appended to the FIFO so
+ * WebSocket::recv() can pick them up. Control frames (PING/PONG/
+ * CLOSE) are handled here without surfacing to PHP — auto-PONG
+ * lands in the keepalive commit; for now CLOSE flips peer_closed
+ * and PING is dropped silently (wslay's default behaviour responds
+ * to PING automatically when no callback intercepts it).
  */
 static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
                                             const struct wslay_event_on_msg_recv_arg *arg,
                                             void *user_data)
 {
     (void)ctx;
-    (void)arg;
-    (void)user_data;
-    /* TODO: deliver to handler coroutine. */
+    ws_session_t *const s = (ws_session_t *)user_data;
+
+    if (wslay_is_ctrl_frame(arg->opcode)) {
+        if (arg->opcode == WSLAY_CONNECTION_CLOSE) {
+            ws_session_mark_peer_closed(s);
+        }
+        /* PING / PONG: wslay_event auto-handles PING (queues a PONG
+         * via the outbound machinery). PONG is just a keepalive
+         * response — we'll consume it in the keepalive timer commit.
+         * Either way, never surfaces to the PHP layer. */
+        return;
+    }
+
+    /* Text (0x1) or binary (0x2) data message — enqueue. */
+    ws_pending_message_t *node = emalloc(sizeof(*node));
+    node->next   = NULL;
+    node->binary = (arg->opcode == WSLAY_BINARY_FRAME);
+    node->data   = zend_string_init((const char *)arg->msg, arg->msg_length, 0);
+
+    if (s->recv_tail != NULL) {
+        s->recv_tail->next = node;
+    } else {
+        s->recv_head = node;
+    }
+    s->recv_tail = node;
+
+    ws_notify_recv_waiter(s);
 }
 /* }}} */
 
@@ -135,7 +176,47 @@ void ws_session_destroy(ws_session_t *session)
     if (session->ctx) {
         wslay_event_context_free(session->ctx);
     }
+
+    /* Drain the FIFO. Any messages that nobody got around to popping
+     * leak owned zend_strings if we don't release them here. */
+    ws_pending_message_t *node = session->recv_head;
+    while (node != NULL) {
+        ws_pending_message_t *next = node->next;
+        if (node->data) {
+            zend_string_release(node->data);
+        }
+        efree(node);
+        node = next;
+    }
+
+    if (session->recv_event != NULL) {
+        session->recv_event->base.dispose(&session->recv_event->base);
+    }
+
     efree(session);
+}
+
+ws_pending_message_t *ws_session_recv_pop(ws_session_t *session)
+{
+    if (session == NULL || session->recv_head == NULL) {
+        return NULL;
+    }
+    ws_pending_message_t *node = session->recv_head;
+    session->recv_head = node->next;
+    if (session->recv_head == NULL) {
+        session->recv_tail = NULL;
+    }
+    node->next = NULL;
+    return node;
+}
+
+void ws_session_mark_peer_closed(ws_session_t *session)
+{
+    if (session == NULL || session->peer_closed) {
+        return;
+    }
+    session->peer_closed = 1;
+    ws_notify_recv_waiter(session);
 }
 
 int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
