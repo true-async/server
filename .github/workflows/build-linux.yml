@@ -497,17 +497,17 @@ jobs:
         working-directory: http-server
         run: |
           sudo make install
-          echo "extension=http_server.so" | sudo tee /etc/php.d/http_server.ini
+          echo "extension=true_async_server.so" | sudo tee /etc/php.d/true_async_server.ini
 
       - name: Verify http_server loads
         run: |
-          /usr/local/bin/php -m | grep -i 'http_server'
-          /usr/local/bin/php --ri http_server || true
+          /usr/local/bin/php -m | grep -i 'true_async_server'
+          /usr/local/bin/php --ri true_async_server || true
 
       - name: Run http_server phpt suite
         working-directory: http-server
         run: |
-          /usr/local/bin/php /home/runner/work/php-http-server/php-http-server/php-src/run-tests.php \
+          /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
             -P -q -j"$(nproc)" \
             -g FAIL,BORK,LEAK,XLEAK \
             --no-progress \
