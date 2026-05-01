@@ -35,7 +35,7 @@ use function Async\await;
 
 $port = 19840 + getmypid() % 50;
 
-spawn(function () use ($port) {
+$coro = spawn(function () use ($port) {
     $config = (new HttpServerConfig())
         ->addListener('127.0.0.1', $port)
         ->setReadTimeout(5)
@@ -49,14 +49,32 @@ spawn(function () use ($port) {
     });
 
     $pool = new ThreadPool(2);
+    $futures = [];
     for ($i = 0; $i < 2; $i++) {
-        $pool->submit(function () use ($server) {
+        $futures[] = $pool->submit(function () use ($server) {
+            /* Each worker has its own runtime; stop() invoked from the
+             * main thread does not propagate. Schedule a per-worker
+             * coroutine that stops the server from inside the worker's
+             * own loop so start() returns and the pool can drain. */
+            spawn(function () use ($server) {
+                usleep(2000000);
+                $server->stop();
+            });
             $server->start();
         });
     }
 
-    /* Give workers a beat to bind. */
-    usleep(80000);
+    /* Wait until at least one worker has bound the listen socket. */
+    $deadline = microtime(true) + 3.0;
+    $bound = false;
+    while (microtime(true) < $deadline) {
+        $probe = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 0.1);
+        if ($probe) { fclose($probe); $bound = true; break; }
+        usleep(20000);
+    }
+    if (!$bound) {
+        echo "bind failed\n";
+    }
 
     /* Send two requests; with two workers they may land on either. */
     foreach (['/alpha', '/beta'] as $path) {
@@ -81,12 +99,13 @@ spawn(function () use ($port) {
         echo "$path: $statusLine | $body\n";
     }
 
-    /* Each worker has its own runtime; stop() on the main shell does
-     * not propagate. Use the pool's cancel() to abort the blocking
-     * start() calls so the test process exits. */
-    $pool->cancel();
+    foreach ($futures as $f) {
+        await($f);
+    }
+    $pool->close();
 });
 
+await($coro);
 echo "Done\n";
 ?>
 --EXPECT--
