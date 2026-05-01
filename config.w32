@@ -1,19 +1,23 @@
 // vim:ft=javascript
 
-ARG_ENABLE('http-server', 'Enable HTTP Server extension', 'no');
-ARG_ENABLE('http2', 'Enable HTTP/2 in http_server (requires nghttp2)', 'no');
-ARG_ENABLE('http3', 'Enable HTTP/3 in http_server (requires ngtcp2, nghttp3, OpenSSL >= 3.5)', 'no');
+ARG_ENABLE('true-async-server', 'Enable TrueAsync HTTP Server extension', 'no');
+ARG_ENABLE('http2', 'Enable HTTP/2 in true_async_server (requires nghttp2)', 'no');
+ARG_ENABLE('http3', 'Enable HTTP/3 in true_async_server (requires ngtcp2, nghttp3, OpenSSL >= 3.5)', 'no');
 
-if (PHP_HTTP_SERVER == "yes") {
+if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
+    // Subdir paths MUST use backslashes — confutils.js ADD_SOURCES() splits
+    // on '\\' to derive (dirname, filename); forward slashes leave dirname
+    // empty and the .obj lands in build-dir root while the linker looks for
+    // it under build-dir\src\, producing LNK1181.
     var http_server_sources =
-        "http_server.c " +
-        "http_server_exceptions.c " +
-        "http_server_config.c " +
-        "http_server_class.c " +
-        "http_request.c " +
-        "http_response.c " +
-        "uploaded_file.c ";
+        "src\\http_server.c " +
+        "src\\http_server_exceptions.c " +
+        "src\\http_server_config.c " +
+        "src\\http_server_class.c " +
+        "src\\http_request.c " +
+        "src\\http_response.c " +
+        "src\\uploaded_file.c ";
 
     var http_server_core =
         "http_connection.c " +
@@ -50,8 +54,7 @@ if (PHP_HTTP_SERVER == "yes") {
         "api.c " +
         "http.c ";
 
-    EXTENSION("true_async_server", "stub.c", true);
-    ADD_SOURCES(configure_module_dirname + "/src",         http_server_sources, "true_async_server");
+    EXTENSION("true_async_server", http_server_sources);
     ADD_SOURCES(configure_module_dirname + "/src/core",    http_server_core,    "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/src/http1",   http_server_http1,   "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/src/formats", http_server_formats, "true_async_server");
