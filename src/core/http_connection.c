@@ -63,6 +63,7 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
 static void http_connection_dispatch_request(http_connection_t *conn, http_request_t *req);
 static void http_handler_coroutine_entry(void);
 static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
+static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend_async_buf_t *out);
 static void http_connection_read_callback_fn(
     zend_async_event_t *event,
     zend_async_event_callback_t *callback,
@@ -151,6 +152,13 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
     conn->read_buffer_size = DEFAULT_READ_BUFFER_SIZE;
     conn->read_buffer = emalloc(conn->read_buffer_size);
     conn->read_buffer_len = 0;
+
+    /* Wire up the per-chunk allocator: lets multishot stay armed across
+     * back-to-back keep-alive requests and pipelined tails without a
+     * uv_read_stop/start cycle. The reactor calls back into us with the
+     * sliding offset on every chunk. */
+    conn->io->alloc_cb  = http_connection_alloc_cb;
+    conn->io->user_data = conn;
 
     conn->keep_alive = true;
     conn->headers_complete = false;
@@ -801,11 +809,11 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
 
     /* If the parser has reached on_message_complete, the body is
      * fully materialised. The handler coroutine (already queued or
-     * running) will take over: it calls dispatch_request, then
-     * re-arms reads for keep-alive or destroys the connection. We
-     * must stop pumping reads from this side. Any tail we just shifted
-     * down stays put; http_handler_coroutine_dispose will re-feed it. */
+     * running) will take over. Mark request_in_flight so the multishot
+     * read callback buffers further bytes without parsing — handler
+     * dispose drains the pipelined tail before clearing the flag. */
     if (conn->parser && http_parser_is_complete(conn->parser)) {
+        conn->request_in_flight = true;
         return false;
     }
 
@@ -889,13 +897,19 @@ static void http_connection_read_callback_fn(
     }
 
     if (UNEXPECTED(err || bytes_read <= 0)) {
-        /* EOF or error — drop the connection. On non-terminal error we also
-         * need to stop and dispose (defensive — reactor shouldn't deliver
-         * non-terminal errors, but stay safe). */
         if (!terminal) {
             rcb->active_req = NULL;
             conn->io->event.stop(&conn->io->event);
             req->dispose(req);
+        }
+        /* Defer destroy if a handler is in flight or the read_buffer holds
+         * a pipelined tail — flagging keep_alive=false makes handler dispose
+         * tear the conn down once it (and any pipelined chain) has finished
+         * responding. Without this, an EOF from a peer that sent its last
+         * request and shut down the write half kills mid-flight responses. */
+        if (conn->request_in_flight || conn->read_buffer_len > 0) {
+            conn->keep_alive = false;
+            return;
         }
         http_connection_destroy(conn);
         return;
@@ -903,30 +917,28 @@ static void http_connection_read_callback_fn(
 
     conn->read_buffer_len += bytes_read;
 
+    /* Re-entrancy guard: a handler coroutine is currently in flight (possibly
+     * suspended at an await), so the parser must not run — feeding new bytes
+     * could on_message_complete and dispatch a *second* handler on the same
+     * conn while the first one's response slot is still live. Just buffer the
+     * tail; handler dispose will pull it out via handle_read_completion. */
+    if (!terminal && conn->request_in_flight) {
+        return;
+    }
+
     bool should_destroy = false;
     if (!http_connection_handle_read_completion(conn, &should_destroy)) {
-        /* Connection handed off (to handler coroutine) or destroyed. If the
-         * multishot reader is still armed, stop it cleanly so the keep-alive
-         * re-arm in http_handler_coroutine_dispose can start fresh without
-         * hitting UV_EALREADY from a second uv_read_start on the same stream.
-         *
-         * Order matters: we MUST disarm the multishot read while conn is
-         * still alive — destroy frees rcb (via callbacks_remove) and
-         * conn->io. After destroy, both pointers are dangling. */
-        if (!terminal && rcb->active_req != NULL) {
-            rcb->active_req = NULL;
-            conn->io->event.stop(&conn->io->event);
-            req->dispose(req);
-        }
         if (should_destroy) {
             http_connection_destroy(conn);
         }
+        /* Multishot reader stays armed on the same req; alloc_cb will
+         * point libuv at the correct offset on the next chunk. */
         return;
     }
 
     /* Still need more data. In multishot the reader is already armed on the
      * same req — just wait for the next chunk. Only re-arm for the rare
-     * terminal-but-need-more-data case (e.g. sync fast path on a non-EOF
+     * terminal-but-need-more-data case (sync fast path on a non-EOF
      * completion is not expected, but defensive). */
     if (terminal) {
         http_connection_read(conn);
@@ -934,23 +946,26 @@ static void http_connection_read_callback_fn(
 }
 /* }}} */
 
-/* {{{ http_connection_read
- *
- * Submit a ZEND_ASYNC_IO_READ into conn->read_buffer. Handles the
- * sync-complete fast path inline (libuv's Windows shortcut or an
- * already-buffered read) and otherwise arms the persistent read
- * callback by remembering the req on conn->read_cb->active_req.
- *
- * The callback itself is allocated lazily on first arm and stays
- * attached to io->event for the connection's whole lifetime; we just
- * update active_req each time so the callback knows which req this
- * notify is for.
- */
+/* Per-chunk allocator wired into conn->io->alloc_cb. Hands the reactor
+ * the next free slice of read_buffer so multishot keeps writing at the
+ * correct offset across requests and pipelined tails. */
+static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend_async_buf_t *out)
+{
+    (void)suggested;
+    http_connection_t *conn = (http_connection_t *) io->user_data;
+    if (UNEXPECTED(conn == NULL || conn->read_buffer_len >= conn->read_buffer_size)) {
+        out->base = NULL;
+        out->len  = 0;
+        return;
+    }
+    out->base = conn->read_buffer + conn->read_buffer_len;
+    out->len  = conn->read_buffer_size - conn->read_buffer_len;
+}
+
+/* {{{ http_connection_read */
 bool http_connection_read(http_connection_t *conn)
 {
     if (conn->read_buffer_len >= conn->read_buffer_size) {
-        /* Buffer full without a complete request — client is sending
-         * something too big, or parser bug. Either way, bail. */
         http_connection_destroy(conn);
         return false;
     }
@@ -1608,21 +1623,15 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     }
 #endif
 
-    if (!should_continue) {
-        http_connection_destroy(conn);
-        return;
-    }
+    /* Drain any pipelined request before honouring a close decision: an
+     * EOF observed in read_cb may have flipped keep_alive=false while a
+     * pipelined chain is still in the buffer, and clients expect every
+     * request they sent to get a response. */
+    conn->request_in_flight = false;
 
-    /* Pipelined request already in the buffer — feed it synchronously.
-     * handle_read_completion will fire dispatch for the next message
-     * (spawning a fresh handler coroutine) and shift any further tail.
-     * If it returns true, there's still room for more data and we need
-     * another IO_READ for the rest; if false, a new handler owns the
-     * connection and we just return. */
     if (conn->read_buffer_len > 0) {
         bool should_destroy = false;
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {
-            /* Dispatched another request or connection destroyed. */
             if (should_destroy) {
                 http_connection_destroy(conn);
             }
@@ -1630,7 +1639,12 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         }
     }
 
-    (void)http_connection_read(conn);
+    if (!should_continue) {
+        http_connection_destroy(conn);
+        return;
+    }
+    /* Multishot reader on conn->io is armed for the connection's lifetime;
+     * the next request's bytes will arrive via the read callback. */
 }
 /* }}} */
 

@@ -182,6 +182,15 @@ struct _http_connection_t {
     unsigned                 drain_pending : 1;     /* decision: this conn should drain */
     unsigned                 drain_submitted : 1;   /* HTTP/2: GOAWAY already queued on this session */
     unsigned                 destroy_pending : 1;   /* destroy deferred — a handler coroutine is mid-dispose */
+    /* True between dispatch_request and handler_coroutine_dispose end. While
+     * set, the multishot read callback only buffers bytes — it must NOT feed
+     * the parser, because dispatching another request on the same conn while
+     * one is in flight collides on conn-level state (current_request, parser
+     * pause point, response slot). Cleared by handler dispose right before it
+     * checks for pipelined bytes. Eliminates the per-request DEL+ADD epoll_ctl
+     * cycle that the old "stop multishot before dispatch, re-arm in dispose"
+     * pattern produced. */
+    unsigned                 request_in_flight : 1;
 
     /* Intrusive single-link node in http_server_object::conn_list. The
      * list lets http_server_free() walk all live connections and clear
