@@ -115,14 +115,16 @@ ZEND_METHOD(TrueAsync_HttpRequest, getUri)
 ZEND_METHOD(TrueAsync_HttpRequest, getHttpVersion)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
-    char version[8];
+    char version[4];
     ZEND_PARSE_PARAMETERS_NONE();
 
-    snprintf(version, sizeof(version), "%d.%d",
-             intern->request->http_major,
-             intern->request->http_minor);
+    /* HTTP/1.x major/minor are single digits — skip libc format_converter. */
+    version[0] = '0' + (char)intern->request->http_major;
+    version[1] = '.';
+    version[2] = '0' + (char)intern->request->http_minor;
+    version[3] = '\0';
 
-    RETURN_STRING(version);
+    RETURN_STRINGL(version, 3);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, hasHeader)

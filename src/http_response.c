@@ -1097,11 +1097,9 @@ zend_string *http_response_format(zend_object *obj)
 
     if (!zend_hash_str_exists(response->headers, "content-length",
                               sizeof("content-length") - 1)) {
-        char len_str[32];
-        snprintf(len_str, sizeof(len_str), "%zu", body_len);
-        smart_str_appends(&result, "Content-Length: ");
-        smart_str_appends(&result, len_str);
-        smart_str_appends(&result, "\r\n");
+        smart_str_appendl(&result, "Content-Length: ", sizeof("Content-Length: ") - 1);
+        smart_str_append_unsigned(&result, body_len);
+        smart_str_appendl(&result, "\r\n", 2);
     }
 
     /* Headers — flat IS_STRING avoids nested foreach for the
@@ -1363,3 +1361,4 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
 
     response->committed = true;
 }
+

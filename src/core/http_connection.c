@@ -92,9 +92,12 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
 
     /* Capture HTTP version + keep-alive BEFORE handing off — the handler
      * coroutine uses conn->http_version / conn->keep_alive after
-     * dispatch runs. */
-    snprintf(conn->http_version, sizeof(conn->http_version), "%d.%d",
-             req->http_major, req->http_minor);
+     * dispatch runs. major/minor are 0..9 in HTTP/1.x, written directly
+     * to skip libc format_converter on the hot path. */
+    conn->http_version[0] = '0' + (char)req->http_major;
+    conn->http_version[1] = '.';
+    conn->http_version[2] = '0' + (char)req->http_minor;
+    conn->http_version[3] = '\0';
     conn->keep_alive = req->keep_alive;
 
     /* CoDel enqueue point: parser finished, request about to be
