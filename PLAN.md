@@ -518,7 +518,39 @@ populated при `addHttpHandler` через `Z_PARAM_FUNC`. Эффект:
 
 QUIC over UDP. Добавить fire-and-forget API для UDP send (или унифицировать с существующим UDP_REQ pattern). Рассмотреть UDP_SEGMENT (GSO).
 
-### Шаг 9 — TLS оптимизация
+### ~~Шаг 9a — TLS write zero-copy через WRITE_EX~~ ✓ (uncommitted)
+
+`tls_fsm_send_kick` переписан на zero-copy. Раньше он вытягивал
+ciphertext из BIO output ring через `tls_peek_cipher_out` + `memcpy` в
+heap-buffer, потом отправлял через `ZEND_ASYNC_IO_WRITE`, hold'ил buf
+до completion'а. Теперь — пик одного contiguous span'а из BIO,
+submit указатель напрямую через `ZEND_ASYNC_IO_WRITE_EX` (fire-and-forget),
+а free_cb консумит ring на completion'е. Wrap-случай (когда в BIO
+несколько span'ов) шипит остаток на следующем kick'е, который сам
+запускается из free_cb через `tls_advance_state`.
+
+Старый NOTIFY-based write path в `tls_fsm_io_callback_fn` удалён
+вместе с полями `cb->write_req`/`write_buf`/`write_buf_len`. Callback
+теперь только для read'ов. Введено поле `conn->tls_zc_write_n` —
+размер in-flight write'а для consume на completion'е и gate против
+double-submission (BIO бы re-peek'ил байты, которые libuv ещё держит).
+
+Эффект (perf -F999 / h2load --h1 -c64 -n1M):
+- _emalloc:                     2.63% → 2.19% (−0.44%)
+- _emalloc_16:                  0.19% → 0.06% (−0.13%)
+- tls_fsm_send_kick:            0.40% → 0.11% (−0.29%)
+- Net: ~−0.85% CPU на TLS hot path.
+
+RPS на TLS bench (pre9a → step9a, 6 пар h2load):
+- median: 15095 → 15242 (+1.0%)
+- mean:   14983 → 15307 (+2.2%)
+
+Это закрывает архитектурный разрыв со Swoole (который использует
+socket-BIO без extra memcpy). Полный шаг 9 (kTLS + socket-BIO) пока
+не делаем — Swoole сам kTLS не активирует, выигрыш на хелло-ворлд
+маленький, переработка большая.
+
+### Шаг 9 — TLS kTLS (полный) — отложен
 
 kTLS, `SSL_sendfile` для больших ответов, меньше копирований между ring buffer'ами.
 

@@ -124,13 +124,21 @@ struct _http_connection_t {
     /* Read FSM async-write slot. The TLS read FSM lives in event-loop
      * callback context (no coroutine, no suspension). Bytes it produces
      * via SSL_do_handshake / SSL_read (handshake, NewSessionTicket,
-     * KeyUpdate, alerts, close_notify) are copied into a private
-     * heap buffer and shipped via a non-blocking ZEND_ASYNC_IO_WRITE.
-     * The persistent send-completion callback frees the buffer and
-     * re-enters the FSM. Coordination with the producer flusher is via
-     * tls_flushing: while the handler-side flusher owns the cipher
+     * KeyUpdate, alerts, close_notify) are shipped zero-copy: the FSM
+     * peeks BIO_nread0 and submits the slot pointer directly via
+     * ZEND_ASYNC_IO_WRITE_EX (fire-and-forget); the free_cb consumes
+     * the ring on completion. Coordination with the producer flusher is
+     * via tls_flushing: while the handler-side flusher owns the cipher
      * BIO, the FSM defers and lets that loop pick up its bytes. */
     tls_fsm_send_cb_t             *tls_fsm_send_cb;
+
+    /* Zero-copy FSM write: bytes peeked from BIO and submitted to
+     * libuv. Non-zero while a write is in flight; the free_cb consumes
+     * exactly this many bytes from the BIO output ring on completion
+     * (or zero on error — connection torn down). Gate against double
+     * submission while a write is outstanding (BIO would re-peek the
+     * same bytes the in-flight write still owns). */
+    size_t                         tls_zc_write_n;
 
     /* Bit-fields packed with the rest of the flag word at the end of
      * the struct to save padding. unsigned : 1 chosen over bool : 1 for
