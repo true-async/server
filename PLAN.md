@@ -5,19 +5,14 @@
 > **выполнены**, в `main`/`feat/multishot-alloc-cb`. Подробный список —
 > в разделе «Что уже сделано» в конце документа.
 
-> **TLS — сломан на baseline, помечено 2026-05-02**. Попытка прогнать
-> бенч `wrk` через `https://:8443` показала, что TLS handshake падает
-> на ЛЮБОЙ конфигурации (`tas-final` baseline + наш `tas-step6` ведут
-> себя идентично): TCP accept проходит, сервер немедленно закрывает
-> соединение, клиент видит `unexpected eof while reading` (TLSv1.3
-> alert «decode error»). Cert/key валидны (openssl s_server с теми же
-> файлами работает). В `docs/PERF_2026_05_02_STEPS_1_3.md` уже была
-> запись о 10 проваленных TLS phpt + 2 H2-over-TLS. Это **отдельная
-> известная баг-зона**, не вызвана шагами 1–10. Любое TLS-сравнение
-> со Swoole / измерения шага 9 (kTLS) заблокированы до починки
-> handshake. Подозреваемый код-район: `http_connection_tls.c`
-> `tls_advance_state` / `tls_arm_one_shot_read` — первые операции
-> read-FSM на свежем conn'е.
+> **TLS — починен 2026-05-02 (uncommitted)**. Регресс был вызван
+> `http_connection_alloc_cb` (введён в шаге 3.1 вместе с slab-arena):
+> в `libuv_io_alloc_cb` он имеет приоритет над per-req буфером, и
+> ciphertext из libuv писался в plaintext `read_buffer` вместо
+> зарезервированного слота BIO-кольца, тогда как BIO write head
+> продвигался по `tls_commit_cipher_in` — `SSL_do_handshake` читал
+> мусор и алёртил decode_error. Фикс — обнулить `conn->io->alloc_cb`
+> для TLS connections. Все 14 TLS phpt + оба H2-over-TLS зелёные.
 
 ## Контекст
 
@@ -401,27 +396,31 @@ Bench-номер на step 4 шумит из-за WSL2/docker network — мед
 
 ## Что дальше
 
-### Шаг 0 — TLS handshake regression (BLOCKER для шагов 9 / 4.4 / TLS-бенча)
+### ~~Шаг 0 — TLS handshake regression~~ ✓ (uncommitted)
 
-**Симптом** (зафиксирован 2026-05-02): TCP accept на :8443 проходит,
-сервер сразу закрывает соединение, клиент видит TLSv1.3 alert
-«decode error» / `unexpected eof while reading`. Воспроизводится
-одинаково на baseline `tas-final` (до моих коммитов) и на
-`tas-step6`. Cert/key валидны: `openssl s_server` с теми же файлами
-успешно отвечает. В `docs/PERF_2026_05_02_STEPS_1_3.md` уже отмечалось
-10 TLS phpt + 2 H2-over-TLS regression — это та же зона.
+**Причина**: `http_connection_alloc_cb` (multishot per-chunk allocator,
+введён вместе с шагом 3.1) был зарегистрирован на `conn->io`
+безусловно — и `libuv_io_alloc_cb` всегда отдаёт ему приоритет, даже
+для one-shot read'ов с явно переданным буфером. В TLS-пути
+`tls_arm_one_shot_read` резервирует слот в BIO-кольце через
+`BIO_nwrite0` и передаёт его в `ZEND_ASYNC_IO_READ(io, slot, space)`,
+но libuv писал ciphertext в plaintext `read_buffer` (то, что
+возвращает alloc_cb), а `tls_commit_cipher_in(n)` затем продвигал
+write head BIO как будто байты лежат в кольце. `SSL_do_handshake`
+читал нулевой мусор из BIO и возвращал decode_error → сервер закрывал
+соединение, клиент видел `unexpected eof`.
 
-**Что блокирует**: любое TLS-сравнение со Swoole, шаг 4.4 (рефакторинг
-TLS write), шаг 9 (kTLS / SSL_sendfile).
+**Фикс**: после `ZEND_ASYNC_IO_CLR_MULTISHOT(conn->io)` для TLS
+обнуляем `conn->io->alloc_cb = NULL`. Per-req путь (`req->base.buf`)
+теперь действительно используется.
 
-**Подозреваемые места**: `http_connection_tls.c` →
-`tls_arm_one_shot_read` / `tls_advance_state` (первый
-`SSL_do_handshake` после поступления ClientHello). Возможно — недавние
-изменения в read-FSM или интеграция с alpn/ALPN-callback'ом. Нужен
-debug-лог в `tls_advance_state` чтобы увидеть, какой `SSL_get_error`
-возвращается.
+**Проверка**: 14/15 TLS phpt PASS (один `SKIP` — нет `ext/openssl` в
+CLI-сборке для `ssl://` транспорта в тесте), оба H2-over-TLS PASS.
+Преды­дущие 10 TLS phpt + 2 H2-over-TLS regression закрыты.
+Plaintext H1/H2 регрессов нет (два падения в `h1/005` и `h2/009-h2spec`
+existed pre-fix, не связаны).
 
-**До починки** TLS-связанные шаги отложены.
+**Разблокированы**: шаг 4.4 (TLS path на единый `_EX` API), шаг 9 (kTLS).
 
 ### ~~Шаг 4.1 — Telemetry/CoDel/drain gates на zend_hrtime stamps~~ ✓ (uncommitted)
 
@@ -447,7 +446,7 @@ debug-лог в `tls_advance_state` чтобы увидеть, какой `SSL_g
 
 `http_now_coarse_ns()` через `clock_gettime(CLOCK_MONOTONIC_COARSE)` — ~5ns vs ~25ns vdso. Точность 4-10ms (зависит от HZ). Подходит для long-window решений (drain age, watchdog deadline). Не подходит для CoDel-sample (нужна ns-точность).
 
-### Шаг 4.4 — TLS path на единый fire-and-forget API ⛔ blocked by Шаг 0
+### Шаг 4.4 — TLS path на единый fire-and-forget API
 
 `http_connection_tls.c:535` имеет собственный fire-and-forget mechanism (persistent send-completion callback, stash `cb->write_buf` + `cb->write_req`). Заменить на `ZEND_ASYNC_IO_WRITE_EX` с `efree` free_cb. Удалить связанные поля из `http_connection_tls_t`.
 
@@ -476,7 +475,7 @@ populated при `addHttpHandler` через `Z_PARAM_FUNC`. Эффект:
 
 QUIC over UDP. Добавить fire-and-forget API для UDP send (или унифицировать с существующим UDP_REQ pattern). Рассмотреть UDP_SEGMENT (GSO).
 
-### Шаг 9 — TLS оптимизация ⛔ blocked by Шаг 0
+### Шаг 9 — TLS оптимизация
 
 kTLS, `SSL_sendfile` для больших ответов, меньше копирований между ring buffer'ами.
 

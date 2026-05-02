@@ -1965,8 +1965,14 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
          * coroutine — handler coroutines spawn per request, exactly
          * like the plaintext path. Multishot is left disabled for
          * TLS so each chunk can land directly in a fresh BIO slot
-         * without a staging buffer. */
+         * without a staging buffer. alloc_cb must be cleared too:
+         * libuv_io_alloc_cb honors alloc_cb unconditionally and
+         * would route ciphertext into the plaintext read_buffer
+         * while tls_commit_cipher_in advances the BIO write head as
+         * if those bytes had landed in the ring — SSL_do_handshake
+         * then reads zero-init garbage and alerts decode_error. */
         ZEND_ASYNC_IO_CLR_MULTISHOT(conn->io);
+        conn->io->alloc_cb = NULL;
         return http_connection_tls_arm_read(conn);
     }
 #endif
