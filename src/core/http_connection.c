@@ -1686,13 +1686,12 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     /* Reset the conn deadline for the next phase. Going into keep-
      * alive idle wait → keepalive_timeout_ms ahead. Going to close →
      * 0 (the close path destroys this conn directly; the watchdog
-     * doesn't need to revisit). The previous request's window is
-     * already accounted for by sojourn/service samples. */
+     * doesn't need to revisit). ZEND_ASYNC_NOW() reads cached loop
+     * time — no syscall on the hot path. */
     if (should_continue && conn->keepalive_timeout_ms > 0) {
-        conn->deadline_ns = zend_hrtime()
-            + (uint64_t)conn->keepalive_timeout_ms * 1000000ULL;
+        conn->deadline_ms = ZEND_ASYNC_NOW() + conn->keepalive_timeout_ms;
     } else {
-        conn->deadline_ns = 0;
+        conn->deadline_ms = 0;
     }
 
     /* Release the dispatch-time pin (see http_connection_dispatch_request).
@@ -1820,9 +1819,10 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
 
     /* Initial deadline: waiting for the first request bytes. The
      * per-worker periodic deadline_tick walks the alive list and
-     * force-closes any conn where this stamp has elapsed. */
+     * force-closes any conn where this stamp has elapsed. Uses
+     * cached reactor "now" — no syscall. */
     if (read_timeout_ms > 0) {
-        conn->deadline_ns = zend_hrtime() + (uint64_t)read_timeout_ms * 1000000ULL;
+        conn->deadline_ms = ZEND_ASYNC_NOW() + read_timeout_ms;
     }
 
     /* Graceful drain state init. If proactive MAX_CONNECTION_AGE is

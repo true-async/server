@@ -334,12 +334,12 @@ static void http_server_deadline_tick_fn(zend_async_event_t *event,
     if (UNEXPECTED(server == NULL)) {
         return;
     }
-    const uint64_t now = zend_hrtime();
+    const uint64_t now = ZEND_ASYNC_NOW();
     http_connection_t *c = server->conn_arena.alive_head;
     while (c != NULL) {
         /* `next` captured before destroy: arena_free unlinks `c`. */
         http_connection_t *next = c->next_conn;
-        if (c->deadline_ns != 0 && now >= c->deadline_ns) {
+        if (c->deadline_ms != 0 && now >= c->deadline_ms) {
             http_connection_destroy(c);
         }
         c = next;
