@@ -1,5 +1,10 @@
 # Оптимизация HTTP-сервера — план работ
 
+> **Статус на 2026-05-02**: шаги 1, 3.0a, 3.1, 3.3, добавление
+> `zend_async_now()` API, coalesce `zend_hrtime` — **выполнены**,
+> в `main`/`feat/multishot-alloc-cb`. Подробный список — в разделе
+> «Что уже сделано» в конце документа.
+
 ## Контекст
 
 Per-thread бенч 2026-05-02: TAS 44.2k rps vs Swoole 46.5k rps (gap 5%).
@@ -350,3 +355,79 @@ docker exec tas-bench /usr/lib/linux-tools-6.8.0-111/perf record \
 | Swoole | 46.5k | 1.42 ms | 2.63 ms | ~2 |
 
 Цель после шагов 1-3: **TAS ≥ Swoole по rps + сохранить p99 преимущество**.
+
+---
+
+## Что уже сделано (2026-05-02)
+
+| шаг | коммит | что |
+|---|---|---|
+| 1 | `c5fd2c9` | Fire-and-forget plaintext write (`http_connection_send_str_owned`), убран мёртвый while-цикл в `send_raw`, новый API `ZEND_ASYNC_IO_WRITE_EX` с `free_cb` (php-src `124622ca59` + ext/async `24bb0c1`). |
+| 3.0a | `dc548c0` | Split `http_server_object`: PHP-обёртка `http_server_php { server*; std }`, refcount на C-state. Conn'ы держат ref, C-state переживает PHP wrapper. |
+| 3.1 | `29fd57e` | Slab arena для `http_connection_t`: 256 слотов на чанк, embedded freelist (`next_conn`), doubly-linked alive list (`next_conn`/`prev_conn`). |
+| 3.3 | `4a14ec8` | Periodic `deadline_tick` watchdog на worker thread. Tick = `max(250, min(read,write,keepalive)/2)`. Заменил per-conn write_timer и per-await read-timeout. Keepalive timeout наконец-то enforced. |
+| extra | `b9d74fe974` (php-src) + `45e599a` (ext/async) | API `zend_async_now()` — cached loop time в ms, через `uv_now()`. |
+| extra | `14f3b1f` | `deadline_ns` → `deadline_ms` через `ZEND_ASYNC_NOW()`. |
+| extra | `7015c9f` | Coalesce `zend_hrtime`: `on_request_sample` и `should_drain_now`/`drain_evaluate` теперь принимают `now_ns` параметром, переиспользуют `req->end_ns`. Минус 2 zend_hrtime per request. |
+| docs | `ffee257` | `docs/PERF_2026_05_02_STEPS_1_3.md` — историческая запись результатов. |
+
+### Перфо-итоги
+
+| | rps c=64 | p99 | vdso_clock_gettime |
+|---|---:|---:|---:|
+| baseline (вчера) | 44.2k | 1.94 ms | 1.46% (5 zend_hrtime + libuv) |
+| step 1 | 65.6k | 1.78 ms | 1.46% |
+| step 3.3 | 66.3k | 1.38 ms | 1.46% |
+| step 4 (coalesce) | 60-66k шум | 1.38 ms | **0.74%** |
+
+Bench-номер на step 4 шумит из-за WSL2/docker network — медиана в районе 60-65k. p99 стабилен. Реальное улучшение — на CPU-budget (vdso в 2 раза меньше → ~5 ms/sec saved).
+
+---
+
+## Что дальше
+
+### Шаг 4.1 — Telemetry/CoDel/drain gates на zend_hrtime stamps
+
+Сейчас `req->enqueue_ns`, `req->start_ns`, `req->end_ns` стампятся **всегда**. Если CoDel выключен (`codel_target_ms == 0`), drain выключен (`max_connection_age_ms == 0`), и aggregate-телеметрия не нужна — все 3 stamp'а — мёртвый груз. Условный stamp гейтится одним флагом server'а.
+
+Плюс: ещё 3 zend_hrtime ноль на минимальном конфиге. Минус: один branch per stamp — компилятор ветку предскажет.
+
+### Шаг 4.2 — Inline `on_request_sample`
+
+Перенести `struct http_server_object` в публичный header (`include/php_http_server.h`), сделать `on_request_sample` `static inline`. Будут видны fast-path branches `if codel disabled return` прямо на сайте вызова — компилятор уберёт мёртвый код когда конфиг это позволяет.
+
+### Шаг 4.3 — `CLOCK_MONOTONIC_COARSE` inline хелпер
+
+`http_now_coarse_ns()` через `clock_gettime(CLOCK_MONOTONIC_COARSE)` — ~5ns vs ~25ns vdso. Точность 4-10ms (зависит от HZ). Подходит для long-window решений (drain age, watchdog deadline). Не подходит для CoDel-sample (нужна ns-точность).
+
+### Шаг 4.4 — TLS path на единый fire-and-forget API
+
+`http_connection_tls.c:535` имеет собственный fire-and-forget mechanism (persistent send-completion callback, stash `cb->write_buf` + `cb->write_req`). Заменить на `ZEND_ASYNC_IO_WRITE_EX` с `efree` free_cb. Удалить связанные поля из `http_connection_tls_t`.
+
+### Шаг 5 — Coroutine context pool
+
+Per-thread freelist для `async_coroutine_t`, per-conn reuse `http1_request_ctx_t`, переиспользование HttpRequest/HttpResponse zval'ов. Часть оставшихся 2.21% `_emalloc/_efree`.
+
+### Шаг 6 — `zend_get_executed_filename_ex` с горячего пути
+
+0.28% в perf'е, кешировать на `conn->handler` один раз.
+
+### Шаг 7 — HTTP/2 hot-path
+
+Профилирование h2load после применения предыдущих шагов. Возможно нужен per-stream output buffer pooling.
+
+### Шаг 8 — HTTP/3 hot-path
+
+QUIC over UDP. Добавить fire-and-forget API для UDP send (или унифицировать с существующим UDP_REQ pattern). Рассмотреть UDP_SEGMENT (GSO).
+
+### Шаг 9 — TLS оптимизация
+
+kTLS, `SSL_sendfile` для больших ответов, меньше копирований между ring buffer'ами.
+
+### Шаг 10 — Vector-write (iovec) для headers + body
+
+Расширить API `ZEND_ASYNC_IO_WRITEV(io, bufs, nbufs, free_cb)`. В `http_response_format` отдавать headers и body отдельными буферами. Минус один `emalloc + memcpy` per request.
+
+### Шаг 11 — Zero-copy для больших ответов
+
+`MSG_ZEROCOPY` или `io_uring SEND_ZC` для ответов > 16 КБ. Threshold-based.
