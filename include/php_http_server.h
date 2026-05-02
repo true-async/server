@@ -365,17 +365,21 @@ void http_server_on_request_sample(http_server_object *server,
                                    uint64_t sojourn_ns, uint64_t service_ns);
 void http_server_on_connection_close(http_server_object *server);
 
-/* Connection-list registry. http_connection_create / _destroy maintain
- * an intrusive list of live connections on each server so http_server_free
- * can NULL their server back-pointers before freeing self — without it,
- * libuv's shutdown drain fires read callbacks against the freed server
- * and on_connection_close UAFs (caught by ASAN 2026-04-28). Both no-op
- * when server == NULL. */
+/* Conn slab arena. Owns http_connection_t slot memory for every live
+ * conn AND the doubly-linked alive list. Lifetime tied to the
+ * refcounted C-state — slot memory stays valid until the last conn
+ * destroy returns its slot. Defined in http_server_class.c. */
+struct conn_arena_s;
+typedef struct conn_arena_s conn_arena_t;
+conn_arena_t *http_server_arena(http_server_object *server);
+
+/* Hot-path slices binder. Called by http_connection_spawn after
+ * http_connection_create has obtained a slot via http_server_arena —
+ * wires up counter/view/log_state pointers so subsequent inline
+ * bumps in http_connection.c don't need NULL checks. */
 struct _http_connection_t;   /* fwd from src/core/http_connection.h */
-void http_server_register_connection(http_server_object *server,
-                                     struct _http_connection_t *conn);
-void http_server_unregister_connection(http_server_object *server,
-                                       struct _http_connection_t *conn);
+void http_server_bind_connection(http_server_object *server,
+                                 struct _http_connection_t *conn);
 
 /* Refcount on the C-state. PHP wrapper holds 1; each live conn that
  * stores a back-pointer in conn->server holds 1. Last release frees

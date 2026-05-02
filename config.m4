@@ -338,6 +338,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/http_server_config.c
     src/http_server_class.c
     src/core/http_connection.c
+    src/core/conn_arena.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/formats/multipart_parser.c

@@ -192,14 +192,27 @@ struct _http_connection_t {
      * pattern produced. */
     unsigned                 request_in_flight : 1;
 
-    /* Intrusive single-link node in http_server_object::conn_list. The
-     * list lets http_server_free() walk all live connections and clear
-     * their server back-pointer before the server struct is freed —
-     * otherwise libuv's shutdown drain fires the per-conn read callback
-     * after server is gone, and on_connection_close UAFs. NULL means
-     * "not in any list" (e.g. server == NULL at create time, or already
-     * unlinked by destroy). */
+    /* Intrusive doubly-linked node. Dual role:
+     *   - while the slot is ALIVE, (next_conn, prev_conn) link into
+     *     the conn_arena's alive-list — used by the periodic
+     *     deadline_tick walk and any future broadcast / admission
+     *     sweep / graceful-shutdown traversal.
+     *   - while the slot is FREE in the conn_arena freelist, only
+     *     `next_conn` is meaningful (single-linked). prev_conn is
+     *     undefined.
+     * The arena owns the slab memory; lifetime tied to the
+     * refcounted http_server_object C-state. */
     http_connection_t       *next_conn;
+    http_connection_t       *prev_conn;
+
+    /* Logical I/O deadline. Zero = no active deadline. Otherwise an
+     * absolute millisecond timestamp from zend_hrtime/1e6. Updated
+     * by pure stores on state transitions; the per-worker periodic
+     * deadline_tick callback walks the alive list and force-closes
+     * conns where now >= deadline_ms. No libuv timer is rearmed per
+     * I/O — tick granularity is min(read,write,keepalive)/2 with a
+     * 250 ms floor. */
+    uint64_t                 deadline_ms;
 
     /* Number of handler coroutines currently holding a reference to
      * this connection (H2 multiplex: N concurrent handler coroutines
@@ -242,7 +255,13 @@ typedef struct {
 } http1_request_ctx_t;
 
 /* Connection lifecycle */
-http_connection_t *http_connection_create(php_socket_t socket_fd, zend_async_scope_t *parent_scope);
+/* Allocate a conn slot from server's arena (or fall back to ecalloc
+ * when server is NULL — used by tests that exercise the conn lifecycle
+ * without an owning server). The arena's alive list ownership of the
+ * slot starts here. */
+struct http_server_object;
+http_connection_t *http_connection_create(php_socket_t socket_fd, zend_async_scope_t *parent_scope,
+                                          struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 
 /* Connection processing */

@@ -18,6 +18,7 @@
 #include "http1/http_parser.h"
 #include "http_connection.h"
 #include "http_connection_internal.h"
+#include "conn_arena.h"
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
 
@@ -120,9 +121,23 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
  * the listen socket inside libuv_socket_listen — we enable it per-client
  * via ZEND_ASYNC_IO_SET_OPTION for low-latency responses.
  */
-http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_async_scope_t *parent_scope)
+http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_async_scope_t *parent_scope,
+                                          struct http_server_object *server)
 {
-    http_connection_t *conn = ecalloc(1, sizeof(http_connection_t));
+    http_connection_t *conn;
+    if (server != NULL) {
+        conn = conn_arena_alloc(http_server_arena(server));
+    } else {
+        /* Server-less test path. The slot is just an ecalloc'd
+         * standalone allocation, not in any arena's alive list, and
+         * destroy must NOT call conn_arena_free. */
+        conn = ecalloc(1, sizeof(http_connection_t));
+    }
+    if (UNEXPECTED(conn == NULL)) {
+        closesocket(socket_fd);
+        return NULL;
+    }
+    conn->server = server;
 
     conn->io = ZEND_ASYNC_IO_CREATE(
         (zend_file_descriptor_t)socket_fd,
@@ -130,7 +145,11 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
         ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_WRITABLE
     );
     if (!conn->io) {
-        efree(conn);
+        if (server != NULL) {
+            conn_arena_free(http_server_arena(server), conn);
+        } else {
+            efree(conn);
+        }
         closesocket(socket_fd);
         return NULL;
     }
@@ -216,11 +235,9 @@ void http_connection_destroy(http_connection_t *conn)
      * timing carried on the connection itself. Safe with server == NULL. */
     http_server_on_connection_close(conn->server);
 
-    /* Unlink from the server's conn_list. Safe with server == NULL
-     * (no-op) and idempotent — if http_server_free has already wiped
-     * the list and NULLed our back-pointer, this branch was skipped
-     * by the NULL check above. */
-    http_server_unregister_connection(conn->server, conn);
+    /* Slot is unlinked from the arena's alive list inside
+     * conn_arena_free at the end of destroy. No O(N) walk needed —
+     * O(1) doubly-linked unlink via prev_conn/next_conn. */
 
     /* Detach the persistent read callback first. If we let
      * ZEND_ASYNC_IO_CLOSE dispose the event with our callback still in
@@ -321,12 +338,17 @@ void http_connection_destroy(http_connection_t *conn)
     }
 #endif
 
-    /* Capture before efree — `conn` is gone after the next call.
-     * Release the C-state ref we took in spawn. If this is the last
-     * ref (PHP wrapper already gone, this was the last live conn) the
-     * C-state struct is freed inside http_server_release. */
+    /* Capture the owning C-state pointer before returning the slot
+     * to the arena — `conn` is gone after the next call. The release
+     * after that drops our ref; if the PHP wrapper already gave up
+     * its ref and this was the last live conn, http_server_release
+     * runs the finalizer (arena cleanup) and pefrees the C-state. */
     http_server_object *owning_server = conn->server;
-    efree(conn);
+    if (owning_server != NULL) {
+        conn_arena_free(http_server_arena(owning_server), conn);
+    } else {
+        efree(conn);
+    }
     http_server_release(owning_server);
 }
 /* }}} */
@@ -1727,13 +1749,14 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
                            http_server_object *server,
                            tls_context_t *tls_ctx)
 {
-    /* Create connection. On failure http_connection_create closes the fd
-     * itself (either via closesocket on early-out or via ZEND_ASYNC_IO_CLOSE
-     * on a successfully created io handle). */
-    http_connection_t *conn = http_connection_create(client_fd, server_scope);
+    /* Allocate from the server's slab arena (or ecalloc for the
+     * server-less test path). conn->server is set by create. */
+    http_connection_t *conn = http_connection_create(client_fd, server_scope, server);
     if (!conn) {
         return false;
     }
+    /* Bind hot-path slices — counters / view / log_state pointers. */
+    http_server_bind_connection(server, conn);
 
 #ifdef HAVE_OPENSSL
     if (tls_ctx != NULL) {
@@ -1776,18 +1799,11 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
     conn->write_timeout_ms = write_timeout_ms;
     conn->keepalive_timeout_ms = keepalive_timeout_ms;
 
-    /* Owning server for backpressure reporting. May be NULL (unsupervised
-     * connection in tests). Per-request timing fields are stamped by
-     * on_request_ready (enqueue_ns) and the coroutine entry (start_ns,
-     * end_ns), then reported via http_server_on_request_sample. */
-    conn->server    = server;
-    conn->next_conn = NULL;
-    /* Register in the server's intrusive conn_list AND take a refcount
-     * on the server's C-state. The C-state outlives the PHP wrapper
-     * if any conn is still alive — the ref keeps it valid for late
-     * libuv callbacks that fire after wrapper free. Released in
+    /* server back-pointer set inside http_connection_create. Take a
+     * refcount on the C-state — keeps it (and the arena slab memory
+     * we just allocated from) alive for late libuv callbacks that
+     * may fire after the PHP wrapper goes away. Released in
      * http_connection_destroy. */
-    http_server_register_connection(server, conn);
     http_server_addref(server);
 
     /* Graceful drain state init. If proactive MAX_CONNECTION_AGE is

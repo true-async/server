@@ -20,6 +20,7 @@
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
+#include "core/conn_arena.h"
 #include "core/http_protocol_handlers.h"
 #include "core/http_protocol_strategy.h"
 #include "core/tls_layer.h"
@@ -99,14 +100,14 @@ struct http_server_object {
     size_t                   active_connections;
     size_t                   total_requests;
 
-    /* Intrusive list of every live http_connection_t whose ->server
-     * points to us. Singly linked via conn->next_conn, prepended at
-     * connection_create, walked + unlinked at connection_destroy.
-     * http_server_free walks once to NULL each conn's server back-
-     * pointer before freeing self — without this the libuv shutdown
-     * drain would fire per-conn read callbacks against a dead pointer
-     * and UAF http_server_on_connection_close. */
-    http_connection_t       *conn_list;
+    /* Slab allocator for live http_connection_t instances. Owns both
+     * the chunk memory AND the intrusive doubly-linked alive list
+     * (arena.alive_head). Lifetime is tied to the refcounted C-state:
+     * each live conn holds one ref on the C-state, so the arena's
+     * memory stays valid until the last conn returns its slot.
+     * Walked by the per-worker periodic deadline_tick + future
+     * broadcast / admission paths. */
+    conn_arena_t             conn_arena;
 
     /* Inline listener array */
     http_listener_t          listeners[MAX_LISTENERS];
@@ -710,44 +711,26 @@ bool http_server_should_drain_now(http_server_object *const server,
  * active_connections counter, which is bounded by max_connections). The
  * list exists solely so http_server_free can clear conn->server back-
  * pointers before the server struct is freed. */
-void http_server_register_connection(http_server_object *server,
-                                     struct _http_connection_t *conn)
+/* Public arena accessor — http_connection.c uses it to allocate /
+ * free conn slots without seeing the http_server_object internals. */
+conn_arena_t *http_server_arena(http_server_object *server)
+{
+    return &server->conn_arena;
+}
+
+/* Bind a freshly-allocated conn to its owning server's hot-path
+ * slices. Called by http_connection_spawn after http_connection_create
+ * has obtained a slot from the arena. */
+void http_server_bind_connection(http_server_object *server,
+                                 struct _http_connection_t *conn)
 {
     if (server == NULL || conn == NULL) {
         return;
     }
     http_connection_t *real = (http_connection_t *)conn;
-    real->next_conn = server->conn_list;
-    server->conn_list = real;
-    /* Rebind hot-path counters/view to the server's embedded slices.
-     * From here on the inline helpers in php_http_server.h bump fields
-     * directly with no NULL check. http_server_free reverts these to
-     * the dummies before the server struct is freed. */
     real->counters  = &server->counters;
     real->view      = &server->view;
     real->log_state = &server->log_state;
-}
-
-void http_server_unregister_connection(http_server_object *server,
-                                       struct _http_connection_t *conn)
-{
-    if (server == NULL || conn == NULL) {
-        return;
-    }
-    http_connection_t *real = (http_connection_t *)conn;
-    /* Walk: head pointer hops via the next_conn link. Stop on first match
-     * (each conn is registered exactly once). */
-    http_connection_t **cur = &server->conn_list;
-    while (*cur != NULL) {
-        if (*cur == real) {
-            *cur = real->next_conn;
-            real->next_conn = NULL;
-            return;
-        }
-        cur = &(*cur)->next_conn;
-    }
-    /* Not found: conn was never registered, or already unlinked by
-     * http_server_free's wipe. Either way, harmless. */
 }
 
 /* Connection close hook. Drives active_connections-- and the hysteresis
@@ -1955,6 +1938,7 @@ static zend_object *http_server_create(zend_class_entry *ce)
     ZVAL_UNDEF(&server->config);
     http_protocol_handlers_init(&server->protocol_handlers);
     http_log_state_init(&server->log_state);
+    conn_arena_init(&server->conn_arena);
     /* All other fields are pecalloc-zeroed: running=false, stopping=false,
      * server_scope/scope_object/wait_event=NULL, counters/view zeroed,
      * listeners[] zeroed, transit_handlers=NULL, etc. */
@@ -2092,13 +2076,10 @@ static void http_server_free(zend_object *obj)
  * ago. */
 static void http_server_state_finalize(http_server_object *server)
 {
-    /* Currently nothing additional — protocol_handlers, log_state etc.
-     * are all destroyed in http_server_free which runs before the
-     * last release in the no-live-conns case. When live conns exist
-     * past wrapper death, this point is reached only after the last
-     * conn destroy releases. C-state memory is freed by the caller
-     * (pefree). */
-    (void)server;
+    /* Last ref dropped — every live conn has returned its slot to
+     * the arena, which means alive_head is empty and the slab can be
+     * released. C-state memory itself is freed by the caller (pefree). */
+    conn_arena_cleanup(&server->conn_arena);
 }
 
 /* ==========================================================================
