@@ -249,6 +249,14 @@ void http_connection_destroy(http_connection_t *conn);
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len);
 bool http_connection_send_error(http_connection_t *conn, int status_code, const char *message);
 
+/* Fire-and-forget plaintext send. Transfers ownership of @p body to
+ * the reactor; returns true if the submit succeeded (and the body will
+ * be released when the kernel-level write completes), false if submit
+ * failed (and the body has already been released by the failure path).
+ * Plaintext only — TLS sessions must continue to use http_connection_send.
+ */
+bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
+
 /* Build and emit the RFC-compliant 4xx response for a parser failure.
  * Reads parser->parse_error, maps to status + reason, writes through
  * http_connection_send (plaintext or TLS), bumps the parse-error

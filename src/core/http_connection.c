@@ -1079,38 +1079,26 @@ bool http_connection_send_raw(http_connection_t *conn,
         return false;
     }
 
-    bool ok_total = true;
-    size_t bytes_sent = 0;
-    while (bytes_sent < len) {
-        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE(
-            conn->io, data + bytes_sent, len - bytes_sent);
-        if (UNEXPECTED(req == NULL)) {
-            ok_total = false;
-            break;
-        }
-
+    /* Single-shot submit. uv_write is all-or-error from the caller's
+     * perspective: io_pipe_write_cb sets transferred = max_size on
+     * status==0 or transferred = -1 with an exception on failure. The
+     * pre-existing while-loop iterating on partial-write was dead code:
+     * partial absorption is handled internally by libuv (uv_try_write
+     * + EPOLLOUT-driven drain). */
+    bool ok_total = false;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE(conn->io, data, len);
+    if (req != NULL) {
         const bool ok = async_io_req_await(req, conn->io, write_timeout_ms,
                                            HTTP_IO_REQ_WRITE,
                                            conn->log_state);
-
-        if (UNEXPECTED(!ok || req->exception != NULL)) {
-            if (req->exception != NULL) {
-                OBJ_RELEASE(req->exception);
-                req->exception = NULL;
-            }
-            req->dispose(req);
-            ok_total = false;
-            break;
+        const bool had_exc = (req->exception != NULL);
+        if (had_exc) {
+            OBJ_RELEASE(req->exception);
+            req->exception = NULL;
         }
-
         const ssize_t transferred = req->transferred;
         req->dispose(req);
-
-        if (UNEXPECTED(transferred <= 0)) {
-            ok_total = false;
-            break;
-        }
-        bytes_sent += (size_t)transferred;
+        ok_total = ok && !had_exc && transferred == (ssize_t)len;
     }
 
     if (write_timeout_ms > 0) {
@@ -1120,6 +1108,56 @@ bool http_connection_send_raw(http_connection_t *conn,
         return false;
     }
     return ok_total;
+}
+/* }}} */
+
+/* {{{ http_connection_send_str_owned
+ *
+ * Fire-and-forget plaintext send: transfer ownership of @p body to the
+ * reactor. Returns immediately after submit; the buffer is released
+ * when libuv reports completion (success or error), without parking
+ * the calling coroutine. Hot path for the HTTP/1 dispose flow — avoids
+ * the suspend/resume cycle around uv_try_write that absorbs the whole
+ * payload inline in the steady state.
+ *
+ * On submit failure the body is released here. On any kernel-level
+ * write error, the io is closed by libuv and the next read attempt on
+ * this conn surfaces the failure to the read FSM, which tears the
+ * connection down — the just-finished handler does not need to know.
+ */
+static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
+{
+    (void)io;
+    zend_string *str = (zend_string *)((char *)data - offsetof(zend_string, val));
+    zend_string_release(str);
+}
+
+bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
+{
+    if (body == NULL) {
+        return true;
+    }
+    if (ZSTR_LEN(body) == 0) {
+        zend_string_release(body);
+        return true;
+    }
+    if (UNEXPECTED(conn->write_timed_out)) {
+        zend_string_release(body);
+        return false;
+    }
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(conn->io,
+                                                     ZSTR_VAL(body),
+                                                     ZSTR_LEN(body),
+                                                     http1_send_release_zstr_cb);
+    if (UNEXPECTED(req == NULL)) {
+        /* libuv_io_req_dispose ran free_cb on the partially-built req
+         * and the body was released there. Caller must not touch body. */
+        return false;
+    }
+    /* Caller does not await, does not dispose. The completion callback
+     * (io_pipe_write_cb) frees the body and disposes the req. */
+    return true;
 }
 /* }}} */
 
@@ -1566,7 +1604,25 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     } else {
         zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
         if (response_str) {
-            if (http_connection_send(conn, ZSTR_VAL(response_str), ZSTR_LEN(response_str))) {
+            bool sent;
+#ifdef HAVE_OPENSSL
+            if (conn->tls != NULL) {
+                /* TLS path keeps the existing copying-into-encrypt-ring
+                 * semantics; ownership-transfer plaintext write doesn't
+                 * apply. Body is released by the caller after send. */
+                sent = http_connection_send(conn, ZSTR_VAL(response_str), ZSTR_LEN(response_str));
+                zend_string_release(response_str);
+            } else
+#endif
+            {
+                /* Hot path: ownership transfer to the reactor, no
+                 * await, no per-request write timer. response_str is
+                 * released by the io completion callback. */
+                sent = http_connection_send_str_owned(conn, response_str);
+                /* response_str is now owned by the reactor (or already
+                 * released on submit failure) — must not touch it. */
+            }
+            if (sent) {
                 /* Keep-alive is purely a transport decision — it mirrors the
                  * request's Connection header (and HTTP version default).
                  * http_response_is_closed means "$res->end() was called",
@@ -1574,7 +1630,6 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                  * that the transport should close. */
                 should_continue = conn->keep_alive;
             }
-            zend_string_release(response_str);
         }
     }
 
