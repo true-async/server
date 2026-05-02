@@ -321,7 +321,13 @@ void http_connection_destroy(http_connection_t *conn)
     }
 #endif
 
+    /* Capture before efree — `conn` is gone after the next call.
+     * Release the C-state ref we took in spawn. If this is the last
+     * ref (PHP wrapper already gone, this was the last live conn) the
+     * C-state struct is freed inside http_server_release. */
+    http_server_object *owning_server = conn->server;
     efree(conn);
+    http_server_release(owning_server);
 }
 /* }}} */
 
@@ -1776,11 +1782,13 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
      * end_ns), then reported via http_server_on_request_sample. */
     conn->server    = server;
     conn->next_conn = NULL;
-    /* Register in the server's intrusive conn_list. Server will walk
-     * the list at free-time to NULL each conn->server back-pointer
-     * before its struct is freed, preventing UAF in the libuv shutdown
-     * drain path (http_connection_destroy -> on_connection_close). */
+    /* Register in the server's intrusive conn_list AND take a refcount
+     * on the server's C-state. The C-state outlives the PHP wrapper
+     * if any conn is still alive — the ref keeps it valid for late
+     * libuv callbacks that fire after wrapper free. Released in
+     * http_connection_destroy. */
     http_server_register_connection(server, conn);
+    http_server_addref(server);
 
     /* Graceful drain state init. If proactive MAX_CONNECTION_AGE is
      * configured, precompute the drain time here (age + ±10% jitter);

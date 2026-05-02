@@ -377,6 +377,12 @@ void http_server_register_connection(http_server_object *server,
 void http_server_unregister_connection(http_server_object *server,
                                        struct _http_connection_t *conn);
 
+/* Refcount on the C-state. PHP wrapper holds 1; each live conn that
+ * stores a back-pointer in conn->server holds 1. Last release frees
+ * the C-state struct itself (pemalloc-backed). Per-worker, no atomics. */
+void http_server_addref(http_server_object *server);
+void http_server_release(http_server_object *server);
+
 /* TLS handshake telemetry hooks. on_tls_io is now inline (see counters
  * slice below); these stay out-of-line because they touch state outside
  * the public counters slice (handshake count + ns sum). All safe with

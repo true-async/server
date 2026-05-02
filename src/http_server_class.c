@@ -65,7 +65,19 @@ typedef struct {
  * Struct is tagged (not anonymous) so a forward declaration in
  * php_http_server.h can let http_connection carry a typed pointer without
  * seeing the layout. Only http_server_class.c dereferences these fields. */
+/*
+ * Lifetime separation: the C-state struct (http_server_object) is split
+ * from the PHP wrapper (http_server_php). The PHP wrapper holds the
+ * zend_object handle that Zend's GC manages; the C-state is refcounted
+ * and can outlive the wrapper. A live connection holds one ref on the
+ * C-state, so reactor/libuv shutdown drains that fire late callbacks
+ * post-wrapper-free still see valid memory. The last release frees the
+ * C-state (including the embedded conn arena slab).
+ */
 struct http_server_object {
+    /* Refcount. PHP wrapper holds 1, each live conn holds 1. */
+    int32_t                  refcount;
+
     zval                     config;             /* HttpServerConfig object */
     HashTable                protocol_handlers;  /* Protocol handlers (type -> callback) */
     /* Read-mostly config snapshot. Layout-public via php_http_server.h.
@@ -228,8 +240,13 @@ struct http_server_object {
      * side can rebuild fcall_t entries in the destination thread's heap.
      * Always NULL in the source thread's emalloc object. */
     void                    *transit_handlers;
+};
 
-    zend_object              std;
+/* PHP wrapper. The std handle is what Zend hands out to userland; the
+ * server pointer reaches into the refcounted C-state. */
+struct http_server_php {
+    http_server_object *server;
+    zend_object         std;
 };
 
 /* Class entry */
@@ -243,11 +260,33 @@ static __declspec(thread) http_server_object *current_server = NULL;
 static __thread http_server_object *current_server = NULL;
 #endif
 
-/* Object retrieval macro */
+/* Recover the PHP wrapper from a Zend object pointer. */
+static inline struct http_server_php *http_server_php_from_obj(zend_object *obj) {
+    return (struct http_server_php *)((char *)(obj) - XtOffsetOf(struct http_server_php, std));
+}
+
+/* Recover the C-state from a Zend object pointer (one indirection
+ * through the wrapper). The C-state is shared and refcounted. */
 static inline http_server_object *http_server_from_obj(zend_object *obj) {
-    return (http_server_object *)((char *)(obj) - XtOffsetOf(http_server_object, std));
+    return http_server_php_from_obj(obj)->server;
 }
 #define Z_HTTP_SERVER_P(zv) http_server_from_obj(Z_OBJ_P(zv))
+
+/* Refcount on the C-state. Single-thread per worker — no atomics.
+ * Forward decl: finalizer body is below http_server_free. */
+static void http_server_state_finalize(http_server_object *server);
+
+void http_server_addref(http_server_object *server) {
+    if (server == NULL) return;
+    server->refcount++;
+}
+void http_server_release(http_server_object *server) {
+    if (server == NULL) return;
+    if (--server->refcount == 0) {
+        http_server_state_finalize(server);
+        pefree(server, /*persistent*/ 0);
+    }
+}
 
 static HashTable *http_server_get_gc(zend_object *obj, zval **table, int *n);
 static void http_server_accept_callback(
@@ -1900,40 +1939,32 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
 
 static zend_object *http_server_create(zend_class_entry *ce)
 {
-    http_server_object *server = zend_object_alloc(sizeof(http_server_object), ce);
+    /* PHP wrapper — holds zend_object handle + ref to C-state.
+     * std must remain the LAST field of http_server_php so Zend can
+     * lay properties out after it (zend_object_alloc semantics). */
+    struct http_server_php *php =
+        zend_object_alloc(sizeof(struct http_server_php), ce);
+
+    /* C-state — pemalloc'd because it can outlive the PHP wrapper:
+     * a live conn that fires a late libuv callback after wrapper
+     * free still needs valid memory (its own ref keeps the C-state
+     * alive). Last release in http_server_release frees it. */
+    http_server_object *server = pecalloc(1, sizeof(*server), /*persistent*/ 0);
+    server->refcount = 1;   /* held by the wrapper */
 
     ZVAL_UNDEF(&server->config);
     http_protocol_handlers_init(&server->protocol_handlers);
     http_log_state_init(&server->log_state);
-    server->running = false;
-    server->stopping = false;
-    server->server_scope = NULL;
-    server->scope_object = NULL;
-    server->wait_event = NULL;
-    server->listener_count = 0;
-    server->active_connections = 0;
-    server->total_requests = 0;
-#ifdef HAVE_HTTP_SERVER_HTTP3
-    server->http3_listener_count = 0;
-    server->alt_svc_header_value = NULL;
-    memset(server->http3_listeners, 0, sizeof(server->http3_listeners));
-#endif
+    /* All other fields are pecalloc-zeroed: running=false, stopping=false,
+     * server_scope/scope_object/wait_event=NULL, counters/view zeroed,
+     * listeners[] zeroed, transit_handlers=NULL, etc. */
 
-    memset(server->listeners, 0, sizeof(server->listeners));
-    server->transit_handlers = NULL;
+    php->server = server;
+    zend_object_std_init(&php->std, ce);
+    object_properties_init(&php->std, ce);
+    php->std.handlers = &http_server_handlers;
 
-    /* server->view is zeroed by the alloc'd-from-emalloc path above.
-     * protocol_mask=0 by design: addXHandler() OR's in only the
-     * protocols actually registered, so the post-setup mask is the
-     * exact handler set (the legacy pre-handler "ALL" fallback lives
-     * in http_server_view_default for unsupervised conns). 0 is the
-     * built-in-default sentinel for the rest. */
-
-    zend_object_std_init(&server->std, ce);
-    object_properties_init(&server->std, ce);
-    server->std.handlers = &http_server_handlers;
-
-    return &server->std;
+    return &php->std;
 }
 
 /* get_gc: expose registered handler closures so the cycle collector can
@@ -1959,33 +1990,17 @@ static HashTable *http_server_get_gc(zend_object *obj, zval **table, int *n)
 
 static void http_server_free(zend_object *obj)
 {
-    http_server_object *server = http_server_from_obj(obj);
+    struct http_server_php *php = http_server_php_from_obj(obj);
+    http_server_object *server = php->server;
 
-    /* CRITICAL: clear the back-pointer on every live connection BEFORE
-     * we proceed. ext/async's libuv shutdown drain (engine_shutdown,
-     * which runs AFTER object dtors per Zend's ordering) will fire
-     * read callbacks for any still-armed accepted-conn read events;
-     * each callback paths through http_connection_destroy ->
-     * http_server_on_connection_close(conn->server). If conn->server
-     * is still pointing at this freed struct, that's a UAF (caught by
-     * ASAN 2026-04-28 in tests 013, 020). NULL-ing the back-pointer
-     * makes those calls no-ops. */
-    {
-        http_connection_t *c = server->conn_list;
-        while (c != NULL) {
-            http_connection_t *next = c->next_conn;
-            c->server    = NULL;
-            /* Repoint counters/view at the process-wide fallbacks so any
-             * post-free inline bump becomes a write to dummy garbage rather
-             * than a UAF on freed server memory. */
-            c->counters  = &http_server_counters_dummy;
-            c->view      = &http_server_view_default;
-            c->log_state = &http_log_state_default;
-            c->next_conn = NULL;
-            c = next;
-        }
-        server->conn_list = NULL;
-    }
+    /* The wrapper is going away. Live conns still hold refs on the
+     * C-state; we no longer need to NULL their back-pointers because
+     * the C-state outlives this call until the last conn releases.
+     * The libuv shutdown drain that fires post-wrapper-free now sees
+     * a valid (still-refcounted) C-state. The C-state's own teardown
+     * (listeners, scope, config, TLS ctx) still happens HERE — that's
+     * the user-facing "destroy the server" semantic and shouldn't
+     * wait on conn lifetimes. */
 
     /* Stop server if running */
     if (server->running) {
@@ -2059,7 +2074,31 @@ static void http_server_free(zend_object *obj)
     /* Destroy protocol handlers */
     http_protocol_handlers_destroy(&server->protocol_handlers);
 
-    zend_object_std_dtor(&server->std);
+    /* Destroy the std object — the PHP-side resources die with the
+     * wrapper. The C-state stays alive until the last conn releases. */
+    zend_object_std_dtor(&php->std);
+
+    /* Drop the wrapper's ref on the C-state. If no live conns remain
+     * the C-state finalizes and is freed right here; otherwise the
+     * last conn release will finalize. */
+    http_server_release(server);
+}
+
+/* Final cleanup of the C-state, called from http_server_release when
+ * the refcount reaches zero. Anything that depends on C-state-only
+ * memory (counters, conn arena, view) is freed here. PHP-facing
+ * resources (config zval, std) were already torn down by
+ * http_server_free; by the time this runs they were dropped long
+ * ago. */
+static void http_server_state_finalize(http_server_object *server)
+{
+    /* Currently nothing additional — protocol_handlers, log_state etc.
+     * are all destroyed in http_server_free which runs before the
+     * last release in the no-live-conns case. When live conns exist
+     * past wrapper death, this point is reached only after the last
+     * conn destroy releases. C-state memory is freed by the caller
+     * (pefree). */
+    (void)server;
 }
 
 /* ==========================================================================
@@ -2109,11 +2148,18 @@ static zend_object *http_server_transfer_obj(
             return NULL;
         }
 
-        zend_object *dst = default_fn(object, ctx, sizeof(http_server_object));
+        /* default_fn pemallocs a raw shell sized for our wrapper. We
+         * then pemalloc a fresh C-state and link it into the wrapper.
+         * Post-split: the wrapper holds only `server*` + `std`, the
+         * full server fields live in the separately-allocated core. */
+        zend_object *dst = default_fn(object, ctx, sizeof(struct http_server_php));
         if (UNEXPECTED(dst == NULL)) {
             return NULL;
         }
-        http_server_object *dst_shell = http_server_from_obj(dst);
+        struct http_server_php *dst_php = http_server_php_from_obj(dst);
+        http_server_object *dst_shell = pecalloc(1, sizeof(*dst_shell), /*persistent*/ 1);
+        dst_shell->refcount = 1;
+        dst_php->server = dst_shell;
 
         /* Recursive zval transfer dispatches to HttpServerConfig's transfer_obj,
          * which just addrefs the frozen shared snapshot — cheap. */
@@ -2161,6 +2207,10 @@ static zend_object *http_server_transfer_obj(
 
     /* LOAD */
     http_server_object *src_shell = http_server_from_obj(object);
+    /* Pass sizeof(struct http_server_php) so default_fn allocates a
+     * properly-sized wrapper. The destination thread's create_object
+     * pathway (called by default_fn under LOAD) wires up its own core
+     * via emalloc, so we don't need to allocate one here. */
     zend_object *dst = default_fn(object, ctx, 0);
     if (UNEXPECTED(dst == NULL)) {
         return NULL;
@@ -2250,7 +2300,7 @@ void http_server_class_register(void)
     http_server_ce->create_object = http_server_create;
 
     memcpy(&http_server_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-    http_server_handlers.offset = XtOffsetOf(http_server_object, std);
+    http_server_handlers.offset = XtOffsetOf(struct http_server_php, std);
     http_server_handlers.free_obj = http_server_free;
     http_server_handlers.get_gc = http_server_get_gc;
     http_server_handlers.clone_obj = NULL;

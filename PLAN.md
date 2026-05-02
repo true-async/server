@@ -74,21 +74,134 @@ Per-thread бенч 2026-05-02: TAS 44.2k rps vs Swoole 46.5k rps (gap 5%).
 
 ---
 
-## Шаг 3 — Per-conn write watchdog (вместо per-request timer)
+## Шаг 3 — Один global periodic watchdog + conn arena с alive-list
 
-**Контекст**: текущий `http_write_timer_arm/stop` пере-армирует libuv-таймер на каждый
-вызов `send_raw`. После шага 1 он сработает только на партишнной записи (rare path),
-но всё равно дороже одного дормантного watchdog'а на conn.
+**Контекст**: текущая модель таймаутов фрагментирована —
+- `http_write_timer` per-conn lazy timer, arm/stop per send (теперь не на горячем
+  пути после шага 1, но всё равно работает в TLS / partial-write случаях),
+- per-await read-timeout (`async_io_req_await:557-563` создаёт **новый**
+  `ZEND_ASYNC_NEW_TIMER_EVENT` на КАЖДЫЙ read await),
+- keepalive_timeout логически отдельная семантика.
 
-### Изменения
-- В `http_connection_t` — один таймер на conn, lifecycle = lifetime of conn
-- Армится один раз при первом pending-write, тикает с грубой гранулярностью (1s)
-- При срабатывании пробегает `pending writes` и разрывает зависшие
-- Снимает `http_write_timer_arm/stop` из `http_connection_send_raw`
+Каждое из этих мест — это операции с heap'ом libuv.
+
+### Архитектура
+
+**Один periodic watchdog на worker thread** + **slab arena conn'ов с alive-list'ом**.
+
+#### Conn arena (slab + intrusive lists)
+
+```c
+typedef struct conn_chunk_s {
+    struct conn_chunk_s *next_chunk;
+    http_connection_t    slots[CONNS_PER_CHUNK];   // 256
+} conn_chunk_t;
+
+typedef struct conn_arena_s {
+    conn_chunk_t      *chunks;       // chain of chunks
+    http_connection_t *free_head;    // single-linked freelist (через `next`)
+    http_connection_t *alive_head;   // double-linked alive-list (через `next`/`prev`)
+    size_t             live_count;
+} conn_arena_t;
+```
+
+В `http_connection_t` добавляется:
+```c
+http_connection_t *next, *prev;   // в alive: двусвязный; в free: только `next` (single-linked)
+uint64_t           deadline_ms;   // 0 = нет активного дедлайна
+```
+
+Поля `next`/`prev` играют две роли в зависимости от состояния слота. По
+аналогии с Zend MM small-bins.
+
+#### Alloc/free
+
+- `conn_arena_alloc()` — pop из free_head; если пусто, аллоцируется новый чанк
+  и его 256 слотов добавляются в free-list. Затем conn пушится в alive-list.
+- `conn_arena_free()` — remove из alive-list, push в free-list. Никаких
+  `pemalloc/pefree` на горячем пути.
+
+#### Watchdog
+
+Один periodic `deadline_tick` per-worker:
+```c
+uint32_t tick_ms = MIN(read_timeout_ms, write_timeout_ms, keepalive_timeout_ms) / 2;
+if (tick_ms < 250) tick_ms = 250;        // floor для коротких таймаутов
+
+server->deadline_tick = ZEND_ASYNC_NEW_TIMER_EVENT(tick_ms, /*periodic*/ true);
+ZEND_ASYNC_TIMER_SET_MULTISHOT(server->deadline_tick);
+server->deadline_tick->add_callback(deadline_tick, deadline_tick_cb);
+server->deadline_tick->start(deadline_tick);
+```
+
+При типичных дефолтах (15s/15s/60s): tick = **7.5s**. Окно убийства conn'а
+с истёкшим дедлайном = `[deadline, deadline + 7.5s]`. Для HTTP это адекватно.
+
+В колбэке tick'а:
+```c
+static void deadline_tick_cb(...) {
+    uint64_t now = now_ms();
+    http_connection_t *c, *next;
+    for (c = arena->alive_head; c; c = next) {
+        next = c->next;     // safe — c может быть удалён внутри
+        if (c->deadline_ms != 0 && now >= c->deadline_ms) {
+            force_close(c);  // marks for destroy, removes from alive-list
+        }
+    }
+}
+```
+
+#### Установка дедлайнов в горячем пути
+
+На точках смены состояния — **просто store**:
+
+```c
+// На старте чтения headers:
+conn->deadline_ms = now_ms() + read_timeout_ms;
+
+// На старте записи (если IO_WRITE_EX вернул не completed=true):
+conn->deadline_ms = now_ms() + write_timeout_ms;
+
+// При переходе в keepalive:
+conn->deadline_ms = now_ms() + keepalive_timeout_ms;
+
+// При завершении операции (опционально):
+conn->deadline_ms = 0;       // явно "нет дедлайна"
+```
+
+Никаких `uv_timer_start`, `uv_timer_stop`, никаких heap-операций.
+
+### Что удаляем
+
+- `http_write_timer`, `http_write_timer_arm`, `http_write_timer_stop`,
+  `http_write_timer_cb_fn`, `http_write_timer_cb_dispose`,
+  `http_write_timer_dispose` — целиком.
+- Поля `write_timer`, `write_timer_cb` из `http_connection_t`.
+- Read-timeout таймер в `async_io_req_await:557-563` (или сделать его no-op
+  для callers, мигрировавших на deadline_ms-модель).
+
+### Бонус — broadcast / admission / shutdown
+
+`alive_head` пригоден для всего, что требует обхода живых conn'ов:
+WebSocket broadcast, admission control sweep под нагрузкой, graceful shutdown,
+`/server/status`. Не нужно строить отдельные структуры под каждое.
 
 ### Эффект
-- O(1) timer ops на conn, не на запрос
-- Память — один лишний таймер на conn (16-32 байта)
+- На горячем пути — **0 timer-ops, 0 heap-ops** на запрос. Только 1 store.
+- На worker thread — **1 timer** в libuv-heap независимо от числа conn'ов.
+- Аллокация conn'а — без `pemalloc` (pool'ed).
+- Сканирование alive-list cache-friendly за счёт slab'а.
+
+### Порядок реализации
+
+1. Ввести `conn_arena_t` per-worker (где живёт глобальное состояние server thread'а).
+2. Заменить `http_connection_create`/`destroy` на arena alloc/free + init.
+3. Добавить `next/prev/deadline_ms` в `http_connection_t`.
+4. На старте worker'а — создать `deadline_tick` с динамической гранулярностью.
+5. В колбэке tick'а — обход alive-list и `force_close` expired'ов.
+6. На точках смены состояния — `set_deadline(conn, ms)` (1 store).
+7. Удалить `http_write_timer*` и связанный код.
+8. Удалить read-timeout таймер из `async_io_req_await`.
 
 ---
 
