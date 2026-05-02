@@ -1683,6 +1683,18 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         ? CONN_STATE_KEEPALIVE_WAIT
         : CONN_STATE_CLOSING;
 
+    /* Reset the conn deadline for the next phase. Going into keep-
+     * alive idle wait → keepalive_timeout_ms ahead. Going to close →
+     * 0 (the close path destroys this conn directly; the watchdog
+     * doesn't need to revisit). The previous request's window is
+     * already accounted for by sojourn/service samples. */
+    if (should_continue && conn->keepalive_timeout_ms > 0) {
+        conn->deadline_ns = zend_hrtime()
+            + (uint64_t)conn->keepalive_timeout_ms * 1000000ULL;
+    } else {
+        conn->deadline_ns = 0;
+    }
+
     /* Release the dispatch-time pin (see http_connection_dispatch_request).
      * If a competing path requested teardown while we ran (destroy_pending
      * set by the read-callback CLOSING transition under TLS pipelining),
@@ -1805,6 +1817,13 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
      * may fire after the PHP wrapper goes away. Released in
      * http_connection_destroy. */
     http_server_addref(server);
+
+    /* Initial deadline: waiting for the first request bytes. The
+     * per-worker periodic deadline_tick walks the alive list and
+     * force-closes any conn where this stamp has elapsed. */
+    if (read_timeout_ms > 0) {
+        conn->deadline_ns = zend_hrtime() + (uint64_t)read_timeout_ms * 1000000ULL;
+    }
 
     /* Graceful drain state init. If proactive MAX_CONNECTION_AGE is
      * configured, precompute the drain time here (age + ±10% jitter);

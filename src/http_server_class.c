@@ -109,6 +109,15 @@ struct http_server_object {
      * broadcast / admission paths. */
     conn_arena_t             conn_arena;
 
+    /* Per-worker deadline watchdog. Single periodic libuv timer that
+     * fires every tick_ms milliseconds. The callback walks
+     * conn_arena.alive_head and force-closes any conn whose
+     * deadline_ns has elapsed. tick_ms = max(250, min(read, write,
+     * keepalive) / 2) — set at start(). Replaces the per-conn
+     * write_timer arm/stop dance that used to run on every send. */
+    zend_async_event_t          *deadline_tick;
+    zend_async_event_callback_t *deadline_tick_cb;
+
     /* Inline listener array */
     http_listener_t          listeners[MAX_LISTENERS];
     size_t                   listener_count;
@@ -295,6 +304,126 @@ static void http_server_accept_callback(
     zend_async_event_callback_t *callback,
     void *result,
     zend_object *exception);
+
+/* ==========================================================================
+ * Deadline watchdog — one periodic libuv timer per worker, walks the
+ * conn arena's alive list each tick and force-closes conns whose
+ * deadline_ns has elapsed. Replaces per-conn / per-await timers.
+ * ========================================================================== */
+
+typedef struct {
+    zend_async_event_callback_t  base;
+    http_server_object          *server;
+} http_server_deadline_cb_t;
+
+static void http_server_deadline_cb_dispose(zend_async_event_callback_t *cb,
+                                            zend_async_event_t *event)
+{
+    (void)event;
+    efree(cb);
+}
+
+static void http_server_deadline_tick_fn(zend_async_event_t *event,
+                                         zend_async_event_callback_t *callback,
+                                         void *result,
+                                         zend_object *exception)
+{
+    (void)event; (void)result; (void)exception;
+    http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)callback;
+    http_server_object *server = cb->server;
+    if (UNEXPECTED(server == NULL)) {
+        return;
+    }
+    const uint64_t now = zend_hrtime();
+    http_connection_t *c = server->conn_arena.alive_head;
+    while (c != NULL) {
+        /* `next` captured before destroy: arena_free unlinks `c`. */
+        http_connection_t *next = c->next_conn;
+        if (c->deadline_ns != 0 && now >= c->deadline_ns) {
+            http_connection_destroy(c);
+        }
+        c = next;
+    }
+}
+
+/* tick_ms = max(250, min(read, write, keepalive) / 2). */
+static uint32_t http_server_deadline_tick_ms(const http_server_object *server)
+{
+    uint32_t r = server->read_timeout_s ? server->read_timeout_s * 1000 : UINT32_MAX;
+    uint32_t w = server->view.write_timeout_s ? server->view.write_timeout_s * 1000 : UINT32_MAX;
+    uint32_t k = server->keepalive_timeout_s ? server->keepalive_timeout_s * 1000 : UINT32_MAX;
+    uint32_t m = r;
+    if (w < m) m = w;
+    if (k < m) m = k;
+    if (m == UINT32_MAX) {
+        /* All timeouts disabled — still tick at a slow cadence so a
+         * broadcast / future graceful-shutdown walker has a heartbeat. */
+        return 60000;
+    }
+    uint32_t tick = m / 2;
+    if (tick < 250) tick = 250;
+    return tick;
+}
+
+/* Lazy start: armed the first time start() runs. Failure is non-fatal —
+ * the server still serves requests, just without idle-conn reaping. */
+static void http_server_deadline_tick_start(http_server_object *server)
+{
+    if (server->deadline_tick != NULL) {
+        return;
+    }
+    const uint32_t tick_ms = http_server_deadline_tick_ms(server);
+    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)tick_ms, /*periodic*/ true);
+    if (UNEXPECTED(t == NULL)) {
+        return;
+    }
+    /* Multishot ensures the event survives across periodic fires —
+     * libuv_timer_rearm rejects non-multishot timers. */
+    ZEND_ASYNC_TIMER_SET_MULTISHOT(t);
+
+    http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(http_server_deadline_tick_fn, sizeof(*cb));
+    if (UNEXPECTED(cb == NULL)) {
+        t->base.dispose(&t->base);
+        return;
+    }
+    cb->base.dispose = http_server_deadline_cb_dispose;
+    cb->server = server;
+    if (!t->base.add_callback(&t->base, &cb->base)) {
+        efree(cb);
+        t->base.dispose(&t->base);
+        return;
+    }
+    server->deadline_tick    = &t->base;
+    server->deadline_tick_cb = &cb->base;
+    if (!t->base.start(&t->base)) {
+        zend_async_callbacks_remove(&t->base, &cb->base);
+        t->base.dispose(&t->base);
+        server->deadline_tick    = NULL;
+        server->deadline_tick_cb = NULL;
+    }
+}
+
+static void http_server_deadline_tick_stop(http_server_object *server)
+{
+    if (server->deadline_tick_cb != NULL) {
+        http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)server->deadline_tick_cb;
+        cb->server = NULL;  /* defensive: in-flight tick won't deref */
+        if (server->deadline_tick != NULL) {
+            zend_async_callbacks_remove(server->deadline_tick, server->deadline_tick_cb);
+        } else if (server->deadline_tick_cb->dispose != NULL) {
+            server->deadline_tick_cb->dispose(server->deadline_tick_cb, NULL);
+        }
+        server->deadline_tick_cb = NULL;
+    }
+    if (server->deadline_tick != NULL) {
+        if (server->deadline_tick->loop_ref_count > 0) {
+            server->deadline_tick->stop(server->deadline_tick);
+        }
+        server->deadline_tick->dispose(server->deadline_tick);
+        server->deadline_tick = NULL;
+    }
+}
 
 /* Backpressure primitives. Calling stop()/start() on a zend_async listen
  * event toggles its presence in the reactor poll set — no fd is closed,
@@ -1528,6 +1657,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     server->running = true;
     current_server = server;
 
+    /* Per-worker deadline watchdog: one periodic timer that walks the
+     * conn arena's alive list each tick and force-closes idle conns
+     * whose deadline_ns has elapsed. Replaces per-conn write_timer +
+     * per-await read-timeout creation. Failure here is non-fatal. */
+    http_server_deadline_tick_start(server);
+
     /* Create wait event and suspend until stop() is called */
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
@@ -1573,6 +1708,11 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
     }
 
     server->stopping = true;
+
+    /* Stop the deadline watchdog FIRST so the periodic timer no longer
+     * keeps the libuv loop alive past server stop. Without this, the
+     * loop drains forever and stop() never lets the script exit. */
+    http_server_deadline_tick_stop(server);
 
     /* Stop all listen events. dispose() also closes the underlying uv_tcp_t
      * and frees the fd — no separate closesocket call needed. */
@@ -1989,6 +2129,11 @@ static void http_server_free(zend_object *obj)
     /* Stop server if running */
     if (server->running) {
         server->stopping = true;
+
+        /* Stop the deadline watchdog before tearing down listeners —
+         * a tick firing during shutdown could try to force-close a
+         * conn whose io has already been disposed. */
+        http_server_deadline_tick_stop(server);
 
         for (size_t i = 0; i < server->listener_count; i++) {
             if (server->listeners[i].listen_event) {

@@ -205,14 +205,14 @@ struct _http_connection_t {
     http_connection_t       *next_conn;
     http_connection_t       *prev_conn;
 
-    /* Logical I/O deadline. Zero = no active deadline. Otherwise an
-     * absolute millisecond timestamp from zend_hrtime/1e6. Updated
-     * by pure stores on state transitions; the per-worker periodic
-     * deadline_tick callback walks the alive list and force-closes
-     * conns where now >= deadline_ms. No libuv timer is rearmed per
-     * I/O — tick granularity is min(read,write,keepalive)/2 with a
-     * 250 ms floor. */
-    uint64_t                 deadline_ms;
+    /* Logical I/O deadline in zend_hrtime nanoseconds. Zero = no
+     * active deadline. Updated by pure stores on state transitions;
+     * the per-worker periodic deadline_tick callback walks the alive
+     * list and force-closes conns where zend_hrtime() >= deadline_ns.
+     * No libuv timer is rearmed per I/O — tick granularity is
+     * min(read,write,keepalive)/2 with a 250 ms floor, so worst-case
+     * lateness is half the smallest configured timeout. */
+    uint64_t                 deadline_ns;
 
     /* Number of handler coroutines currently holding a reference to
      * this connection (H2 multiplex: N concurrent handler coroutines
