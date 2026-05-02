@@ -276,6 +276,12 @@ bool http_connection_send_error(http_connection_t *conn, int status_code, const 
  */
 bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
 
+/* Vectored fire-and-forget variant: each slot of @p bufs is an OWNED
+ * zend_string reference, consumed by the reactor's writev completion.
+ * Plaintext only — same TLS caveat as send_str_owned. */
+bool http_connection_send_strv_owned(http_connection_t *conn,
+                                     zend_string * const *bufs, unsigned nbufs);
+
 /* Build and emit the RFC-compliant 4xx response for a parser failure.
  * Reads parser->parse_error, maps to status + reason, writes through
  * http_connection_send (plaintext or TLS), bumps the parse-error

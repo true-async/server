@@ -788,6 +788,30 @@ extern zend_class_entry *http_server_ce;
  */
 
 zend_string *http_response_format(zend_object *obj);
+
+/* Vectored HTTP/1 formatter for the WRITEV hot path. Returns the headers
+ * block (status line + Content-Length + headers + CRLF terminator) as
+ * *headers_out and a refcount-bumped reference to the body string as
+ * *body_out (NULL when body is empty). Caller owns both refs and is
+ * expected to consume them via ZEND_ASYNC_IO_WRITEV (which releases
+ * each on completion). Saves one emalloc + memcpy per response vs.
+ * http_response_format. */
+void http_response_format_parts(zend_object *obj,
+                                zend_string **headers_out,
+                                zend_string **body_out);
+
+/* Cheap body-length probe used by the dispose hot path to pick between
+ * single-string concat (small bodies) and writev (large bodies). */
+size_t http_response_get_body_len(zend_object *obj);
+
+/* Threshold (bytes) under which the legacy concat formatter wins over
+ * vectored writev. Set conservatively at 1 KiB based on the A/B
+ * matrix in docs/PERF_2026_05_02_STEP_10.md: writev is at-worst-wash
+ * for /4k–/16k bodies and clearly wins at /64k (+18% rps, −5% p99) and
+ * /256k (+24% rps, −10% p99). 1 KiB keeps every "hello"/JSON-stub
+ * response on the legacy fast path with zero risk of regression while
+ * still cashing in the win on real payload-sized responses. */
+#define HTTP_WRITEV_THRESHOLD 1024
 zend_string *http_response_format_streaming_headers(zend_object *obj);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
 void http_response_set_protocol_version(zend_object *obj, const char *version);

@@ -1192,6 +1192,38 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
 }
 /* }}} */
 
+/* {{{ http_connection_send_strv_owned
+ *
+ * Vectored fire-and-forget plaintext send. Each slot of @p bufs is an
+ * OWNED zend_string reference; ZEND_ASYNC_IO_WRITEV consumes one ref per
+ * slot on completion. Used for the HTTP/1 dispose hot path where
+ * headers and body live in two separate zend_strings — saves one
+ * emalloc + memcpy that http_response_format would otherwise spend
+ * concatenating them. TLS path stays on the single-buffer
+ * http_connection_send (encryption ring needs a contiguous payload).
+ */
+bool http_connection_send_strv_owned(http_connection_t *conn,
+                                     zend_string * const *bufs, unsigned nbufs)
+{
+    if (UNEXPECTED(nbufs == 0)) {
+        return true;
+    }
+    if (UNEXPECTED(conn->write_timed_out)) {
+        for (unsigned i = 0; i < nbufs; i++) {
+            zend_string_release(bufs[i]);
+        }
+        return false;
+    }
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV(conn->io, bufs, nbufs);
+    if (UNEXPECTED(req == NULL)) {
+        /* Reactor already released every slot on submit failure. */
+        return false;
+    }
+    return true;
+}
+/* }}} */
+
 
 /* {{{ http_connection_send
  *
@@ -1645,34 +1677,64 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         }
         should_continue = conn->keep_alive;
     } else {
-        zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
-        if (response_str) {
-            bool sent;
+        bool sent;
 #ifdef HAVE_OPENSSL
-            if (conn->tls != NULL) {
-                /* TLS path keeps the existing copying-into-encrypt-ring
-                 * semantics; ownership-transfer plaintext write doesn't
-                 * apply. Body is released by the caller after send. */
-                sent = http_connection_send(conn, ZSTR_VAL(response_str), ZSTR_LEN(response_str));
+        if (conn->tls != NULL) {
+            /* TLS path keeps the legacy single-buffer formatter — the
+             * encryption ring needs a contiguous payload, so vectored
+             * write would only force an extra copy. */
+            zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
+            if (response_str) {
+                sent = http_connection_send(conn, ZSTR_VAL(response_str),
+                                            ZSTR_LEN(response_str));
                 zend_string_release(response_str);
-            } else
+            } else {
+                sent = false;
+            }
+        } else
 #endif
-            {
-                /* Hot path: ownership transfer to the reactor, no
-                 * await, no per-request write timer. response_str is
-                 * released by the io completion callback. */
-                sent = http_connection_send_str_owned(conn, response_str);
-                /* response_str is now owned by the reactor (or already
-                 * released on submit failure) — must not touch it. */
+        {
+            /* Threshold branch: writev submit costs ~150ns of fixed
+             * overhead (pecalloc + slot loop + completion-cb release
+             * loop). For tiny bodies the single-buffer concat formatter
+             * is cheaper (memcpy of 2-byte body is essentially free).
+             * The crossover sits around 0.5–1 KB; HTTP_WRITEV_THRESHOLD
+             * is a conservative cutoff under it. body_len is already a
+             * hot load (smart_str header), branch is one cmp + jmp. */
+            const size_t body_len =
+                    http_response_get_body_len(Z_OBJ(ctx->response_zv));
+            if (body_len < HTTP_WRITEV_THRESHOLD) {
+                zend_string *response_str =
+                        http_response_format(Z_OBJ(ctx->response_zv));
+                sent = response_str
+                        ? http_connection_send_str_owned(conn, response_str)
+                        : false;
+            } else {
+                /* Large body: skip the concat memcpy; reactor consumes
+                 * both refs (headers + body) on completion. */
+                zend_string *headers_str = NULL, *body_str = NULL;
+                http_response_format_parts(Z_OBJ(ctx->response_zv),
+                                           &headers_str, &body_str);
+                zend_string *bufs[2];
+                unsigned nbufs = 0;
+                if (headers_str != NULL && ZSTR_LEN(headers_str) > 0) {
+                    bufs[nbufs++] = headers_str;
+                } else if (headers_str != NULL) {
+                    zend_string_release(headers_str);
+                }
+                if (body_str != NULL) {
+                    bufs[nbufs++] = body_str;
+                }
+                sent = http_connection_send_strv_owned(conn, bufs, nbufs);
             }
-            if (sent) {
-                /* Keep-alive is purely a transport decision — it mirrors the
-                 * request's Connection header (and HTTP version default).
-                 * http_response_is_closed means "$res->end() was called",
-                 * which is the *expected* finalization path, not a signal
-                 * that the transport should close. */
-                should_continue = conn->keep_alive;
-            }
+        }
+        if (sent) {
+            /* Keep-alive is purely a transport decision — it mirrors the
+             * request's Connection header (and HTTP version default).
+             * http_response_is_closed means "$res->end() was called",
+             * which is the *expected* finalization path, not a signal
+             * that the transport should close. */
+            should_continue = conn->keep_alive;
         }
     }
 
