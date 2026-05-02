@@ -435,9 +435,17 @@ QUIC over UDP. Добавить fire-and-forget API для UDP send (или ун
 
 kTLS, `SSL_sendfile` для больших ответов, меньше копирований между ring buffer'ами.
 
-### Шаг 10 — Vector-write (iovec) для headers + body
+### ~~Шаг 10 — Vector-write (iovec) для headers + body~~ ✓
 
-Расширить API `ZEND_ASYNC_IO_WRITEV(io, bufs, nbufs, free_cb)`. В `http_response_format` отдавать headers и body отдельными буферами. Минус один `emalloc + memcpy` per request.
+Сделано (`cba6418` server, `5080a77` ext/async, `a0d1458fb3` php-src).
+API стал `ZEND_ASYNC_IO_WRITEV(io, bufs, nbufs)` — массив owned
+`zend_string*` (refcount передаётся reactor'у, free_cb не нужен).
+В hot-path HTTP/1 dispose добавлен threshold-branch: body < 1 КиБ
+идут через legacy concat-формат (защита от регресса на «hello world»),
+≥ 1 КиБ — через writev. См. `docs/PERF_2026_05_02_STEP_10.md` —
+A/B показывает +18% rps на /64k, +24% rps на /256k, без регресса на
+маленьких. TLS path остаётся на single-buffer (encrypt ring требует
+contiguous payload).
 
 ### Шаг 11 — Zero-copy для больших ответов
 
