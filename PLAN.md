@@ -419,9 +419,14 @@ Bench-номер на step 4 шумит из-за WSL2/docker network — мед
 
 Per-thread freelist для `async_coroutine_t`, per-conn reuse `http1_request_ctx_t`, переиспользование HttpRequest/HttpResponse zval'ов. Часть оставшихся 2.21% `_emalloc/_efree`.
 
-### Шаг 6 — `zend_get_executed_filename_ex` с горячего пути
+### ~~Шаг 6 — `zend_get_executed_filename_ex` с горячего пути~~ ✓
 
-0.28% в perf'е, кешировать на `conn->handler` один раз.
+Сделано (`7d499d4`). Заменили `call_user_function(NULL, NULL, …)` на
+`zend_call_function(&fci, &handler->fci_cache)` во всех трёх dispatch
+paths (H1/H2/H3). Кешированный `fci_cache` уже был в `zend_fcall_t` —
+populated при `addHttpHandler` через `Z_PARAM_FUNC`. Эффект:
+`zend_get_executed_filename_ex` 0.28% → 0.12%, `zend_is_callable_ex`
+ушёл из топа.
 
 ### Шаг 7 — HTTP/2 hot-path
 
