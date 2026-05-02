@@ -1663,10 +1663,14 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * A handler-supplied `Connection: keep-alive` is overridden — the
      * RFC grants the server that authority. */
     /* Reuse req->end_ns (already stamped at handler return) so the
-     * drain decision skips its own zend_hrtime call. */
+     * drain decision skips its own zend_hrtime call. When stamps are
+     * gated off (CoDel + telemetry both disabled, the minimal-config
+     * fast path), end_ns == 0 and we need a fresh stamp — drain age
+     * is at the seconds-to-hours scale, so coarse clock is sufficient
+     * and ~5x cheaper than zend_hrtime. */
     const uint64_t drain_now_ns =
         (ctx->request != NULL && ctx->request->end_ns != 0)
-            ? ctx->request->end_ns : zend_hrtime();
+            ? ctx->request->end_ns : http_now_coarse_ns();
     if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;

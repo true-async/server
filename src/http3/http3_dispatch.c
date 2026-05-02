@@ -206,8 +206,6 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     if (s->request != NULL) s->request->coroutine = NULL;
 
     http3_connection_t *c = s->conn;
-    http_server_object *server = (c != NULL && c->listener != NULL)
-        ? (http_server_object *)http3_listener_server_obj(c->listener) : NULL;
 
     /* In-flight bracket (paired with on_request_dispatch). */
     if (c != NULL) http_server_on_request_dispose(c->counters);

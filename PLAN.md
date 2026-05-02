@@ -466,9 +466,28 @@ existed pre-fix, не связаны).
 Бенч пока не прогонялся (микро-эффект, нужны медианы). Все TLS/H1/H2
 phpt зелёные кроме двух пре-existing'ов (h1/005, h2/009-h2spec).
 
-### Шаг 4.3 — `CLOCK_MONOTONIC_COARSE` inline хелпер
+### ~~Шаг 4.3 — `CLOCK_MONOTONIC_COARSE` inline хелпер~~ ✓ (uncommitted)
 
-`http_now_coarse_ns()` через `clock_gettime(CLOCK_MONOTONIC_COARSE)` — ~5ns vs ~25ns vdso. Точность 4-10ms (зависит от HZ). Подходит для long-window решений (drain age, watchdog deadline). Не подходит для CoDel-sample (нужна ns-точность).
+`http_now_coarse_ns()` добавлен в `php_http_server.h` как `static
+zend_always_inline`. На Linux идёт через `clock_gettime(CLOCK_MONOTONIC_COARSE)`,
+на остальных платформах fallback на `zend_hrtime()`. Заменены три
+drain-сайта:
+
+- `http_connection.c:1670` — H1 dispose drain fallback, когда
+  stamps off (минимальный конфиг).
+- `http2_strategy.c:655` — H2 commit drain decision (раз на conn —
+  guard'ится `drain_submitted`).
+- `http_server_class.c:768` — `trigger_drain` cooldown check.
+
+Стэмпы CoDel/telemetry (`enqueue_ns`/`start_ns`/`end_ns`) НЕ тронуты —
+ns-точность нужна для CoDel-окна.
+
+Эффект (perf -F999 / wrk -t4 -c64 -d18s):
+- vdso_clock_gettime: 2.29% → 2.21% (−0.08%)
+- http_server_should_drain_now: 0.49% → 0.43% (−0.06%)
+- http_handler_coroutine_dispose: 1.25% → 1.09% (−0.16%)
+
+Чистый выигрыш ≈ 0.30% CPU. RPS — wash (внутри WSL2 шума, σ ≈ 7k).
 
 ### Шаг 4.4 — TLS path на единый fire-and-forget API
 

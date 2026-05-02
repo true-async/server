@@ -652,7 +652,7 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
      * same session; existing streams continue to drain naturally
      * after GOAWAY per RFC 9113 §6.8. */
     if (!conn->drain_submitted
-        && http_server_should_drain_now(conn->server, conn, zend_hrtime())) {
+        && http_server_should_drain_now(conn->server, conn, http_now_coarse_ns())) {
         (void)http2_session_terminate(self->session, 0 /* NGHTTP2_NO_ERROR */);
         conn->drain_submitted = true;
         http_server_on_h2_goaway_sent(conn->counters);

@@ -765,7 +765,10 @@ void http_server_trigger_drain(http_server_object *const server)
     if (server == NULL) {
         return;
     }
-    const uint64_t now = zend_hrtime();
+    /* Cooldown window is in seconds (default 10s); drain_last_fired_ns
+     * was stamped with the same coarse clock — apples-to-apples. Saves
+     * one vdso_clock_gettime per CoDel trip. */
+    const uint64_t now = http_now_coarse_ns();
 
     /* Cooldown: prevent oscillation when CoDel / hard-cap flap. The
      * blocked counter stays observable so operators can tune down a

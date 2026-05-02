@@ -28,6 +28,9 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#if defined(__linux__)
+# include <time.h>   /* clock_gettime(CLOCK_MONOTONIC_COARSE) for http_now_coarse_ns() */
+#endif
 
 extern zend_module_entry http_server_module_entry;
 #define phpext_http_server_ptr &http_server_module_entry
@@ -763,6 +766,26 @@ static zend_always_inline void http_server_count_request(http_server_counters_t 
 static zend_always_inline bool http_server_sample_stamps_enabled(const http_server_view_t *v)
 {
     return v->sample_stamps_enabled;
+}
+
+/* Coarse monotonic clock for long-window decisions (drain age,
+ * watchdog deadline, pause duration). ~5ns vs ~25ns for the high-res
+ * zend_hrtime path because CLOCK_MONOTONIC_COARSE skips the hardware
+ * timer read and reads the kernel-cached jiffies value. Granularity
+ * is 4-10ms (depends on CONFIG_HZ); fine for any decision measured
+ * in seconds. NOT safe for CoDel sojourn samples (needs ns precision)
+ * — those still call zend_hrtime(). Windows + non-Linux fall back to
+ * zend_hrtime so the API works everywhere; the optimisation only
+ * fires on Linux. */
+static zend_always_inline uint64_t http_now_coarse_ns(void)
+{
+#if defined(__linux__) && defined(CLOCK_MONOTONIC_COARSE)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#else
+    return (uint64_t)zend_hrtime();
+#endif
 }
 
 /*
