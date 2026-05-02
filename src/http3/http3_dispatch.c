@@ -131,7 +131,10 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_server_on_request_dispatch(s->conn->counters);
 
     s->request->coroutine   = co;
-    s->request->enqueue_ns  = zend_hrtime();
+    if (http_server_sample_stamps_enabled(
+            (const http_server_object *)http3_listener_server_obj(s->conn->listener))) {
+        s->request->enqueue_ns  = zend_hrtime();
+    }
 
     ZEND_ASYNC_ENQUEUE_COROUTINE(co);
 }
@@ -142,12 +145,13 @@ static void h3_handler_coroutine_entry(void)
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
     if (s == NULL || s->conn == NULL) return;
 
-    if (s->request != NULL) {
+    http_server_object *server =
+        (http_server_object *)http3_listener_server_obj(s->conn->listener);
+    const bool stamps = http_server_sample_stamps_enabled(server);
+    if (s->request != NULL && stamps) {
         s->request->start_ns = zend_hrtime();
     }
 
-    http_server_object *server =
-        (http_server_object *)http3_listener_server_obj(s->conn->listener);
     HashTable *handlers = http_server_get_protocol_handlers(server);
     zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
     if (fcall == NULL) {
@@ -165,8 +169,11 @@ static void h3_handler_coroutine_entry(void)
 
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't get counted as
-     * service time. Same discipline as H1/H2 handler entries. */
-    if (s->request != NULL && server != NULL) {
+     * service time. Same discipline as H1/H2 handler entries. Stamps
+     * and the sample call are gated on sample_stamps_enabled;
+     * total_requests is still bumped. */
+    http_server_count_request(server);
+    if (s->request != NULL && server != NULL && stamps) {
         s->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
             server,

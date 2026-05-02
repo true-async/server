@@ -245,6 +245,13 @@ struct http_server_object {
     bool                     stopping;
     bool                     listeners_paused;
 
+    /* Derived once at start(): true iff at least one consumer of the
+     * per-request hrtime stamps (enqueue_ns / start_ns / end_ns) is
+     * active — currently CoDel or telemetry. When false, the H1/H2/H3
+     * hot paths skip three zend_hrtime() calls and the on_request_sample
+     * call entirely; only the cheap total_requests bump survives. */
+    bool                     sample_stamps_enabled;
+
     /* Transit sidecar — non-NULL only in the persistent shell created by
      * transfer_obj(TRANSFER). Holds pemalloc-copied closures so the LOAD
      * side can rebuild fcall_t entries in the destination thread's heap.
@@ -512,6 +519,18 @@ static void http_server_resume_listeners(http_server_object *server)
  * separately by the hard-cap hysteresis (active_connections <= pause_low)
  * — CoDel cannot self-resume because paused listeners produce no new
  * samples. */
+void http_server_count_request(http_server_object *server)
+{
+    if (server) {
+        server->total_requests++;
+    }
+}
+
+bool http_server_sample_stamps_enabled(const http_server_object *server)
+{
+    return server != NULL && server->sample_stamps_enabled;
+}
+
 void http_server_on_request_sample(http_server_object *server,
                                    const uint64_t sojourn_ns,
                                    const uint64_t service_ns,
@@ -521,10 +540,9 @@ void http_server_on_request_sample(http_server_object *server,
         return;
     }
 
-    /* Always aggregate — telemetry continues even with CoDel disabled.
-     * total_requests is the per-request counter; keep-alive requests
-     * count individually because sample fires once per handler call. */
-    server->total_requests++;
+    /* Aggregate sojourn/service samples for telemetry. total_requests is
+     * bumped separately by http_server_count_request — hot-path callers
+     * count requests even when stamps are gated off. */
     http_server_aggregate_sample(server, sojourn_ns, service_ns);
 
     /* Target = 0 disables CoDel entirely. */
@@ -1345,6 +1363,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isTelemetryEnabled", &retval);
     server->view.telemetry_enabled = (Z_TYPE(retval) == IS_TRUE);
+
+    /* Stamps drive CoDel sojourn samples and the telemetry aggregate
+     * (sojourn_sum / service_sum / sojourn_max). Drain falls back to a
+     * fresh hrtime when end_ns is 0, so it does not require stamps. */
+    server->sample_stamps_enabled =
+        (server->codel_target_ns != 0) || server->view.telemetry_enabled;
 
     /* Mirror configured max_body_size into the global parser pool.
      * Both the H1 parser (via http_parser_create on checkout) and the

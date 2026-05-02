@@ -366,6 +366,18 @@ void http_server_on_request_sample(http_server_object *server,
                                    uint64_t now_ns);
 void http_server_on_connection_close(http_server_object *server);
 
+/* Cheap per-request counter bump (just `total_requests++`). Split out of
+ * on_request_sample so the H1/H2/H3 hot paths can keep counting requests
+ * even when sample_stamps_enabled is false and the full sojourn/service
+ * sample is skipped. Safe with server == NULL. */
+void http_server_count_request(http_server_object *server);
+
+/* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are
+ * needed by an active consumer (CoDel or telemetry). Hot-path stamp
+ * sites gate on this — false skips three zend_hrtime() calls per
+ * request. Safe with server == NULL (returns false). */
+bool http_server_sample_stamps_enabled(const http_server_object *server);
+
 /* Conn slab arena. Owns http_connection_t slot memory for every live
  * conn AND the doubly-linked alive list. Lifetime tied to the
  * refcounted C-state — slot memory stays valid until the last conn

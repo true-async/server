@@ -58,8 +58,8 @@ Per-thread бенч 2026-05-02: TAS 44.2k rps vs Swoole 46.5k rps (gap 5%).
 - Полный phpt прогон должен проходить
 - Бенч `wrk -t4 -c64 -d30s` http://localhost:8080/
 - Сравнение с предыдущим baseline и Swoole
-- Счётчики `[bench] fiber_switch` и `[bench] scheduler_suspend` в stderr —
-  ожидаем кратное снижение
+- При желании — ad-hoc счётчики `[bench] fiber_switch` / `[bench] scheduler_suspend`
+  в stderr (инструментация локальная, не коммитится); ожидаем кратное снижение
 
 ---
 
@@ -344,8 +344,9 @@ docker exec tas-bench /usr/lib/linux-tools-6.8.0-111/perf record \
     -g -F 999 --call-graph dwarf -p 1 -o /tmp/perf.data -- sleep 25
 ```
 
-Счётчики переключений — в `php-src/Zend/zend_fibers.c` и `php-src/ext/async/scheduler.c`,
-печатают каждые 100k. Считать `count / total_requests` для switches/req.
+Счётчики переключений (`[bench] fiber_switch` / `[bench] scheduler_suspend`) — ad-hoc
+инструментация в `php-src/Zend/zend_fibers.c` и `php-src/ext/async/scheduler.c`,
+вшивается локально на время замеров и убирается перед коммитом.
 
 ## Базовые числа на 2026-05-02
 
@@ -386,11 +387,21 @@ Bench-номер на step 4 шумит из-за WSL2/docker network — мед
 
 ## Что дальше
 
-### Шаг 4.1 — Telemetry/CoDel/drain gates на zend_hrtime stamps
+### ~~Шаг 4.1 — Telemetry/CoDel/drain gates на zend_hrtime stamps~~ ✓ (uncommitted)
 
-Сейчас `req->enqueue_ns`, `req->start_ns`, `req->end_ns` стампятся **всегда**. Если CoDel выключен (`codel_target_ms == 0`), drain выключен (`max_connection_age_ms == 0`), и aggregate-телеметрия не нужна — все 3 stamp'а — мёртвый груз. Условный stamp гейтится одним флагом server'а.
+Сделано во working tree. `http_server_object` получил поле
+`sample_stamps_enabled`, выставляется на старте по правилу
+`(codel_target_ns != 0) || telemetry_enabled` (drain не нужен — у него
+свой fallback к свежему `zend_hrtime`). Публичные хелперы
+`http_server_sample_stamps_enabled()` / `http_server_count_request()`
+вынесены в `php_http_server.h`. `http_server_on_request_sample` больше
+не делает `total_requests++` — счётчик бампается отдельным дешёвым
+вызовом, безусловно. Все 3 hot-path сайта (`http_connection.c`,
+`http2_strategy.c`, `http3_dispatch.c`) гейтят `enqueue_ns`/`start_ns`/
+`end_ns` + `on_request_sample` через флаг.
 
-Плюс: ещё 3 zend_hrtime ноль на минимальном конфиге. Минус: один branch per stamp — компилятор ветку предскажет.
+Эффект на минимальном конфиге (CoDel off, telemetry off): минус 3
+`zend_hrtime` per request. Бенч пока не прогонялся.
 
 ### Шаг 4.2 — Inline `on_request_sample`
 

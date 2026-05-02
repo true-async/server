@@ -103,8 +103,11 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
 
     /* CoDel enqueue point: parser finished, request about to be
      * dispatched. Stamping on req (not conn) so concurrent streams
-     * (HTTP/2) don't overwrite each other. */
-    req->enqueue_ns = zend_hrtime();
+     * (HTTP/2) don't overwrite each other. Skipped entirely when no
+     * consumer (CoDel/telemetry) is active — see step 4.1 in PLAN.md. */
+    if (http_server_sample_stamps_enabled(conn->server)) {
+        req->enqueue_ns = zend_hrtime();
+    }
 
     http_connection_dispatch_request(conn, req);
 }
@@ -1484,7 +1487,8 @@ static void http_handler_coroutine_entry(void)
     http_connection_t *conn = ctx->conn;
 
     http_request_t *req = ctx->request;
-    if (req) {
+    const bool stamps = http_server_sample_stamps_enabled(conn->server);
+    if (req && stamps) {
         req->start_ns = zend_hrtime();
     }
 
@@ -1502,8 +1506,10 @@ static void http_handler_coroutine_entry(void)
      * One sample per request: sojourn feeds CoDel, service feeds
      * telemetry. Fires even on handler exception (EG(exception) set) —
      * the measurement is still meaningful, work was done.
-     * http_server_on_request_sample is a no-op when server is NULL. */
-    if (req) {
+     * Skipped when no consumer is active (sample_stamps_enabled == false);
+     * total_requests is still bumped via http_server_count_request. */
+    http_server_count_request(conn->server);
+    if (req && stamps) {
         req->end_ns = zend_hrtime();
         /* Pass req->end_ns so on_request_sample's CoDel-window logic
          * reuses the stamp instead of taking a fresh zend_hrtime —
