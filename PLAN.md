@@ -1,9 +1,23 @@
 # Оптимизация HTTP-сервера — план работ
 
 > **Статус на 2026-05-02**: шаги 1, 3.0a, 3.1, 3.3, добавление
-> `zend_async_now()` API, coalesce `zend_hrtime` — **выполнены**,
-> в `main`/`feat/multishot-alloc-cb`. Подробный список — в разделе
-> «Что уже сделано» в конце документа.
+> `zend_async_now()` API, coalesce `zend_hrtime`, шаги 4.1, 10, 6 —
+> **выполнены**, в `main`/`feat/multishot-alloc-cb`. Подробный список —
+> в разделе «Что уже сделано» в конце документа.
+
+> **TLS — сломан на baseline, помечено 2026-05-02**. Попытка прогнать
+> бенч `wrk` через `https://:8443` показала, что TLS handshake падает
+> на ЛЮБОЙ конфигурации (`tas-final` baseline + наш `tas-step6` ведут
+> себя идентично): TCP accept проходит, сервер немедленно закрывает
+> соединение, клиент видит `unexpected eof while reading` (TLSv1.3
+> alert «decode error»). Cert/key валидны (openssl s_server с теми же
+> файлами работает). В `docs/PERF_2026_05_02_STEPS_1_3.md` уже была
+> запись о 10 проваленных TLS phpt + 2 H2-over-TLS. Это **отдельная
+> известная баг-зона**, не вызвана шагами 1–10. Любое TLS-сравнение
+> со Swoole / измерения шага 9 (kTLS) заблокированы до починки
+> handshake. Подозреваемый код-район: `http_connection_tls.c`
+> `tls_advance_state` / `tls_arm_one_shot_read` — первые операции
+> read-FSM на свежем conn'е.
 
 ## Контекст
 
@@ -387,6 +401,28 @@ Bench-номер на step 4 шумит из-за WSL2/docker network — мед
 
 ## Что дальше
 
+### Шаг 0 — TLS handshake regression (BLOCKER для шагов 9 / 4.4 / TLS-бенча)
+
+**Симптом** (зафиксирован 2026-05-02): TCP accept на :8443 проходит,
+сервер сразу закрывает соединение, клиент видит TLSv1.3 alert
+«decode error» / `unexpected eof while reading`. Воспроизводится
+одинаково на baseline `tas-final` (до моих коммитов) и на
+`tas-step6`. Cert/key валидны: `openssl s_server` с теми же файлами
+успешно отвечает. В `docs/PERF_2026_05_02_STEPS_1_3.md` уже отмечалось
+10 TLS phpt + 2 H2-over-TLS regression — это та же зона.
+
+**Что блокирует**: любое TLS-сравнение со Swoole, шаг 4.4 (рефакторинг
+TLS write), шаг 9 (kTLS / SSL_sendfile).
+
+**Подозреваемые места**: `http_connection_tls.c` →
+`tls_arm_one_shot_read` / `tls_advance_state` (первый
+`SSL_do_handshake` после поступления ClientHello). Возможно — недавние
+изменения в read-FSM или интеграция с alpn/ALPN-callback'ом. Нужен
+debug-лог в `tls_advance_state` чтобы увидеть, какой `SSL_get_error`
+возвращается.
+
+**До починки** TLS-связанные шаги отложены.
+
 ### ~~Шаг 4.1 — Telemetry/CoDel/drain gates на zend_hrtime stamps~~ ✓ (uncommitted)
 
 Сделано во working tree. `http_server_object` получил поле
@@ -411,9 +447,13 @@ Bench-номер на step 4 шумит из-за WSL2/docker network — мед
 
 `http_now_coarse_ns()` через `clock_gettime(CLOCK_MONOTONIC_COARSE)` — ~5ns vs ~25ns vdso. Точность 4-10ms (зависит от HZ). Подходит для long-window решений (drain age, watchdog deadline). Не подходит для CoDel-sample (нужна ns-точность).
 
-### Шаг 4.4 — TLS path на единый fire-and-forget API
+### Шаг 4.4 — TLS path на единый fire-and-forget API ⛔ blocked by Шаг 0
 
 `http_connection_tls.c:535` имеет собственный fire-and-forget mechanism (persistent send-completion callback, stash `cb->write_buf` + `cb->write_req`). Заменить на `ZEND_ASYNC_IO_WRITE_EX` с `efree` free_cb. Удалить связанные поля из `http_connection_tls_t`.
+
+Решение 2026-05-02: пропускаем — перфо-выигрыш ≈ 0%, чистый рефакторинг,
+плюс TLS handshake сейчас всё равно сломан. Имеет смысл только после
+починки шага 0 и в рамках общего пересмотра TLS-стека.
 
 ### Шаг 5 — Coroutine context pool
 
@@ -436,7 +476,7 @@ populated при `addHttpHandler` через `Z_PARAM_FUNC`. Эффект:
 
 QUIC over UDP. Добавить fire-and-forget API для UDP send (или унифицировать с существующим UDP_REQ pattern). Рассмотреть UDP_SEGMENT (GSO).
 
-### Шаг 9 — TLS оптимизация
+### Шаг 9 — TLS оптимизация ⛔ blocked by Шаг 0
 
 kTLS, `SSL_sendfile` для больших ответов, меньше копирований между ring buffer'ами.
 
