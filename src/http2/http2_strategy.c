@@ -209,8 +209,17 @@ static void http2_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[1], &stream->response_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &conn->handler->fci.function_name,
-                       &retval, 2, params);
+    /* Cached fcall_info_cache path — see http_connection.c for rationale. */
+    zend_fcall_info fci = {
+        .size           = sizeof(zend_fcall_info),
+        .function_name  = conn->handler->fci.function_name,
+        .retval         = &retval,
+        .params         = params,
+        .object         = NULL,
+        .param_count    = 2,
+        .named_params   = NULL,
+    };
+    zend_call_function(&fci, &conn->handler->fci_cache);
 
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't count as service

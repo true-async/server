@@ -1529,8 +1529,21 @@ static void http_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[1], &ctx->response_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &conn->handler->fci.function_name,
-                       &retval, 2, params);
+    /* Direct invoke via the cached fcall_info_cache — populated once
+     * when addHttpHandler() ran Z_PARAM_FUNC. Skips the per-request
+     * zend_is_callable_ex / zend_get_executed_filename_ex pair that
+     * call_user_function (NULL fci_cache) would otherwise repeat for
+     * every request on the hot path. */
+    zend_fcall_info fci = {
+        .size           = sizeof(zend_fcall_info),
+        .function_name  = conn->handler->fci.function_name,
+        .retval         = &retval,
+        .params         = params,
+        .object         = NULL,
+        .param_count    = 2,
+        .named_params   = NULL,
+    };
+    zend_call_function(&fci, &conn->handler->fci_cache);
 
     /* Stamp end_ns and fire the backpressure sample immediately after
      * the handler returned — BEFORE zval_ptr_dtor(retval) so destructor
