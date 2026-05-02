@@ -151,7 +151,7 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
     /* Save for cancellation (peer RST_STREAM, server shutdown). */
     stream->coroutine          = co;
     stream->request->coroutine = co;
-    if (http_server_sample_stamps_enabled(self->conn->server)) {
+    if (http_server_sample_stamps_enabled(self->conn->view)) {
         stream->request->enqueue_ns = zend_hrtime();
     }
 
@@ -199,7 +199,7 @@ static void http2_handler_coroutine_entry(void)
     http_connection_t *const conn = http2_session_get_conn(stream->session);
     if (conn == NULL || conn->handler == NULL) { return; }
 
-    const bool stamps = http_server_sample_stamps_enabled(conn->server);
+    const bool stamps = http_server_sample_stamps_enabled(conn->view);
     if (stream->request != NULL && stamps) {
         stream->request->start_ns = zend_hrtime();
     }
@@ -226,7 +226,7 @@ static void http2_handler_coroutine_entry(void)
      * time. Matches the HTTP/1 handler-coroutine discipline. Stamps and
      * the sample call are skipped when no consumer (CoDel/telemetry) is
      * active; total_requests is still bumped. */
-    http_server_count_request(conn->server);
+    http_server_count_request(conn->counters);
     if (stream->request != NULL && stamps) {
         stream->request->end_ns = zend_hrtime();
         http_server_on_request_sample(

@@ -131,8 +131,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_server_on_request_dispatch(s->conn->counters);
 
     s->request->coroutine   = co;
-    if (http_server_sample_stamps_enabled(
-            (const http_server_object *)http3_listener_server_obj(s->conn->listener))) {
+    if (http_server_sample_stamps_enabled(s->conn->view)) {
         s->request->enqueue_ns  = zend_hrtime();
     }
 
@@ -147,7 +146,7 @@ static void h3_handler_coroutine_entry(void)
 
     http_server_object *server =
         (http_server_object *)http3_listener_server_obj(s->conn->listener);
-    const bool stamps = http_server_sample_stamps_enabled(server);
+    const bool stamps = http_server_sample_stamps_enabled(s->conn->view);
     if (s->request != NULL && stamps) {
         s->request->start_ns = zend_hrtime();
     }
@@ -181,7 +180,7 @@ static void h3_handler_coroutine_entry(void)
      * service time. Same discipline as H1/H2 handler entries. Stamps
      * and the sample call are gated on sample_stamps_enabled;
      * total_requests is still bumped. */
-    http_server_count_request(server);
+    http_server_count_request(s->conn->counters);
     if (s->request != NULL && server != NULL && stamps) {
         s->request->end_ns = zend_hrtime();
         http_server_on_request_sample(

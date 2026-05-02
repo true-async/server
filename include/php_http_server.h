@@ -366,17 +366,9 @@ void http_server_on_request_sample(http_server_object *server,
                                    uint64_t now_ns);
 void http_server_on_connection_close(http_server_object *server);
 
-/* Cheap per-request counter bump (just `total_requests++`). Split out of
- * on_request_sample so the H1/H2/H3 hot paths can keep counting requests
- * even when sample_stamps_enabled is false and the full sojourn/service
- * sample is skipped. Safe with server == NULL. */
-void http_server_count_request(http_server_object *server);
-
-/* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are
- * needed by an active consumer (CoDel or telemetry). Hot-path stamp
- * sites gate on this — false skips three zend_hrtime() calls per
- * request. Safe with server == NULL (returns false). */
-bool http_server_sample_stamps_enabled(const http_server_object *server);
+/* http_server_count_request / http_server_sample_stamps_enabled are
+ * defined as inline helpers further down (after http_server_counters_t /
+ * http_server_view_t are declared). */
 
 /* Conn slab arena. Owns http_connection_t slot memory for every live
  * conn AND the doubly-linked alive list. Lifetime tied to the
@@ -595,6 +587,11 @@ typedef struct {
     uint64_t tls_bytes_plaintext_out_total;
     uint64_t tls_bytes_ciphertext_in_total;
     uint64_t tls_bytes_ciphertext_out_total;
+
+    /* Per-request bump kept on the write-mostly slice so the inline
+     * http_server_count_request() helper hits one cache line shared with
+     * the rest of the hot counters. Read by getStats / __debugInfo. */
+    uint64_t total_requests;
 } http_server_counters_t;
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
@@ -612,6 +609,11 @@ typedef struct {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
     bool     telemetry_enabled;          /* W3C trace context ingestion */
+    /* Hot-path gate: true iff per-request hrtime stamps (enqueue_ns /
+     * start_ns / end_ns) are needed by an active consumer (CoDel or
+     * telemetry). Set once at start(); the H1/H2/H3 hot paths read it
+     * via the inline http_server_sample_stamps_enabled() below. */
+    bool     sample_stamps_enabled;
 } http_server_view_t;
 
 /* Process-wide fallback objects. Used when a connection has no owning
@@ -741,6 +743,26 @@ static zend_always_inline void http_server_on_tls_io(http_server_counters_t *c,
     c->tls_bytes_plaintext_out_total  += plaintext_out;
     c->tls_bytes_ciphertext_in_total  += ciphertext_in;
     c->tls_bytes_ciphertext_out_total += ciphertext_out;
+}
+
+/* Cheap per-request counter bump. Split out of on_request_sample so the
+ * H1/H2/H3 hot paths can keep counting requests even when
+ * sample_stamps_enabled is false and the full sojourn/service sample is
+ * skipped. Caller passes its cached counters slice (conn->counters) —
+ * never NULL, falls back to http_server_counters_dummy. */
+static zend_always_inline void http_server_count_request(http_server_counters_t *c)
+{
+    c->total_requests++;
+}
+
+/* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are
+ * needed by an active consumer (CoDel or telemetry). Hot-path stamp
+ * sites gate on this — false skips three zend_hrtime() calls per
+ * request. Caller passes its cached view slice (conn->view) — never
+ * NULL, falls back to http_server_view_default. */
+static zend_always_inline bool http_server_sample_stamps_enabled(const http_server_view_t *v)
+{
+    return v->sample_stamps_enabled;
 }
 
 /*

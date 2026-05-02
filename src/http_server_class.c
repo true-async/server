@@ -96,9 +96,8 @@ struct http_server_object {
                                                  * the dtor phase before our http_server_free. */
     zend_async_event_t      *wait_event;        /* Event to block start() */
 
-    /* Statistics — active_requests moved into counters slice. */
+    /* Statistics — active_requests + total_requests moved into counters slice. */
     size_t                   active_connections;
-    size_t                   total_requests;
 
     /* Slab allocator for live http_connection_t instances. Owns both
      * the chunk memory AND the intrusive doubly-linked alive list
@@ -245,12 +244,8 @@ struct http_server_object {
     bool                     stopping;
     bool                     listeners_paused;
 
-    /* Derived once at start(): true iff at least one consumer of the
-     * per-request hrtime stamps (enqueue_ns / start_ns / end_ns) is
-     * active — currently CoDel or telemetry. When false, the H1/H2/H3
-     * hot paths skip three zend_hrtime() calls and the on_request_sample
-     * call entirely; only the cheap total_requests bump survives. */
-    bool                     sample_stamps_enabled;
+    /* sample_stamps_enabled migrated to view slice (read on hot path
+     * via inline http_server_sample_stamps_enabled). */
 
     /* Transit sidecar — non-NULL only in the persistent shell created by
      * transfer_obj(TRANSFER). Holds pemalloc-copied closures so the LOAD
@@ -519,17 +514,10 @@ static void http_server_resume_listeners(http_server_object *server)
  * separately by the hard-cap hysteresis (active_connections <= pause_low)
  * — CoDel cannot self-resume because paused listeners produce no new
  * samples. */
-void http_server_count_request(http_server_object *server)
-{
-    if (server) {
-        server->total_requests++;
-    }
-}
-
-bool http_server_sample_stamps_enabled(const http_server_object *server)
-{
-    return server != NULL && server->sample_stamps_enabled;
-}
+/* http_server_count_request / http_server_sample_stamps_enabled moved to
+ * inline helpers in php_http_server.h — they're slice-pointer based now
+ * (counters / view) so the hot path doesn't pay a function call per
+ * request and the compiler can const-fold the gate when stamps are off. */
 
 void http_server_on_request_sample(http_server_object *server,
                                    const uint64_t sojourn_ns,
@@ -1367,7 +1355,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     /* Stamps drive CoDel sojourn samples and the telemetry aggregate
      * (sojourn_sum / service_sum / sojourn_max). Drain falls back to a
      * fresh hrtime when end_ns is 0, so it does not require stamps. */
-    server->sample_stamps_enabled =
+    server->view.sample_stamps_enabled =
         (server->codel_target_ns != 0) || server->view.telemetry_enabled;
 
     /* Mirror configured max_body_size into the global parser pool.
@@ -1809,7 +1797,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     array_init(return_value);
-    add_assoc_long(return_value, "total_requests", server->total_requests);
+    add_assoc_long(return_value, "total_requests", (zend_long)server->counters.total_requests);
     add_assoc_long(return_value, "active_connections", server->active_connections);
     add_assoc_long(return_value, "active_requests", (zend_long)server->counters.active_requests);
     add_assoc_long(return_value, "max_inflight_requests", (zend_long)server->max_inflight_requests);
@@ -1922,7 +1910,7 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
 
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
-    server->total_requests       = 0;
+    server->counters.total_requests = 0;
     server->sojourn_sum_ns       = 0;
     server->service_sum_ns       = 0;
     server->sojourn_max_ns       = 0;

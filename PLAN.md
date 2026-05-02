@@ -438,9 +438,33 @@ existed pre-fix, не связаны).
 Эффект на минимальном конфиге (CoDel off, telemetry off): минус 3
 `zend_hrtime` per request. Бенч пока не прогонялся.
 
-### Шаг 4.2 — Inline `on_request_sample`
+### ~~Шаг 4.2 — Inline `on_request_sample`~~ ✓ (uncommitted)
 
-Перенести `struct http_server_object` в публичный header (`include/php_http_server.h`), сделать `on_request_sample` `static inline`. Будут видны fast-path branches `if codel disabled return` прямо на сайте вызова — компилятор уберёт мёртвый код когда конфиг это позволяет.
+Сделано не через перенос всего `struct http_server_object` (потянуло бы
+цепочку internal headers — `conn_arena_t`, `http_log_state_t`,
+`tls_context_t`), а точечно. На горячий путь приходились две out-of-line
+функции: `http_server_sample_stamps_enabled` (3 сайта × 2 раза) и
+`http_server_count_request` (3 сайта). Сделал слайс-based:
+
+- В `http_server_view_t` добавлено `bool sample_stamps_enabled`,
+  выставляется на старте сервера.
+- В `http_server_counters_t` перенесено `uint64_t total_requests` (было
+  отдельным полем `http_server_object`).
+- Обе функции стали `static zend_always_inline` в `php_http_server.h`,
+  принимают `view*` / `counters*` соответственно.
+- Все 6 hot-path вызовов в `http_connection.c`/`http2_strategy.c`/
+  `http3_dispatch.c` переведены на `conn->view` / `conn->counters`.
+- Само `on_request_sample` оставлено out-of-line — оно идёт ТОЛЬКО когда
+  stamps включены (после inline-гейта), плюс CoDel-trip ветка вызывает
+  `http_server_pause_listeners` который не-hot-path.
+
+Эффект: 9 indirect-call'ов в минимальном конфиге заменены на чтение
+поля + сравнение. Компилятор видит, что после `if (!stamps) return`
+никакой трафик не уходит в out-of-line — мёртвый код устранён по сайту
+вызова.
+
+Бенч пока не прогонялся (микро-эффект, нужны медианы). Все TLS/H1/H2
+phpt зелёные кроме двух пре-existing'ов (h1/005, h2/009-h2spec).
 
 ### Шаг 4.3 — `CLOCK_MONOTONIC_COARSE` inline хелпер
 

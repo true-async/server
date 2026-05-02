@@ -105,7 +105,7 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
      * dispatched. Stamping on req (not conn) so concurrent streams
      * (HTTP/2) don't overwrite each other. Skipped entirely when no
      * consumer (CoDel/telemetry) is active — see step 4.1 in PLAN.md. */
-    if (http_server_sample_stamps_enabled(conn->server)) {
+    if (http_server_sample_stamps_enabled(conn->view)) {
         req->enqueue_ns = zend_hrtime();
     }
 
@@ -1519,7 +1519,7 @@ static void http_handler_coroutine_entry(void)
     http_connection_t *conn = ctx->conn;
 
     http_request_t *req = ctx->request;
-    const bool stamps = http_server_sample_stamps_enabled(conn->server);
+    const bool stamps = http_server_sample_stamps_enabled(conn->view);
     if (req && stamps) {
         req->start_ns = zend_hrtime();
     }
@@ -1553,7 +1553,7 @@ static void http_handler_coroutine_entry(void)
      * the measurement is still meaningful, work was done.
      * Skipped when no consumer is active (sample_stamps_enabled == false);
      * total_requests is still bumped via http_server_count_request. */
-    http_server_count_request(conn->server);
+    http_server_count_request(conn->counters);
     if (req && stamps) {
         req->end_ns = zend_hrtime();
         /* Pass req->end_ns so on_request_sample's CoDel-window logic
