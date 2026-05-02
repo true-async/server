@@ -217,7 +217,8 @@ static void http2_handler_coroutine_entry(void)
         http_server_on_request_sample(
             conn->server,
             stream->request->start_ns - stream->request->enqueue_ns,
-            stream->request->end_ns   - stream->request->start_ns);
+            stream->request->end_ns   - stream->request->start_ns,
+            stream->request->end_ns);
     }
 
     zval_ptr_dtor(&retval);
@@ -636,7 +637,7 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
      * same session; existing streams continue to drain naturally
      * after GOAWAY per RFC 9113 §6.8. */
     if (!conn->drain_submitted
-        && http_server_should_drain_now(conn->server, conn)) {
+        && http_server_should_drain_now(conn->server, conn, zend_hrtime())) {
         (void)http2_session_terminate(self->session, 0 /* NGHTTP2_NO_ERROR */);
         conn->drain_submitted = true;
         http_server_on_h2_goaway_sent(conn->counters);

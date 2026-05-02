@@ -1505,9 +1505,13 @@ static void http_handler_coroutine_entry(void)
      * http_server_on_request_sample is a no-op when server is NULL. */
     if (req) {
         req->end_ns = zend_hrtime();
+        /* Pass req->end_ns so on_request_sample's CoDel-window logic
+         * reuses the stamp instead of taking a fresh zend_hrtime —
+         * one syscall less per request on the hot path. */
         http_server_on_request_sample(conn->server,
                                       req->start_ns - req->enqueue_ns,
-                                      req->end_ns   - req->start_ns);
+                                      req->end_ns   - req->start_ns,
+                                      req->end_ns);
     }
 
     zval_ptr_dtor(&retval);
@@ -1607,7 +1611,12 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * but BEFORE format() so the override actually lands on the wire.
      * A handler-supplied `Connection: keep-alive` is overridden — the
      * RFC grants the server that authority. */
-    if (http_server_should_drain_now(conn->server, conn)) {
+    /* Reuse req->end_ns (already stamped at handler return) so the
+     * drain decision skips its own zend_hrtime call. */
+    const uint64_t drain_now_ns =
+        (ctx->request != NULL && ctx->request->end_ns != 0)
+            ? ctx->request->end_ns : zend_hrtime();
+    if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;
         http_server_on_h1_connection_close_sent(conn->counters);

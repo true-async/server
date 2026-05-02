@@ -171,7 +171,8 @@ static void h3_handler_coroutine_entry(void)
         http_server_on_request_sample(
             server,
             s->request->start_ns - s->request->enqueue_ns,
-            s->request->end_ns   - s->request->start_ns);
+            s->request->end_ns   - s->request->start_ns,
+            s->request->end_ns);
     }
     zval_ptr_dtor(&retval);
 }
@@ -262,7 +263,8 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         const http_server_drain_eval_t r = http_server_drain_evaluate(srv,
             c->drain_pending,
             c->drain_not_before_ns,
-            c->drain_epoch_seen);
+            c->drain_epoch_seen,
+            zend_hrtime());
         c->drain_pending       = r.drain_pending;
         c->drain_not_before_ns = r.drain_not_before_ns;
         c->drain_epoch_seen    = r.drain_epoch_seen;

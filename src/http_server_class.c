@@ -514,7 +514,8 @@ static void http_server_resume_listeners(http_server_object *server)
  * samples. */
 void http_server_on_request_sample(http_server_object *server,
                                    const uint64_t sojourn_ns,
-                                   const uint64_t service_ns)
+                                   const uint64_t service_ns,
+                                   const uint64_t now_ns)
 {
     if (!server) {
         return;
@@ -531,9 +532,10 @@ void http_server_on_request_sample(http_server_object *server,
         return;
     }
 
-    /* CoDel: track min sojourn in 100ms window. Uses the same
-     * zend_hrtime source as the enqueue/start stamps so no drift. */
-    const uint64_t now = zend_hrtime();
+    /* CoDel: track min sojourn in 100ms window. `now_ns` is reused
+     * from the caller's already-taken stamp (req->end_ns) — no fresh
+     * zend_hrtime on the hot path. */
+    const uint64_t now = now_ns;
     if (server->codel_window_start_ns == 0
         || now - server->codel_window_start_ns >= CODEL_INTERVAL_NS) {
         server->codel_window_start_ns = now;
@@ -782,7 +784,8 @@ void http_server_trigger_drain(http_server_object *const server)
 http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const server,
                                                     bool drain_pending,
                                                     uint64_t drain_not_before_ns,
-                                                    uint64_t drain_epoch_seen)
+                                                    uint64_t drain_epoch_seen,
+                                                    uint64_t now_ns)
 {
     http_server_drain_eval_t r = {
         .should_drain        = false,
@@ -793,7 +796,9 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const se
     if (server == NULL) {
         return r;
     }
-    const uint64_t now = zend_hrtime();
+    /* now_ns reused from caller's stamp (req->end_ns at dispose) —
+     * skips a fresh zend_hrtime on the hot path. */
+    const uint64_t now = now_ns;
 
     if (!r.drain_pending
         && server->max_connection_age_ns > 0
@@ -819,7 +824,8 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const se
 }
 
 bool http_server_should_drain_now(http_server_object *const server,
-                                  http_connection_t *const conn)
+                                  http_connection_t *const conn,
+                                  uint64_t now_ns)
 {
     if (conn == NULL) {
         return false;
@@ -827,7 +833,8 @@ bool http_server_should_drain_now(http_server_object *const server,
     const http_server_drain_eval_t r = http_server_drain_evaluate(server,
         conn->drain_pending,
         conn->drain_not_before_ns,
-        conn->drain_epoch_seen);
+        conn->drain_epoch_seen,
+        now_ns);
     conn->drain_pending       = r.drain_pending;
     conn->drain_not_before_ns = r.drain_not_before_ns;
     conn->drain_epoch_seen    = r.drain_epoch_seen;

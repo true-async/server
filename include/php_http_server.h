@@ -362,7 +362,8 @@ bool http_server_config_is_locked(zend_object *obj);
  * http_server_class.c where the server_object struct is defined.
  * Safe to call with server == NULL (no-op). */
 void http_server_on_request_sample(http_server_object *server,
-                                   uint64_t sojourn_ns, uint64_t service_ns);
+                                   uint64_t sojourn_ns, uint64_t service_ns,
+                                   uint64_t now_ns);
 void http_server_on_connection_close(http_server_object *server);
 
 /* Conn slab arena. Owns http_connection_t slot memory for every live
@@ -449,7 +450,8 @@ bool http_server_should_shed_request(const http_server_object *server);
  * Called at every response-commit point; must be O(1) and inlined-
  * friendly (plain field reads, one hrtime call). */
 bool http_server_should_drain_now(http_server_object *server,
-                                  http_connection_t *conn);
+                                  http_connection_t *conn,
+                                  uint64_t now_ns);
 
 /* Generic pull-model drain decision. Same semantics as
  * should_drain_now but takes drain state by value and returns the
@@ -466,7 +468,8 @@ typedef struct {
 http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
                                                     bool drain_pending,
                                                     uint64_t drain_not_before_ns,
-                                                    uint64_t drain_epoch_seen);
+                                                    uint64_t drain_epoch_seen,
+                                                    uint64_t now_ns);
 
 /* Fired from inside http_server_pause_listeners when its
  * drain_connections argument is true (CoDel trip / hard-cap
