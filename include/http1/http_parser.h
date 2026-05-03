@@ -112,6 +112,12 @@ struct http_request_t {
     HashTable   *post_data;                 /* Parsed POST fields */
     HashTable   *files;                     /* Parsed uploaded files */
 
+    /* Lazy-parsed URI components. Both stay NULL until the first call to
+     * getPath() / getQuery() / getQueryParam(); after that they are cached
+     * for the lifetime of the request. NULL == "not yet parsed". */
+    zend_string *path;          /* URI path component (no query string) */
+    HashTable   *query_params;  /* Parsed query string (php_default_treat_data) */
+
     /* 8-byte counters */
     size_t       content_length;
 

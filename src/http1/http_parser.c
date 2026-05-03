@@ -871,6 +871,14 @@ void http_request_destroy(http_request_t *req)
         FREE_HASHTABLE(req->files);
     }
 
+    if (req->path) {
+        zend_string_release(req->path);
+    }
+    if (req->query_params) {
+        zend_hash_destroy(req->query_params);
+        FREE_HASHTABLE(req->query_params);
+    }
+
     if (req->traceparent_raw) {
         zend_string_release(req->traceparent_raw);
     }

@@ -28,6 +28,28 @@ final class HttpRequest
     public function getUri(): string {}
 
     /**
+     * Get path component of the URI (no query string)
+     */
+    public function getPath(): string {}
+
+    /**
+     * Get all query parameters as an associative array.
+     * Supports PHP array notation: foo[bar], foo[]
+     *
+     * @return array<string, mixed>
+     */
+    public function getQuery(): array {}
+
+    /**
+     * Get a single query parameter by name.
+     *
+     * @param string $name  Parameter name
+     * @param mixed  $default  Value to return when the parameter is absent (default: null)
+     * @return mixed
+     */
+    public function getQueryParam(string $name, mixed $default = null): mixed {}
+
+    /**
      * Get HTTP version string (e.g., "1.1")
      */
     public function getHttpVersion(): string {}
