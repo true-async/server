@@ -130,6 +130,11 @@ struct _http3_listener_s {
     bool                       last_peer_valid;
 
     http3_listener_stats_t     stats;
+
+    /* Slab pool for http3_stream_t. Shared across all conns on this
+     * listener. Initialised in http3_listener_spawn, cleaned up in
+     * http3_listener_destroy after all conns are gone. */
+    http3_stream_pool_t        stream_pool;
 };
 
 /* Callback subclass — carries a back-pointer to the listener. */
@@ -862,6 +867,7 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     listener->port       = port;
     listener->ssl_ctx    = ssl_ctx;
     listener->server_obj = server_obj;
+    http3_stream_pool_init(&listener->stream_pool);
 
 #ifdef __linux__
     /* Raw-fd path: socket() + setsockopt + bind() + uv_poll_t. We need
@@ -1209,6 +1215,17 @@ void http3_listener_destroy(http3_listener_t *listener)
      * process. The compiler can't dead-store-eliminate OPENSSL_cleanse. */
     OPENSSL_cleanse(listener->sr_key, sizeof(listener->sr_key));
     OPENSSL_cleanse(listener->retry_token_key, sizeof(listener->retry_token_key));
+
+    /* Stream pool: every conn freed above released its streams back into
+     * the pool, so live_count is 0 here. cleanup() walks the chunk chain
+     * and pefrees the slab memory. */
+    http3_stream_pool_cleanup(&listener->stream_pool);
+
     efree(listener);
+}
+
+http3_stream_pool_t *http3_listener_stream_pool(http3_listener_t *listener)
+{
+    return listener != NULL ? &listener->stream_pool : NULL;
 }
 

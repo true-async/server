@@ -24,6 +24,10 @@
  * before ever invoking on_begin_headers_cb, so we never race past it.
  */
 
+/* Forward decl — defined below; release callback stored in
+ * _request_storage.release at allocation. */
+static void http2_stream_release_via_request(http_request_t *req);
+
 http2_stream_t *http2_stream_new(http2_session_t *const session,
                                  const uint32_t stream_id)
 {
@@ -38,12 +42,27 @@ http2_stream_t *http2_stream_new(http2_session_t *const session,
     ZVAL_UNDEF(&stream->request_zv);
     ZVAL_UNDEF(&stream->response_zv);
 
-    /* Allocate an empty http_request_t. Headers HashTable is lazy
-     * (allocated on first on_header_cb) to match the HTTP/1 pattern in
-     * src/http1/http_parser.c:173. */
-    stream->request = ecalloc(1, sizeof(http_request_t));
+    /* Wire up the embedded request. _request_storage was zeroed by
+     * ecalloc; just set the alias pointer and the release callback so
+     * http_request_destroy returns this slot back to ZendMM via efree
+     * once the request refcount hits zero. */
+    stream->request = &stream->_request_storage;
     stream->request->refcount = 1;
+    stream->request->release  = http2_stream_release_via_request;
     return stream;
+}
+
+/* Release callback fires from http_request_destroy when the request
+ * refcount finally reaches zero. By then http2_stream_release has
+ * already done every field-level teardown step; this hook just
+ * efrees the slot, which is safe whether the wrapper outlived the
+ * stream or not. Mirrors http3_stream_release_via_request. */
+static void http2_stream_release_via_request(http_request_t *req)
+{
+    /* Offset-0 invariant: _request_storage is the first field of
+     * http2_stream_t, so they share the same address. */
+    http2_stream_t *const stream = (http2_stream_t *)req;
+    efree(stream);
 }
 
 void http2_stream_release(http2_stream_t *const stream)
@@ -55,16 +74,19 @@ void http2_stream_release(http2_stream_t *const stream)
         return;
     }
 
-    /* Drop any partial request body we accumulated but never moved into
-     * request->body (peer reset the stream mid-body, or we rejected it
-     * for exceeding HTTP2_MAX_BODY_SIZE). smart_str_free is NULL-safe. */
+    /* Stream-side cleanup. The slot itself is NOT efree'd here — the
+     * embedded request may still hold an outstanding ref from a PHP
+     * HttpRequest wrapper. The release callback installed at alloc
+     * time efrees the slot once the wrapper finally releases. */
+
+    /* Drop any partial request body we accumulated but never moved
+     * into request->body (peer reset, or rejected for exceeding
+     * HTTP2_MAX_BODY_SIZE). smart_str_free is NULL-safe. */
     smart_str_free(&stream->request_body_buf);
 
-    /* Drain the streaming chunk queue.
-     * Any chunk still refcount'ed from a send() that didn't flush
-     * before teardown (peer reset mid-stream, graceful close with
-     * pending bytes) must release its ref so zend_string tracking
-     * stays correct. */
+    /* Drain the streaming chunk queue. Any chunk still refcount'ed
+     * from a send() that didn't flush before teardown must release
+     * its ref so zend_string tracking stays correct. */
     if (stream->chunk_queue != NULL) {
         for (size_t i = stream->chunk_queue_head; i < stream->chunk_queue_tail; i++) {
             if (stream->chunk_queue[i] != NULL) {
@@ -74,6 +96,7 @@ void http2_stream_release(http2_stream_t *const stream)
         efree(stream->chunk_queue);
         stream->chunk_queue = NULL;
     }
+
     /* write_event — trigger event lazily created by
      * h2_wait_for_drain_event. Dispose explicitly so TrueAsync's
      * event registry releases backing memory. Safe on NULL. */
@@ -87,21 +110,17 @@ void http2_stream_release(http2_stream_t *const stream)
     }
 
     /* Per-stream PHP objects — dtor is a no-op when UNDEF. The
-     * handler coroutine's dispose clears them to UNDEF before
-     * releasing its ref; the only path that can hit non-UNDEF here
-     * is an early teardown before dispatch ever fired. */
+     * wrapper's free_object will call http_request_destroy on
+     * stream->request; if that hits 0 the release callback efrees
+     * the slot now; if not (wrapper outlived stream) the callback
+     * fires later on the wrapper's final release. */
     zval_ptr_dtor(&stream->request_zv);
     zval_ptr_dtor(&stream->response_zv);
 
-    /* Refcounted release. The stream owns one ref independent
-     * of any PHP HttpRequest ref bumped at dispatch time; release it
-     * unconditionally. http_request_destroy decrements; the actual free
-     * happens when the last holder releases. */
-    if (stream->request != NULL) {
-        http_request_destroy(stream->request);
-    }
-    stream->request = NULL;
-    efree(stream);
+    /* Drop our own request refcount. Either races to 0 with the
+     * wrapper above (slot freed via callback), or stays positive
+     * pending the wrapper release. */
+    http_request_destroy(stream->request);
 }
 
 /* Back-compat name used by the session table destructor. The table

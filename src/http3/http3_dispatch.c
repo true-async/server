@@ -122,7 +122,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     co->extended_dispose = h3_handler_coroutine_dispose;
 
     s->coroutine = co;
-    /* Coroutine holds its own ref. Released in dispose. */
+    /* Coroutine holds its own stream ref. Released in dispose. */
     s->refcount++;
 
     /* Bracket on the server's in-flight counter — admission / CoDel

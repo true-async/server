@@ -38,18 +38,27 @@ typedef enum {
 
 /* One per concurrent HTTP/2 request on a session. Owns a full
  * http_request_t so the connection layer can hand it to a user
- * handler coroutine the same way it does for HTTP/1. */
+ * handler coroutine the same way it does for HTTP/1.
+ *
+ * **Layout invariant**: `_request_storage` MUST stay the first field.
+ * Every API in the codebase that takes an `http_request_t *` is fed
+ * `&s->_request_storage`, and an `http_request_t *` recovered from the
+ * PHP HttpRequest wrapper or destroy callback is cast back to
+ * `http2_stream_t *` via the same offset-0 trick. Mirrors the
+ * http3_stream_t layout. The `request` pointer below is a back-compat
+ * alias so existing call sites keep using `s->request->...`. */
 struct http2_stream_t {
+    /* Embedded request storage — first field, see invariant above. */
+    http_request_t       _request_storage;
+
+    /* Alias pointer kept at &_request_storage. Re-set on every alloc
+     * since memset clears it. Lets existing s->request->X work
+     * unchanged. */
+    http_request_t      *request;
+
     http2_session_t     *session;       /* back-ref for callback routing */
     uint32_t             stream_id;
     http2_stream_state_t state;
-
-    /* Logical request — pseudo-headers populate method/uri; regular
-     * headers go into the HashTable. Owned by the stream; freed when
-     * the stream returns to the pool. For buffered handlers
-     * (REST/JSON) body accumulates in request->body via
-     * on_data_chunk_recv_cb. */
-    http_request_t      *request;
 
     /* Cumulative decoded-header bytes across HEADERS + CONTINUATION
      * frames for this stream. Belt-and-braces against

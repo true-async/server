@@ -878,6 +878,17 @@ void http_request_destroy(http_request_t *req)
         zend_string_release(req->tracestate_raw);
     }
 
+    /* Custom release path — embedder pools the slot itself and finishes
+     * any embedder-specific teardown. NULL = legacy ecalloc owner, free
+     * via efree. Capture the callback before clearing — defensive in
+     * case the cb does anything that might re-enter via field reads. */
+    void (*const release_cb)(http_request_t *) = req->release;
+    if (release_cb != NULL) {
+        req->release = NULL;
+        release_cb(req);
+        return;
+    }
+
     efree(req);
 }
 

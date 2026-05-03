@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "http3_packet.h"
+#include "http3/http3_stream_pool.h"
 
 /* HTTP/3 UDP listener.
  *
@@ -96,5 +97,11 @@ ssize_t http3_listener_send_gso(http3_listener_t *listener,
                                 size_t segsize, uint8_t ecn,
                                 const struct sockaddr *peer,
                                 socklen_t peer_len);
+
+/* Per-listener slab pool for http3_stream_t. All conns under this
+ * listener share the same pool — H3 listener is single-thread per
+ * worker, so no locking. Returns non-NULL once the listener is up. */
+struct http3_stream_pool_s;
+struct http3_stream_pool_s *http3_listener_stream_pool(http3_listener_t *listener);
 
 #endif /* HTTP3_LISTENER_H */
