@@ -955,6 +955,14 @@ static void tls_advance_state(http_connection_t *conn)
 
         const int feed = tls_feed_parser_step(conn);
         if (feed < 0) {
+            /* See http_connection.c handle_read_completion: latch on
+             * the first parse-error tick to avoid double-counting +
+             * double-emitting on subsequent multishot deliveries. */
+            if (conn->parse_error_handled) {
+                tls_flush_pending_alert(conn);
+                conn->state = CONN_STATE_CLOSING;
+                return;
+            }
             if (conn->current_request != NULL
                 && conn->current_request->coroutine != NULL) {
                 http_connection_cancel_handler_for_parse_error(conn);

@@ -217,6 +217,12 @@ struct _http_connection_t {
      * cycle that the old "stop multishot before dispatch, re-arm in dispose"
      * pattern produced. */
     unsigned                 request_in_flight : 1;
+    /* Latched on the first parse-error tick so subsequent multishot
+     * deliveries (the kernel's already-buffered tail of the same
+     * connection) don't re-enter cancel/emit and double-count
+     * parse_errors_*_total. Cleared on connection reset only — once
+     * a parse error is handled the connection is on its way down. */
+    unsigned                 parse_error_handled : 1;
 
     /* Intrusive doubly-linked node. Dual role:
      *   - while the slot is ALIVE, (next_conn, prev_conn) link into

@@ -833,8 +833,29 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
          *     multishot read + dispose its req before destroy frees
          *     rcb out from under it.
          */
-        if (conn->current_request != NULL && conn->current_request->coroutine != NULL) {
-            http_connection_cancel_handler_for_parse_error(conn);
+        /* Multishot read may keep delivering chunks after the parser
+         * latched its error — the kernel's recv buffer was already full
+         * when feed() returned <0. Each subsequent tick re-feeds the
+         * same parse error. Guard against double-counting telemetry +
+         * double-emitting the 4xx by latching parse_error_handled on
+         * the first tick. */
+        if (conn->parse_error_handled) {
+            *should_destroy_out = (conn->current_request == NULL);
+            return false;
+        }
+        if (conn->current_request != NULL) {
+            /* Handler was dispatched. Two sub-cases:
+             *   - coroutine != NULL: this is the first parse-error tick
+             *     for this request; cancel the handler so dispose can
+             *     build the 4xx from the HttpException.
+             *   - coroutine == NULL: a prior multishot tick already
+             *     cancelled the handler. Dispose owns the response.
+             *     Don't re-enter emit_parse_error — that path would
+             *     double-count the parse-error telemetry counter for
+             *     a single logical event. */
+            if (conn->current_request->coroutine != NULL) {
+                http_connection_cancel_handler_for_parse_error(conn);
+            }
             *should_destroy_out = false;
             return false;
         }
@@ -1408,6 +1429,7 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
      * not actually go on the wire (socket may be dead by then), but
      * the parser-error event itself is what we want counted. */
     http_server_on_parse_error(conn->server, status);
+    conn->parse_error_handled = 1;
     conn->keep_alive = false;
 
     /* Build HttpException(message=reason, code=status) directly
@@ -1482,6 +1504,7 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
 
     conn->keep_alive = false;
     http_server_on_parse_error(conn->server, status);
+    conn->parse_error_handled = 1;
 
     if (n <= 0 || (size_t)n >= sizeof(response)) {
         return false;  /* truncation guard — unreachable for current reasons */
