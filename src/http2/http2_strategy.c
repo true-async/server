@@ -658,19 +658,50 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
         http_server_on_h2_goaway_sent(conn->counters);
     }
 
-    /* Drain nghttp2's outbound buffer into the socket. 16 KiB chunks
-     * match MAX_FRAME_SIZE so each send_raw call carries at most one
-     * full frame. Loops until nghttp2 reports no more bytes pending
-     * or a write fails. */
-    char drain_buf[16384];
-    while (http2_session_want_write(self->session)) {
-        const ssize_t n = http2_session_drain(self->session,
-                                              drain_buf, sizeof(drain_buf));
-        if (n < 0) { return false; }
-        if (n == 0) { break; }
-        if (!http_connection_send(conn, drain_buf, (size_t)n)) {
-            return false;
+    /* Plaintext: drain ALL pending bytes from nghttp2 into a single
+     * heap buffer in one pass, then ship it via ZEND_ASYNC_IO_WRITE_EX
+     * fire-and-forget — one uv_write, one syscall, no per-frame
+     * coroutine suspend, no zend_string middleware. Buffer grows
+     * geometrically if nghttp2 has more than the initial cap.
+     * efree fires from the completion callback. TLS keeps the
+     * await-based send (encrypt ring needs contiguous payload, FSM
+     * has its own zero-copy submit). */
+#ifdef HAVE_OPENSSL
+    if (conn->tls != NULL) {
+        char drain_buf[16384];
+        while (http2_session_want_write(self->session)) {
+            const ssize_t n = http2_session_drain(self->session,
+                                                  drain_buf, sizeof(drain_buf));
+            if (n < 0) { return false; }
+            if (n == 0) { break; }
+            if (!http_connection_send(conn, drain_buf, (size_t)n)) {
+                return false;
+            }
         }
+        return true;
+    }
+#endif
+
+    size_t cap   = 16384;
+    size_t total = 0;
+    char  *buf   = emalloc(cap);
+    while (http2_session_want_write(self->session)) {
+        if (cap - total < 16384) {
+            cap *= 2;
+            buf = erealloc(buf, cap);
+        }
+        const ssize_t n = http2_session_drain(self->session,
+                                              buf + total, cap - total);
+        if (n < 0) { efree(buf); return false; }
+        if (n == 0) { break; }
+        total += (size_t)n;
+    }
+    if (total == 0) {
+        efree(buf);
+        return true;
+    }
+    if (!http_connection_send_batched(conn, buf, total)) {
+        return false;   /* send_raw_owned freed buf on submit failure */
     }
     return true;
 }
@@ -766,20 +797,44 @@ static bool h2_commit_streaming_headers(http_connection_t *const conn,
 }
 
 /* Drive nghttp2 to push whatever it can onto the socket right now.
- * Runs from the handler coroutine context — http_connection_send is
- * safe here (proper async suspend/resume through the TrueAsync I/O
- * waker). Same 16 KiB chunk size as commit_stream_response. */
+ * Runs from the handler coroutine context. Plaintext: drain-all-then-
+ * single-WRITE_EX, same shape as commit_stream_response above. TLS
+ * stays on await-based send_raw via http_connection_send. */
 static void h2_drain_to_socket(http_connection_t *const conn,
                                http2_session_t *const session)
 {
-    char buf[16384];
-    while (http2_session_want_write(session)) {
-        const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
-        if (n <= 0) { break; }
-        if (!http_connection_send(conn, buf, (size_t)n)) {
-            break;
+#ifdef HAVE_OPENSSL
+    if (conn->tls != NULL) {
+        char buf[16384];
+        while (http2_session_want_write(session)) {
+            const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
+            if (n <= 0) { break; }
+            if (!http_connection_send(conn, buf, (size_t)n)) {
+                break;
+            }
         }
+        return;
     }
+#endif
+
+    size_t cap   = 16384;
+    size_t total = 0;
+    char  *buf   = emalloc(cap);
+    while (http2_session_want_write(session)) {
+        if (cap - total < 16384) {
+            cap *= 2;
+            buf = erealloc(buf, cap);
+        }
+        const ssize_t n = http2_session_drain(session, buf + total, cap - total);
+        if (n < 0) { efree(buf); return; }
+        if (n == 0) { break; }
+        total += (size_t)n;
+    }
+    if (total == 0) {
+        efree(buf);
+        return;
+    }
+    (void)http_connection_send_batched(conn, buf, total);
 }
 
 /* Suspend-until-drain-event helper. Called from append_chunk's tail

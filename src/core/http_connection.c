@@ -231,6 +231,20 @@ void http_connection_destroy(http_connection_t *conn)
         return;
     }
 #endif
+    /* Same deferral for the batched plaintext send: libuv owns a
+     * pointer into the heap buf we passed to ZEND_ASYNC_IO_WRITE_EX.
+     * The completion cb sees destroy_pending == true and re-runs
+     * teardown after draining/freeing. */
+    if (conn->out_in_flight) {
+        conn->destroy_pending = true;
+        return;
+    }
+    if (conn->out_pending_buf != NULL) {
+        efree(conn->out_pending_buf);
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+    }
 
     /* Notify server of close so it can decrement active_connections and
      * maybe resume listeners. Per-request timing is already reported by
@@ -1161,6 +1175,111 @@ static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
     (void)io;
     zend_string *str = (zend_string *)((char *)data - offsetof(zend_string, val));
     zend_string_release(str);
+}
+
+/* Batched fire-and-forget: amortises N back-to-back writes to one
+ * socket into a single in-flight uv_write + a growing pending buffer.
+ *
+ * Workaround for libuv 1.52's uv_write2 inline-write fast path: it
+ * only kicks in when stream->write_queue_size == 0 at submit time, and
+ * uv__write_req_finish does not zero the counter — that happens later
+ * in uv__write_callbacks, fired from the loop's pending_queue. Back-
+ * to-back writes from multiple stream coroutines (HTTP/2 multiplex)
+ * force every write past the first into the slow EPOLLOUT-arming
+ * path, which on the io_uring backend triggers uv__epoll_ctl_prep
+ * and eventually io_uring_enter — orders of magnitude more syscalls
+ * than necessary.
+ *
+ * Solution: only one uv_write is outstanding at a time. Subsequent
+ * sends append into conn->out_pending_buf. The completion callback
+ * (fired from inside uv__write_callbacks, where write_queue_size has
+ * just been decremented) drains the pending buffer with one more
+ * uv_write — that submit takes the fast path because the counter is
+ * now zero. Chain continues until pending is empty.
+ *
+ * Plaintext only: TLS uses tls_zc_write_n via the BIO ring path.
+ * Caller transfers ownership of `buf` (emalloc'd); the reactor — or
+ * the append-into-pending path here — owns it after this call. */
+static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
+{
+    efree(data);
+    if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
+        return;
+    }
+    http_connection_t *conn = (http_connection_t *)io->user_data;
+
+    if (conn->out_pending_len > 0) {
+        /* Drain the accumulated batch as one writev. write_queue_size
+         * was just decremented for the completed req before we were
+         * called, so this submit takes the inline-writev fast path. */
+        char  *next_buf = conn->out_pending_buf;
+        size_t next_len = conn->out_pending_len;
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+        /* out_in_flight stays true — chain continues through the next
+         * completion. */
+        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+            conn->io, next_buf, next_len, http_send_batched_completion_cb);
+        if (UNEXPECTED(req == NULL)) {
+            /* Reactor already efree'd next_buf via the cb on submit failure. */
+            conn->out_in_flight = false;
+        }
+        return;
+    }
+
+    conn->out_in_flight = false;
+
+    /* Conn destroy was deferred while a batched write was in flight
+     * (see http_connection_destroy below). Now that the buffer is
+     * released and the chain has drained, run the pending teardown. */
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+    }
+}
+
+bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len)
+{
+    if (buf == NULL || len == 0) {
+        if (buf != NULL) { efree(buf); }
+        return true;
+    }
+    if (UNEXPECTED(conn->write_timed_out)) {
+        efree(buf);
+        return false;
+    }
+
+    if (conn->out_in_flight) {
+        /* A uv_write is outstanding — append + return without dipping
+         * back into libuv. The completion cb will pick this up. */
+        const size_t need = conn->out_pending_len + len;
+        if (need > conn->out_pending_cap) {
+            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
+            while (new_cap < need) {
+                new_cap *= 2;
+            }
+            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
+            conn->out_pending_cap = new_cap;
+        }
+        memcpy(conn->out_pending_buf + conn->out_pending_len, buf, len);
+        conn->out_pending_len += len;
+        efree(buf);
+        return true;
+    }
+
+    /* No write in flight — submit directly. Mark in-flight BEFORE
+     * the call so a sync-complete (rare on Linux for stream writes)
+     * still sees a consistent state when the cb fires inline. */
+    conn->out_in_flight = true;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+        conn->io, buf, len, http_send_batched_completion_cb);
+    if (UNEXPECTED(req == NULL)) {
+        /* Submit failed — reactor invoked the cb (efree'd buf), and
+         * the cb sets out_in_flight = false / drains pending. */
+        return false;
+    }
+    return true;
 }
 
 bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)

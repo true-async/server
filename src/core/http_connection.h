@@ -153,6 +153,23 @@ struct _http_connection_t {
     size_t                   read_buffer_size;
     size_t                   read_buffer_len;
 
+    /* Batched plaintext output: amortises N consecutive writes to one
+     * socket into a single in-flight uv_write + a growing pending
+     * buffer. While `out_in_flight` is true, http_connection_send_batched
+     * appends to `out_pending_buf` instead of issuing another uv_write —
+     * libuv's `write_queue_size` is non-zero until the in-flight req's
+     * completion callback fires (uv_write2 only takes the inline-writev
+     * fast path when the queue was empty at submit time, so back-to-back
+     * writes from multiple stream coroutines force every write past the
+     * first into the slow EPOLLOUT-arming path). The completion callback
+     * then drains the pending buffer in one more uv_write — at that
+     * point write_queue_size has been decremented, so the next submit
+     * also takes the fast path. Plaintext only: TLS path has its own
+     * BIO-pair zero-copy submit (tls_zc_write_n above). */
+    char    *out_pending_buf;
+    size_t   out_pending_len;
+    size_t   out_pending_cap;
+
     /* 4-byte fields */
     http_connection_state_t  state;
     http_protocol_type_t     protocol_type;
@@ -187,6 +204,7 @@ struct _http_connection_t {
     unsigned                 headers_complete : 1;
     unsigned                 body_complete : 1;
     unsigned                 request_ready : 1;     /* set by strategy->on_request_ready */
+    unsigned                 out_in_flight : 1;     /* batched send: one uv_write outstanding, pending buffer accumulates */
     unsigned                 drain_pending : 1;     /* decision: this conn should drain */
     unsigned                 drain_submitted : 1;   /* HTTP/2: GOAWAY already queued on this session */
     unsigned                 destroy_pending : 1;   /* destroy deferred — a handler coroutine is mid-dispose */
@@ -283,6 +301,16 @@ bool http_connection_send_error(http_connection_t *conn, int status_code, const 
  * Plaintext only — TLS sessions must continue to use http_connection_send.
  */
 bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
+
+/* Batched fire-and-forget. Caller passes an emalloc'd buffer; the
+ * connection accumulates concurrent sends into one in-flight uv_write
+ * and drains the rest from the completion callback (one outstanding
+ * uv_write at a time, every chained submit takes libuv's inline-write
+ * fast path). On submit failure the buffer is freed by the reactor,
+ * so the caller must not touch `buf` after this returns. Plaintext
+ * only — TLS uses the BIO-pair zero-copy path. */
+bool http_connection_send_batched(http_connection_t *conn,
+                                  void *buf, size_t len);
 
 /* Vectored fire-and-forget variant: each slot of @p bufs is an OWNED
  * zend_string reference, consumed by the reactor's writev completion.
