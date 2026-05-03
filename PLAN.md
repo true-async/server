@@ -510,9 +510,44 @@ populated при `addHttpHandler` через `Z_PARAM_FUNC`. Эффект:
 `zend_get_executed_filename_ex` 0.28% → 0.12%, `zend_is_callable_ex`
 ушёл из топа.
 
-### Шаг 7 — HTTP/2 hot-path
+### ~~Шаг 7 — HTTP/2 hot-path~~ ✓
 
-Профилирование h2load после применения предыдущих шагов. Возможно нужен per-stream output buffer pooling.
+Профилировка h2load (c=32 m=32) показала 17.5% CPU в `http_connection_send_raw`
++ `async_io_req_await` per-stream commit. Попытка fire-and-forget без suspend'а
+неожиданно дала **регресс −45%** RPS вместо ожидаемого выигрыша. Расследование
+вскрыло **системный оверхед в шедулере**: main loop (`scheduler.c:1679`) звал
+`REACTOR_EXECUTE` после каждой завершившейся корутины — для микро-handler'ов
+H/2 stream'а (единицы микросекунд) cost тика реактора начинал доминировать над
+самим handler'ом.
+
+Решение в двух слоях:
+
+1. **php-async (commit `870e264`)**: добавлен throttle на `REACTOR_EXECUTE` в
+   main scheduler loop через `CLOCK_MONOTONIC_COARSE` — реактор тикается не
+   чаще раза в kernel jiffy (4-10мс) когда есть runnable корутины. Когда
+   runnable нет — тик безусловный (нужно ждать I/O).
+   `scheduler_next_tick` тоже переведён с `zend_hrtime` на coarse clock в
+   throttle-проверке.
+
+2. **server (commit `66af11b`)**: `http_connection_send_batched` —
+   in-flight трекинг через флаг `out_in_flight` + per-conn pending буфер +
+   chained completion. Subsequent send'ы append'ятся в pending, completion
+   cb chain'ит следующий uv_write. Без throttle'а из (1) этот батчинг не
+   работал бы — между commit'ами libuv успевал бы тикнуть и сбросить флаг.
+   Замер: ~96% commit'ов идут по batched-ветке; в среднем ~28 stream
+   commit'ов сливаются в один uv_write.
+
+Эффект (h2load -c32 -m32 на h2c hello-world, single worker):
+- H/1 wrk -c64:                64k → 117k req/s (+82%)
+- **H/2 c=32 m=32:           117k → 400k req/s (+241%)**
+- TLS H/1 c=64:               15k → 42k req/s (+180%)
+
+Syscalls на 8s H/2-нагрузки:
+- io_uring_enter: 19385 → 1448 (−92%)
+- epoll_pwait:    19386 → 1461 (−92%)
+
+Тесты: ext/async/tests/ — 884/884 effective PASS (1041 total, 156 SKIP),
+0 регрессий. server H/1+H/2+TLS phpt — только pre-existing failures.
 
 ### Шаг 8 — HTTP/3 hot-path
 
