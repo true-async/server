@@ -122,7 +122,6 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     co->extended_dispose = h3_handler_coroutine_dispose;
 
     s->coroutine = co;
-    /* Coroutine holds its own stream ref. Released in dispose. */
     s->refcount++;
 
     /* Bracket on the server's in-flight counter — admission / CoDel
@@ -163,7 +162,6 @@ static void h3_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[1], &s->response_zv);
     ZVAL_UNDEF(&retval);
 
-    /* Cached fcall_info_cache path — see http_connection.c for rationale. */
     zend_fcall_info fci = {
         .size           = sizeof(zend_fcall_info),
         .function_name  = fcall->fci.function_name,

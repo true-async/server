@@ -50,7 +50,6 @@ void http3_stream_pool_cleanup(http3_stream_pool_t *pool)
     pool->live_count = 0;
 }
 
-/* Grow by one chunk. Returns false on alloc failure. */
 static bool http3_stream_pool_grow(http3_stream_pool_t *pool)
 {
     http3_stream_chunk_t *chunk = emalloc(sizeof(*chunk));

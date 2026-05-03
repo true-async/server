@@ -48,7 +48,6 @@ typedef enum {
  * http3_stream_t layout. The `request` pointer below is a back-compat
  * alias so existing call sites keep using `s->request->...`. */
 struct http2_stream_t {
-    /* Embedded request storage — first field, see invariant above. */
     http_request_t       _request_storage;
 
     /* Alias pointer kept at &_request_storage. Re-set on every alloc

@@ -10,29 +10,19 @@
 #include "http3_listener.h"     /* http3_listener_stream_pool */
 
 
-/* Forward decl — defined below; the release cb is a member of
- * http_request_t.release set at allocation time. */
 static void http3_stream_release_via_request(http_request_t *req);
 
 http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
 {
-    http3_stream_pool_t *pool =
-        conn != NULL ? http3_listener_stream_pool(conn->listener) : NULL;
-
-    http3_stream_t *s;
-    if (pool != NULL) {
-        s = http3_stream_pool_alloc(pool);
-        if (UNEXPECTED(s == NULL)) {
-            return NULL;
-        }
-    } else {
-        /* Unit-test fallback — no listener, no pool. */
-        s = ecalloc(1, sizeof(*s));
+    http3_stream_pool_t *pool = http3_listener_stream_pool(conn->listener);
+    http3_stream_t *s = http3_stream_pool_alloc(pool);
+    if (UNEXPECTED(s == NULL)) {
+        return NULL;
     }
 
     s->stream_id = stream_id;
     s->refcount  = 1;
-    s->pool      = pool;   /* NULL on the ecalloc fallback */
+    s->pool      = pool;
 
     /* Wire up the embedded request. _request_storage was zeroed by the
      * pool memset (or ecalloc); just set the alias pointer and the
@@ -61,11 +51,7 @@ static void http3_stream_release_via_request(http_request_t *req)
      * http3_stream_t, so the same byte address is both. */
     http3_stream_t *const s = (http3_stream_t *)req;
 
-    if (s->pool != NULL) {
-        http3_stream_pool_free(s->pool, s);
-    } else {
-        efree(s);
-    }
+    http3_stream_pool_free(s->pool, s);
 }
 
 void http3_stream_release(http3_stream_t *const s)
@@ -83,11 +69,8 @@ void http3_stream_release(http3_stream_t *const s)
      * which case the slot stays in the alive list until the wrapper's
      * free_object calls http_request_destroy down to zero. */
 
-    /* Drop any partial body the peer never finished framing. */
     smart_str_free(&s->body_buf);
 
-    /* Release the buffered response body the data_reader was draining
-     * from (REST/setBody path). */
     if (s->response_body != NULL) {
         zend_string_release(s->response_body);
         s->response_body = NULL;
@@ -106,7 +89,6 @@ void http3_stream_release(http3_stream_t *const s)
         s->chunk_queue = NULL;
     }
 
-    /* Trigger event lazily created by streaming-backpressure wait. */
     if (s->write_event != NULL) {
         zend_async_event_t *ev = &s->write_event->base;
         if (ev->dispose != NULL) {

@@ -209,7 +209,6 @@ static void http2_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[1], &stream->response_zv);
     ZVAL_UNDEF(&retval);
 
-    /* Cached fcall_info_cache path — see http_connection.c for rationale. */
     zend_fcall_info fci = {
         .size           = sizeof(zend_fcall_info),
         .function_name  = conn->handler->fci.function_name,
@@ -701,7 +700,7 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
         return true;
     }
     if (!http_connection_send_batched(conn, buf, total)) {
-        return false;   /* send_raw_owned freed buf on submit failure */
+        return false;
     }
     return true;
 }

@@ -43,8 +43,7 @@
 extern "C" {
 #endif
 
-/* Slots per chunk. 256 × ~768 B ≈ 192 KiB. Power-of-two for cleaner
- * grow-by-doubling later if we want; otherwise irrelevant. */
+/* Slots per chunk. 256 × ~768 B ≈ 192 KiB. */
 #define CONN_ARENA_CHUNK_SLOTS  256
 
 typedef struct conn_chunk_s {

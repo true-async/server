@@ -31,7 +31,6 @@ typedef struct _http3_connection_s http3_connection_t;  /* defined in http3_conn
  * diagnostic. The `request` pointer below is a back-compat alias so
  * existing call sites keep using `s->request->...` without changes. */
 struct _http3_stream_s {
-    /* Embedded request storage. First field — see invariant above. */
     http_request_t    _request_storage;
 
     /* Alias pointer kept at &_request_storage. Re-set on every pool
@@ -135,11 +134,9 @@ struct _http3_stream_s {
      * stream it carries. */
     http3_connection_t *conn;
 
-    /* Direct back-pointer to the slab pool the slot came from. Stable
-     * across the stream's lifetime even when conn is NULLed during
-     * teardown — release() needs this to return the slot to its pool.
-     * NULL only when the stream came from the unit-test ecalloc
-     * fallback path. */
+    /* Slab pool the slot came from. Stable across the stream's lifetime
+     * even when conn is NULLed during teardown — release() needs this
+     * to return the slot. */
     struct http3_stream_pool_s *pool;
 
     /* Lifecycle refcount. Starts at 1 (held by nghttp3 stream_user_data).
@@ -155,14 +152,9 @@ struct _http3_stream_s {
     http3_stream_t   *list_next;
 };
 
-/* Allocate a stream + its empty http_request_t.
- *
- * The slot itself comes from the listener's slab pool reached through
- * `conn->listener`. `conn` must be non-NULL on the production code
- * path; pass NULL only from unit tests that exercise stream lifecycle
- * without a real listener. The `conn` back-pointer is NOT stored here
- * — h3_begin_headers_cb sets `s->conn` after the stream joins the
- * connection's live-stream list. */
+/* Allocate a stream + its http_request_t from the listener's slab pool.
+ * The conn back-pointer is NOT stored here — h3_begin_headers_cb sets
+ * s->conn after the stream joins the connection's live-stream list. */
 http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id);
 
 /* Decrement refcount; release storage when it hits zero. Drops the

@@ -57,8 +57,6 @@ void http3_stream_pool_init(http3_stream_pool_t *pool);
  * (assert live_count == 0 in debug). */
 void http3_stream_pool_cleanup(http3_stream_pool_t *pool);
 
-/* Pop a slot, zero it. Grows by one chunk on empty freelist. Returns
- * NULL only on chunk allocation failure. */
 http3_stream_t *http3_stream_pool_alloc(http3_stream_pool_t *pool);
 
 /* Push a slot back onto the freelist. Caller must have torn down all

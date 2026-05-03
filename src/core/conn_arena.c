@@ -69,7 +69,6 @@ http_connection_t *conn_arena_alloc(conn_arena_t *arena)
         }
     }
 
-    /* Pop. */
     http_connection_t *slot = arena->free_head;
     arena->free_head = slot->next_conn;
 
@@ -77,7 +76,6 @@ http_connection_t *conn_arena_alloc(conn_arena_t *arena)
      * pointer fields; the arena preserves that contract. */
     memset(slot, 0, sizeof(*slot));
 
-    /* Push onto alive list (head insert — O(1)). */
     slot->next_conn = arena->alive_head;
     slot->prev_conn = NULL;
     if (arena->alive_head != NULL) {
@@ -90,7 +88,6 @@ http_connection_t *conn_arena_alloc(conn_arena_t *arena)
 
 void conn_arena_free(conn_arena_t *arena, http_connection_t *conn)
 {
-    /* Unlink from alive list. */
     if (conn->prev_conn != NULL) {
         conn->prev_conn->next_conn = conn->next_conn;
     } else {
@@ -102,8 +99,7 @@ void conn_arena_free(conn_arena_t *arena, http_connection_t *conn)
     }
     arena->live_count--;
 
-    /* Push onto freelist. prev_conn is left undefined — freelist
-     * traversal only reads next_conn. */
+    /* prev_conn is left undefined on the freelist — only next_conn is read. */
     conn->next_conn = arena->free_head;
     arena->free_head = conn;
 }

@@ -24,8 +24,6 @@
  * before ever invoking on_begin_headers_cb, so we never race past it.
  */
 
-/* Forward decl — defined below; release callback stored in
- * _request_storage.release at allocation. */
 static void http2_stream_release_via_request(http_request_t *req);
 
 http2_stream_t *http2_stream_new(http2_session_t *const session,
@@ -79,14 +77,8 @@ void http2_stream_release(http2_stream_t *const stream)
      * HttpRequest wrapper. The release callback installed at alloc
      * time efrees the slot once the wrapper finally releases. */
 
-    /* Drop any partial request body we accumulated but never moved
-     * into request->body (peer reset, or rejected for exceeding
-     * HTTP2_MAX_BODY_SIZE). smart_str_free is NULL-safe. */
     smart_str_free(&stream->request_body_buf);
 
-    /* Drain the streaming chunk queue. Any chunk still refcount'ed
-     * from a send() that didn't flush before teardown must release
-     * its ref so zend_string tracking stays correct. */
     if (stream->chunk_queue != NULL) {
         for (size_t i = stream->chunk_queue_head; i < stream->chunk_queue_tail; i++) {
             if (stream->chunk_queue[i] != NULL) {

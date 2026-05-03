@@ -244,9 +244,6 @@ struct http_server_object {
     bool                     stopping;
     bool                     listeners_paused;
 
-    /* sample_stamps_enabled migrated to view slice (read on hot path
-     * via inline http_server_sample_stamps_enabled). */
-
     /* Transit sidecar — non-NULL only in the persistent shell created by
      * transfer_obj(TRANSFER). Holds pemalloc-copied closures so the LOAD
      * side can rebuild fcall_t entries in the destination thread's heap.
@@ -272,20 +269,16 @@ static __declspec(thread) http_server_object *current_server = NULL;
 static __thread http_server_object *current_server = NULL;
 #endif
 
-/* Recover the PHP wrapper from a Zend object pointer. */
 static inline struct http_server_php *http_server_php_from_obj(zend_object *obj) {
     return (struct http_server_php *)((char *)(obj) - XtOffsetOf(struct http_server_php, std));
 }
 
-/* Recover the C-state from a Zend object pointer (one indirection
- * through the wrapper). The C-state is shared and refcounted. */
 static inline http_server_object *http_server_from_obj(zend_object *obj) {
     return http_server_php_from_obj(obj)->server;
 }
 #define Z_HTTP_SERVER_P(zv) http_server_from_obj(Z_OBJ_P(zv))
 
-/* Refcount on the C-state. Single-thread per worker — no atomics.
- * Forward decl: finalizer body is below http_server_free. */
+/* Single-thread per worker — no atomics needed. */
 static void http_server_state_finalize(http_server_object *server);
 
 void http_server_addref(http_server_object *server) {
@@ -514,11 +507,6 @@ static void http_server_resume_listeners(http_server_object *server)
  * separately by the hard-cap hysteresis (active_connections <= pause_low)
  * — CoDel cannot self-resume because paused listeners produce no new
  * samples. */
-/* http_server_count_request / http_server_sample_stamps_enabled moved to
- * inline helpers in php_http_server.h — they're slice-pointer based now
- * (counters / view) so the hot path doesn't pay a function call per
- * request and the compiler can const-fold the gate when stamps are off. */
-
 void http_server_on_request_sample(http_server_object *server,
                                    const uint64_t sojourn_ns,
                                    const uint64_t service_ns,

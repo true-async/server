@@ -127,15 +127,7 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
 http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_async_scope_t *parent_scope,
                                           struct http_server_object *server)
 {
-    http_connection_t *conn;
-    if (server != NULL) {
-        conn = conn_arena_alloc(http_server_arena(server));
-    } else {
-        /* Server-less test path. The slot is just an ecalloc'd
-         * standalone allocation, not in any arena's alive list, and
-         * destroy must NOT call conn_arena_free. */
-        conn = ecalloc(1, sizeof(http_connection_t));
-    }
+    http_connection_t *conn = conn_arena_alloc(http_server_arena(server));
     if (UNEXPECTED(conn == NULL)) {
         closesocket(socket_fd);
         return NULL;
@@ -148,11 +140,7 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
         ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_WRITABLE
     );
     if (!conn->io) {
-        if (server != NULL) {
-            conn_arena_free(http_server_arena(server), conn);
-        } else {
-            efree(conn);
-        }
+        conn_arena_free(http_server_arena(server), conn);
         closesocket(socket_fd);
         return NULL;
     }
@@ -206,16 +194,11 @@ void http_connection_destroy(http_connection_t *conn)
     if (!conn) return;
 
     /* Defer the actual free if a handler coroutine is still holding
-     * this conn alive. Prevents the classic async UAF where a
-     * read-callback CLOSING path (peer FIN, close_notify, parse
-     * error) frees strategy/session while a dispose coroutine is
-     * suspended inside commit/send drain — reproducibly SEGVs with
-     * conn->io / session pointer clobbered by ASCII debris from the
-     * fresh alloc that reused the memory. Pinned by:
-     *   - HTTP/2: http2_strategy.c:165 (per-stream dispatch)
-     *   - HTTP/1: http_connection_dispatch_request (TLS pipelining)
-     * The last handler's dispose re-enters destroy via destroy_pending;
-     * by then handler_refcount is zero and the free proceeds. */
+     * this conn alive. Prevents the async UAF where a read-callback
+     * CLOSING path frees strategy/session while a dispose coroutine is
+     * suspended inside commit/send drain. The last handler's dispose
+     * re-enters destroy via destroy_pending once handler_refcount hits
+     * zero. */
     if (conn->handler_refcount > 0) {
         conn->destroy_pending = true;
         return;
@@ -251,10 +234,6 @@ void http_connection_destroy(http_connection_t *conn)
      * http_server_on_request_sample from the coroutine entry — no
      * timing carried on the connection itself. Safe with server == NULL. */
     http_server_on_connection_close(conn->server);
-
-    /* Slot is unlinked from the arena's alive list inside
-     * conn_arena_free at the end of destroy. No O(N) walk needed —
-     * O(1) doubly-linked unlink via prev_conn/next_conn. */
 
     /* Detach the persistent read callback first. If we let
      * ZEND_ASYNC_IO_CLOSE dispose the event with our callback still in
@@ -355,17 +334,11 @@ void http_connection_destroy(http_connection_t *conn)
     }
 #endif
 
-    /* Capture the owning C-state pointer before returning the slot
-     * to the arena — `conn` is gone after the next call. The release
-     * after that drops our ref; if the PHP wrapper already gave up
-     * its ref and this was the last live conn, http_server_release
-     * runs the finalizer (arena cleanup) and pefrees the C-state. */
+    /* Capture server before returning the slot — conn is gone after
+     * arena_free. release() drops our ref; if this was the last one,
+     * http_server_state_finalize runs (arena cleanup + pefree). */
     http_server_object *owning_server = conn->server;
-    if (owning_server != NULL) {
-        conn_arena_free(http_server_arena(owning_server), conn);
-    } else {
-        efree(conn);
-    }
+    conn_arena_free(http_server_arena(owning_server), conn);
     http_server_release(owning_server);
 }
 /* }}} */
@@ -1996,13 +1969,10 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
                            http_server_object *server,
                            tls_context_t *tls_ctx)
 {
-    /* Allocate from the server's slab arena (or ecalloc for the
-     * server-less test path). conn->server is set by create. */
     http_connection_t *conn = http_connection_create(client_fd, server_scope, server);
     if (!conn) {
         return false;
     }
-    /* Bind hot-path slices — counters / view / log_state pointers. */
     http_server_bind_connection(server, conn);
 
 #ifdef HAVE_OPENSSL

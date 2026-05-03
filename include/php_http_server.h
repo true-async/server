@@ -29,7 +29,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #if defined(__linux__)
-# include <time.h>   /* clock_gettime(CLOCK_MONOTONIC_COARSE) for http_now_coarse_ns() */
+# include <time.h>
 #endif
 
 extern zend_module_entry http_server_module_entry;
@@ -368,10 +368,6 @@ void http_server_on_request_sample(http_server_object *server,
                                    uint64_t sojourn_ns, uint64_t service_ns,
                                    uint64_t now_ns);
 void http_server_on_connection_close(http_server_object *server);
-
-/* http_server_count_request / http_server_sample_stamps_enabled are
- * defined as inline helpers further down (after http_server_counters_t /
- * http_server_view_t are declared). */
 
 /* Conn slab arena. Owns http_connection_t slot memory for every live
  * conn AND the doubly-linked alive list. Lifetime tied to the
@@ -845,8 +841,6 @@ void http_response_format_parts(zend_object *obj,
                                 zend_string **headers_out,
                                 zend_string **body_out);
 
-/* Cheap body-length probe used by the dispose hot path to pick between
- * single-string concat (small bodies) and writev (large bodies). */
 size_t http_response_get_body_len(zend_object *obj);
 
 /* Threshold (bytes) under which the legacy concat formatter wins over
