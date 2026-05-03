@@ -33,3 +33,6 @@ phpt/**/*.php
 phpt/**/*.sh
 e2e/**/*.php
 e2e/**/*.sh
+
+# Exception: shared e2e test helper (committed source, not a phpt artifact).
+!e2e/HttpTestCase.php

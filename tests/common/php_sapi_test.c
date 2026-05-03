@@ -20,6 +20,8 @@
 #include "php_main.h"
 #include "php_variables.h"
 
+#include "php_http_server.h"   /* zend_http_server_globals layout */
+
 /* Weak stubs for extension-level class entries referenced by production
  * source files that are linked into unit tests. The real definitions
  * live in src/http_server_exceptions.c and are populated at MINIT in
@@ -32,10 +34,12 @@ zend_class_entry *http_exception_ce __attribute__((weak)) = NULL;
  * src/http_response.c / src/http_server_class.c. Unit tests link only
  * the protocol-strategy + session TUs, so these cross-TU references
  * would otherwise fail to resolve. Any individual test that exercises
- * these paths can supply a strong override. */
-struct http_response_stream_ops;
-typedef struct http_response_stream_ops http_response_stream_ops_t;
-
+ * these paths can supply a strong override.
+ *
+ * Signatures track the real declarations from php_http_server.h —
+ * keep them in sync if the header changes. http_server_on_h2_goaway_sent
+ * and http_server_on_h1_connection_close_sent migrated to inline
+ * helpers (counters slice) and no longer need extern stubs. */
 __attribute__((weak)) void http_response_install_stream_ops(zend_object *obj,
                                                             const http_response_stream_ops_t *ops,
                                                             void *ctx) {
@@ -47,22 +51,27 @@ __attribute__((weak)) bool http_response_is_streaming(zend_object *obj) {
     return false;
 }
 
-/* http_server_object is forward-declared only; use void* signatures in
- * the weak stubs since we don't actually touch the struct. The real
- * declarations take http_server_object* / http_connection_t*, which
- * are pointer-compatible at the ABI level. */
-__attribute__((weak)) bool http_server_should_drain_now(void *server,
-                                                        void *conn) {
-    (void)server; (void)conn;
+__attribute__((weak)) bool http_server_should_drain_now(http_server_object *server,
+                                                        http_connection_t *conn,
+                                                        uint64_t now_ns) {
+    (void)server; (void)conn; (void)now_ns;
     return false;
 }
 
-__attribute__((weak)) void http_server_on_h2_goaway_sent(void *server) {
-    (void)server;
-}
+/* Real definition of the extension's module globals — TUs that reference
+ * HTTP_SERVER_G (e.g. http2_session.c reading parser_pool.max_body_size)
+ * fail to link otherwise. The full extension's MINIT does not run here,
+ * so we register the slot ourselves in php_test_runtime_init below. */
+ZEND_DECLARE_MODULE_GLOBALS(http_server)
 
-__attribute__((weak)) void http_server_on_h1_connection_close_sent(void *server) {
-    (void)server;
+static void test_http_server_globals_ctor(void *globals) {
+    zend_http_server_globals *g = (zend_http_server_globals *)globals;
+    g->parser_pool.parsers       = NULL;
+    g->parser_pool.count         = 0;
+    g->parser_pool.capacity      = 0;
+    /* Generous default — http2_session body-cap tests pick their own
+     * cap via SETTINGS / direct assignment when they care about it. */
+    g->parser_pool.max_body_size = 16 * 1024 * 1024;
 }
 
 /* Minimal SAPI callbacks */
@@ -189,6 +198,18 @@ int php_test_runtime_init(void) {
 #endif
         return -1;
     }
+
+    /* Allocate the http_server module-globals slot. Done after SAPI
+     * startup (TSRM resource allocator is up by then) and before request
+     * startup so the per-thread storage is wired before any test code
+     * dereferences HTTP_SERVER_G. */
+#ifdef ZTS
+    ts_allocate_id(&http_server_globals_id,
+                   sizeof(zend_http_server_globals),
+                   test_http_server_globals_ctor, NULL);
+#else
+    test_http_server_globals_ctor(&http_server_globals);
+#endif
 
     /* Start request */
     if (php_request_startup() == FAILURE) {
