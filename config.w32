@@ -20,6 +20,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "src\\uploaded_file.c ";
 
     var http_server_core =
+        "conn_arena.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +
