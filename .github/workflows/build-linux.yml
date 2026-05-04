@@ -573,7 +573,7 @@ jobs:
         run: |
           set -eux
           git fetch --no-tags --depth=200 origin "$BASE_SHA" || true
-          git diff --name-only "$BASE_SHA"..."$HEAD_SHA" > /tmp/touched.txt
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/touched.txt
           wc -l /tmp/touched.txt
           head -50 /tmp/touched.txt
 
