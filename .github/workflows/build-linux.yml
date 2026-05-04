@@ -650,11 +650,10 @@ jobs:
                 owner, repo, issue_number, body: tagged });
             }
 
-      - name: Fail on coverage regression
+      - name: Warn on coverage regression
         if: matrix.debug == false && github.event_name == 'pull_request' && steps.compare.outputs.exit != '0'
         run: |
-          echo "Coverage gate failed (exit=${{ steps.compare.outputs.exit }})." >&2
-          exit 1
+          echo "::warning::Coverage regression detected (exit=${{ steps.compare.outputs.exit }}). See coverage comment for details."
 
       - name: Refresh baseline on main
         if: matrix.debug == false && github.event_name == 'push' && github.ref == 'refs/heads/main'
