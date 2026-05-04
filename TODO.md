@@ -2,12 +2,10 @@
 
 ## Step 1 — HTTP/3 hot path
 
-**Goal**: fire-and-forget write for QUIC/UDP, matching what steps 1–4 did for HTTP/1 and HTTP/2.
+Most of this is already done: handler coroutines do not suspend on write, UDP_SEGMENT / GSO batching is implemented in `src/http3/http3_listener.c:584` (`http3_listener_send_gso`), and Linux uses direct `sendmsg(MSG_DONTWAIT)` bypassing libuv.
 
-- Add `ZEND_ASYNC_UDP_SENDTO_EX` or unify with existing `ZEND_ASYNC_UDP_REQ_F_*` flags into a single API
-- Profile under `h3load` or `curl --http3-only` with keep-alive
-- Consider UDP Generic Segmentation Offload (`UDP_SEGMENT`) for batching small QUIC packets
-- Consider `MSG_ZEROCOPY` for large DATA frames in QUIC (> 8 KB)
+Remaining:
+- `MSG_ZEROCOPY` for large QUIC DATA frames (> 8 KB) — can be addressed together with Step 3
 
 ## Step 2 — Full TLS optimization (deferred)
 
