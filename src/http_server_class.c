@@ -2184,6 +2184,23 @@ static void http_server_free(zend_object *obj)
     }
 #endif
 
+    /* Force-close any conn still on the alive list. With multishot
+     * armed for the connection lifetime, an idle conn (no handler in
+     * flight, peer hasn't FIN'd yet) holds io_t + the outstanding
+     * read req — which in turn keep a ref on the C-state. Without an
+     * explicit sweep here those refs never drop and the whole
+     * conn/io/parser/strategy chain leaks at script shutdown. Conns
+     * with a handler mid-flight set destroy_pending and finalise when
+     * the scope release below cancels the handler coroutine. */
+    {
+        http_connection_t *c = server->conn_arena.alive_head;
+        while (c != NULL) {
+            http_connection_t *next = c->next_conn;
+            http_connection_destroy(c);
+            c = next;
+        }
+    }
+
     /* Release the scope_object we took at scope creation in start().
      *
      * scope_destroy (the object dtor) will clear scope->scope_object = NULL
