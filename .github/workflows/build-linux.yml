@@ -572,7 +572,11 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eux
+          # actions/checkout for pull_request checks out the merge ref,
+          # so neither BASE nor HEAD is guaranteed to be present locally —
+          # fetch both as explicit objects before diffing.
           git fetch --no-tags --depth=200 origin "$BASE_SHA" || true
+          git fetch --no-tags --depth=200 origin "$HEAD_SHA" || true
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/touched.txt
           wc -l /tmp/touched.txt
           head -50 /tmp/touched.txt
