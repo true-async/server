@@ -5,8 +5,6 @@
 # include <config.h>
 #endif
 
-#ifdef HAVE_HTTP_SERVER_HTTP3
-
 #include "http3/http3_stream.h"
 
 #ifdef __cplusplus
@@ -67,7 +65,5 @@ void http3_stream_pool_free(http3_stream_pool_t *pool, http3_stream_t *slot);
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* HAVE_HTTP_SERVER_HTTP3 */
 
 #endif /* HTTP3_STREAM_POOL_H */

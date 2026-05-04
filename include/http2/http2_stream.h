@@ -13,8 +13,6 @@
 # include <config.h>
 #endif
 
-#ifdef HAVE_HTTP2
-
 #include "php.h"
 #include "zend_smart_str.h"
 #include "http1/http_parser.h"     /* http_request_t */
@@ -171,7 +169,5 @@ http2_stream_t *http2_stream_new(http2_session_t *session, uint32_t stream_id);
 
 /* Destroy a stream (including its request). Safe with NULL. */
 void http2_stream_free(http2_stream_t *stream);
-
-#endif /* HAVE_HTTP2 */
 
 #endif /* HTTP2_STREAM_H */

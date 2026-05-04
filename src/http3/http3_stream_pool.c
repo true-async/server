@@ -12,8 +12,6 @@
 # include <config.h>
 #endif
 
-#ifdef HAVE_HTTP_SERVER_HTTP3
-
 #include <php.h>
 #include <Zend/zend_alloc.h>
 #include <Zend/zend_portability.h>
@@ -99,5 +97,3 @@ void http3_stream_pool_free(http3_stream_pool_t *pool, http3_stream_t *slot)
     pool->free_head = slot;
     pool->live_count--;
 }
-
-#endif /* HAVE_HTTP_SERVER_HTTP3 */

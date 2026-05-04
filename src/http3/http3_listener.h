@@ -1,12 +1,6 @@
 #ifndef HTTP3_LISTENER_H
 #define HTTP3_LISTENER_H
 
-/* Declarations are always visible — implementation guards itself with
- * HAVE_HTTP_SERVER_HTTP3 in the .c file. Prevents header-ordering bugs
- * where a caller includes this before config.h/php.h and sees an empty
- * header. Call sites that do not want H3 simply never link against the
- * implementation. */
-
 #include <zend.h>
 #include <zend_async_API.h>
 #include <stdint.h>
@@ -101,7 +95,6 @@ ssize_t http3_listener_send_gso(http3_listener_t *listener,
 /* Per-listener slab pool for http3_stream_t. All conns under this
  * listener share the same pool — H3 listener is single-thread per
  * worker, so no locking. Returns non-NULL once the listener is up. */
-struct http3_stream_pool_s;
-struct http3_stream_pool_s *http3_listener_stream_pool(http3_listener_t *listener);
+http3_stream_pool_t *http3_listener_stream_pool(http3_listener_t *listener);
 
 #endif /* HTTP3_LISTENER_H */

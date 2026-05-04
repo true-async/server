@@ -5,8 +5,6 @@
 # include <config.h>
 #endif
 
-#ifdef HAVE_HTTP_SERVER_HTTP3
-
 #include "php.h"
 #include "Zend/zend_async_API.h"   /* zend_coroutine_t, zend_async_trigger_event_t */
 #include "zend_smart_str.h"
@@ -160,7 +158,5 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id);
 /* Decrement refcount; release storage when it hits zero. Drops the
  * partial body buffer, frees the request only if dispatch never fired. */
 void http3_stream_release(http3_stream_t *s);
-
-#endif /* HAVE_HTTP_SERVER_HTTP3 */
 
 #endif /* HTTP3_STREAM_H */
