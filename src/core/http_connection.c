@@ -18,6 +18,7 @@
 #include "http1/http_parser.h"
 #include "http_connection.h"
 #include "http_connection_internal.h"
+#include "conn_arena.h"
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
 
@@ -63,6 +64,7 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
 static void http_connection_dispatch_request(http_connection_t *conn, http_request_t *req);
 static void http_handler_coroutine_entry(void);
 static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
+static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend_async_buf_t *out);
 static void http_connection_read_callback_fn(
     zend_async_event_t *event,
     zend_async_event_callback_t *callback,
@@ -91,15 +93,21 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
 
     /* Capture HTTP version + keep-alive BEFORE handing off — the handler
      * coroutine uses conn->http_version / conn->keep_alive after
-     * dispatch runs. */
-    snprintf(conn->http_version, sizeof(conn->http_version), "%d.%d",
-             req->http_major, req->http_minor);
+     * dispatch runs. major/minor are 0..9 in HTTP/1.x, written directly
+     * to skip libc format_converter on the hot path. */
+    conn->http_version[0] = '0' + (char)req->http_major;
+    conn->http_version[1] = '.';
+    conn->http_version[2] = '0' + (char)req->http_minor;
+    conn->http_version[3] = '\0';
     conn->keep_alive = req->keep_alive;
 
     /* CoDel enqueue point: parser finished, request about to be
      * dispatched. Stamping on req (not conn) so concurrent streams
-     * (HTTP/2) don't overwrite each other. */
-    req->enqueue_ns = zend_hrtime();
+     * (HTTP/2) don't overwrite each other. Skipped entirely when no
+     * consumer (CoDel/telemetry) is active — see step 4.1 in PLAN.md. */
+    if (http_server_sample_stamps_enabled(conn->view)) {
+        req->enqueue_ns = zend_hrtime();
+    }
 
     http_connection_dispatch_request(conn, req);
 }
@@ -116,9 +124,15 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
  * the listen socket inside libuv_socket_listen — we enable it per-client
  * via ZEND_ASYNC_IO_SET_OPTION for low-latency responses.
  */
-http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_async_scope_t *parent_scope)
+http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_async_scope_t *parent_scope,
+                                          struct http_server_object *server)
 {
-    http_connection_t *conn = ecalloc(1, sizeof(http_connection_t));
+    http_connection_t *conn = conn_arena_alloc(http_server_arena(server));
+    if (UNEXPECTED(conn == NULL)) {
+        closesocket(socket_fd);
+        return NULL;
+    }
+    conn->server = server;
 
     conn->io = ZEND_ASYNC_IO_CREATE(
         (zend_file_descriptor_t)socket_fd,
@@ -126,7 +140,7 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
         ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_WRITABLE
     );
     if (!conn->io) {
-        efree(conn);
+        conn_arena_free(http_server_arena(server), conn);
         closesocket(socket_fd);
         return NULL;
     }
@@ -152,6 +166,13 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
     conn->read_buffer = emalloc(conn->read_buffer_size);
     conn->read_buffer_len = 0;
 
+    /* Wire up the per-chunk allocator: lets multishot stay armed across
+     * back-to-back keep-alive requests and pipelined tails without a
+     * uv_read_stop/start cycle. The reactor calls back into us with the
+     * sliding offset on every chunk. */
+    conn->io->alloc_cb  = http_connection_alloc_cb;
+    conn->io->user_data = conn;
+
     conn->keep_alive = true;
     conn->headers_complete = false;
     conn->body_complete = false;
@@ -173,16 +194,11 @@ void http_connection_destroy(http_connection_t *conn)
     if (!conn) return;
 
     /* Defer the actual free if a handler coroutine is still holding
-     * this conn alive. Prevents the classic async UAF where a
-     * read-callback CLOSING path (peer FIN, close_notify, parse
-     * error) frees strategy/session while a dispose coroutine is
-     * suspended inside commit/send drain — reproducibly SEGVs with
-     * conn->io / session pointer clobbered by ASCII debris from the
-     * fresh alloc that reused the memory. Pinned by:
-     *   - HTTP/2: http2_strategy.c:165 (per-stream dispatch)
-     *   - HTTP/1: http_connection_dispatch_request (TLS pipelining)
-     * The last handler's dispose re-enters destroy via destroy_pending;
-     * by then handler_refcount is zero and the free proceeds. */
+     * this conn alive. Prevents the async UAF where a read-callback
+     * CLOSING path frees strategy/session while a dispose coroutine is
+     * suspended inside commit/send drain. The last handler's dispose
+     * re-enters destroy via destroy_pending once handler_refcount hits
+     * zero. */
     if (conn->handler_refcount > 0) {
         conn->destroy_pending = true;
         return;
@@ -198,18 +214,26 @@ void http_connection_destroy(http_connection_t *conn)
         return;
     }
 #endif
+    /* Same deferral for the batched plaintext send: libuv owns a
+     * pointer into the heap buf we passed to ZEND_ASYNC_IO_WRITE_EX.
+     * The completion cb sees destroy_pending == true and re-runs
+     * teardown after draining/freeing. */
+    if (conn->out_in_flight) {
+        conn->destroy_pending = true;
+        return;
+    }
+    if (conn->out_pending_buf != NULL) {
+        efree(conn->out_pending_buf);
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+    }
 
     /* Notify server of close so it can decrement active_connections and
      * maybe resume listeners. Per-request timing is already reported by
      * http_server_on_request_sample from the coroutine entry — no
      * timing carried on the connection itself. Safe with server == NULL. */
     http_server_on_connection_close(conn->server);
-
-    /* Unlink from the server's conn_list. Safe with server == NULL
-     * (no-op) and idempotent — if http_server_free has already wiped
-     * the list and NULLed our back-pointer, this branch was skipped
-     * by the NULL check above. */
-    http_server_unregister_connection(conn->server, conn);
 
     /* Detach the persistent read callback first. If we let
      * ZEND_ASYNC_IO_CLOSE dispose the event with our callback still in
@@ -310,7 +334,12 @@ void http_connection_destroy(http_connection_t *conn)
     }
 #endif
 
-    efree(conn);
+    /* Capture server before returning the slot — conn is gone after
+     * arena_free. release() drops our ref; if this was the last one,
+     * http_server_state_finalize runs (arena cleanup + pefree). */
+    http_server_object *owning_server = conn->server;
+    conn_arena_free(http_server_arena(owning_server), conn);
+    http_server_release(owning_server);
 }
 /* }}} */
 
@@ -777,8 +806,29 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
          *     multishot read + dispose its req before destroy frees
          *     rcb out from under it.
          */
-        if (conn->current_request != NULL && conn->current_request->coroutine != NULL) {
-            http_connection_cancel_handler_for_parse_error(conn);
+        /* Multishot read may keep delivering chunks after the parser
+         * latched its error — the kernel's recv buffer was already full
+         * when feed() returned <0. Each subsequent tick re-feeds the
+         * same parse error. Guard against double-counting telemetry +
+         * double-emitting the 4xx by latching parse_error_handled on
+         * the first tick. */
+        if (conn->parse_error_handled) {
+            *should_destroy_out = (conn->current_request == NULL);
+            return false;
+        }
+        if (conn->current_request != NULL) {
+            /* Handler was dispatched. Two sub-cases:
+             *   - coroutine != NULL: this is the first parse-error tick
+             *     for this request; cancel the handler so dispose can
+             *     build the 4xx from the HttpException.
+             *   - coroutine == NULL: a prior multishot tick already
+             *     cancelled the handler. Dispose owns the response.
+             *     Don't re-enter emit_parse_error — that path would
+             *     double-count the parse-error telemetry counter for
+             *     a single logical event. */
+            if (conn->current_request->coroutine != NULL) {
+                http_connection_cancel_handler_for_parse_error(conn);
+            }
             *should_destroy_out = false;
             return false;
         }
@@ -801,11 +851,11 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
 
     /* If the parser has reached on_message_complete, the body is
      * fully materialised. The handler coroutine (already queued or
-     * running) will take over: it calls dispatch_request, then
-     * re-arms reads for keep-alive or destroys the connection. We
-     * must stop pumping reads from this side. Any tail we just shifted
-     * down stays put; http_handler_coroutine_dispose will re-feed it. */
+     * running) will take over. Mark request_in_flight so the multishot
+     * read callback buffers further bytes without parsing — handler
+     * dispose drains the pipelined tail before clearing the flag. */
     if (conn->parser && http_parser_is_complete(conn->parser)) {
+        conn->request_in_flight = true;
         return false;
     }
 
@@ -889,13 +939,19 @@ static void http_connection_read_callback_fn(
     }
 
     if (UNEXPECTED(err || bytes_read <= 0)) {
-        /* EOF or error — drop the connection. On non-terminal error we also
-         * need to stop and dispose (defensive — reactor shouldn't deliver
-         * non-terminal errors, but stay safe). */
         if (!terminal) {
             rcb->active_req = NULL;
             conn->io->event.stop(&conn->io->event);
             req->dispose(req);
+        }
+        /* Defer destroy if a handler is in flight or the read_buffer holds
+         * a pipelined tail — flagging keep_alive=false makes handler dispose
+         * tear the conn down once it (and any pipelined chain) has finished
+         * responding. Without this, an EOF from a peer that sent its last
+         * request and shut down the write half kills mid-flight responses. */
+        if (conn->request_in_flight || conn->read_buffer_len > 0) {
+            conn->keep_alive = false;
+            return;
         }
         http_connection_destroy(conn);
         return;
@@ -903,30 +959,28 @@ static void http_connection_read_callback_fn(
 
     conn->read_buffer_len += bytes_read;
 
+    /* Re-entrancy guard: a handler coroutine is currently in flight (possibly
+     * suspended at an await), so the parser must not run — feeding new bytes
+     * could on_message_complete and dispatch a *second* handler on the same
+     * conn while the first one's response slot is still live. Just buffer the
+     * tail; handler dispose will pull it out via handle_read_completion. */
+    if (!terminal && conn->request_in_flight) {
+        return;
+    }
+
     bool should_destroy = false;
     if (!http_connection_handle_read_completion(conn, &should_destroy)) {
-        /* Connection handed off (to handler coroutine) or destroyed. If the
-         * multishot reader is still armed, stop it cleanly so the keep-alive
-         * re-arm in http_handler_coroutine_dispose can start fresh without
-         * hitting UV_EALREADY from a second uv_read_start on the same stream.
-         *
-         * Order matters: we MUST disarm the multishot read while conn is
-         * still alive — destroy frees rcb (via callbacks_remove) and
-         * conn->io. After destroy, both pointers are dangling. */
-        if (!terminal && rcb->active_req != NULL) {
-            rcb->active_req = NULL;
-            conn->io->event.stop(&conn->io->event);
-            req->dispose(req);
-        }
         if (should_destroy) {
             http_connection_destroy(conn);
         }
+        /* Multishot reader stays armed on the same req; alloc_cb will
+         * point libuv at the correct offset on the next chunk. */
         return;
     }
 
     /* Still need more data. In multishot the reader is already armed on the
      * same req — just wait for the next chunk. Only re-arm for the rare
-     * terminal-but-need-more-data case (e.g. sync fast path on a non-EOF
+     * terminal-but-need-more-data case (sync fast path on a non-EOF
      * completion is not expected, but defensive). */
     if (terminal) {
         http_connection_read(conn);
@@ -934,23 +988,26 @@ static void http_connection_read_callback_fn(
 }
 /* }}} */
 
-/* {{{ http_connection_read
- *
- * Submit a ZEND_ASYNC_IO_READ into conn->read_buffer. Handles the
- * sync-complete fast path inline (libuv's Windows shortcut or an
- * already-buffered read) and otherwise arms the persistent read
- * callback by remembering the req on conn->read_cb->active_req.
- *
- * The callback itself is allocated lazily on first arm and stays
- * attached to io->event for the connection's whole lifetime; we just
- * update active_req each time so the callback knows which req this
- * notify is for.
- */
+/* Per-chunk allocator wired into conn->io->alloc_cb. Hands the reactor
+ * the next free slice of read_buffer so multishot keeps writing at the
+ * correct offset across requests and pipelined tails. */
+static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend_async_buf_t *out)
+{
+    (void)suggested;
+    http_connection_t *conn = (http_connection_t *) io->user_data;
+    if (UNEXPECTED(conn == NULL || conn->read_buffer_len >= conn->read_buffer_size)) {
+        out->base = NULL;
+        out->len  = 0;
+        return;
+    }
+    out->base = conn->read_buffer + conn->read_buffer_len;
+    out->len  = conn->read_buffer_size - conn->read_buffer_len;
+}
+
+/* {{{ http_connection_read */
 bool http_connection_read(http_connection_t *conn)
 {
     if (conn->read_buffer_len >= conn->read_buffer_size) {
-        /* Buffer full without a complete request — client is sending
-         * something too big, or parser bug. Either way, bail. */
         http_connection_destroy(conn);
         return false;
     }
@@ -1061,38 +1118,26 @@ bool http_connection_send_raw(http_connection_t *conn,
         return false;
     }
 
-    bool ok_total = true;
-    size_t bytes_sent = 0;
-    while (bytes_sent < len) {
-        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE(
-            conn->io, data + bytes_sent, len - bytes_sent);
-        if (UNEXPECTED(req == NULL)) {
-            ok_total = false;
-            break;
-        }
-
+    /* Single-shot submit. uv_write is all-or-error from the caller's
+     * perspective: io_pipe_write_cb sets transferred = max_size on
+     * status==0 or transferred = -1 with an exception on failure. The
+     * pre-existing while-loop iterating on partial-write was dead code:
+     * partial absorption is handled internally by libuv (uv_try_write
+     * + EPOLLOUT-driven drain). */
+    bool ok_total = false;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE(conn->io, data, len);
+    if (req != NULL) {
         const bool ok = async_io_req_await(req, conn->io, write_timeout_ms,
                                            HTTP_IO_REQ_WRITE,
                                            conn->log_state);
-
-        if (UNEXPECTED(!ok || req->exception != NULL)) {
-            if (req->exception != NULL) {
-                OBJ_RELEASE(req->exception);
-                req->exception = NULL;
-            }
-            req->dispose(req);
-            ok_total = false;
-            break;
+        const bool had_exc = (req->exception != NULL);
+        if (had_exc) {
+            OBJ_RELEASE(req->exception);
+            req->exception = NULL;
         }
-
         const ssize_t transferred = req->transferred;
         req->dispose(req);
-
-        if (UNEXPECTED(transferred <= 0)) {
-            ok_total = false;
-            break;
-        }
-        bytes_sent += (size_t)transferred;
+        ok_total = ok && !had_exc && transferred == (ssize_t)len;
     }
 
     if (write_timeout_ms > 0) {
@@ -1102,6 +1147,193 @@ bool http_connection_send_raw(http_connection_t *conn,
         return false;
     }
     return ok_total;
+}
+/* }}} */
+
+/* {{{ http_connection_send_str_owned
+ *
+ * Fire-and-forget plaintext send: transfer ownership of @p body to the
+ * reactor. Returns immediately after submit; the buffer is released
+ * when libuv reports completion (success or error), without parking
+ * the calling coroutine. Hot path for the HTTP/1 dispose flow — avoids
+ * the suspend/resume cycle around uv_try_write that absorbs the whole
+ * payload inline in the steady state.
+ *
+ * On submit failure the body is released here. On any kernel-level
+ * write error, the io is closed by libuv and the next read attempt on
+ * this conn surfaces the failure to the read FSM, which tears the
+ * connection down — the just-finished handler does not need to know.
+ */
+static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
+{
+    (void)io;
+    zend_string *str = (zend_string *)((char *)data - offsetof(zend_string, val));
+    zend_string_release(str);
+}
+
+/* Batched fire-and-forget: amortises N back-to-back writes to one
+ * socket into a single in-flight uv_write + a growing pending buffer.
+ *
+ * Workaround for libuv 1.52's uv_write2 inline-write fast path: it
+ * only kicks in when stream->write_queue_size == 0 at submit time, and
+ * uv__write_req_finish does not zero the counter — that happens later
+ * in uv__write_callbacks, fired from the loop's pending_queue. Back-
+ * to-back writes from multiple stream coroutines (HTTP/2 multiplex)
+ * force every write past the first into the slow EPOLLOUT-arming
+ * path, which on the io_uring backend triggers uv__epoll_ctl_prep
+ * and eventually io_uring_enter — orders of magnitude more syscalls
+ * than necessary.
+ *
+ * Solution: only one uv_write is outstanding at a time. Subsequent
+ * sends append into conn->out_pending_buf. The completion callback
+ * (fired from inside uv__write_callbacks, where write_queue_size has
+ * just been decremented) drains the pending buffer with one more
+ * uv_write — that submit takes the fast path because the counter is
+ * now zero. Chain continues until pending is empty.
+ *
+ * Plaintext only: TLS uses tls_zc_write_n via the BIO ring path.
+ * Caller transfers ownership of `buf` (emalloc'd); the reactor — or
+ * the append-into-pending path here — owns it after this call. */
+static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
+{
+    efree(data);
+    if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
+        return;
+    }
+    http_connection_t *conn = (http_connection_t *)io->user_data;
+
+    if (conn->out_pending_len > 0) {
+        /* Drain the accumulated batch as one writev. write_queue_size
+         * was just decremented for the completed req before we were
+         * called, so this submit takes the inline-writev fast path. */
+        char  *next_buf = conn->out_pending_buf;
+        size_t next_len = conn->out_pending_len;
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+        /* out_in_flight stays true — chain continues through the next
+         * completion. */
+        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+            conn->io, next_buf, next_len, http_send_batched_completion_cb);
+        if (UNEXPECTED(req == NULL)) {
+            /* Reactor already efree'd next_buf via the cb on submit failure. */
+            conn->out_in_flight = false;
+        }
+        return;
+    }
+
+    conn->out_in_flight = false;
+
+    /* Conn destroy was deferred while a batched write was in flight
+     * (see http_connection_destroy below). Now that the buffer is
+     * released and the chain has drained, run the pending teardown. */
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+    }
+}
+
+bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len)
+{
+    if (buf == NULL || len == 0) {
+        if (buf != NULL) { efree(buf); }
+        return true;
+    }
+    if (UNEXPECTED(conn->write_timed_out)) {
+        efree(buf);
+        return false;
+    }
+
+    if (conn->out_in_flight) {
+        /* A uv_write is outstanding — append + return without dipping
+         * back into libuv. The completion cb will pick this up. */
+        const size_t need = conn->out_pending_len + len;
+        if (need > conn->out_pending_cap) {
+            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
+            while (new_cap < need) {
+                new_cap *= 2;
+            }
+            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
+            conn->out_pending_cap = new_cap;
+        }
+        memcpy(conn->out_pending_buf + conn->out_pending_len, buf, len);
+        conn->out_pending_len += len;
+        efree(buf);
+        return true;
+    }
+
+    /* No write in flight — submit directly. Mark in-flight BEFORE
+     * the call so a sync-complete (rare on Linux for stream writes)
+     * still sees a consistent state when the cb fires inline. */
+    conn->out_in_flight = true;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+        conn->io, buf, len, http_send_batched_completion_cb);
+    if (UNEXPECTED(req == NULL)) {
+        /* Submit failed — reactor invoked the cb (efree'd buf), and
+         * the cb sets out_in_flight = false / drains pending. */
+        return false;
+    }
+    return true;
+}
+
+bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
+{
+    if (body == NULL) {
+        return true;
+    }
+    if (ZSTR_LEN(body) == 0) {
+        zend_string_release(body);
+        return true;
+    }
+    if (UNEXPECTED(conn->write_timed_out)) {
+        zend_string_release(body);
+        return false;
+    }
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(conn->io,
+                                                     ZSTR_VAL(body),
+                                                     ZSTR_LEN(body),
+                                                     http1_send_release_zstr_cb);
+    if (UNEXPECTED(req == NULL)) {
+        /* libuv_io_req_dispose ran free_cb on the partially-built req
+         * and the body was released there. Caller must not touch body. */
+        return false;
+    }
+    /* Caller does not await, does not dispose. The completion callback
+     * (io_pipe_write_cb) frees the body and disposes the req. */
+    return true;
+}
+/* }}} */
+
+/* {{{ http_connection_send_strv_owned
+ *
+ * Vectored fire-and-forget plaintext send. Each slot of @p bufs is an
+ * OWNED zend_string reference; ZEND_ASYNC_IO_WRITEV consumes one ref per
+ * slot on completion. Used for the HTTP/1 dispose hot path where
+ * headers and body live in two separate zend_strings — saves one
+ * emalloc + memcpy that http_response_format would otherwise spend
+ * concatenating them. TLS path stays on the single-buffer
+ * http_connection_send (encryption ring needs a contiguous payload).
+ */
+bool http_connection_send_strv_owned(http_connection_t *conn,
+                                     zend_string * const *bufs, unsigned nbufs)
+{
+    if (UNEXPECTED(nbufs == 0)) {
+        return true;
+    }
+    if (UNEXPECTED(conn->write_timed_out)) {
+        for (unsigned i = 0; i < nbufs; i++) {
+            zend_string_release(bufs[i]);
+        }
+        return false;
+    }
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV(conn->io, bufs, nbufs);
+    if (UNEXPECTED(req == NULL)) {
+        /* Reactor already released every slot on submit failure. */
+        return false;
+    }
+    return true;
 }
 /* }}} */
 
@@ -1170,6 +1402,7 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
      * not actually go on the wire (socket may be dead by then), but
      * the parser-error event itself is what we want counted. */
     http_server_on_parse_error(conn->server, status);
+    conn->parse_error_handled = 1;
     conn->keep_alive = false;
 
     /* Build HttpException(message=reason, code=status) directly
@@ -1244,6 +1477,7 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
 
     conn->keep_alive = false;
     http_server_on_parse_error(conn->server, status);
+    conn->parse_error_handled = 1;
 
     if (n <= 0 || (size_t)n >= sizeof(response)) {
         return false;  /* truncation guard — unreachable for current reasons */
@@ -1400,7 +1634,8 @@ static void http_handler_coroutine_entry(void)
     http_connection_t *conn = ctx->conn;
 
     http_request_t *req = ctx->request;
-    if (req) {
+    const bool stamps = http_server_sample_stamps_enabled(conn->view);
+    if (req && stamps) {
         req->start_ns = zend_hrtime();
     }
 
@@ -1409,8 +1644,21 @@ static void http_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[1], &ctx->response_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &conn->handler->fci.function_name,
-                       &retval, 2, params);
+    /* Direct invoke via the cached fcall_info_cache — populated once
+     * when addHttpHandler() ran Z_PARAM_FUNC. Skips the per-request
+     * zend_is_callable_ex / zend_get_executed_filename_ex pair that
+     * call_user_function (NULL fci_cache) would otherwise repeat for
+     * every request on the hot path. */
+    zend_fcall_info fci = {
+        .size           = sizeof(zend_fcall_info),
+        .function_name  = conn->handler->fci.function_name,
+        .retval         = &retval,
+        .params         = params,
+        .object         = NULL,
+        .param_count    = 2,
+        .named_params   = NULL,
+    };
+    zend_call_function(&fci, &conn->handler->fci_cache);
 
     /* Stamp end_ns and fire the backpressure sample immediately after
      * the handler returned — BEFORE zval_ptr_dtor(retval) so destructor
@@ -1418,12 +1666,18 @@ static void http_handler_coroutine_entry(void)
      * One sample per request: sojourn feeds CoDel, service feeds
      * telemetry. Fires even on handler exception (EG(exception) set) —
      * the measurement is still meaningful, work was done.
-     * http_server_on_request_sample is a no-op when server is NULL. */
-    if (req) {
+     * Skipped when no consumer is active (sample_stamps_enabled == false);
+     * total_requests is still bumped via http_server_count_request. */
+    http_server_count_request(conn->counters);
+    if (req && stamps) {
         req->end_ns = zend_hrtime();
+        /* Pass req->end_ns so on_request_sample's CoDel-window logic
+         * reuses the stamp instead of taking a fresh zend_hrtime —
+         * one syscall less per request on the hot path. */
         http_server_on_request_sample(conn->server,
                                       req->start_ns - req->enqueue_ns,
-                                      req->end_ns   - req->start_ns);
+                                      req->end_ns   - req->start_ns,
+                                      req->end_ns);
     }
 
     zval_ptr_dtor(&retval);
@@ -1523,7 +1777,16 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * but BEFORE format() so the override actually lands on the wire.
      * A handler-supplied `Connection: keep-alive` is overridden — the
      * RFC grants the server that authority. */
-    if (http_server_should_drain_now(conn->server, conn)) {
+    /* Reuse req->end_ns (already stamped at handler return) so the
+     * drain decision skips its own zend_hrtime call. When stamps are
+     * gated off (CoDel + telemetry both disabled, the minimal-config
+     * fast path), end_ns == 0 and we need a fresh stamp — drain age
+     * is at the seconds-to-hours scale, so coarse clock is sufficient
+     * and ~5x cheaper than zend_hrtime. */
+    const uint64_t drain_now_ns =
+        (ctx->request != NULL && ctx->request->end_ns != 0)
+            ? ctx->request->end_ns : http_now_coarse_ns();
+    if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;
         http_server_on_h1_connection_close_sent(conn->counters);
@@ -1546,17 +1809,64 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         }
         should_continue = conn->keep_alive;
     } else {
-        zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
-        if (response_str) {
-            if (http_connection_send(conn, ZSTR_VAL(response_str), ZSTR_LEN(response_str))) {
-                /* Keep-alive is purely a transport decision — it mirrors the
-                 * request's Connection header (and HTTP version default).
-                 * http_response_is_closed means "$res->end() was called",
-                 * which is the *expected* finalization path, not a signal
-                 * that the transport should close. */
-                should_continue = conn->keep_alive;
+        bool sent;
+#ifdef HAVE_OPENSSL
+        if (conn->tls != NULL) {
+            /* TLS path keeps the legacy single-buffer formatter — the
+             * encryption ring needs a contiguous payload, so vectored
+             * write would only force an extra copy. */
+            zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
+            if (response_str) {
+                sent = http_connection_send(conn, ZSTR_VAL(response_str),
+                                            ZSTR_LEN(response_str));
+                zend_string_release(response_str);
+            } else {
+                sent = false;
             }
-            zend_string_release(response_str);
+        } else
+#endif
+        {
+            /* Threshold branch: writev submit costs ~150ns of fixed
+             * overhead (pecalloc + slot loop + completion-cb release
+             * loop). For tiny bodies the single-buffer concat formatter
+             * is cheaper (memcpy of 2-byte body is essentially free).
+             * The crossover sits around 0.5–1 KB; HTTP_WRITEV_THRESHOLD
+             * is a conservative cutoff under it. body_len is already a
+             * hot load (smart_str header), branch is one cmp + jmp. */
+            const size_t body_len =
+                    http_response_get_body_len(Z_OBJ(ctx->response_zv));
+            if (body_len < HTTP_WRITEV_THRESHOLD) {
+                zend_string *response_str =
+                        http_response_format(Z_OBJ(ctx->response_zv));
+                sent = response_str
+                        ? http_connection_send_str_owned(conn, response_str)
+                        : false;
+            } else {
+                /* Large body: skip the concat memcpy; reactor consumes
+                 * both refs (headers + body) on completion. */
+                zend_string *headers_str = NULL, *body_str = NULL;
+                http_response_format_parts(Z_OBJ(ctx->response_zv),
+                                           &headers_str, &body_str);
+                zend_string *bufs[2];
+                unsigned nbufs = 0;
+                if (headers_str != NULL && ZSTR_LEN(headers_str) > 0) {
+                    bufs[nbufs++] = headers_str;
+                } else if (headers_str != NULL) {
+                    zend_string_release(headers_str);
+                }
+                if (body_str != NULL) {
+                    bufs[nbufs++] = body_str;
+                }
+                sent = http_connection_send_strv_owned(conn, bufs, nbufs);
+            }
+        }
+        if (sent) {
+            /* Keep-alive is purely a transport decision — it mirrors the
+             * request's Connection header (and HTTP version default).
+             * http_response_is_closed means "$res->end() was called",
+             * which is the *expected* finalization path, not a signal
+             * that the transport should close. */
+            should_continue = conn->keep_alive;
         }
     }
 
@@ -1581,6 +1891,17 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     conn->state = should_continue
         ? CONN_STATE_KEEPALIVE_WAIT
         : CONN_STATE_CLOSING;
+
+    /* Reset the conn deadline for the next phase. Going into keep-
+     * alive idle wait → keepalive_timeout_ms ahead. Going to close →
+     * 0 (the close path destroys this conn directly; the watchdog
+     * doesn't need to revisit). ZEND_ASYNC_NOW() reads cached loop
+     * time — no syscall on the hot path. */
+    if (should_continue && conn->keepalive_timeout_ms > 0) {
+        conn->deadline_ms = ZEND_ASYNC_NOW() + conn->keepalive_timeout_ms;
+    } else {
+        conn->deadline_ms = 0;
+    }
 
     /* Release the dispatch-time pin (see http_connection_dispatch_request).
      * If a competing path requested teardown while we ran (destroy_pending
@@ -1608,21 +1929,15 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     }
 #endif
 
-    if (!should_continue) {
-        http_connection_destroy(conn);
-        return;
-    }
+    /* Drain any pipelined request before honouring a close decision: an
+     * EOF observed in read_cb may have flipped keep_alive=false while a
+     * pipelined chain is still in the buffer, and clients expect every
+     * request they sent to get a response. */
+    conn->request_in_flight = false;
 
-    /* Pipelined request already in the buffer — feed it synchronously.
-     * handle_read_completion will fire dispatch for the next message
-     * (spawning a fresh handler coroutine) and shift any further tail.
-     * If it returns true, there's still room for more data and we need
-     * another IO_READ for the rest; if false, a new handler owns the
-     * connection and we just return. */
     if (conn->read_buffer_len > 0) {
         bool should_destroy = false;
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {
-            /* Dispatched another request or connection destroyed. */
             if (should_destroy) {
                 http_connection_destroy(conn);
             }
@@ -1630,7 +1945,12 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         }
     }
 
-    (void)http_connection_read(conn);
+    if (!should_continue) {
+        http_connection_destroy(conn);
+        return;
+    }
+    /* Multishot reader on conn->io is armed for the connection's lifetime;
+     * the next request's bytes will arrive via the read callback. */
 }
 /* }}} */
 
@@ -1649,13 +1969,11 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
                            http_server_object *server,
                            tls_context_t *tls_ctx)
 {
-    /* Create connection. On failure http_connection_create closes the fd
-     * itself (either via closesocket on early-out or via ZEND_ASYNC_IO_CLOSE
-     * on a successfully created io handle). */
-    http_connection_t *conn = http_connection_create(client_fd, server_scope);
+    http_connection_t *conn = http_connection_create(client_fd, server_scope, server);
     if (!conn) {
         return false;
     }
+    http_server_bind_connection(server, conn);
 
 #ifdef HAVE_OPENSSL
     if (tls_ctx != NULL) {
@@ -1698,17 +2016,20 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
     conn->write_timeout_ms = write_timeout_ms;
     conn->keepalive_timeout_ms = keepalive_timeout_ms;
 
-    /* Owning server for backpressure reporting. May be NULL (unsupervised
-     * connection in tests). Per-request timing fields are stamped by
-     * on_request_ready (enqueue_ns) and the coroutine entry (start_ns,
-     * end_ns), then reported via http_server_on_request_sample. */
-    conn->server    = server;
-    conn->next_conn = NULL;
-    /* Register in the server's intrusive conn_list. Server will walk
-     * the list at free-time to NULL each conn->server back-pointer
-     * before its struct is freed, preventing UAF in the libuv shutdown
-     * drain path (http_connection_destroy -> on_connection_close). */
-    http_server_register_connection(server, conn);
+    /* server back-pointer set inside http_connection_create. Take a
+     * refcount on the C-state — keeps it (and the arena slab memory
+     * we just allocated from) alive for late libuv callbacks that
+     * may fire after the PHP wrapper goes away. Released in
+     * http_connection_destroy. */
+    http_server_addref(server);
+
+    /* Initial deadline: waiting for the first request bytes. The
+     * per-worker periodic deadline_tick walks the alive list and
+     * force-closes any conn where this stamp has elapsed. Uses
+     * cached reactor "now" — no syscall. */
+    if (read_timeout_ms > 0) {
+        conn->deadline_ms = ZEND_ASYNC_NOW() + read_timeout_ms;
+    }
 
     /* Graceful drain state init. If proactive MAX_CONNECTION_AGE is
      * configured, precompute the drain time here (age + ±10% jitter);
@@ -1760,8 +2081,14 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
          * coroutine — handler coroutines spawn per request, exactly
          * like the plaintext path. Multishot is left disabled for
          * TLS so each chunk can land directly in a fresh BIO slot
-         * without a staging buffer. */
+         * without a staging buffer. alloc_cb must be cleared too:
+         * libuv_io_alloc_cb honors alloc_cb unconditionally and
+         * would route ciphertext into the plaintext read_buffer
+         * while tls_commit_cipher_in advances the BIO write head as
+         * if those bytes had landed in the ring — SSL_do_handshake
+         * then reads zero-init garbage and alerts decode_error. */
         ZEND_ASYNC_IO_CLR_MULTISHOT(conn->io);
+        conn->io->alloc_cb = NULL;
         return http_connection_tls_arm_read(conn);
     }
 #endif

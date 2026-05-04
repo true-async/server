@@ -112,6 +112,12 @@ struct http_request_t {
     HashTable   *post_data;                 /* Parsed POST fields */
     HashTable   *files;                     /* Parsed uploaded files */
 
+    /* Lazy-parsed URI components. Both stay NULL until the first call to
+     * getPath() / getQuery() / getQueryParam(); after that they are cached
+     * for the lifetime of the request. NULL == "not yet parsed". */
+    zend_string *path;          /* URI path component (no query string) */
+    HashTable   *query_params;  /* Parsed query string (php_default_treat_data) */
+
     /* 8-byte counters */
     size_t       content_length;
 
@@ -146,6 +152,19 @@ struct http_request_t {
      * single owner; release brings it to 0 and frees, same observable
      * behavior as the pre-refcount API. */
     unsigned     refcount;
+
+    /* Custom release callback. NULL = legacy efree(req) at refcount=0.
+     * Non-NULL: invoked instead of efree, used by stream owners that
+     * embed http_request_t as their first field and want the slot to
+     * return to a slab pool rather than being efree'd individually.
+     *
+     * The callback receives the same pointer that http_request_destroy
+     * decremented to 0 (i.e. the embedding struct's address — first-
+     * field cast trick). It is responsible for any extra teardown the
+     * embedder needs (smart_str_free / zval_ptr_dtor / etc.) and then
+     * returns the slot to its pool. The base http_request_destroy has
+     * already cleaned up every field declared in http_request_t. */
+    void       (*release)(struct http_request_t *req);
 
     /* W3C Trace Context. Populated by http_request_parse_trace_context
      * at on_headers_complete iff server has telemetry enabled and the

@@ -64,12 +64,41 @@ void http_response_set_protocol_version(zend_object *o, const char *v) {
 zend_class_entry *http_response_ce = NULL;
 zval *http_request_create_from_parsed(http_request_t *r) { (void)r; return NULL; }
 void http_server_on_request_sample(http_server_object *s,
-                                   uint64_t sojourn, uint64_t service) {
-    (void)s; (void)sojourn; (void)service;
+                                   uint64_t sojourn, uint64_t service,
+                                   uint64_t now_ns) {
+    (void)s; (void)sojourn; (void)service; (void)now_ns;
 }
 
 bool http_connection_send(http_connection_t *c, const char *d, size_t l) {
     (void)c; (void)d; (void)l; return false;
+}
+
+bool http_connection_send_batched(http_connection_t *c, void *buf, size_t len) {
+    (void)c; (void)buf; (void)len; return false;
+}
+
+void http_connection_destroy(http_connection_t *c) { (void)c; }
+
+void http_connection_on_request_ready(http_connection_t *c, http_request_t *r) {
+    (void)c; (void)r;
+}
+
+/* http_server_view_default is the const fallback used when no server is
+ * attached to a connection — strategies cache it via http_server_view().
+ * Tests don't assert on its fields, so a zero-initialized const is enough
+ * to satisfy the linker. */
+const http_server_view_t http_server_view_default;
+
+const http_server_view_t *http_server_view(const http_server_object *s) {
+    (void)s; return &http_server_view_default;
+}
+
+zend_string *http_server_get_alt_svc_value(const http_server_object *s) {
+    (void)s; return NULL;
+}
+
+void http_response_set_alt_svc_if_unset(zend_object *o, const char *v, size_t l) {
+    (void)o; (void)v; (void)l;
 }
 
 static void test_strategy_create_vtable_complete(void **state)

@@ -139,11 +139,13 @@ add_executable(test_multipart_processor
     http1/test_multipart_processor.c
     ${MULTIPART_PARSER_SRC}
     ${CMAKE_SOURCE_DIR}/../src/formats/multipart_processor.c
+    ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
 )
 
 target_include_directories(test_multipart_processor PRIVATE
     ${CMAKE_SOURCE_DIR}/../include
     ${CMAKE_SOURCE_DIR}/../include/formats
+    ${CMAKE_SOURCE_DIR}/../src
 )
 
 

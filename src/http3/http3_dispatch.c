@@ -122,7 +122,6 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     co->extended_dispose = h3_handler_coroutine_dispose;
 
     s->coroutine = co;
-    /* Coroutine holds its own ref. Released in dispose. */
     s->refcount++;
 
     /* Bracket on the server's in-flight counter — admission / CoDel
@@ -131,7 +130,9 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_server_on_request_dispatch(s->conn->counters);
 
     s->request->coroutine   = co;
-    s->request->enqueue_ns  = zend_hrtime();
+    if (http_server_sample_stamps_enabled(s->conn->view)) {
+        s->request->enqueue_ns  = zend_hrtime();
+    }
 
     ZEND_ASYNC_ENQUEUE_COROUTINE(co);
 }
@@ -142,12 +143,13 @@ static void h3_handler_coroutine_entry(void)
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
     if (s == NULL || s->conn == NULL) return;
 
-    if (s->request != NULL) {
+    http_server_object *server =
+        (http_server_object *)http3_listener_server_obj(s->conn->listener);
+    const bool stamps = http_server_sample_stamps_enabled(s->conn->view);
+    if (s->request != NULL && stamps) {
         s->request->start_ns = zend_hrtime();
     }
 
-    http_server_object *server =
-        (http_server_object *)http3_listener_server_obj(s->conn->listener);
     HashTable *handlers = http_server_get_protocol_handlers(server);
     zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
     if (fcall == NULL) {
@@ -160,18 +162,30 @@ static void h3_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[1], &s->response_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &fcall->fci.function_name,
-                       &retval, 2, params);
+    zend_fcall_info fci = {
+        .size           = sizeof(zend_fcall_info),
+        .function_name  = fcall->fci.function_name,
+        .retval         = &retval,
+        .params         = params,
+        .object         = NULL,
+        .param_count    = 2,
+        .named_params   = NULL,
+    };
+    zend_call_function(&fci, &fcall->fci_cache);
 
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't get counted as
-     * service time. Same discipline as H1/H2 handler entries. */
-    if (s->request != NULL && server != NULL) {
+     * service time. Same discipline as H1/H2 handler entries. Stamps
+     * and the sample call are gated on sample_stamps_enabled;
+     * total_requests is still bumped. */
+    http_server_count_request(s->conn->counters);
+    if (s->request != NULL && server != NULL && stamps) {
         s->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
             server,
             s->request->start_ns - s->request->enqueue_ns,
-            s->request->end_ns   - s->request->start_ns);
+            s->request->end_ns   - s->request->start_ns,
+            s->request->end_ns);
     }
     zval_ptr_dtor(&retval);
 }
@@ -190,8 +204,6 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     if (s->request != NULL) s->request->coroutine = NULL;
 
     http3_connection_t *c = s->conn;
-    http_server_object *server = (c != NULL && c->listener != NULL)
-        ? (http_server_object *)http3_listener_server_obj(c->listener) : NULL;
 
     /* In-flight bracket (paired with on_request_dispatch). */
     if (c != NULL) http_server_on_request_dispose(c->counters);
@@ -262,7 +274,8 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         const http_server_drain_eval_t r = http_server_drain_evaluate(srv,
             c->drain_pending,
             c->drain_not_before_ns,
-            c->drain_epoch_seen);
+            c->drain_epoch_seen,
+            zend_hrtime());
         c->drain_pending       = r.drain_pending;
         c->drain_not_before_ns = r.drain_not_before_ns;
         c->drain_epoch_seen    = r.drain_epoch_seen;

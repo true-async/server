@@ -57,13 +57,19 @@ if (!preg_match('~/php(\d+(\.\d+)?)?$~', $php) || str_contains($php, 'phpdbg')) 
 }
 
 // run-tests.php copies the FILE block to a temp dir, so __DIR__ won't
-// resolve back to the project. Honour HTTP_SERVER_ROOT env var; if
-// unset, walk up from __FILE__ which IS the temp file (still no help)
-// then try common locations.
+// resolve back to the project. Honour HTTP_SERVER_ROOT env var; otherwise
+// fall back to TEST_PHP_SRCDIR (set by run-tests.php) and getcwd(). The
+// matching candidate must look like a project tree (Makefile +
+// tests/bench/h2spec_server.php) so we don't accidentally pick a
+// stale sibling checkout that would link an ABI-incompatible .so.
 $root = (string)getenv('HTTP_SERVER_ROOT');
 if ($root === '' || !is_file("$root/Makefile")) {
-    foreach (['/home/edmond/php-http-server', getcwd()] as $cand) {
-        if (is_string($cand) && $cand !== '' && is_file("$cand/Makefile")
+    $candidates = array_filter([
+        getenv('TEST_PHP_SRCDIR') ?: null,
+        getcwd() ?: null,
+    ]);
+    foreach ($candidates as $cand) {
+        if (is_file("$cand/Makefile")
             && is_file("$cand/tests/bench/h2spec_server.php")) {
             $root = $cand;
             break;

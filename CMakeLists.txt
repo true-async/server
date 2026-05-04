@@ -48,6 +48,7 @@ set(CORE_SOURCES
 # Source files - Core subsystem
 set(CORE_SUBSYSTEM_SOURCES
     src/core/http_connection.c
+    src/core/conn_arena.c
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c
     src/core/tls_layer.c

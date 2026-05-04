@@ -1081,27 +1081,24 @@ static inline void emit_status_line(smart_str *result,
     smart_str_appends(result, "\r\n");
 }
 
-/* Format response as HTTP string */
-zend_string *http_response_format(zend_object *obj)
+/* Internal: append status line + Content-Length + headers + CRLF terminator
+ * into @p result. Body is NOT appended — callers either append it themselves
+ * (legacy http_response_format) or send it as a separate iov entry
+ * (http_response_format_parts). Splitting this out keeps the two formatters
+ * byte-identical for the headers section. */
+static void emit_headers_block(smart_str *result, http_response_object *response,
+                               size_t body_len)
 {
-    http_response_object *response = http_response_from_obj(obj);
-    smart_str result = {0};
-
-    emit_status_line(&result, response);
+    emit_status_line(result, response);
 
     /* Add Content-Length if body exists and not already set. Use
      * zend_hash_str_exists to skip the zend_string alloc/release
      * round-trip on the literal name lookup. */
-    smart_str_0(&response->body);
-    size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;
-
     if (!zend_hash_str_exists(response->headers, "content-length",
                               sizeof("content-length") - 1)) {
-        char len_str[32];
-        snprintf(len_str, sizeof(len_str), "%zu", body_len);
-        smart_str_appends(&result, "Content-Length: ");
-        smart_str_appends(&result, len_str);
-        smart_str_appends(&result, "\r\n");
+        smart_str_appendl(result, "Content-Length: ", sizeof("Content-Length: ") - 1);
+        smart_str_append_unsigned(result, body_len);
+        smart_str_appendl(result, "\r\n", 2);
     }
 
     /* Headers — flat IS_STRING avoids nested foreach for the
@@ -1111,26 +1108,79 @@ zend_string *http_response_format(zend_object *obj)
     ZEND_HASH_FOREACH_STR_KEY_VAL(response->headers, name, values) {
         if (UNEXPECTED(name == NULL)) continue;
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            smart_str_append(&result, name);
-            smart_str_appends(&result, ": ");
-            smart_str_append(&result, Z_STR_P(values));
-            smart_str_appends(&result, "\r\n");
+            smart_str_append(result, name);
+            smart_str_appends(result, ": ");
+            smart_str_append(result, Z_STR_P(values));
+            smart_str_appends(result, "\r\n");
         } else if (Z_TYPE_P(values) == IS_ARRAY) {
             zval *val;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                smart_str_append(&result, name);
-                smart_str_appends(&result, ": ");
-                smart_str_append(&result, Z_STR_P(val));
-                smart_str_appends(&result, "\r\n");
+                smart_str_append(result, name);
+                smart_str_appends(result, ": ");
+                smart_str_append(result, Z_STR_P(val));
+                smart_str_appends(result, "\r\n");
             } ZEND_HASH_FOREACH_END();
         }
     } ZEND_HASH_FOREACH_END();
 
     /* End of headers */
-    smart_str_appends(&result, "\r\n");
+    smart_str_appends(result, "\r\n");
+}
 
-    /* Body */
-    if (response->body.s && ZSTR_LEN(response->body.s) > 0) {
+/* Body length for the threshold branch in the dispose hot path. Reads
+ * the smart_str's terminator-safe length without exposing the response
+ * struct. Returns 0 when no body has been buffered. */
+size_t http_response_get_body_len(zend_object *obj)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    return response->body.s != NULL ? ZSTR_LEN(response->body.s) : 0;
+}
+
+/* Vectored format: produces the headers block as one zend_string and hands
+ * back the body as a refcount-bumped reference (or NULL if empty). Caller
+ * owns both refs and must release them — typically by passing the pair to
+ * ZEND_ASYNC_IO_WRITEV, where the reactor consumes the refs on completion.
+ *
+ * Saves one emalloc + one memcpy per response compared to http_response_format
+ * (which concatenates headers + body into a single zend_string). */
+void http_response_format_parts(zend_object *obj,
+                                zend_string **headers_out,
+                                zend_string **body_out)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    smart_str result = {0};
+
+    smart_str_0(&response->body);
+    const size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;
+
+    emit_headers_block(&result, response, body_len);
+    smart_str_0(&result);
+
+    *headers_out = result.s ? result.s : zend_empty_string;
+    if (response->body.s != NULL && body_len > 0) {
+        zend_string_addref(response->body.s);
+        *body_out = response->body.s;
+    } else {
+        *body_out = NULL;
+    }
+}
+
+/* Format response as a single HTTP string (legacy: headers + body
+ * concatenated). Hot-path callers prefer http_response_format_parts +
+ * ZEND_ASYNC_IO_WRITEV which skips the body memcpy; this stays for the
+ * TLS path and assorted error/HEAD/204 callers that already work in
+ * single-buffer terms. */
+zend_string *http_response_format(zend_object *obj)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    smart_str result = {0};
+
+    smart_str_0(&response->body);
+    const size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;
+
+    emit_headers_block(&result, response, body_len);
+
+    if (response->body.s && body_len > 0) {
         smart_str_append(&result, response->body.s);
     }
 
@@ -1363,3 +1413,4 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
 
     response->committed = true;
 }
+

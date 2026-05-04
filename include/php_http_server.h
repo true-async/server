@@ -28,6 +28,9 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#if defined(__linux__)
+# include <time.h>
+#endif
 
 extern zend_module_entry http_server_module_entry;
 #define phpext_http_server_ptr &http_server_module_entry
@@ -362,20 +365,31 @@ bool http_server_config_is_locked(zend_object *obj);
  * http_server_class.c where the server_object struct is defined.
  * Safe to call with server == NULL (no-op). */
 void http_server_on_request_sample(http_server_object *server,
-                                   uint64_t sojourn_ns, uint64_t service_ns);
+                                   uint64_t sojourn_ns, uint64_t service_ns,
+                                   uint64_t now_ns);
 void http_server_on_connection_close(http_server_object *server);
 
-/* Connection-list registry. http_connection_create / _destroy maintain
- * an intrusive list of live connections on each server so http_server_free
- * can NULL their server back-pointers before freeing self — without it,
- * libuv's shutdown drain fires read callbacks against the freed server
- * and on_connection_close UAFs (caught by ASAN 2026-04-28). Both no-op
- * when server == NULL. */
+/* Conn slab arena. Owns http_connection_t slot memory for every live
+ * conn AND the doubly-linked alive list. Lifetime tied to the
+ * refcounted C-state — slot memory stays valid until the last conn
+ * destroy returns its slot. Defined in http_server_class.c. */
+struct conn_arena_s;
+typedef struct conn_arena_s conn_arena_t;
+conn_arena_t *http_server_arena(http_server_object *server);
+
+/* Hot-path slices binder. Called by http_connection_spawn after
+ * http_connection_create has obtained a slot via http_server_arena —
+ * wires up counter/view/log_state pointers so subsequent inline
+ * bumps in http_connection.c don't need NULL checks. */
 struct _http_connection_t;   /* fwd from src/core/http_connection.h */
-void http_server_register_connection(http_server_object *server,
-                                     struct _http_connection_t *conn);
-void http_server_unregister_connection(http_server_object *server,
-                                       struct _http_connection_t *conn);
+void http_server_bind_connection(http_server_object *server,
+                                 struct _http_connection_t *conn);
+
+/* Refcount on the C-state. PHP wrapper holds 1; each live conn that
+ * stores a back-pointer in conn->server holds 1. Last release frees
+ * the C-state struct itself (pemalloc-backed). Per-worker, no atomics. */
+void http_server_addref(http_server_object *server);
+void http_server_release(http_server_object *server);
 
 /* TLS handshake telemetry hooks. on_tls_io is now inline (see counters
  * slice below); these stay out-of-line because they touch state outside
@@ -439,7 +453,8 @@ bool http_server_should_shed_request(const http_server_object *server);
  * Called at every response-commit point; must be O(1) and inlined-
  * friendly (plain field reads, one hrtime call). */
 bool http_server_should_drain_now(http_server_object *server,
-                                  http_connection_t *conn);
+                                  http_connection_t *conn,
+                                  uint64_t now_ns);
 
 /* Generic pull-model drain decision. Same semantics as
  * should_drain_now but takes drain state by value and returns the
@@ -456,7 +471,8 @@ typedef struct {
 http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
                                                     bool drain_pending,
                                                     uint64_t drain_not_before_ns,
-                                                    uint64_t drain_epoch_seen);
+                                                    uint64_t drain_epoch_seen,
+                                                    uint64_t now_ns);
 
 /* Fired from inside http_server_pause_listeners when its
  * drain_connections argument is true (CoDel trip / hard-cap
@@ -570,6 +586,11 @@ typedef struct {
     uint64_t tls_bytes_plaintext_out_total;
     uint64_t tls_bytes_ciphertext_in_total;
     uint64_t tls_bytes_ciphertext_out_total;
+
+    /* Per-request bump kept on the write-mostly slice so the inline
+     * http_server_count_request() helper hits one cache line shared with
+     * the rest of the hot counters. Read by getStats / __debugInfo. */
+    uint64_t total_requests;
 } http_server_counters_t;
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
@@ -587,6 +608,11 @@ typedef struct {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
     bool     telemetry_enabled;          /* W3C trace context ingestion */
+    /* Hot-path gate: true iff per-request hrtime stamps (enqueue_ns /
+     * start_ns / end_ns) are needed by an active consumer (CoDel or
+     * telemetry). Set once at start(); the H1/H2/H3 hot paths read it
+     * via the inline http_server_sample_stamps_enabled() below. */
+    bool     sample_stamps_enabled;
 } http_server_view_t;
 
 /* Process-wide fallback objects. Used when a connection has no owning
@@ -718,6 +744,46 @@ static zend_always_inline void http_server_on_tls_io(http_server_counters_t *c,
     c->tls_bytes_ciphertext_out_total += ciphertext_out;
 }
 
+/* Cheap per-request counter bump. Split out of on_request_sample so the
+ * H1/H2/H3 hot paths can keep counting requests even when
+ * sample_stamps_enabled is false and the full sojourn/service sample is
+ * skipped. Caller passes its cached counters slice (conn->counters) —
+ * never NULL, falls back to http_server_counters_dummy. */
+static zend_always_inline void http_server_count_request(http_server_counters_t *c)
+{
+    c->total_requests++;
+}
+
+/* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are
+ * needed by an active consumer (CoDel or telemetry). Hot-path stamp
+ * sites gate on this — false skips three zend_hrtime() calls per
+ * request. Caller passes its cached view slice (conn->view) — never
+ * NULL, falls back to http_server_view_default. */
+static zend_always_inline bool http_server_sample_stamps_enabled(const http_server_view_t *v)
+{
+    return v->sample_stamps_enabled;
+}
+
+/* Coarse monotonic clock for long-window decisions (drain age,
+ * watchdog deadline, pause duration). ~5ns vs ~25ns for the high-res
+ * zend_hrtime path because CLOCK_MONOTONIC_COARSE skips the hardware
+ * timer read and reads the kernel-cached jiffies value. Granularity
+ * is 4-10ms (depends on CONFIG_HZ); fine for any decision measured
+ * in seconds. NOT safe for CoDel sojourn samples (needs ns precision)
+ * — those still call zend_hrtime(). Windows + non-Linux fall back to
+ * zend_hrtime so the API works everywhere; the optimisation only
+ * fires on Linux. */
+static zend_always_inline uint64_t http_now_coarse_ns(void)
+{
+#if defined(__linux__) && defined(CLOCK_MONOTONIC_COARSE)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#else
+    return (uint64_t)zend_hrtime();
+#endif
+}
+
 /*
  * TODO: http_server_config_from_obj() is currently defined locally
  * in http_server_config.c with a different structure type.
@@ -763,6 +829,28 @@ extern zend_class_entry *http_server_ce;
  */
 
 zend_string *http_response_format(zend_object *obj);
+
+/* Vectored HTTP/1 formatter for the WRITEV hot path. Returns the headers
+ * block (status line + Content-Length + headers + CRLF terminator) as
+ * *headers_out and a refcount-bumped reference to the body string as
+ * *body_out (NULL when body is empty). Caller owns both refs and is
+ * expected to consume them via ZEND_ASYNC_IO_WRITEV (which releases
+ * each on completion). Saves one emalloc + memcpy per response vs.
+ * http_response_format. */
+void http_response_format_parts(zend_object *obj,
+                                zend_string **headers_out,
+                                zend_string **body_out);
+
+size_t http_response_get_body_len(zend_object *obj);
+
+/* Threshold (bytes) under which the legacy concat formatter wins over
+ * vectored writev. Set conservatively at 1 KiB based on the A/B
+ * matrix in docs/PERF_2026_05_02_STEP_10.md: writev is at-worst-wash
+ * for /4k–/16k bodies and clearly wins at /64k (+18% rps, −5% p99) and
+ * /256k (+24% rps, −10% p99). 1 KiB keeps every "hello"/JSON-stub
+ * response on the legacy fast path with zero risk of regression while
+ * still cashing in the win on real payload-sized responses. */
+#define HTTP_WRITEV_THRESHOLD 1024
 zend_string *http_response_format_streaming_headers(zend_object *obj);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
 void http_response_set_protocol_version(zend_object *obj, const char *version);

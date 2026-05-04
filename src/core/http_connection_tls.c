@@ -299,22 +299,14 @@ bool tls_push_and_maybe_flush(http_connection_t *conn,
  * via tls_drain_ring_to_socket on every loop iteration.
  * ======================================================================== */
 
-/* Unified callback. Both the read FSM and the FSM async-send share a
- * single callback on io->event so the io subsystem fires us at most
- * once per NOTIFY. Holding two separate callbacks here is unsafe:
- * disposing the read req from inside the read branch frees its slot
- * back to zend_mm; if the FSM then submits a fresh write req that
- * gets the same recycled address, the stored result pointer in the
- * still-iterating notify loop falsely matches the second callback's
- * active_req on the next iteration. With one callback the dispatch
- * happens once and the recycled-address path stays harmless. */
+/* Read-side dispatch callback. The FSM-send path is fire-and-forget
+ * via ZEND_ASYNC_IO_WRITE_EX (no NOTIFY) so only reads route through
+ * here. Renamed-but-typedef'd as tls_fsm_io_cb_t below for the rest of
+ * the file. */
 struct _tls_fsm_send_cb {
     zend_async_event_callback_t  base;
     http_connection_t           *conn;
     zend_async_io_req_t         *read_req;     /* outstanding read, NULL when idle */
-    zend_async_io_req_t         *write_req;    /* outstanding FSM-send write, NULL when idle */
-    char                        *write_buf;    /* heap-owned bytes underlying write_req */
-    size_t                       write_buf_len;
 };
 
 /* Compatibility alias for the rest of the file — the unified struct
@@ -347,46 +339,9 @@ static void tls_fsm_io_callback_fn(
         return;
     }
 
-    /* Dispatch by req identity. read_req and write_req are distinct
-     * pointers while both live; once one is disposed and a fresh
-     * allocation reuses its slot, that fresh allocation lives on the
-     * other field — a stale match against the just-fired result is
-     * impossible because notify carries a single result pointer per
-     * fire. */
-    const bool is_read  = (cb->read_req  != NULL && result == cb->read_req);
-    const bool is_write = (cb->write_req != NULL && result == cb->write_req);
-    if (!is_read && !is_write) {
-        return;
-    }
-
-    if (is_write) {
-        zend_async_io_req_t *req = cb->write_req;
-        const ssize_t transferred = req->transferred;
-        const bool err = (exception != NULL) || (req->exception != NULL);
-        if (UNEXPECTED(req->exception != NULL)) {
-            OBJ_RELEASE(req->exception);
-            req->exception = NULL;
-        }
-        cb->write_req = NULL;
-        req->dispose(req);
-
-        if (cb->write_buf != NULL) {
-            efree(cb->write_buf);
-            cb->write_buf = NULL;
-            cb->write_buf_len = 0;
-        }
-        if (UNEXPECTED(err || transferred < 0)) {
-            conn->tls_write_error = true;
-        }
-
-        if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-            return;
-        }
-
-        tls_advance_state(conn);
-        (void)tls_finalize_if_closing(conn);
+    /* Dispatch by read req identity. Writes are fire-and-forget via
+     * WRITE_EX and never route through this NOTIFY path. */
+    if (cb->read_req == NULL || result != cb->read_req) {
         return;
     }
 
@@ -451,9 +406,6 @@ static bool tls_fsm_io_cb_attach(http_connection_t *conn)
     cb->base.dispose    = tls_fsm_io_callback_dispose;
     cb->conn            = conn;
     cb->read_req        = NULL;
-    cb->write_req       = NULL;
-    cb->write_buf       = NULL;
-    cb->write_buf_len   = 0;
 
     if (UNEXPECTED(!conn->io->event.add_callback(&conn->io->event, &cb->base))) {
         tls_fsm_io_callback_dispose(&cb->base, NULL);
@@ -463,16 +415,67 @@ static bool tls_fsm_io_cb_attach(http_connection_t *conn)
     return true;
 }
 
-/* Pull every byte of pending ciphertext out of the BIO pair into a
- * single heap buffer and submit one non-blocking write. On sync-
- * complete we consume + free in-line and may re-enter to drain any
- * bytes the just-completed write opened up. The async path lets the
- * completion callback take over.
+/* Zero-copy fire-and-forget completion: consume the BIO output ring slot
+ * libuv just finished writing, count the bytes, then re-advance the FSM
+ * (which will produce more ciphertext via SSL_write and re-kick). The
+ * `data` arg is the BIO ring pointer we passed in — opaque to us here;
+ * the size is stamped on conn->tls_zc_write_n at submit time so the
+ * consume call below knows how much to release.
+ *
+ * Errors are silent here (libuv's free_cb contract doesn't surface
+ * status); a failed write makes the next read attempt fail and the conn
+ * tears down through the existing peer-FIN path. */
+static void tls_zc_write_free_cb(void *data, zend_async_io_t *io)
+{
+    (void)data;
+    if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
+        return;
+    }
+    http_connection_t *conn = (http_connection_t *)io->user_data;
+    if (UNEXPECTED(conn->tls == NULL)) {
+        return;
+    }
+
+    const size_t n = conn->tls_zc_write_n;
+    conn->tls_zc_write_n = 0;
+    if (UNEXPECTED(n == 0)) {
+        return;
+    }
+
+    if (UNEXPECTED(!tls_consume_cipher_out(conn->tls, n))) {
+        conn->tls_write_error = true;
+    } else {
+        http_server_on_tls_io(conn->counters, 0, 0, 0, n);
+    }
+
+    /* Connection-level destroy was deferred while this write was in
+     * flight (http_connection_destroy sees fsm_send_in_flight and sets
+     * destroy_pending). Now that the buffer is released, run the
+     * pending teardown. */
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+        return;
+    }
+
+    /* Drain any ciphertext the FSM produced while we were waiting, and
+     * keep the state machine moving (e.g. a queued close_notify after
+     * the just-completed alert). */
+    tls_advance_state(conn);
+    (void)tls_finalize_if_closing(conn);
+}
+
+/* Submit one ciphertext span from the BIO output ring zero-copy via
+ * ZEND_ASYNC_IO_WRITE_EX: the BIO ring slot pointer is handed straight
+ * to libuv; the free_cb consumes the ring on completion. If the BIO
+ * has more bytes than fit in one contiguous span (ring wrap), the
+ * remainder ships on the next kick — fired automatically by the
+ * free_cb's tls_advance_state call.
  *
  * No-op when:
  *   - no bytes pending;
  *   - tls_flushing is held (producer flusher will ship our bytes);
- *   - a previous FSM submission is still in flight;
+ *   - a previous FSM write is still in flight (tls_zc_write_n != 0);
  *   - tls_write_error is sticky. */
 static void tls_fsm_send_kick(http_connection_t *conn)
 {
@@ -482,91 +485,47 @@ static void tls_fsm_send_kick(http_connection_t *conn)
     if (conn->tls_flushing) {
         return;
     }
+    if (conn->tls_zc_write_n != 0) {
+        return;   /* a zero-copy write is already in flight; the free_cb re-kicks */
+    }
     if (UNEXPECTED(!tls_fsm_io_cb_attach(conn))) {
         conn->tls_write_error = true;
         return;
     }
-    tls_fsm_io_cb_t *cb = conn->tls_fsm_send_cb;
-    if (cb->write_req != NULL) {
-        return;   /* an FSM write is already in flight; will re-kick on completion */
+
+    /* Peek one contiguous span out of the BIO output ring. The libuv
+     * write borrows the slot until completion — we MUST NOT consume
+     * (and therefore free) the span until the free_cb fires. */
+    char  *slot  = NULL;
+    const size_t avail = tls_peek_cipher_out(conn->tls, &slot);
+    if (avail == 0 || slot == NULL) {
+        return;   /* nothing pending */
     }
 
-    /* Siphon the entire BIO output ring into one heap buffer so the
-     * write is atomic from the FSM's view and BIO_nread is consumed
-     * in the same step. The buffer rarely exceeds one TLS record
-     * (~16 KiB) for FSM-produced bytes. */
-    char  *buf       = NULL;
-    size_t total     = 0;
-    size_t buf_cap   = 0;
-    bool   bio_error = false;
-
-    for (;;) {
-        char *slot = NULL;
-        const size_t avail = tls_peek_cipher_out(conn->tls, &slot);
-        if (avail == 0 || slot == NULL) {
-            break;
-        }
-        if (total + avail > buf_cap) {
-            buf_cap = total + avail;
-            buf = erealloc(buf, buf_cap);
-        }
-        memcpy(buf + total, slot, avail);
-        if (!tls_consume_cipher_out(conn->tls, avail)) {
-            bio_error = true;
-            break;
-        }
-        total += avail;
-    }
-
-    if (UNEXPECTED(bio_error)) {
-        if (buf != NULL) {
-            efree(buf);
-        }
-        conn->tls_write_error = true;
-        return;
-    }
-    if (total == 0) {
-        if (buf != NULL) {
-            efree(buf);
-        }
-        return;
-    }
-
-    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE(conn->io, buf, total);
+    conn->tls_zc_write_n = avail;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+        conn->io, slot, avail, tls_zc_write_free_cb);
     if (UNEXPECTED(req == NULL)) {
+        /* Submission failed before libuv took ownership — the buffer
+         * is still in the BIO and free_cb will NOT fire. Roll back the
+         * tracking field and treat as a hard write error. */
+        conn->tls_zc_write_n = 0;
         tls_absorb_io_submission_exception(conn, "write");
-        efree(buf);
         conn->tls_write_error = true;
         return;
     }
 
-    /* Sync-complete fast path — consume in line, recurse to drain any
-     * bytes the SSL state machine added while we were here. */
+    /* Sync-complete fast path: WRITE_EX path in libuv invokes free_cb
+     * inline when the kernel accepts the bytes synchronously. The
+     * free_cb already did consume + counters + re-kick, so there's
+     * nothing left for us to do here. */
     if (req->completed) {
-        const bool err = (req->exception != NULL);
-        const ssize_t transferred = req->transferred;
-        if (req->exception != NULL) {
-            OBJ_RELEASE(req->exception);
-            req->exception = NULL;
-        }
-        req->dispose(req);
-        efree(buf);
-
-        if (UNEXPECTED(err || transferred < (ssize_t)total)) {
-            conn->tls_write_error = true;
-            return;
-        }
-        http_server_on_tls_io(conn->counters, 0, 0, 0, (size_t)transferred);
-
-        /* SSL may have produced more bytes since we started; re-kick. */
-        tls_fsm_send_kick(conn);
         return;
     }
 
-    /* Async path: hand the buffer to the unified io callback. */
-    cb->write_req     = req;
-    cb->write_buf     = buf;
-    cb->write_buf_len = total;
+    /* Async path: nothing to track on the cb struct — fire-and-forget
+     * via WRITE_EX, the free_cb owns completion. The conn-level
+     * tls_zc_write_n field is the "in flight" gate. */
 }
 
 /* Atomic-encrypt-and-queue helper for callers that want to send a small
@@ -996,6 +955,14 @@ static void tls_advance_state(http_connection_t *conn)
 
         const int feed = tls_feed_parser_step(conn);
         if (feed < 0) {
+            /* See http_connection.c handle_read_completion: latch on
+             * the first parse-error tick to avoid double-counting +
+             * double-emitting on subsequent multishot deliveries. */
+            if (conn->parse_error_handled) {
+                tls_flush_pending_alert(conn);
+                conn->state = CONN_STATE_CLOSING;
+                return;
+            }
             if (conn->current_request != NULL
                 && conn->current_request->coroutine != NULL) {
                 http_connection_cancel_handler_for_parse_error(conn);
@@ -1035,11 +1002,10 @@ static bool tls_finalize_if_closing(http_connection_t *conn)
     if (conn->state != CONN_STATE_CLOSING) {
         return false;
     }
-    if (conn->tls_fsm_send_cb != NULL
-        && conn->tls_fsm_send_cb->write_req != NULL) {
-        /* Hold off until close_notify (or whatever the FSM queued) has
-         * left the wire. The send-completion callback re-runs the
-         * teardown via destroy_pending. */
+    if (conn->tls_zc_write_n != 0) {
+        /* Hold off until the in-flight zero-copy write has cleared
+         * the BIO ring slot. The free_cb re-runs teardown via
+         * destroy_pending. */
         return false;
     }
     http_connection_destroy(conn);
@@ -1071,8 +1037,7 @@ bool http_connection_tls_arm_read(http_connection_t *conn)
  * stays private to this TU. */
 bool http_connection_tls_fsm_send_in_flight(const http_connection_t *conn)
 {
-    return conn->tls_fsm_send_cb != NULL
-        && conn->tls_fsm_send_cb->write_req != NULL;
+    return conn->tls_zc_write_n != 0;
 }
 
 /* Re-enter the FSM after a handler coroutine has finished its dispose.

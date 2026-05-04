@@ -124,13 +124,21 @@ struct _http_connection_t {
     /* Read FSM async-write slot. The TLS read FSM lives in event-loop
      * callback context (no coroutine, no suspension). Bytes it produces
      * via SSL_do_handshake / SSL_read (handshake, NewSessionTicket,
-     * KeyUpdate, alerts, close_notify) are copied into a private
-     * heap buffer and shipped via a non-blocking ZEND_ASYNC_IO_WRITE.
-     * The persistent send-completion callback frees the buffer and
-     * re-enters the FSM. Coordination with the producer flusher is via
-     * tls_flushing: while the handler-side flusher owns the cipher
+     * KeyUpdate, alerts, close_notify) are shipped zero-copy: the FSM
+     * peeks BIO_nread0 and submits the slot pointer directly via
+     * ZEND_ASYNC_IO_WRITE_EX (fire-and-forget); the free_cb consumes
+     * the ring on completion. Coordination with the producer flusher is
+     * via tls_flushing: while the handler-side flusher owns the cipher
      * BIO, the FSM defers and lets that loop pick up its bytes. */
     tls_fsm_send_cb_t             *tls_fsm_send_cb;
+
+    /* Zero-copy FSM write: bytes peeked from BIO and submitted to
+     * libuv. Non-zero while a write is in flight; the free_cb consumes
+     * exactly this many bytes from the BIO output ring on completion
+     * (or zero on error — connection torn down). Gate against double
+     * submission while a write is outstanding (BIO would re-peek the
+     * same bytes the in-flight write still owns). */
+    size_t                         tls_zc_write_n;
 
     /* Bit-fields packed with the rest of the flag word at the end of
      * the struct to save padding. unsigned : 1 chosen over bool : 1 for
@@ -144,6 +152,23 @@ struct _http_connection_t {
     /* size_t fields (8 bytes on 64-bit) */
     size_t                   read_buffer_size;
     size_t                   read_buffer_len;
+
+    /* Batched plaintext output: amortises N consecutive writes to one
+     * socket into a single in-flight uv_write + a growing pending
+     * buffer. While `out_in_flight` is true, http_connection_send_batched
+     * appends to `out_pending_buf` instead of issuing another uv_write —
+     * libuv's `write_queue_size` is non-zero until the in-flight req's
+     * completion callback fires (uv_write2 only takes the inline-writev
+     * fast path when the queue was empty at submit time, so back-to-back
+     * writes from multiple stream coroutines force every write past the
+     * first into the slow EPOLLOUT-arming path). The completion callback
+     * then drains the pending buffer in one more uv_write — at that
+     * point write_queue_size has been decremented, so the next submit
+     * also takes the fast path. Plaintext only: TLS path has its own
+     * BIO-pair zero-copy submit (tls_zc_write_n above). */
+    char    *out_pending_buf;
+    size_t   out_pending_len;
+    size_t   out_pending_cap;
 
     /* 4-byte fields */
     http_connection_state_t  state;
@@ -179,18 +204,47 @@ struct _http_connection_t {
     unsigned                 headers_complete : 1;
     unsigned                 body_complete : 1;
     unsigned                 request_ready : 1;     /* set by strategy->on_request_ready */
+    unsigned                 out_in_flight : 1;     /* batched send: one uv_write outstanding, pending buffer accumulates */
     unsigned                 drain_pending : 1;     /* decision: this conn should drain */
     unsigned                 drain_submitted : 1;   /* HTTP/2: GOAWAY already queued on this session */
     unsigned                 destroy_pending : 1;   /* destroy deferred — a handler coroutine is mid-dispose */
+    /* True between dispatch_request and handler_coroutine_dispose end. While
+     * set, the multishot read callback only buffers bytes — it must NOT feed
+     * the parser, because dispatching another request on the same conn while
+     * one is in flight collides on conn-level state (current_request, parser
+     * pause point, response slot). Cleared by handler dispose right before it
+     * checks for pipelined bytes. Eliminates the per-request DEL+ADD epoll_ctl
+     * cycle that the old "stop multishot before dispatch, re-arm in dispose"
+     * pattern produced. */
+    unsigned                 request_in_flight : 1;
+    /* Latched on the first parse-error tick so subsequent multishot
+     * deliveries (the kernel's already-buffered tail of the same
+     * connection) don't re-enter cancel/emit and double-count
+     * parse_errors_*_total. Cleared on connection reset only — once
+     * a parse error is handled the connection is on its way down. */
+    unsigned                 parse_error_handled : 1;
 
-    /* Intrusive single-link node in http_server_object::conn_list. The
-     * list lets http_server_free() walk all live connections and clear
-     * their server back-pointer before the server struct is freed —
-     * otherwise libuv's shutdown drain fires the per-conn read callback
-     * after server is gone, and on_connection_close UAFs. NULL means
-     * "not in any list" (e.g. server == NULL at create time, or already
-     * unlinked by destroy). */
+    /* Intrusive doubly-linked node. Dual role:
+     *   - while the slot is ALIVE, (next_conn, prev_conn) link into
+     *     the conn_arena's alive-list — used by the periodic
+     *     deadline_tick walk and any future broadcast / admission
+     *     sweep / graceful-shutdown traversal.
+     *   - while the slot is FREE in the conn_arena freelist, only
+     *     `next_conn` is meaningful (single-linked). prev_conn is
+     *     undefined.
+     * The arena owns the slab memory; lifetime tied to the
+     * refcounted http_server_object C-state. */
     http_connection_t       *next_conn;
+    http_connection_t       *prev_conn;
+
+    /* Logical I/O deadline in reactor-cached "now" milliseconds. Zero
+     * = no active deadline. Updated by pure stores on state transitions;
+     * the per-worker periodic deadline_tick callback walks the alive
+     * list and force-closes conns where ZEND_ASYNC_NOW() >= deadline_ms.
+     * Source of truth is the reactor's loop->time (uv_now under libuv)
+     * — a single load, no syscall, no vDSO. Tick granularity is
+     * min(read,write,keepalive)/2 with a 250 ms floor. */
+    uint64_t                 deadline_ms;
 
     /* Number of handler coroutines currently holding a reference to
      * this connection (H2 multiplex: N concurrent handler coroutines
@@ -233,12 +287,42 @@ typedef struct {
 } http1_request_ctx_t;
 
 /* Connection lifecycle */
-http_connection_t *http_connection_create(php_socket_t socket_fd, zend_async_scope_t *parent_scope);
+/* Allocate a conn slot from server's arena (or fall back to ecalloc
+ * when server is NULL — used by tests that exercise the conn lifecycle
+ * without an owning server). The arena's alive list ownership of the
+ * slot starts here. */
+struct http_server_object;
+http_connection_t *http_connection_create(php_socket_t socket_fd, zend_async_scope_t *parent_scope,
+                                          struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 
 /* Connection processing */
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len);
 bool http_connection_send_error(http_connection_t *conn, int status_code, const char *message);
+
+/* Fire-and-forget plaintext send. Transfers ownership of @p body to
+ * the reactor; returns true if the submit succeeded (and the body will
+ * be released when the kernel-level write completes), false if submit
+ * failed (and the body has already been released by the failure path).
+ * Plaintext only — TLS sessions must continue to use http_connection_send.
+ */
+bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
+
+/* Batched fire-and-forget. Caller passes an emalloc'd buffer; the
+ * connection accumulates concurrent sends into one in-flight uv_write
+ * and drains the rest from the completion callback (one outstanding
+ * uv_write at a time, every chained submit takes libuv's inline-write
+ * fast path). On submit failure the buffer is freed by the reactor,
+ * so the caller must not touch `buf` after this returns. Plaintext
+ * only — TLS uses the BIO-pair zero-copy path. */
+bool http_connection_send_batched(http_connection_t *conn,
+                                  void *buf, size_t len);
+
+/* Vectored fire-and-forget variant: each slot of @p bufs is an OWNED
+ * zend_string reference, consumed by the reactor's writev completion.
+ * Plaintext only — same TLS caveat as send_str_owned. */
+bool http_connection_send_strv_owned(http_connection_t *conn,
+                                     zend_string * const *bufs, unsigned nbufs);
 
 /* Build and emit the RFC-compliant 4xx response for a parser failure.
  * Reads parser->parse_error, maps to status + reason, writes through

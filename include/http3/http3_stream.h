@@ -5,8 +5,6 @@
 # include <config.h>
 #endif
 
-#ifdef HAVE_HTTP_SERVER_HTTP3
-
 #include "php.h"
 #include "Zend/zend_async_API.h"   /* zend_coroutine_t, zend_async_trigger_event_t */
 #include "zend_smart_str.h"
@@ -20,15 +18,26 @@ typedef struct _http3_connection_s http3_connection_t;  /* defined in http3_conn
 
 /* One per inbound HTTP/3 request stream (bidi, client-initiated).
  * Mirrors http2_stream_t in spirit but carries less state — nghttp3
- * already keeps the framing/header decoder state. */
+ * already keeps the framing/header decoder state.
+ *
+ * **Layout invariant**: `_request_storage` MUST stay the first field.
+ * Every API in the codebase that takes an `http_request_t *` is fed
+ * `&s->_request_storage`, and an `http_request_t *` recovered from the
+ * PHP HttpRequest wrapper or the destroy callback is cast back to
+ * `http3_stream_t *` via the same offset-0 trick. Reordering this
+ * field breaks both directions of the cast at runtime — no compiler
+ * diagnostic. The `request` pointer below is a back-compat alias so
+ * existing call sites keep using `s->request->...` without changes. */
 struct _http3_stream_s {
+    http_request_t    _request_storage;
+
+    /* Alias pointer kept at &_request_storage. Re-set on every pool
+     * alloc since the surrounding memset clears it to NULL. Lets the
+     * existing s->request->X call sites work unchanged. */
+    http_request_t   *request;
+
     /* QUIC bidi stream id (always client-initiated, low bits 00). */
     int64_t           stream_id;
-
-    /* Logical request — pseudo-headers populate method/uri; regular
-     * headers go into the lazily-allocated HashTable. Owned by the
-     * stream until dispatch fires; freed on release. */
-    http_request_t   *request;
 
     /* Body accumulator across nghttp3 recv_data callbacks. On
      * end_stream the completed buffer moves into request->body and
@@ -123,6 +132,11 @@ struct _http3_stream_s {
      * stream it carries. */
     http3_connection_t *conn;
 
+    /* Slab pool the slot came from. Stable across the stream's lifetime
+     * even when conn is NULLed during teardown — release() needs this
+     * to return the slot. */
+    struct http3_stream_pool_s *pool;
+
     /* Lifecycle refcount. Starts at 1 (held by nghttp3 stream_user_data).
      * Once dispatch fires, the handler coroutine bumps to 2. */
     unsigned          refcount;
@@ -136,14 +150,13 @@ struct _http3_stream_s {
     http3_stream_t   *list_next;
 };
 
-/* Allocate a stream + its empty http_request_t. Returns NULL on OOM
- * (ecalloc never returns NULL in PHP, so this is informational only). */
-http3_stream_t *http3_stream_new(int64_t stream_id);
+/* Allocate a stream + its http_request_t from the listener's slab pool.
+ * The conn back-pointer is NOT stored here — h3_begin_headers_cb sets
+ * s->conn after the stream joins the connection's live-stream list. */
+http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id);
 
 /* Decrement refcount; release storage when it hits zero. Drops the
  * partial body buffer, frees the request only if dispatch never fired. */
 void http3_stream_release(http3_stream_t *s);
-
-#endif /* HAVE_HTTP_SERVER_HTTP3 */
 
 #endif /* HTTP3_STREAM_H */

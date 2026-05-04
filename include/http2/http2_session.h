@@ -13,8 +13,6 @@
 # include <config.h>
 #endif
 
-#ifdef HAVE_HTTP2
-
 #include "php.h"
 #include <nghttp2/nghttp2.h>
 #include <stdbool.h>
@@ -262,7 +260,5 @@ int http2_session_submit_ping(http2_session_t *session);
  * has arrived yet. Updated on every PING-ACK we receive in response
  * to our own PING. */
 uint64_t http2_session_last_ping_rtt_ns(const http2_session_t *session);
-
-#endif /* HAVE_HTTP2 */
 
 #endif /* HTTP2_SESSION_H */

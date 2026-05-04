@@ -17,7 +17,6 @@
 
 #include "tls_layer.h"
 
-#ifdef HAVE_OPENSSL
 
 #include <openssl/err.h>
 #include <openssl/opensslv.h>
@@ -1025,5 +1024,3 @@ const tls_error_info_t *tls_session_last_error(const tls_session_t *const sessio
     }
     return &session->last_error;
 }
-
-#endif /* HAVE_OPENSSL */

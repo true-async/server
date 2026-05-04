@@ -338,6 +338,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/http_server_config.c
     src/http_server_class.c
     src/core/http_connection.c
+    src/core/conn_arena.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/formats/multipart_parser.c
@@ -347,7 +348,6 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/uploaded_file.c
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c
-    src/core/tls_layer.c
     src/core/http_known_strings.c
     src/log/http_log.c
     src/log/trace_context.c
@@ -357,7 +357,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   dnl handshake/decrypt coroutine). Compiled only when OpenSSL is present
   dnl so non-TLS builds stay smaller.
   if test "$_http_server_openssl_ok" = "yes"; then
-    http_server_sources="$http_server_sources src/core/http_connection_tls.c"
+    http_server_sources="$http_server_sources src/core/tls_layer.c src/core/http_connection_tls.c"
   fi
 
   dnl HTTP/2 sources compile only when --enable-http2 succeeded and
@@ -383,6 +383,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/http3/http3_callbacks.c
       src/http3/http3_dispatch.c
       src/http3/http3_stream.c
+      src/http3/http3_stream_pool.c
     "
   fi
 

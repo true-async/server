@@ -179,7 +179,7 @@ static int h3_begin_headers_cb(nghttp3_conn *conn, int64_t stream_id,
     http3_packet_stats_t *stats = c != NULL
         ? http3_listener_packet_stats(c->listener) : NULL;
 
-    http3_stream_t *s = http3_stream_new(stream_id);
+    http3_stream_t *s = http3_stream_new(c, stream_id);
     if (s == NULL) {
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }

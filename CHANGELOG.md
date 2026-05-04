@@ -5,7 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-05-04
+
+### Added
+
+- **`HttpRequest::getPath()`** — returns the URI path without the query
+  string (e.g. `/search` from `/search?q=hello`). Works identically for
+  HTTP/1.1, HTTP/2 (`:path` pseudo-header), and HTTP/3.
+- **`HttpRequest::getQuery(): array`** — returns all query parameters as
+  an associative array, equivalent to `$_GET`. Supports percent-decoding,
+  `+`-as-space, and PHP array notation (`foo[]`, `foo[bar]`).
+- **`HttpRequest::getQueryParam(string $name, mixed $default = null): mixed`** —
+  returns a single query parameter by name, or `$default` (null unless
+  overridden) when the parameter is absent.
+
+  All three methods share a single lazy parse: the URI is split into path
+  and query string on the first call and the result is cached in the
+  request struct for subsequent accesses. The query parser delegates to
+  `php_default_treat_data(PARSE_STRING, …)` — the same function PHP uses
+  to populate `$_GET`.
 
 ### Fixed
 

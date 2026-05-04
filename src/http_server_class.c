@@ -20,6 +20,7 @@
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
+#include "core/conn_arena.h"
 #include "core/http_protocol_handlers.h"
 #include "core/http_protocol_strategy.h"
 #include "core/tls_layer.h"
@@ -65,7 +66,19 @@ typedef struct {
  * Struct is tagged (not anonymous) so a forward declaration in
  * php_http_server.h can let http_connection carry a typed pointer without
  * seeing the layout. Only http_server_class.c dereferences these fields. */
+/*
+ * Lifetime separation: the C-state struct (http_server_object) is split
+ * from the PHP wrapper (http_server_php). The PHP wrapper holds the
+ * zend_object handle that Zend's GC manages; the C-state is refcounted
+ * and can outlive the wrapper. A live connection holds one ref on the
+ * C-state, so reactor/libuv shutdown drains that fire late callbacks
+ * post-wrapper-free still see valid memory. The last release frees the
+ * C-state (including the embedded conn arena slab).
+ */
 struct http_server_object {
+    /* Refcount. PHP wrapper holds 1, each live conn holds 1. */
+    int32_t                  refcount;
+
     zval                     config;             /* HttpServerConfig object */
     HashTable                protocol_handlers;  /* Protocol handlers (type -> callback) */
     /* Read-mostly config snapshot. Layout-public via php_http_server.h.
@@ -83,18 +96,26 @@ struct http_server_object {
                                                  * the dtor phase before our http_server_free. */
     zend_async_event_t      *wait_event;        /* Event to block start() */
 
-    /* Statistics — active_requests moved into counters slice. */
+    /* Statistics — active_requests + total_requests moved into counters slice. */
     size_t                   active_connections;
-    size_t                   total_requests;
 
-    /* Intrusive list of every live http_connection_t whose ->server
-     * points to us. Singly linked via conn->next_conn, prepended at
-     * connection_create, walked + unlinked at connection_destroy.
-     * http_server_free walks once to NULL each conn's server back-
-     * pointer before freeing self — without this the libuv shutdown
-     * drain would fire per-conn read callbacks against a dead pointer
-     * and UAF http_server_on_connection_close. */
-    http_connection_t       *conn_list;
+    /* Slab allocator for live http_connection_t instances. Owns both
+     * the chunk memory AND the intrusive doubly-linked alive list
+     * (arena.alive_head). Lifetime is tied to the refcounted C-state:
+     * each live conn holds one ref on the C-state, so the arena's
+     * memory stays valid until the last conn returns its slot.
+     * Walked by the per-worker periodic deadline_tick + future
+     * broadcast / admission paths. */
+    conn_arena_t             conn_arena;
+
+    /* Per-worker deadline watchdog. Single periodic libuv timer that
+     * fires every tick_ms milliseconds. The callback walks
+     * conn_arena.alive_head and force-closes any conn whose
+     * deadline_ns has elapsed. tick_ms = max(250, min(read, write,
+     * keepalive) / 2) — set at start(). Replaces the per-conn
+     * write_timer arm/stop dance that used to run on every send. */
+    zend_async_event_t          *deadline_tick;
+    zend_async_event_callback_t *deadline_tick_cb;
 
     /* Inline listener array */
     http_listener_t          listeners[MAX_LISTENERS];
@@ -228,8 +249,13 @@ struct http_server_object {
      * side can rebuild fcall_t entries in the destination thread's heap.
      * Always NULL in the source thread's emalloc object. */
     void                    *transit_handlers;
+};
 
-    zend_object              std;
+/* PHP wrapper. The std handle is what Zend hands out to userland; the
+ * server pointer reaches into the refcounted C-state. */
+struct http_server_php {
+    http_server_object *server;
+    zend_object         std;
 };
 
 /* Class entry */
@@ -243,11 +269,29 @@ static __declspec(thread) http_server_object *current_server = NULL;
 static __thread http_server_object *current_server = NULL;
 #endif
 
-/* Object retrieval macro */
+static inline struct http_server_php *http_server_php_from_obj(zend_object *obj) {
+    return (struct http_server_php *)((char *)(obj) - XtOffsetOf(struct http_server_php, std));
+}
+
 static inline http_server_object *http_server_from_obj(zend_object *obj) {
-    return (http_server_object *)((char *)(obj) - XtOffsetOf(http_server_object, std));
+    return http_server_php_from_obj(obj)->server;
 }
 #define Z_HTTP_SERVER_P(zv) http_server_from_obj(Z_OBJ_P(zv))
+
+/* Single-thread per worker — no atomics needed. */
+static void http_server_state_finalize(http_server_object *server);
+
+void http_server_addref(http_server_object *server) {
+    if (server == NULL) return;
+    server->refcount++;
+}
+void http_server_release(http_server_object *server) {
+    if (server == NULL) return;
+    if (--server->refcount == 0) {
+        http_server_state_finalize(server);
+        pefree(server, /*persistent*/ 0);
+    }
+}
 
 static HashTable *http_server_get_gc(zend_object *obj, zval **table, int *n);
 static void http_server_accept_callback(
@@ -255,6 +299,126 @@ static void http_server_accept_callback(
     zend_async_event_callback_t *callback,
     void *result,
     zend_object *exception);
+
+/* ==========================================================================
+ * Deadline watchdog — one periodic libuv timer per worker, walks the
+ * conn arena's alive list each tick and force-closes conns whose
+ * deadline_ns has elapsed. Replaces per-conn / per-await timers.
+ * ========================================================================== */
+
+typedef struct {
+    zend_async_event_callback_t  base;
+    http_server_object          *server;
+} http_server_deadline_cb_t;
+
+static void http_server_deadline_cb_dispose(zend_async_event_callback_t *cb,
+                                            zend_async_event_t *event)
+{
+    (void)event;
+    efree(cb);
+}
+
+static void http_server_deadline_tick_fn(zend_async_event_t *event,
+                                         zend_async_event_callback_t *callback,
+                                         void *result,
+                                         zend_object *exception)
+{
+    (void)event; (void)result; (void)exception;
+    http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)callback;
+    http_server_object *server = cb->server;
+    if (UNEXPECTED(server == NULL)) {
+        return;
+    }
+    const uint64_t now = ZEND_ASYNC_NOW();
+    http_connection_t *c = server->conn_arena.alive_head;
+    while (c != NULL) {
+        /* `next` captured before destroy: arena_free unlinks `c`. */
+        http_connection_t *next = c->next_conn;
+        if (c->deadline_ms != 0 && now >= c->deadline_ms) {
+            http_connection_destroy(c);
+        }
+        c = next;
+    }
+}
+
+/* tick_ms = max(250, min(read, write, keepalive) / 2). */
+static uint32_t http_server_deadline_tick_ms(const http_server_object *server)
+{
+    uint32_t r = server->read_timeout_s ? server->read_timeout_s * 1000 : UINT32_MAX;
+    uint32_t w = server->view.write_timeout_s ? server->view.write_timeout_s * 1000 : UINT32_MAX;
+    uint32_t k = server->keepalive_timeout_s ? server->keepalive_timeout_s * 1000 : UINT32_MAX;
+    uint32_t m = r;
+    if (w < m) m = w;
+    if (k < m) m = k;
+    if (m == UINT32_MAX) {
+        /* All timeouts disabled — still tick at a slow cadence so a
+         * broadcast / future graceful-shutdown walker has a heartbeat. */
+        return 60000;
+    }
+    uint32_t tick = m / 2;
+    if (tick < 250) tick = 250;
+    return tick;
+}
+
+/* Lazy start: armed the first time start() runs. Failure is non-fatal —
+ * the server still serves requests, just without idle-conn reaping. */
+static void http_server_deadline_tick_start(http_server_object *server)
+{
+    if (server->deadline_tick != NULL) {
+        return;
+    }
+    const uint32_t tick_ms = http_server_deadline_tick_ms(server);
+    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)tick_ms, /*periodic*/ true);
+    if (UNEXPECTED(t == NULL)) {
+        return;
+    }
+    /* Multishot ensures the event survives across periodic fires —
+     * libuv_timer_rearm rejects non-multishot timers. */
+    ZEND_ASYNC_TIMER_SET_MULTISHOT(t);
+
+    http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(http_server_deadline_tick_fn, sizeof(*cb));
+    if (UNEXPECTED(cb == NULL)) {
+        t->base.dispose(&t->base);
+        return;
+    }
+    cb->base.dispose = http_server_deadline_cb_dispose;
+    cb->server = server;
+    if (!t->base.add_callback(&t->base, &cb->base)) {
+        efree(cb);
+        t->base.dispose(&t->base);
+        return;
+    }
+    server->deadline_tick    = &t->base;
+    server->deadline_tick_cb = &cb->base;
+    if (!t->base.start(&t->base)) {
+        zend_async_callbacks_remove(&t->base, &cb->base);
+        t->base.dispose(&t->base);
+        server->deadline_tick    = NULL;
+        server->deadline_tick_cb = NULL;
+    }
+}
+
+static void http_server_deadline_tick_stop(http_server_object *server)
+{
+    if (server->deadline_tick_cb != NULL) {
+        http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)server->deadline_tick_cb;
+        cb->server = NULL;  /* defensive: in-flight tick won't deref */
+        if (server->deadline_tick != NULL) {
+            zend_async_callbacks_remove(server->deadline_tick, server->deadline_tick_cb);
+        } else if (server->deadline_tick_cb->dispose != NULL) {
+            server->deadline_tick_cb->dispose(server->deadline_tick_cb, NULL);
+        }
+        server->deadline_tick_cb = NULL;
+    }
+    if (server->deadline_tick != NULL) {
+        if (server->deadline_tick->loop_ref_count > 0) {
+            server->deadline_tick->stop(server->deadline_tick);
+        }
+        server->deadline_tick->dispose(server->deadline_tick);
+        server->deadline_tick = NULL;
+    }
+}
 
 /* Backpressure primitives. Calling stop()/start() on a zend_async listen
  * event toggles its presence in the reactor poll set — no fd is closed,
@@ -345,16 +509,16 @@ static void http_server_resume_listeners(http_server_object *server)
  * samples. */
 void http_server_on_request_sample(http_server_object *server,
                                    const uint64_t sojourn_ns,
-                                   const uint64_t service_ns)
+                                   const uint64_t service_ns,
+                                   const uint64_t now_ns)
 {
     if (!server) {
         return;
     }
 
-    /* Always aggregate — telemetry continues even with CoDel disabled.
-     * total_requests is the per-request counter; keep-alive requests
-     * count individually because sample fires once per handler call. */
-    server->total_requests++;
+    /* Aggregate sojourn/service samples for telemetry. total_requests is
+     * bumped separately by http_server_count_request — hot-path callers
+     * count requests even when stamps are gated off. */
     http_server_aggregate_sample(server, sojourn_ns, service_ns);
 
     /* Target = 0 disables CoDel entirely. */
@@ -362,9 +526,10 @@ void http_server_on_request_sample(http_server_object *server,
         return;
     }
 
-    /* CoDel: track min sojourn in 100ms window. Uses the same
-     * zend_hrtime source as the enqueue/start stamps so no drift. */
-    const uint64_t now = zend_hrtime();
+    /* CoDel: track min sojourn in 100ms window. `now_ns` is reused
+     * from the caller's already-taken stamp (req->end_ns) — no fresh
+     * zend_hrtime on the hot path. */
+    const uint64_t now = now_ns;
     if (server->codel_window_start_ns == 0
         || now - server->codel_window_start_ns >= CODEL_INTERVAL_NS) {
         server->codel_window_start_ns = now;
@@ -588,7 +753,10 @@ void http_server_trigger_drain(http_server_object *const server)
     if (server == NULL) {
         return;
     }
-    const uint64_t now = zend_hrtime();
+    /* Cooldown window is in seconds (default 10s); drain_last_fired_ns
+     * was stamped with the same coarse clock — apples-to-apples. Saves
+     * one vdso_clock_gettime per CoDel trip. */
+    const uint64_t now = http_now_coarse_ns();
 
     /* Cooldown: prevent oscillation when CoDel / hard-cap flap. The
      * blocked counter stays observable so operators can tune down a
@@ -613,7 +781,8 @@ void http_server_trigger_drain(http_server_object *const server)
 http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const server,
                                                     bool drain_pending,
                                                     uint64_t drain_not_before_ns,
-                                                    uint64_t drain_epoch_seen)
+                                                    uint64_t drain_epoch_seen,
+                                                    uint64_t now_ns)
 {
     http_server_drain_eval_t r = {
         .should_drain        = false,
@@ -624,7 +793,9 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const se
     if (server == NULL) {
         return r;
     }
-    const uint64_t now = zend_hrtime();
+    /* now_ns reused from caller's stamp (req->end_ns at dispose) —
+     * skips a fresh zend_hrtime on the hot path. */
+    const uint64_t now = now_ns;
 
     if (!r.drain_pending
         && server->max_connection_age_ns > 0
@@ -650,7 +821,8 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const se
 }
 
 bool http_server_should_drain_now(http_server_object *const server,
-                                  http_connection_t *const conn)
+                                  http_connection_t *const conn,
+                                  uint64_t now_ns)
 {
     if (conn == NULL) {
         return false;
@@ -658,7 +830,8 @@ bool http_server_should_drain_now(http_server_object *const server,
     const http_server_drain_eval_t r = http_server_drain_evaluate(server,
         conn->drain_pending,
         conn->drain_not_before_ns,
-        conn->drain_epoch_seen);
+        conn->drain_epoch_seen,
+        now_ns);
     conn->drain_pending       = r.drain_pending;
     conn->drain_not_before_ns = r.drain_not_before_ns;
     conn->drain_epoch_seen    = r.drain_epoch_seen;
@@ -671,44 +844,26 @@ bool http_server_should_drain_now(http_server_object *const server,
  * active_connections counter, which is bounded by max_connections). The
  * list exists solely so http_server_free can clear conn->server back-
  * pointers before the server struct is freed. */
-void http_server_register_connection(http_server_object *server,
-                                     struct _http_connection_t *conn)
+/* Public arena accessor — http_connection.c uses it to allocate /
+ * free conn slots without seeing the http_server_object internals. */
+conn_arena_t *http_server_arena(http_server_object *server)
+{
+    return &server->conn_arena;
+}
+
+/* Bind a freshly-allocated conn to its owning server's hot-path
+ * slices. Called by http_connection_spawn after http_connection_create
+ * has obtained a slot from the arena. */
+void http_server_bind_connection(http_server_object *server,
+                                 struct _http_connection_t *conn)
 {
     if (server == NULL || conn == NULL) {
         return;
     }
     http_connection_t *real = (http_connection_t *)conn;
-    real->next_conn = server->conn_list;
-    server->conn_list = real;
-    /* Rebind hot-path counters/view to the server's embedded slices.
-     * From here on the inline helpers in php_http_server.h bump fields
-     * directly with no NULL check. http_server_free reverts these to
-     * the dummies before the server struct is freed. */
     real->counters  = &server->counters;
     real->view      = &server->view;
     real->log_state = &server->log_state;
-}
-
-void http_server_unregister_connection(http_server_object *server,
-                                       struct _http_connection_t *conn)
-{
-    if (server == NULL || conn == NULL) {
-        return;
-    }
-    http_connection_t *real = (http_connection_t *)conn;
-    /* Walk: head pointer hops via the next_conn link. Stop on first match
-     * (each conn is registered exactly once). */
-    http_connection_t **cur = &server->conn_list;
-    while (*cur != NULL) {
-        if (*cur == real) {
-            *cur = real->next_conn;
-            real->next_conn = NULL;
-            return;
-        }
-        cur = &(*cur)->next_conn;
-    }
-    /* Not found: conn was never registered, or already unlinked by
-     * http_server_free's wipe. Either way, harmless. */
 }
 
 /* Connection close hook. Drives active_connections-- and the hysteresis
@@ -1188,6 +1343,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isTelemetryEnabled", &retval);
     server->view.telemetry_enabled = (Z_TYPE(retval) == IS_TRUE);
 
+    /* Stamps drive CoDel sojourn samples and the telemetry aggregate
+     * (sojourn_sum / service_sum / sojourn_max). Drain falls back to a
+     * fresh hrtime when end_ns is 0, so it does not require stamps. */
+    server->view.sample_stamps_enabled =
+        (server->codel_target_ns != 0) || server->view.telemetry_enabled;
+
     /* Mirror configured max_body_size into the global parser pool.
      * Both the H1 parser (via http_parser_create on checkout) and the
      * H2 DATA-frame guard read from this global. Existing pooled parsers
@@ -1506,6 +1667,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     server->running = true;
     current_server = server;
 
+    /* Per-worker deadline watchdog: one periodic timer that walks the
+     * conn arena's alive list each tick and force-closes idle conns
+     * whose deadline_ns has elapsed. Replaces per-conn write_timer +
+     * per-await read-timeout creation. Failure here is non-fatal. */
+    http_server_deadline_tick_start(server);
+
     /* Create wait event and suspend until stop() is called */
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
@@ -1551,6 +1718,11 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
     }
 
     server->stopping = true;
+
+    /* Stop the deadline watchdog FIRST so the periodic timer no longer
+     * keeps the libuv loop alive past server stop. Without this, the
+     * loop drains forever and stop() never lets the script exit. */
+    http_server_deadline_tick_stop(server);
 
     /* Stop all listen events. dispose() also closes the underlying uv_tcp_t
      * and frees the fd — no separate closesocket call needed. */
@@ -1616,7 +1788,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     array_init(return_value);
-    add_assoc_long(return_value, "total_requests", server->total_requests);
+    add_assoc_long(return_value, "total_requests", (zend_long)server->counters.total_requests);
     add_assoc_long(return_value, "active_connections", server->active_connections);
     add_assoc_long(return_value, "active_requests", (zend_long)server->counters.active_requests);
     add_assoc_long(return_value, "max_inflight_requests", (zend_long)server->max_inflight_requests);
@@ -1729,7 +1901,7 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
 
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
-    server->total_requests       = 0;
+    server->counters.total_requests = 0;
     server->sojourn_sum_ns       = 0;
     server->service_sum_ns       = 0;
     server->sojourn_max_ns       = 0;
@@ -1900,40 +2072,33 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
 
 static zend_object *http_server_create(zend_class_entry *ce)
 {
-    http_server_object *server = zend_object_alloc(sizeof(http_server_object), ce);
+    /* PHP wrapper — holds zend_object handle + ref to C-state.
+     * std must remain the LAST field of http_server_php so Zend can
+     * lay properties out after it (zend_object_alloc semantics). */
+    struct http_server_php *php =
+        zend_object_alloc(sizeof(struct http_server_php), ce);
+
+    /* C-state — pemalloc'd because it can outlive the PHP wrapper:
+     * a live conn that fires a late libuv callback after wrapper
+     * free still needs valid memory (its own ref keeps the C-state
+     * alive). Last release in http_server_release frees it. */
+    http_server_object *server = pecalloc(1, sizeof(*server), /*persistent*/ 0);
+    server->refcount = 1;   /* held by the wrapper */
 
     ZVAL_UNDEF(&server->config);
     http_protocol_handlers_init(&server->protocol_handlers);
     http_log_state_init(&server->log_state);
-    server->running = false;
-    server->stopping = false;
-    server->server_scope = NULL;
-    server->scope_object = NULL;
-    server->wait_event = NULL;
-    server->listener_count = 0;
-    server->active_connections = 0;
-    server->total_requests = 0;
-#ifdef HAVE_HTTP_SERVER_HTTP3
-    server->http3_listener_count = 0;
-    server->alt_svc_header_value = NULL;
-    memset(server->http3_listeners, 0, sizeof(server->http3_listeners));
-#endif
+    conn_arena_init(&server->conn_arena);
+    /* All other fields are pecalloc-zeroed: running=false, stopping=false,
+     * server_scope/scope_object/wait_event=NULL, counters/view zeroed,
+     * listeners[] zeroed, transit_handlers=NULL, etc. */
 
-    memset(server->listeners, 0, sizeof(server->listeners));
-    server->transit_handlers = NULL;
+    php->server = server;
+    zend_object_std_init(&php->std, ce);
+    object_properties_init(&php->std, ce);
+    php->std.handlers = &http_server_handlers;
 
-    /* server->view is zeroed by the alloc'd-from-emalloc path above.
-     * protocol_mask=0 by design: addXHandler() OR's in only the
-     * protocols actually registered, so the post-setup mask is the
-     * exact handler set (the legacy pre-handler "ALL" fallback lives
-     * in http_server_view_default for unsupervised conns). 0 is the
-     * built-in-default sentinel for the rest. */
-
-    zend_object_std_init(&server->std, ce);
-    object_properties_init(&server->std, ce);
-    server->std.handlers = &http_server_handlers;
-
-    return &server->std;
+    return &php->std;
 }
 
 /* get_gc: expose registered handler closures so the cycle collector can
@@ -1959,37 +2124,26 @@ static HashTable *http_server_get_gc(zend_object *obj, zval **table, int *n)
 
 static void http_server_free(zend_object *obj)
 {
-    http_server_object *server = http_server_from_obj(obj);
+    struct http_server_php *php = http_server_php_from_obj(obj);
+    http_server_object *server = php->server;
 
-    /* CRITICAL: clear the back-pointer on every live connection BEFORE
-     * we proceed. ext/async's libuv shutdown drain (engine_shutdown,
-     * which runs AFTER object dtors per Zend's ordering) will fire
-     * read callbacks for any still-armed accepted-conn read events;
-     * each callback paths through http_connection_destroy ->
-     * http_server_on_connection_close(conn->server). If conn->server
-     * is still pointing at this freed struct, that's a UAF (caught by
-     * ASAN 2026-04-28 in tests 013, 020). NULL-ing the back-pointer
-     * makes those calls no-ops. */
-    {
-        http_connection_t *c = server->conn_list;
-        while (c != NULL) {
-            http_connection_t *next = c->next_conn;
-            c->server    = NULL;
-            /* Repoint counters/view at the process-wide fallbacks so any
-             * post-free inline bump becomes a write to dummy garbage rather
-             * than a UAF on freed server memory. */
-            c->counters  = &http_server_counters_dummy;
-            c->view      = &http_server_view_default;
-            c->log_state = &http_log_state_default;
-            c->next_conn = NULL;
-            c = next;
-        }
-        server->conn_list = NULL;
-    }
+    /* The wrapper is going away. Live conns still hold refs on the
+     * C-state; we no longer need to NULL their back-pointers because
+     * the C-state outlives this call until the last conn releases.
+     * The libuv shutdown drain that fires post-wrapper-free now sees
+     * a valid (still-refcounted) C-state. The C-state's own teardown
+     * (listeners, scope, config, TLS ctx) still happens HERE — that's
+     * the user-facing "destroy the server" semantic and shouldn't
+     * wait on conn lifetimes. */
 
     /* Stop server if running */
     if (server->running) {
         server->stopping = true;
+
+        /* Stop the deadline watchdog before tearing down listeners —
+         * a tick firing during shutdown could try to force-close a
+         * conn whose io has already been disposed. */
+        http_server_deadline_tick_stop(server);
 
         for (size_t i = 0; i < server->listener_count; i++) {
             if (server->listeners[i].listen_event) {
@@ -2030,6 +2184,23 @@ static void http_server_free(zend_object *obj)
     }
 #endif
 
+    /* Force-close any conn still on the alive list. With multishot
+     * armed for the connection lifetime, an idle conn (no handler in
+     * flight, peer hasn't FIN'd yet) holds io_t + the outstanding
+     * read req — which in turn keep a ref on the C-state. Without an
+     * explicit sweep here those refs never drop and the whole
+     * conn/io/parser/strategy chain leaks at script shutdown. Conns
+     * with a handler mid-flight set destroy_pending and finalise when
+     * the scope release below cancels the handler coroutine. */
+    {
+        http_connection_t *c = server->conn_arena.alive_head;
+        while (c != NULL) {
+            http_connection_t *next = c->next_conn;
+            http_connection_destroy(c);
+            c = next;
+        }
+    }
+
     /* Release the scope_object we took at scope creation in start().
      *
      * scope_destroy (the object dtor) will clear scope->scope_object = NULL
@@ -2059,7 +2230,28 @@ static void http_server_free(zend_object *obj)
     /* Destroy protocol handlers */
     http_protocol_handlers_destroy(&server->protocol_handlers);
 
-    zend_object_std_dtor(&server->std);
+    /* Destroy the std object — the PHP-side resources die with the
+     * wrapper. The C-state stays alive until the last conn releases. */
+    zend_object_std_dtor(&php->std);
+
+    /* Drop the wrapper's ref on the C-state. If no live conns remain
+     * the C-state finalizes and is freed right here; otherwise the
+     * last conn release will finalize. */
+    http_server_release(server);
+}
+
+/* Final cleanup of the C-state, called from http_server_release when
+ * the refcount reaches zero. Anything that depends on C-state-only
+ * memory (counters, conn arena, view) is freed here. PHP-facing
+ * resources (config zval, std) were already torn down by
+ * http_server_free; by the time this runs they were dropped long
+ * ago. */
+static void http_server_state_finalize(http_server_object *server)
+{
+    /* Last ref dropped — every live conn has returned its slot to
+     * the arena, which means alive_head is empty and the slab can be
+     * released. C-state memory itself is freed by the caller (pefree). */
+    conn_arena_cleanup(&server->conn_arena);
 }
 
 /* ==========================================================================
@@ -2109,11 +2301,18 @@ static zend_object *http_server_transfer_obj(
             return NULL;
         }
 
-        zend_object *dst = default_fn(object, ctx, sizeof(http_server_object));
+        /* default_fn pemallocs a raw shell sized for our wrapper. We
+         * then pemalloc a fresh C-state and link it into the wrapper.
+         * Post-split: the wrapper holds only `server*` + `std`, the
+         * full server fields live in the separately-allocated core. */
+        zend_object *dst = default_fn(object, ctx, sizeof(struct http_server_php));
         if (UNEXPECTED(dst == NULL)) {
             return NULL;
         }
-        http_server_object *dst_shell = http_server_from_obj(dst);
+        struct http_server_php *dst_php = http_server_php_from_obj(dst);
+        http_server_object *dst_shell = pecalloc(1, sizeof(*dst_shell), /*persistent*/ 1);
+        dst_shell->refcount = 1;
+        dst_php->server = dst_shell;
 
         /* Recursive zval transfer dispatches to HttpServerConfig's transfer_obj,
          * which just addrefs the frozen shared snapshot — cheap. */
@@ -2161,6 +2360,10 @@ static zend_object *http_server_transfer_obj(
 
     /* LOAD */
     http_server_object *src_shell = http_server_from_obj(object);
+    /* Pass sizeof(struct http_server_php) so default_fn allocates a
+     * properly-sized wrapper. The destination thread's create_object
+     * pathway (called by default_fn under LOAD) wires up its own core
+     * via emalloc, so we don't need to allocate one here. */
     zend_object *dst = default_fn(object, ctx, 0);
     if (UNEXPECTED(dst == NULL)) {
         return NULL;
@@ -2250,7 +2453,7 @@ void http_server_class_register(void)
     http_server_ce->create_object = http_server_create;
 
     memcpy(&http_server_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-    http_server_handlers.offset = XtOffsetOf(http_server_object, std);
+    http_server_handlers.offset = XtOffsetOf(struct http_server_php, std);
     http_server_handlers.free_obj = http_server_free;
     http_server_handlers.get_gc = http_server_get_gc;
     http_server_handlers.clone_obj = NULL;

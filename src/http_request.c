@@ -14,6 +14,7 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "log/trace_context.h"
+#include "main/php_variables.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -115,14 +116,16 @@ ZEND_METHOD(TrueAsync_HttpRequest, getUri)
 ZEND_METHOD(TrueAsync_HttpRequest, getHttpVersion)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
-    char version[8];
+    char version[4];
     ZEND_PARSE_PARAMETERS_NONE();
 
-    snprintf(version, sizeof(version), "%d.%d",
-             intern->request->http_major,
-             intern->request->http_minor);
+    /* HTTP/1.x major/minor are single digits — skip libc format_converter. */
+    version[0] = '0' + (char)intern->request->http_major;
+    version[1] = '.';
+    version[2] = '0' + (char)intern->request->http_minor;
+    version[3] = '\0';
 
-    RETURN_STRING(version);
+    RETURN_STRINGL(version, 3);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, hasHeader)
@@ -272,6 +275,87 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFile)
     /* Single file */
     if (Z_TYPE_P(file) == IS_OBJECT) {
         RETURN_OBJ_COPY(Z_OBJ_P(file));
+    }
+
+    RETURN_NULL();
+}
+
+/* Parse URI into path + query_params on first access; results are cached. */
+static void http_request_ensure_uri_parsed(http_request_t *req)
+{
+    if (req->path != NULL) {
+        return;
+    }
+
+    if (!req->uri || ZSTR_LEN(req->uri) == 0) {
+        req->path         = ZSTR_EMPTY_ALLOC();
+        req->query_params = zend_new_array(0);
+        return;
+    }
+
+    const char *uri  = ZSTR_VAL(req->uri);
+    size_t      ulen = ZSTR_LEN(req->uri);
+    const char *q    = memchr(uri, '?', ulen);
+
+    if (!q) {
+        req->path         = zend_string_copy(req->uri);
+        req->query_params = zend_new_array(0);
+        return;
+    }
+
+    req->path = zend_string_init(uri, (size_t)(q - uri), 0);
+
+    zval arr;
+    array_init(&arr);
+    size_t qslen = ulen - (size_t)(q + 1 - uri);
+    if (qslen > 0) {
+        /* php_default_treat_data takes ownership of the string (calls efree),
+         * handles percent-decoding, '+'-as-space, PHP array notation, and
+         * max_input_vars — identical to how PHP populates $_GET. */
+        php_default_treat_data(PARSE_STRING, estrndup(q + 1, qslen), &arr);
+    }
+    req->query_params = Z_ARR(arr);
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getPath)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_request_ensure_uri_parsed(intern->request);
+    RETURN_STR_COPY(intern->request->path);
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getQuery)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_request_ensure_uri_parsed(intern->request);
+    ZVAL_ARR(return_value, zend_array_dup(intern->request->query_params));
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    zend_string *name;
+    zval        *default_value = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(default_value)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_request_ensure_uri_parsed(intern->request);
+
+    zval *val = zend_hash_find(intern->request->query_params, name);
+    if (val) {
+        RETURN_COPY(val);
+    }
+
+    if (default_value) {
+        RETURN_COPY(default_value);
     }
 
     RETURN_NULL();
