@@ -21,6 +21,7 @@
 #include "http3_listener.h"                /* http3_listener_server_obj */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 #include "log/trace_context.h"
+#include "http_connection.h"               /* http_handler_log_bailout */
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -171,7 +172,27 @@ static void h3_handler_coroutine_entry(void)
         .param_count    = 2,
         .named_params   = NULL,
     };
-    zend_call_function(&fci, &fcall->fci_cache);
+    /* Bailout firewall — see http_handler_log_bailout in
+     * src/core/http_connection.c. */
+    volatile bool bailout = false;
+    zend_try
+    {
+        zend_call_function(&fci, &fcall->fci_cache);
+    }
+    zend_catch
+    {
+        bailout = true;
+    }
+    zend_end_try();
+
+    if (UNEXPECTED(bailout)) {
+        const char *m = (s->request && s->request->method)
+                            ? ZSTR_VAL(s->request->method) : "?";
+        const char *u = (s->request && s->request->uri)
+                            ? ZSTR_VAL(s->request->uri) : "?";
+        http_handler_log_bailout("h3", co, m, u);
+        return;
+    }
 
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't get counted as

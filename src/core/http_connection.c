@@ -27,6 +27,10 @@
  * headers are needed — the async reactor owns the socket lifecycle. */
 #include <limits.h>
 #include <stdint.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <execinfo.h>
+#include <stdio.h>
 
 /* MSG_NOSIGNAL is a Linux extension. On BSD/macOS SO_NOSIGPIPE is the
  * equivalent; on Windows SIGPIPE does not exist. Providing a no-op macro
@@ -1622,6 +1626,48 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
 }
 /* }}} */
 
+/* {{{ http_handler_log_bailout
+ *
+ * Shared bailout-firewall logger. Called from H1/H2/H3 handler-entry
+ * zend_catch sites. See declaration in http_connection.h for contract.
+ *
+ * Three pieces of info we want at the catch site:
+ *   1. The PHP-level cause — PG(last_error_message)/file/lineno are set
+ *      by zend_error_cb on the way to zend_bailout and stay valid past
+ *      the longjmp (they're pemalloc'd, persistent globals).
+ *   2. The PHP user-stack at the moment of the fatal — already printed
+ *      by SAPI's php_error_cb when log_errors=1 / display_errors=stderr.
+ *      No need to duplicate; we route via zend_error so SAPI handles it.
+ *   3. The C-stack inside the server when the catch fired — nothing
+ *      else captures this. Dump via backtrace(3) directly.
+ */
+void http_handler_log_bailout(const char *proto, const void *coroutine,
+                              const char *method, const char *uri)
+{
+    const zend_string *last_err = PG(last_error_message);
+    const zend_string *err_file = PG(last_error_file);
+    const int err_line = PG(last_error_lineno);
+    const char *cause = (last_err != NULL) ? ZSTR_VAL(last_err) : "(no PG message)";
+    const char *file  = (err_file != NULL) ? ZSTR_VAL(err_file) : "?";
+    const char *m     = method ? method : "?";
+    const char *u     = uri    ? uri    : "?";
+
+    zend_error(E_WARNING,
+               "[true-async-server] zend_bailout in %s handler: tid=%ld co=%p %s %s "
+               "— %s (at %s:%d)",
+               proto ? proto : "?", (long) syscall(SYS_gettid),
+               coroutine, m, u, cause, file, err_line);
+
+    void *bt[48];
+    const int n = backtrace(bt, 48);
+    fprintf(stderr, "[true-async-server] --- C backtrace (proto=%s) ---\n",
+            proto ? proto : "?");
+    backtrace_symbols_fd(bt, n, fileno(stderr));
+    fprintf(stderr, "[true-async-server] --- end C backtrace ---\n");
+    fflush(stderr);
+}
+/* }}} */
+
 /* {{{ http_handler_coroutine_entry
  *
  * Coroutine body: calls the user's PHP handler with (request, response).
@@ -1658,7 +1704,46 @@ static void http_handler_coroutine_entry(void)
         .param_count    = 2,
         .named_params   = NULL,
     };
-    zend_call_function(&fci, &conn->handler->fci_cache);
+    /* Bailout firewall at the request boundary.
+     *
+     * Without this, a zend_bailout inside the user handler (OOM,
+     * max_execution_time, fatal error, internal corruption) propagates
+     * via longjmp past this function into async_coroutine_execute's
+     * outer zend_catch, which sets should_start_graceful_shutdown = true
+     * and quietly retires the WHOLE worker thread. Under sustained load
+     * even rare bailouts decimate worker count and throughput collapses
+     * silently. With the catch here:
+     *   1. The bailout is contained to one request.
+     *   2. We log it via zend_error(E_WARNING, ...) — SAPI routes it to
+     *      the configured error_log (or stderr when display_errors=stderr),
+     *      so failure never goes silent regardless of operator config.
+     *   3. We mark the ctx so dispose synthesizes a 500 response instead
+     *      of touching the user's potentially-clobbered response zval.
+     *   4. We MUST NOT call any further PHP API in this function: post-
+     *      bailout EG state cannot sustain another emalloc/zval op
+     *      (verified empirically — earlier attempts SIGSEGV'd on
+     *      zval_ptr_dtor and the per-request sample). Jump straight to
+     *      exit; OBJ_RELEASE on the coroutine and the rest of cleanup
+     *      run in async_coroutine_finalize → extended_dispose, which has
+     *      its own zend_try and treats this case via ctx->handler_bailout. */
+    zend_try
+    {
+        zend_call_function(&fci, &conn->handler->fci_cache);
+    }
+    zend_catch
+    {
+        ctx->handler_bailout = true;
+    }
+    zend_end_try();
+
+    if (UNEXPECTED(ctx->handler_bailout)) {
+        const char *m = (req && req->method) ? ZSTR_VAL(req->method) : "?";
+        const char *u = (req && req->uri)    ? ZSTR_VAL(req->uri)    : "?";
+        http_handler_log_bailout("h1", coroutine, m, u);
+        /* Skip retval dtor, sample, end_ns, count_request — every one of
+         * those touches state that's untrustworthy after a bailout. */
+        return;
+    }
 
     /* Stamp end_ns and fire the backpressure sample immediately after
      * the handler returned — BEFORE zval_ptr_dtor(retval) so destructor
@@ -1716,6 +1801,15 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * request object lifetime is already detached from conn. */
     if (conn->current_request == ctx->request) {
         conn->current_request = NULL;
+    }
+
+    /* Bailout firewall path: handler longjmp'd out via zend_bailout
+     * (see http_handler_coroutine_entry). PHP-VM state is tainted but
+     * the response object itself is just a C struct — safe to reset. */
+    if (ctx->handler_bailout
+        && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {
+        http_response_reset_to_error(Z_OBJ(ctx->response_zv), 500,
+                                     "Internal Server Error");
     }
 
     /* If the handler threw / was cancelled and the response isn't

@@ -284,7 +284,23 @@ typedef struct {
     zval               request_zv;
     zval               response_zv;
     bool               h1_stream_headers_sent;  /* status+headers already on wire (chunked) */
+    bool               handler_bailout;          /* zend_bailout caught in handler entry —
+                                                  * dispose must skip PHP API on zvals and
+                                                  * emit a synthetic 500 response. */
 } http1_request_ctx_t;
+
+/* Bailout firewall: log helper called from every handler-entry zend_catch
+ * (H1, H2, H3). Reads PG(last_error_*) for the cause (set by zend_error_cb
+ * just before zend_bailout), emits zend_error(E_WARNING, ...) so SAPI
+ * routes it through the normal error_log/display_errors pipeline, and
+ * dumps a C backtrace to stderr. Safe to call from a zend_catch block —
+ * touches only pemalloc-backed PG state and libc.
+ *
+ * proto: short tag for the protocol the bailout fired in ("h1"/"h2"/"h3").
+ * coroutine, method, uri: identification of the request that died — any
+ * may be NULL/"" if unavailable. */
+void http_handler_log_bailout(const char *proto, const void *coroutine,
+                              const char *method, const char *uri);
 
 /* Connection lifecycle */
 /* Allocate a conn slot from server's arena (or fall back to ecalloc

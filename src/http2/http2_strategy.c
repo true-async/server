@@ -218,7 +218,33 @@ static void http2_handler_coroutine_entry(void)
         .param_count    = 2,
         .named_params   = NULL,
     };
-    zend_call_function(&fci, &conn->handler->fci_cache);
+    /* Bailout firewall — see http_handler_log_bailout in
+     * src/core/http_connection.c for the rationale. Without it any
+     * zend_bailout under the user handler propagates to
+     * async_coroutine_execute's outer zend_catch and quietly retires the
+     * worker via should_start_graceful_shutdown. */
+    volatile bool bailout = false;
+    zend_try
+    {
+        zend_call_function(&fci, &conn->handler->fci_cache);
+    }
+    zend_catch
+    {
+        bailout = true;
+    }
+    zend_end_try();
+
+    if (UNEXPECTED(bailout)) {
+        const char *m = (stream->request && stream->request->method)
+                            ? ZSTR_VAL(stream->request->method) : "?";
+        const char *u = (stream->request && stream->request->uri)
+                            ? ZSTR_VAL(stream->request->uri) : "?";
+        http_handler_log_bailout("h2", co, m, u);
+        /* Skip retval dtor + sample + count — post-bailout PHP state
+         * cannot sustain those. Stream dispose still runs and will
+         * RST or send whatever the response was at the point of bailout. */
+        return;
+    }
 
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't count as service
