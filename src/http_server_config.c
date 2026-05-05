@@ -101,7 +101,10 @@ static void http_server_config_populate_from_shared(
 #define DEFAULT_KEEPALIVE_TIMEOUT       5      /* 5 seconds */
 #define DEFAULT_SHUTDOWN_TIMEOUT        5      /* 5 seconds */
 #define DEFAULT_WRITE_BUFFER_SIZE       65536  /* 64KB */
-#define DEFAULT_BACKPRESSURE_TARGET_MS  5      /* RFC 8289 CoDel default */
+#define DEFAULT_BACKPRESSURE_TARGET_MS  0      /* CoDel off by default — sojourn-based AQM
+                                                * misfires on HTTP/2 mux (sustained pipeline
+                                                * looks like persistent queue). Opt-in via
+                                                * setBackpressureTargetMs() / CODEL_TARGET_MS. */
 
 /* Drain defaults.
  * Age + grace default 0 = "proactive drain off"; opt-in by operator.
@@ -671,7 +674,9 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getShutdownTimeout)
  * Sets the CoDel target sojourn in milliseconds. When request queue-wait
  * (sojourn) stays above this threshold for 100 ms, the listener is paused
  * until existing work drains. 0 disables CoDel (hard cap via
- * max_connections still works). Default: 5 ms (RFC 8289).
+ * max_connections still works). Default: 0 (off) — sojourn-based AQM
+ * misfires on HTTP/2 mux where sustained pipelines look like persistent
+ * queue. Set to 5 (RFC 8289) to opt in for HTTP/1-dominated workloads.
  *
  * See docs/BACKPRESSURE.md for full mechanism + tuning guidance. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBackpressureTargetMs)

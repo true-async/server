@@ -154,8 +154,9 @@ struct http_server_object {
      * sojourn samples delivered from http_handler_coroutine_entry.
      * codel_target_ns is the threshold: if min sojourn stays above this
      * value for one full interval, listeners pause. Sourced once at
-     * start() from env CODEL_TARGET_MS (default 5) pending a proper
-     * config-API entry. */
+     * start() from HttpServerConfig::setBackpressureTargetMs() (default
+     * 0 = off — sojourn misfires on HTTP/2 mux), with env
+     * CODEL_TARGET_MS as ops-time override. */
     uint64_t                 codel_target_ns;
     uint64_t                 codel_window_start_ns;
     uint64_t                 codel_min_sojourn_ns;
@@ -1276,10 +1277,11 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     server->codel_min_sojourn_ns = 0;
     server->codel_first_above_target_ns = 0;
 
-    /* CoDel target from config (default 5 ms, RFC 8289). CODEL_TARGET_MS
-     * env var still honoured as an ops-friendly override — no rebuild
-     * needed to tune a running deployment. 0 (either source) disables
-     * CoDel; hard-cap hysteresis keeps working. */
+    /* CoDel target from config (default 0 = off; sojourn-based AQM misfires
+     * on HTTP/2 mux). CODEL_TARGET_MS env var still honoured as an
+     * ops-friendly override — no rebuild needed to tune a running
+     * deployment. 0 (either source) disables CoDel; hard-cap hysteresis
+     * keeps working. */
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL,
                                    "getBackpressureTargetMs", &retval);
     uint64_t codel_target_ms = (uint64_t)Z_LVAL(retval);
