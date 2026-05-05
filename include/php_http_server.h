@@ -435,6 +435,11 @@ void http_server_on_parse_error(http_server_object *server, int status_code);
 HashTable          *http_server_get_protocol_handlers(http_server_object *server);
 zend_async_scope_t *http_server_get_scope            (http_server_object *server);
 
+/* Live HttpServerConfig the server was constructed with. The returned
+ * pointer is non-owning and stays valid for the server's lifetime —
+ * the config object's zval is held inside http_server_object. */
+http_server_config_t *http_server_get_config         (http_server_object *server);
+
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures
  * (http_connection_t, http3_connection_t, mp_processor_t) cache the
  * result at create time. Returns &http_log_state_default for NULL. */

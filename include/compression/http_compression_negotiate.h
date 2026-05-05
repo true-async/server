@@ -20,11 +20,12 @@ typedef struct {
     bool identity_acceptable;
 } http_accept_encoding_t;
 
-/* Initialise to "no Accept-Encoding header was sent" (RFC: any coding
- * acceptable). Distinct from parsing an empty header value, which means
- * "no content coding wanted" — pure-identity. Callers must use this
- * helper when the header is absent rather than calling parse() with
- * len=0, to keep that distinction explicit. */
+/* Initialise to the "no Accept-Encoding header was sent" default. We
+ * deliberately resolve this to identity-only (gzip rejected) rather
+ * than RFC 9110 §12.5.3's strict "any coding acceptable" — see the
+ * impl comment for the rationale (BREACH-safe-by-default + matching
+ * nginx). Distinct from parsing an empty header value, which also
+ * resolves to identity-only via parse() but for a different RFC reason. */
 void http_accept_encoding_init_default(http_accept_encoding_t *out);
 
 /* Parse a single Accept-Encoding header value. Multi-value headers

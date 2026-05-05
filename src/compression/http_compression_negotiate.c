@@ -54,7 +54,11 @@ static bool q_is_zero(const char *s, size_t len)
 
 void http_accept_encoding_init_default(http_accept_encoding_t *out)
 {
-    out->gzip_acceptable     = true;
+    /* "No Accept-Encoding header" → identity only. RFC 9110 §12.5.3
+     * permits any coding, but real-world clients without AE are usually
+     * CLI tools / probes that may not handle gzip — and BREACH risk
+     * argues for opt-in over opt-out. nginx ships the same default. */
+    out->gzip_acceptable     = false;
     out->identity_acceptable = true;
 }
 

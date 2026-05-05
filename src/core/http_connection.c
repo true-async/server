@@ -1581,6 +1581,20 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
                                      &h1_stream_ops, ctx);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Attach compression state (issue #8): captures the request +
+     * server cfg references the apply/wrapper hooks consult. No-op
+     * when the operator disabled compression in cfg. */
+    {
+        extern void http_compression_attach(zend_object *,
+            http_request_t *, http_server_config_t *);
+        http_server_config_t *cfg = http_server_get_config(conn->server);
+        if (cfg != NULL) {
+            http_compression_attach(Z_OBJ(ctx->response_zv), req, cfg);
+        }
+    }
+#endif
+
     conn->state = CONN_STATE_PROCESSING;
 
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);

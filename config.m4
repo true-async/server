@@ -441,6 +441,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/compression/http_compression_gzip.c
       src/compression/http_compression_defaults.c
       src/compression/http_compression_negotiate.c
+      src/compression/http_compression_response.c
     "
   fi
 

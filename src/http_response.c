@@ -94,6 +94,13 @@ typedef struct {
     bool             committed;         /* Response fully prepared for sending? */
     bool             streaming;         /* send() has been called — setBody/setHeader now throw */
 
+    /* Compression module state (issue #8). Opaque ptr — owned by the
+     * compression TU; allocated by http_compression_attach at dispatch
+     * and freed by http_compression_state_free at object dtor. NULL
+     * when compression is disabled or the response was created
+     * standalone (no dispatch). */
+    void            *compression_state;
+
     zend_object      std;
 } http_response_object;
 
@@ -849,6 +856,16 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
         response->streaming = true;
         response->committed = true;
         response->headers_sent = true;
+#ifdef HAVE_HTTP_COMPRESSION
+        /* Wrap stream_ops with a compressing one if Accept-Encoding +
+         * response state allow gzip. Mutates Content-Encoding/Vary on
+         * the response so the stream's underlying header-commit picks
+         * them up on the next line. */
+        {
+            extern void http_compression_maybe_install_stream_wrapper(zend_object *);
+            http_compression_maybe_install_stream_wrapper(Z_OBJ_P(ZEND_THIS));
+        }
+#endif
     }
 
     /* Hand ownership of the chunk to the queue — the ops layer
@@ -920,6 +937,23 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
 }
 /* }}} */
 
+/* {{{ proto HttpResponse::setNoCompression(): static
+ *
+ * Mark the response as ineligible for compression — overrides every
+ * other rule. Use on responses that mix secrets with reflected user
+ * input (BREACH mitigation), pre-compressed payloads, or anything the
+ * server should not wrap in Content-Encoding. Idempotent. */
+ZEND_METHOD(TrueAsync_HttpResponse, setNoCompression)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+#ifdef HAVE_HTTP_COMPRESSION
+    extern void http_compression_mark_no_compression(zend_object *obj);
+    http_compression_mark_no_compression(Z_OBJ_P(ZEND_THIS));
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::isHeadersSent(): bool */
 ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent)
 {
@@ -953,6 +987,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->streaming = false;
     response->stream_ops = NULL;
     response->stream_ctx = NULL;
+    response->compression_state = NULL;
     response->socket_fd = SOCK_ERR;
     memset(&response->body, 0, sizeof(smart_str));
 
@@ -995,7 +1030,56 @@ static void http_response_free(zend_object *obj)
 
     smart_str_free(&response->body);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Compression state is owned by the compression TU; reach in only
+     * via the dedicated free helper — keeps the response struct opaque
+     * to that side. NULL-safe. */
+    {
+        extern void http_compression_state_free(zend_object *obj);
+        http_compression_state_free(obj);
+    }
+#endif
+
     zend_object_std_dtor(&response->std);
+}
+
+/* ============================================================
+ * Accessors used by the compression module (issue #8). Kept here
+ * so http_response_object stays private to this TU.
+ * ============================================================ */
+
+void *http_response_get_compression_slot(zend_object *obj)
+{
+    return http_response_from_obj(obj)->compression_state;
+}
+
+void http_response_set_compression_slot(zend_object *obj, void *p)
+{
+    http_response_from_obj(obj)->compression_state = p;
+}
+
+const http_response_stream_ops_t *http_response_get_stream_ops(zend_object *obj)
+{
+    return http_response_from_obj(obj)->stream_ops;
+}
+
+void *http_response_get_stream_ctx(zend_object *obj)
+{
+    return http_response_from_obj(obj)->stream_ctx;
+}
+
+void http_response_replace_stream_ops(zend_object *obj,
+                                      const http_response_stream_ops_t *ops,
+                                      void *ctx)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    r->stream_ops = ops;
+    r->stream_ctx = ctx;
+}
+
+smart_str *http_response_get_body_smart_str(zend_object *obj)
+{
+    return &http_response_from_obj(obj)->body;
 }
 
 /* {{{ http_response_class_register */
@@ -1150,6 +1234,13 @@ void http_response_format_parts(zend_object *obj,
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
 
+#ifdef HAVE_HTTP_COMPRESSION
+    {
+        extern void http_compression_apply_buffered(zend_object *);
+        http_compression_apply_buffered(obj);
+    }
+#endif
+
     smart_str_0(&response->body);
     const size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;
 
@@ -1174,6 +1265,13 @@ zend_string *http_response_format(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+
+#ifdef HAVE_HTTP_COMPRESSION
+    {
+        extern void http_compression_apply_buffered(zend_object *);
+        http_compression_apply_buffered(obj);
+    }
+#endif
 
     smart_str_0(&response->body);
     const size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;

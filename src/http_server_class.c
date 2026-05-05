@@ -743,6 +743,13 @@ zend_async_scope_t *http_server_get_scope(http_server_object *server)
     return server != NULL ? server->server_scope : NULL;
 }
 
+http_server_config_t *http_server_get_config(http_server_object *server)
+{
+    if (server == NULL) return NULL;
+    if (Z_TYPE(server->config) != IS_OBJECT) return NULL;
+    return http_server_config_from_obj(Z_OBJ(server->config));
+}
+
 http_log_state_t *http_server_get_log_state(http_server_object *server)
 {
     return server != NULL ? &server->log_state : &http_log_state_default;

@@ -21,14 +21,17 @@
 
 /* ---- Accept-Encoding parser ------------------------------------------ */
 
-static void test_default_accepts_everything(void **state)
+static void test_default_is_identity_only(void **state)
 {
     (void)state;
+    /* No header sent → conservative default: only identity. The init
+     * helper deliberately diverges from RFC 9110's "any coding
+     * acceptable" — see helper docstring for the rationale. */
     http_accept_encoding_t ae;
     http_accept_encoding_init_default(&ae);
-    assert_true(ae.gzip_acceptable);
+    assert_false(ae.gzip_acceptable);
     assert_true(ae.identity_acceptable);
-    assert_int_equal(http_accept_encoding_select(&ae), HTTP_CODEC_GZIP);
+    assert_int_equal(http_accept_encoding_select(&ae), HTTP_CODEC_IDENTITY);
 }
 
 static void test_empty_header_means_identity_only(void **state)
@@ -215,7 +218,7 @@ static void test_mime_normalize_buffer_too_small(void **state)
 int main(void)
 {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test(test_default_accepts_everything),
+        cmocka_unit_test(test_default_is_identity_only),
         cmocka_unit_test(test_empty_header_means_identity_only),
         cmocka_unit_test(test_explicit_gzip),
         cmocka_unit_test(test_gzip_q_zero),
