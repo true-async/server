@@ -174,6 +174,27 @@ static void h3_handler_coroutine_entry(void)
     }
     if (fcall == NULL) return;
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Inbound Content-Encoding decode (issue #8). Same shape as the
+     * H1/H2 handler entries. */
+    if (s->request != NULL) {
+        extern int http_compression_decode_request_body(
+            http_request_t *, http_server_config_t *);
+        extern void http_response_set_error(zend_object *, int, const char *);
+        http_server_config_t *cfg = http_server_get_config(server);
+        int dec = http_compression_decode_request_body(s->request, cfg);
+        if (dec != 0) {
+            http_response_set_error(Z_OBJ(s->response_zv), dec,
+                dec == 415 ? "Unsupported Content-Encoding" :
+                dec == 413 ? "Payload Too Large after decompression" :
+                             "Malformed compressed request body");
+            http_server_count_request(s->conn->counters);
+            if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
+            return;
+        }
+    }
+#endif
+
     zval params[2], retval;
     ZVAL_COPY_VALUE(&params[0], &s->request_zv);
     ZVAL_COPY_VALUE(&params[1], &s->response_zv);

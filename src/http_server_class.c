@@ -871,6 +871,14 @@ void http_server_bind_connection(http_server_object *server,
     real->counters  = &server->counters;
     real->view      = &server->view;
     real->log_state = &server->log_state;
+    /* Live config pointer for hot-path readers (compression, future
+     * inline accessors). Same NULL-on-server-free discipline as the
+     * other cached pointers. */
+    if (Z_TYPE(server->config) == IS_OBJECT) {
+        real->config = http_server_config_from_obj(Z_OBJ(server->config));
+    } else {
+        real->config = NULL;
+    }
 }
 
 /* Connection close hook. Drives active_connections-- and the hysteresis

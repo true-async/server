@@ -88,6 +88,12 @@ struct _http_connection_t {
     http_server_counters_t    *counters;
     const http_server_view_t  *view;
 
+    /* Live config pointer, cached at bind time. Same NULL-safety
+     * discipline as counters/view: re-pointed to NULL at server free,
+     * callers null-check before reading non-snapshot fields (HashTables,
+     * MIME whitelist) that don't fit into the lean view slice. */
+    http_server_config_t      *config;
+
     /* Sink for log emits originating from this connection. Set at
      * create time to &server->log_state (or &http_log_state_default
      * when unsupervised). http_server_free re-points back to default

@@ -134,17 +134,12 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* Attach compression state (issue #8). Mirror of the H1 dispatch
-     * hook — sets up the request + cfg references that apply_buffered
-     * and the streaming wrapper consult at commit time. */
-    {
+     * hook — uses conn->config cached at bind time. */
+    if (self->conn->config != NULL) {
         extern void http_compression_attach(zend_object *,
             http_request_t *, http_server_config_t *);
-        http_server_config_t *cfg =
-            http_server_get_config(self->conn->server);
-        if (cfg != NULL) {
-            http_compression_attach(Z_OBJ(stream->response_zv),
-                                    stream->request, cfg);
-        }
+        http_compression_attach(Z_OBJ(stream->response_zv),
+                                stream->request, self->conn->config);
     }
 #endif
 
@@ -219,6 +214,28 @@ static void http2_handler_coroutine_entry(void)
     if (stream->request != NULL && stamps) {
         stream->request->start_ns = zend_hrtime();
     }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Inbound Content-Encoding decode (issue #8). Mirror of the H1
+     * handler-entry hook — produces a canned error response and skips
+     * the user handler when decoding fails. */
+    if (stream->request != NULL) {
+        extern int http_compression_decode_request_body(
+            http_request_t *, http_server_config_t *);
+        extern void http_response_set_error(zend_object *, int, const char *);
+        int dec = http_compression_decode_request_body(
+            stream->request, conn->config);
+        if (dec != 0) {
+            http_response_set_error(Z_OBJ(stream->response_zv), dec,
+                dec == 415 ? "Unsupported Content-Encoding" :
+                dec == 413 ? "Payload Too Large after decompression" :
+                             "Malformed compressed request body");
+            http_server_count_request(conn->counters);
+            if (stamps) stream->request->end_ns = zend_hrtime();
+            return;
+        }
+    }
+#endif
 
     zval params[2], retval;
     ZVAL_COPY_VALUE(&params[0], &stream->request_zv);

@@ -1082,6 +1082,28 @@ smart_str *http_response_get_body_smart_str(zend_object *obj)
     return &http_response_from_obj(obj)->body;
 }
 
+/* Internal "set canned error" — used when the dispatch layer rejects
+ * a request before the handler runs (e.g. Content-Encoding decode
+ * failure). Bypasses the PHP-facing setHeader/setStatusCode guards
+ * because nothing has been committed yet. The dispose path emits it
+ * exactly like a handler-built response. */
+void http_response_set_error(zend_object *obj, int status, const char *message)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    r->status_code = status;
+    /* text/plain so curl / fetch clients show the body without
+     * format-sniffing surprises. */
+    zend_string *ct_name  = zend_string_init("content-type", 12, 0);
+    zend_string *ct_value = zend_string_init("text/plain; charset=utf-8", 25, 0);
+    zval ct_z;
+    ZVAL_STR(&ct_z, ct_value);
+    zend_hash_update(r->headers, ct_name, &ct_z);
+    zend_string_release(ct_name);
+    smart_str_free(&r->body);
+    smart_str_appends(&r->body, message);
+    smart_str_0(&r->body);
+}
+
 /* {{{ http_response_class_register */
 void http_response_class_register(void)
 {
