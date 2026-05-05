@@ -439,6 +439,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     http_server_sources="$http_server_sources
       src/compression/http_compression.c
       src/compression/http_compression_gzip.c
+      src/compression/http_compression_defaults.c
     "
   fi
 

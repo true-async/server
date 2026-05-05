@@ -147,6 +147,7 @@ if(ENABLE_HTTP_COMPRESSION)
         set(COMPRESSION_SOURCES
             src/compression/http_compression.c
             src/compression/http_compression_gzip.c
+            src/compression/http_compression_defaults.c
         )
     else()
         message(STATUS "  Compression: disabled (no zlib-ng or zlib found)")

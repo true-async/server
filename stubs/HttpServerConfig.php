@@ -392,6 +392,89 @@ final class HttpServerConfig
     /** @return bool */
     public function isHttp3AltSvcEnabled(): bool {}
 
+    // === HTTP body compression (issue #8) ===
+
+    /**
+     * Master switch for HTTP body compression. When true (default), responses
+     * served on H1/H2/H3 are compressed when the client advertises a
+     * supported encoding via Accept-Encoding and the response satisfies
+     * the policy filters (size, MIME, no Range, etc.).
+     *
+     * Default: true. When the extension is built without
+     * --enable-http-compression, only setCompressionEnabled(false) is
+     * accepted — passing true throws.
+     *
+     * @param bool $enable
+     * @return static
+     */
+    public function setCompressionEnabled(bool $enable): static {}
+
+    /** @return bool */
+    public function isCompressionEnabled(): bool {}
+
+    /**
+     * Compression level. zlib semantics: 1 = fastest/weakest,
+     * 9 = slowest/strongest, 6 = balanced default.
+     *
+     * Default: 6. Valid: 1..9.
+     *
+     * @param int $level
+     * @return static
+     */
+    public function setCompressionLevel(int $level): static {}
+
+    /** @return int */
+    public function getCompressionLevel(): int {}
+
+    /**
+     * Body-size threshold below which responses are left uncompressed
+     * (the encoding overhead beats any real-world win on tiny bodies).
+     *
+     * Default: 1024 (1 KiB). Valid: 0..16 MiB.
+     *
+     * @param int $bytes
+     * @return static
+     */
+    public function setCompressionMinSize(int $bytes): static {}
+
+    /** @return int */
+    public function getCompressionMinSize(): int {}
+
+    /**
+     * MIME-type whitelist eligible for compression. REPLACES the current
+     * list wholesale (nginx `gzip_types` semantics). Entries are
+     * normalised at setter time: parameters (`; charset=…`) stripped,
+     * whitespace trimmed, lowercased — so the per-request match is
+     * exact and zero-allocation.
+     *
+     * Default: ["application/javascript", "application/json",
+     * "application/xml", "image/svg+xml", "text/css", "text/html",
+     * "text/javascript", "text/plain", "text/xml"].
+     *
+     * @param string[] $types
+     * @return static
+     */
+    public function setCompressionMimeTypes(array $types): static {}
+
+    /** @return string[] The materialised whitelist */
+    public function getCompressionMimeTypes(): array {}
+
+    /**
+     * Anti-zip-bomb cap on decoded request bodies (Content-Encoding: gzip
+     * inbound). Decoders abort and the request fails with 413 once the
+     * decompressed byte count exceeds this. 0 disables the cap entirely
+     * (must be set explicitly — there is no implicit "unlimited" path).
+     *
+     * Default: 10485760 (10 MiB).
+     *
+     * @param int $bytes
+     * @return static
+     */
+    public function setRequestMaxDecompressedSize(int $bytes): static {}
+
+    /** @return int */
+    public function getRequestMaxDecompressedSize(): int {}
+
     // === Buffers ===
 
     /**

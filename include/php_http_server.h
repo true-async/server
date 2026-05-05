@@ -210,6 +210,26 @@ struct _http_server_config_t {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
 
+    /* HTTP body compression (issue #8). Phase 1 ships gzip via zlib-ng.
+     *   compression_enabled         — master switch (default true).
+     *   compression_level           — 1..9 (zlib semantics; default 6).
+     *   compression_min_size        — body below this is left identity
+     *                                 (overhead beats win on tiny bodies).
+     *   compression_mime_types      — set of `type/subtype` strings (lowercase,
+     *                                 stripped of params) eligible for compression.
+     *                                 Materialised at object init from the
+     *                                 default whitelist so getters always
+     *                                 return the live policy. setter REPLACES
+     *                                 wholesale (nginx semantics).
+     *   request_max_decompressed_size — anti-zip-bomb cap on decoded request
+     *                                 bodies. 0 = no cap (must be explicit).
+     */
+    bool     compression_enabled;
+    uint8_t  compression_level;
+    size_t   compression_min_size;
+    HashTable *compression_mime_types;
+    size_t   request_max_decompressed_size;
+
     /* Log + telemetry. log_severity is an http_log_severity_t int value
      * (0/5/9/13/17), set via setLogSeverity(LogSeverity). log_stream is
      * an IS_RESOURCE zval pointing at any
