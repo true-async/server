@@ -132,6 +132,22 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
     http_response_install_stream_ops(Z_OBJ(stream->response_zv),
                                      &h2_stream_ops, stream);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Attach compression state (issue #8). Mirror of the H1 dispatch
+     * hook — sets up the request + cfg references that apply_buffered
+     * and the streaming wrapper consult at commit time. */
+    {
+        extern void http_compression_attach(zend_object *,
+            http_request_t *, http_server_config_t *);
+        http_server_config_t *cfg =
+            http_server_get_config(self->conn->server);
+        if (cfg != NULL) {
+            http_compression_attach(Z_OBJ(stream->response_zv),
+                                    stream->request, cfg);
+        }
+    }
+#endif
+
     /* Spawn the handler coroutine. extended_data is the STREAM, not
      * the connection — that's what makes multiplex safe: N
      * coroutines hold N distinct stream pointers, each pointing at
@@ -523,6 +539,17 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
     if (self->session == NULL) {
         return false;
     }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* H2 reads body via http_response_get_body() directly rather than
+     * http_response_format[/_parts], so the buffered apply hook lives
+     * here too — must run before the headers flatten so the mutated
+     * Content-Encoding/Vary ride the HEADERS frame. */
+    {
+        extern void http_compression_apply_buffered(zend_object *);
+        http_compression_apply_buffered(response_obj);
+    }
+#endif
 
     /* Advertise H3 endpoint to H2 clients via Alt-Svc.
      * Same hook as H1; no-op when handler already set the header or

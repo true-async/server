@@ -106,6 +106,23 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_response_install_stream_ops(Z_OBJ(s->response_zv),
                                      &h3_stream_ops, s);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Attach compression state (issue #8). Server pointer comes from
+     * the listener — same pattern that http3_handler_coroutine uses
+     * for the request-sample bookkeeping. */
+    {
+        extern void http_compression_attach(zend_object *,
+            http_request_t *, http_server_config_t *);
+        http_server_object *srv =
+            (http_server_object *)http3_listener_server_obj(c->listener);
+        http_server_config_t *cfg = http_server_get_config(srv);
+        if (cfg != NULL) {
+            http_compression_attach(Z_OBJ(s->response_zv),
+                                    s->request, cfg);
+        }
+    }
+#endif
+
     /* Spawn the per-stream handler coroutine. extended_data is the
      * STREAM (not the connection) — that's how N concurrent streams on
      * the same QUIC connection get N independent (request, response)
