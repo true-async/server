@@ -105,6 +105,14 @@ typedef struct ws_session_t {
      * when no recv() is suspended; non-NULL while one is. A second
      * concurrent recv() throws WebSocketConcurrentReadException. */
     zend_coroutine_t *recv_waiter;
+
+    /* Periodic keepalive PING (PLAN_WEBSOCKET.md §6.6). Created when
+     * ws_ping_interval_ms > 0 in the owning HttpServerConfig. Fires
+     * every interval; the callback queues a control PING through
+     * wslay and drives wslay_event_send. Stopped + disposed in
+     * ws_session_destroy. NULL when keepalive is disabled. */
+    zend_async_event_t          *ping_timer;
+    zend_async_event_callback_t *ping_timer_cb;
 } ws_session_t;
 
 /*

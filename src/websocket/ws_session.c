@@ -95,6 +95,102 @@ static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
 }
 /* }}} */
 
+/* {{{ ws_ping_timer_cb_t / ws_ping_timer_fire — periodic keepalive
+ *
+ * Fires every ws_ping_interval_ms. Queues a zero-payload PING into
+ * wslay's outbound queue and drives wslay_event_send to push it on
+ * the wire. Runs in event-loop context (timer callbacks are not
+ * coroutines), so the send goes through ws_session_send_callback
+ * which routes through http_connection_send — which is suspending,
+ * but timer callbacks DO get a coroutine assigned automatically by
+ * the TrueAsync timer machinery (see how http_write_timer_cb_fn
+ * uses async_io APIs from its callback).
+ *
+ * If the session is mid-flush by another coroutine, our queue_msg
+ * still adds the frame; that flusher will drain it. We avoid stomping
+ * on its in-flight wslay_event_send by checking session->flushing.
+ */
+typedef struct {
+    zend_async_event_callback_t base;
+    ws_session_t               *session;
+} ws_ping_timer_cb_t;
+
+static void ws_ping_timer_cb_dispose(
+    zend_async_event_callback_t *callback, zend_async_event_t *event)
+{
+    (void)event;
+    efree(callback);
+}
+
+static void ws_ping_timer_fire(zend_async_event_t *event,
+                               zend_async_event_callback_t *callback,
+                               void *result, zend_object *exception)
+{
+    (void)event; (void)result; (void)exception;
+    ws_ping_timer_cb_t *cb = (ws_ping_timer_cb_t *)callback;
+    ws_session_t *s = cb->session;
+    if (s == NULL || s->ctx == NULL || s->peer_closed || s->write_error) {
+        return;
+    }
+
+    /* Queue a control PING with empty payload. wslay handles framing,
+     * including the FIN=1 + control-opcode bits. */
+    static const struct wslay_event_msg ping = {
+        .opcode     = WSLAY_PING,
+        .msg        = NULL,
+        .msg_length = 0,
+    };
+    if (wslay_event_queue_msg(s->ctx, &ping) != 0) {
+        return;
+    }
+
+    /* Drive the send only if no other coroutine is currently
+     * flushing — they'll pick up our frame on their next iteration.
+     * This honours the same flusher-role discipline as
+     * WebSocket::send() (PLAN_WEBSOCKET.md §2.4). */
+    if (!s->flushing) {
+        s->flushing = 1;
+        (void)wslay_event_send(s->ctx);
+        s->flushing = 0;
+    }
+}
+
+void ws_session_arm_ping_timer(ws_session_t *s, uint32_t interval_ms)
+{
+    if (s->ping_timer != NULL) {
+        return;
+    }
+    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT(
+        (zend_ulong)interval_ms, /*nanoseconds=*/false);
+    if (t == NULL) {
+        return;
+    }
+    ZEND_ASYNC_TIMER_SET_MULTISHOT(t);
+
+    ws_ping_timer_cb_t *cb = (ws_ping_timer_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(ws_ping_timer_fire, sizeof(*cb));
+    if (cb == NULL) {
+        t->base.dispose(&t->base);
+        return;
+    }
+    cb->base.dispose = ws_ping_timer_cb_dispose;
+    cb->session      = s;
+
+    if (!t->base.add_callback(&t->base, &cb->base)) {
+        efree(cb);
+        t->base.dispose(&t->base);
+        return;
+    }
+    if (!t->base.start(&t->base)) {
+        zend_async_callbacks_remove(&t->base, &cb->base);
+        t->base.dispose(&t->base);
+        return;
+    }
+    s->ping_timer    = &t->base;
+    s->ping_timer_cb = &cb->base;
+}
+/* }}} */
+
 /* {{{ ws_notify_recv_waiter
  *
  * Wake whoever is suspended in WebSocket::recv() (if anyone). The
@@ -183,6 +279,22 @@ ws_session_t *ws_session_init(http_connection_t *conn)
         return NULL;
     }
 
+    /* Arm the periodic PING keepalive if configured. Reads
+     * ws_ping_interval_ms from the owning server's HttpServerConfig.
+     * 0 = disabled (peer-driven keepalive only). */
+    uint32_t ping_ms = 0;
+    if (conn != NULL && conn->server != NULL) {
+        zval *config_zv = http_server_get_config_zv(conn->server);
+        if (config_zv != NULL && Z_TYPE_P(config_zv) == IS_OBJECT) {
+            http_server_config_t *cfg =
+                http_server_config_from_obj(Z_OBJ_P(config_zv));
+            ping_ms = cfg->ws_ping_interval_ms;
+        }
+    }
+    if (ping_ms > 0) {
+        ws_session_arm_ping_timer(s, ping_ms);
+    }
+
     /* Pull the configured cap from the owning server's frozen config
      * (the values were validated by the HttpServerConfig::setWs*
      * setters). Falls back to the documented 1 MiB default when this
@@ -211,6 +323,24 @@ void ws_session_destroy(ws_session_t *session)
     if (session == NULL) {
         return;
     }
+
+    /* Tear down the keepalive timer first so a late fire cannot
+     * race against the wslay context free below. The cb struct
+     * is owned by the timer's callback list — disposed via remove. */
+    if (session->ping_timer != NULL) {
+        if (session->ping_timer_cb != NULL) {
+            ((ws_ping_timer_cb_t *)session->ping_timer_cb)->session = NULL;
+            zend_async_callbacks_remove(session->ping_timer,
+                                        session->ping_timer_cb);
+            session->ping_timer_cb = NULL;
+        }
+        if (session->ping_timer->loop_ref_count > 0) {
+            session->ping_timer->stop(session->ping_timer);
+        }
+        session->ping_timer->dispose(session->ping_timer);
+        session->ping_timer = NULL;
+    }
+
     if (session->ctx) {
         wslay_event_context_free(session->ctx);
     }
