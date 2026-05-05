@@ -78,26 +78,23 @@ static inline http_compression_state_t *state_of(zend_object *obj)
 
 /* Direct HashTable insertion bypasses the user-facing setHeader guard
  * (which blocks edits after committed=true). That's intentional —
- * compression mutations happen *during* commit. */
+ * compression mutations happen *during* commit. zend_hash_str_update
+ * skips the key zend_string allocation (vs. zend_hash_update); only
+ * the value needs to be reified. */
 static void put_header_string(HashTable *ht, const char *name, size_t name_len,
                               const char *value, size_t value_len)
 {
-    zend_string *key = zend_string_init(name, name_len, 0);
-    zend_string *zv  = zend_string_init(value, value_len, 0);
     zval z;
-    ZVAL_STR(&z, zv);
-    zend_hash_update(ht, key, &z);
-    zend_string_release(key);
+    ZVAL_STR(&z, zend_string_init(value, value_len, 0));
+    zend_hash_str_update(ht, name, name_len, &z);
 }
 
-static void delete_header(HashTable *ht, const char *name, size_t name_len)
+static inline void delete_header(HashTable *ht, const char *name, size_t name_len)
 {
-    zend_string *key = zend_string_init(name, name_len, 0);
-    zend_hash_del(ht, key);
-    zend_string_release(key);
+    zend_hash_str_del(ht, name, name_len);
 }
 
-static bool has_header(const HashTable *ht, const char *name, size_t name_len)
+static inline bool has_header(const HashTable *ht, const char *name, size_t name_len)
 {
     return zend_hash_str_exists(ht, name, name_len);
 }
@@ -107,30 +104,38 @@ static void merge_vary_accept_encoding(HashTable *ht)
 {
     static const char V[]    = "vary";
     static const char AE[]   = "Accept-Encoding";
-    zval *existing = zend_hash_str_find(ht, V, sizeof(V) - 1);
+    const size_t      AE_LEN = sizeof(AE) - 1;
+
+    zval *const existing = zend_hash_str_find(ht, V, sizeof(V) - 1);
     if (existing == NULL) {
-        put_header_string(ht, V, sizeof(V) - 1, AE, sizeof(AE) - 1);
+        put_header_string(ht, V, sizeof(V) - 1, AE, AE_LEN);
         return;
     }
-    if (Z_TYPE_P(existing) == IS_STRING) {
-        const char *cur = Z_STRVAL_P(existing);
-        size_t      cl  = Z_STRLEN_P(existing);
-        /* Already mentions Accept-Encoding (case-insensitive needle)? */
-        for (size_t i = 0; i + (sizeof(AE) - 1) <= cl; i++) {
-            if (strncasecmp(cur + i, AE, sizeof(AE) - 1) == 0) return;
+    if (EXPECTED(Z_TYPE_P(existing) == IS_STRING)) {
+        const char *const cur = Z_STRVAL_P(existing);
+        const size_t      cl  = Z_STRLEN_P(existing);
+        /* Already mentions Accept-Encoding (case-insensitive needle)?
+         * Loop bound guarantees no read past the buffer end. */
+        if (cl >= AE_LEN) {
+            for (size_t i = 0, stop = cl - AE_LEN + 1; i < stop; i++) {
+                if (strncasecmp(cur + i, AE, AE_LEN) == 0) return;
+            }
         }
-        smart_str s = {0};
-        smart_str_appendl(&s, cur, cl);
-        smart_str_appends(&s, ", ");
-        smart_str_appendl(&s, AE, sizeof(AE) - 1);
-        smart_str_0(&s);
-        put_header_string(ht, V, sizeof(V) - 1, ZSTR_VAL(s.s), ZSTR_LEN(s.s));
-        smart_str_free(&s);
+        /* Build "<cur>, Accept-Encoding" in one allocation, store it. */
+        zend_string *const merged = zend_string_alloc(cl + 2 + AE_LEN, 0);
+        memcpy(ZSTR_VAL(merged), cur, cl);
+        memcpy(ZSTR_VAL(merged) + cl, ", ", 2);
+        memcpy(ZSTR_VAL(merged) + cl + 2, AE, AE_LEN);
+        ZSTR_VAL(merged)[cl + 2 + AE_LEN] = '\0';
+        zval z;
+        ZVAL_STR(&z, merged);
+        zend_hash_str_update(ht, V, sizeof(V) - 1, &z);
+        return;
     }
     /* IS_ARRAY: rare; just add a fresh entry — most clients dedup Vary. */
-    else if (Z_TYPE_P(existing) == IS_ARRAY) {
+    if (Z_TYPE_P(existing) == IS_ARRAY) {
         zval z;
-        ZVAL_STR(&z, zend_string_init(AE, sizeof(AE) - 1, 0));
+        ZVAL_STR(&z, zend_string_init(AE, AE_LEN, 0));
         zend_hash_next_index_insert(Z_ARRVAL_P(existing), &z);
     }
 }
@@ -149,21 +154,30 @@ static void mutate_headers_for_codec(HashTable *ht, http_codec_id_t codec)
 
 /* ----- decide() ------------------------------------------------------- */
 
-/* Look up `accept-encoding` in the request headers HT. The H1 parser
- * lowercases keys; H2/H3 already pass lowercase via :pseudo handling. */
-static bool request_header_lookup(http_request_t *req, const char *lower_name,
-                                  size_t lower_len,
-                                  const char **out_val, size_t *out_len)
+/* Look up a header value as a string. The H1 parser lowercases keys;
+ * H2/H3 pass lowercase via :pseudo handling — case-sensitive lookup
+ * suffices. Returns false on absence or non-string entry. */
+static bool request_header_value(const http_request_t *req,
+                                 const char *lower_name, size_t lower_len,
+                                 const char **out_val, size_t *out_len)
 {
-    if (req == NULL || req->headers == NULL) return false;
-    zval *zv = zend_hash_str_find(req->headers, lower_name, lower_len);
+    if (UNEXPECTED(req == NULL || req->headers == NULL)) return false;
+    const zval *zv = zend_hash_str_find(req->headers, lower_name, lower_len);
     if (zv == NULL || Z_TYPE_P(zv) != IS_STRING) return false;
     *out_val = Z_STRVAL_P(zv);
     *out_len = Z_STRLEN_P(zv);
     return true;
 }
 
-static bool method_is_head(http_request_t *req)
+/* Cheap presence-only check — no zval read, no string copy. */
+static inline bool request_has_header(const http_request_t *req,
+                                      const char *lower_name, size_t lower_len)
+{
+    if (UNEXPECTED(req == NULL || req->headers == NULL)) return false;
+    return zend_hash_str_exists(req->headers, lower_name, lower_len);
+}
+
+static inline bool method_is_head(const http_request_t *req)
 {
     return req && req->method &&
            ZSTR_LEN(req->method) == 4 &&
@@ -173,10 +187,10 @@ static bool method_is_head(http_request_t *req)
 /* Read the chosen content-type from the response's headers HT. The
  * dispatch flow lowercases stored keys, so a case-sensitive lookup
  * suffices. Returns 0 when the handler did not set one. */
-static size_t response_content_type(HashTable *resp_headers,
+static size_t response_content_type(const HashTable *resp_headers,
                                     char *buf, size_t buf_cap)
 {
-    zval *zv = zend_hash_str_find(resp_headers, "content-type", 12);
+    const zval *zv = zend_hash_str_find(resp_headers, "content-type", 12);
     if (zv == NULL || Z_TYPE_P(zv) != IS_STRING) return 0;
     return http_compression_mime_normalize(
         Z_STRVAL_P(zv), Z_STRLEN_P(zv), buf, buf_cap);
@@ -200,12 +214,12 @@ static http_codec_id_t decide(http_compression_state_t *st,
     }
     /* Range responses are sliced; compressing them would corrupt the
      * byte ranges the client asked for. */
-    if (request_header_lookup(st->request, "range", 5, &(const char*){0}, &(size_t){0})) {
+    if (request_has_header(st->request, "range", 5)) {
         return HTTP_CODEC_IDENTITY;
     }
     const char *ae_val = NULL; size_t ae_len = 0;
     http_accept_encoding_t ae;
-    if (request_header_lookup(st->request, "accept-encoding", 15, &ae_val, &ae_len)) {
+    if (request_header_value(st->request, "accept-encoding", 15, &ae_val, &ae_len)) {
         http_accept_encoding_parse(ae_val, ae_len, &ae);
     } else {
         http_accept_encoding_init_default(&ae);
@@ -316,52 +330,58 @@ void http_compression_apply_buffered(zend_object *response_obj)
         return;
     }
 
-    const http_encoder_vtable_t *vt = http_compression_lookup(codec);
-    if (vt == NULL) return;
-    http_encoder_t *enc = vt->create((int)st->cfg->compression_level);
-    if (enc == NULL) return;
+    const http_encoder_vtable_t *const vt = http_compression_lookup(codec);
+    if (UNEXPECTED(vt == NULL)) return;
+    http_encoder_t *const enc = vt->create((int)st->cfg->compression_level);
+    if (UNEXPECTED(enc == NULL)) return;
 
-    /* Output sizing: worst-case gzip overhead is small (~0.1% + 18 bytes
-     * for a single small block); allocating body_len + 64 covers it for
-     * all but pathologically incompressible inputs, and we grow on
-     * NEED_OUTPUT anyway. */
+    /* Pre-size for the worst-case output: gzip overhead on text is
+     * <0.1% + 18-byte header/trailer; on already-compressed input deflate
+     * may swell by up to 0.015% + 5 bytes per 32 KiB block. body_len + 64
+     * covers the common case in one allocation; NEED_OUTPUT tail-grows
+     * on the rare incompressible path. */
     smart_str out = {0};
     smart_str_alloc(&out, body_len + 64, 0);
 
-    /* Drive write() until all input consumed. */
-    const unsigned char *in = (const unsigned char *)ZSTR_VAL(body->s);
+    const unsigned char *const in = (const unsigned char *)ZSTR_VAL(body->s);
     size_t fed = 0;
+
+    /* write() drain. smart_str_alloc on NEED_OUTPUT instead of every
+     * iteration so the common single-pass case is one alloc. */
     while (fed < body_len) {
-        smart_str_alloc(&out, 4096, 0);
-        size_t consumed = 0, produced = 0;
-        size_t cap = ZSTR_LEN(out.s) ? out.a - ZSTR_LEN(out.s) : out.a;
-        if (cap < 256) {
+        size_t avail = out.a - ZSTR_LEN(out.s);
+        if (UNEXPECTED(avail < 64)) {
             smart_str_alloc(&out, 4096, 0);
-            cap = out.a - (out.s ? ZSTR_LEN(out.s) : 0);
+            avail = out.a - ZSTR_LEN(out.s);
         }
-        char *tail = ZSTR_VAL(out.s) + (out.s ? ZSTR_LEN(out.s) : 0);
-        http_encoder_status_t s = vt->write(enc,
+        size_t consumed = 0, produced = 0;
+        const http_encoder_status_t s = vt->write(enc,
             in + fed, body_len - fed, &consumed,
-            tail, cap, &produced);
-        if (s == HTTP_ENC_ERROR) {
+            ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
+        ZSTR_LEN(out.s) += produced;
+        fed             += consumed;
+        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
             vt->destroy(enc);
             smart_str_free(&out);
             return;  /* Leave body as-is; identity wins. */
         }
-        fed += consumed;
-        ZSTR_LEN(out.s) += produced;
+        /* HTTP_ENC_OK or NEED_OUTPUT: loop continues. */
     }
-    /* Drain finish(). */
+
+    /* finish() drain — emits gzip trailer (CRC32 + ISIZE). */
     for (;;) {
-        smart_str_alloc(&out, 64, 0);
-        size_t cap = out.a - ZSTR_LEN(out.s);
-        char *tail = ZSTR_VAL(out.s) + ZSTR_LEN(out.s);
+        size_t avail = out.a - ZSTR_LEN(out.s);
+        if (UNEXPECTED(avail < 32)) {
+            smart_str_alloc(&out, 64, 0);
+            avail = out.a - ZSTR_LEN(out.s);
+        }
         size_t produced = 0;
-        http_encoder_status_t s = vt->finish(enc, tail, cap, &produced);
+        const http_encoder_status_t s = vt->finish(enc,
+            ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
         ZSTR_LEN(out.s) += produced;
-        if (s == HTTP_ENC_DONE)        break;
-        if (s == HTTP_ENC_NEED_OUTPUT) continue;
-        /* Error mid-finish — abort. */
+        if (EXPECTED(s == HTTP_ENC_DONE))   break;
+        if (s == HTTP_ENC_NEED_OUTPUT)      continue;
+        /* Error mid-finish — abort, keep original body. */
         vt->destroy(enc);
         smart_str_free(&out);
         return;
@@ -369,7 +389,7 @@ void http_compression_apply_buffered(zend_object *response_obj)
     vt->destroy(enc);
     smart_str_0(&out);
 
-    /* Swap body. */
+    /* Swap body — release old, transfer ownership of out's zend_string. */
     smart_str_free(body);
     body->s = out.s;
     body->a = out.a;
@@ -390,22 +410,25 @@ typedef struct {
     bool                              first_chunk_done;
 } ws_ctx_t;
 
-/* Drain encoder output into freshly-allocated zend_strings and forward
- * them to the underlying append_chunk. Used by both append + finish. */
-static int forward_compressed(ws_ctx_t *w, const char *src, size_t src_len)
+/* Hand off an accumulated zend_string to the underlying stream ops.
+ * One call → one underlying append_chunk → one downstream chunk on the
+ * wire. Compared with emitting per-loop slices, this trades a small
+ * temporary buffer for fewer protocol-level frames (H2 DATA / chunked
+ * size-line). zs is consumed; the underlying owns the refcount. */
+static int forward_compressed(ws_ctx_t *const w, zend_string *zs)
 {
-    if (src_len == 0) return HTTP_STREAM_APPEND_OK;
-    zend_string *zs = zend_string_init(src, src_len, 0);
-    int rc = w->underlying_ops->append_chunk(w->underlying_ctx, zs);
-    /* underlying takes the refcount; we transferred it. */
-    return rc;
+    if (UNEXPECTED(zs == NULL || ZSTR_LEN(zs) == 0)) {
+        if (zs) zend_string_release(zs);
+        return HTTP_STREAM_APPEND_OK;
+    }
+    return w->underlying_ops->append_chunk(w->underlying_ctx, zs);
 }
 
 static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
 {
-    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+    ws_ctx_t *const w = (ws_ctx_t *)ctx_opaque;
 
-    if (!w->first_chunk_done) {
+    if (UNEXPECTED(!w->first_chunk_done)) {
         /* Header mutation deferred to first chunk: by now the handler
          * has finalised setHeader/setStatusCode (committed=true was set
          * by HttpResponse::send before we got here), and we know we
@@ -415,69 +438,94 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
         w->first_chunk_done = true;
     }
 
-    char buf[8192];
-    const unsigned char *in = (const unsigned char *)ZSTR_VAL(chunk);
-    size_t in_len = ZSTR_LEN(chunk);
-    int last_rc = HTTP_STREAM_APPEND_OK;
+    /* Accumulate compressed output across all encoder iterations into
+     * one zend_string, hand the whole thing to the underlying ops as a
+     * single chunk. Avoids one zend_string_init + one append_chunk
+     * round-trip per inner pass — relevant for chunked H1 (per-chunk
+     * size line + CRLF on the wire) and H2 (one DATA frame per call). */
+    const unsigned char *const in = (const unsigned char *)ZSTR_VAL(chunk);
+    const size_t in_len = ZSTR_LEN(chunk);
+    smart_str out = {0};
+    /* Pre-size: gzipped text is typically <50% of source. The estimate
+     * reduces realloc churn on the common case; finish() is not called
+     * here (mark_ended drains it) so 0-bytes-produced is also valid. */
+    smart_str_alloc(&out, in_len + 32, 0);
 
     size_t fed = 0;
     while (fed < in_len) {
+        size_t avail = out.a - ZSTR_LEN(out.s);
+        if (UNEXPECTED(avail < 64)) {
+            smart_str_alloc(&out, 4096, 0);
+            avail = out.a - ZSTR_LEN(out.s);
+        }
         size_t consumed = 0, produced = 0;
-        http_encoder_status_t s = w->encoder->vt->write(w->encoder,
+        const http_encoder_status_t s = w->encoder->vt->write(w->encoder,
             in + fed, in_len - fed, &consumed,
-            buf, sizeof(buf), &produced);
-        if (s == HTTP_ENC_ERROR) {
+            ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
+        ZSTR_LEN(out.s) += produced;
+        fed             += consumed;
+        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
+            smart_str_free(&out);
             zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
-        fed += consumed;
-        if (produced > 0) {
-            int rc = forward_compressed(w, buf, produced);
-            if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
-                zend_string_release(chunk);
-                return rc;
-            }
-            last_rc = rc;
-        }
-        /* HTTP_ENC_OK with avail_out > 0 and avail_in == 0 → done with
-         * this chunk; loop exits naturally. NEED_OUTPUT loops back to
-         * drain the next 8 KiB. */
+        /* HTTP_ENC_OK with all input consumed → loop exits. */
     }
     zend_string_release(chunk);
-    return last_rc;
+
+    if (out.s == NULL || ZSTR_LEN(out.s) == 0) {
+        /* Encoder had nothing to flush yet (deflate buffers internally). */
+        smart_str_free(&out);
+        return HTTP_STREAM_APPEND_OK;
+    }
+    smart_str_0(&out);
+    return forward_compressed(w, out.s);  /* transfers ownership */
 }
 
 static void ws_mark_ended(void *ctx_opaque)
 {
-    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+    ws_ctx_t *const w = (ws_ctx_t *)ctx_opaque;
     /* Drain finish() into the underlying stream. If the handler never
      * sent a single byte we still need to commit headers, encode the
      * empty stream's footer (10-byte gzip header + CRC trailer), and
      * tell the underlying side to terminate. */
-    if (!w->first_chunk_done) {
+    if (UNEXPECTED(!w->first_chunk_done)) {
         mutate_headers_for_codec(
             http_response_get_headers(w->response_obj), HTTP_CODEC_GZIP);
         w->first_chunk_done = true;
     }
 
-    char buf[8192];
+    /* Same accumulator pattern as append_chunk: build the trailer (and
+     * any deflate-buffered bytes finish() emits) into one zend_string
+     * and ship as a single underlying chunk. */
+    smart_str out = {0};
+    smart_str_alloc(&out, 64, 0);
     for (;;) {
-        size_t produced = 0;
-        http_encoder_status_t s = w->encoder->vt->finish(
-            w->encoder, buf, sizeof(buf), &produced);
-        if (produced > 0) {
-            (void)forward_compressed(w, buf, produced);
+        size_t avail = out.a - ZSTR_LEN(out.s);
+        if (UNEXPECTED(avail < 32)) {
+            smart_str_alloc(&out, 4096, 0);
+            avail = out.a - ZSTR_LEN(out.s);
         }
-        if (s == HTTP_ENC_DONE)        break;
-        if (s == HTTP_ENC_NEED_OUTPUT) continue;
-        break; /* error — best-effort: still close the underlying stream */
+        size_t produced = 0;
+        const http_encoder_status_t s = w->encoder->vt->finish(
+            w->encoder, ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
+        ZSTR_LEN(out.s) += produced;
+        if (EXPECTED(s == HTTP_ENC_DONE))   break;
+        if (s == HTTP_ENC_NEED_OUTPUT)      continue;
+        break;  /* error — fall through, still close the underlying stream */
+    }
+    if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
+        smart_str_0(&out);
+        (void)forward_compressed(w, out.s);  /* transfers ownership */
+    } else {
+        smart_str_free(&out);
     }
     w->underlying_ops->mark_ended(w->underlying_ctx);
 }
 
 static zend_async_event_t *ws_get_wait_event(void *ctx_opaque)
 {
-    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+    ws_ctx_t *const w = (ws_ctx_t *)ctx_opaque;
     return w->underlying_ops->get_wait_event(w->underlying_ctx);
 }
 
