@@ -333,5 +333,34 @@ if(NGHTTP2_FOUND)
     endif()
 endif()
 
+# Compression negotiation tests (issue #8). The negotiate TU is pure
+# C with no Zend deps so the unit test compiles standalone — no PHP
+# headers, no llhttp. Other compression sources (registry, gzip backend,
+# defaults) require HAVE_HTTP_COMPRESSION at compile time; we set it
+# directly here rather than re-running the pkg-config probe so the test
+# build stays decoupled from the main feature flag.
+add_executable(test_compression_negotiate
+    compression/test_negotiate.c
+    ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_negotiate.c
+)
+
+target_compile_definitions(test_compression_negotiate PRIVATE HAVE_HTTP_COMPRESSION=1)
+
+target_include_directories(test_compression_negotiate PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+)
+
+target_link_libraries(test_compression_negotiate
+    test_common
+    ${CMOCKA_LIBRARIES}
+)
+
+if(UNIX)
+    target_link_libraries(test_compression_negotiate m pthread)
+endif()
+
+add_test(NAME CompressionNegotiate COMMAND test_compression_negotiate)
+
 # Install test binaries (optional)
 # install(TARGETS test_http1_parser test_http1_parser_edge_cases test_multipart_parser DESTINATION bin/tests)
