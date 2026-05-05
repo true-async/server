@@ -362,5 +362,67 @@ endif()
 
 add_test(NAME CompressionNegotiate COMMAND test_compression_negotiate)
 
+# Compression gzip-encoder round-trip tests. Pulls in real zlib(-ng)
+# at link time and depends on the PHP runtime (the encoder uses
+# emalloc/efree). pkg-config probe mirrors the main build's preference
+# for zlib-ng with zlib fallback.
+find_package(PkgConfig QUIET)
+set(_compr_test_ok FALSE)
+if(PkgConfig_FOUND)
+    pkg_check_modules(ZLIB_NG_TEST QUIET zlib-ng)
+    if(ZLIB_NG_TEST_FOUND)
+        set(_compr_test_libs ${ZLIB_NG_TEST_LIBRARIES})
+        set(_compr_test_incs ${ZLIB_NG_TEST_INCLUDE_DIRS})
+        set(_compr_test_def  HAVE_ZLIB_NG=1)
+        set(_compr_test_ok TRUE)
+    else()
+        pkg_check_modules(ZLIB_TEST QUIET zlib)
+        if(ZLIB_TEST_FOUND)
+            set(_compr_test_libs ${ZLIB_TEST_LIBRARIES})
+            set(_compr_test_incs ${ZLIB_TEST_INCLUDE_DIRS})
+            set(_compr_test_def  "")
+            set(_compr_test_ok TRUE)
+        endif()
+    endif()
+endif()
+if(NOT _compr_test_ok)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        set(_compr_test_libs ZLIB::ZLIB)
+        set(_compr_test_incs "")
+        set(_compr_test_def  "")
+        set(_compr_test_ok TRUE)
+    endif()
+endif()
+if(_compr_test_ok)
+    add_executable(test_compression_gzip
+        compression/test_gzip_encoder.c
+        ${CMAKE_SOURCE_DIR}/../src/compression/http_compression.c
+        ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_gzip.c
+    )
+    target_compile_definitions(test_compression_gzip PRIVATE
+        HAVE_HTTP_COMPRESSION=1 ${_compr_test_def})
+    target_include_directories(test_compression_gzip PRIVATE
+        ${CMAKE_SOURCE_DIR}/../include
+        ${CMAKE_SOURCE_DIR}/../src
+        ${_compr_test_incs}
+    )
+    target_link_libraries(test_compression_gzip
+        test_common
+        ${CMOCKA_LIBRARIES}
+        ${_compr_test_libs}
+        ${CMAKE_DL_LIBS}
+    )
+    if(UNIX)
+        target_link_libraries(test_compression_gzip m pthread rt)
+    endif()
+    add_test(NAME CompressionGzip COMMAND test_compression_gzip)
+    if(UNIX AND NOT APPLE)
+        set_tests_properties(CompressionGzip PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+        )
+    endif()
+endif()
+
 # Install test binaries (optional)
 # install(TARGETS test_http1_parser test_http1_parser_edge_cases test_multipart_parser DESTINATION bin/tests)
