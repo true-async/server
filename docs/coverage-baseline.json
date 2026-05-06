@@ -1,7 +1,7 @@
 {
   "totals": {
     "lines": {
-      "total": 9495,
+      "total": 9496,
       "hit": 7686
     },
     "functions": {
@@ -72,7 +72,7 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 754,
+        "total": 755,
         "hit": 586
       },
       "functions": {
