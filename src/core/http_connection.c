@@ -27,8 +27,12 @@
  * headers are needed — the async reactor owns the socket lifecycle. */
 #include <limits.h>
 #include <stdint.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <sys/syscall.h>
+#  include <unistd.h>
+#endif
 #ifdef HAVE_EXECINFO_H
 #  include <execinfo.h>
 #endif
@@ -1665,10 +1669,15 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
     const char *m     = method ? method : "?";
     const char *u     = uri    ? uri    : "?";
 
+#ifdef _WIN32
+    const long tid = (long) GetCurrentThreadId();
+#else
+    const long tid = (long) syscall(SYS_gettid);
+#endif
     zend_error(E_WARNING,
                "[true-async-server] zend_bailout in %s handler: tid=%ld co=%p %s %s "
                "— %s (at %s:%d)",
-               proto ? proto : "?", (long) syscall(SYS_gettid),
+               proto ? proto : "?", tid,
                coroutine, m, u, cause, file, err_line);
 
 #ifdef HAVE_EXECINFO_H
