@@ -142,6 +142,12 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
                                 stream->request, self->conn->config);
     }
 #endif
+    /* Per-request JSON encode default for HttpResponse::json(). */
+    if (self->conn->config != NULL) {
+        extern void http_response_set_default_json_flags(zend_object *, uint32_t);
+        http_response_set_default_json_flags(
+            Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
+    }
 
     /* Spawn the handler coroutine. extended_data is the STREAM, not
      * the connection — that's what makes multiplex safe: N

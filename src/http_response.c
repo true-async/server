@@ -101,6 +101,12 @@ typedef struct {
      * standalone (no dispatch). */
     void            *compression_state;
 
+    /* JSON encode flags applied by ::json() when its $flags arg is 0.
+     * Populated at dispatch from http_server_config_t.json_encode_flags;
+     * stays 0 for standalone-constructed responses (no dispatch path),
+     * which makes ::json() fall back to ext/json's own zero-flag default. */
+    uint32_t         default_json_flags;
+
     zend_object      std;
 } http_response_object;
 
@@ -709,38 +715,110 @@ ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream)
 }
 /* }}} */
 
-/* {{{ proto HttpResponse::json(mixed $data): static */
+/* Wire the per-request JSON-encode default into a freshly-dispatched
+ * response. Called from H1/H2/H3 dispatch alongside compression_attach;
+ * exported (non-static) so the protocol TUs can reach it without
+ * publishing the response struct layout. */
+void http_response_set_default_json_flags(zend_object *obj, uint32_t flags)
+{
+    if (UNEXPECTED(obj == NULL)) return;
+    http_response_object *const response = http_response_from_obj(obj);
+    response->default_json_flags = flags;
+}
+
+/* {{{ proto HttpResponse::json(array|string $data, int $status = 200, int $flags = 0): static
+ *
+ * Set the response body to a JSON payload.
+ *
+ *   $data: array|object → encoded via php_json_encode_ex.
+ *          string       → shipped as-is (caller already has JSON bytes,
+ *                         e.g. from a cache or a JSON_UNESCAPED build
+ *                         done elsewhere). The string is NOT validated;
+ *                         that contract is on the caller.
+ *   $status: HTTP status code. Default 200.
+ *   $flags:  JSON_* bitmask. 0 → use the per-server default
+ *            (HttpServerConfig::setJsonEncodeFlags).
+ *            JSON_THROW_ON_ERROR is silently stripped — encode failure
+ *            yields a 500 JSON error body, not a propagated exception
+ *            (handlers never need to wrap json() in try/catch).
+ *
+ * Content-Type is set to application/json only if the handler did NOT
+ * already set one — this lets handlers ship application/problem+json,
+ * application/vnd.api+json, etc. just by calling setHeader() before
+ * json(). */
 ZEND_METHOD(TrueAsync_HttpResponse, json)
 {
-    zval *data;
+    zval     *data;
+    zend_long status = 200;
+    zend_long flags  = 0;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    ZEND_PARSE_PARAMETERS_START(1, 3)
         Z_PARAM_ZVAL(data)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(status)
+        Z_PARAM_LONG(flags)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response_check_closed(response)) {
         return;
     }
-
-    /* Set Content-Type header */
-    zval content_type;
-    ZVAL_STRING(&content_type, "application/json");
-    zend_string *ct_name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
-    add_header_value(response->headers, ct_name, &content_type, true);
-    zend_string_release(ct_name);
-    zval_ptr_dtor(&content_type);
-
-    /* Encode JSON */
-    smart_str json = {0};
-    php_json_encode(&json, data, PHP_JSON_UNESCAPED_UNICODE);
-    smart_str_0(&json);
-
-    if (json.s) {
-        smart_str_free(&response->body);
-        response->body = json;
+    if (UNEXPECTED(status < 100 || status > 599)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "HTTP status code must be between 100 and 599", 0);
+        return;
     }
+
+    /* Per-call $flags override the server default; THROW_ON_ERROR stripped. */
+    int effective_flags = (int)((flags != 0 ? (uint32_t)flags
+                                            : response->default_json_flags)
+                                 & ~PHP_JSON_THROW_ON_ERROR);
+
+    /* Set Content-Type: application/json only if the handler did not
+     * already specify one — preserves application/problem+json,
+     * application/vnd.api+json, etc. */
+    if (!zend_hash_str_exists(response->headers, "content-type", sizeof("content-type") - 1)) {
+        zval ct;
+        ZVAL_STRING(&ct, "application/json");
+        zend_string *const ct_name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
+        add_header_value(response->headers, ct_name, &ct, true);
+        zend_string_release(ct_name);
+        zval_ptr_dtor(&ct);
+    }
+
+    response->status_code = (int)status;
+
+    /* Pre-encoded passthrough: caller hands us JSON bytes directly. */
+    if (Z_TYPE_P(data) == IS_STRING) {
+        smart_str_free(&response->body);
+        smart_str_appendl(&response->body, Z_STRVAL_P(data), Z_STRLEN_P(data));
+        smart_str_0(&response->body);
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
+    /* Encode into a fresh smart_str — only swap into the response body
+     * on success, so an aborted encode leaves the previous body intact. */
+    smart_str encoded = {0};
+    const zend_result rc = php_json_encode_ex(&encoded, data, effective_flags,
+                                              PHP_JSON_PARSER_DEFAULT_DEPTH);
+    smart_str_0(&encoded);
+
+    if (UNEXPECTED(rc == FAILURE)) {
+        /* Build a controlled 500 response body so the client never sees
+         * a partial encode (which is what php_json_encode would have
+         * left in `encoded` on failure without PARTIAL_OUTPUT_ON_ERROR). */
+        smart_str_free(&encoded);
+        smart_str_free(&response->body);
+        static const char err_body[] = "{\"error\":\"json encoding failed\"}";
+        smart_str_appendl(&response->body, err_body, sizeof(err_body) - 1);
+        smart_str_0(&response->body);
+        response->status_code = 500;
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
+    smart_str_free(&response->body);
+    response->body = encoded;
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -988,6 +1066,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->stream_ops = NULL;
     response->stream_ctx = NULL;
     response->compression_state = NULL;
+    response->default_json_flags = 0;
     response->socket_fd = SOCK_ERR;
     memset(&response->body, 0, sizeof(smart_str));
 

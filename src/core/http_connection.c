@@ -1601,6 +1601,13 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
         http_compression_attach(Z_OBJ(ctx->response_zv), req, conn->config);
     }
 #endif
+    /* Wire the per-request JSON encode default — used by
+     * HttpResponse::json() when the per-call $flags arg is 0. */
+    if (conn->config != NULL) {
+        extern void http_response_set_default_json_flags(zend_object *, uint32_t);
+        http_response_set_default_json_flags(
+            Z_OBJ(ctx->response_zv), conn->config->json_encode_flags);
+    }
 
     conn->state = CONN_STATE_PROCESSING;
 

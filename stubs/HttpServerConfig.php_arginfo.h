@@ -129,6 +129,8 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel               arginfo_class_TrueAsync_HttpServerConfig_getBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel                 arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel                 arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_setJsonEncodeFlags           arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getJsonEncodeFlags           arginfo_class_TrueAsync_HttpServerConfig_getBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings        arginfo_class_TrueAsync_HttpServerConfig_getListeners
 #define arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
@@ -270,6 +272,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setBrotliLevel);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getBrotliLevel);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setZstdLevel);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getZstdLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setJsonEncodeFlags);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getJsonEncodeFlags);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getSupportedEncodings);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMinSize);
@@ -358,6 +362,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getBrotliLevel,                arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel,                ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setZstdLevel,                  arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel,                  ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getZstdLevel,                  arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel,                  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setJsonEncodeFlags,            arginfo_class_TrueAsync_HttpServerConfig_setJsonEncodeFlags,            ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getJsonEncodeFlags,            arginfo_class_TrueAsync_HttpServerConfig_getJsonEncodeFlags,            ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getSupportedEncodings,         arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings,         ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize,         ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize,         ZEND_ACC_PUBLIC)

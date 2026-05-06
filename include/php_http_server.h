@@ -250,6 +250,17 @@ struct _http_server_config_t {
     HashTable *compression_mime_types;
     size_t   request_max_decompressed_size;
 
+    /* JSON encoding defaults applied by HttpResponse::json(). Bitmask of
+     * PHP's JSON_* constants (UNESCAPED_UNICODE, UNESCAPED_SLASHES, etc.).
+     * Per-call $flags = 0 → this value is used; non-zero overrides.
+     * Default: JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES — the
+     * combo nearly every API benefits from (smaller wire size + readable
+     * URLs without superfluous backslashes). JSON_THROW_ON_ERROR is
+     * silently stripped at call time — it bypasses the response's
+     * error-handling contract (encode failure should yield a 500 JSON
+     * error body, not propagate an exception out of the handler). */
+    uint32_t json_encode_flags;
+
     /* Log + telemetry. log_severity is an http_log_severity_t int value
      * (0/5/9/13/17), set via setLogSeverity(LogSeverity). log_stream is
      * an IS_RESOURCE zval pointing at any

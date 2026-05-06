@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawns an internal `Async\ThreadPool` from `start()`; each worker
   re-binds the listeners (`SO_REUSEPORT`). Default `1` keeps current
   behaviour bit-for-bit. Cross-thread `stop()` is a follow-up.
+- `HttpResponse::json(array|string $data, int $status = 200, int $flags = 0)`
+  — explicit JSON serialization through `php_json_encode_ex`. String
+  passthrough for pre-encoded payloads (cached JSON ships as-is).
+  Custom Content-Type set via `setHeader()` before `json()` is
+  preserved (works for `application/problem+json`,
+  `application/vnd.api+json`, etc.). Encode failure yields a
+  controlled `500 {"error":"json encoding failed"}` — no exception
+  propagation; `JSON_THROW_ON_ERROR` silently stripped. Per-server
+  default flags via `HttpServerConfig::setJsonEncodeFlags()`,
+  defaulting to `JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES`.
 - HTTP body compression phase 2 (issue #9): Brotli (`br`) + zstd
   (`zstd`) plug into the phase-1 `http_encoder_t` vtable. Preference
   order `zstd > br > gzip > identity`; inbound `Content-Encoding: br`

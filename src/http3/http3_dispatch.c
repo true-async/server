@@ -114,12 +114,15 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     {
         extern void http_compression_attach(zend_object *,
             http_request_t *, http_server_config_t *);
+        extern void http_response_set_default_json_flags(zend_object *, uint32_t);
         http_server_object *srv =
             (http_server_object *)http3_listener_server_obj(c->listener);
         http_server_config_t *cfg = http_server_get_config(srv);
         if (cfg != NULL) {
             http_compression_attach(Z_OBJ(s->response_zv),
                                     s->request, cfg);
+            http_response_set_default_json_flags(
+                Z_OBJ(s->response_zv), cfg->json_encode_flags);
         }
     }
 #endif

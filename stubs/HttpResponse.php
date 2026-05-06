@@ -219,14 +219,36 @@ final class HttpResponse
     // === Helper methods ===
 
     /**
-     * Send JSON response
+     * Set the response body to a JSON payload.
      *
-     * Sets Content-Type to application/json and encodes data
+     *  - `array` / `object` / scalar `$data` → encoded via the same
+     *    `php_json_encode_ex` that powers `json_encode()`.
+     *  - `string` `$data` → shipped as-is. Use this when you already
+     *    have JSON bytes (cached, pre-built, fetched from another
+     *    service) — skips re-encoding entirely.
      *
-     * @param mixed $data Data to encode
+     * Content-Type is set to `application/json` only if the handler
+     * has not already set one — chain `setHeader('Content-Type',
+     * 'application/problem+json')->json($payload)` to ship a different
+     * media type.
+     *
+     * `$flags` is a `JSON_*` bitmask (same constants as
+     * `json_encode()`). When `0`, the per-server default from
+     * `HttpServerConfig::setJsonEncodeFlags()` is used —
+     * `JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES` out of the box.
+     *
+     * `JSON_THROW_ON_ERROR` is silently stripped: encode failure
+     * yields a `500` JSON error response, not a propagated exception.
+     * Handlers never need to wrap `json()` in try/catch.
+     *
+     * @param array|string|object|scalar|null $data
+     * @param int $status HTTP status code, default 200
+     * @param int $flags  JSON_* bitmask; 0 = use server default
      * @return static
      */
-    public function json(mixed $data): static {}
+    public function json(array|string|object|null|int|float|bool $data,
+                         int $status = 200,
+                         int $flags = 0): static {}
 
     /**
      * Send HTML response

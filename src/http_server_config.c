@@ -12,6 +12,7 @@
 
 #include "php.h"
 #include "zend_exceptions.h"
+#include "ext/json/php_json.h"             /* PHP_JSON_* flags */
 #include "Zend/zend_atomic.h"
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_virtual_cwd.h"        /* VCWD_STAT, VCWD_ACCESS — crossplat */
@@ -91,6 +92,7 @@ struct _http_server_shared_config_t {
     size_t                  request_max_decompressed_size;
     zend_string           **compression_mime_types;     /* persistent strings */
     size_t                  compression_mime_count;
+    uint32_t                json_encode_flags;
 
     bool                    http2_enabled;
     bool                    websocket_enabled;
@@ -1483,6 +1485,42 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getZstdLevel)
     RETURN_LONG(config->zstd_level);
 }
 
+/* {{{ proto HttpServerConfig::setJsonEncodeFlags(int $flags): static
+ *
+ * Default JSON_* flags applied by HttpResponse::json() when the per-call
+ * $flags argument is 0. JSON_THROW_ON_ERROR is silently stripped at
+ * call time — see ::json() for the rationale (encode failure must yield
+ * a 500 JSON error body, not propagate an exception). The setter
+ * accepts the flag here for forward-compat (and so callers can OR in
+ * the constant freely without having to remember the strip rule), but
+ * the bit will not affect actual encode behaviour. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setJsonEncodeFlags)
+{
+    zend_long flags;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(flags)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+    if (flags < 0 || flags > UINT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "JSON encode flags must fit in 32 bits", 0);
+        return;
+    }
+    config->json_encode_flags = (uint32_t)flags;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getJsonEncodeFlags)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->json_encode_flags);
+}
+
 /* {{{ proto static HttpServerConfig::getSupportedEncodings(): array
  *
  * Reports the codecs compiled into this build, in server preference
@@ -2142,6 +2180,11 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->compression_mime_types     = NULL;
 #endif
 
+    /* JSON encode defaults — UNESCAPED_UNICODE + UNESCAPED_SLASHES. The
+     * pair is the right default for ~every JSON API (smaller bytes on
+     * the wire, readable URLs in payloads). */
+    config->json_encode_flags = PHP_JSON_UNESCAPED_UNICODE | PHP_JSON_UNESCAPED_SLASHES;
+
     zend_object_std_init(&config->std, ce);
     object_properties_init(&config->std, ce);
     config->std.handlers = &http_server_config_handlers;
@@ -2242,6 +2285,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->zstd_level                    = src->zstd_level;
     shared->compression_min_size          = src->compression_min_size;
     shared->request_max_decompressed_size = src->request_max_decompressed_size;
+    shared->json_encode_flags             = src->json_encode_flags;
     if (src->compression_mime_types && zend_hash_num_elements(src->compression_mime_types) > 0) {
         size_t n = zend_hash_num_elements(src->compression_mime_types);
         shared->compression_mime_types = pecalloc(n, sizeof(zend_string *), 1);
@@ -2381,6 +2425,7 @@ static void http_server_config_populate_from_shared(
     dst->zstd_level                    = src->zstd_level;
     dst->compression_min_size          = src->compression_min_size;
     dst->request_max_decompressed_size = src->request_max_decompressed_size;
+    dst->json_encode_flags             = src->json_encode_flags;
     if (dst->compression_mime_types) {
         /* create_object pre-populated this with defaults; replace with the
          * actual locked snapshot. */

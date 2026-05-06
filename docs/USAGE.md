@@ -160,6 +160,51 @@ both directions are available.
 
 ---
 
+## 4.5. JSON responses
+
+`HttpResponse::json()` is the framework's standard JSON path — encodes
+arrays/objects via PHP's own `php_json_encode_ex`, ships strings as-is.
+
+```php
+$server->addHttpHandler(function ($req, $resp) {
+    // Array → encoded with the per-server default flags
+    // (JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES out of the box).
+    return $resp->json(['ok' => true, 'msg' => 'привет/мир'])->end();
+});
+
+// Pre-encoded string passthrough — no re-encoding cost. Use this when
+// you have JSON cached in Redis / Memcache / a file:
+$resp->json($cached_json_string)->end();
+
+// Custom HTTP status:
+$resp->json(['error' => 'invalid input'], 422)->end();
+
+// Per-call flag override (server default is bypassed when $flags != 0):
+$resp->json($data, 200, JSON_PRETTY_PRINT)->end();
+
+// Custom Content-Type — set BEFORE json() and it is preserved.
+// Useful for application/problem+json (RFC 7807),
+// application/vnd.api+json (JSON:API), etc.:
+$resp->setHeader('Content-Type', 'application/problem+json')
+     ->json(['type' => 'about:blank', 'title' => 'oops'], 400)
+     ->end();
+```
+
+Encode failure (resources, recursion limit) yields a controlled
+`500 {"error":"json encoding failed"}` — handlers never need to wrap
+`json()` in try/catch. `JSON_THROW_ON_ERROR` is silently stripped for
+the same reason.
+
+Per-server defaults:
+
+```php
+$config->setJsonEncodeFlags(
+    JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+);
+```
+
+---
+
 ## 5. Compression
 
 Inbound + outbound compression with three backends — gzip (issue #8),

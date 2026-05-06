@@ -510,6 +510,26 @@ final class HttpServerConfig
     public function getZstdLevel(): int {}
 
     /**
+     * Default JSON_* flags applied by HttpResponse::json() when the
+     * per-call $flags argument is 0 (or omitted). Bitmask of PHP's
+     * `JSON_*` constants — same values as `json_encode()`.
+     *
+     * Default: `JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES`
+     * (smaller wire size for non-ASCII text + readable URLs in
+     * payloads).
+     *
+     * `JSON_THROW_ON_ERROR` is silently stripped at call time — encode
+     * failure yields a 500 JSON error body, not a propagated exception.
+     *
+     * @param int $flags
+     * @return static
+     */
+    public function setJsonEncodeFlags(int $flags): static {}
+
+    /** @return int */
+    public function getJsonEncodeFlags(): int {}
+
+    /**
      * Codecs compiled into this build, in server preference order.
      * Always contains "identity"; "gzip" present iff
      * --enable-http-compression succeeded; "br" / "zstd" present iff
