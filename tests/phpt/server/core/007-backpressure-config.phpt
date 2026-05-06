@@ -8,7 +8,7 @@ use TrueAsync\HttpServerConfig;
 
 $c = new HttpServerConfig();
 
-// Default value is RFC 8289 CoDel target
+// Default is 0 (CoDel disabled — see da944b8: misfires on HTTP/2 mux)
 var_dump($c->getBackpressureTargetMs());
 
 // Setting and reading back
@@ -48,7 +48,7 @@ var_dump($c->getBackpressureTargetMs());
 
 echo "Done\n";
 --EXPECT--
-int(5)
+int(0)
 int(20)
 int(0)
 int(10)
