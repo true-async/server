@@ -1,23 +1,33 @@
 {
   "totals": {
     "lines": {
-      "total": 9657,
-      "hit": 7732
+      "total": 9915,
+      "hit": 7952
     },
     "functions": {
-      "total": 661,
-      "hit": 590
+      "total": 677,
+      "hit": 605
     }
   },
   "files": {
     "src/compression/http_compression.c": {
       "lines": {
-        "total": 10,
-        "hit": 5
+        "total": 16,
+        "hit": 11
       },
       "functions": {
         "total": 3,
         "hit": 2
+      }
+    },
+    "src/compression/http_compression_brotli.c": {
+      "lines": {
+        "total": 101,
+        "hit": 77
+      },
+      "functions": {
+        "total": 6,
+        "hit": 5
       }
     },
     "src/compression/http_compression_gzip.c": {
@@ -32,8 +42,8 @@
     },
     "src/compression/http_compression_negotiate.c": {
       "lines": {
-        "total": 75,
-        "hit": 69
+        "total": 89,
+        "hit": 83
       },
       "functions": {
         "total": 6,
@@ -42,8 +52,8 @@
     },
     "src/compression/http_compression_request.c": {
       "lines": {
-        "total": 60,
-        "hit": 55
+        "total": 63,
+        "hit": 59
       },
       "functions": {
         "total": 2,
@@ -52,12 +62,22 @@
     },
     "src/compression/http_compression_response.c": {
       "lines": {
-        "total": 250,
-        "hit": 200
+        "total": 258,
+        "hit": 208
       },
       "functions": {
         "total": 17,
         "hit": 16
+      }
+    },
+    "src/compression/http_compression_zstd.c": {
+      "lines": {
+        "total": 81,
+        "hit": 66
+      },
+      "functions": {
+        "total": 5,
+        "hit": 5
       }
     },
     "src/core/conn_arena.c": {
@@ -332,12 +352,12 @@
     },
     "src/http_server_config.c": {
       "lines": {
-        "total": 1071,
-        "hit": 918
+        "total": 1116,
+        "hit": 963
       },
       "functions": {
-        "total": 98,
-        "hit": 84
+        "total": 103,
+        "hit": 89
       }
     },
     "src/http_server_exceptions.c": {
