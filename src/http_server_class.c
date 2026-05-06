@@ -1354,19 +1354,23 @@ static int http_server_start_pool(http_server_object *const server,
     server->in_pool_mode = true;
     server->running = true;
 
-    /* Suspend until all submitted workers report done. */
-    zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
-    if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Failed to create waker for pool parent", 0);
-        goto cleanup;
-    }
-    zend_async_resume_when(coroutine, st->all_done, true,
-                           zend_async_waker_callback_resolve, NULL);
-    ZEND_ASYNC_SUSPEND();
-    zend_async_waker_clean(coroutine);
-    if (EG(exception)) {
-        zend_clear_exception();
+    /* Suspend until all submitted workers report done. Skip the suspend
+     * entirely when nothing got submitted — there is no callback to
+     * notify all_done, so awaiting on it would deadlock. */
+    if (st->pending > 0) {
+        zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+        if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "Failed to create waker for pool parent", 0);
+            goto cleanup;
+        }
+        zend_async_resume_when(coroutine, st->all_done, true,
+                               zend_async_waker_callback_resolve, NULL);
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(coroutine);
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
     }
 
     rc = (st->pending == 0) ? SUCCESS : FAILURE;
