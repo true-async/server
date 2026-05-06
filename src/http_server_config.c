@@ -57,6 +57,7 @@ struct _http_server_shared_config_t {
     size_t                  write_buffer_size;
     int                     backlog;
     int                     max_connections;
+    int                     workers;                /* built-in pool size; 1 = off (issue #11) */
     size_t                  max_inflight_requests;  /* 0 = disabled */
     uint32_t                read_timeout_s;
     uint32_t                write_timeout_s;
@@ -334,6 +335,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     /* Set defaults */
     config->backlog = DEFAULT_BACKLOG;
     config->max_connections = DEFAULT_MAX_CONNECTIONS;
+    config->workers = 1;
     config->max_inflight_requests = 0;  /* disabled by default — derived at start() */
     config->read_timeout_s = DEFAULT_READ_TIMEOUT;
     config->write_timeout_s = DEFAULT_WRITE_TIMEOUT;
@@ -606,6 +608,48 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getBacklog)
     ZEND_PARSE_PARAMETERS_NONE();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     RETURN_LONG(config->backlog);
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::setWorkers(int $workers): static
+ *
+ * Built-in worker pool size (issue #11). 1 (default) = single-threaded;
+ * start() runs the event loop on the calling thread. > 1 = HttpServer
+ * spawns an Async\ThreadPool of this size at start() time, replicates
+ * the config + handler set to each worker via transfer_obj, and the
+ * parent's start() awaits all workers' completion. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWorkers)
+{
+    zend_long workers;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(workers)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (workers < 1 || workers > 1024) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Workers must be between 1 and 1024", 0);
+        return;
+    }
+
+    config->workers = (int)workers;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::getWorkers(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWorkers)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG(config->workers);
 }
 /* }}} */
 
@@ -2054,6 +2098,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
 
     shared->backlog            = src->backlog;
     shared->max_connections    = src->max_connections;
+    shared->workers            = src->workers;
     shared->max_inflight_requests = src->max_inflight_requests;
     shared->read_timeout_s       = src->read_timeout_s;
     shared->write_timeout_s      = src->write_timeout_s;
@@ -2190,6 +2235,7 @@ static void http_server_config_populate_from_shared(
 {
     dst->backlog            = src->backlog;
     dst->max_connections    = src->max_connections;
+    dst->workers            = src->workers;
     dst->max_inflight_requests = src->max_inflight_requests;
     dst->read_timeout_s       = src->read_timeout_s;
     dst->write_timeout_s      = src->write_timeout_s;

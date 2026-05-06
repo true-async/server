@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Proactive drain mis-fired on the first response when CoDel/telemetry
+  were disabled. The fallback timestamp used `CLOCK_MONOTONIC_COARSE`
+  while `created_at_ns` and `drain_not_before_ns` are `zend_hrtime`
+  (CLOCK_MONOTONIC_RAW); the two domains drift by minutes after
+  suspend / NTP slewing. Drain check now stays in the same clock
+  domain in both H1 dispose and H2 commit paths.
+
 ### Added
 
 - Per-listener protocol mask (FUTURES #1). New
   `HttpServerConfig::addHttp1Listener()` / `addHttp2Listener()` for
   protocol-restricted ports (h2c-only, h1-only). Default
   `addListener()` unchanged (H1+H2).
+- Built-in worker pool (issue #11). New `HttpServerConfig::setWorkers(N)`
+  spawns an internal `Async\ThreadPool` from `start()`; each worker
+  re-binds the listeners (`SO_REUSEPORT`). Default `1` keeps current
+  behaviour bit-for-bit. Cross-thread `stop()` is a follow-up.
 - `docs/USAGE.md` — full configuration guide.
 
 ## [0.3.2] - 2026-05-06

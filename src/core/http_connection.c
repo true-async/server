@@ -1922,12 +1922,19 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     /* Reuse req->end_ns (already stamped at handler return) so the
      * drain decision skips its own zend_hrtime call. When stamps are
      * gated off (CoDel + telemetry both disabled, the minimal-config
-     * fast path), end_ns == 0 and we need a fresh stamp — drain age
-     * is at the seconds-to-hours scale, so coarse clock is sufficient
-     * and ~5x cheaper than zend_hrtime. */
+     * fast path) end_ns == 0 and a fresh stamp is needed.
+     *
+     * Both end_ns (when set) and conn->created_at_ns/drain_not_before_ns
+     * are zend_hrtime() values — on Linux that's CLOCK_MONOTONIC_RAW,
+     * which is NOT comparable with CLOCK_MONOTONIC_COARSE (different
+     * NTP correction state, can drift by minutes after suspend / boot).
+     * The earlier coarse-clock fallback shaved ~20ns per request but
+     * mis-fires drain on the first response when stamps are gated off.
+     * Stay in the same clock domain — correctness over a one-clock
+     * call's worth of cycles. */
     const uint64_t drain_now_ns =
         (ctx->request != NULL && ctx->request->end_ns != 0)
-            ? ctx->request->end_ns : http_now_coarse_ns();
+            ? ctx->request->end_ns : zend_hrtime();
     if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;

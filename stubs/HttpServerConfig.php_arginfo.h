@@ -43,6 +43,12 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getBacklog, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+/* setWorkers */
+#define arginfo_class_TrueAsync_HttpServerConfig_setWorkers arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+
+/* getWorkers */
+#define arginfo_class_TrueAsync_HttpServerConfig_getWorkers arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+
 /* setMaxConnections */
 #define arginfo_class_TrueAsync_HttpServerConfig_setMaxConnections arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 
@@ -213,6 +219,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp3Listener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getListeners);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBacklog);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getBacklog);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWorkers);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWorkers);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnections);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxConnections);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxInflightRequests);
@@ -294,6 +302,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getListeners, arginfo_class_TrueAsync_HttpServerConfig_getListeners, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setBacklog, arginfo_class_TrueAsync_HttpServerConfig_setBacklog, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getBacklog, arginfo_class_TrueAsync_HttpServerConfig_getBacklog, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setWorkers, arginfo_class_TrueAsync_HttpServerConfig_setWorkers, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getWorkers, arginfo_class_TrueAsync_HttpServerConfig_getWorkers, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnections, arginfo_class_TrueAsync_HttpServerConfig_setMaxConnections, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getMaxConnections, arginfo_class_TrueAsync_HttpServerConfig_getMaxConnections, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setMaxInflightRequests, arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests, ZEND_ACC_PUBLIC)
