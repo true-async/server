@@ -479,6 +479,47 @@ final class HttpServerConfig
     public function getCompressionLevel(): int {}
 
     /**
+     * Brotli quality (issue #9). Default: 4 (production-typical;
+     * quality 11 is research-quality, roughly 50× slower than 4 with
+     * marginal extra ratio). Range: 0..11. Throws on out-of-range or
+     * if the config is locked.
+     *
+     * Inert when the extension was built without --enable-brotli — the
+     * response pipeline never selects Brotli without HAVE_HTTP_BROTLI,
+     * regardless of what this setter is called with.
+     *
+     * @param int $level
+     * @return static
+     */
+    public function setBrotliLevel(int $level): static {}
+
+    /** @return int */
+    public function getBrotliLevel(): int {}
+
+    /**
+     * zstd compression level (issue #9). Default: 3 (the zstd team's
+     * own production default — better ratio than gzip-6 at higher
+     * throughput). Range: 1..22.
+     *
+     * @param int $level
+     * @return static
+     */
+    public function setZstdLevel(int $level): static {}
+
+    /** @return int */
+    public function getZstdLevel(): int {}
+
+    /**
+     * Codecs compiled into this build, in server preference order.
+     * Always contains "identity"; "gzip" present iff
+     * --enable-http-compression succeeded; "br" / "zstd" present iff
+     * the corresponding library was found at configure time.
+     *
+     * @return string[]
+     */
+    public static function getSupportedEncodings(): array {}
+
+    /**
      * Body-size threshold below which responses are left uncompressed
      * (the encoding overhead beats any real-world win on tiny bodies).
      *

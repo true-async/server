@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawns an internal `Async\ThreadPool` from `start()`; each worker
   re-binds the listeners (`SO_REUSEPORT`). Default `1` keeps current
   behaviour bit-for-bit. Cross-thread `stop()` is a follow-up.
+- HTTP body compression phase 2 (issue #9): Brotli (`br`) + zstd
+  (`zstd`) plug into the phase-1 `http_encoder_t` vtable. Preference
+  order `zstd > br > gzip > identity`; inbound `Content-Encoding: br`
+  / `zstd` decoded under the same anti-bomb cap as gzip. New setters
+  `setBrotliLevel(int)` (0..11, default 4), `setZstdLevel(int)`
+  (1..22, default 3); `setCompressionLevel` stays gzip-only. Build
+  flags `--enable-brotli` / `--enable-zstd` (auto-detect; missing libs
+  warn + skip codec, build still succeeds). New introspection method
+  `HttpServerConfig::getSupportedEncodings()`. Compression sources
+  also wired into `config.w32` (Windows) and `CMakeLists.txt`.
+  Compression coverage 80.4% → 82.9% lines.
 - `docs/USAGE.md` — full configuration guide.
 
 ## [0.3.2] - 2026-05-06

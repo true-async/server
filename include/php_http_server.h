@@ -225,9 +225,12 @@ struct _http_server_config_t {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
 
-    /* HTTP body compression (issue #8). Phase 1 ships gzip via zlib-ng.
+    /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
+     * phase 2 adds Brotli + zstd through the same vtable.
      *   compression_enabled         — master switch (default true).
-     *   compression_level           — 1..9 (zlib semantics; default 6).
+     *   compression_level           — gzip 1..9 (default 6, zlib semantics).
+     *   brotli_level                — brotli 0..11 (default 4).
+     *   zstd_level                  — zstd 1..22 (default 3).
      *   compression_min_size        — body below this is left identity
      *                                 (overhead beats win on tiny bodies).
      *   compression_mime_types      — set of `type/subtype` strings (lowercase,
@@ -241,6 +244,8 @@ struct _http_server_config_t {
      */
     bool     compression_enabled;
     uint8_t  compression_level;
+    uint8_t  brotli_level;
+    uint8_t  zstd_level;
     size_t   compression_min_size;
     HashTable *compression_mime_types;
     size_t   request_max_decompressed_size;

@@ -17,6 +17,8 @@
 
 typedef struct {
     bool gzip_acceptable;
+    bool brotli_acceptable;
+    bool zstd_acceptable;
     bool identity_acceptable;
 } http_accept_encoding_t;
 
@@ -37,6 +39,12 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
                                 http_accept_encoding_t *out);
 
 /* Pick the best codec given the parsed prefs and what we have built in.
+ * Preference order: zstd > brotli > gzip > identity (server-side; q-value
+ * weighting is a future extension — server preference covers ~99% of
+ * real Accept-Encoding strings). Codecs absent from the build are
+ * skipped via the registry lookup, not via the parser.
+ *   HTTP_CODEC_ZSTD       — encode with zstd
+ *   HTTP_CODEC_BROTLI     — encode with brotli
  *   HTTP_CODEC_GZIP       — encode with gzip
  *   HTTP_CODEC_IDENTITY   — send raw
  *   HTTP_CODEC__COUNT     — sentinel: client refuses every coding we

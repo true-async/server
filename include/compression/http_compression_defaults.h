@@ -15,6 +15,18 @@
 #define HTTP_COMPRESSION_LEVEL_MIN                     1
 #define HTTP_COMPRESSION_LEVEL_MAX                     9
 
+/* Brotli quality. 4 is production-typical (~gzip-6 ratio at 5–10× speed);
+ * 11 is research-quality (~50× slower than 4, marginal extra ratio). */
+#define HTTP_COMPRESSION_BROTLI_DEFAULT_LEVEL          4
+#define HTTP_COMPRESSION_BROTLI_LEVEL_MIN              0
+#define HTTP_COMPRESSION_BROTLI_LEVEL_MAX              11
+
+/* zstd compression level. 3 is the zstd team's own production default —
+ * better ratio than gzip-6 at higher throughput. 22 is ultra mode. */
+#define HTTP_COMPRESSION_ZSTD_DEFAULT_LEVEL            3
+#define HTTP_COMPRESSION_ZSTD_LEVEL_MIN                1
+#define HTTP_COMPRESSION_ZSTD_LEVEL_MAX                22
+
 #define HTTP_COMPRESSION_DEFAULT_MIN_SIZE              1024u    /* below this, overhead wins */
 #define HTTP_COMPRESSION_MIN_SIZE_MAX                  (16u * 1024u * 1024u)
 

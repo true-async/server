@@ -3,6 +3,9 @@
 ARG_ENABLE('true-async-server', 'Enable TrueAsync HTTP Server extension', 'no');
 ARG_ENABLE('http2', 'Enable HTTP/2 in true_async_server (requires nghttp2)', 'yes');
 ARG_ENABLE('http3', 'Enable HTTP/3 in true_async_server (requires ngtcp2, nghttp3, OpenSSL >= 3.5)', 'no');
+ARG_ENABLE('http-compression', 'Enable HTTP body compression (gzip via zlib)', 'yes');
+ARG_ENABLE('brotli',            'Enable Brotli backend (requires libbrotli)', 'yes');
+ARG_ENABLE('zstd',              'Enable zstd backend (requires libzstd)',     'yes');
 
 if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
@@ -167,6 +170,63 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
             ADD_FLAG("LIBS", "bcrypt.lib crypt32.lib");
         } else {
             ERROR("HTTP/3 was requested but prerequisites are missing. Install OpenSSL >= 3.5, ngtcp2 >= 1.6, ngtcp2_crypto_ossl, nghttp3 >= 1.4 into '" + PHP_PHP_BUILD + "', or omit --enable-http3.");
+        }
+    }
+
+    // HTTP body compression (issues #8, #9). Mirrors config.m4 — gzip is
+    // the base, brotli + zstd plug into the same vtable. zlib ships with
+    // the PHP SDK; brotli + zstd headers/libs must be supplied by the
+    // user under PHP_PHP_BUILD\\include\\{brotli,zstd}.
+    var http_server_compression =
+        "http_compression.c " +
+        "http_compression_gzip.c " +
+        "http_compression_defaults.c " +
+        "http_compression_negotiate.c " +
+        "http_compression_response.c " +
+        "http_compression_request.c ";
+
+    if (PHP_HTTP_COMPRESSION == "yes") {
+        if (CHECK_HEADER_ADD_INCLUDE("zlib.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_LIB("zlib_a.lib;zlib.lib", "true_async_server")) {
+            AC_DEFINE("HAVE_HTTP_COMPRESSION", 1, "Whether HTTP body compression is enabled");
+            ADD_SOURCES(configure_module_dirname + "/src/compression",
+                http_server_compression, "true_async_server");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/include/compression");
+        } else {
+            WARNING("HTTP body compression disabled: zlib not found in '" + PHP_PHP_BUILD + "'.");
+            PHP_HTTP_COMPRESSION = "no";
+        }
+    }
+
+    // Brotli — requires libbrotlienc + libbrotlidec; static-link convention
+    // matches nghttp3/ngtcp2 above (the bundled brotli headers gate
+    // __declspec(dllimport) on a STATIC define).
+    if (PHP_BROTLI == "yes" && PHP_HTTP_COMPRESSION == "yes") {
+        if (CHECK_HEADER_ADD_INCLUDE("brotli/encode.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_HEADER_ADD_INCLUDE("brotli/decode.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_LIB("brotlienc.lib;brotlienc-static.lib", "true_async_server")
+            && CHECK_LIB("brotlidec.lib;brotlidec-static.lib", "true_async_server")
+            && CHECK_LIB("brotlicommon.lib;brotlicommon-static.lib", "true_async_server")) {
+            AC_DEFINE("HAVE_HTTP_BROTLI", 1, "Whether Brotli compression backend is available");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D BROTLI_STATIC_DEFINE");
+            ADD_SOURCES(configure_module_dirname + "/src/compression",
+                "http_compression_brotli.c", "true_async_server");
+        } else {
+            WARNING("Brotli backend disabled: libbrotli not found in '" + PHP_PHP_BUILD + "'.");
+        }
+    }
+
+    // zstd — single library, drops in. static lib is named zstd_static.lib
+    // by upstream's CMake; some distributions ship libzstd.lib instead.
+    if (PHP_ZSTD == "yes" && PHP_HTTP_COMPRESSION == "yes") {
+        if (CHECK_HEADER_ADD_INCLUDE("zstd.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
+            && CHECK_LIB("zstd_static.lib;zstd.lib;libzstd.lib", "true_async_server")) {
+            AC_DEFINE("HAVE_HTTP_ZSTD", 1, "Whether zstd compression backend is available");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D ZSTD_STATIC_LINKING_ONLY");
+            ADD_SOURCES(configure_module_dirname + "/src/compression",
+                "http_compression_zstd.c", "true_async_server");
+        } else {
+            WARNING("zstd backend disabled: libzstd not found in '" + PHP_PHP_BUILD + "'.");
         }
     }
 

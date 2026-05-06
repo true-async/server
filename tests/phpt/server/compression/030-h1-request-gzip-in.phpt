@@ -84,8 +84,11 @@ $client = spawn(function () use ($port, $server) {
     [$status,] = post($port, $gzbomb, 'gzip');
     echo "bomb status: $status\n";
 
-    /* 3. unknown coding → 415. */
-    [$status,] = post($port, 'whatever', 'br');
+    /* 3. unknown coding → 415. `deflate` is intentionally not implemented
+     * (the wire format mismatch between raw deflate vs zlib-wrapped is a
+     * footgun; gzip / br / zstd cover the negotiated codings the server
+     * actually supports). */
+    [$status,] = post($port, 'whatever', 'deflate');
     echo "unknown status: $status\n";
 
     /* 4. identity coding → no-op decode, handler sees raw body. */

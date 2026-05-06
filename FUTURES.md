@@ -136,66 +136,19 @@ precompressed: true)` call. The hand-written prelude that scans
 
 ---
 
-## 3. Transparent response compression middleware
+## 3. Transparent response compression middleware — *shipped*
 
-### Why
+Phase 1 (issue #8) landed the response-pipeline compression filter with
+gzip: registry, `Accept-Encoding` negotiation, request decoder, response
+encoder, and `setCompressionLevel()` on `HttpServerConfig`. See
+`src/compression/` and `docs/COMPRESSION.md`.
 
-HttpArena `json-comp` requires per-request gzip/brotli on `/json/{N}`:
+Phase 2 (issue #9) extends the same `http_encoder_t` vtable with Brotli
+and zstd as drop-in codecs — no architectural changes. Tracked on
+GitHub; not duplicated here.
 
-> Must use the framework standard JSON serialization and the framework
-> or engine's built-in response compression (middleware, filter, or
-> equivalent). No pre-compressed caches, no bypassing the response
-> pipeline.
-> *(`docs/test-profiles/h1/isolated/json-compressed/implementation.md`)*
-
-For production, hand-rolled `gzencode($body)` in the handler is
-explicitly disallowed.
-
-### What's missing
-
-`HttpResponse` has `setBody()` only; the response pipeline never looks
-at `Accept-Encoding`. There's no compression filter between the user
-handler returning a body and the wire write.
-
-### What needs to change
-
-Add an opt-in compression filter in the response pipeline. Suggested
-API:
-
-```php
-$config->enableCompression(
-    array $algorithms = ['br', 'gzip'],   // priority order
-    int $minBytes = 1024,                  // skip below threshold
-    array $skipMimePrefixes = [            // already-compressed types
-        'image/', 'video/', 'audio/',
-        'font/woff', 'application/zip',
-    ],
-): static;
-```
-
-Behaviour:
-
-- Honour the request's `Accept-Encoding` per-request (parse `q=` and
-  `q=0` correctly).
-- Pick the highest-priority algorithm both client and server agree on.
-  Set `Content-Encoding`. Set/append `Vary: Accept-Encoding`.
-- Stream-encode with zlib / brotli at the C level. Prefer
-  `deflate` on a buffer when the response body is fully buffered, and
-  a streaming filter for chunked / streaming responses.
-- Don't compress when:
-  - `Content-Encoding` is already set by the handler,
-  - body is below `minBytes`,
-  - MIME matches a `skipMimePrefixes` entry,
-  - request didn't accept any of the configured algorithms.
-- For `static` requests served by feature 2 with
-  `precompressed: true`, this filter must be a no-op (the file already
-  has `Content-Encoding`).
-
-### When done
-
-`entry.php` doesn't need any compression code for `/json/`. The
-`json-comp` profile becomes pass-through, and `meta.json` can list
-`"json-comp"`.
+`entry.php` no longer needs hand-rolled compression for `/json/`, and
+the `json-comp` profile can be listed in `meta.json` once #9 lands.
 
 ---
 
@@ -239,9 +192,9 @@ don't pay PHP-call cost when they could be served from C.
 |---|---|---|---|
 | 1 | Per-listener protocol mask + `addH2cListener` | `baseline-h2c`, `json-h2c` | No (independent) |
 | 2 | Built-in static handler | `static`, `static-h2`, `static-h3` | **Yes** |
-| 3 | Built-in compression middleware | `json-comp` | **Yes** |
-| 4 | Built-in routing | None directly — perf only | No |
+| 3 | Built-in routing | None directly — perf only | No |
 
-Without (2) and (3) we cannot legitimately classify as `production` for
-the static and compressed-JSON profiles. Until they land, `meta.json`
-stays at `"type": "tuned"`.
+Compression middleware (formerly item 3) shipped via issues #8/#9 — see
+section 3 above. Without (2) we cannot legitimately classify as
+`production` for the static profiles; until it lands, `meta.json` stays
+at `"type": "tuned"`.

@@ -127,16 +127,26 @@ int http_compression_decode_request_body(http_request_t *req,
         (len == 8 && zend_binary_strcasecmp(val, 8, "identity", 8) == 0)) {
         return HTTP_DECODE_OK;
     }
+    size_t cap = (cfg != NULL) ? cfg->request_max_decompressed_size : 0;
+
     if (len == 4 && zend_binary_strcasecmp(val, 4, "gzip", 4) == 0) {
-        size_t cap = (cfg != NULL) ? cfg->request_max_decompressed_size : 0;
         return decode_gzip(req, cap);
     }
     /* Aliases — RFC 9110 lists "x-gzip" as an obsolete synonym still
      * found in older intermediaries. Decode the same way. */
     if (len == 6 && zend_binary_strcasecmp(val, 6, "x-gzip", 6) == 0) {
-        size_t cap = (cfg != NULL) ? cfg->request_max_decompressed_size : 0;
         return decode_gzip(req, cap);
     }
+#ifdef HAVE_HTTP_BROTLI
+    if (len == 2 && zend_binary_strcasecmp(val, 2, "br", 2) == 0) {
+        return http_compression_decode_request_brotli(req, cap);
+    }
+#endif
+#ifdef HAVE_HTTP_ZSTD
+    if (len == 4 && zend_binary_strcasecmp(val, 4, "zstd", 4) == 0) {
+        return http_compression_decode_request_zstd(req, cap);
+    }
+#endif
 
     return HTTP_DECODE_UNKNOWN_CODING;
 }

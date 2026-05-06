@@ -15,7 +15,8 @@
 typedef enum {
     HTTP_CODEC_IDENTITY = 0,
     HTTP_CODEC_GZIP,
-    /* HTTP_CODEC_BROTLI, HTTP_CODEC_ZSTD reserved for phase 2. */
+    HTTP_CODEC_BROTLI,
+    HTTP_CODEC_ZSTD,
     HTTP_CODEC__COUNT
 } http_codec_id_t;
 
@@ -32,9 +33,12 @@ typedef struct http_encoder_vtable {
     const char     *name;
     http_codec_id_t id;
 
-    /* Allocate and initialise an encoder at the given level (1..9 for
-     * gzip; backends ignore the value when not applicable). Returns NULL
-     * on allocation/init failure. */
+    /* Allocate and initialise an encoder at the given level. Each backend
+     * defines its own valid range and clamps internally:
+     *   gzip   1..9   (zlib semantics; 6 default)
+     *   brotli 0..11  (4 default — production-typical; 11 is research-quality)
+     *   zstd   1..22  (3 default — zstd team's production default)
+     * Returns NULL on allocation/init failure. */
     http_encoder_t *(*create)(int level);
 
     /* Compress one chunk. The implementation must update *in_consumed
@@ -61,7 +65,8 @@ struct http_encoder {
 /* Codec registry. Returns NULL when the codec is not compiled in. */
 const http_encoder_vtable_t *http_compression_lookup(http_codec_id_t id);
 
-/* Token for Content-Encoding / Accept-Encoding ("gzip", "identity"). */
+/* Token for Content-Encoding / Accept-Encoding ("gzip", "br", "zstd",
+ * "identity"). Returns NULL for unknown codec IDs. */
 const char *http_compression_codec_token(http_codec_id_t id);
 
 /* Build-time identifier of the gzip engine: "zlib-ng" or "zlib".

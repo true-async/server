@@ -85,6 +85,8 @@ struct _http_server_shared_config_t {
      * thread's HashTable. */
     bool                    compression_enabled;
     uint8_t                 compression_level;
+    uint8_t                 brotli_level;
+    uint8_t                 zstd_level;
     size_t                  compression_min_size;
     size_t                  request_max_decompressed_size;
     zend_string           **compression_mime_types;     /* persistent strings */
@@ -1399,6 +1401,112 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionLevel)
     RETURN_LONG(config->compression_level);
 }
 
+/* {{{ proto HttpServerConfig::setBrotliLevel(int $level): static
+ *
+ * Brotli quality 0..11. setCompressionLevel keeps its gzip-only meaning
+ * — codec level scales differ enough (gzip 1..9, brotli 0..11, zstd 1..22)
+ * that a unified setter would lose the high end of brotli/zstd. The
+ * setter throws on out-of-range and on a locked config; defaults to 4
+ * (production-typical; quality 11 is ~50× slower than 4 with marginal
+ * extra ratio). When the extension was built without --enable-brotli
+ * the setter is still callable but inert (the response pipeline never
+ * picks brotli without HAVE_HTTP_BROTLI). */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setBrotliLevel)
+{
+    zend_long level;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(level)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (level < HTTP_COMPRESSION_BROTLI_LEVEL_MIN ||
+        level > HTTP_COMPRESSION_BROTLI_LEVEL_MAX) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "Brotli level must be between %d and %d",
+            HTTP_COMPRESSION_BROTLI_LEVEL_MIN, HTTP_COMPRESSION_BROTLI_LEVEL_MAX);
+        return;
+    }
+    config->brotli_level = (uint8_t)level;
+#else
+    (void)level;
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getBrotliLevel)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG(config->brotli_level);
+}
+
+/* {{{ proto HttpServerConfig::setZstdLevel(int $level): static
+ *
+ * zstd compression level 1..22. Default 3 (zstd team's own production
+ * default — better ratio than gzip-6 at higher throughput). Levels
+ * above ~19 enter "ultra" territory where the encoder reserves
+ * substantial extra memory; rarely worthwhile for HTTP payloads. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setZstdLevel)
+{
+    zend_long level;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(level)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (level < HTTP_COMPRESSION_ZSTD_LEVEL_MIN ||
+        level > HTTP_COMPRESSION_ZSTD_LEVEL_MAX) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "zstd level must be between %d and %d",
+            HTTP_COMPRESSION_ZSTD_LEVEL_MIN, HTTP_COMPRESSION_ZSTD_LEVEL_MAX);
+        return;
+    }
+    config->zstd_level = (uint8_t)level;
+#else
+    (void)level;
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getZstdLevel)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG(config->zstd_level);
+}
+
+/* {{{ proto static HttpServerConfig::getSupportedEncodings(): array
+ *
+ * Reports the codecs compiled into this build, in server preference
+ * order (zstd > br > gzip). Always includes "identity". Tests use this
+ * to skip cleanly when the relevant library was not present at build
+ * time; production code can use it to surface actual capability without
+ * trial-and-error. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getSupportedEncodings)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    array_init(return_value);
+#ifdef HAVE_HTTP_ZSTD
+    add_next_index_string(return_value, "zstd");
+#endif
+#ifdef HAVE_HTTP_BROTLI
+    add_next_index_string(return_value, "br");
+#endif
+#ifdef HAVE_HTTP_COMPRESSION
+    add_next_index_string(return_value, "gzip");
+#endif
+    add_next_index_string(return_value, "identity");
+}
+/* }}} */
+
 /* {{{ proto HttpServerConfig::setCompressionMinSize(int $bytes): static */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize)
 {
@@ -2018,6 +2126,8 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
 #ifdef HAVE_HTTP_COMPRESSION
     config->compression_enabled        = true;
     config->compression_level          = HTTP_COMPRESSION_DEFAULT_LEVEL;
+    config->brotli_level               = HTTP_COMPRESSION_BROTLI_DEFAULT_LEVEL;
+    config->zstd_level                 = HTTP_COMPRESSION_ZSTD_DEFAULT_LEVEL;
     config->compression_min_size       = HTTP_COMPRESSION_DEFAULT_MIN_SIZE;
     config->request_max_decompressed_size = HTTP_COMPRESSION_DEFAULT_REQUEST_MAX_DECOMP;
     http_compression_mime_table_init(&config->compression_mime_types);
@@ -2025,6 +2135,8 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
 #else
     config->compression_enabled        = false;
     config->compression_level          = 0;
+    config->brotli_level               = 0;
+    config->zstd_level                 = 0;
     config->compression_min_size       = 0;
     config->request_max_decompressed_size = 0;
     config->compression_mime_types     = NULL;
@@ -2126,6 +2238,8 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
 
     shared->compression_enabled           = src->compression_enabled;
     shared->compression_level             = src->compression_level;
+    shared->brotli_level                  = src->brotli_level;
+    shared->zstd_level                    = src->zstd_level;
     shared->compression_min_size          = src->compression_min_size;
     shared->request_max_decompressed_size = src->request_max_decompressed_size;
     if (src->compression_mime_types && zend_hash_num_elements(src->compression_mime_types) > 0) {
@@ -2263,6 +2377,8 @@ static void http_server_config_populate_from_shared(
 
     dst->compression_enabled           = src->compression_enabled;
     dst->compression_level             = src->compression_level;
+    dst->brotli_level                  = src->brotli_level;
+    dst->zstd_level                    = src->zstd_level;
     dst->compression_min_size          = src->compression_min_size;
     dst->request_max_decompressed_size = src->request_max_decompressed_size;
     if (dst->compression_mime_types) {

@@ -59,13 +59,16 @@ void http_accept_encoding_init_default(http_accept_encoding_t *out)
      * CLI tools / probes that may not handle gzip — and BREACH risk
      * argues for opt-in over opt-out. nginx ships the same default. */
     out->gzip_acceptable     = false;
+    out->brotli_acceptable   = false;
+    out->zstd_acceptable     = false;
     out->identity_acceptable = true;
 }
 
 void http_accept_encoding_parse(const char *hdr, size_t len,
                                 http_accept_encoding_t *out)
 {
-    q_t q_gzip = Q_UNSEEN, q_identity = Q_UNSEEN, q_star = Q_UNSEEN;
+    q_t q_gzip = Q_UNSEEN, q_brotli = Q_UNSEEN, q_zstd = Q_UNSEEN;
+    q_t q_identity = Q_UNSEEN, q_star = Q_UNSEEN;
 
     size_t i = 0;
     while (i < len) {
@@ -123,9 +126,12 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
         q_t outcome = (found_q && qzero) ? Q_REJECT : Q_OK;
 
         if      (ascii_eq_ci(name, name_len, "gzip"))     q_gzip     = outcome;
+        else if (ascii_eq_ci(name, name_len, "x-gzip"))   q_gzip     = outcome;
+        else if (ascii_eq_ci(name, name_len, "br"))       q_brotli   = outcome;
+        else if (ascii_eq_ci(name, name_len, "zstd"))     q_zstd     = outcome;
         else if (ascii_eq_ci(name, name_len, "identity")) q_identity = outcome;
         else if (name_len == 1 && name[0] == '*')         q_star     = outcome;
-        /* Unknown coding: ignored. Phase-2 backends extend the if-chain. */
+        /* Unknown codings: ignored. */
     }
 
     /* Resolution rules per RFC 9110 §12.5.3:
@@ -142,6 +148,14 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
         (q_gzip == Q_OK) ||
         (q_gzip == Q_UNSEEN && q_star == Q_OK);
 
+    out->brotli_acceptable =
+        (q_brotli == Q_OK) ||
+        (q_brotli == Q_UNSEEN && q_star == Q_OK);
+
+    out->zstd_acceptable =
+        (q_zstd == Q_OK) ||
+        (q_zstd == Q_UNSEEN && q_star == Q_OK);
+
     out->identity_acceptable =
         (q_identity == Q_OK) ||
         (q_identity == Q_UNSEEN && q_star != Q_REJECT);
@@ -149,9 +163,21 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
 
 http_codec_id_t http_accept_encoding_select(const http_accept_encoding_t *ae)
 {
-    /* Phase-2 will preface gzip with brotli/zstd lookups in preference
-     * order. The single-codec phase-1 branch keeps the type stable. */
-    if (ae->gzip_acceptable) {
+    /* Server-side preference order: zstd > brotli > gzip > identity.
+     * Matches typical server policy (best-ratio-first, with gzip last
+     * as the most universal fallback). q-value-based client preference
+     * is a future extension — server preference covers ~99% of real
+     * Accept-Encoding strings. The registry lookup at the call site
+     * filters out codecs absent from the build, so picking a codec the
+     * client accepts but we cannot encode degrades to identity rather
+     * than failing. */
+    if (ae->zstd_acceptable && http_compression_lookup(HTTP_CODEC_ZSTD)) {
+        return HTTP_CODEC_ZSTD;
+    }
+    if (ae->brotli_acceptable && http_compression_lookup(HTTP_CODEC_BROTLI)) {
+        return HTTP_CODEC_BROTLI;
+    }
+    if (ae->gzip_acceptable && http_compression_lookup(HTTP_CODEC_GZIP)) {
         return HTTP_CODEC_GZIP;
     }
     if (ae->identity_acceptable) {

@@ -162,24 +162,49 @@ both directions are available.
 
 ## 5. Compression
 
-Phase-1 inbound + outbound compression ships in this build (issue #8).
-Enabled by default for response bodies that match the configured MIME
-allowlist:
+Inbound + outbound compression with three backends — gzip (issue #8),
+Brotli + zstd (issue #9). Enabled by default; the response pipeline
+picks the best codec the client advertises in `Accept-Encoding`,
+preferring `zstd > br > gzip`. Codecs missing from the build skip
+silently.
 
 ```php
 $config
     ->setCompressionEnabled(true)        // default
-    ->setCompressionLevel(6)             // 1..9, zlib semantics
+    ->setCompressionLevel(6)             // gzip 1..9, zlib semantics
+    ->setBrotliLevel(4)                  // 0..11, default 4
+    ->setZstdLevel(3)                    // 1..22, default 3
     ->setCompressionMinSize(1024)        // skip below threshold
     ->setCompressionMimeTypes([          // wholesale replacement
         'text/html', 'text/plain', 'application/json',
         'application/javascript', 'image/svg+xml',
     ])
     ->setRequestMaxDecompressedSize(10 * 1024 * 1024);   // anti zip-bomb
+
+// Discover what this build was compiled with — useful for ops health
+// checks and for skipping codec-specific tests cleanly.
+$encodings = HttpServerConfig::getSupportedEncodings();
+// → ["zstd", "br", "gzip", "identity"]  (order: server preference)
+```
+
+`setCompressionLevel` retains its **gzip-only** meaning; brotli and zstd
+have their own ranges (see comments above) because the level scales
+differ enough that linear mapping would lose the high end of either.
+
+A handler can opt out per-response — useful for endpoints that mix
+secrets with reflected user input (BREACH mitigation):
+
+```php
+$server->addHttpHandler(function ($req, $resp) {
+    $resp->setNoCompression()
+         ->setHeader('Content-Type', 'application/json')
+         ->setBody($payload)
+         ->end();
+});
 ```
 
 See [docs/COMPRESSION.md](COMPRESSION.md) for the full negotiation
-matrix and the H1/H2/H3-specific behaviour.
+matrix, build flags, and the H1/H2/H3-specific behaviour.
 
 ---
 

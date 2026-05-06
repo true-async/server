@@ -31,6 +31,14 @@ typedef struct _http_server_config_t http_server_config_t;
 int http_compression_decode_request_body(http_request_t *req,
                                          http_server_config_t *cfg);
 
+/* Per-codec request decoders. Defined in their respective backend TUs;
+ * declared here so http_compression_request.c can dispatch without
+ * pulling in the codec-specific headers (libbrotli / libzstd). The
+ * dispatcher only calls these when the matching HAVE_HTTP_* macro is
+ * defined, so unbuilt codecs do not need stub implementations. */
+int http_compression_decode_request_brotli(http_request_t *req, size_t cap);
+int http_compression_decode_request_zstd(http_request_t *req, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

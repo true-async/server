@@ -55,6 +55,20 @@ PHP_ARG_ENABLE([http-compression],
   [yes],
   [no])
 
+PHP_ARG_ENABLE([brotli],
+  [whether to enable Brotli compression],
+  [AS_HELP_STRING([--enable-brotli],
+    [Enable Brotli compression backend (auto-detected; requires libbrotlienc + libbrotlidec; use --disable-brotli to opt out). Implies --enable-http-compression.])],
+  [yes],
+  [no])
+
+PHP_ARG_ENABLE([zstd],
+  [whether to enable zstd compression],
+  [AS_HELP_STRING([--enable-zstd],
+    [Enable zstd compression backend (auto-detected; requires libzstd; use --disable-zstd to opt out). Implies --enable-http-compression.])],
+  [yes],
+  [no])
+
 PHP_ARG_ENABLE([tests],
   [whether to build tests],
   [AS_HELP_STRING([--enable-tests],
@@ -369,6 +383,55 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     fi
   fi
 
+  dnl Brotli backend (issue #9). Plugs into the http_encoder vtable shipped
+  dnl in phase 1; needs encode + decode libs (libbrotlienc + libbrotlidec).
+  dnl Auto-detected; --disable-brotli opts out. Brotli without the gzip
+  dnl base path makes no sense (the vtable lives in the compression layer),
+  dnl so we silently skip detection when --disable-http-compression was
+  dnl chosen.
+  _http_server_brotli_ok=no
+  if test "$PHP_BROTLI" = "yes" -a "$PHP_HTTP_COMPRESSION" = "yes"; then
+    AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
+    AC_MSG_CHECKING([for libbrotlienc + libbrotlidec])
+    if test -x "$PKG_CONFIG" && \
+       "$PKG_CONFIG" --exists libbrotlienc libbrotlidec 2>/dev/null; then
+      BROTLI_CFLAGS=`"$PKG_CONFIG" --cflags libbrotlienc libbrotlidec`
+      BROTLI_LIBS=`"$PKG_CONFIG" --libs libbrotlienc libbrotlidec`
+      BROTLI_VERSION=`"$PKG_CONFIG" --modversion libbrotlienc`
+      AC_MSG_RESULT([yes (version $BROTLI_VERSION)])
+      PHP_EVAL_LIBLINE($BROTLI_LIBS, TRUE_ASYNC_SERVER_SHARED_LIBADD)
+      PHP_EVAL_INCLINE($BROTLI_CFLAGS)
+      AC_DEFINE([HAVE_HTTP_BROTLI], [1], [Whether Brotli compression backend is available])
+      _http_server_brotli_ok=yes
+    else
+      AC_MSG_RESULT([no])
+      AC_MSG_WARN([Brotli backend disabled: libbrotlienc + libbrotlidec not found via pkg-config. Install libbrotli-dev to enable.])
+      PHP_BROTLI=no
+    fi
+  fi
+
+  dnl zstd backend (issue #9). Same shape as Brotli — single library, drops
+  dnl into the encoder vtable. Auto-detected; --disable-zstd opts out.
+  _http_server_zstd_ok=no
+  if test "$PHP_ZSTD" = "yes" -a "$PHP_HTTP_COMPRESSION" = "yes"; then
+    AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
+    AC_MSG_CHECKING([for libzstd])
+    if test -x "$PKG_CONFIG" && "$PKG_CONFIG" --exists libzstd 2>/dev/null; then
+      ZSTD_CFLAGS=`"$PKG_CONFIG" --cflags libzstd`
+      ZSTD_LIBS=`"$PKG_CONFIG" --libs libzstd`
+      ZSTD_VERSION=`"$PKG_CONFIG" --modversion libzstd`
+      AC_MSG_RESULT([yes (version $ZSTD_VERSION)])
+      PHP_EVAL_LIBLINE($ZSTD_LIBS, TRUE_ASYNC_SERVER_SHARED_LIBADD)
+      PHP_EVAL_INCLINE($ZSTD_CFLAGS)
+      AC_DEFINE([HAVE_HTTP_ZSTD], [1], [Whether zstd compression backend is available])
+      _http_server_zstd_ok=yes
+    else
+      AC_MSG_RESULT([no])
+      AC_MSG_WARN([zstd backend disabled: libzstd not found via pkg-config. Install libzstd-dev to enable.])
+      PHP_ZSTD=no
+    fi
+  fi
+
   dnl Unit tests support (CMocka)
   if test "$PHP_TESTS" = "yes"; then
     AC_CHECK_LIB(cmocka, _cmocka_run_group_tests, [
@@ -443,6 +506,18 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/compression/http_compression_negotiate.c
       src/compression/http_compression_response.c
       src/compression/http_compression_request.c
+    "
+  fi
+
+  if test "$_http_server_brotli_ok" = "yes"; then
+    http_server_sources="$http_server_sources
+      src/compression/http_compression_brotli.c
+    "
+  fi
+
+  if test "$_http_server_zstd_ok" = "yes"; then
+    http_server_sources="$http_server_sources
+      src/compression/http_compression_zstd.c
     "
   fi
 

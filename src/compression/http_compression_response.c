@@ -225,10 +225,13 @@ static http_codec_id_t decide(http_compression_state_t *st,
         http_accept_encoding_init_default(&ae);
     }
     http_codec_id_t chosen = http_accept_encoding_select(&ae);
-    if (chosen != HTTP_CODEC_GZIP) {
-        /* Either identity-only or fully unsatisfiable. The 406 path is
-         * not in scope here — the dispose code already commits identity
-         * by default. We just skip compression. */
+    /* select() may return ZSTD, BROTLI, GZIP, IDENTITY, or COUNT. Anything
+     * other than a real encodable codec falls back to identity — the 406
+     * path is not in scope here; the dispose code commits identity by
+     * default. */
+    if (chosen != HTTP_CODEC_GZIP &&
+        chosen != HTTP_CODEC_BROTLI &&
+        chosen != HTTP_CODEC_ZSTD) {
         return HTTP_CODEC_IDENTITY;
     }
 
@@ -262,7 +265,21 @@ static http_codec_id_t decide(http_compression_state_t *st,
         return HTTP_CODEC_IDENTITY;
     }
 
-    return HTTP_CODEC_GZIP;
+    return chosen;
+}
+
+/* Pick the configured level for a codec. Each backend clamps internally,
+ * so out-of-range values are still safe — this just keeps the call site
+ * codec-agnostic. */
+static inline int level_for_codec(const http_server_config_t *const cfg,
+                                  const http_codec_id_t codec)
+{
+    switch (codec) {
+        case HTTP_CODEC_GZIP:   return (int)cfg->compression_level;
+        case HTTP_CODEC_BROTLI: return (int)cfg->brotli_level;
+        case HTTP_CODEC_ZSTD:   return (int)cfg->zstd_level;
+        default:                return 0;
+    }
 }
 
 /* ----- attach / free / opt-out --------------------------------------- */
@@ -323,16 +340,16 @@ void http_compression_apply_buffered(zend_object *response_obj)
     smart_str *body = http_response_get_body_smart_str(response_obj);
     size_t body_len = (body && body->s) ? ZSTR_LEN(body->s) : 0;
 
-    http_codec_id_t codec = decide(st, response_obj, body_len);
+    const http_codec_id_t codec = decide(st, response_obj, body_len);
     st->applied = true;  /* Whether or not we compress, never run twice. */
 
-    if (codec != HTTP_CODEC_GZIP || body_len == 0) {
+    if (codec == HTTP_CODEC_IDENTITY || body_len == 0) {
         return;
     }
 
     const http_encoder_vtable_t *const vt = http_compression_lookup(codec);
     if (UNEXPECTED(vt == NULL)) return;
-    http_encoder_t *const enc = vt->create((int)st->cfg->compression_level);
+    http_encoder_t *const enc = vt->create(level_for_codec(st->cfg, codec));
     if (UNEXPECTED(enc == NULL)) return;
 
     /* Pre-size for the worst-case output: gzip overhead on text is
@@ -407,6 +424,7 @@ typedef struct {
     const http_response_stream_ops_t *underlying_ops;
     void                             *underlying_ctx;
     http_encoder_t                   *encoder;
+    http_codec_id_t                   codec;
     bool                              first_chunk_done;
 } ws_ctx_t;
 
@@ -434,7 +452,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
          * by HttpResponse::send before we got here), and we know we
          * are actually going to encode at least one byte. */
         mutate_headers_for_codec(
-            http_response_get_headers(w->response_obj), HTTP_CODEC_GZIP);
+            http_response_get_headers(w->response_obj), w->codec);
         w->first_chunk_done = true;
     }
 
@@ -491,7 +509,7 @@ static void ws_mark_ended(void *ctx_opaque)
      * tell the underlying side to terminate. */
     if (UNEXPECTED(!w->first_chunk_done)) {
         mutate_headers_for_codec(
-            http_response_get_headers(w->response_obj), HTTP_CODEC_GZIP);
+            http_response_get_headers(w->response_obj), w->codec);
         w->first_chunk_done = true;
     }
 
@@ -540,15 +558,16 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     http_compression_state_t *st = state_of(response_obj);
     if (st == NULL || st->wrapper_installed) return;
 
-    /* Streaming path: size unknown → pass 0 to skip the threshold check. */
-    if (decide(st, response_obj, 0) != HTTP_CODEC_GZIP) {
-        return;
-    }
+    /* Streaming path: size unknown → pass 0 to skip the threshold check.
+     * decide() only ever returns IDENTITY or one of the encodable codecs,
+     * so a single inequality is enough to short-circuit. */
+    const http_codec_id_t codec = decide(st, response_obj, 0);
+    if (codec == HTTP_CODEC_IDENTITY) return;
 
-    const http_encoder_vtable_t *vt = http_compression_lookup(HTTP_CODEC_GZIP);
-    if (vt == NULL) return;
-    http_encoder_t *enc = vt->create((int)st->cfg->compression_level);
-    if (enc == NULL) return;
+    const http_encoder_vtable_t *const vt = http_compression_lookup(codec);
+    if (UNEXPECTED(vt == NULL)) return;
+    http_encoder_t *const enc = vt->create(level_for_codec(st->cfg, codec));
+    if (UNEXPECTED(enc == NULL)) return;
 
     const http_response_stream_ops_t *under_ops =
         http_response_get_stream_ops(response_obj);
@@ -564,6 +583,7 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     w->underlying_ops  = under_ops;
     w->underlying_ctx  = under_ctx;
     w->encoder         = enc;
+    w->codec           = codec;
     w->first_chunk_done = false;
 
     http_response_replace_stream_ops(response_obj, &compressing_stream_ops, w);

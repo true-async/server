@@ -19,6 +19,12 @@
 #ifdef HAVE_HTTP_COMPRESSION
 extern const http_encoder_vtable_t http_compression_gzip_vt;
 #endif
+#ifdef HAVE_HTTP_BROTLI
+extern const http_encoder_vtable_t http_compression_brotli_vt;
+#endif
+#ifdef HAVE_HTTP_ZSTD
+extern const http_encoder_vtable_t http_compression_zstd_vt;
+#endif
 
 const http_encoder_vtable_t *http_compression_lookup(http_codec_id_t id)
 {
@@ -26,6 +32,14 @@ const http_encoder_vtable_t *http_compression_lookup(http_codec_id_t id)
 #ifdef HAVE_HTTP_COMPRESSION
         case HTTP_CODEC_GZIP:
             return &http_compression_gzip_vt;
+#endif
+#ifdef HAVE_HTTP_BROTLI
+        case HTTP_CODEC_BROTLI:
+            return &http_compression_brotli_vt;
+#endif
+#ifdef HAVE_HTTP_ZSTD
+        case HTTP_CODEC_ZSTD:
+            return &http_compression_zstd_vt;
 #endif
         case HTTP_CODEC_IDENTITY:
         default:
@@ -38,6 +52,8 @@ const char *http_compression_codec_token(http_codec_id_t id)
     switch (id) {
         case HTTP_CODEC_IDENTITY: return "identity";
         case HTTP_CODEC_GZIP:     return "gzip";
+        case HTTP_CODEC_BROTLI:   return "br";
+        case HTTP_CODEC_ZSTD:     return "zstd";
         default:                  return NULL;
     }
 }

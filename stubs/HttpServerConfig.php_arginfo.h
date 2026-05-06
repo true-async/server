@@ -125,6 +125,11 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled         arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
 #define arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel          arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel          arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_setBrotliLevel               arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel               arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel                 arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel                 arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings        arginfo_class_TrueAsync_HttpServerConfig_getListeners
 #define arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes, 0, 1, IS_STATIC, 0)
@@ -261,6 +266,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setBrotliLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getBrotliLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setZstdLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getZstdLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getSupportedEncodings);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMinSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMimeTypes);
@@ -344,6 +354,11 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled,          arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled,          ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel,           arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel,           ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionLevel,           arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel,           ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setBrotliLevel,                arginfo_class_TrueAsync_HttpServerConfig_setBrotliLevel,                ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getBrotliLevel,                arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel,                ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setZstdLevel,                  arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel,                  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getZstdLevel,                  arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel,                  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getSupportedEncodings,         arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings,         ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize,         ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize,         ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMimeTypes,       arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes,       ZEND_ACC_PUBLIC)
