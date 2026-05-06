@@ -1,7 +1,7 @@
 // vim:ft=javascript
 
 ARG_ENABLE('true-async-server', 'Enable TrueAsync HTTP Server extension', 'no');
-ARG_ENABLE('http2', 'Enable HTTP/2 in true_async_server (requires nghttp2)', 'no');
+ARG_ENABLE('http2', 'Enable HTTP/2 in true_async_server (requires nghttp2)', 'yes');
 ARG_ENABLE('http3', 'Enable HTTP/3 in true_async_server (requires ngtcp2, nghttp3, OpenSSL >= 3.5)', 'no');
 
 if (PHP_TRUE_ASYNC_SERVER == "yes") {

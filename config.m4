@@ -9,8 +9,8 @@ PHP_ARG_ENABLE([http-server],
 PHP_ARG_ENABLE([http2],
   [whether to enable HTTP/2 support],
   [AS_HELP_STRING([--enable-http2],
-    [Enable HTTP/2 support (requires nghttp2)])],
-  [no],
+    [Enable HTTP/2 support (auto-detected; requires nghttp2; use --disable-http2 to opt out)])],
+  [yes],
   [no])
 
 PHP_ARG_ENABLE([http3],

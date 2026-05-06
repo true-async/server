@@ -165,15 +165,13 @@ cd nghttp3 && autoreconf -i \
 phpize
 ./configure \
     --enable-http-server \
-    --enable-http2 \
-    --enable-http3 \
     --with-php-config="$(which php-config)" \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 make -j$(nproc)
 sudo make install
 ```
 
-> `--enable-http2` and `--enable-http3` should always be passed together — `--enable-http3` alone silently drops HTTP/2 detection. If `config.nice` exists from a prior run, treat it as untrusted and re-pass the flags explicitly.
+HTTP/2 and HTTP/3 are enabled by default when their respective dependencies are detected (`libnghttp2 ≥ 1.57` for HTTP/2; `libngtcp2 ≥ 1.22`, `libnghttp3 ≥ 1.15`, and OpenSSL ≥ 3.5 for HTTP/3). To opt out: `--disable-http2`, `--disable-http3`.
 
 Optional flags: `--enable-tests` (links `libcmocka` for unit tests), `--enable-coverage` (gcov instrumentation), `--without-openssl` (build without TLS — disables HTTP/3 too).
 
@@ -210,8 +208,6 @@ configure.bat ^
     --enable-cli ^
     --enable-async=shared ^
     --enable-http-server=shared ^
-    --enable-http2 ^
-    --enable-http3 ^
     --with-openssl=shared
 
 nmake
