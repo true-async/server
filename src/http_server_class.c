@@ -247,6 +247,17 @@ struct http_server_object {
     bool                     running;
     bool                     stopping;
     bool                     listeners_paused;
+    /* Set in transfer_obj LOAD when this object was constructed by the
+     * built-in worker pool (issue #11) — start() skips re-spawning the
+     * pool and runs the standalone event loop. */
+    bool                     is_worker_clone;
+
+    /* Async\ThreadPool object held while the parent server is awaiting
+     * its workers. UNDEF when workers <= 1 or outside start(). stop()
+     * calls cancel() on this pool to broadcast shutdown to every worker
+     * (their start() returns, the pool task completes, await resolves).
+     * Issue #11. */
+    zval                     worker_pool;
 
     /* Transit sidecar — non-NULL only in the persistent shell created by
      * transfer_obj(TRANSFER). Holds pemalloc-copied closures so the LOAD
@@ -1214,6 +1225,149 @@ static void http_server_accept_callback(
     }
 }
 
+/* {{{ http_server_start_pool — built-in worker pool path (issue #11)
+ *
+ * Constructs an Async\ThreadPool of `workers` size, submits N copies of
+ * `[$this, 'start']` (the array callable transfers $this to each worker
+ * via HttpServer::transfer_obj — the worker-side clone has
+ * is_worker_clone=true so its own start() skips this branch and runs
+ * the standalone path), then awaits every returned Future before
+ * closing the pool.
+ *
+ * Returns SUCCESS on a clean shutdown of every worker, FAILURE if pool
+ * construction or any submit fails (a PHP exception is set in that
+ * case). Awaits propagate worker exceptions through the returned
+ * Future — the parent's start() bubbles those up unchanged.
+ */
+static int http_server_start_pool(http_server_object *server,
+                                  zval *this_zv,
+                                  int workers)
+{
+    int rc = FAILURE;
+    zend_class_entry *tp_ce = NULL;
+    zval pool, callable, *futures = NULL;
+    int submitted = 0;
+
+    ZVAL_UNDEF(&pool);
+    ZVAL_UNDEF(&callable);
+
+    /* Lookup Async\ThreadPool. zend_lookup_class follows autoloaders if
+     * registered; the class is built-in to true_async so the lookup is
+     * a hash hit in normal runs. */
+    zend_string *tp_name = zend_string_init("Async\\ThreadPool", sizeof("Async\\ThreadPool") - 1, 0);
+    tp_ce = zend_lookup_class(tp_name);
+    zend_string_release(tp_name);
+    if (UNEXPECTED(tp_ce == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Async\\ThreadPool is not available — load the true_async extension before setting workers > 1", 0);
+        return FAILURE;
+    }
+
+    /* new ThreadPool($workers) */
+    if (UNEXPECTED(object_init_ex(&pool, tp_ce) != SUCCESS)) {
+        goto cleanup;
+    }
+    {
+        zval n_zv;
+        ZVAL_LONG(&n_zv, workers);
+        zend_call_method_with_1_params(Z_OBJ(pool), tp_ce, NULL, "__construct", NULL, &n_zv);
+        if (UNEXPECTED(EG(exception))) {
+            goto cleanup;
+        }
+    }
+
+    /* Build a user-land worker closure. ThreadPool::submit serialises the
+     * callable to ship across threads and expects a real op_array in the
+     * function — internal methods (`[$this, 'start']`) have none, so a
+     * naive array callable crashes the snapshot serialiser. Eval'ing a
+     * tiny user-space closure side-steps that: it owns an op_array and
+     * its single $server arg is transferred via HttpServer::transfer_obj
+     * exactly the way the user-driven multi-worker pattern relies on. */
+    {
+        /* zend_eval_string wraps as `return <src>;` so we feed it just
+         * the closure expression — no leading `return`, no trailing `;`. */
+        const char *src =
+            "static function (\\TrueAsync\\HttpServer $server): void {"
+            " $server->start(); }";
+        if (zend_eval_string((char *)src, &callable,
+                             "TrueAsync\\HttpServer worker pool stub") != SUCCESS
+            || Z_TYPE(callable) != IS_OBJECT) {
+            if (!EG(exception)) {
+                zend_throw_exception(http_server_runtime_exception_ce,
+                    "Failed to build worker pool stub closure", 0);
+            }
+            goto cleanup;
+        }
+    }
+
+    /* submit N copies; collect their Futures so we can await all. The
+     * closure receives $this as its $server argument; submit transfers
+     * the trailing args alongside the closure to each worker. */
+    futures = ecalloc((size_t)workers, sizeof(zval));
+    for (int i = 0; i < workers; i++) {
+        ZVAL_UNDEF(&futures[i]);
+        zend_call_method_with_2_params(Z_OBJ(pool), tp_ce, NULL, "submit",
+                                       &futures[i], &callable, this_zv);
+        if (UNEXPECTED(EG(exception))) {
+            goto cleanup;
+        }
+        if (UNEXPECTED(Z_TYPE(futures[i]) != IS_OBJECT)) {
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "ThreadPool::submit returned non-object", 0);
+            goto cleanup;
+        }
+        submitted++;
+    }
+
+    /* Hold a ref to the pool on the server-object so stop() can call
+     * cancel() on it from another coroutine. Mark the parent as running
+     * for the duration of the await so a concurrent stop() call sees a
+     * live server instead of returning immediately. */
+    ZVAL_COPY(&server->worker_pool, &pool);
+    server->running = true;
+
+    /* Await each Future. Each await suspends the calling coroutine
+     * until the worker's start() returns; an exception inside the
+     * worker propagates out of await(). We deliberately await
+     * sequentially — semantics of "block until all workers done" are
+     * equivalent, and serialising the awaits keeps the error path
+     * simple (first failure stops collecting). */
+    for (int i = 0; i < submitted; i++) {
+        zval ret;
+        ZVAL_UNDEF(&ret);
+        zend_call_method_with_0_params(Z_OBJ(futures[i]), Z_OBJCE(futures[i]),
+                                       NULL, "await", &ret);
+        zval_ptr_dtor(&ret);
+        if (UNEXPECTED(EG(exception))) {
+            goto cleanup;
+        }
+    }
+
+    /* close() releases pool's worker threads. */
+    zend_call_method_with_0_params(Z_OBJ(pool), tp_ce, NULL, "close", NULL);
+    if (UNEXPECTED(EG(exception))) {
+        goto cleanup;
+    }
+
+    rc = SUCCESS;
+
+cleanup:
+    if (futures) {
+        for (int i = 0; i < submitted; i++) {
+            zval_ptr_dtor(&futures[i]);
+        }
+        efree(futures);
+    }
+    server->running = false;
+    server->stopping = false;
+    zval_ptr_dtor(&server->worker_pool);
+    ZVAL_UNDEF(&server->worker_pool);
+    zval_ptr_dtor(&callable);
+    zval_ptr_dtor(&pool);
+    return rc;
+}
+/* }}} */
+
 /* {{{ proto HttpServer::start(): bool */
 ZEND_METHOD(TrueAsync_HttpServer, start)
 {
@@ -1249,6 +1403,29 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         if (!ZEND_ASYNC_SCHEDULER_LAUNCH()) {
             zend_throw_exception(http_server_runtime_exception_ce,
                 "Failed to launch TrueAsync scheduler", 0);
+            RETURN_FALSE;
+        }
+    }
+
+    /* Built-in worker pool dispatch (issue #11). When workers > 1 AND
+     * we are not ourselves a worker clone constructed by transfer_obj,
+     * delegate to http_server_start_pool which spawns Async\ThreadPool
+     * and awaits every worker's standalone start(). Worker clones fall
+     * through to the standalone path below. The scheduler must already
+     * be active at this point — ThreadPool::__construct registers
+     * worker threads with the reactor, and Future::await suspends the
+     * calling coroutine. */
+    if (!server->is_worker_clone) {
+        zval workers_zv;
+        ZVAL_UNDEF(&workers_zv);
+        zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL,
+                                       "getWorkers", &workers_zv);
+        const int workers_n = (Z_TYPE(workers_zv) == IS_LONG) ? (int)Z_LVAL(workers_zv) : 1;
+        zval_ptr_dtor(&workers_zv);
+        if (workers_n > 1) {
+            if (http_server_start_pool(server, ZEND_THIS, workers_n) == SUCCESS) {
+                RETURN_TRUE;
+            }
             RETURN_FALSE;
         }
     }
@@ -1746,6 +1923,23 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
 
     server->stopping = true;
 
+    /* Pool-mode (issue #11): the parent server has no listen events of
+     * its own — it's awaiting Future objects from a child Async\ThreadPool.
+     * Async\ThreadPool::cancel() is intentionally not used here because
+     * scheduler-suspended tasks on cross-thread workers don't observe the
+     * cancellation reliably; a HttpServer running inside a worker has to
+     * stop itself (e.g. by calling $server->stop() from within its own
+     * handler). Until cross-thread pool cancellation lands, the right
+     * answer is to surface that asymmetry instead of pretending. */
+    if (Z_TYPE(server->worker_pool) == IS_OBJECT) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "stop() on a pool-parent HttpServer is not supported yet "
+            "(issue #11). Stop each worker from within its own handler "
+            "(e.g. on a /stop endpoint that calls $server->stop()) — the "
+            "parent's start() returns once every worker has stopped.", 0);
+        RETURN_FALSE;
+    }
+
     /* Stop the deadline watchdog FIRST so the periodic timer no longer
      * keeps the libuv loop alive past server stop. Without this, the
      * loop drains forever and stop() never lets the script exit. */
@@ -2113,6 +2307,7 @@ static zend_object *http_server_create(zend_class_entry *ce)
     server->refcount = 1;   /* held by the wrapper */
 
     ZVAL_UNDEF(&server->config);
+    ZVAL_UNDEF(&server->worker_pool);
     http_protocol_handlers_init(&server->protocol_handlers);
     http_log_state_init(&server->log_state);
     conn_arena_init(&server->conn_arena);
@@ -2251,8 +2446,10 @@ static void http_server_free(zend_object *obj)
     }
 #endif
 
-    /* Release config */
+    /* Release config + worker pool ref (issue #11). worker_pool is UNDEF
+     * outside start()/stop(); zval_ptr_dtor on UNDEF is a no-op. */
     zval_ptr_dtor(&server->config);
+    zval_ptr_dtor(&server->worker_pool);
 
     /* Destroy protocol handlers */
     http_protocol_handlers_destroy(&server->protocol_handlers);
@@ -2396,6 +2593,12 @@ static zend_object *http_server_transfer_obj(
         return NULL;
     }
     http_server_object *dst_obj = http_server_from_obj(dst);
+    /* Worker-clone marker (issue #11). The C-state was just constructed
+     * by the destination thread's create_object — when start() runs on
+     * this object it must skip the pool-spawn branch and go straight to
+     * the standalone event loop, otherwise we'd recursively spawn a
+     * fresh ThreadPool on every worker. */
+    dst_obj->is_worker_clone = true;
 
     if (Z_TYPE(src_shell->config) == IS_OBJECT) {
         /* create_object zeroed dst->config; drop the UNDEF and install loaded. */

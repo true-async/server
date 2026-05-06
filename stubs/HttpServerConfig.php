@@ -103,6 +103,27 @@ final class HttpServerConfig
     public function setBacklog(int $backlog): static {}
 
     /**
+     * Built-in worker pool size (issue #11).
+     *
+     * 1 (default) = single-threaded. {@see HttpServer::start()} runs the
+     * event loop on the calling thread, identical to pre-#11 behaviour.
+     *
+     * > 1 = `HttpServer::start()` spawns an `Async\ThreadPool` of this
+     * size, replicates the config + handler set to each worker via
+     * transfer_obj, and the parent's `start()` awaits all workers'
+     * completion. Each worker re-binds the same listeners; the kernel
+     * load-balances accept() across them via `SO_REUSEPORT` (Linux).
+     *
+     * @return static
+     */
+    public function setWorkers(int $workers): static {}
+
+    /**
+     * @return int Configured worker pool size (1 = single-threaded).
+     */
+    public function getWorkers(): int {}
+
+    /**
      * Get socket backlog
      */
     public function getBacklog(): int {}

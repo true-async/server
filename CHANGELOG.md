@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HttpServerConfig::addHttp1Listener()` / `addHttp2Listener()` for
   protocol-restricted ports (h2c-only, h1-only). Default
   `addListener()` unchanged (H1+H2).
+- Built-in worker pool (issue #11). New `HttpServerConfig::setWorkers(N)`
+  spawns an internal `Async\ThreadPool` from `start()`; each worker
+  re-binds the listeners (`SO_REUSEPORT`). Default `1` keeps current
+  behaviour bit-for-bit. Cross-thread `stop()` is a follow-up.
 - `docs/USAGE.md` — full configuration guide.
 
 ## [0.3.2] - 2026-05-06

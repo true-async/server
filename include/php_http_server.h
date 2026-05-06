@@ -137,6 +137,15 @@ struct _http_server_config_t {
     int backlog;            /* Listen backlog (default: 128); passed to listen(2) as int */
     int max_connections;    /* Max concurrent connections (0 = unlimited) */
 
+    /* Built-in worker pool (issue #11). 1 (default) = single-threaded —
+     * start() runs the event loop on the calling thread, identical to
+     * pre-#11 behaviour. > 1 = HttpServer::start() spawns an internal
+     * Async\ThreadPool of this size, replicates config + handlers to each
+     * worker via transfer_obj, and awaits all workers' completion. 0 is
+     * reserved for "auto = available_parallelism" — set at start() if
+     * the runtime exposes it; until then 0 collapses to 1. */
+    int workers;
+
     /* Admission reject (overload shedding).
      * Maximum in-flight handler coroutines before new H1 requests get 503
      * and new H2 streams get RST_STREAM(REFUSED_STREAM). 0 = disabled,

@@ -269,20 +269,43 @@ once all in-flight handlers finish (subject to `shutdown_timeout_s`).
 
 ---
 
-## 9. Multi-worker (preforking)
+## 9. Multi-worker (built-in pool)
 
-`HttpServerConfig` is transferable across `TrueAsync\ThreadChannel`s.
-The intended pattern:
+Set `setWorkers(N)` and `start()` spawns an internal `Async\ThreadPool`
+of N workers. Each worker re-binds the same listeners; the kernel
+load-balances accept() across them via `SO_REUSEPORT` on Linux.
 
-1. Build the config in the parent.
-2. Send it to N worker threads.
-3. Each worker reconstructs `new HttpServer($config)` and calls
-   `start()`.
-4. The kernel load-balances accept across workers via `SO_REUSEPORT`
-   (Linux only — Windows libuv falls back to single-accept).
+```php
+$config = (new HttpServerConfig())
+    ->addListener('0.0.0.0', 8080)
+    ->setWorkers(4);                    // 1 (default) = single-thread
 
-See [`examples/multi-worker.php`](../examples/multi-worker.php) for a
-fully wired example.
+$server = new HttpServer($config);
+$server->addHttpHandler($handler);
+$server->start();                       // blocks until every worker exits
+```
+
+### Caveats
+
+- **Cross-thread shutdown is incomplete.** `$server->stop()` on the
+  pool-parent throws — `Async\ThreadPool::cancel()` doesn't reliably
+  wake workers suspended on their own server's wait event. Until that
+  lands, terminate the process at the OS level (SIGINT / SIGTERM /
+  `posix_kill`) when you need to bring everything down.
+- **`SO_REUSEPORT` is Linux/BSD-only.** On Windows libuv falls back to
+  a single accept thread; workers > 1 will compile but provide no
+  parallelism.
+- **No worker init hook.** State that's expensive to build (preloaded
+  fixtures, opcache warm-up) lives in your handler closure's
+  by-value captures; transfer_obj clones it once per worker. If you
+  need an explicit init step, fall back to the manual pattern in
+  [`examples/multi-worker.php`](../examples/multi-worker.php) where
+  each worker constructs its own `HttpServer` from scratch.
+
+The manual `Async\ThreadPool::submit()` pattern in
+[`examples/multi-worker.php`](../examples/multi-worker.php) still works
+and is the right choice when you need per-worker init or your own
+control over the lifecycle.
 
 ---
 
