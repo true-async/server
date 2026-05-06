@@ -71,7 +71,7 @@ PHP_ARG_ENABLE([coverage],
 
 if test "$PHP_HTTP_SERVER" != "no"; then
   dnl Check for required headers
-  AC_CHECK_HEADERS([sys/socket.h netinet/in.h arpa/inet.h])
+  AC_CHECK_HEADERS([sys/socket.h netinet/in.h arpa/inet.h execinfo.h])
 
   dnl Use bundled llhttp
   AC_MSG_CHECKING([for llhttp])

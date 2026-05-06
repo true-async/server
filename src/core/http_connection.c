@@ -29,7 +29,9 @@
 #include <stdint.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <execinfo.h>
+#ifdef HAVE_EXECINFO_H
+#  include <execinfo.h>
+#endif
 #include <stdio.h>
 
 /* MSG_NOSIGNAL is a Linux extension. On BSD/macOS SO_NOSIGPIPE is the
@@ -1669,6 +1671,11 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
                proto ? proto : "?", (long) syscall(SYS_gettid),
                coroutine, m, u, cause, file, err_line);
 
+#ifdef HAVE_EXECINFO_H
+    /* execinfo.h is glibc-only. On musl (Alpine) and Windows the
+     * C-frame dump is silently skipped — the PHP-level stack is already
+     * on stderr via SAPI's php_error_cb above, which is what operators
+     * actually act on. */
     void *bt[48];
     const int n = backtrace(bt, 48);
     fprintf(stderr, "[true-async-server] --- C backtrace (proto=%s) ---\n",
@@ -1676,6 +1683,7 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
     backtrace_symbols_fd(bt, n, fileno(stderr));
     fprintf(stderr, "[true-async-server] --- end C backtrace ---\n");
     fflush(stderr);
+#endif
 }
 /* }}} */
 

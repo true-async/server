@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-06
+
+### Fixed
+
+- **Alpine / musl libc build broken in 0.3.0.** The bailout-firewall
+  diagnostic added in 0.3.0 included `<execinfo.h>` and called
+  `backtrace()` / `backtrace_symbols_fd()` unconditionally — both are
+  glibc-only, so musl-based images (Alpine) failed to compile with
+  `fatal error: execinfo.h: No such file or directory`. The header
+  is now gated behind a new `HAVE_EXECINFO_H` autoconf check
+  (`AC_CHECK_HEADERS`) and the C-stack dump compiles only on
+  platforms that have it. On musl / Windows the bailout fence still
+  emits the PHP-level `zend_error` line via SAPI; the C-frame dump
+  is silently skipped (no fake "unavailable" notice in stderr).
+
 ## [0.3.0] - 2026-05-06
 
 ### Added
