@@ -720,8 +720,11 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
      * double-GOAWAY when multiple concurrent streams commit on the
      * same session; existing streams continue to drain naturally
      * after GOAWAY per RFC 9113 §6.8. */
+    /* zend_hrtime() — same clock domain as conn->drain_not_before_ns
+     * (CLOCK_MONOTONIC_RAW on Linux). The coarse clock would drift
+     * after NTP slewing / suspend and mis-fire drain. */
     if (!conn->drain_submitted
-        && http_server_should_drain_now(conn->server, conn, http_now_coarse_ns())) {
+        && http_server_should_drain_now(conn->server, conn, zend_hrtime())) {
         (void)http2_session_terminate(self->session, 0 /* NGHTTP2_NO_ERROR */);
         conn->drain_submitted = true;
         http_server_on_h2_goaway_sent(conn->counters);

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Proactive drain mis-fired on the first response when CoDel/telemetry
+  were disabled. The fallback timestamp used `CLOCK_MONOTONIC_COARSE`
+  while `created_at_ns` and `drain_not_before_ns` are `zend_hrtime`
+  (CLOCK_MONOTONIC_RAW); the two domains drift by minutes after
+  suspend / NTP slewing. Drain check now stays in the same clock
+  domain in both H1 dispose and H2 commit paths.
+
 ### Added
 
 - Per-listener protocol mask (FUTURES #1). New
