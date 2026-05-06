@@ -2109,12 +2109,14 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
                            const uint32_t read_timeout_ms, const uint32_t write_timeout_ms,
                            const uint32_t keepalive_timeout_ms,
                            http_server_object *server,
-                           tls_context_t *tls_ctx)
+                           tls_context_t *tls_ctx,
+                           const uint32_t protocol_mask)
 {
     http_connection_t *conn = http_connection_create(client_fd, server_scope, server);
     if (!conn) {
         return false;
     }
+    conn->protocol_mask = protocol_mask;
     http_server_bind_connection(server, conn);
 
 #ifdef HAVE_OPENSSL

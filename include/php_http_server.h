@@ -100,6 +100,12 @@ typedef struct {
     zend_string *host;  /* IP address for TCP, path for Unix socket */
     int port;           /* Port (0 for Unix sockets) */
     bool tls;           /* TLS enabled */
+    /* HTTP protocols this listener accepts. HTTP_PROTO_MASK_HTTP1|HTTP2 for
+     * a default TCP listener; H1-only for addHttp1Listener; H2-only (h2c on
+     * plaintext, h2 negotiated via ALPN on TLS) for addHttp2Listener; H3 for
+     * UDP/QUIC. Read by detect_and_assign_protocol via the connection — a
+     * protocol absent from this mask is rejected at the byte stream level. */
+    uint32_t protocol_mask;
 } http_listener_config_t;
 
 /*

@@ -234,17 +234,28 @@ Expect ~123/124 PASS, with at most one environment-dependent skip.
 ## Quick Start
 
 ```php
-$server = new TrueAsync\Server\HttpServer(
-    host: '0.0.0.0',
-    port: 8080,
+use TrueAsync\HttpServer;
+use TrueAsync\HttpServerConfig;
+
+$server = new HttpServer(
+    (new HttpServerConfig())->addListener('0.0.0.0', 8080)
 );
 
-$server->onRequest(function ($request, $response) {
-    $response->end('Hello, World!');
+$server->addHttpHandler(function ($request, $response) {
+    $response->setStatusCode(200)->setBody('Hello, World!');
 });
 
 $server->start();
 ```
+
+For a full walkthrough — multi-listener layouts (HTTP/1-only, h2c-only,
+HTTP/3 alongside TCP), TLS, compression, timeouts, backpressure,
+multi-worker preforking — see **[docs/USAGE.md](docs/USAGE.md)**.
+
+Working examples live under [`examples/`](examples/):
+[`minimal-server.php`](examples/minimal-server.php),
+[`demo-server.php`](examples/demo-server.php),
+[`multi-worker.php`](examples/multi-worker.php).
 
 ---
 

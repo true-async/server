@@ -13,6 +13,12 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, tls, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
+/* addHttp1Listener */
+#define arginfo_class_TrueAsync_HttpServerConfig_addHttp1Listener arginfo_class_TrueAsync_HttpServerConfig_addListener
+
+/* addHttp2Listener */
+#define arginfo_class_TrueAsync_HttpServerConfig_addHttp2Listener arginfo_class_TrueAsync_HttpServerConfig_addListener
+
 /* addUnixListener */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_addUnixListener, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
@@ -200,6 +206,8 @@ ZEND_END_ARG_INFO()
 /* Method declarations */
 ZEND_METHOD(TrueAsync_HttpServerConfig, __construct);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addListener);
+ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp1Listener);
+ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp2Listener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addUnixListener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp3Listener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getListeners);
@@ -279,6 +287,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, isTelemetryEnabled);
 static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, __construct, arginfo_class_TrueAsync_HttpServerConfig___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, addListener, arginfo_class_TrueAsync_HttpServerConfig_addListener, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, addHttp1Listener, arginfo_class_TrueAsync_HttpServerConfig_addHttp1Listener, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, addHttp2Listener, arginfo_class_TrueAsync_HttpServerConfig_addHttp2Listener, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, addUnixListener, arginfo_class_TrueAsync_HttpServerConfig_addUnixListener, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, addHttp3Listener, arginfo_class_TrueAsync_HttpServerConfig_addHttp3Listener, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getListeners, arginfo_class_TrueAsync_HttpServerConfig_getListeners, ZEND_ACC_PUBLIC)

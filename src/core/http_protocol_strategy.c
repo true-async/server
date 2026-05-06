@@ -51,8 +51,15 @@ bool detect_and_assign_protocol(http_connection_t *conn)
         return true;
     }
 
-    const http_protocol_mask_t mask =
-        (http_protocol_mask_t)http_server_get_protocol_mask(conn->server);
+    /* Effective mask = listener policy ∩ registered-handler set. The
+     * listener mask narrows by transport (h2c-only port rejects h1 even
+     * when an h1 handler is registered); the server view mask narrows
+     * by handler registration (no h1 handler ⇒ no h1 accepted, even on
+     * a default H1|H2 listener). Empty intersection ⇒ no protocol is
+     * accepted; the caller sees a NULL strategy and closes. */
+    const uint32_t server_mask = http_server_get_protocol_mask(conn->server);
+    const uint32_t listener_mask = conn->protocol_mask ? conn->protocol_mask : server_mask;
+    const http_protocol_mask_t mask = (http_protocol_mask_t)(listener_mask & server_mask);
     const char *const data = conn->read_buffer;
     const size_t len       = conn->read_buffer_len;
 

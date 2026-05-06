@@ -18,6 +18,7 @@
 #include "Zend/zend_enum.h"
 #include "php_streams.h"                  /* php_stream_from_zval_no_verify */
 #include "php_http_server.h"
+#include "core/http_protocol_strategy.h"  /* HTTP_PROTO_MASK_* */
 #include "log/http_log.h"                 /* http_log_severity_ce */
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_defaults.h"
@@ -41,6 +42,7 @@ typedef struct {
     zend_string         *host;   /* persistent zend_string */
     int                  port;
     bool                 tls;
+    uint32_t             protocol_mask;  /* HTTP_PROTO_MASK_* per listener */
 } http_listener_shared_t;
 
 struct _http_server_shared_config_t {
@@ -297,7 +299,8 @@ static inline bool config_validate_readable_file(const zend_string *path,
 
 /* Helper: Add listener */
 static void config_add_listener(http_server_config_t *config, http_listener_type_t type,
-                                 zend_string *host, int port, bool tls)
+                                 zend_string *host, int port, bool tls,
+                                 uint32_t protocol_mask)
 {
     /* Grow array if needed */
     if (config->listener_count >= config->listener_capacity) {
@@ -311,6 +314,7 @@ static void config_add_listener(http_server_config_t *config, http_listener_type
     listener->host = host ? zend_string_copy(host) : NULL;
     listener->port = port;
     listener->tls = tls;
+    listener->protocol_mask = protocol_mask;
 }
 
 /* {{{ proto HttpServerConfig::__construct(?string $host = null, int $port = 8080) */
@@ -357,12 +361,17 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
                 "Port must be between 1 and 65535", 0);
             return;
         }
-        config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, false);
+        config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, false,
+                            HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
     }
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::addListener(string $host, int $port, bool $tls = false): static */
+/* {{{ proto HttpServerConfig::addListener(string $host, int $port, bool $tls = false): static
+ *
+ * TCP listener accepting both HTTP/1.1 and HTTP/2 (h2c via preface detection
+ * on plaintext, h2 via ALPN on TLS). For protocol-restricted ports use
+ * addHttp1Listener / addHttp2Listener / addHttp3Listener instead. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, addListener)
 {
     zend_string *host;
@@ -388,7 +397,84 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addListener)
         return;
     }
 
-    config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, tls);
+    config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, tls,
+                        HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::addHttp1Listener(string $host, int $port, bool $tls = false): static
+ *
+ * HTTP/1.1-only TCP listener. A connection that opens with the HTTP/2
+ * preface is handed to llhttp, which emits a compliant 400 Bad Request
+ * (RFC 9112) and closes. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp1Listener)
+{
+    zend_string *host;
+    zend_long port;
+    bool tls = false;
+
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STR(host)
+        Z_PARAM_LONG(port)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(tls)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (port < 1 || port > 65535) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Port must be between 1 and 65535", 0);
+        return;
+    }
+
+    config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, tls,
+                        HTTP_PROTO_MASK_HTTP1);
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::addHttp2Listener(string $host, int $port, bool $tls = false): static
+ *
+ * HTTP/2-only listener. With tls=false this is h2c (cleartext HTTP/2):
+ * the listener requires the RFC 7540 §3.5 preface and routes anything
+ * else into nghttp2's BAD_CLIENT_MAGIC path so the client receives a
+ * compliant GOAWAY(PROTOCOL_ERROR). With tls=true the server only
+ * advertises h2 over ALPN. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp2Listener)
+{
+    zend_string *host;
+    zend_long port;
+    bool tls = false;
+
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STR(host)
+        Z_PARAM_LONG(port)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(tls)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (port < 1 || port > 65535) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Port must be between 1 and 65535", 0);
+        return;
+    }
+
+    config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, tls,
+                        HTTP_PROTO_MASK_HTTP2);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -421,7 +507,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp3Listener)
      * the shared tls_context_t and requires the cert/key config (same as
      * TCP+TLS listeners). The UDP transport reuses that SSL_CTX for
      * ngtcp2_crypto_ossl per-connection handshake. */
-    config_add_listener(config, LISTENER_TYPE_UDP_H3, host, (int)port, true);
+    config_add_listener(config, LISTENER_TYPE_UDP_H3, host, (int)port, true,
+                        HTTP_PROTO_MASK_HTTP3);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -442,7 +529,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addUnixListener)
         return;
     }
 
-    config_add_listener(config, LISTENER_TYPE_UNIX, path, 0, false);
+    config_add_listener(config, LISTENER_TYPE_UNIX, path, 0, false,
+                        HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -467,14 +555,17 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getListeners)
             add_assoc_str(&entry, "host", zend_string_copy(listener->host));
             add_assoc_long(&entry, "port", listener->port);
             add_assoc_bool(&entry, "tls", listener->tls);
+            add_assoc_long(&entry, "protocol_mask", (zend_long)listener->protocol_mask);
         } else if (listener->type == LISTENER_TYPE_UDP_H3) {
             add_assoc_string(&entry, "type", "udp_h3");
             add_assoc_str(&entry, "host", zend_string_copy(listener->host));
             add_assoc_long(&entry, "port", listener->port);
             add_assoc_bool(&entry, "tls", listener->tls);
+            add_assoc_long(&entry, "protocol_mask", (zend_long)listener->protocol_mask);
         } else {
             add_assoc_string(&entry, "type", "unix");
             add_assoc_str(&entry, "path", zend_string_copy(listener->host));
+            add_assoc_long(&entry, "protocol_mask", (zend_long)listener->protocol_mask);
         }
 
         add_next_index_zval(return_value, &entry);
@@ -2024,9 +2115,10 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
         shared->listeners = pecalloc(src->listener_count, sizeof(http_listener_shared_t), 1);
         shared->listener_count = src->listener_count;
         for (size_t i = 0; i < src->listener_count; i++) {
-            shared->listeners[i].type = src->listeners[i].type;
-            shared->listeners[i].port = src->listeners[i].port;
-            shared->listeners[i].tls  = src->listeners[i].tls;
+            shared->listeners[i].type          = src->listeners[i].type;
+            shared->listeners[i].port          = src->listeners[i].port;
+            shared->listeners[i].tls           = src->listeners[i].tls;
+            shared->listeners[i].protocol_mask = src->listeners[i].protocol_mask;
             if (src->listeners[i].host) {
                 shared->listeners[i].host = zend_string_init(
                     ZSTR_VAL(src->listeners[i].host),
@@ -2155,9 +2247,10 @@ static void http_server_config_populate_from_shared(
         dst->listener_capacity = src->listener_count;
         dst->listener_count    = src->listener_count;
         for (size_t i = 0; i < src->listener_count; i++) {
-            dst->listeners[i].type = src->listeners[i].type;
-            dst->listeners[i].port = src->listeners[i].port;
-            dst->listeners[i].tls  = src->listeners[i].tls;
+            dst->listeners[i].type          = src->listeners[i].type;
+            dst->listeners[i].port          = src->listeners[i].port;
+            dst->listeners[i].tls           = src->listeners[i].tls;
+            dst->listeners[i].protocol_mask = src->listeners[i].protocol_mask;
             if (src->listeners[i].host) {
                 dst->listeners[i].host = zend_string_init(
                     ZSTR_VAL(src->listeners[i].host),

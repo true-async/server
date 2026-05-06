@@ -53,10 +53,13 @@
 #define MAX_LISTENERS 16
 
 /* Listener info. The listen_event owns the socket fd and the libuv handle;
- * we just store the handle plus any per-listener flags. */
+ * we just store the handle plus any per-listener flags. protocol_mask is
+ * the per-listener HTTP_PROTO_MASK_* set; carried onto each spawned
+ * http_connection_t and consulted by detect_and_assign_protocol. */
 typedef struct {
     zend_async_listen_event_t   *listen_event;
     bool                         tls;
+    uint32_t                     protocol_mask;
 } http_listener_t;
 
 /* Server object structure.
@@ -1164,21 +1167,22 @@ static void http_server_accept_callback(
     }
 
     /* Match the firing listen_event back to its row so we know whether
-     * this accept belongs to a TLS listener. MAX_LISTENERS is tiny
-     * (16), the scan is effectively free. */
+     * this accept belongs to a TLS listener AND which protocol mask it
+     * carries. MAX_LISTENERS is tiny (16), the scan is effectively free. */
     tls_context_t *conn_tls_ctx = NULL;
-#ifdef HAVE_OPENSSL
+    uint32_t conn_protocol_mask = server->view.protocol_mask;
     for (size_t i = 0; i < server->listener_count; i++) {
         if (server->listeners[i].listen_event != NULL
-            && &server->listeners[i].listen_event->base == event
-            && server->listeners[i].tls) {
-            conn_tls_ctx = server->tls_ctx;
+            && &server->listeners[i].listen_event->base == event) {
+            conn_protocol_mask = server->listeners[i].protocol_mask;
+#ifdef HAVE_OPENSSL
+            if (server->listeners[i].tls) {
+                conn_tls_ctx = server->tls_ctx;
+            }
+#endif
             break;
         }
     }
-#else
-    (void)event;
-#endif
 
     if (!http_connection_spawn(
             client_fd,
@@ -1188,7 +1192,8 @@ static void http_server_accept_callback(
             seconds_to_ms_clamped(server->view.write_timeout_s),
             seconds_to_ms_clamped(server->keepalive_timeout_s),
             server,
-            conn_tls_ctx)) {
+            conn_tls_ctx,
+            conn_protocol_mask)) {
         /* spawn() closed the fd itself; nothing to undo since we bump
          * active_connections only after success. */
         return;
@@ -1524,12 +1529,16 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             zval *host_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "host", 4);
             zval *port_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "port", 4);
             zval *tls_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "tls", 3);
+            zval *mask_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "protocol_mask", sizeof("protocol_mask") - 1);
 
             if (!host_zv || !port_zv) continue;
 
             const char *host = Z_STRVAL_P(host_zv);
             int port = Z_LVAL_P(port_zv);
             bool tls = tls_zv && zend_is_true(tls_zv);
+            uint32_t protocol_mask = (mask_zv && Z_TYPE_P(mask_zv) == IS_LONG)
+                ? (uint32_t)Z_LVAL_P(mask_zv)
+                : (HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
 
             /* REUSEPORT enables kernel-level load balancing across worker
              * processes / threads sharing host:port. The reactor creates
@@ -1568,6 +1577,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
             server->listeners[server->listener_count].listen_event = listen_event;
             server->listeners[server->listener_count].tls = tls;
+            server->listeners[server->listener_count].protocol_mask = protocol_mask;
             server->listener_count++;
 
             listen_event->base.add_callback(&listen_event->base,

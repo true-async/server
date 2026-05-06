@@ -24,7 +24,10 @@ final class HttpServerConfig
     // === Listener configuration ===
 
     /**
-     * Add TCP listener
+     * Add TCP listener accepting both HTTP/1.1 and HTTP/2 (h2c via preface
+     * detection on plaintext, h2 via ALPN on TLS). For protocol-restricted
+     * ports use {@see addHttp1Listener()}, {@see addHttp2Listener()}, or
+     * {@see addHttp3Listener()}.
      *
      * @param string $host Host to bind (e.g., "127.0.0.1", "0.0.0.0")
      * @param int $port Port to listen on
@@ -34,7 +37,35 @@ final class HttpServerConfig
     public function addListener(string $host, int $port, bool $tls = false): static {}
 
     /**
-     * Add Unix socket listener
+     * Add HTTP/1.1-only TCP listener.
+     *
+     * A connection that opens with the HTTP/2 preface is handed to llhttp,
+     * which emits a compliant 400 Bad Request and closes.
+     *
+     * @param string $host Host to bind
+     * @param int $port Port to listen on
+     * @param bool $tls Enable TLS for this listener
+     * @return static
+     */
+    public function addHttp1Listener(string $host, int $port, bool $tls = false): static {}
+
+    /**
+     * Add HTTP/2-only listener.
+     *
+     * With $tls=false this is h2c (cleartext HTTP/2): the listener requires
+     * the RFC 7540 §3.5 preface and routes anything else into nghttp2's
+     * BAD_CLIENT_MAGIC path, returning a compliant GOAWAY(PROTOCOL_ERROR).
+     * With $tls=true the server only advertises h2 over ALPN.
+     *
+     * @param string $host Host to bind
+     * @param int $port Port to listen on
+     * @param bool $tls Enable TLS for this listener
+     * @return static
+     */
+    public function addHttp2Listener(string $host, int $port, bool $tls = false): static {}
+
+    /**
+     * Add Unix socket listener (HTTP/1.1 + HTTP/2, h2c-style).
      *
      * @param string $path Path to Unix socket
      * @return static

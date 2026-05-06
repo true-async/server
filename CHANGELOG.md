@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Per-listener protocol mask (FUTURES #1). New
+  `HttpServerConfig::addHttp1Listener()` / `addHttp2Listener()` for
+  protocol-restricted ports (h2c-only, h1-only). Default
+  `addListener()` unchanged (H1+H2).
+- `docs/USAGE.md` — full configuration guide.
+
 ## [0.3.2] - 2026-05-06
 
 ### Fixed

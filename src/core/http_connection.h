@@ -182,6 +182,10 @@ struct _http_connection_t {
     uint32_t                 read_timeout_ms;       /* milliseconds; 0 = disabled */
     uint32_t                 write_timeout_ms;      /* milliseconds; 0 = disabled */
     uint32_t                 keepalive_timeout_ms;  /* milliseconds; 0 = disabled */
+    /* Per-listener protocol acceptance mask (HTTP_PROTO_MASK_*). Carried
+     * onto the connection at spawn time so detect_and_assign_protocol can
+     * gate on the listener's policy without re-walking the listener list. */
+    uint32_t                 protocol_mask;
 
     char                     http_version[8];
 
@@ -374,6 +378,7 @@ bool http_connection_spawn(php_socket_t client_fd, zend_async_scope_t *server_sc
                            zend_fcall_t *handler,
                            uint32_t read_timeout_ms, uint32_t write_timeout_ms, uint32_t keepalive_timeout_ms,
                            http_server_object *server,
-                           tls_context_t *tls_ctx);
+                           tls_context_t *tls_ctx,
+                           uint32_t protocol_mask);
 
 #endif /* HTTP_CONNECTION_H */
