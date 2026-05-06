@@ -296,16 +296,11 @@ $server->start();                       // blocks until every worker exits
   a single accept thread; workers > 1 will compile but provide no
   parallelism.
 - **No worker init hook.** State that's expensive to build (preloaded
-  fixtures, opcache warm-up) lives in your handler closure's
-  by-value captures; transfer_obj clones it once per worker. If you
-  need an explicit init step, fall back to the manual pattern in
-  [`examples/multi-worker.php`](../examples/multi-worker.php) where
-  each worker constructs its own `HttpServer` from scratch.
-
-The manual `Async\ThreadPool::submit()` pattern in
-[`examples/multi-worker.php`](../examples/multi-worker.php) still works
-and is the right choice when you need per-worker init or your own
-control over the lifecycle.
+  fixtures, opcache warm-up) lives in your handler closure's by-value
+  captures; transfer_obj clones it once per worker. If you need an
+  explicit init step that runs *before* listeners come up, fall back
+  to the manual pattern in
+  [`examples/multi-worker-manual.php`](../examples/multi-worker-manual.php).
 
 ---
 
@@ -313,7 +308,8 @@ control over the lifecycle.
 
 - [`examples/minimal-server.php`](../examples/minimal-server.php) — bench-grade single-handler.
 - [`examples/demo-server.php`](../examples/demo-server.php) — routing-style dispatch.
-- [`examples/multi-worker.php`](../examples/multi-worker.php) — preforking layout.
+- [`examples/multi-worker.php`](../examples/multi-worker.php) — built-in pool via `setWorkers()`.
+- [`examples/multi-worker-manual.php`](../examples/multi-worker-manual.php) — manual `Async\ThreadPool` layout (per-worker init hook).
 - [`docs/COMPRESSION.md`](COMPRESSION.md) — gzip pipeline, request and response.
 - [`docs/RECOMMENDATIONS.md`](RECOMMENDATIONS.md) — backpressure, drain, kernel knobs.
 - [`docs/CODING_STANDARDS.md`](CODING_STANDARDS.md) — internal conventions (only relevant if you're hacking the C core).

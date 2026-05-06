@@ -238,24 +238,30 @@ use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 
 $server = new HttpServer(
-    (new HttpServerConfig())->addListener('0.0.0.0', 8080)
+    (new HttpServerConfig())
+        ->addListener('0.0.0.0', 8080)
+        ->setWorkers(4)              // optional: spawn N worker threads
 );
 
 $server->addHttpHandler(function ($request, $response) {
     $response->setStatusCode(200)->setBody('Hello, World!');
 });
 
-$server->start();
+$server->start();                    // blocks until every worker exits
 ```
 
-For a full walkthrough — multi-listener layouts (HTTP/1-only, h2c-only,
-HTTP/3 alongside TCP), TLS, compression, timeouts, backpressure,
-multi-worker preforking — see **[docs/USAGE.md](docs/USAGE.md)**.
+`setWorkers(N)` opts into the built-in worker pool: the server spawns N
+threads via `Async\ThreadPool` and load-balances accept() across them
+with `SO_REUSEPORT` (Linux/BSD). Default `1` keeps single-threaded
+behaviour. See **[docs/USAGE.md](docs/USAGE.md)** for protocol-restricted
+listeners (`addHttp1Listener`/`addHttp2Listener`/`addHttp3Listener`),
+TLS, compression, timeouts, backpressure and caveats.
 
 Working examples live under [`examples/`](examples/):
 [`minimal-server.php`](examples/minimal-server.php),
 [`demo-server.php`](examples/demo-server.php),
-[`multi-worker.php`](examples/multi-worker.php).
+[`multi-worker.php`](examples/multi-worker.php),
+[`multi-worker-manual.php`](examples/multi-worker-manual.php).
 
 ---
 
