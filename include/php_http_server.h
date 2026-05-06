@@ -210,6 +210,26 @@ struct _http_server_config_t {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
 
+    /* HTTP body compression (issue #8). Phase 1 ships gzip via zlib-ng.
+     *   compression_enabled         — master switch (default true).
+     *   compression_level           — 1..9 (zlib semantics; default 6).
+     *   compression_min_size        — body below this is left identity
+     *                                 (overhead beats win on tiny bodies).
+     *   compression_mime_types      — set of `type/subtype` strings (lowercase,
+     *                                 stripped of params) eligible for compression.
+     *                                 Materialised at object init from the
+     *                                 default whitelist so getters always
+     *                                 return the live policy. setter REPLACES
+     *                                 wholesale (nginx semantics).
+     *   request_max_decompressed_size — anti-zip-bomb cap on decoded request
+     *                                 bodies. 0 = no cap (must be explicit).
+     */
+    bool     compression_enabled;
+    uint8_t  compression_level;
+    size_t   compression_min_size;
+    HashTable *compression_mime_types;
+    size_t   request_max_decompressed_size;
+
     /* Log + telemetry. log_severity is an http_log_severity_t int value
      * (0/5/9/13/17), set via setLogSeverity(LogSeverity). log_stream is
      * an IS_RESOURCE zval pointing at any
@@ -414,6 +434,11 @@ void http_server_on_parse_error(http_server_object *server, int status_code);
  * getters are clearer than exposing the whole struct. */
 HashTable          *http_server_get_protocol_handlers(http_server_object *server);
 zend_async_scope_t *http_server_get_scope            (http_server_object *server);
+
+/* Live HttpServerConfig the server was constructed with. The returned
+ * pointer is non-owning and stays valid for the server's lifetime —
+ * the config object's zval is held inside http_server_object. */
+http_server_config_t *http_server_get_config         (http_server_object *server);
 
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures
  * (http_connection_t, http3_connection_t, mp_processor_t) cache the

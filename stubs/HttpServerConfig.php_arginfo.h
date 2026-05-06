@@ -108,6 +108,20 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled        arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
 #define arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled         arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
 
+/* HTTP body compression (issue #8) */
+#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled        arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
+#define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled         arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
+#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel          arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel          arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, types, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMimeTypes      arginfo_class_TrueAsync_HttpServerConfig_getListeners
+#define arginfo_class_TrueAsync_HttpServerConfig_setRequestMaxDecompressedSize arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getRequestMaxDecompressedSize arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+
 /* setWriteBufferSize */
 #define arginfo_class_TrueAsync_HttpServerConfig_setWriteBufferSize arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 
@@ -227,6 +241,16 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, isCompressionEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionLevel);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMinSize);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMimeTypes);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMimeTypes);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setRequestMaxDecompressedSize);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getRequestMaxDecompressedSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWriteBufferSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWriteBufferSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, enableHttp2);
@@ -296,6 +320,16 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled,        arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled,        ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled,         arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled,         ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled,         arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled,         ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled,          arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled,          ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel,           arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel,           ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionLevel,           arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel,           ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize,         ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize,         ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMimeTypes,       arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes,       ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMimeTypes,       arginfo_class_TrueAsync_HttpServerConfig_getCompressionMimeTypes,       ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setRequestMaxDecompressedSize, arginfo_class_TrueAsync_HttpServerConfig_setRequestMaxDecompressedSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getRequestMaxDecompressedSize, arginfo_class_TrueAsync_HttpServerConfig_getRequestMaxDecompressedSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setWriteBufferSize, arginfo_class_TrueAsync_HttpServerConfig_setWriteBufferSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getWriteBufferSize, arginfo_class_TrueAsync_HttpServerConfig_getWriteBufferSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, enableHttp2, arginfo_class_TrueAsync_HttpServerConfig_enableHttp2, ZEND_ACC_PUBLIC)

@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **HTTP body compression** — gzip on responses and inbound request
+  bodies, served identically across HTTP/1.1, HTTP/2 and HTTP/3.
+  Build flag: `--enable-http-compression` (default on; auto-detects
+  zlib-ng with system zlib as fallback).
+
+  Five `HttpServerConfig` setters drive the policy and are frozen at
+  `HttpServer::__construct`:
+  - `setCompressionEnabled(bool)` — master switch (default `true`).
+  - `setCompressionLevel(int)` — zlib level 1..9 (default 6).
+  - `setCompressionMinSize(int)` — body-size threshold below which
+    responses stay identity (default 1 KiB; valid 0..16 MiB).
+  - `setCompressionMimeTypes(array)` — replaces the whitelist
+    wholesale (nginx semantics). Default ships the union of nginx
+    `gzip_types` and h2o text-only defaults.
+  - `setRequestMaxDecompressedSize(int)` — anti-zip-bomb cap on
+    decoded request bodies (default 10 MiB; 0 = no cap, must be
+    explicit).
+
+  Per-response opt-out: `HttpResponse::setNoCompression()` overrides
+  every other rule. Use for endpoints combining secrets with
+  reflected user input (BREACH mitigation), pre-encoded payloads,
+  or anywhere the server must not wrap the body.
+
+  Negotiation follows RFC 9110 §12.5.3 — q-values, `identity;q=0`,
+  `*;q=0` excludes identity unless an explicit identity entry
+  rescues it. Default when no `Accept-Encoding` header is sent
+  resolves to identity-only (matches nginx; safer than the strict
+  RFC reading). Skip rules: status 1xx/204/304, HEAD, Range
+  responses, handler-set `Content-Encoding`, MIME outside the
+  whitelist, body below the threshold.
+
+  Inbound: `Content-Encoding: gzip` (and the legacy `x-gzip`
+  alias) on requests is decoded transparently. `identity` is a
+  no-op. Unknown codings → 415; bomb-cap exceeded → 413; corrupt
+  inflate → 400. The handler observes the decoded body via
+  `HttpRequest::getBody()`.
+
+  Streaming: when handlers call `HttpResponse::send($chunk)`, the
+  compressing wrapper transparently engages on first call (subject
+  to negotiation) and produces one downstream chunk per source
+  chunk — preserving framing efficiency on chunked H1 and H2
+  DATA frames.
+
+  Backend: `zlib-ng` is preferred at build time for ~2-4× higher
+  throughput at the same compression level; system `zlib` is the
+  drop-in fallback. Both share the same source via a thin
+  `zng_*` ↔ `*` macro layer.
+
+  Issue [#8](https://github.com/true-async/server/issues/8).
+
 ## [0.2.0] - 2026-05-04
 
 ### Added

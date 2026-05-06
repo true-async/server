@@ -177,6 +177,18 @@ final class HttpResponse
     public function send(string $chunk): static {}
 
     /**
+     * Mark this response as ineligible for compression. Overrides every
+     * other rule (Accept-Encoding negotiation, MIME whitelist, size
+     * threshold). Use for endpoints that combine secrets with reflected
+     * user input (BREACH mitigation), responses already bearing a
+     * Content-Encoding the handler set itself, or any payload the
+     * server must not wrap. Idempotent.
+     *
+     * @return static
+     */
+    public function setNoCompression(): static {}
+
+    /**
      * Get current body content
      */
     public function getBody(): string {}

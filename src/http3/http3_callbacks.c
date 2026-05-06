@@ -489,6 +489,20 @@ bool http3_stream_submit_response(http3_connection_t *c,
 
     zend_object *resp_obj = Z_OBJ(s->response_zv);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* H3 reads body via http_response_get_body_str() directly rather
+     * than http_response_format[/_parts], so the buffered apply hook
+     * runs here too — must precede the headers-flatten loop so the
+     * mutated Content-Encoding/Vary land in the HEADERS frame. The
+     * streaming path (`streaming==true`) is handled by the stream
+     * wrapper installed at first send(); the apply call is a cheap
+     * no-op there. */
+    {
+        extern void http_compression_apply_buffered(zend_object *);
+        http_compression_apply_buffered(resp_obj);
+    }
+#endif
+
     /* :status must come first per RFC 9114 §4.3.1. Stringified into a
      * fixed scratch buffer so its lifetime matches the submit call. */
     char status_buf[8];
