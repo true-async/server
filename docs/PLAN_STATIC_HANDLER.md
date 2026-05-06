@@ -1,0 +1,386 @@
+# Built-in static file handler — design + implementation plan
+
+Tracks FUTURES.md item #2. Unblocks HttpArena `production` tier on the
+static profiles (`static`, `static-h2`, `static-h3`). Required because
+production rules forbid user-land MIME lookup, in-memory caching, and
+hand-rolled compression — none of which `entry.php` can replace today
+because the framework has no static API.
+
+This document is the load-bearing context for resuming the work after a
+clean session. Read it end-to-end before touching code.
+
+---
+
+## 1. Surface (PHP API)
+
+Builder class + register-on-server method. Mirrors the existing
+`HttpServerConfig` + `HttpServer` split: config-as-object, behavior on
+the server.
+
+```php
+namespace TrueAsync;
+
+final class StaticHandler {
+    public function __construct(string $urlPrefix, string $rootDirectory) {}
+
+    // index / fallthrough
+    public function setIndexFiles(string ...$files): static {}      // default ['index.html']
+    public function disableIndex(): static {}
+    public function setOnMissing(StaticOnMissing $mode): static {}  // NotFound | Next
+
+    // precompressed sidecars
+    public function enablePrecompressed(string ...$encodings): static {}  // 'br', 'gzip', 'zstd'
+    public function disablePrecompressed(): static {}
+
+    // security
+    public function setDotfilePolicy(StaticDotfiles $p): static {}     // Deny (default) | Allow | Ignore
+    public function setSymlinkPolicy(StaticSymlinks $p): static {}     // Reject (default) | Follow | OwnerMatch
+    public function hide(string ...$globs): static {}
+
+    // cache / headers
+    public function setEtagEnabled(bool $enabled): static {}           // default true, weak
+    public function setCacheControl(string $value): static {}
+    public function setHeader(string $name, string $value): static {}  // declarative, no callbacks
+
+    // dir listing
+    public function setBrowseEnabled(bool $enabled): static {}         // default false
+
+    // MIME overrides
+    public function setMimeType(string $extension, string $contentType): static {}
+
+    // getters for introspection (omitted here — generated boilerplate)
+}
+
+enum StaticOnMissing { case NotFound; case Next; }
+enum StaticDotfiles  { case Deny;     case Allow; case Ignore; }
+enum StaticSymlinks  { case Reject;   case Follow; case OwnerMatch; }
+
+// Registered on server, parallel to addHttpHandler
+$server->addStaticHandler(StaticHandler $h): static;
+```
+
+Multiple `addStaticHandler` calls are allowed — each pinned to its own
+URL prefix. Order of registration = order of prefix-match attempts.
+
+Why a builder class and not `array $options`: typo'd string keys
+silently misconfigure (Express footgun); IDE autocomplete + per-setter
+validation (`enablePrecompressed('foo')` throws immediately, not at
+`start()`); presets reusable as factories. Symmetric to existing
+`HttpServerConfig`.
+
+`setHeader()` is declarative (header-map evaluated in C). **No PHP
+callable per-request** — that re-enters the VM and kills the no-coroutine
+fast path.
+
+---
+
+## 2. Where it dispatches
+
+**Insertion point: `src/core/http_connection.c::http_connection_dispatch_request`,
+after `request_zv`/`response_zv` are built and stream ops attached, but
+**before** `ZEND_ASYNC_NEW_COROUTINE` (line ~1614).**
+
+Current flow today:
+
+```
+http_connection_dispatch_request(conn, req):
+   1. ecalloc(ctx)                                      :1573
+   2. http_request_create_from_parsed → request_zv      :1577
+   3. object_init_ex(response_zv)                       :1582
+   4. install h1_stream_ops                             :1591
+   5. http_compression_attach                           :1601
+   6. set_default_json_flags                            :1609
+   7. ZEND_ASYNC_NEW_COROUTINE  ← spawn coroutine       :1614
+   8. coroutine->internal_entry = http_handler_coroutine_entry
+   9. http_server_on_request_dispatch                   :1638
+  10. ZEND_ASYNC_ENQUEUE_COROUTINE                      :1649
+```
+
+New flow inserts step 6.5:
+
+```c
+if (UNEXPECTED(server->static_handler_count > 0)) {
+    const http_static_result_t rc =
+        http_static_try_serve(server, conn, ctx, req);
+
+    if (rc == HTTP_STATIC_HANDLED) {
+        /* C-handler owns ctx; lifecycle ends in uv_fs callback chain. */
+        return;                       /* NO coroutine spawned */
+    }
+    if (rc == HTTP_STATIC_ERROR) {
+        /* 4xx already written; emit short response without coroutine. */
+        http_static_emit_short_error(conn, ctx);
+        return;
+    }
+    /* PASSTHROUGH → fall through to coroutine + PHP handler. */
+}
+/* steps 7-10 unchanged */
+```
+
+**Why this point**: `http_request_t` is fully parsed, response object
+exists, stream ops are bound. We are in a libuv read-callback context
+(`ZEND_ASYNC_CURRENT_COROUTINE == NULL` — see `http_connection.c:1502`)
+where suspend isn't allowed but registering further async ops via
+`uv_fs_*` / `ZEND_ASYNC_*` callbacks is fine. The C handler is pure FSM:
+no coroutine alloc, no `zend_try` setup, no PHP-VM entry, no context
+switch.
+
+Symmetric insertion for HTTP/2 (before `ZEND_ASYNC_NEW_COROUTINE` at
+`src/http2/http2_strategy.c:156`) and HTTP/3 (before
+`ZEND_ASYNC_NEW_COROUTINE` at `src/http3/http3_dispatch.c:134`). PR #1
+ships H1 only; H2/H3 land in PR #2.
+
+**Lifecycle hook**: cleanup steps currently done in
+`http_handler_coroutine_dispose` (response flush, keep-alive re-arm,
+`http_server_on_request_dispose`, OBJ_RELEASE on `ctx` zvals) must run
+on the static path too. Extract a shared helper
+`http_request_finalize(conn, ctx)` invoked from both the coroutine
+dispose and the static FSM tail (after `uv_fs_close`).
+
+---
+
+## 3. C-level architecture
+
+**`src/static/`** — new package.
+
+| File | Purpose |
+|---|---|
+| `static_handler_class.c` | PHP class: ctor, setters with validation, getters, lock-on-attach |
+| `http_static_dispatch.c`  | `http_static_try_serve()` — prefix match, FSM driver |
+| `http_static_path.c`      | URL-decode → traversal guard → `realpath()` → root-prefix check |
+| `http_static_mime.c`      | Built-in MIME table (HttpArena set: css/js/html/woff2/svg/webp/json/txt/wasm/ico/xml) + per-mount overrides |
+| `http_static_etag.c`      | Weak ETag from `(mtime_ns, size, ino)`; `If-None-Match` / `If-Modified-Since` |
+| `http_static_range.c`     | Range parser, single + `multipart/byteranges`, `If-Range` (PR #3) |
+| `http_static_precompressed.c` | `.br/.gz/.zst` sibling lookup, reuses `compression/http_compression_negotiate.c` (PR #4) |
+| `http_static_serve.c`     | uv_fs_open → fstat → read-loop → write-into-response-stream → close |
+
+**Storage on `http_server_object`**:
+
+```c
+typedef struct {
+    zend_string *url_prefix;           /* "/static/" — interned where possible */
+    size_t       url_prefix_len;       /* memcmp fast path */
+    zend_string *root_directory;       /* canonicalized at attach time */
+    zend_string *cache_control;        /* nullable */
+    HashTable    extra_headers;        /* set via setHeader(), evaluated in C */
+    HashTable    mime_overrides;       /* ext → content-type */
+    zend_string **hide_globs;          /* compiled patterns */
+    size_t        hide_count;
+    zend_string **index_files;
+    size_t        index_count;
+    uint32_t      flags;               /* DOTFILES_*, SYMLINKS_*, PRECOMP_BR/GZ/ZSTD, ETAG, BROWSE, ON_MISSING_NEXT */
+} http_static_handler_t;
+
+/* in http_server_object: */
+http_static_handler_t *static_handlers;   /* ecalloc'd array */
+size_t                 static_handler_count;
+```
+
+Bit-flags over a struct of bools — one cache-line load on the hot path,
+not eight.
+
+**FSM, no coroutine**:
+
+```
+try_serve():
+  prefix-match (single linear scan; usual count <= 3)
+  ↓
+  build absolute path: root || (req->path - prefix)
+  validate: no "..", no NUL, no "%00", dotfile policy, hide globs
+  realpath() (or O_NOFOLLOW + fstat for symlink reject mode)
+  ↓
+  uv_fs_open(O_RDONLY | O_CLOEXEC, callback)
+  ↓ on_open:
+    if ENOENT → 404 / passthrough per on_missing
+    if EACCES → 403
+  uv_fs_fstat(fd, callback)
+  ↓ on_fstat:
+    weak ETag = mtime_ns ^ size ^ ino  (single 64-bit mix)
+    If-None-Match / If-Modified-Since  → 304 + early return
+    Range header                       → range FSM (PR #3)
+    format status + headers (single iovec build, single send)
+  ↓
+  read-write pump:
+    uv_fs_read(fd, buf=64K, off, callback)
+    on_read: stream_ops->push_chunk(response, buf, n) [H1: uv_write callback]
+    advance offset; loop until size reached
+  ↓
+  uv_fs_close(fd, callback)
+  ↓ on_close: http_request_finalize(conn, ctx) — same path as PHP-handler dispose
+```
+
+For HTTP/2 and HTTP/3, the file is plumbed as an nghttp2/nghttp3 **data
+provider** rather than a chunk push: the library calls our provider when
+its flow window allows; we kick `uv_fs_read` and return DEFERRED; on
+read completion we resume the stream. Natural fit, zero coroutine.
+
+---
+
+## 4. Optimality requirements
+
+The static path is **hot** — bench profiles hammer `/static/main.css`
+millions of times. Every microsecond in our handler is a microsecond
+that doesn't go to the next request.
+
+### Syscall minimization
+- **One `open(O_RDONLY|O_CLOEXEC|O_NOFOLLOW?)`** per file. No probe-stat
+  before open. No reopen for compressed sibling without first checking
+  Accept-Encoding (skip the syscall when client doesn't accept br/gz).
+- **One `fstat`** per request — gives mtime, size, ino, mode, all from
+  the open fd. Don't `stat(path)` *and* `fstat(fd)`.
+- **Headers + body coalescing**: H1 plain — try `writev(2)` (uv_write
+  with two iovecs: headers buf + first read chunk) so the TCP stack
+  packetizes them together. Avoid Nagle/cork dance for single-write
+  small files.
+- **No per-request directory walk**. Index file resolution: stat each
+  candidate once and cache *negative* results within a single request
+  (don't re-stat after 404).
+- **`SO_LINGER` / keep-alive re-arm** — no extra syscall on success
+  path; reuse what `http_request_finalize` already does for PHP path.
+- **`sendfile(2)` / `splice(2)`** — PR #5 only, when not TLS-userspace
+  and not encoding-on-the-fly. MVP uses `uv_fs_read` + write; sendfile
+  is incremental.
+
+### Memory minimization
+- **Read buffer 64 KiB**, allocated **per-request** (not per-chunk),
+  freed in close-callback. One `emalloc` for the buffer, one for the
+  headers iovec.
+- **Headers buffer** built once into a `smart_str` at fstat time, sent
+  once; never reallocated mid-request.
+- **No PHP zval allocation** on the static path past what
+  `dispatch_request` already built (`request_zv`, `response_zv`). No
+  `zend_string` creation per request — all per-mount strings (prefix,
+  root, cache_control) are owned by the handler struct, refcounted.
+- **No HashTable lookups in the hot loop**. MIME map is consulted once
+  (at fstat-time after extension extraction); extension lookup is a
+  fixed-size perfect-hash or sorted-array binary search over the built-in
+  table, falling back to per-mount override HashTable only on miss.
+- **Stack-allocated path buffer**: `char path[PATH_MAX]` on stack for
+  resolve, copied to allocated `zend_string` only if passed onward
+  (logging). Avoid PATH_MAX-on-stack only on platforms where it's huge
+  (Hurd ≥ 8 KiB) — cap at 4096 then heap-fallback.
+
+### CPU minimization
+- **Branch hints on the hot path**: `EXPECTED(server->static_handler_count == 0)` at the
+  early skip; `UNEXPECTED(rc == HTTP_STATIC_ERROR)` for error paths;
+  `EXPECTED(file_found)` for the success branch. The compiler already
+  does PGO-shaped guesses, but explicit hints win on the dispatcher
+  prefix-match loop.
+- **`const` everywhere meaningful**: `const http_static_handler_t *`
+  parameters in helpers; `const char *path`; `const zend_string *prefix`.
+  Lets the compiler keep values in registers across calls and proves
+  intent to readers.
+- **No allocation in the prefix-match loop**: `memcmp` on
+  `(req->path, sh->url_prefix, sh->url_prefix_len)`. No `zend_string`
+  comparison helpers (those branch on interned vs not, refcount, etc.).
+- **Single ETag mix**: `etag = mtime_ns ^ ((uint64_t)size << 17) ^ ino`,
+  formatted as 16 hex chars. No SHA, no MD5 — they cost too much per
+  request and add no security value here.
+- **Validate options at attach time** (`addStaticHandler`), not per
+  request: precompressed encoding list precomputed into a bitmask;
+  cache_control header pre-formatted into an immutable buffer; index
+  file list materialized once.
+- **Skip body decompression on static path**: `http_compression_attach`
+  is currently called before our hook (line :1601). For static the call
+  is wasted (GET/HEAD have no body to decode). PR #1 leaves it; PR #2
+  considers reordering: do `http_static_try_serve` *before*
+  `http_compression_attach` — saves a function call + branch on every
+  static request.
+- **No PHP call_user_func anywhere** on the static path. No
+  `zend_call_function`, no `zend_is_callable`, no fcc cache lookup.
+- **Bailout firewall**: not needed on the static path — pure C, no
+  PHP-VM. `zend_try` is omitted entirely.
+
+### Concurrency / contention
+- **Per-mount handler array is read-only after `start()`**: locked via
+  the same mechanism as `HttpServerConfig`. Workers see their own copy
+  via the existing `transfer_obj` machinery — no shared mutable state,
+  no atomics in hot path.
+- **No global FD cache** in MVP. Each request opens its own fd.
+  `open_file_cache`-style optimization is deferred (PR #6+) and must be
+  per-worker (no cross-worker contention).
+- **No userland syscall serialization**. `uv_fs_*` runs on the libuv
+  thread pool; the read callback fires on the loop thread without
+  locks.
+
+### Coding-standard checks
+- C: see `docs/CODING_STANDARDS.md`. `const` on pointers and arguments
+  by default. `UNEXPECTED`/`EXPECTED` on the hot dispatcher and FSM
+  branches. `static` on every file-local function.
+- No `printf`-family in hot path — use SAPI logger only on errors.
+- `pemalloc` only for cross-request lifetime data (per-mount config);
+  `emalloc` for per-request (path buffer, read buffer, iovec).
+- No `ZEND_ASSERT` on hot path beyond cheap pointer-non-null checks
+  (asserts are no-ops in release builds, but readability still costs).
+
+---
+
+## 5. PR breakdown
+
+| PR | Scope | Blocks |
+|---|---|---|
+| **#1** | `StaticHandler` class + stub + arginfo. `addStaticHandler` on `HttpServer`. Storage in `http_server_object`. Dispatch hook in `http_connection_dispatch_request` (H1 only). MIME table. Path traversal guard. Weak ETag, conditional GET (304). `uv_fs_open/fstat/read/close` chain → write to response stream. `http_request_finalize` extracted. PHPT: 200, 304, 404, 403, traversal blocked, MIME, dotfile-deny default. | — |
+| **#2** | H2/H3 integration: nghttp2/nghttp3 data-provider hookup. PHPT: same matrix on H2 and H3. | #1 |
+| **#3** | Range support: single byte-range, suffix range, `multipart/byteranges`, `If-Range`. 416 emission. PHPT: range matrix incl. invalid syntax. | #1 |
+| **#4** | Precompressed sidecars `.br` / `.gz` / `.zst`. Reuse `compression/http_compression_negotiate.c` for `Accept-Encoding` parsing. Range over encoded bytes. | #1, #3 |
+| **#5** | `sendfile(2)` / `splice(2)` zero-copy fast path. Plain HTTP/1, no encoding-on-the-fly only. Behind a config flag for first release. | #1 |
+| **#6** | `browse` (dir listing) HTML index. Optional, lowest priority. | #1 |
+
+**After PR #1+#2+#3+#4 land**: rewrite `entry.php` to drop the in-memory
+static map and the hand-rolled `.br`/`.gz` chooser. Mark
+`frameworks/true-async-server/meta.json` as `"type": "production"` for
+the static profiles. This closes FUTURES.md item #2.
+
+---
+
+## 6. Acceptance checklist
+
+- [ ] `StaticHandler` class compiles, stubs regenerate cleanly, arginfo
+      hash matches.
+- [ ] `addStaticHandler` rejects calls after `start()` (`isLocked`).
+- [ ] `enablePrecompressed('foo')` throws `InvalidArgumentException` at
+      setter time, not at start time.
+- [ ] Path traversal: `/static/../etc/passwd`, `/static/%2e%2e/x`,
+      `/static/foo%00.html`, absolute paths, NUL — all 400 or 404.
+- [ ] Symlink reject mode: 404 on symlinks; follow mode: serves;
+      owner-match: serves only if owner of link == owner of target.
+- [ ] `If-None-Match` matches → 304 with empty body, weak ETag echoed.
+- [ ] `If-Modified-Since` past mtime → 304.
+- [ ] Dotfile policy default `Deny` → 404 on `/.git/config`.
+- [ ] `on_missing: Next` falls through to `addHttpHandler` callback;
+      default `NotFound` returns 404 in C without PHP entry.
+- [ ] Telemetry counter confirms zero coroutines spawned for matched
+      static requests (verifies the no-coroutine architecture).
+- [ ] Bench: `wrk -c 256 -t 4 -d 30 /static/main.css` baseline vs
+      current `entry.php` map — must not regress; expected 5-15% gain
+      from coroutine-skip.
+- [ ] No new memory leaks under valgrind on a million-request run
+      (existing CI target).
+
+---
+
+## 7. Open questions parked for later
+
+1. `open_file_cache`-style per-worker FD/stat cache — defer until bench
+   shows it matters.
+2. Per-listener static handler scoping (admin port wants no static).
+   Currently global, like `addHttpHandler`. If needed, add `listeners:
+   [...]` option later — not breaking.
+3. `browse` (dir listing) — defer to PR #6, low priority.
+4. `setHeader` interaction with conditional GET (do extra headers fire
+   on 304? Yes, except `Content-*` family — match RFC 9110 §15.4.5).
+
+---
+
+## 8. Anchor file references (for resume)
+
+- Insertion site: `src/core/http_connection.c:1562` (`http_connection_dispatch_request`).
+- Coroutine spawn to skip: `src/core/http_connection.c:1614` (`ZEND_ASYNC_NEW_COROUTINE`).
+- Existing handler invocation (for parallel structure): `src/core/http_connection.c:1786` (`zend_call_function`).
+- Compression hook order reference: `src/core/http_connection.c:1601` (`http_compression_attach`).
+- Dispose to fold into `http_request_finalize`: `http_handler_coroutine_dispose` (search same file).
+- Listener mask reference: `src/http_server_class.c:1190-1213`.
+- Handler registration template: `src/http_server_class.c:944-966` (`addHttpHandler` — pattern for `addStaticHandler`).
+- Config-class template: `src/http_server_config.c` (whole file is the model for `static_handler_class.c`).
+- Stub generation: `stubs/HttpServerConfig.php` + `_arginfo.h` — copy pattern for `stubs/StaticHandler.php`.
+- Coding standards: `docs/CODING_STANDARDS.md`.

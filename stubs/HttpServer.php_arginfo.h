@@ -10,6 +10,11 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_addHt
 	ZEND_ARG_TYPE_INFO(0, handler, IS_CALLABLE, 0)
 ZEND_END_ARG_INFO()
 
+/* addStaticHandler */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_addStaticHandler, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_OBJ_INFO(0, handler, TrueAsync\\StaticHandler, 0)
+ZEND_END_ARG_INFO()
+
 /* addWebSocketHandler */
 #define arginfo_class_TrueAsync_HttpServer_addWebSocketHandler arginfo_class_TrueAsync_HttpServer_addHttpHandler
 
@@ -46,6 +51,7 @@ ZEND_END_ARG_INFO()
 /* Method declarations */
 ZEND_METHOD(TrueAsync_HttpServer, __construct);
 ZEND_METHOD(TrueAsync_HttpServer, addHttpHandler);
+ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler);
 ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler);
 ZEND_METHOD(TrueAsync_HttpServer, addHttp2Handler);
 ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler);
@@ -61,6 +67,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats);
 static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, __construct, arginfo_class_TrueAsync_HttpServer___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addHttpHandler, arginfo_class_TrueAsync_HttpServer_addHttpHandler, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, addStaticHandler, arginfo_class_TrueAsync_HttpServer_addStaticHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addWebSocketHandler, arginfo_class_TrueAsync_HttpServer_addWebSocketHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addHttp2Handler, arginfo_class_TrueAsync_HttpServer_addHttp2Handler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addGrpcHandler, arginfo_class_TrueAsync_HttpServer_addGrpcHandler, ZEND_ACC_PUBLIC)

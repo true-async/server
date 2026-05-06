@@ -474,6 +474,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/http_known_strings.c
     src/log/http_log.c
     src/log/trace_context.c
+    src/static/static_handler_class.c
   "
 
   dnl TLS-only TU split out of http_connection.c (BIO ring writer +
@@ -572,6 +573,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   PHP_ADD_BUILD_DIR([$ext_builddir/src/http1])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/formats])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/log])
+  PHP_ADD_BUILD_DIR([$ext_builddir/src/static])
   PHP_ADD_BUILD_DIR([$ext_builddir/deps/llhttp])
 
   if test "$PHP_HTTP2" = "yes"; then

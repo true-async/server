@@ -25,6 +25,7 @@
 #include "core/http_protocol_strategy.h"
 #include "core/tls_layer.h"
 #include "log/http_log.h"
+#include "static/static_handler.h"
 #ifdef HAVE_HTTP_SERVER_HTTP3
 # include "http3/http3_listener.h"
 #endif
@@ -270,6 +271,18 @@ struct http_server_object {
      * side can rebuild fcall_t entries in the destination thread's heap.
      * Always NULL in the source thread's emalloc object. */
     void                    *transit_handlers;
+
+    /* Built-in static file mounts (issue #13). Each entry references a
+     * locked TrueAsync\StaticHandler PHP object whose embedded
+     * descriptor we read on the dispatch fast path. The array is
+     * append-only, sized by static_handler_capacity. We hold a strong
+     * ref on each handler PHP object via static_handler_objects so the
+     * descriptors stay alive while requests are in flight. The mount
+     * pointers are read-mostly after start() — no atomics needed. */
+    http_static_handler_t  **static_handler_mounts;
+    zend_object            **static_handler_objects;
+    size_t                   static_handler_count;
+    size_t                   static_handler_capacity;
 };
 
 /* PHP wrapper. The std handle is what Zend hands out to userland; the
@@ -966,6 +979,64 @@ ZEND_METHOD(TrueAsync_HttpServer, addHttpHandler)
 }
 /* }}} */
 
+/* {{{ proto HttpServer::addStaticHandler(StaticHandler $handler): static */
+ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
+{
+    zval *handler_zv = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_OBJECT_OF_CLASS(handler_zv, http_static_handler_ce)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (server->running) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot add static handler while server is running", 0);
+        return;
+    }
+
+    zend_object *handler_obj = Z_OBJ_P(handler_zv);
+    http_static_handler_t *mount = http_static_handler_from_obj(handler_obj);
+    if (UNEXPECTED(mount == NULL || mount->url_prefix == NULL)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "StaticHandler is not initialised", 0);
+        return;
+    }
+
+    if (server->static_handler_count >= server->static_handler_capacity) {
+        const size_t new_cap = server->static_handler_capacity == 0
+            ? 4
+            : server->static_handler_capacity * 2;
+        server->static_handler_mounts = server->static_handler_mounts
+            ? erealloc(server->static_handler_mounts,
+                       sizeof(http_static_handler_t *) * new_cap)
+            : emalloc(sizeof(http_static_handler_t *) * new_cap);
+        server->static_handler_objects = server->static_handler_objects
+            ? erealloc(server->static_handler_objects,
+                       sizeof(zend_object *) * new_cap)
+            : emalloc(sizeof(zend_object *) * new_cap);
+        server->static_handler_capacity = new_cap;
+    }
+
+    /* Lock and pin the handler so subsequent mutations throw and the
+     * descriptor can't be freed while requests are in flight. */
+    http_static_handler_lock(mount);
+
+    GC_ADDREF(handler_obj);
+    server->static_handler_objects[server->static_handler_count] = handler_obj;
+    server->static_handler_mounts[server->static_handler_count]  = mount;
+    server->static_handler_count++;
+
+    /* Static handler covers H1 (and H2/H3 once #2/#3 land). Flip the
+     * H1 bit so a server with only static mounts and no addHttpHandler
+     * still passes the "any handler registered?" preflight in start(). */
+    server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
 /* {{{ proto HttpServer::addWebSocketHandler(callable $handler): static */
 ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler)
 {
@@ -1401,13 +1472,16 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         RETURN_FALSE;
     }
 
-    /* Require at least one handler that serves HTTP requests (h1 or h2).
-     * h2-only deployments use addHttp2Handler; dual-protocol deployments
-     * use addHttpHandler which covers both. */
+    /* Require at least one handler that serves HTTP requests (h1 or h2),
+     * OR at least one static mount. h2-only deployments use
+     * addHttp2Handler; dual-protocol deployments use addHttpHandler;
+     * static-only deployments use addStaticHandler (issue #13). */
     if (!http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP1) &&
-        !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2)) {
+        !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2) &&
+        server->static_handler_count == 0) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "No HTTP handler registered. Call addHttpHandler() or addHttp2Handler() first", 0);
+            "No HTTP handler registered. Call addHttpHandler(), "
+            "addHttp2Handler(), or addStaticHandler() first", 0);
         RETURN_FALSE;
     }
 
@@ -2476,6 +2550,25 @@ static void http_server_free(zend_object *obj)
 
     /* Destroy protocol handlers */
     http_protocol_handlers_destroy(&server->protocol_handlers);
+
+    /* Release static handler refs (issue #13). The mounts pointer array
+     * is pemalloc'd, the descriptors are owned by the PHP objects we
+     * are releasing here. */
+    if (server->static_handler_objects != NULL) {
+        for (size_t i = 0; i < server->static_handler_count; i++) {
+            if (server->static_handler_objects[i] != NULL) {
+                OBJ_RELEASE(server->static_handler_objects[i]);
+            }
+        }
+        efree(server->static_handler_objects);
+        server->static_handler_objects = NULL;
+    }
+    if (server->static_handler_mounts != NULL) {
+        efree(server->static_handler_mounts);
+        server->static_handler_mounts = NULL;
+    }
+    server->static_handler_count    = 0;
+    server->static_handler_capacity = 0;
 
     /* Destroy the std object — the PHP-side resources die with the
      * wrapper. The C-state stays alive until the last conn releases. */
