@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-06
+
 ### Added
 
+- **Bailout firewall at H1/H2/H3 request boundary.** PHP fatal errors
+  thrown from a user handler (E_ERROR, OOM, uncaught exceptions during
+  shutdown) no longer take the server process down. Each protocol's
+  request entry point now wraps the handler call in a bailout fence
+  that drains the failing coroutine, emits a 500, and lets the listener
+  keep accepting. Same behaviour across HTTP/1.1, HTTP/2 streams and
+  HTTP/3 streams.
 - **HTTP body compression** — gzip on responses and inbound request
   bodies, served identically across HTTP/1.1, HTTP/2 and HTTP/3.
   Build flag: `--enable-http-compression` (default on; auto-detects
@@ -58,6 +67,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zng_*` ↔ `*` macro layer.
 
   Issue [#8](https://github.com/true-async/server/issues/8).
+
+### Changed
+
+- **HTTP/2 enabled by default in the build.** `--enable-http2` (Linux
+  `config.m4`) and `ARG_ENABLE('http2', …)` (Windows `config.w32`) now
+  default to `yes` (auto-detected via `libnghttp2 ≥ 1.57`). Previously
+  the default was `no`, so a vanilla `./configure --enable-http-server`
+  produced a binary whose TLS listener advertised only `http/1.1` over
+  ALPN — h2 was silently absent. Use `--disable-http2` to opt out.
+  Mirrors the existing HTTP/3 default.
+
+### Fixed
+
+- **CoDel backpressure misfired on HTTP/2 multiplexing.** The default
+  CoDel queue-management hook applied per-connection sojourn estimates
+  to muxed h2 streams, where short fast streams would push the
+  connection into an "overloaded" state and pause unrelated long-lived
+  streams. CoDel is now off by default; opt in explicitly when wanted.
 
 ## [0.2.0] - 2026-05-04
 
