@@ -187,6 +187,7 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
     conn->counters  = &http_server_counters_dummy;
     conn->view      = &http_server_view_default;
     conn->log_state = &http_log_state_default;
+    conn->config    = NULL;  /* bound by http_server_bind_connection */
 
     return conn;
 }
@@ -1585,6 +1586,16 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
                                      &h1_stream_ops, ctx);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Attach compression state (issue #8). conn->config is cached at
+     * bind time so this hot path is a single load + null-check. */
+    if (conn->config != NULL) {
+        extern void http_compression_attach(zend_object *,
+            http_request_t *, http_server_config_t *);
+        http_compression_attach(Z_OBJ(ctx->response_zv), req, conn->config);
+    }
+#endif
+
     conn->state = CONN_STATE_PROCESSING;
 
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
@@ -1684,6 +1695,26 @@ static void http_handler_coroutine_entry(void)
     if (req && stamps) {
         req->start_ns = zend_hrtime();
     }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Request body decode (Content-Encoding: gzip in). Failures emit
+     * a canned error response and skip the handler. */
+    if (req != NULL) {
+        extern int http_compression_decode_request_body(
+            http_request_t *, http_server_config_t *);
+        extern void http_response_set_error(zend_object *, int, const char *);
+        int dec = http_compression_decode_request_body(req, conn->config);
+        if (dec != 0) {
+            http_response_set_error(Z_OBJ(ctx->response_zv), dec,
+                dec == 415 ? "Unsupported Content-Encoding" :
+                dec == 413 ? "Payload Too Large after decompression" :
+                             "Malformed compressed request body");
+            http_server_count_request(conn->counters);
+            if (req && stamps) req->end_ns = zend_hrtime();
+            return;  /* Skip handler call; dispose emits the response. */
+        }
+    }
+#endif
 
     zval params[2], retval;
     ZVAL_COPY_VALUE(&params[0], &ctx->request_zv);

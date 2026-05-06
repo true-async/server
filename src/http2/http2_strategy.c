@@ -132,6 +132,17 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
     http_response_install_stream_ops(Z_OBJ(stream->response_zv),
                                      &h2_stream_ops, stream);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Attach compression state (issue #8). Mirror of the H1 dispatch
+     * hook — uses conn->config cached at bind time. */
+    if (self->conn->config != NULL) {
+        extern void http_compression_attach(zend_object *,
+            http_request_t *, http_server_config_t *);
+        http_compression_attach(Z_OBJ(stream->response_zv),
+                                stream->request, self->conn->config);
+    }
+#endif
+
     /* Spawn the handler coroutine. extended_data is the STREAM, not
      * the connection — that's what makes multiplex safe: N
      * coroutines hold N distinct stream pointers, each pointing at
@@ -203,6 +214,28 @@ static void http2_handler_coroutine_entry(void)
     if (stream->request != NULL && stamps) {
         stream->request->start_ns = zend_hrtime();
     }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Inbound Content-Encoding decode (issue #8). Mirror of the H1
+     * handler-entry hook — produces a canned error response and skips
+     * the user handler when decoding fails. */
+    if (stream->request != NULL) {
+        extern int http_compression_decode_request_body(
+            http_request_t *, http_server_config_t *);
+        extern void http_response_set_error(zend_object *, int, const char *);
+        int dec = http_compression_decode_request_body(
+            stream->request, conn->config);
+        if (dec != 0) {
+            http_response_set_error(Z_OBJ(stream->response_zv), dec,
+                dec == 415 ? "Unsupported Content-Encoding" :
+                dec == 413 ? "Payload Too Large after decompression" :
+                             "Malformed compressed request body");
+            http_server_count_request(conn->counters);
+            if (stamps) stream->request->end_ns = zend_hrtime();
+            return;
+        }
+    }
+#endif
 
     zval params[2], retval;
     ZVAL_COPY_VALUE(&params[0], &stream->request_zv);
@@ -549,6 +582,17 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
     if (self->session == NULL) {
         return false;
     }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* H2 reads body via http_response_get_body() directly rather than
+     * http_response_format[/_parts], so the buffered apply hook lives
+     * here too — must run before the headers flatten so the mutated
+     * Content-Encoding/Vary ride the HEADERS frame. */
+    {
+        extern void http_compression_apply_buffered(zend_object *);
+        http_compression_apply_buffered(response_obj);
+    }
+#endif
 
     /* Advertise H3 endpoint to H2 clients via Alt-Svc.
      * Same hook as H1; no-op when handler already set the header or

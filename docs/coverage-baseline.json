@@ -1,15 +1,65 @@
 {
   "totals": {
     "lines": {
-      "total": 8745,
-      "hit": 7033
+      "total": 9495,
+      "hit": 7686
     },
     "functions": {
-      "total": 599,
-      "hit": 534
+      "total": 654,
+      "hit": 588
     }
   },
   "files": {
+    "src/compression/http_compression.c": {
+      "lines": {
+        "total": 10,
+        "hit": 5
+      },
+      "functions": {
+        "total": 3,
+        "hit": 2
+      }
+    },
+    "src/compression/http_compression_gzip.c": {
+      "lines": {
+        "total": 39,
+        "hit": 35
+      },
+      "functions": {
+        "total": 4,
+        "hit": 4
+      }
+    },
+    "src/compression/http_compression_negotiate.c": {
+      "lines": {
+        "total": 75,
+        "hit": 69
+      },
+      "functions": {
+        "total": 6,
+        "hit": 6
+      }
+    },
+    "src/compression/http_compression_request.c": {
+      "lines": {
+        "total": 60,
+        "hit": 55
+      },
+      "functions": {
+        "total": 2,
+        "hit": 2
+      }
+    },
+    "src/compression/http_compression_response.c": {
+      "lines": {
+        "total": 250,
+        "hit": 200
+      },
+      "functions": {
+        "total": 17,
+        "hit": 16
+      }
+    },
     "src/core/conn_arena.c": {
       "lines": {
         "total": 54,
@@ -22,12 +72,12 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 714,
-        "hit": 554
+        "total": 754,
+        "hit": 586
       },
       "functions": {
-        "total": 38,
-        "hit": 34
+        "total": 39,
+        "hit": 35
       }
     },
     "src/core/http_connection_internal.h": {
@@ -142,8 +192,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 426,
-        "hit": 335
+        "total": 452,
+        "hit": 343
       },
       "functions": {
         "total": 16,
@@ -162,8 +212,8 @@
     },
     "src/http3/http3_callbacks.c": {
       "lines": {
-        "total": 509,
-        "hit": 401
+        "total": 511,
+        "hit": 406
       },
       "functions": {
         "total": 32,
@@ -182,8 +232,8 @@
     },
     "src/http3/http3_dispatch.c": {
       "lines": {
-        "total": 116,
-        "hit": 102
+        "total": 144,
+        "hit": 112
       },
       "functions": {
         "total": 3,
@@ -252,12 +302,12 @@
     },
     "src/http_response.c": {
       "lines": {
-        "total": 652,
-        "hit": 540
+        "total": 692,
+        "hit": 595
       },
       "functions": {
-        "total": 58,
-        "hit": 53
+        "total": 66,
+        "hit": 62
       }
     },
     "src/http_server.c": {
@@ -272,22 +322,22 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 949,
-        "hit": 784
+        "total": 956,
+        "hit": 790
       },
       "functions": {
-        "total": 54,
-        "hit": 48
+        "total": 55,
+        "hit": 49
       }
     },
     "src/http_server_config.c": {
       "lines": {
-        "total": 839,
-        "hit": 718
+        "total": 1012,
+        "hit": 891
       },
       "functions": {
-        "total": 81,
-        "hit": 69
+        "total": 94,
+        "hit": 82
       }
     },
     "src/http_server_exceptions.c": {

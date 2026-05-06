@@ -107,6 +107,23 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_response_install_stream_ops(Z_OBJ(s->response_zv),
                                      &h3_stream_ops, s);
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Attach compression state (issue #8). Server pointer comes from
+     * the listener — same pattern that http3_handler_coroutine uses
+     * for the request-sample bookkeeping. */
+    {
+        extern void http_compression_attach(zend_object *,
+            http_request_t *, http_server_config_t *);
+        http_server_object *srv =
+            (http_server_object *)http3_listener_server_obj(c->listener);
+        http_server_config_t *cfg = http_server_get_config(srv);
+        if (cfg != NULL) {
+            http_compression_attach(Z_OBJ(s->response_zv),
+                                    s->request, cfg);
+        }
+    }
+#endif
+
     /* Spawn the per-stream handler coroutine. extended_data is the
      * STREAM (not the connection) — that's how N concurrent streams on
      * the same QUIC connection get N independent (request, response)
@@ -157,6 +174,27 @@ static void h3_handler_coroutine_entry(void)
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
     }
     if (fcall == NULL) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Inbound Content-Encoding decode (issue #8). Same shape as the
+     * H1/H2 handler entries. */
+    if (s->request != NULL) {
+        extern int http_compression_decode_request_body(
+            http_request_t *, http_server_config_t *);
+        extern void http_response_set_error(zend_object *, int, const char *);
+        http_server_config_t *cfg = http_server_get_config(server);
+        int dec = http_compression_decode_request_body(s->request, cfg);
+        if (dec != 0) {
+            http_response_set_error(Z_OBJ(s->response_zv), dec,
+                dec == 415 ? "Unsupported Content-Encoding" :
+                dec == 413 ? "Payload Too Large after decompression" :
+                             "Malformed compressed request body");
+            http_server_count_request(s->conn->counters);
+            if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
+            return;
+        }
+    }
+#endif
 
     zval params[2], retval;
     ZVAL_COPY_VALUE(&params[0], &s->request_zv);

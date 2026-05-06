@@ -123,6 +123,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, send);
 
 /* send() has the same (string) → static signature as write(). */
 #define arginfo_class_TrueAsync_HttpResponse_send arginfo_class_TrueAsync_HttpResponse_write
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_setNoCompression, 0, 0, IS_STATIC, 0)
+ZEND_END_ARG_INFO()
+ZEND_METHOD(TrueAsync_HttpResponse, setNoCompression);
 ZEND_METHOD(TrueAsync_HttpResponse, getBody);
 ZEND_METHOD(TrueAsync_HttpResponse, setBody);
 ZEND_METHOD(TrueAsync_HttpResponse, getBodyStream);
@@ -155,6 +158,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, getProtocolVersion, arginfo_class_TrueAsync_HttpResponse_getProtocolVersion, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, write, arginfo_class_TrueAsync_HttpResponse_write, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, send,  arginfo_class_TrueAsync_HttpResponse_send,  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, setNoCompression, arginfo_class_TrueAsync_HttpResponse_setNoCompression, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, getBody, arginfo_class_TrueAsync_HttpResponse_getBody, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setBody, arginfo_class_TrueAsync_HttpResponse_setBody, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, getBodyStream, arginfo_class_TrueAsync_HttpResponse_getBodyStream, ZEND_ACC_PUBLIC)

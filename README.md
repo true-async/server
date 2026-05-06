@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/PHP-8.6%2B-blue.svg" alt="PHP 8.6+"/>
   <img src="https://img.shields.io/badge/HTTP-1.1%20%7C%202%20%7C%203-green.svg" alt="HTTP 1.1 | 2 | 3"/>
   <img src="https://img.shields.io/badge/TLS-1.2%20%7C%201.3-green.svg" alt="TLS 1.2 | 1.3"/>
+  <img src="https://img.shields.io/badge/gzip-zlib--ng-green.svg" alt="gzip via zlib-ng"/>
   <img src="https://img.shields.io/badge/WebSocket-RFC%206455-orange.svg" alt="WebSocket"/>
   <img src="https://img.shields.io/badge/gRPC-supported-orange.svg" alt="gRPC"/>
   <img src="https://img.shields.io/badge/security-audited-brightgreen.svg" alt="Security Audited"/>
@@ -42,6 +43,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **Zero-copy architecture** | Minimal allocations on hot paths |
 | ✅ Ready | **HTTP/2** | Multiplexing, server push (via nghttp2) |
 | ✅ Ready | **HTTP/3 / QUIC** | UDP transport via ngtcp2 + nghttp3; OpenSSL 3.5 QUIC API |
+| ✅ Ready | **Compression (gzip)** | Response gzip + inbound decode across H1/H2/H3 (zlib-ng / zlib). See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
 | 📋 Planned | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2, full duplex |
 | 📋 Planned | **SSE (Server-Sent Events)** | RFC 8895, server-to-client event streaming |
 | 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |

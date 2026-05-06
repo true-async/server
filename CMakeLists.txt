@@ -111,6 +111,52 @@ if(ENABLE_HTTP3)
     endif()
 endif()
 
+# HTTP body compression (issue #8). Mirrors config.m4: prefer zlib-ng
+# (faster API-compatible drop-in for zlib), fall back to system zlib.
+# Fail-soft: if neither is found, HAVE_HTTP_COMPRESSION stays undefined
+# and the compression sources are dropped from the build.
+option(ENABLE_HTTP_COMPRESSION "Enable HTTP body compression (zlib-ng preferred, zlib fallback)" ON)
+set(COMPRESSION_SOURCES "")
+if(ENABLE_HTTP_COMPRESSION)
+    find_package(PkgConfig QUIET)
+    set(_compression_ok FALSE)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ZLIB_NG QUIET zlib-ng)
+        if(ZLIB_NG_FOUND)
+            add_compile_definitions(HAVE_ZLIB_NG=1 HAVE_HTTP_COMPRESSION=1)
+            message(STATUS "  Compression: zlib-ng ${ZLIB_NG_VERSION}")
+            set(_compression_ok TRUE)
+        else()
+            pkg_check_modules(ZLIB_PC QUIET zlib)
+            if(ZLIB_PC_FOUND)
+                add_compile_definitions(HAVE_HTTP_COMPRESSION=1)
+                message(STATUS "  Compression: zlib ${ZLIB_PC_VERSION} (zlib-ng not found)")
+                set(_compression_ok TRUE)
+            endif()
+        endif()
+    endif()
+    if(NOT _compression_ok)
+        find_package(ZLIB QUIET)
+        if(ZLIB_FOUND)
+            add_compile_definitions(HAVE_HTTP_COMPRESSION=1)
+            message(STATUS "  Compression: zlib ${ZLIB_VERSION_STRING} (system)")
+            set(_compression_ok TRUE)
+        endif()
+    endif()
+    if(_compression_ok)
+        set(COMPRESSION_SOURCES
+            src/compression/http_compression.c
+            src/compression/http_compression_gzip.c
+            src/compression/http_compression_defaults.c
+            src/compression/http_compression_negotiate.c
+            src/compression/http_compression_response.c
+            src/compression/http_compression_request.c
+        )
+    else()
+        message(STATUS "  Compression: disabled (no zlib-ng or zlib found)")
+    endif()
+endif()
+
 # Source files - HTTP/1.1 parser
 set(HTTP1_SOURCES
     src/http1/http_parser.c
@@ -143,6 +189,7 @@ set(ALL_SOURCES
     ${FORMAT_SOURCES}
     ${LOG_SOURCES}
     ${LLHTTP_SOURCES}
+    ${COMPRESSION_SOURCES}
 )
 
 # Create library target (not for actual building, just for CodeQL analysis)

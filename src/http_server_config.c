@@ -19,6 +19,9 @@
 #include "php_streams.h"                  /* php_stream_from_zval_no_verify */
 #include "php_http_server.h"
 #include "log/http_log.h"                 /* http_log_severity_ce */
+#ifdef HAVE_HTTP_COMPRESSION
+#include "compression/http_compression_defaults.h"
+#endif
 
 #include <stdint.h>
 #include <sys/stat.h>
@@ -72,6 +75,17 @@ struct _http_server_shared_config_t {
     uint32_t                http3_stream_window_bytes;
     uint32_t                http3_max_concurrent_streams;
     uint32_t                http3_peer_connection_budget;
+
+    /* Compression — see http_server_config_t for semantics. The MIME
+     * whitelist is deep-copied to a persistent zend_string array so
+     * cross-thread LOAD can rebuild it without touching the source
+     * thread's HashTable. */
+    bool                    compression_enabled;
+    uint8_t                 compression_level;
+    size_t                  compression_min_size;
+    size_t                  request_max_decompressed_size;
+    zend_string           **compression_mime_types;     /* persistent strings */
+    size_t                  compression_mime_count;
 
     bool                    http2_enabled;
     bool                    websocket_enabled;
@@ -139,6 +153,56 @@ static void http_server_config_populate_from_shared(
 #define HTTP3_MAX_CONCURRENT_STREAMS_MAX      1000000u
 #define DEFAULT_HTTP3_PEER_BUDGET             16u
 #define HTTP3_PEER_BUDGET_MAX                 4096u
+
+#ifdef HAVE_HTTP_COMPRESSION
+/* Compression knob defaults are sourced from
+ * include/compression/http_compression_defaults.h so policy and the
+ * HttpServerConfig setters share a single source of truth. */
+
+/* Strip MIME parameters (`; charset=utf-8`), trim, lowercase. Returns
+ * an emalloc'd zend_string. NULL on empty/blank input — callers reject
+ * such entries. Done once at setter time so the per-request match path
+ * does no normalisation work. */
+static zend_string *http_compression_normalize_mime(const char *src, size_t len)
+{
+    while (len > 0 && (src[0] == ' ' || src[0] == '\t')) { src++; len--; }
+    size_t end = len;
+    for (size_t i = 0; i < len; i++) {
+        if (src[i] == ';') { end = i; break; }
+    }
+    while (end > 0 && (src[end - 1] == ' ' || src[end - 1] == '\t')) end--;
+    if (end == 0) return NULL;
+
+    zend_string *out = zend_string_alloc(end, 0);
+    for (size_t i = 0; i < end; i++) {
+        char c = src[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        ZSTR_VAL(out)[i] = c;
+    }
+    ZSTR_VAL(out)[end] = '\0';
+    return out;
+}
+
+/* Initialise an empty-but-allocated mime-types HashTable on the config.
+ * Set semantics: keys are lowercase mime strings, values are dummy
+ * IS_TRUE zvals so zend_hash_str_exists is the only lookup. */
+static void http_compression_mime_table_init(HashTable **dst)
+{
+    ALLOC_HASHTABLE(*dst);
+    zend_hash_init(*dst, 16, NULL, ZVAL_PTR_DTOR, 0);
+}
+
+/* Populate dst from a NULL-terminated default whitelist. Idempotent:
+ * adding a key already present is a no-op for set semantics. */
+static void http_compression_mime_table_load_defaults(HashTable *dst)
+{
+    for (const char *const *p = http_compression_default_mime_types; *p != NULL; p++) {
+        zval one;
+        ZVAL_TRUE(&one);
+        zend_hash_str_update(dst, *p, strlen(*p), &one);
+    }
+}
+#endif /* HAVE_HTTP_COMPRESSION */
 
 /* Class entry */
 zend_class_entry *http_server_config_ce;
@@ -1127,6 +1191,218 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled)
     RETURN_BOOL(config->http3_alt_svc_enabled);
 }
 
+/* ==========================================================================
+ * HTTP body compression knobs (issue #8). Editable until the config is
+ * locked — see HttpServer::__construct. The MIME whitelist setter
+ * REPLACES the list wholesale (nginx semantics): pass the full set of
+ * eligible types, not a delta against the defaults.
+ * ==========================================================================
+ */
+
+/* {{{ proto HttpServerConfig::setCompressionEnabled(bool $enable): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled)
+{
+    bool enable;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enable)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    config->compression_enabled = enable;
+#else
+    if (enable) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "HTTP body compression is not built into this extension "
+            "(rebuild with --enable-http-compression)", 0);
+        return;
+    }
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, isCompressionEnabled)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_BOOL(config->compression_enabled);
+}
+
+/* {{{ proto HttpServerConfig::setCompressionLevel(int $level): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel)
+{
+    zend_long level;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(level)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (level < HTTP_COMPRESSION_LEVEL_MIN || level > HTTP_COMPRESSION_LEVEL_MAX) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "Compression level must be between %d and %d",
+            HTTP_COMPRESSION_LEVEL_MIN, HTTP_COMPRESSION_LEVEL_MAX);
+        return;
+    }
+    config->compression_level = (uint8_t)level;
+#else
+    (void)level;
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionLevel)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG(config->compression_level);
+}
+
+/* {{{ proto HttpServerConfig::setCompressionMinSize(int $bytes): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize)
+{
+    zend_long bytes;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(bytes)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (bytes < 0 || (zend_ulong)bytes > HTTP_COMPRESSION_MIN_SIZE_MAX) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "Compression min-size must be in [0, %u]",
+            (unsigned)HTTP_COMPRESSION_MIN_SIZE_MAX);
+        return;
+    }
+    config->compression_min_size = (size_t)bytes;
+#else
+    (void)bytes;
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMinSize)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->compression_min_size);
+}
+
+/* {{{ proto HttpServerConfig::setCompressionMimeTypes(array $types): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMimeTypes)
+{
+    HashTable *types;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY_HT(types)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Pre-validate every entry into a staging HashTable so a malformed
+     * element doesn't leave us with a half-replaced policy. nginx
+     * semantics: this REPLACES the previous list (defaults included). */
+    HashTable staged;
+    zend_hash_init(&staged, zend_hash_num_elements(types) + 1, NULL, ZVAL_PTR_DTOR, 0);
+
+    zval *entry;
+    ZEND_HASH_FOREACH_VAL(types, entry) {
+        if (Z_TYPE_P(entry) != IS_STRING) {
+            zend_hash_destroy(&staged);
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "Compression MIME types must be strings", 0);
+            return;
+        }
+        zend_string *norm = http_compression_normalize_mime(
+            Z_STRVAL_P(entry), Z_STRLEN_P(entry));
+        if (norm == NULL) {
+            zend_hash_destroy(&staged);
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "Compression MIME type is empty after stripping parameters", 0);
+            return;
+        }
+        zval one;
+        ZVAL_TRUE(&one);
+        zend_hash_update(&staged, norm, &one);
+        zend_string_release(norm);
+    } ZEND_HASH_FOREACH_END();
+
+    zend_hash_destroy(config->compression_mime_types);
+    /* Re-init in place — preserves the existing pointer that snapshots
+     * may already reference internally during config-lock. */
+    zend_hash_init(config->compression_mime_types, zend_hash_num_elements(&staged) + 1,
+                   NULL, ZVAL_PTR_DTOR, 0);
+    zend_string *key;
+    ZEND_HASH_FOREACH_STR_KEY(&staged, key) {
+        if (key) {
+            zval one;
+            ZVAL_TRUE(&one);
+            zend_hash_update(config->compression_mime_types, key, &one);
+        }
+    } ZEND_HASH_FOREACH_END();
+    zend_hash_destroy(&staged);
+#else
+    (void)types;
+#endif
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMimeTypes)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    array_init(return_value);
+    if (config->compression_mime_types) {
+        zend_string *key;
+        ZEND_HASH_FOREACH_STR_KEY(config->compression_mime_types, key) {
+            if (key) {
+                add_next_index_str(return_value, zend_string_copy(key));
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+}
+
+/* {{{ proto HttpServerConfig::setRequestMaxDecompressedSize(int $bytes): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setRequestMaxDecompressedSize)
+{
+    zend_long bytes;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(bytes)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) return;
+
+    if (bytes < 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Max decompressed request body size must be >= 0 "
+            "(0 = no cap, must be explicit)", 0);
+        return;
+    }
+    config->request_max_decompressed_size = (size_t)bytes;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getRequestMaxDecompressedSize)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->request_max_decompressed_size);
+}
+
 /* {{{ proto HttpServerConfig::setWriteBufferSize(int $size): static */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWriteBufferSize)
 {
@@ -1604,6 +1880,21 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->telemetry_enabled = false;
     config->frozen = NULL;
 
+#ifdef HAVE_HTTP_COMPRESSION
+    config->compression_enabled        = true;
+    config->compression_level          = HTTP_COMPRESSION_DEFAULT_LEVEL;
+    config->compression_min_size       = HTTP_COMPRESSION_DEFAULT_MIN_SIZE;
+    config->request_max_decompressed_size = HTTP_COMPRESSION_DEFAULT_REQUEST_MAX_DECOMP;
+    http_compression_mime_table_init(&config->compression_mime_types);
+    http_compression_mime_table_load_defaults(config->compression_mime_types);
+#else
+    config->compression_enabled        = false;
+    config->compression_level          = 0;
+    config->compression_min_size       = 0;
+    config->request_max_decompressed_size = 0;
+    config->compression_mime_types     = NULL;
+#endif
+
     zend_object_std_init(&config->std, ce);
     object_properties_init(&config->std, ce);
     config->std.handlers = &http_server_config_handlers;
@@ -1641,6 +1932,12 @@ static void http_server_config_free(zend_object *obj)
     if (config->frozen) {
         http_server_shared_config_release(config->frozen);
         config->frozen = NULL;
+    }
+
+    if (config->compression_mime_types) {
+        zend_hash_destroy(config->compression_mime_types);
+        FREE_HASHTABLE(config->compression_mime_types);
+        config->compression_mime_types = NULL;
     }
 
     zend_object_std_dtor(&config->std);
@@ -1690,6 +1987,27 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->protocol_detection_enabled = src->protocol_detection_enabled;
     shared->tls_enabled                = src->tls_enabled;
     shared->auto_await_body            = src->auto_await_body;
+
+    shared->compression_enabled           = src->compression_enabled;
+    shared->compression_level             = src->compression_level;
+    shared->compression_min_size          = src->compression_min_size;
+    shared->request_max_decompressed_size = src->request_max_decompressed_size;
+    if (src->compression_mime_types && zend_hash_num_elements(src->compression_mime_types) > 0) {
+        size_t n = zend_hash_num_elements(src->compression_mime_types);
+        shared->compression_mime_types = pecalloc(n, sizeof(zend_string *), 1);
+        shared->compression_mime_count = n;
+        size_t i = 0;
+        zend_string *key;
+        ZEND_HASH_FOREACH_STR_KEY(src->compression_mime_types, key) {
+            if (key) {
+                shared->compression_mime_types[i] = zend_string_init(
+                    ZSTR_VAL(key), ZSTR_LEN(key), 1);
+                GC_MAKE_PERSISTENT_LOCAL(shared->compression_mime_types[i]);
+                i++;
+            }
+        } ZEND_HASH_FOREACH_END();
+        shared->compression_mime_count = i;
+    }
 
     if (src->tls_cert_path) {
         shared->tls_cert_path = zend_string_init(
@@ -1759,6 +2077,15 @@ static void http_server_shared_config_release(http_server_shared_config_t *share
         zend_string_release_ex(shared->tls_key_path, 1);
     }
 
+    if (shared->compression_mime_types) {
+        for (size_t i = 0; i < shared->compression_mime_count; i++) {
+            if (shared->compression_mime_types[i]) {
+                zend_string_release_ex(shared->compression_mime_types[i], 1);
+            }
+        }
+        pefree(shared->compression_mime_types, 1);
+    }
+
     pefree(shared, 1);
 }
 
@@ -1795,6 +2122,24 @@ static void http_server_config_populate_from_shared(
     dst->protocol_detection_enabled = src->protocol_detection_enabled;
     dst->tls_enabled                = src->tls_enabled;
     dst->auto_await_body            = src->auto_await_body;
+
+    dst->compression_enabled           = src->compression_enabled;
+    dst->compression_level             = src->compression_level;
+    dst->compression_min_size          = src->compression_min_size;
+    dst->request_max_decompressed_size = src->request_max_decompressed_size;
+    if (dst->compression_mime_types) {
+        /* create_object pre-populated this with defaults; replace with the
+         * actual locked snapshot. */
+        zend_hash_clean(dst->compression_mime_types);
+        for (size_t i = 0; i < src->compression_mime_count; i++) {
+            zval one;
+            ZVAL_TRUE(&one);
+            zend_hash_str_update(dst->compression_mime_types,
+                ZSTR_VAL(src->compression_mime_types[i]),
+                ZSTR_LEN(src->compression_mime_types[i]),
+                &one);
+        }
+    }
 
     if (src->tls_cert_path) {
         dst->tls_cert_path = zend_string_init(

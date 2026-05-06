@@ -48,6 +48,13 @@ PHP_ARG_WITH([nghttp3],
   [no],
   [no])
 
+PHP_ARG_ENABLE([http-compression],
+  [whether to enable HTTP body compression],
+  [AS_HELP_STRING([--enable-http-compression],
+    [Enable HTTP body compression (auto-detected; prefers zlib-ng, falls back to zlib; use --disable-http-compression to opt out)])],
+  [yes],
+  [no])
+
 PHP_ARG_ENABLE([tests],
   [whether to build tests],
   [AS_HELP_STRING([--enable-tests],
@@ -309,6 +316,59 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     fi
   fi
 
+  dnl HTTP body compression (issue #8). Default: auto-detect — enabled
+  dnl if zlib-ng or zlib is present. Prefers zlib-ng for ~2–4x throughput
+  dnl over stock zlib at the same compression level; falls back to system
+  dnl zlib so the build never blocks on a missing optional dependency.
+  dnl Fail-soft policy: if neither is found, emit a warning and leave
+  dnl HAVE_HTTP_COMPRESSION undefined (build completes, feature absent).
+  if test "$PHP_HTTP_COMPRESSION" = "yes"; then
+    AC_PATH_PROG([PKG_CONFIG], [pkg-config], [no])
+    _http_server_compression_ok=no
+
+    AC_MSG_CHECKING([for zlib-ng])
+    if test -x "$PKG_CONFIG" && "$PKG_CONFIG" --exists zlib-ng 2>/dev/null; then
+      ZLIB_NG_CFLAGS=`"$PKG_CONFIG" --cflags zlib-ng`
+      ZLIB_NG_LIBS=`"$PKG_CONFIG" --libs zlib-ng`
+      ZLIB_NG_VERSION=`"$PKG_CONFIG" --modversion zlib-ng`
+      AC_MSG_RESULT([yes (version $ZLIB_NG_VERSION)])
+      PHP_EVAL_LIBLINE($ZLIB_NG_LIBS, TRUE_ASYNC_SERVER_SHARED_LIBADD)
+      PHP_EVAL_INCLINE($ZLIB_NG_CFLAGS)
+      AC_DEFINE([HAVE_ZLIB_NG], [1], [Whether zlib-ng is available])
+      AC_DEFINE([HAVE_HTTP_COMPRESSION], [1], [Whether HTTP body compression is enabled])
+      _http_server_compression_ok=yes
+    else
+      AC_MSG_RESULT([no])
+
+      AC_MSG_CHECKING([for zlib (fallback)])
+      if test -x "$PKG_CONFIG" && "$PKG_CONFIG" --exists zlib 2>/dev/null; then
+        ZLIB_CFLAGS=`"$PKG_CONFIG" --cflags zlib`
+        ZLIB_LIBS=`"$PKG_CONFIG" --libs zlib`
+        ZLIB_VERSION=`"$PKG_CONFIG" --modversion zlib`
+        AC_MSG_RESULT([yes (version $ZLIB_VERSION)])
+        PHP_EVAL_LIBLINE($ZLIB_LIBS, TRUE_ASYNC_SERVER_SHARED_LIBADD)
+        PHP_EVAL_INCLINE($ZLIB_CFLAGS)
+        AC_DEFINE([HAVE_HTTP_COMPRESSION], [1], [Whether HTTP body compression is enabled])
+        _http_server_compression_ok=yes
+      else
+        dnl Last resort — many systems have libz.so without a .pc file.
+        AC_CHECK_LIB([z], [deflate], [
+          PHP_ADD_LIBRARY([z], [1], [TRUE_ASYNC_SERVER_SHARED_LIBADD])
+          AC_DEFINE([HAVE_HTTP_COMPRESSION], [1], [Whether HTTP body compression is enabled])
+          _http_server_compression_ok=yes
+          AC_MSG_RESULT([yes (linked via -lz)])
+        ], [
+          AC_MSG_RESULT([no])
+        ])
+      fi
+    fi
+
+    if test "$_http_server_compression_ok" != "yes"; then
+      AC_MSG_WARN([HTTP body compression disabled: neither zlib-ng nor zlib found. Install libzlib-ng-dev or zlib1g-dev to enable.])
+      PHP_HTTP_COMPRESSION=no
+    fi
+  fi
+
   dnl Unit tests support (CMocka)
   if test "$PHP_TESTS" = "yes"; then
     AC_CHECK_LIB(cmocka, _cmocka_run_group_tests, [
@@ -371,6 +431,21 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     "
   fi
 
+  dnl Compression sources — gated by the same PHP_HTTP_COMPRESSION=yes
+  dnl set by the detection block above. Layout under src/compression/
+  dnl mirrors src/http2/ and src/http3/ — additional codecs (Brotli,
+  dnl zstd) drop in here in phase 2 without touching the response path.
+  if test "$PHP_HTTP_COMPRESSION" = "yes"; then
+    http_server_sources="$http_server_sources
+      src/compression/http_compression.c
+      src/compression/http_compression_gzip.c
+      src/compression/http_compression_defaults.c
+      src/compression/http_compression_negotiate.c
+      src/compression/http_compression_response.c
+      src/compression/http_compression_request.c
+    "
+  fi
+
   dnl HTTP/3 sources — gated by the same PHP_HTTP3=yes set by the detection
   dnl block above. Files appear in the build only when H3 detection
   dnl succeeded; no internal #ifdef wrap is needed.
@@ -426,6 +501,10 @@ if test "$PHP_HTTP_SERVER" != "no"; then
 
   if test "$PHP_HTTP2" = "yes"; then
     PHP_ADD_BUILD_DIR([$ext_builddir/src/http2])
+  fi
+
+  if test "$PHP_HTTP_COMPRESSION" = "yes"; then
+    PHP_ADD_BUILD_DIR([$ext_builddir/src/compression])
   fi
 
   if test "$PHP_HTTP3" = "yes"; then
