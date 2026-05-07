@@ -1622,12 +1622,18 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     if (UNEXPECTED(http_static_handler_count(conn->server) > 0)) {
         const http_static_result_t static_rc =
             http_static_try_serve(conn->server, conn, ctx, req);
-        (void)static_rc;
-        /* HANDLED → ctx->skip_php_handler is set; fall through and
-         *   spawn the coroutine so dispose runs the normal flush path.
-         * PASSTHROUGH → nothing was populated; spawn the coroutine
-         *   normally. The decision is encoded in ctx->skip_php_handler,
-         *   no extra branch on static_rc here. */
+        /* HARD_ZERO → state machine has the request lifecycle and
+         *   already pinned conn / counted dispatch. We MUST NOT
+         *   spawn a coroutine; finalize fires from the sendfile
+         *   completion callback.
+         * HANDLED → ctx->skip_php_handler is set, response is
+         *   populated; fall through and spawn the coroutine so
+         *   dispose runs the normal flush path.
+         * PASSTHROUGH → nothing was populated; coroutine + PHP
+         *   handler runs as usual. */
+        if (static_rc == HTTP_STATIC_HARD_ZERO) {
+            return;
+        }
     }
 
     /* No PHP handler is registered (static-only deployment) and the
