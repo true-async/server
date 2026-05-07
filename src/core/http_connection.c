@@ -145,10 +145,17 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_asy
     }
     conn->server = server;
 
+    /* ZERO_COPY_OK: bytes written to this io_t can land on the wire
+     * without a user-space encryption pass. Plain TCP qualifies; TLS
+     * connections clear the bit at TLS-session create and re-set it
+     * later when kTLS engages on the BIO. The static handler's
+     * sendfile path consults this flag to pick the zero-copy syscall
+     * vs. the read+write fallback (no plaintext leak). */
     conn->io = ZEND_ASYNC_IO_CREATE(
         (zend_file_descriptor_t)socket_fd,
         ZEND_ASYNC_IO_TYPE_TCP,
         ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_WRITABLE
+            | ZEND_ASYNC_IO_ZERO_COPY_OK
     );
     if (!conn->io) {
         conn_arena_free(http_server_arena(server), conn);
@@ -2190,6 +2197,12 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
             http_connection_destroy(conn);
             return false;
         }
+        /* TLS session attached: bytes written to conn->io may need a
+         * user-space encryption pass via OpenSSL. Clear ZERO_COPY_OK
+         * so the static handler's sendfile path falls back to
+         * read+write. The bit is re-set in the post-handshake hook if
+         * kTLS engages on this session. */
+        conn->io->state &= ~ZEND_ASYNC_IO_ZERO_COPY_OK;
         /* Plaintext queue feeding the cooperative flusher. Freed in
          * http_connection_destroy — each half of the BIO pair must be
          * released independently (BIO_free on one does not free the
