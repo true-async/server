@@ -2083,15 +2083,28 @@ static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         }
     }
 
-    /* Tear down per-coroutine state. Zvals + ctx are owned solely by
-     * this dispose; no other path looks at them after extended_data
-     * was cleared above. */
+    http_request_finalize(conn, ctx, should_continue);
+}
+/* }}} */
+
+/* {{{ http_request_finalize
+ *
+ * Shared cleanup tail. Called from http_handler_coroutine_dispose
+ * after the coroutine path has formatted + sent the response, and
+ * from the static-handler hard-zero state machine (issue #13) after
+ * its callback chain has finished writing headers + body.
+ */
+void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
+                           const bool should_continue)
+{
+    /* Tear down per-request state. Zvals + ctx are owned solely by
+     * this finalize; no other path looks at them after the caller
+     * cleared its own back-pointer. */
     zval_ptr_dtor(&ctx->request_zv);
     ZVAL_UNDEF(&ctx->request_zv);
     zval_ptr_dtor(&ctx->response_zv);
     ZVAL_UNDEF(&ctx->response_zv);
     efree(ctx);
-    ctx = NULL;
 
     /* Reset per-request state. Do NOT clear read_buffer_len — any bytes
      * still sitting there belong to the next pipelined request (parser

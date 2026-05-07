@@ -81,15 +81,31 @@ typedef struct {
     uint32_t      flags;
 } http_static_handler_t;
 
-/* Result of the dispatch attempt. HANDLED → C handler owns the
- * connection lifecycle from here. ERROR → C handler emitted (or will
- * emit) a short error response on its own. PASSTHROUGH → no static
- * mount matched (or `on_missing: Next` fell through); the dispatcher
- * must continue with the regular coroutine + PHP handler path. */
+/* Result of the dispatch attempt.
+ *
+ * PASSTHROUGH — no static mount matched (or `on_missing: Next` fell
+ *               through). Dispatcher continues with the regular
+ *               coroutine + PHP handler path.
+ *
+ * HANDLED     — populated ctx->response_zv synchronously (4xx error
+ *               body, or a soft-skip mode). Dispatcher proceeds with
+ *               the normal coroutine path; ctx->skip_php_handler is
+ *               set so the entry short-circuits and dispose flushes.
+ *
+ * HARD_ZERO   — owns the request lifecycle from here on. Dispatcher
+ *               MUST NOT spawn a coroutine: a callback chain is
+ *               already in flight that will emit the response and
+ *               run http_request_finalize on its own. Used by the
+ *               sendfile path (fs_open → fstat → write headers →
+ *               sendfile → close → finalize).
+ *
+ * ERROR       — reserved.
+ */
 typedef enum {
     HTTP_STATIC_PASSTHROUGH = 0,
     HTTP_STATIC_HANDLED     = 1,
     HTTP_STATIC_ERROR       = 2,
+    HTTP_STATIC_HARD_ZERO   = 3,
 } http_static_result_t;
 
 /* Forward decls — concrete types live in C TUs that include this.

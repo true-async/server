@@ -80,6 +80,18 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn);
  * byte-level detect) and pre-binds this callback. */
 void http_connection_on_request_ready(http_connection_t *conn, http_request_t *req);
 
+/* Shared cleanup tail used by both http_handler_coroutine_dispose and
+ * the static-handler's hard-zero callback chain (issue #13). Releases
+ * per-request state (zvals + ctx), updates conn flags, applies the
+ * keep-alive decision, and either resumes the TLS FSM, drains a
+ * pipelined request out of conn->read_buffer, or destroys the conn.
+ *
+ * `should_continue` is the keep-alive verdict the caller has already
+ * computed from the response state (true == reuse the conn for the
+ * next request; false == close after this dispatch). */
+void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
+                           bool should_continue);
+
 #ifdef HAVE_OPENSSL
 /* ===== TLS path entry points (defined in http_connection_tls.c) ===== */
 
