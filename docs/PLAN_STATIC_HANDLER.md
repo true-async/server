@@ -333,29 +333,110 @@ the static profiles. This closes FUTURES.md item #2.
 
 ---
 
+## 5a. Status — что сделано, что осталось (2026-05-07)
+
+### Закрыто
+
+PR #1 + PR #5 фактически слились в одну ветку (sendfile попал
+вместе с базовой инфраструктурой через расширение zend_async API):
+
+- ✅ `StaticHandler` class + 3 enum'а + полный набор setter'ов с
+  валидацией (`enablePrecompressed('foo')` throws at setter, locks
+  on attach, header injection blocked, etc.).
+- ✅ `addStaticHandler` на `HttpServer`, storage на server-object,
+  static-only deployments (без addHttpHandler) работают.
+- ✅ Dispatch hook в `http_connection_dispatch_request` с тремя
+  результатами (PASSTHROUGH / HANDLED soft-skip / HARD_ZERO).
+- ✅ MIME table (44 расширения, sorted-array binary search,
+  precomputed lengths, debug-build sorted-assert).
+- ✅ Path resolution (percent-decode, traversal guard, dotfile
+  policy, hide-globs via fnmatch, **backslash reject** для
+  Windows-семантики, **realpath prefix-check** против symlink
+  traversal через intermediate components).
+- ✅ Weak ETag + conditional GET (RFC 9110 §13.1.2 wildcard, weak-
+  equal compare, IMF-fixdate / RFC 850 / asctime parsing).
+- ✅ HEAD method handling (Content-Length без body).
+- ✅ `http_request_finalize` extracted из dispose tail в shared
+  helper. Используется coroutine path и hard-zero path.
+- ✅ **Hard-zero coroutine path** на plain TCP: callback chain
+  `fs_open → io_stat → write headers fire-and-forget → sendfile
+  → finalize`. Никакой корутины не спавнится.
+- ✅ zend_async API v0.11 (отдельный PR в php-src + ext/async):
+  `ZEND_ASYNC_FS_OPEN` (returns pending io_t),
+  `ZEND_ASYNC_IO_SENDFILE` (zero-copy uv_fs_sendfile с partial
+  loop). Вместе с CHANGELOG'ом.
+- ✅ Soft-skip path (для TLS, on_missing: Next, directory + index
+  walk) сохранён как always-correct fallback.
+- ✅ PHPT: 001-static-basic (200/304/404/HEAD/conditional/POST
+  passthrough), 002-dotfile-and-onmissing, 003-static-security
+  (symlink-escape, backslash, NUL, header injection, EACCES
+  disclosure). 154/155 общего suite passes (1 pre-existing skip).
+
+### Осталось
+
+| Acceptance / Plan item | Status | Notes |
+|---|---|---|
+| `If-Modified-Since` past mtime → 304 | partial | парсер реализован, PHPT покрывает только If-None-Match |
+| Symlink owner-match (`OwnerMatch`) | aliased to `Reject` | post-open uid compare не реализован; политика не слабее заявленной |
+| Telemetry counter zero-coroutine | not done | надо счётчик `static_zero_coroutine_total` + PHPT |
+| Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | not done | нужны цифры для подтверждения 5-15% gain |
+| Valgrind на 1M запросов | not done | существующий CI target надо натравить |
+| TLS+kTLS hard-zero | not done | нужен non-suspending TLS write helper |
+| Headers + sendfile ordering на slow-write | TBD | сейчас fire-and-forget headers, sendfile сразу после; теоретический race на EAGAIN партиальной записи. Нужен либо TCP_CORK, либо ожидание headers-completion перед submit sendfile |
+| **PR #2** H2/H3 интеграция | not started | nghttp2/nghttp3 data-provider hookup |
+| **PR #3** Range support | not started | single + multipart/byteranges + If-Range |
+| **PR #4** Precompressed sidecars `.br/.gz/.zst` | not started | reuse `http_compression_negotiate.c` |
+| **PR #6** Browse listing | not started | lowest priority |
+| Rewrite `entry.php` + flip `meta.json` to production | blocked | требует #2 + #3 + #4 |
+
+### Что переехало в зависимый PR
+
+PR #5 (sendfile) технически реализован, но **через расширение
+zend_async API в php-src** (не через config-flag в этом репо). API
+v0.11 живёт в:
+
+- `~/php-src` ветка `true-async` (commits `618e8d222f`, `67aa465162`,
+  `aab16cb5ba`, `c5a8f083d3`)
+- `~/php-src/ext/async` ветка `main` (commits `3312c56`, `73571f4`,
+  `0167a5c`, `0ff08d5`, `99e7695`)
+
+ABI breaking — поднята до 0.11.0. Описание в
+`ext/async/CHANGELOG.md` под секцией [0.7.0].
+
+### splice(2) — отложен
+
+splice требует промежуточного pipe'а (fd→pipe→fd семантика, не
+file→socket как sendfile). Без реального consumer'а с конкретными
+требованиями (request-body→storage / fd-to-fd proxy) — оставляем
+sendfile единственным zero-copy примитивом до появления реального
+use case.
+
+---
+
 ## 6. Acceptance checklist
 
-- [ ] `StaticHandler` class compiles, stubs regenerate cleanly, arginfo
+- [x] `StaticHandler` class compiles, stubs regenerate cleanly, arginfo
       hash matches.
-- [ ] `addStaticHandler` rejects calls after `start()` (`isLocked`).
-- [ ] `enablePrecompressed('foo')` throws `InvalidArgumentException` at
+- [x] `addStaticHandler` rejects calls after `start()` (через
+      `server->running` — функционально эквивалентно `isLocked`).
+- [x] `enablePrecompressed('foo')` throws `InvalidArgumentException` at
       setter time, not at start time.
-- [ ] Path traversal: `/static/../etc/passwd`, `/static/%2e%2e/x`,
+- [x] Path traversal: `/static/../etc/passwd`, `/static/%2e%2e/x`,
       `/static/foo%00.html`, absolute paths, NUL — all 400 or 404.
-- [ ] Symlink reject mode: 404 on symlinks; follow mode: serves;
-      owner-match: serves only if owner of link == owner of target.
-- [ ] `If-None-Match` matches → 304 with empty body, weak ETag echoed.
-- [ ] `If-Modified-Since` past mtime → 304.
-- [ ] Dotfile policy default `Deny` → 404 on `/.git/config`.
-- [ ] `on_missing: Next` falls through to `addHttpHandler` callback;
+- [~] Symlink reject mode: 404 on symlinks; follow mode: serves;
+      owner-match: aliased to Reject в MVP — реальный owner-check
+      ждёт следующей итерации.
+- [x] `If-None-Match` matches → 304 with empty body, weak ETag echoed.
+- [~] `If-Modified-Since` past mtime → 304 — реализован, PHPT не
+      покрывает (только If-None-Match).
+- [x] Dotfile policy default `Deny` → 404 on `/.git/config`.
+- [x] `on_missing: Next` falls through to `addHttpHandler` callback;
       default `NotFound` returns 404 in C without PHP entry.
 - [ ] Telemetry counter confirms zero coroutines spawned for matched
-      static requests (verifies the no-coroutine architecture).
+      static requests.
 - [ ] Bench: `wrk -c 256 -t 4 -d 30 /static/main.css` baseline vs
-      current `entry.php` map — must not regress; expected 5-15% gain
-      from coroutine-skip.
-- [ ] No new memory leaks under valgrind on a million-request run
-      (existing CI target).
+      current `entry.php` map.
+- [ ] No new memory leaks under valgrind on a million-request run.
 
 ---
 
@@ -367,8 +448,22 @@ the static profiles. This closes FUTURES.md item #2.
    Currently global, like `addHttpHandler`. If needed, add `listeners:
    [...]` option later — not breaking.
 3. `browse` (dir listing) — defer to PR #6, low priority.
-4. `setHeader` interaction with conditional GET (do extra headers fire
-   on 304? Yes, except `Content-*` family — match RFC 9110 §15.4.5).
+4. `setHeader` interaction with conditional GET — закрыт: extra
+   headers fire on 304, кроме `Content-*` family (RFC 9110 §15.4.5).
+5. **TLS hard-zero**: нужен non-suspending TLS write helper в
+   `tls_layer.c`. Без него hard-zero ограничен plain TCP. Дизайн
+   open: либо callback-based BIO drain, либо отдельный fire-and-
+   forget API через зашифрованный pipe.
+6. **Headers + sendfile ordering**: текущий fire-and-forget headers
+   + immediate sendfile submit оставляет теоретический race на
+   slow socket (EAGAIN partial write libuv → headers retry-flush
+   после того, как sendfile уже записал body bytes). Возможные
+   решения: TCP_CORK на entry в state machine, uncork в finalize;
+   или ждать headers-completion (uv_write callback) перед submit
+   sendfile. Для production надо выбрать один.
+7. **`SYMLINKS_OWNER`** реальная реализация — fstat после open,
+   сравнение st_uid файла с st_uid lstat'а каждого segment'а.
+   TOCTOU acceptable (требует write-access на хосте).
 
 ---
 
