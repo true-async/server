@@ -63,13 +63,23 @@ void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
         "Jan","Feb","Mar","Apr","May","Jun",
         "Jul","Aug","Sep","Oct","Nov","Dec" };
 
-    snprintf(buf, HTTP_STATIC_DATE_BUF_LEN,
-             "%s, %02d %s %04d %02d:%02d:%02d GMT",
-             day_names[tm.tm_wday & 7],
-             tm.tm_mday,
-             month_names[tm.tm_mon % 12],
-             tm.tm_year + 1900,
-             tm.tm_hour, tm.tm_min, tm.tm_sec);
+    /* %04d on a 5-digit year would overflow the fixed buffer if
+     * truncation were silent; clamp to the formatter's documented
+     * range. mtime values that far in the future are filesystem
+     * tampering, not legitimate. */
+    int year = tm.tm_year + 1900;
+    if (UNEXPECTED(year < 0 || year > 9999)) {
+        year = 9999;
+    }
+    const int written = snprintf(buf, HTTP_STATIC_DATE_BUF_LEN,
+        "%s, %02d %s %04d %02d:%02d:%02d GMT",
+        day_names[tm.tm_wday & 7],
+        tm.tm_mday,
+        month_names[tm.tm_mon % 12],
+        year,
+        tm.tm_hour, tm.tm_min, tm.tm_sec);
+    ZEND_ASSERT(written == HTTP_STATIC_DATE_LEN);
+    (void)written;
 }
 
 static inline void trim_ws(const char **start, size_t *len)

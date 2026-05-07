@@ -48,7 +48,9 @@ percent_decode(const char *const src, const size_t src_len,
                 return HTTP_STATIC_PATH_BAD_REQUEST;
             }
             const unsigned char byte = (unsigned char)((hi << 4) | lo);
-            if (byte == 0) {
+            /* NUL ends C strings; backslash is a path separator on
+             * Windows and would bypass the segment validator below. */
+            if (byte == 0 || byte == '\\') {
                 return HTTP_STATIC_PATH_BAD_REQUEST;
             }
             if (out + 1 >= dst_cap) {
@@ -57,6 +59,9 @@ percent_decode(const char *const src, const size_t src_len,
             dst[out++] = (char)byte;
             i += 3;
             continue;
+        }
+        if (UNEXPECTED(src[i] == '\\')) {
+            return HTTP_STATIC_PATH_BAD_REQUEST;
         }
         if (out + 1 >= dst_cap) {
             return HTTP_STATIC_PATH_BAD_REQUEST;

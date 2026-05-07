@@ -92,11 +92,44 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
     int flags = O_RDONLY | O_CLOEXEC;
 #ifdef O_NOFOLLOW
-    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
+    /* OWNER mode is documented as "follow if owner-of-link == owner-
+     * of-target" but the post-open uid comparison isn't implemented
+     * yet — alias to REJECT so the policy is no weaker than the
+     * advertised security promise. The real owner-match check lands
+     * with the async serve path. */
+    if (mount->flags & (HTTP_STATIC_FLAG_SYMLINKS_REJECT
+                      | HTTP_STATIC_FLAG_SYMLINKS_OWNER)) {
         flags |= O_NOFOLLOW;
     }
 #endif
     return open(path, flags);
+}
+
+/* After try_open_candidate succeeds we know the FINAL component is
+ * not a symlink (O_NOFOLLOW handles that). Intermediate components
+ * are still followed by open(2), so a symlink at any level inside
+ * the mount root could redirect us outside. realpath()-based prefix
+ * verification closes that gap. The TOCTOU between realpath() and
+ * the open we already did is acceptable — exploiting it requires
+ * filesystem write access on the host. */
+static bool resolved_under_root(const http_static_handler_t *mount,
+                                const char *path)
+{
+    char canonical[PATH_MAX];
+    if (UNEXPECTED(realpath(path, canonical) == NULL)) {
+        return false;
+    }
+    const char *const root     = ZSTR_VAL(mount->root_directory);
+    const size_t      root_len = ZSTR_LEN(mount->root_directory);
+
+    if (strncmp(canonical, root, root_len) != 0) {
+        return false;
+    }
+    /* canonical == root exactly, or canonical[root_len] is a separator
+     * (subpath). Otherwise canonical only happens to share a prefix
+     * (e.g. root="/srv/foo", canonical="/srv/foobar/x"). */
+    const char tail = canonical[root_len];
+    return tail == '\0' || tail == '/';
 }
 
 static zend_string *slurp_fd(const int fd, const size_t size)
@@ -294,17 +327,24 @@ http_static_result_t http_static_try_serve(http_server_object *server,
         }
 
         if (UNEXPECTED(!opened)) {
-            const int saved_errno = errno;
-            if (saved_errno == EACCES || saved_errno == EPERM) {
-                emit_status(response_obj, 403, "Forbidden", 9);
-                ctx->skip_php_handler = true;
-                return HTTP_STATIC_HANDLED;
-            }
-            /* ENOENT / ELOOP (symlink rejected) / ENOTDIR: missing-file
-             * semantics drive the on_missing decision. */
+            /* ENOENT / ELOOP (symlink rejected) / ENOTDIR / EACCES /
+             * EPERM all collapse to "not available". 404 (rather than
+             * 403 on EACCES) avoids disclosing whether a restricted
+             * file actually exists, matching the dotfile-deny path. */
             if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
                 return HTTP_STATIC_PASSTHROUGH;
             }
+            emit_status(response_obj, 404, "Not Found", 9);
+            ctx->skip_php_handler = true;
+            return HTTP_STATIC_HANDLED;
+        }
+
+        /* Closes the intermediate-symlink-traversal gap that O_NOFOLLOW
+         * leaves open: realpath() canonicalises every segment, so a
+         * symlink anywhere on the path that points outside the mount
+         * surfaces here as a prefix mismatch. */
+        if (UNEXPECTED(!resolved_under_root(mount, fs_path))) {
+            close(fd);
             emit_status(response_obj, 404, "Not Found", 9);
             ctx->skip_php_handler = true;
             return HTTP_STATIC_HANDLED;

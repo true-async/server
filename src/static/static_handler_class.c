@@ -502,6 +502,18 @@ ZEND_METHOD(TrueAsync_StaticHandler, setCacheControl)
         return;
     }
 
+    /* Defense-in-depth — the value flows straight onto the wire as
+     * a Cache-Control header, so reject the bytes that would forge a
+     * response split if an operator concatenated user input here. */
+    for (size_t i = 0; i < ZSTR_LEN(value); i++) {
+        const unsigned char c = (unsigned char)ZSTR_VAL(value)[i];
+        if (c == '\r' || c == '\n' || c == '\0') {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "StaticHandler cache-control value contains a control character", 0);
+            return;
+        }
+    }
+
     if (mount->cache_control != NULL) {
         zend_string_release(mount->cache_control);
         mount->cache_control = NULL;
