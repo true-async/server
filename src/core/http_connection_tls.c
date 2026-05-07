@@ -834,18 +834,10 @@ static void tls_on_handshake_done(http_connection_t *conn,
         zend_hrtime() - handshake_start_ns,
         tls_session_was_resumed(conn->tls));
 
-    const bool ktls_tx = tls_session_ktls_tx_active(conn->tls);
     http_server_on_tls_ktls(
         conn->server,
-        ktls_tx,
+        tls_session_ktls_tx_active(conn->tls),
         tls_session_ktls_rx_active(conn->tls));
-
-    /* kTLS TX engaged: the kernel will encrypt sendfile output for us,
-     * so the static handler's zero-copy path is safe again on this
-     * connection. Re-set the bit cleared at TLS attach. */
-    if (ktls_tx && conn->io != NULL) {
-        conn->io->state |= ZEND_ASYNC_IO_ZERO_COPY_OK;
-    }
 
     if (conn->protocol_detected) {
         return;
