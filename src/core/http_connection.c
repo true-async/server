@@ -21,6 +21,7 @@
 #include "conn_arena.h"
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
+#include "static/static_handler.h"  /* issue #13 — dispatch hook */
 
 /* php_network.h (pulled in via http_connection.h) supplies socket
  * types and closesocket on both POSIX and Windows. No direct POSIX
@@ -1611,6 +1612,38 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
 
     conn->state = CONN_STATE_PROCESSING;
 
+    /* Static handler dispatch (issue #13). When any mount is
+     * configured, give the C handler the first chance to claim the
+     * request: it resolves the URL, opens + reads the file, and
+     * populates ctx->response_zv / sets skip_php_handler so the
+     * coroutine entry below short-circuits without entering the PHP
+     * VM. Falls through to the PHP handler on PASSTHROUGH (no mount
+     * matched, non-GET method, on_missing: Next, ...). */
+    if (UNEXPECTED(http_static_handler_count(conn->server) > 0)) {
+        const http_static_result_t static_rc =
+            http_static_try_serve(conn->server, conn, ctx, req);
+        (void)static_rc;
+        /* HANDLED → ctx->skip_php_handler is set; fall through and
+         *   spawn the coroutine so dispose runs the normal flush path.
+         * PASSTHROUGH → nothing was populated; spawn the coroutine
+         *   normally. The decision is encoded in ctx->skip_php_handler,
+         *   no extra branch on static_rc here. */
+    }
+
+    /* No PHP handler is registered (static-only deployment) and the
+     * static path didn't claim the request: synthesise a 404 directly
+     * on the response so dispose flushes it. Otherwise the coroutine
+     * entry would dereference NULL conn->handler. */
+    if (conn->handler == NULL && !ctx->skip_php_handler) {
+        http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
+        http_response_static_set_header(Z_OBJ(ctx->response_zv),
+            "content-type", 12, "text/plain; charset=utf-8", 25);
+        zend_string *msg = zend_string_init("Not Found", 9, 0);
+        http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
+        zend_string_release(msg);
+        ctx->skip_php_handler = true;
+    }
+
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
     if (coroutine == NULL) {
         zval_ptr_dtor(&ctx->request_zv);
@@ -1718,6 +1751,23 @@ static void http_handler_coroutine_entry(void)
     const bool stamps = http_server_sample_stamps_enabled(conn->view);
     if (req && stamps) {
         req->start_ns = zend_hrtime();
+    }
+
+    /* Static handler (issue #13) already populated the response in C
+     * inside http_static_try_serve — skip the PHP handler call entirely.
+     * Dispose still runs through the normal flush path so all the
+     * counters / keepalive / drain / Alt-Svc work converges in one
+     * place. */
+    if (ctx->skip_php_handler) {
+        http_server_count_request(conn->counters);
+        if (req && stamps) {
+            req->end_ns = zend_hrtime();
+            http_server_on_request_sample(conn->server,
+                                          req->start_ns - req->enqueue_ns,
+                                          req->end_ns   - req->start_ns,
+                                          req->end_ns);
+        }
+        return;
     }
 
 #ifdef HAVE_HTTP_COMPRESSION

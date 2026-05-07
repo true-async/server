@@ -767,6 +767,20 @@ const http_server_view_t *http_server_view(const http_server_object *const serve
     return server != NULL ? &server->view : &http_server_view_default;
 }
 
+size_t http_static_handler_count(const http_server_object *server)
+{
+    return server != NULL ? server->static_handler_count : 0;
+}
+
+const http_static_handler_t *
+http_static_handler_get(const http_server_object *server, size_t index)
+{
+    if (server == NULL || index >= server->static_handler_count) {
+        return NULL;
+    }
+    return server->static_handler_mounts[index];
+}
+
 HashTable *http_server_get_protocol_handlers(http_server_object *server)
 {
     return server != NULL ? &server->protocol_handlers : NULL;
@@ -1242,14 +1256,15 @@ static void http_server_accept_callback(
     }
 
     /* Pre-accept sanity check: at least one HTTP-family handler must be
-     * registered. Actual handler selection happens later, after protocol
-     * detection matches the connection to a specific strategy. */
+     * registered, OR at least one static mount (issue #13). Actual
+     * handler selection happens later, after protocol detection
+     * matches the connection to a specific strategy. */
     zend_fcall_t *handler =
         http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP1);
     if (handler == NULL) {
         handler = http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2);
     }
-    if (UNEXPECTED(!handler)) {
+    if (UNEXPECTED(handler == NULL && server->static_handler_count == 0)) {
         closesocket(client_fd);
         return;
     }

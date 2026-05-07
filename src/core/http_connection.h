@@ -297,6 +297,10 @@ typedef struct {
     bool               handler_bailout;          /* zend_bailout caught in handler entry —
                                                   * dispose must skip PHP API on zvals and
                                                   * emit a synthetic 500 response. */
+    bool               skip_php_handler;         /* static handler (issue #13) populated the
+                                                  * response in C; coroutine entry must NOT
+                                                  * call the user PHP handler. Dispose still
+                                                  * runs and flushes via the normal path. */
 } http1_request_ctx_t;
 
 /* Bailout firewall: log helper called from every handler-entry zend_catch

@@ -59,18 +59,7 @@ void http_static_handler_lock(http_static_handler_t *handler)
     }
 }
 
-/* Skeleton dispatch entrypoint. The full FSM lands incrementally per
- * docs/PLAN_STATIC_HANDLER.md PR #1+. Until then we always passthrough
- * so the dispatcher hook is wire-compatible without changing observable
- * behaviour. */
-http_static_result_t http_static_try_serve(struct http_server_object *server,
-                                           struct _http_connection_t *conn,
-                                           void *ctx,
-                                           struct _http_request_t *request)
-{
-    (void)server; (void)conn; (void)ctx; (void)request;
-    return HTTP_STATIC_PASSTHROUGH;
-}
+/* http_static_try_serve is implemented in http_static_serve.c. */
 
 /* Helper: throw if locked. Returns true on locked. */
 static inline bool handler_check_locked(const http_static_handler_t *mount)

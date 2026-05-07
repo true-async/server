@@ -1585,6 +1585,50 @@ zend_string *http_response_get_body_str(zend_object *obj)
     return response->body.s;  /* may be NULL */
 }
 
+/* Static-handler internal API (issue #13). The dispatch path resolves
+ * the file in C without entering the PHP VM, then populates status,
+ * headers, and body via these direct field setters before the
+ * coroutine entry's skip_php_handler short-circuit fires.
+ *
+ * No `closed`/`streaming` guard like the PHP-facing setters: we are
+ * the single writer, the response object is freshly object_init_ex'd,
+ * and there is no PHP code path that could have flipped those bits. */
+void http_response_static_set_status(zend_object *obj, int status_code)
+{
+    http_response_object *const r = http_response_from_obj(obj);
+    r->status_code = status_code;
+}
+
+void http_response_static_set_header(zend_object *obj,
+                                     const char *name, size_t name_len,
+                                     const char *value, size_t value_len)
+{
+    http_response_object *const r = http_response_from_obj(obj);
+    /* Header names are stored lowercased — reader paths assume it. */
+    zend_string *lower_name = zend_string_alloc(name_len, 0);
+    for (size_t i = 0; i < name_len; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        ZSTR_VAL(lower_name)[i] = c;
+    }
+    ZSTR_VAL(lower_name)[name_len] = '\0';
+
+    zval header_value;
+    ZVAL_STR(&header_value, zend_string_init(value, value_len, 0));
+    zend_hash_update(r->headers, lower_name, &header_value);
+    zend_string_release(lower_name);
+}
+
+void http_response_static_set_body_str(zend_object *obj, zend_string *body)
+{
+    http_response_object *const r = http_response_from_obj(obj);
+    smart_str_free(&r->body);
+    if (body != NULL && ZSTR_LEN(body) > 0) {
+        smart_str_appendl(&r->body, ZSTR_VAL(body), ZSTR_LEN(body));
+    }
+    smart_str_0(&r->body);
+}
+
 void http_response_reset_to_error(zend_object *obj, int status_code, const char *message)
 {
     http_response_object *response = http_response_from_obj(obj);

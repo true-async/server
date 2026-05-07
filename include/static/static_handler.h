@@ -92,8 +92,10 @@ typedef enum {
     HTTP_STATIC_ERROR       = 2,
 } http_static_result_t;
 
-/* Forward decls — concrete types live in C TUs that include this. */
-struct _http_request_t;
+/* Forward decls — concrete types live in C TUs that include this.
+ * Names match those in src/core/http_connection.h and the public
+ * php_http_server.h. */
+struct http_request_t;
 struct _http_connection_t;
 struct http_server_object;
 
@@ -117,12 +119,30 @@ http_static_handler_t *http_static_handler_from_obj(zend_object *obj);
 void http_static_handler_lock(http_static_handler_t *handler);
 
 /* Dispatch hook entrypoint — declared here so http_connection.c can
- * call it without needing the full implementation header. The current
- * skeleton always returns PASSTHROUGH; the real FSM lands incrementally
- * (PRs #1+ per docs/PLAN_STATIC_HANDLER.md). */
+ * call it without needing the full implementation header. */
 http_static_result_t http_static_try_serve(struct http_server_object *server,
                                            struct _http_connection_t *conn,
                                            void *ctx,
-                                           struct _http_request_t *request);
+                                           struct http_request_t *request);
+
+/* Out-of-line "is any mount registered" helper. The struct layout
+ * lives in http_server_class.c so the count is not directly visible to
+ * the dispatcher TU; this getter is the single authority and is cheap
+ * (one load on the hot path). Returns 0 when server is NULL. */
+size_t http_static_handler_count(const struct http_server_object *server);
+
+/* Borrow the read-only mount descriptor at `index` (0-based, must be
+ * < http_static_handler_count). Pointer is stable for the lifetime of
+ * the server. Used by the dispatch FSM to iterate without seeing the
+ * server-object struct layout. */
+const http_static_handler_t *
+http_static_handler_get(const struct http_server_object *server, size_t index);
+
+/* Maximum file size served on the synchronous read path. Larger files
+ * passthrough to the regular handler (or in a future iteration, to a
+ * streaming async path). 256 MiB is a comfortable upper bound for
+ * typical static asset deployments and protects against a stray giant
+ * file blocking the loop on a synchronous read. */
+#define HTTP_STATIC_MAX_FILE_SIZE  ((size_t)256u * 1024u * 1024u)
 
 #endif /* TRUE_ASYNC_STATIC_HANDLER_H */

@@ -928,6 +928,16 @@ const char    *http_response_get_body    (zend_object *obj, size_t *len_out);
  * of the submit call but the data_reader walks the bytes asynchronously. */
 zend_string   *http_response_get_body_str(zend_object *obj);
 
+/* Static-handler (issue #13) direct field setters. Used by
+ * http_static_try_serve to populate a freshly-init'd response without
+ * paying the PHP-facing setter validation cost. Call site is
+ * single-writer (no PHP handler ever ran on the response). */
+void http_response_static_set_status   (zend_object *obj, int status_code);
+void http_response_static_set_header   (zend_object *obj,
+                                        const char *name, size_t name_len,
+                                        const char *value, size_t value_len);
+void http_response_static_set_body_str (zend_object *obj, zend_string *body);
+
 /* Response-state helpers used by handler-dispose paths (HTTP/1 in
  * http_connection.c, HTTP/2 in src/http2/http2_strategy.c). */
 bool  http_response_is_committed   (zend_object *obj);
