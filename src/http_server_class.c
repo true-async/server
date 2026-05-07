@@ -1042,9 +1042,9 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
     server->static_handler_mounts[server->static_handler_count]  = mount;
     server->static_handler_count++;
 
-    /* Static handler covers H1 (and H2/H3 once #2/#3 land). Flip the
-     * H1 bit so a server with only static mounts and no addHttpHandler
-     * still passes the "any handler registered?" preflight in start(). */
+    /* Mark H1 as a protocol this server speaks — symmetric with the
+     * addHttpHandler convention. (H2/H3 land in PRs #2/#3.) The
+     * start() preflight uses static_handler_count separately. */
     server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));

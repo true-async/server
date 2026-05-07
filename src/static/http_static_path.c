@@ -16,9 +16,8 @@
 #include <fnmatch.h>
 #include <string.h>
 
-/* Hex-decode one byte of a percent-encoded triplet. Returns -1 on
- * invalid hex. */
-static inline int hex_value(char c)
+/* Returns -1 on non-hex input. */
+static inline int hex_value(const char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
@@ -26,14 +25,13 @@ static inline int hex_value(char c)
     return -1;
 }
 
-/* Percent-decode `src` into `dst`. NUL bytes are rejected with the
- * BAD_REQUEST result. Bytes that are NOT percent-encoded are copied
- * verbatim — including any literal '/' which is the path separator
- * we still need for segment-level traversal checks below. Never
- * over-runs `dst_cap`. */
+/* Decoded literal '/' bytes are preserved — segment-level traversal
+ * validation below relies on the separator being unambiguous. NUL
+ * bytes (literal or %00) are rejected. */
 static http_static_path_result_t
-percent_decode(const char *src, size_t src_len,
-               char *dst, size_t dst_cap, size_t *dst_len_out)
+percent_decode(const char *const src, const size_t src_len,
+               char *const dst, const size_t dst_cap,
+               size_t *const dst_len_out)
 {
     size_t out = 0;
     for (size_t i = 0; i < src_len; ) {
@@ -70,33 +68,23 @@ percent_decode(const char *src, size_t src_len,
     return HTTP_STATIC_PATH_OK;
 }
 
-/* Walk segments of `path` (length `path_len`), enforcing:
- *   - no empty segment after the first character (rejects "//");
- *   - no segment equal to "." or "..";
- *   - dotfile policy on segments starting with '.' (other than the
- *     two above, which are always rejected as traversal).
- *
- * Returns OK / FORBIDDEN / BAD_REQUEST. */
+/* Reject empty / "." / ".." segments and apply the dotfile policy.
+ * `path` always starts with '/' so the leading separator is skipped. */
 static http_static_path_result_t
 validate_segments(const http_static_handler_t *mount,
-                  const char *path, size_t path_len)
+                  const char *const path, const size_t path_len)
 {
-    /* Skip the leading '/' that path always starts with. */
-    size_t i = 0;
-    if (path_len > 0 && path[0] == '/') {
-        i = 1;
-    }
+    size_t i = (path_len > 0 && path[0] == '/') ? 1 : 0;
 
     while (i < path_len) {
-        size_t seg_start = i;
+        const size_t seg_start = i;
         while (i < path_len && path[i] != '/') {
             i++;
         }
         const size_t seg_len = i - seg_start;
-        const char *seg = path + seg_start;
+        const char *const seg = path + seg_start;
 
         if (seg_len == 0) {
-            /* Empty segment from "//" — reject. */
             return HTTP_STATIC_PATH_BAD_REQUEST;
         }
         if (seg_len == 1 && seg[0] == '.') {
@@ -106,17 +94,14 @@ validate_segments(const http_static_handler_t *mount,
             return HTTP_STATIC_PATH_FORBIDDEN;
         }
         if (seg[0] == '.') {
-            /* Genuine dotfile (.git, .htaccess, ...). Apply policy. */
             if (mount->flags & HTTP_STATIC_FLAG_DOTFILES_DENY) {
                 return HTTP_STATIC_PATH_FORBIDDEN;
             }
             if (mount->flags & HTTP_STATIC_FLAG_DOTFILES_IGNORE) {
-                /* Caller treats "hidden" same as on_missing. */
                 return HTTP_STATIC_PATH_HIDE;
             }
-            /* HTTP_STATIC_FLAG_DOTFILES_ALLOW: fall through. */
+            /* DOTFILES_ALLOW falls through. */
         }
-        /* Skip the '/' that terminated the segment, if any. */
         if (i < path_len) {
             i++;
         }
@@ -135,14 +120,12 @@ http_static_path_resolve(const http_static_handler_t *mount,
                    mount->root_directory == NULL)) {
         return HTTP_STATIC_PATH_NO_MATCH;
     }
-    if (request_path_len == 0 || request_path[0] != '/') {
-        /* Absolute-form / authority-form / asterisk targets are rejected
-         * by upstream parsers before reaching here; defensive. */
+    /* Defensive: upstream parsers should already reject absolute-form
+     * / authority-form / asterisk targets. */
+    if (UNEXPECTED(request_path_len == 0 || request_path[0] != '/')) {
         return HTTP_STATIC_PATH_BAD_REQUEST;
     }
 
-    /* Prefix match: request must START with the mount's url_prefix.
-     * Both strings are guaranteed to start and end with '/'. */
     const size_t prefix_len = mount->url_prefix_len;
     if (request_path_len < prefix_len) {
         return HTTP_STATIC_PATH_NO_MATCH;
@@ -151,16 +134,10 @@ http_static_path_resolve(const http_static_handler_t *mount,
         return HTTP_STATIC_PATH_NO_MATCH;
     }
 
-    /* Tail starts at the prefix's terminating '/' so segments share
-     * the exact same separator semantics as the rest of the path —
-     * "/static/foo.css" → tail "foo.css", with the join below
-     * inserting '/' against root. */
-    const char *tail     = request_path + prefix_len;
-    size_t      tail_len = request_path_len - prefix_len;
+    const char *const tail = request_path + prefix_len;
+    size_t            tail_len = request_path_len - prefix_len;
 
-    /* Strip URL query string / fragment if the upstream parser left
-     * them attached — defensive; llhttp normally hands us the path
-     * component only, but the H2/H3 path may differ. */
+    /* Defensive: llhttp hands us path-only, H2/H3 paths may differ. */
     for (size_t i = 0; i < tail_len; i++) {
         if (tail[i] == '?' || tail[i] == '#') {
             tail_len = i;
@@ -168,52 +145,42 @@ http_static_path_resolve(const http_static_handler_t *mount,
         }
     }
 
-    /* Decode into a scratch buffer first; we then concatenate root +
-     * '/' + decoded into out_buf. */
     char decoded[PATH_MAX];
     size_t decoded_len = 0;
     const http_static_path_result_t decode_rc =
         percent_decode(tail, tail_len, decoded, sizeof(decoded), &decoded_len);
-    if (decode_rc != HTTP_STATIC_PATH_OK) {
+    if (UNEXPECTED(decode_rc != HTTP_STATIC_PATH_OK)) {
         return decode_rc;
     }
 
-    /* validate_segments() expects a leading '/' — synthesize one. */
-    char prefixed[PATH_MAX];
-    if (decoded_len + 1 >= sizeof(prefixed)) {
-        return HTTP_STATIC_PATH_BAD_REQUEST;
-    }
-    prefixed[0] = '/';
-    memcpy(prefixed + 1, decoded, decoded_len);
-    prefixed[decoded_len + 1] = '\0';
+    /* Empty tail (URL == prefix) is allowed — caller tries the index
+     * files. Otherwise validate the segment grammar. */
+    if (decoded_len > 0) {
+        char prefixed[PATH_MAX];
+        if (UNEXPECTED(decoded_len + 1 >= sizeof(prefixed))) {
+            return HTTP_STATIC_PATH_BAD_REQUEST;
+        }
+        prefixed[0] = '/';
+        memcpy(prefixed + 1, decoded, decoded_len);
+        prefixed[decoded_len + 1] = '\0';
 
-    /* Empty tail (URL == prefix exactly) is OK — the FSM will try the
-     * index files. validate_segments would reject the empty-segment
-     * case otherwise, so short-circuit. */
-    if (decoded_len == 0) {
-        /* fall through to concatenation below — the resulting path is
-         * just the root directory. */
-    } else {
         const http_static_path_result_t seg_rc =
             validate_segments(mount, prefixed, decoded_len + 1);
-        if (seg_rc != HTTP_STATIC_PATH_OK) {
+        if (UNEXPECTED(seg_rc != HTTP_STATIC_PATH_OK)) {
             return seg_rc;
         }
     }
 
-    /* Concatenate root + '/' + decoded into out_buf. Root is already
-     * canonical (no trailing '/' from realpath, except when root is
-     * exactly "/"). */
+    /* realpath()-canonical root has no trailing '/' except when the
+     * root is exactly "/". */
     const char *const root     = ZSTR_VAL(mount->root_directory);
     const size_t      root_len = ZSTR_LEN(mount->root_directory);
 
-    /* Need root_len + 1 (slash) + decoded_len + 1 (NUL). */
-    if (root_len + 1 + decoded_len + 1 > out_buf_cap) {
+    if (UNEXPECTED(root_len + 1 + decoded_len + 1 > out_buf_cap)) {
         return HTTP_STATIC_PATH_BAD_REQUEST;
     }
     memcpy(out_buf, root, root_len);
     size_t out = root_len;
-    /* Avoid a duplicate '/' when root already ends with one (root="/"). */
     if (out > 0 && out_buf[out - 1] != '/') {
         out_buf[out++] = '/';
     }
@@ -229,12 +196,10 @@ http_static_path_resolve(const http_static_handler_t *mount,
     return HTTP_STATIC_PATH_OK;
 }
 
-bool http_static_path_join(char *buf, size_t cap, size_t *len,
-                           const char *name, size_t name_len)
+bool http_static_path_join(char *const buf, const size_t cap, size_t *const len,
+                           const char *const name, const size_t name_len)
 {
     size_t cur = *len;
-    /* Need '/' + name + NUL. Skip the slash if buf already ends with
-     * one (e.g. when buf is the canonical root "/"). */
     const bool need_sep = (cur == 0 || buf[cur - 1] != '/');
     const size_t extra  = (need_sep ? 1 : 0) + name_len + 1;
     if (cur + extra > cap) {
@@ -256,9 +221,9 @@ bool http_static_path_is_hidden(const http_static_handler_t *mount,
     if (mount == NULL || mount->hide_count == 0) {
         return false;
     }
-    /* fnmatch wants a NUL-terminated string; the caller may pass a
-     * stretch of a larger buffer, so copy into a scratch. */
-    if (relative_len >= PATH_MAX) {
+    /* fnmatch needs a NUL-terminated string; relative is a slice of a
+     * larger buffer, so copy. */
+    if (UNEXPECTED(relative_len >= PATH_MAX)) {
         return false;
     }
     char scratch[PATH_MAX];
@@ -266,7 +231,7 @@ bool http_static_path_is_hidden(const http_static_handler_t *mount,
     scratch[relative_len] = '\0';
 
     for (size_t i = 0; i < mount->hide_count; i++) {
-        const zend_string *glob = mount->hide_globs[i];
+        const zend_string *const glob = mount->hide_globs[i];
         if (fnmatch(ZSTR_VAL(glob), scratch, FNM_PATHNAME) == 0) {
             return true;
         }

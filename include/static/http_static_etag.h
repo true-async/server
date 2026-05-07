@@ -16,19 +16,20 @@
 #include <stddef.h>
 #include <sys/stat.h>
 
-/* Format a weak ETag for the given (mtime_ns, size, ino) into `buf`.
- * Always writes exactly `HTTP_STATIC_ETAG_BUF_LEN` bytes (NUL-terminated)
- * — the leading `W/`, the opening quote, 16 hex chars, the closing
- * quote, NUL. */
-#define HTTP_STATIC_ETAG_BUF_LEN 22  /* W/" + 16 hex + " + NUL */
+/* Buffer-size + NUL for a weak ETag in the form W/"<16 hex>" — that
+ * is `W` + `/` + `"` + 16 hex + `"` = 20 chars, plus the NUL. */
+#define HTTP_STATIC_ETAG_LEN     20
+#define HTTP_STATIC_ETAG_BUF_LEN (HTTP_STATIC_ETAG_LEN + 1)
 
-void http_static_etag_format(struct stat *st, char buf[HTTP_STATIC_ETAG_BUF_LEN]);
+void http_static_etag_format(const struct stat *st,
+                             char buf[HTTP_STATIC_ETAG_BUF_LEN]);
 
-/* Format an HTTP-date for the Last-Modified / Date header. Writes
- * exactly 30 bytes (incl. NUL): "Sun, 06 Nov 1994 08:49:37 GMT". */
+/* IMF-fixdate "Sun, 06 Nov 1994 08:49:37 GMT" + NUL. */
 #define HTTP_STATIC_DATE_BUF_LEN 30
+#define HTTP_STATIC_DATE_LEN     (HTTP_STATIC_DATE_BUF_LEN - 1)
 
-void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN]);
+void http_static_format_http_date(time_t t,
+                                  char buf[HTTP_STATIC_DATE_BUF_LEN]);
 
 /* Returns true when the request's conditional-GET headers
  * (If-None-Match / If-Modified-Since) match the resource state and

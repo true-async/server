@@ -30,22 +30,20 @@ static inline uint64_t mtime_ns_from_stat(const struct stat *st)
 #endif
 }
 
-void http_static_etag_format(struct stat *st, char buf[HTTP_STATIC_ETAG_BUF_LEN])
+void http_static_etag_format(const struct stat *st,
+                             char buf[HTTP_STATIC_ETAG_BUF_LEN])
 {
-    /* Single 64-bit mix — cheap, collision-resistant enough for the
-     * job. SHA/MD5 would cost more per request than the conditional
-     * GET saves. Per docs/PLAN_STATIC_HANDLER.md §4. */
+    /* Single 64-bit mix — SHA/MD5 cost more per request than the
+     * conditional GET saves. See docs/PLAN_STATIC_HANDLER.md §4. */
     const uint64_t mtime_ns = mtime_ns_from_stat(st);
     const uint64_t size     = (uint64_t)st->st_size;
     const uint64_t ino      = (uint64_t)st->st_ino;
     const uint64_t mix      = mtime_ns ^ (size << 17) ^ ino;
 
-    /* W/"<16 hex>"<NUL> = 22 bytes. snprintf into the fixed-size buf. */
     const int written = snprintf(buf, HTTP_STATIC_ETAG_BUF_LEN,
                                  "W/\"%016" PRIx64 "\"", mix);
+    ZEND_ASSERT(written == HTTP_STATIC_ETAG_LEN);
     (void)written;
-    /* Compile-time invariant: the format always produces exactly
-     * HTTP_STATIC_ETAG_BUF_LEN - 1 bytes plus NUL. */
 }
 
 void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
@@ -56,10 +54,9 @@ void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
 #else
     gmtime_r(&t, &tm);
 #endif
-    /* RFC 7231 IMF-fixdate. strftime("%a, %d %b %Y %T GMT") on a glibc
-     * system with C locale produces the canonical form; we still set
-     * the locale conventions explicitly via the format string components
-     * to keep this independent of LC_TIME. */
+    /* Hard-coded English month/day names — strftime would honour
+     * LC_TIME and could produce non-canonical strings on hosts that
+     * forgot to set the locale. RFC 7231 IMF-fixdate is fixed grammar. */
     static const char *const day_names[]   = {
         "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
     static const char *const month_names[] = {
@@ -75,7 +72,6 @@ void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
              tm.tm_hour, tm.tm_min, tm.tm_sec);
 }
 
-/* Trim ASCII whitespace from both ends of [start..start+len). */
 static inline void trim_ws(const char **start, size_t *len)
 {
     while (*len > 0 && ((*start)[0] == ' ' || (*start)[0] == '\t')) {
@@ -98,9 +94,8 @@ static inline void strip_weak_prefix(const char **s, size_t *len)
     }
 }
 
-/* Walk a comma-separated If-None-Match value, comparing each entry
- * (after stripping W/ and surrounding ws) against `etag`. Returns
- * true on any match. The wildcard "*" matches anything that exists. */
+/* RFC 9110 §13.1.2: comma-separated entries, weak-equal comparison,
+ * "*" matches any existing resource. */
 static bool match_if_none_match(const char *header, size_t header_len,
                                 const char *etag, size_t etag_len)
 {
@@ -134,9 +129,7 @@ static bool match_if_none_match(const char *header, size_t header_len,
     return false;
 }
 
-/* Parse an HTTP-date in IMF-fixdate / RFC 850 / asctime forms.
- * Returns (time_t)-1 on failure. Uses the simple-but-correct path:
- * try IMF-fixdate first, then RFC 850, then asctime. */
+/* RFC 9110 §5.6.7 accepts three formats; try in order of frequency. */
 static time_t parse_http_date(const char *src, size_t src_len)
 {
     char buf[64];

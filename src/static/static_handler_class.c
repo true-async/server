@@ -61,7 +61,6 @@ void http_static_handler_lock(http_static_handler_t *handler)
 
 /* http_static_try_serve is implemented in http_static_serve.c. */
 
-/* Helper: throw if locked. Returns true on locked. */
 static inline bool handler_check_locked(const http_static_handler_t *mount)
 {
     if (UNEXPECTED(mount->flags & HTTP_STATIC_FLAG_LOCKED)) {
@@ -72,8 +71,9 @@ static inline bool handler_check_locked(const http_static_handler_t *mount)
     return false;
 }
 
-/* Helper: validate URL prefix — must start and end with '/', non-empty,
- * no NUL, no double-slashes. */
+/* Reject prefixes that don't bracket with '/', contain NUL, or
+ * collapse to "//" — the dispatch fast path memcmps assuming both
+ * the request URL and the prefix are well-formed. */
 static bool validate_url_prefix(const zend_string *prefix)
 {
     const size_t len = ZSTR_LEN(prefix);
@@ -138,7 +138,6 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
     return zend_string_init(resolved, strlen(resolved), 0);
 }
 
-/* Drop everything owned by the descriptor. Called from object free. */
 static void mount_release_owned(http_static_handler_t *mount)
 {
     if (mount->url_prefix != NULL) {
@@ -181,8 +180,6 @@ static void mount_release_owned(http_static_handler_t *mount)
     }
 }
 
-/* === Method bodies ===================================================== */
-
 ZEND_METHOD(TrueAsync_StaticHandler, __construct)
 {
     zend_string *url_prefix = NULL;
@@ -207,9 +204,8 @@ ZEND_METHOD(TrueAsync_StaticHandler, __construct)
     mount->url_prefix_len = ZSTR_LEN(url_prefix);
     mount->root_directory = root;
 
-    /* Default index file = "index.html". */
     mount->index_files    = emalloc(sizeof(zend_string *));
-    mount->index_files[0] = zend_string_init("index.html", strlen("index.html"), 0);
+    mount->index_files[0] = zend_string_init(ZEND_STRL("index.html"), 0);
     mount->index_count    = 1;
 
     mount->flags = HTTP_STATIC_FLAG_DOTFILES_DENY
@@ -231,8 +227,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setIndexFiles)
         return;
     }
 
-    /* Validate first — reject non-strings and segments containing '/'
-     * before mutating any state. */
+    /* Validate up-front so we never half-update the index list. */
     for (uint32_t i = 0; i < argc; i++) {
         if (Z_TYPE(args[i]) != IS_STRING) {
             zend_throw_exception(http_server_invalid_argument_exception_ce,
@@ -538,10 +533,9 @@ ZEND_METHOD(TrueAsync_StaticHandler, setHeader)
             "StaticHandler header name must not be empty", 0);
         return;
     }
-    /* Reject control characters and the line terminators that would
-     * forge a response split. RFC 9110 §5.5 token charset is stricter,
-     * but the bare-minimum CRLF rejection is the load-bearing check
-     * here. */
+    /* CRLF rejection is the load-bearing check (response splitting);
+     * the rest of RFC 9110 §5.5 token charset is stricter but covered
+     * by upstream parsers. */
     for (size_t i = 0; i < ZSTR_LEN(name); i++) {
         const unsigned char c = (unsigned char)ZSTR_VAL(name)[i];
         if (c < 0x20 || c == 0x7f || c == ':') {

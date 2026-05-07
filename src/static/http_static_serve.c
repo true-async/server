@@ -39,9 +39,6 @@
 #include <errno.h>
 #include <string.h>
 
-/* Helper: emit a canned status-only response on the static path. The
- * response object is fully PHP-owned but not yet committed; we set
- * status + (optional) message body and let dispose flush. */
 static void emit_status(zend_object *response_obj, int status,
                         const char *body_msg, size_t body_msg_len)
 {
@@ -49,13 +46,12 @@ static void emit_status(zend_object *response_obj, int status,
     http_response_static_set_header(response_obj,
         "content-type", 12, "text/plain; charset=utf-8", 25);
     if (body_msg != NULL && body_msg_len > 0) {
-        zend_string *msg = zend_string_init(body_msg, body_msg_len, 0);
+        zend_string *const msg = zend_string_init(body_msg, body_msg_len, 0);
         http_response_static_set_body_str(response_obj, msg);
         zend_string_release(msg);
     }
 }
 
-/* Locate the request method (GET/HEAD/...) on the parsed request. */
 static inline bool method_is_get(const http_request_t *req)
 {
     return req != NULL && req->method != NULL
@@ -70,14 +66,13 @@ static inline bool method_is_head(const http_request_t *req)
         && memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
 }
 
-/* Lookup a request header by lower-case name. Returns NULL on miss. */
 static const zend_string *find_request_header(const http_request_t *req,
                                               const char *name, size_t name_len)
 {
     if (req == NULL || req->headers == NULL) {
         return NULL;
     }
-    zval *zv = zend_hash_str_find(req->headers, name, name_len);
+    const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
     if (zv == NULL) {
         return NULL;
     }
@@ -85,7 +80,7 @@ static const zend_string *find_request_header(const http_request_t *req,
         return Z_STR_P(zv);
     }
     if (Z_TYPE_P(zv) == IS_ARRAY) {
-        zval *first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
+        const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
         if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
             return Z_STR_P(first);
         }
@@ -93,8 +88,6 @@ static const zend_string *find_request_header(const http_request_t *req,
     return NULL;
 }
 
-/* Open with the right flags for the configured symlink policy. Returns
- * a non-negative fd on success, -1 on failure (errno set). */
 static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
     int flags = O_RDONLY | O_CLOEXEC;
@@ -106,19 +99,16 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
     return open(path, flags);
 }
 
-/* Slurp `size` bytes from `fd` into a freshly allocated zend_string.
- * Returns the zend_string on success (caller releases), NULL on
- * partial-read / I/O error. */
-static zend_string *slurp_fd(int fd, size_t size)
+static zend_string *slurp_fd(const int fd, const size_t size)
 {
     if (size == 0) {
         return ZSTR_EMPTY_ALLOC();
     }
-    zend_string *out = zend_string_alloc(size, 0);
+    zend_string *const out = zend_string_alloc(size, 0);
     size_t total = 0;
     while (total < size) {
         const ssize_t n = read(fd, ZSTR_VAL(out) + total, size - total);
-        if (n > 0) {
+        if (EXPECTED(n > 0)) {
             total += (size_t)n;
             continue;
         }
@@ -127,7 +117,7 @@ static zend_string *slurp_fd(int fd, size_t size)
         zend_string_release(out);
         return NULL;
     }
-    if (total != size) {
+    if (UNEXPECTED(total != size)) {
         zend_string_release(out);
         return NULL;
     }
@@ -135,12 +125,11 @@ static zend_string *slurp_fd(int fd, size_t size)
     return out;
 }
 
-/* Apply mount-configured extra headers (set via setHeader()) to the
- * response. Skips Content-* members on a 304 emission per RFC 9110
- * §15.4.5; pass include_content_headers=true on 200 / false on 304. */
+/* RFC 9110 §15.4.5: 304 must NOT carry Content-* headers — pass
+ * include_content_headers=false on the not-modified path. */
 static void apply_extra_headers(zend_object *response_obj,
                                 const http_static_handler_t *mount,
-                                bool include_content_headers)
+                                const bool include_content_headers)
 {
     if (mount->extra_headers == NULL) {
         return;
@@ -162,13 +151,8 @@ static void apply_extra_headers(zend_object *response_obj,
     } ZEND_HASH_FOREACH_END();
 }
 
-/* Try one candidate file path: open + fstat. Returns:
- *   true → fd opened, *st filled, *out_fd is the fd (caller owns close)
- *   false → not openable (errno set; ENOENT means try the next index
- *           candidate, anything else is a hard failure)
- *
- * Symlink policy is enforced via O_NOFOLLOW; the rejected case surfaces
- * as ELOOP from open(). */
+/* Try open + fstat. On a non-regular file, surface ENOENT so the
+ * caller's fallthrough mirrors the missing-file path uniformly. */
 static bool try_open_candidate(const http_static_handler_t *mount,
                                const char *path,
                                int *out_fd, struct stat *st)
@@ -177,16 +161,13 @@ static bool try_open_candidate(const http_static_handler_t *mount,
     if (fd < 0) {
         return false;
     }
-    if (fstat(fd, st) != 0) {
+    if (UNEXPECTED(fstat(fd, st) != 0)) {
         const int saved_errno = errno;
         close(fd);
         errno = saved_errno;
         return false;
     }
-    if (!S_ISREG(st->st_mode)) {
-        /* Directory or special file — the caller decides whether this
-         * is "try the index" or "404". Surface as ENOENT so the
-         * fallthrough mirrors a missing file. */
+    if (UNEXPECTED(!S_ISREG(st->st_mode))) {
         close(fd);
         errno = ENOENT;
         return false;
@@ -195,9 +176,8 @@ static bool try_open_candidate(const http_static_handler_t *mount,
     return true;
 }
 
-/* Decide: was the resolved URL path a directory (ends with '/' or
- * empty)? Directory requests trigger the index-file lookup. */
-static inline bool path_targets_directory(const char *relative, size_t relative_len)
+static inline bool path_targets_directory(const char *relative,
+                                          const size_t relative_len)
 {
     return relative_len == 0 || relative[relative_len - 1] == '/';
 }
@@ -216,20 +196,19 @@ http_static_result_t http_static_try_serve(http_server_object *server,
     http1_request_ctx_t *const ctx = (http1_request_ctx_t *)ctx_void;
     zend_object *const response_obj = Z_OBJ(ctx->response_zv);
 
-    /* Static handler covers GET + HEAD only. Other methods fall through
-     * to the regular PHP handler — operators may overlay POST endpoints
-     * on the same prefix without a 405 surprise. */
+    /* GET/HEAD only — operators can overlay POST/PUT endpoints on the
+     * same prefix without the static layer turning them into 405s. */
     const bool is_head = method_is_head(request);
     const bool is_get  = method_is_get(request);
     if (!is_get && !is_head) {
         return HTTP_STATIC_PASSTHROUGH;
     }
 
-    /* Use request->uri (always populated by the parser) — request->path
-     * is lazy-built only on the PHP-side getter. http_static_path_resolve
-     * strips '?' and '#' itself, so feeding the whole URI is fine. */
-    const char  *req_path     = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
-    const size_t req_path_len = (request->uri != NULL) ? ZSTR_LEN(request->uri) : 0;
+    /* request->path is built lazily by the PHP-side getter; req->uri is
+     * always populated by the parser. http_static_path_resolve strips
+     * '?' and '#' so the whole URI is safe to feed in. */
+    const char  *const req_path     = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
+    const size_t       req_path_len = (request->uri != NULL) ? ZSTR_LEN(request->uri) : 0;
     if (UNEXPECTED(req_path == NULL || req_path_len == 0)) {
         return HTTP_STATIC_PASSTHROUGH;
     }
@@ -250,23 +229,21 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             &relative, &relative_len);
 
         if (rc == HTTP_STATIC_PATH_NO_MATCH) {
-            continue;  /* try next mount */
+            continue;
         }
-        if (rc == HTTP_STATIC_PATH_BAD_REQUEST) {
+        if (UNEXPECTED(rc == HTTP_STATIC_PATH_BAD_REQUEST)) {
             emit_status(response_obj, 400, "Bad Request", 11);
             ctx->skip_php_handler = true;
             return HTTP_STATIC_HANDLED;
         }
-        if (rc == HTTP_STATIC_PATH_FORBIDDEN) {
-            /* Dotfile deny / traversal escape: 404 by convention so we
-             * don't disclose the existence of restricted resources. */
+        /* Dotfile-deny / traversal escape: 404 (not 403) so existence
+         * of the restricted resource isn't disclosed. */
+        if (UNEXPECTED(rc == HTTP_STATIC_PATH_FORBIDDEN)) {
             emit_status(response_obj, 404, "Not Found", 9);
             ctx->skip_php_handler = true;
             return HTTP_STATIC_HANDLED;
         }
-        if (rc == HTTP_STATIC_PATH_HIDE) {
-            /* Dotfile-ignore mode: behave like a missing file so the
-             * on_missing policy applies. */
+        if (UNEXPECTED(rc == HTTP_STATIC_PATH_HIDE)) {
             if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
                 return HTTP_STATIC_PASSTHROUGH;
             }
@@ -275,11 +252,10 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             return HTTP_STATIC_HANDLED;
         }
 
-        /* Hide-globs are matched against the path RELATIVE to root —
-         * not the full filesystem path — so the pattern syntax matches
-         * what operators see when configuring. */
-        if (relative_len > 0
-            && http_static_path_is_hidden(mount, relative, relative_len)) {
+        /* Hide-globs match against the relative path so operator-
+         * authored patterns target what they see. */
+        if (UNEXPECTED(relative_len > 0
+                && http_static_path_is_hidden(mount, relative, relative_len))) {
             if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
                 return HTTP_STATIC_PASSTHROUGH;
             }
@@ -293,40 +269,39 @@ http_static_result_t http_static_try_serve(http_server_object *server,
         bool opened = false;
 
         if (path_targets_directory(relative, relative_len)) {
-            /* Directory request → walk the configured index files. The
-             * loop allocates no temporaries: each candidate path is
-             * built in-place into fs_path and rewound on miss. */
+            /* Build each index candidate in-place into fs_path; rewind
+             * by truncating back to the directory prefix on miss. */
             for (size_t ii = 0; ii < mount->index_count; ii++) {
-                const zend_string *idx = mount->index_files[ii];
+                const zend_string *const idx = mount->index_files[ii];
                 size_t cand_len = fs_path_len;
-                if (!http_static_path_join(fs_path, sizeof(fs_path),
-                                           &cand_len,
-                                           ZSTR_VAL(idx), ZSTR_LEN(idx))) {
+                if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path),
+                                                      &cand_len,
+                                                      ZSTR_VAL(idx),
+                                                      ZSTR_LEN(idx)))) {
                     continue;
                 }
                 if (try_open_candidate(mount, fs_path, &fd, &st)) {
                     opened = true;
-                    /* Promote the candidate length so MIME lookup sees
-                     * the index file's extension, not the directory's. */
+                    /* Promote the length so MIME lookup sees the index
+                     * file's extension, not the directory's. */
                     fs_path_len = cand_len;
                     break;
                 }
-                /* Rewind by truncating to the directory prefix. */
                 fs_path[fs_path_len] = '\0';
             }
         } else {
             opened = try_open_candidate(mount, fs_path, &fd, &st);
         }
 
-        if (!opened) {
-            const int e = errno;
-            if (e == EACCES || e == EPERM) {
+        if (UNEXPECTED(!opened)) {
+            const int saved_errno = errno;
+            if (saved_errno == EACCES || saved_errno == EPERM) {
                 emit_status(response_obj, 403, "Forbidden", 9);
                 ctx->skip_php_handler = true;
                 return HTTP_STATIC_HANDLED;
             }
-            /* ENOENT / ELOOP (symlink rejected) / ENOTDIR / others:
-             * treat as "no match" per on_missing policy. */
+            /* ENOENT / ELOOP (symlink rejected) / ENOTDIR: missing-file
+             * semantics drive the on_missing decision. */
             if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
                 return HTTP_STATIC_PASSTHROUGH;
             }
@@ -335,18 +310,15 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             return HTTP_STATIC_HANDLED;
         }
 
-        /* Cap synchronous reads to avoid blocking the event loop on a
-         * stray giant file. The MAX is plenty for static-asset
-         * deployments and a future async path will remove the cap. */
-        if ((uint64_t)st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE) {
+        /* Synchronous slurp cap — protects the loop from a stray giant
+         * file. PR #5 (sendfile / async) removes the limit. */
+        if (UNEXPECTED((uint64_t)st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
             close(fd);
             emit_status(response_obj, 413, "Payload Too Large", 17);
             ctx->skip_php_handler = true;
             return HTTP_STATIC_HANDLED;
         }
 
-        /* ETag + Last-Modified — computed once, used for both the 304
-         * decision and the 200 response. */
         char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
         const bool etag_enabled = (mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
         if (etag_enabled) {
@@ -356,18 +328,17 @@ http_static_result_t http_static_try_serve(http_server_object *server,
         char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
         http_static_format_http_date(st.st_mtime, last_modified_buf);
 
-        /* Conditional GET. */
-        const zend_string *if_none_match = find_request_header(request,
-            "if-none-match", 13);
-        const zend_string *if_modified_since = find_request_header(request,
-            "if-modified-since", 17);
+        const zend_string *const if_none_match     =
+            find_request_header(request, "if-none-match", 13);
+        const zend_string *const if_modified_since =
+            find_request_header(request, "if-modified-since", 17);
         const bool not_modified = http_static_conditional_match(
-            if_none_match    != NULL ? ZSTR_VAL(if_none_match)    : NULL,
-            if_none_match    != NULL ? ZSTR_LEN(if_none_match)    : 0,
+            if_none_match     != NULL ? ZSTR_VAL(if_none_match)     : NULL,
+            if_none_match     != NULL ? ZSTR_LEN(if_none_match)     : 0,
             if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
             if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0,
             etag_enabled ? etag_buf : NULL,
-            etag_enabled ? strlen(etag_buf) : 0,
+            etag_enabled ? HTTP_STATIC_ETAG_LEN : 0,
             st.st_mtime);
 
         if (not_modified) {
@@ -375,32 +346,26 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             http_response_static_set_status(response_obj, 304);
             if (etag_enabled) {
                 http_response_static_set_header(response_obj,
-                    "etag", 4, etag_buf, strlen(etag_buf));
+                    "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
             }
             http_response_static_set_header(response_obj,
                 "last-modified", 13,
-                last_modified_buf, strlen(last_modified_buf));
+                last_modified_buf, HTTP_STATIC_DATE_LEN);
             if (mount->cache_control != NULL) {
                 http_response_static_set_header(response_obj,
                     "cache-control", 13,
                     ZSTR_VAL(mount->cache_control),
                     ZSTR_LEN(mount->cache_control));
             }
-            apply_extra_headers(response_obj, mount,
-                                /* include_content_headers */ false);
+            apply_extra_headers(response_obj, mount, false);
             ctx->skip_php_handler = true;
             return HTTP_STATIC_HANDLED;
         }
 
-        /* 200 path: read body, populate response. HEAD reuses the same
-         * headers but emits an empty body — the dispose formatter
-         * preserves Content-Length from the body length, so for HEAD
-         * we still need to advertise the size. Fix that by setting
-         * content-length explicitly when body is empty. */
         zend_string *body = NULL;
         if (is_get) {
             body = slurp_fd(fd, (size_t)st.st_size);
-            if (body == NULL) {
+            if (UNEXPECTED(body == NULL)) {
                 close(fd);
                 emit_status(response_obj, 500, "Internal Server Error", 21);
                 ctx->skip_php_handler = true;
@@ -409,43 +374,41 @@ http_static_result_t http_static_try_serve(http_server_object *server,
         }
         close(fd);
 
-        /* Build headers. */
         http_response_static_set_status(response_obj, 200);
 
-        const char *content_type = NULL;
+        const char *content_type     = NULL;
         size_t      content_type_len = 0;
         if (!http_static_mime_lookup(mount, fs_path, fs_path_len,
                                      &content_type, &content_type_len)) {
             content_type     = "application/octet-stream";
-            content_type_len = strlen(content_type);
+            content_type_len = sizeof("application/octet-stream") - 1;
         }
         http_response_static_set_header(response_obj,
             "content-type", 12, content_type, content_type_len);
 
         if (etag_enabled) {
             http_response_static_set_header(response_obj,
-                "etag", 4, etag_buf, strlen(etag_buf));
+                "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
         }
         http_response_static_set_header(response_obj,
             "last-modified", 13,
-            last_modified_buf, strlen(last_modified_buf));
+            last_modified_buf, HTTP_STATIC_DATE_LEN);
         if (mount->cache_control != NULL) {
             http_response_static_set_header(response_obj,
                 "cache-control", 13,
                 ZSTR_VAL(mount->cache_control),
                 ZSTR_LEN(mount->cache_control));
         }
-        apply_extra_headers(response_obj, mount,
-                            /* include_content_headers */ true);
+        apply_extra_headers(response_obj, mount, true);
 
         if (is_head) {
-            /* HEAD: advertise Content-Length explicitly so it lines up
-             * with the equivalent GET. The format-time path computes
-             * Content-Length from the body smart_str otherwise. */
+            /* The format-time path computes Content-Length from the
+             * body smart_str; with an empty body we have to advertise
+             * the would-be size explicitly. */
             char clen[32];
             const int n = snprintf(clen, sizeof(clen), "%" PRIu64,
                                    (uint64_t)st.st_size);
-            if (n > 0 && (size_t)n < sizeof(clen)) {
+            if (EXPECTED(n > 0 && (size_t)n < sizeof(clen))) {
                 http_response_static_set_header(response_obj,
                     "content-length", 14, clen, (size_t)n);
             }
