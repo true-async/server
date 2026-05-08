@@ -410,8 +410,29 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
   wrk -c64 -t4 -d5s, warm dentry, 3-run avg):
   - cache **off** : ~16287 req/s
   - cache **on**  : ~19622 req/s (~99.98% hits) — **+20%**
-  Согласуется с Open Question 1: «defer until bench shows it matters»
-  — теперь bench подтверждает, на opt-in базе.
+  Закрывает Open Question 1 («defer until bench shows it matters»)
+  на opt-in базе.
+- ✅ **Symlink::OwnerMatch** (commit 7302ea7). Per-segment lstat/stat
+  sweep — symlink на каждом сегменте path должен иметь owner == owner
+  target'а, иначе 404. За компанию закрыта дыра REJECT в hard-zero
+  на final-segment симлинках внутри mount (ZEND_ASYNC_FS_OPEN не
+  отдает O_NOFOLLOW; помог явный lstat в pre-flight). PHPT 009.
+- ✅ **Precompressed sidecars `.br/.gz/.zst`** (commit eb18e1f, PR #4).
+  При совпадении Accept-Encoding с enabled-codings и существующим
+  sibling-файлом — fs_path swap'ится на sidecar, FSM отдаёт
+  сжатые байты, headers содержат `Content-Encoding` + `Vary`.
+  Server preference zstd > br > gzip — reuse существующего
+  `http_compression_negotiate`. Кэш ключ включает суффикс. MIME
+  считается по оригинальному пути и проносится через override.
+  PHPT 010.
+- ✅ **Range support (single, plain TCP)** (commit 6c99358, PR #3
+  partial). RFC 9110 §14.2: `bytes=A-B`, `bytes=A-`, `bytes=-N`.
+  If-Range strong-equal compare. 206 / 416 / 200-fallthrough.
+  Headers: `Accept-Ranges: bytes`, `Content-Range`. Sendfile с
+  offset+len. Multi-range и multipart/byteranges → fall through к
+  200 (§14.2 разрешает). TLS Range fallthrough'ит на 200
+  (`ZEND_ASYNC_IO_READ` без offset — отдельная async-API extension).
+  PHPT 011.
 
 ### Осталось
 
@@ -420,9 +441,8 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
 | Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | partial | bench tooling готов, цифры выше для file-static; entry.php сравнение out-of-codebase |
 | TLS streaming abrupt-close race | known issue | wrk-style массовый abrupt close с in-flight TLS streaming → assertion в `conn_arena_cleanup` (alive list не пустой при teardown). PHPT 007 чистый, штатный keep-alive close — чистый. Только при `wrk --timeout 0` с десятками одновременных RST. Требует pass над shutdown chain — отдельный fix. |
 | **PR #2** H2/H3 интеграция | not started | nghttp2/nghttp3 data-provider hookup |
-| ✅ **PR #3** Range support (single, plain TCP) | done (commit pending) | single byte-range, suffix-length, open-end; If-Range strong-match; 206 / 416. Multi-range / multipart-byteranges → fall through to 200 (RFC §14.2 permits). TLS Range пока NOT supported (ZEND_ASYNC_IO_READ без offset — нужна async-API extension); 200 full body. PHPT 011. |
-| ✅ **PR #4** Precompressed sidecars `.br/.gz/.zst` | done (commit pending) | reuse `http_compression_negotiate`; pre-flight stat per request на enabled mounts; cache key включает .gz суффикс; PHPT 010 |
-| ✅ Symlink owner-match (`OwnerMatch`) | done (commit 7302ea7) | per-segment lstat/stat sweep; за компанию закрыт REJECT-final-segment hole в hard-zero (was: O_NOFOLLOW не доступен через ZEND_ASYNC_FS_OPEN). PHPT 009 |
+| **PR #3 follow-up** multi-range / multipart-byteranges | not started | low priority — большинство клиентов делают single-range |
+| **PR #3 follow-up** TLS Range | blocked on async-API | нужен `ZEND_ASYNC_IO_READ` с offset (или pread-equivalent) |
 | **PR #6** Browse listing | not started | lowest priority |
 | Rewrite `entry.php` + flip `meta.json` to production | blocked | требует #2 + #3 + #4 |
 
@@ -484,9 +504,10 @@ use case.
       setter time, not at start time.
 - [x] Path traversal: `/static/../etc/passwd`, `/static/%2e%2e/x`,
       `/static/foo%00.html`, absolute paths, NUL — all 400 or 404.
-- [~] Symlink reject mode: 404 on symlinks; follow mode: serves;
-      owner-match: aliased to Reject в MVP — реальный owner-check
-      ждёт следующей итерации.
+- [x] Symlink reject mode: 404 on symlinks; follow mode: serves;
+      owner-match: per-segment lstat/stat sweep, реализован в
+      commit 7302ea7. PHPT 009 покрывает same-owner accept;
+      cross-owner mismatch требует root и не testable в PHPT.
 - [x] `If-None-Match` matches → 304 with empty body, weak ETag echoed.
 - [x] `If-Modified-Since` past mtime → 304 — реализован, PHPT
       покрывает (005-static-if-modified-since.phpt, commit 2c46937).
@@ -506,8 +527,10 @@ use case.
 
 ## 7. Open questions parked for later
 
-1. `open_file_cache`-style per-worker FD/stat cache — defer until bench
-   shows it matters.
+1. ~~`open_file_cache`-style per-worker FD/stat cache~~ ✅ закрыто
+   (commits 81bc752 / 0aab165 / 8f05e8d / e328522). Per-handler
+   opt-in; на cache hit FSM пропускает IO_STAT/etag/MIME/IMF-date.
+   Bench подтвердил +20% на warm dentry.
 2. Per-listener static handler scoping (admin port wants no static).
    Currently global, like `addHttpHandler`. If needed, add `listeners:
    [...]` option later — not breaking.
