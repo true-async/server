@@ -198,6 +198,16 @@ size_t http_static_handler_count(const struct http_server_object *server);
 const http_static_handler_t *
 http_static_handler_get(const struct http_server_object *server, size_t index);
 
+/* Open file cache accessor — lazily creates the cache on first call,
+ * returns it on subsequent calls. NULL if the server is NULL or
+ * allocation failed. Lifetime: until http_server_free destroys the
+ * server. The cache is private per server-object — workers each get
+ * their own copy after worker-pool transfer. See
+ * include/static/http_static_cache.h for cache semantics. */
+struct http_static_cache_s;
+struct http_static_cache_s *
+http_static_cache_acquire(struct http_server_object *server);
+
 /* Maximum file size served on the synchronous read path. Larger files
  * passthrough to the regular handler (or in a future iteration, to a
  * streaming async path). 256 MiB is a comfortable upper bound for

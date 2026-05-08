@@ -35,6 +35,7 @@
 #include "static/http_static_mime.h"
 #include "static/http_static_path.h"
 #include "static/http_static_etag.h"
+#include "static/http_static_cache.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -1280,16 +1281,50 @@ http_static_result_t http_static_try_serve(http_server_object *server,
          *    cipher-drain loop driven by tls_zc_write_done_cb. No
          *    coroutine spawned.
          *
-         * Eligibility check is identical for both: resolved path must
-         * stay inside the mount root after canonicalisation. realpath
-         * here is sync but cheap on warm cache. ss_kick_off picks the
-         * sub-path internally based on conn_supports_sendfile.
+         * Eligibility: resolved path must stay inside the mount root
+         * after canonicalisation. realpath here is sync but cheap on
+         * warm cache; on hot serving we skip it entirely via the
+         * open-file cache (TTL-bound, evicts oldest first).
          *
          * On open-error the on_missing:Next rollback in ss_handle_open
          * detaches state and hands ctx over to a regular PHP-handler
          * coroutine, so on_missing:Next mounts also ride this path on
          * the success path (#5c). */
-        if (resolved_under_root(mount, fs_path)) {
+        http_static_cache_t *cache = http_static_cache_acquire(server);
+        bool gate_ok;
+        if (cache != NULL) {
+            http_static_cache_view_t cv;
+            if (http_static_cache_lookup(cache, fs_path, fs_path_len, &cv)) {
+                /* Hit: realpath was already validated when this entry
+                 * was inserted, skip it. */
+                gate_ok = true;
+            } else {
+                gate_ok = resolved_under_root(mount, fs_path);
+                if (gate_ok) {
+                    /* Insert with the metadata we have right now. We
+                     * don't have st/etag/content_type here yet — the
+                     * async stat in ss_kick_off will produce them.
+                     * For the realpath-only cache, an entry with just
+                     * the resolved path being valid is enough. We
+                     * use the file's mtime epoch as a stable cached_at
+                     * placeholder — TTL is the real invalidation.
+                     * stat is not yet known; pass zero-filled and
+                     * leave content_type/etag NULL for now. The
+                     * follow-up that integrates conditional GET on
+                     * cache hit will populate the rest of the entry
+                     * after ss_handle_stat lands. */
+                    struct stat zero_st = {0};
+                    http_static_cache_insert(cache, fs_path, fs_path_len,
+                                             &zero_st,
+                                             NULL, 0,   /* content_type */
+                                             NULL, 0,   /* etag */
+                                             NULL, 0);  /* last_modified */
+                }
+            }
+        } else {
+            gate_ok = resolved_under_root(mount, fs_path);
+        }
+        if (gate_ok) {
             if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head)) {
                 return HTTP_STATIC_HARD_ZERO;
             }

@@ -26,6 +26,7 @@
 #include "core/tls_layer.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
+#include "static/http_static_cache.h"
 #ifdef HAVE_HTTP_SERVER_HTTP3
 # include "http3/http3_listener.h"
 #endif
@@ -289,6 +290,12 @@ struct http_server_object {
     zend_object            **static_handler_objects;
     size_t                   static_handler_count;
     size_t                   static_handler_capacity;
+
+    /* Open file cache (LRU, TTL-bound) — populated lazily on the
+     * first http_static_try_serve hit. Skips the realpath/stat hot
+     * path syscalls on warm cache. NULL until first use. Freed at
+     * server destroy. See include/static/http_static_cache.h. */
+    http_static_cache_t     *static_cache;
 };
 
 /* PHP wrapper. The std handle is what Zend hands out to userland; the
@@ -785,6 +792,44 @@ http_static_handler_get(const http_server_object *server, size_t index)
         return NULL;
     }
     return server->static_handler_mounts[index];
+}
+
+/* Open file cache accessor. Created lazily on first call so servers
+ * without static handlers don't pay for it.
+ *
+ * Defaults: 512 entries, 60-second TTL. Both match nginx
+ * open_file_cache(_valid) defaults. The cache is per-worker-server
+ * (after worker-pool transfer each worker has its own snapshot — no
+ * cross-worker sharing, no locking).
+ *
+ * env override: TRUE_ASYNC_STATIC_CACHE_ENTRIES /
+ *               TRUE_ASYNC_STATIC_CACHE_TTL — set 0 in either to
+ *               disable the cache without recompiling. */
+http_static_cache_t *http_static_cache_acquire(http_server_object *server)
+{
+    if (UNEXPECTED(server == NULL)) {
+        return NULL;
+    }
+    if (EXPECTED(server->static_cache != NULL)) {
+        return server->static_cache;
+    }
+
+    size_t  entries = 512;
+    time_t  ttl     = 60;
+
+    const char *env_entries = getenv("TRUE_ASYNC_STATIC_CACHE_ENTRIES");
+    if (env_entries != NULL && *env_entries != '\0') {
+        const long v = strtol(env_entries, NULL, 10);
+        entries = (v >= 0) ? (size_t) v : 0;
+    }
+    const char *env_ttl = getenv("TRUE_ASYNC_STATIC_CACHE_TTL");
+    if (env_ttl != NULL && *env_ttl != '\0') {
+        const long v = strtol(env_ttl, NULL, 10);
+        ttl = (v >= 0) ? (time_t) v : 0;
+    }
+
+    server->static_cache = http_static_cache_create(entries, ttl);
+    return server->static_cache;
 }
 
 HashTable *http_server_get_protocol_handlers(http_server_object *server)
@@ -2623,6 +2668,13 @@ static void http_server_free(zend_object *obj)
     }
     server->static_handler_count    = 0;
     server->static_handler_capacity = 0;
+
+    /* Open file cache — persistent allocations, must be freed
+     * before the request-context arenas drop. */
+    if (server->static_cache != NULL) {
+        http_static_cache_destroy(server->static_cache);
+        server->static_cache = NULL;
+    }
 
     /* Destroy the std object — the PHP-side resources die with the
      * wrapper. The C-state stays alive until the last conn releases. */
