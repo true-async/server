@@ -181,22 +181,11 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 void http_static_handler_shared_addref(http_static_handler_t *mount);
 void http_static_handler_shared_release(http_static_handler_t *mount);
 
-/* Protocol-agnostic dispatch callbacks. The static handler resolves
- * the mount, opens + stats the file, populates response_obj headers/
- * status/inline body, then either:
- *   - HARD_ZERO: arms the protocol's send_static_response op for body
- *     delivery; on_hard_zero_armed fires before the op is kicked,
- *     on_static_done fires once delivery completes (success or error).
- *   - HANDLED: response_obj is populated and the caller's normal flush
- *     path emits it.
- *   - PASSTHROUGH: nothing claimed; caller runs its PHP handler.
- *   - ENOENT on `on_missing: Next` mount: the static FSM tears down its
- *     scratch state and fires on_passthrough_to_php so the caller
- *     spawns its handler coroutine.
- *
- * Callbacks are invoked from various points inside try_serve and from
- * the FSM continuations rooted at ZEND_ASYNC_FS_OPEN. The user pointer
- * is passed back to every callback verbatim. */
+/* Protocol-side hooks for the dispatch FSM. Fire from try_serve and
+ * from FSM continuations rooted at ZEND_ASYNC_FS_OPEN. The user
+ * pointer is passed back verbatim to every callback. See
+ * http_static_result_t for the dispatch outcomes these callbacks
+ * cover. */
 typedef struct {
 	/* Called once the static FSM has kicked off its async chain (the
 	 * synchronous tail of try_serve that returns HARD_ZERO). The caller

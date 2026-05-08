@@ -554,10 +554,8 @@ static inline size_t ss_fmt_u64(char *out, uint64_t v)
 	return n;
 }
 
-/* Set Content-Length on response_obj. The H1 protocol op serializes
- * headers verbatim — no auto-Content-Length insertion — so we must
- * write the number ourselves whenever the response is supposed to
- * carry one. */
+/* The protocol op serializes headers verbatim — no auto-Content-Length
+ * — so we own writing the number on every response that needs one. */
 static void ss_set_content_length(zend_object *response_obj, uint64_t len)
 {
 	char buf[24];
@@ -565,11 +563,8 @@ static void ss_set_content_length(zend_object *response_obj, uint64_t len)
 	http_response_static_set_header(response_obj, "content-length", 14, buf, n);
 }
 
-/* Set Connection header tracking the keep-alive verdict. The verdict
- * is queried via the protocol callback; H1 reads conn->keep_alive,
- * H2/H3 always returns true (multiplex transports — Connection header
- * is filtered out at submit time anyway, see http2_strategy.c's
- * response_header_allowed). */
+/* H1 reads conn->keep_alive; H2/H3 return true (multiplex transports
+ * filter out Connection headers at submit time anyway). */
 static bool ss_keep_alive(const ss_state_t *state)
 {
 	if (state->cbs.keep_alive != NULL) {
@@ -739,16 +734,12 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 	}
 }
 
-/* Emit a small text/plain error response through the protocol op.
- * Used for 4xx / 416 / 500 / 413 — bodies are pre-known short text
- * strings. The op's file_io==NULL contract emits inline body off
- * response_obj.
+/* Emit a small text/plain error (4xx/416/500/413) through the
+ * protocol op via the file_io==NULL contract.
  *
- * Returns true if the protocol op accepted the request — in that
- * case state will be freed via ss_on_protocol_done and the caller
- * MUST NOT call ss_finalize. False means the op refused (no
- * stream_ops or send_static_response==NULL); the caller falls
- * back to ss_finalize, which still runs counters / dispose. */
+ * Returns true on accept — `state` is then owned by the op chain and
+ * the caller MUST NOT call ss_finalize. False on refusal: caller
+ * runs ss_finalize for counters / dispose. */
 static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body, size_t body_len)
 {
 	zend_object *const response_obj = state->response_obj;
@@ -765,13 +756,11 @@ static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body
 	return ss_delegate_to_protocol(state, NULL, 0, 0, true);
 }
 
-/* on_missing:Next rollback (#5c). Open failed on a mount configured to
- * fall through. Tear down the static FSM scratch state and hand off to
- * the protocol-supplied callback so it can spawn its handler
- * coroutine. The caller's on_passthrough_to_php is responsible for
- * dropping whatever resources the matching on_hard_zero_armed pinned —
- * conceptually the static path no longer owns this request, the
- * caller's PHP-handler coroutine does. */
+/* on_missing:Next rollback. Open failed on a mount configured to fall
+ * through: tear down our scratch state and let the protocol layer
+ * spawn its PHP handler coroutine. on_hard_zero_armed-pinned resources
+ * are dropped by the caller's on_passthrough_to_php — once we hand
+ * off, the request belongs to the PHP path. */
 static void ss_rollback_to_php_handler(ss_state_t *state)
 {
 	/* Drop the file_io + persistent callback (mirrors ss_finalize but

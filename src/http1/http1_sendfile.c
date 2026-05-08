@@ -186,11 +186,9 @@ static inline void h1_send_cork_set(http_connection_t *conn, const int on)
 #endif
 }
 
-/* Borrow the pre-rendered HTTP/1.1 status line from the shared table
- * in http_response.c — single source of truth for status line text.
- * Static handler only ever emits a narrow subset (200/206/304/4xx/
- * 413/500); falling back to 500 on an unknown code preserves the
- * previous behaviour. */
+/* Borrow the pre-rendered HTTP/1.1 status line. Unknown codes fall
+ * back to 500 — saner than emitting a malformed line, and the static
+ * handler only ever emits a narrow subset (200/206/304/4xx/413/500). */
 static const char *h1_send_status_line(const int status, size_t *out_len)
 {
     const char *line = http_response_status_line_http11(status, out_len);
@@ -200,21 +198,17 @@ static const char *h1_send_status_line(const int status, size_t *out_len)
     return line;
 }
 
-/* Internal accessors into http_response_object — we walk the headers
- * HashTable and body smart_str directly to keep full control over the
- * wire bytes (no auto Content-Length, no compression hooks, no
- * chunked-encoding interference). The static handler put exactly the
- * right headers on the response — we serialize them verbatim. */
+/* Direct accessors into http_response_object: we serialize verbatim
+ * what the static handler put on the response, bypassing
+ * http_response_format which would auto-add Content-Length and run
+ * the compression hook (neither appropriate here). */
 extern int    http_response_get_status_code(zend_object *obj);
 extern HashTable *http_response_get_headers_table(zend_object *obj);
 extern zend_string *http_response_get_body_string(zend_object *obj);
 
-/* Single-bounds-check header writer. smart_str_appendl/_append do one
- * SMART_STR_DO_REALLOC + memcpy each — 4 separate calls per header
- * line is ~4× the bookkeeping for what's logically one write. We
- * grow once via smart_str_extend, then memcpy directly into the
- * returned tail. ~30-50% faster header serialization for a typical
- * 10-15 header static response. */
+/* Single-grow header writer. smart_str_appendl does its own size-
+ * check + memcpy; chaining 4 of them per header pays the bookkeeping
+ * 4×. smart_str_extend grows once, returns the tail to memcpy into. */
 static inline void h1_append_header_line(smart_str *out,
                                          const char *name, size_t name_len,
                                          const char *value, size_t value_len)
@@ -236,9 +230,8 @@ static zend_string *h1_send_build_head(zend_object *response_obj,
                                        bool include_inline_body)
 {
     smart_str out = {0};
-    /* Pre-allocate a typical static-response head (~400-600 B for 10-15
-     * headers). Skips 2-3 realloc rounds on the smart_str grow path —
-     * cheap one-line win since we know the rough upper bound. */
+    /* Pre-size for a typical 10-15 header head — saves 2-3 realloc
+     * rounds on the smart_str grow path. */
     smart_str_alloc(&out, 512, 0);
 
     const int status_code = http_response_get_status_code(response_obj);
@@ -272,7 +265,6 @@ static zend_string *h1_send_build_head(zend_object *response_obj,
         } ZEND_HASH_FOREACH_END();
     }
 
-    /* End of headers. */
     smart_str_appendl(&out, "\r\n", 2);
 
     if (include_inline_body) {

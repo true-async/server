@@ -1555,23 +1555,8 @@ bool http_connection_send_error(http_connection_t *conn, const int status_code, 
 }
 /* }}} */
 
-/* {{{ HTTP/1 static-handler dispatch callbacks
- *
- * Plug into http_static_try_serve. The user pointer is the
- * http1_request_ctx_t for the request; conn is reachable as ctx->conn.
- * These four callbacks are the entire H1-side surface area the
- * (otherwise protocol-agnostic) static handler needs.
- *
- *   on_hard_zero_armed   — pin conn / bump dispatch counter to mirror
- *                          what the regular coroutine path does.
- *   on_static_done       — drop the pin / counter, run the shared
- *                          finalize (keep-alive re-arm or close).
- *   on_passthrough_to_php — open ENOENT on `on_missing: Next`: spawn
- *                          the regular handler coroutine as if the
- *                          static handler had never claimed the
- *                          request.
- *   keep_alive           — query conn->keep_alive (decided by parser).
- */
+/* {{{ HTTP/1 static-handler dispatch callbacks. user is the
+ * http1_request_ctx_t for the request; conn is ctx->conn. */
 static void h1_static_on_hard_zero_armed(void *user)
 {
     http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
@@ -1626,9 +1611,7 @@ static void h1_static_on_passthrough_to_php(void *user)
         http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
         http_response_static_set_header(Z_OBJ(ctx->response_zv), "content-type", 12,
                                         "text/plain; charset=utf-8", 25);
-        zend_string *msg = zend_string_init("Not Found", 9, 0);
-        http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
-        zend_string_release(msg);
+        http_response_static_set_body_cstr(Z_OBJ(ctx->response_zv), "Not Found", 9);
         ctx->skip_php_handler = true;
     }
 
