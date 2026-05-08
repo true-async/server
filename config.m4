@@ -464,6 +464,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/conn_arena.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
+    src/http1/http1_sendfile.c
     src/formats/multipart_parser.c
     src/formats/multipart_processor.c
     src/http_request.c

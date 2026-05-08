@@ -1161,6 +1161,32 @@ smart_str *http_response_get_body_smart_str(zend_object *obj)
     return &http_response_from_obj(obj)->body;
 }
 
+/* Read-only accessors used by the H1 static-file delivery op
+ * (src/http1/http1_sendfile.c) to serialize the head verbatim
+ * without going through http_response_format (which auto-adds
+ * Content-Length and runs the compression hook — neither is
+ * appropriate when the static handler has already decided every
+ * header on the wire). */
+int http_response_get_status_code(zend_object *obj)
+{
+    return http_response_from_obj(obj)->status_code;
+}
+
+HashTable *http_response_get_headers_table(zend_object *obj)
+{
+    return http_response_from_obj(obj)->headers;
+}
+
+zend_string *http_response_get_body_string(zend_object *obj)
+{
+    smart_str *const b = &http_response_from_obj(obj)->body;
+    if (b->s == NULL || ZSTR_LEN(b->s) == 0) {
+        return NULL;
+    }
+    smart_str_0(b);
+    return b->s;
+}
+
 /* Internal "set canned error" — used when the dispatch layer rejects
  * a request before the handler runs (e.g. Content-Encoding decode
  * failure). Bypasses the PHP-facing setHeader/setStatusCode guards

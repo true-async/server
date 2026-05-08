@@ -28,9 +28,6 @@
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
-#ifdef HAVE_OPENSSL
-#include "core/tls_layer.h"
-#endif
 #include "static/static_handler.h"
 #include "static/http_static_mime.h"
 #include "static/http_static_path.h"
@@ -45,11 +42,15 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
-#ifdef __linux__
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h> /* TCP_CORK */
-#endif
+
+/* Pull the streaming vtable accessor — we read response_obj's
+ * stream_ops to delegate body delivery to the H1 protocol module
+ * without re-exposing http_response_get_stream_ops in a public
+ * header (it's an internal cross-TU contract — same pattern as
+ * compression's response wrapper). */
+extern const http_response_stream_ops_t *
+                  http_response_get_stream_ops(zend_object *obj);
+extern void      *http_response_get_stream_ctx(zend_object *obj);
 
 static void emit_status(zend_object *response_obj, int status, const char *body_msg,
 						size_t body_msg_len)
@@ -380,40 +381,33 @@ static inline bool path_targets_directory(const char *relative, const size_t rel
 
 /* ===== Hard-zero async path =========================================
  *
- * Plain-TCP and kTLS-engaged connections take this path: the request
- * lifetime is owned by a callback chain rooted at ZEND_ASYNC_FS_OPEN,
- * never spawns a coroutine, never enters the PHP VM. Each phase
- * (open → stat → headers → sendfile → close → finalize) lives in its
- * own callback subscribed to either the file io's event or a
- * sendfile req's event. http_request_finalize closes out the chain
- * the same way the regular coroutine dispose does, so keep-alive,
- * drain, and pipelined-request resume all keep working.
+ * Resolution + open + stat live here; status/header decisions are
+ * written onto response_obj; the actual bytes-on-the-wire (status
+ * line, headers, sendfile or TLS chunked encrypt) is delegated to
+ * the protocol's send_static_response vtable method. For HTTP/1
+ * that's src/http1/http1_sendfile.c; H2/H3 leave the slot NULL and
+ * we fall back to the synchronous-populate path until they grow
+ * their own implementations.
  *
- * User-space TLS connections fall back to the synchronous-populate
- * path below — sendfile would bypass OpenSSL, and re-routing the
- * read+write loop through http_connection_send buys us nothing the
- * existing code path doesn't already do. */
+ * The request lifetime is owned by a callback chain rooted at
+ * ZEND_ASYNC_FS_OPEN — never spawns a coroutine, never enters the
+ * PHP VM. http_request_finalize closes out the chain the same way
+ * the regular coroutine dispose does, so keep-alive, drain, and
+ * pipelined-request resume all keep working. */
 
 /* Single persistent callback model: one callback registered once on
- * file_io->event for the lifetime of the chain. Phase advances on
- * each completion. Spurious fires (a callback registered mid-NOTIFY
- * can re-enter the same NOTIFY iteration) are filtered by phase
- * versus expected-req identity, mirroring http_log's writer_cb. */
+ * file_io->event for the OPEN/STAT phases. Once we hand off to the
+ * protocol op the persistent callback is removed (the op installs
+ * its own). Spurious fires (a callback registered mid-NOTIFY can
+ * re-enter the same NOTIFY iteration) are filtered by phase versus
+ * expected-req identity. */
 typedef enum
 {
-	SS_PHASE_OPEN = 0,		/* awaiting fs_open completion (result=NULL) */
-	SS_PHASE_STAT = 1,		/* awaiting io_stat completion (result=stat req) */
-	SS_PHASE_SENDFILE = 2,	/* awaiting sendfile completion (result=sendfile req) */
-	SS_PHASE_TLS_READ = 3,	/* awaiting ZEND_ASYNC_IO_READ chunk on file_io */
-	SS_PHASE_TLS_DRAIN = 4, /* awaiting tls_zc_write_done_cb (cipher BIO drained) */
-	SS_PHASE_DONE = 5,
+	SS_PHASE_OPEN = 0,	  /* awaiting fs_open completion (result=NULL) */
+	SS_PHASE_STAT = 1,	  /* awaiting io_stat completion (result=stat req) */
+	SS_PHASE_DELEGATED = 2, /* protocol op owns delivery; awaiting on_done */
+	SS_PHASE_DONE = 3,
 } ss_phase_t;
-
-/* TLS chunked-stream chunk size. Must be ≤ HTTP_TLS_PLAINTEXT_RING_BYTES
- * (32 KiB) so a single SSL_write never returns SSL_ERROR_WANT_WRITE in
- * the strict-ping-pong loop. 16 KiB also matches the typical TLS record
- * size, so each chunk encrypts to one record + framing overhead. */
-#define SS_TLS_CHUNK_BYTES (16 * 1024)
 
 typedef struct
 {
@@ -422,23 +416,20 @@ typedef struct
 	const http_static_handler_t *mount;
 
 	/* Resolved on-disk path. emalloc'd in ss_kick_off, freed by
-	 * ss_state_free.  Used to be a 4 KiB inline scratch — with 10 K
-	 * concurrent in-flight static requests that would have been 40 MiB
-	 * just for path strings, most of which fit comfortably in <100
-	 * bytes (#13 in TODO_STATIC_HANDLER_REVIEW). */
+	 * ss_state_free. */
 	char *fs_path;
 	size_t fs_path_len;
 
-	/* Async file io. Acquired by ZEND_ASYNC_FS_OPEN, disposed at the
-	 * end of the chain. Pending until SS_PHASE_OPEN fires. */
+	/* Async file io. Acquired by ZEND_ASYNC_FS_OPEN. Ownership
+	 * transfers to the protocol op once we call send_static_response;
+	 * we null this slot at hand-off so finalize doesn't double-dispose. */
 	zend_async_io_t *file_io;
 
 	/* Cached fstat. */
 	struct stat st;
 
 	bool is_head;
-	bool should_continue; /* keep-alive verdict */
-	bool is_tls;		  /* picks chunked-encrypt path over sendfile */
+	bool should_continue; /* keep-alive verdict, set before hand-off */
 
 	/* State machine cursor. */
 	ss_phase_t phase;
@@ -450,15 +441,8 @@ typedef struct
 	zend_async_io_req_t *pending_req;
 
 	/* Persistent cb registered once on file_io->event at kick-off,
-	 * removed once at finalize. */
+	 * removed at hand-off (or on early-error finalize). */
 	zend_async_event_callback_t *cb;
-
-	/* TLS chunked path scratch. chunk_buf is emalloc'd once per
-	 * request (16 KiB); reused across every TLS_READ→TLS_DRAIN cycle.
-	 * NULL on the plain-TCP sendfile path. bytes_sent tracks the
-	 * file offset for the next IO_READ submit; capped at st.st_size. */
-	char *chunk_buf;
-	uint64_t bytes_sent;
 
 	/* Open-file cache pre-population. When the
 	 * pre-flight finds a fresh entry for this path, it copies the
@@ -475,24 +459,21 @@ typedef struct
 	const char *cached_content_type;
 	size_t cached_content_type_len;
 
-	/* Precompressed sidecar support. When the
-	 * pre-flight selects a `.gz` / `.br` / `.zst` sibling that
-	 * matches Accept-Encoding, fs_path is rewritten to the sidecar
-	 * (so open/sendfile target the compressed bytes) and these
-	 * fields carry the *original* file's content type plus the
-	 * Content-Encoding token to emit. content_encoding is a static
-	 * string ("gzip" / "br" / "zstd") owned by the codec table —
-	 * never freed by the FSM. */
+	/* Precompressed sidecar support. fs_path points at the sidecar
+	 * (so open targets the compressed bytes); these fields carry the
+	 * *original* file's content type plus the Content-Encoding token
+	 * to emit. content_encoding is a static string ("gzip" / "br" /
+	 * "zstd") owned by the codec table — never freed. */
 	const char *override_content_type;
 	size_t override_content_type_len;
 	const char *content_encoding; /* NULL = identity */
 	size_t content_encoding_len;
 
-	/* Range support. is_range flips
-	 * when the pre-flight accepted a `Range: bytes=A-B` header — the
-	 * FSM emits 206 Partial Content with a sliced body. range_first /
-	 * range_last are inclusive byte offsets; range_total carries the
-	 * unmodified file size for the Content-Range header. */
+	/* Range support (RFC 9110 §14.2). is_range flips when the
+	 * pre-flight accepted a `Range: bytes=A-B` header — we'll emit
+	 * 206 with a sliced body. range_first / range_last are inclusive
+	 * byte offsets; range_total carries the unmodified file size for
+	 * the Content-Range header. */
 	bool is_range;
 	uint64_t range_first;
 	uint64_t range_last;
@@ -514,8 +495,7 @@ static void ss_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *e
 	efree(cb);
 }
 
-/* Single owner of state lifetime. Always frees fs_path (NULL-safe via
- * efree) before efree'ing the state struct. */
+/* Single owner of state lifetime. */
 static inline void ss_state_free(ss_state_t *state)
 {
 	if (state == NULL) {
@@ -525,73 +505,24 @@ static inline void ss_state_free(ss_state_t *state)
 		efree(state->fs_path);
 		state->fs_path = NULL;
 	}
-	if (state->chunk_buf != NULL) {
-		efree(state->chunk_buf);
-		state->chunk_buf = NULL;
-	}
 	efree(state);
 }
 
-/* TCP_CORK gate (Linux). Headers are submitted fire-and-forget through
- * the existing batched uv_write queue; sendfile then writes directly to
- * the same fd via uv_fs_sendfile. Without serialisation, on a slow /
- * congested socket the two could interleave on the wire. Corking the
- * socket from kick-off through finalize forces the kernel to coalesce
- * (and to NEVER reorder partial writes against sendfile output) at the
- * cost of one extra setsockopt round trip per response.
- *
- * Plain-TCP only — the hard-zero path is already plain-TCP gated via
- * conn_supports_sendfile, so we don't need to inspect TLS state here. */
-static inline void ss_cork_set(http_connection_t *conn, const int on)
-{
-#ifdef TCP_CORK
-	if (UNEXPECTED(conn == NULL || conn->io == NULL)) {
-		return;
-	}
-
-	if (conn->io->type != ZEND_ASYNC_IO_TYPE_TCP) {
-		return;
-	}
-
-	const int fd = (int)conn->io->descriptor.socket;
-	if (UNEXPECTED(fd < 0)) {
-		return;
-	}
-
-	/* setsockopt failure here is non-fatal: worst case we skip the
-	 * coalescing optimisation. Sendfile + headers still go out. */
-	(void)setsockopt(fd, IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
-#else
-	(void)conn;
-	(void)on;
-#endif
-}
+/* Forward decl for on_done callback wired into the protocol op. */
+static void ss_on_protocol_done(void *user, int status);
 
 /* Tear down the state machine and run http_request_finalize. After
  * this the conn is either keep-alive-armed for the next request or
- * closed; either way nothing more touches `state`. */
+ * closed; either way nothing more touches `state`. Used on the
+ * early-error paths (open failed before we delegated, stat error)
+ * AND as the tail of ss_on_protocol_done once the protocol op is
+ * finished. */
 static void ss_finalize(ss_state_t *state)
 {
 	http_connection_t *const conn = state->conn;
 	http1_request_ctx_t *const ctx = state->ctx;
 
 	state->phase = SS_PHASE_DONE;
-
-	/* Uncork before tearing down so the kernel flushes whatever's left
-	 * (typically the trailing chunk of the sendfile body). Issued
-	 * unconditionally — TCP_CORK off is a no-op on a non-corked socket
-	 * and a no-op on non-Linux. Pairs with the cork in ss_kick_off. */
-	ss_cork_set(conn, 0);
-
-#ifdef HAVE_OPENSSL
-	/* Detach the static-FSM observer from the cipher write completion
-	 * chain. Done before we efree state — otherwise a late free_cb
-	 * fire would deref a freed pointer. */
-	if (state->is_tls && conn->tls_zc_write_done_cb_data == state) {
-		conn->tls_zc_write_done_cb = NULL;
-		conn->tls_zc_write_done_cb_data = NULL;
-	}
-#endif
 
 	if (state->cb != NULL && state->file_io != NULL) {
 		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
@@ -624,193 +555,141 @@ static void ss_finalize(ss_state_t *state)
 	http_request_finalize(conn, ctx, should_continue);
 }
 
-/* Borrow the pre-rendered HTTP/1.1 status line from the shared table
- * in http_response.c (single source of truth — see #10 in
- * TODO_STATIC_HANDLER_REVIEW). The static handler only ever emits a
- * narrow subset of codes (200/304/4xx/413/500) so falling back to
- * 500 on an unknown code preserves the previous behaviour. */
-static const char *ss_status_line(const int status, size_t *out_len)
+/* Helper: format a uint64 as a decimal string into `out`. Returns
+ * the byte count written (excluding the NUL); 0 on overflow. */
+static inline int ss_fmt_u64(char *out, size_t cap, uint64_t v)
 {
-	const char *line = http_response_status_line_http11(status, out_len);
-	if (UNEXPECTED(line == NULL)) {
-		line = http_response_status_line_http11(500, out_len);
-	}
-
-	return line;
+	const int n = snprintf(out, cap, "%" PRIu64, v);
+	return (n > 0 && (size_t)n < cap) ? n : 0;
 }
 
-/* Build the full response head (status + headers + optional inline
- * body) into a fresh zend_string and submit it fire-and-forget.
- *
- * Plain TCP: ZEND_ASYNC_IO_WRITE_EX → libuv owns the string until
- * write completion (fire-and-forget, single uv_write).
- *
- * TLS: encrypt through SSL_write into the BIO ring, then kick the
- * existing FSM-send chain. Caller must ensure the head fits in
- * one SSL_write — 16 KiB plaintext is the safe ceiling here (BIO
- * ring is 32 KiB, OpenSSL wbio takes ~17 KiB before WANT_WRITE).
- * Status + headers + small inline body for 304/HEAD/error always
- * fit; large bodies skip this helper and ride the chunked TLS_READ
- * loop instead.
- *
- * Returns false on submit failure (string already released). */
-static bool ss_send_response(ss_state_t *state, const int status_code, const smart_str *headers,
-							 const char *body, const size_t body_len)
+/* Set Content-Length on response_obj. The H1 protocol op serializes
+ * headers verbatim — no auto-Content-Length insertion — so we must
+ * write the number ourselves whenever the response is supposed to
+ * carry one. */
+static void ss_set_content_length(zend_object *response_obj, uint64_t len)
 {
-	smart_str line = {0};
-	size_t status_line_len = 0;
-	const char *const status_line = ss_status_line(status_code, &status_line_len);
-
-	smart_str_appendl(&line, status_line, status_line_len);
-	if (headers != NULL && headers->s != NULL) {
-		smart_str_append_smart_str(&line, headers);
+	char buf[32];
+	const int n = ss_fmt_u64(buf, sizeof(buf), len);
+	if (EXPECTED(n > 0)) {
+		http_response_static_set_header(response_obj, "content-length", 14, buf, (size_t)n);
 	}
-	smart_str_appends(&line, "\r\n");
-	if (body != NULL && body_len > 0) {
-		smart_str_appendl(&line, body, body_len);
-	}
-	smart_str_0(&line);
-
-	zend_string *const owned = line.s;
-	line.s = NULL;
-
-#ifdef HAVE_OPENSSL
-	if (state->conn->tls != NULL) {
-		/* TLS path: encrypt+kick instead of bypassing the layer.
-		 * atomic helper bails when the buffer doesn't fully fit in
-		 * one SSL_write — with our size invariants it always does. */
-		const bool ok = http_connection_tls_fsm_send_plaintext_atomic(state->conn, ZSTR_VAL(owned),
-																	  ZSTR_LEN(owned));
-		zend_string_release(owned);
-		return ok;
-	}
-#endif
-
-	/* Plain TCP: zero-copy fire-and-forget. */
-	return http_connection_send_str_owned(state->conn, owned);
 }
 
-/* Append one header line to `out`. Avoids string-init churn. */
-static void ss_append_header(smart_str *out, const char *name, size_t name_len, const char *value,
-							 size_t value_len)
+/* Set Connection header tracking the keep-alive verdict. */
+static void ss_set_connection_header(zend_object *response_obj, bool keep_alive)
 {
-	smart_str_appendl(out, name, name_len);
-	smart_str_appends(out, ": ");
-	smart_str_appendl(out, value, value_len);
-	smart_str_appends(out, "\r\n");
-}
-
-/* Build the response headers block (without the leading status line
- * and without the trailing CRLF — ss_send_response adds those).
- * include_content_headers gates Content-* on the 304 path
- * (RFC 9110 §15.4.5). */
-static void ss_build_headers(ss_state_t *state, smart_str *out, const char *content_type,
-							 size_t content_type_len, const char *etag_buf, bool etag_enabled,
-							 const char *last_modified_buf, const uint64_t content_length,
-							 const bool include_content_headers)
-{
-	if (include_content_headers && content_type != NULL) {
-		ss_append_header(out, "Content-Type", 12, content_type, content_type_len);
-	}
-	if (include_content_headers) {
-		char clen[32];
-		const int n = snprintf(clen, sizeof(clen), "%" PRIu64, content_length);
-		if (n > 0 && (size_t)n < sizeof(clen)) {
-			ss_append_header(out, "Content-Length", 14, clen, (size_t)n);
-		}
-	}
-	if (etag_enabled) {
-		ss_append_header(out, "ETag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
-	}
-	ss_append_header(out, "Last-Modified", 13, last_modified_buf, HTTP_STATIC_DATE_LEN);
-
-	/* Precompressed sidecar served: tell intermediaries the
-	 * representation depends on Accept-Encoding so a cache that saw
-	 * the gzip variant won't replay it to a client that didn't ask
-	 * for compression. Vary is added unconditionally on
-	 * Content-Encoding-bearing responses; no harm in extra Vary on
-	 * the 304 path either. */
-	if (state->content_encoding != NULL && include_content_headers) {
-		ss_append_header(out, "Content-Encoding", 16, state->content_encoding,
-						 state->content_encoding_len);
-	}
-	if (state->content_encoding != NULL) {
-		ss_append_header(out, "Vary", 4, "Accept-Encoding", 15);
-	}
-
-	/* Range advertise / commit. Accept-Ranges goes on every
-	 * 200/206 (and 304); a 206 response also gets Content-Range. */
-	if (include_content_headers) {
-		ss_append_header(out, "Accept-Ranges", 13, "bytes", 5);
-	}
-	if (state->is_range && include_content_headers) {
-		char cr[64];
-		const int n = snprintf(cr, sizeof(cr), "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
-							   state->range_first, state->range_last, state->range_total);
-		if (n > 0 && (size_t)n < sizeof(cr)) {
-			ss_append_header(out, "Content-Range", 13, cr, (size_t)n);
-		}
-	}
-
-	/* Cache-Control + extra_headers are pre-rendered into one persistent
-	 * string at freeze-time (#6 in TODO_STATIC_HANDLER_REVIEW). Splice
-	 * the right variant in with a single append; falling back to the
-	 * iterator path is only needed if freeze somehow ran with prebakes
-	 * NULL (shouldn't happen post-lock, but stays correct if it does). */
-	zend_string *const prebaked = include_content_headers
-									  ? state->mount->prebaked_headers_full
-									  : state->mount->prebaked_headers_no_content;
-	if (prebaked != NULL) {
-		smart_str_append(out, prebaked);
-	}
-	if (state->conn->keep_alive) {
-		ss_append_header(out, "Connection", 10, "keep-alive", 10);
+	if (keep_alive) {
+		http_response_static_set_header(response_obj, "connection", 10, "keep-alive", 10);
 	} else {
-		ss_append_header(out, "Connection", 10, "close", 5);
+		http_response_static_set_header(response_obj, "connection", 10, "close", 5);
 	}
 }
 
-/* Synchronous error emission shortcut. Used when something fails
- * mid-chain (open ENOENT, stat error, sendfile error). */
-static void ss_emit_error(ss_state_t *state, const int status_code, const char *body)
+/* Push the mount's pre-rendered Cache-Control + extra headers onto
+ * response_obj. Mirrors the synchronous-populate path: handler-set
+ * Cache-Control wins over the per-mount default; the freeze step
+ * pre-bakes the mount-side string into mount->cache_control. */
+static void ss_apply_mount_headers(zend_object *response_obj,
+								   const http_static_handler_t *mount,
+								   bool include_content_headers)
 {
-	smart_str h = {0};
-	ss_append_header(&h, "Content-Type", 12, "text/plain; charset=utf-8", 25);
-
-	char clen[32];
-	const size_t body_len = body != NULL ? strlen(body) : 0;
-	const int n = snprintf(clen, sizeof(clen), "%zu", body_len);
-	if (n > 0 && (size_t)n < sizeof(clen)) {
-		ss_append_header(&h, "Content-Length", 14, clen, (size_t)n);
+	if (mount->cache_control != NULL) {
+		http_response_static_set_header(response_obj, "cache-control", 13,
+										ZSTR_VAL(mount->cache_control),
+										ZSTR_LEN(mount->cache_control));
 	}
 
-	ss_append_header(&h, "Connection", 10, state->conn->keep_alive ? "keep-alive" : "close",
-					 state->conn->keep_alive ? 10 : 5);
+	if (mount->extra_headers == NULL) {
+		return;
+	}
 
-	state->should_continue = state->conn->keep_alive;
-	(void)ss_send_response(state, status_code, &h, body, body_len);
-	smart_str_free(&h);
+	zend_string *name;
+	zval *value;
+	ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, name, value)
+	{
+		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
+			continue;
+		}
 
-	/* Telemetry — pair on_request_dispatch from hand-off. */
-	http_server_count_request(state->conn->counters);
+		/* RFC 9110 §15.4.5: 304 must NOT carry Content-* headers. */
+		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
+			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
+			continue;
+		}
+
+		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
+										Z_STRVAL_P(value), Z_STRLEN_P(value));
+	}
+	ZEND_HASH_FOREACH_END();
+}
+
+/* Hand the request off to the protocol's send_static_response op.
+ * file_io ownership transfers; we null state->file_io and remove
+ * the persistent dispatch callback so the protocol op can install
+ * its own. Returns true on synchronous accept. */
+static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
+									uint64_t body_offset, uint64_t body_length, bool head_only)
+{
+	zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+	void *const op_ctx = http_response_get_stream_ctx(response_obj);
+
+	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
+		/* Protocol doesn't implement static delivery yet (H2/H3 path
+		 * pre-plumbing). Caller falls back to the synchronous-populate
+		 * path. We DO NOT consume file_io here — caller still owns it. */
+		return false;
+	}
+
+	/* Detach our persistent callback from state->file_io (the OPEN'd
+	 * fd) — the protocol op assumes it owns the event for whatever
+	 * file_io is passed in. The two pointers diverge on error paths:
+	 * `file_io` (the param) is what the op receives; state->file_io
+	 * is the original OPEN'd fd which on error paths we must dispose
+	 * here because the param is NULL. */
+	if (state->cb != NULL && state->file_io != NULL) {
+		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
+		state->cb = NULL;
+	}
+
+	/* Error paths pass file_io=NULL but state still owns the OPEN'd
+	 * fd from kick_off — dispose it here. The op's only body-source
+	 * is `file_io` (the param), and that's what it disposes; the
+	 * state->file_io fd is independent. */
+	if (file_io == NULL && state->file_io != NULL) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		state->file_io = NULL;
+	}
+
+	state->phase = SS_PHASE_DELEGATED;
+	zend_async_io_t *const owned_pre_call = state->file_io;
+	state->file_io = NULL; /* ownership transferred to the op */
+
+	const int rc = ops->send_static_response(op_ctx, response_obj, file_io, body_offset, body_length,
+											  head_only, ss_on_protocol_done, state);
+	if (UNEXPECTED(rc != 0)) {
+		/* Op refused the request — on_done will NOT fire. Caller
+		 * keeps file_io ownership. We restore state->file_io so
+		 * the early-error finalize disposes it. */
+		state->file_io = owned_pre_call;
+		state->phase = SS_PHASE_STAT; /* indicate "not delegated" */
+		return false;
+	}
+
+	return true;
 }
 
 /* === Single dispatch callback ===================================== */
 
 static void ss_handle_open(ss_state_t *state, zend_object *exception);
 static void ss_handle_stat(ss_state_t *state);
-static void ss_handle_sendfile_done(ss_state_t *state);
-#ifdef HAVE_OPENSSL
-static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read, bool err);
-static void ss_tls_drain_done_cb(void *data);
-static bool ss_tls_submit_next_read(ss_state_t *state);
-#endif
 
-/* The persistent callback. Registered once at kick-off, fires for
- * every NOTIFY on file_io->event. We discriminate completions by
- * (phase, req identity) — a callback registered during a NOTIFY
- * iteration can re-enter the same iteration, so an unexpected
- * (result, phase) tuple is silently ignored. */
+/* The persistent callback. Registered at kick-off, fires for every
+ * NOTIFY on file_io->event during OPEN/STAT. Once we delegate to
+ * the protocol op the callback is removed. */
 static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
 						void *result, zend_object *exception)
 {
@@ -820,89 +699,80 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 
 	switch (state->phase) {
 	case SS_PHASE_OPEN:
-		/* libuv_fs_open notifies with result=NULL — the only
-		 * valid signal during this phase. Any non-NULL result is
-		 * a re-entrant fire from a later phase's submit, ignore. */
+		/* libuv_fs_open notifies with result=NULL — the only valid
+		 * signal during this phase. Any non-NULL result is a re-
+		 * entrant fire from a later phase's submit, ignore. */
 		if (req != NULL) {
 			return;
 		}
-
 		ss_handle_open(state, exception);
 		return;
 
 	case SS_PHASE_STAT:
-		/* The stat-req identity match guards against a reentrant
-		 * fire that arrived before our pending_req was set. */
 		if (req == NULL || req != state->pending_req) {
 			return;
 		}
-
 		state->pending_req = NULL;
 		if (req->dispose != NULL) {
 			req->dispose(req);
 		}
-
 		if (UNEXPECTED(exception != NULL)) {
-			ss_emit_error(state, 500, "Internal Server Error");
-			ss_finalize(state);
+			/* Map to a 500 emitted through the protocol op (so the
+			 * H1 wire write goes through the right channel for plain
+			 * vs TLS). */
+			zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+			http_response_static_set_status(response_obj, 500);
+			http_response_static_set_header(response_obj, "content-type", 12,
+											"text/plain; charset=utf-8", 25);
+			zend_string *msg = zend_string_init("Internal Server Error", 21, 0);
+			http_response_static_set_body_str(response_obj, msg);
+			zend_string_release(msg);
+			ss_set_content_length(response_obj, 21);
+			state->should_continue = state->conn->keep_alive;
+			ss_set_connection_header(response_obj, state->should_continue);
+			http_server_count_request(state->conn->counters);
+			if (!ss_delegate_to_protocol(state, NULL, 0, 0, true)) {
+				ss_finalize(state);
+			}
 			return;
 		}
-
 		ss_handle_stat(state);
 		return;
 
-	case SS_PHASE_SENDFILE:
-		if (req == NULL || req != state->pending_req) {
-			return;
-		}
-
-		state->pending_req = NULL;
-		if (req->dispose != NULL) {
-			req->dispose(req);
-		}
-
-		ss_handle_sendfile_done(state);
-		return;
-
-#ifdef HAVE_OPENSSL
-	case SS_PHASE_TLS_READ:
-		/* IO_READ on file_io completed. result points at the req,
-		 * exception non-NULL on EBADF / read errors. transferred
-		 * == 0 means EOF (early or truncated file). */
-		if (req == NULL || req != state->pending_req) {
-			return;
-		}
-
-		state->pending_req = NULL;
-		{
-			const ssize_t got = req->transferred;
-			const bool err = (exception != NULL || req->exception != NULL);
-
-			if (req->exception != NULL) {
-				OBJ_RELEASE(req->exception);
-				req->exception = NULL;
-			}
-
-			if (req->dispose != NULL) {
-				req->dispose(req);
-			}
-
-			ss_handle_tls_read_done(state, got, err);
-		}
-		return;
-
-	case SS_PHASE_TLS_DRAIN:
-		/* Drain wakeup arrives via the conn->tls_zc_write_done_cb
-		 * direct callback, not through ss_dispatch — we never
-		 * register a pending_req for the drain wait. Spurious
-		 * notifies on file_io while parked in DRAIN are ignored. */
-		return;
-#endif
-
+	case SS_PHASE_DELEGATED:
 	case SS_PHASE_DONE:
 	default:
 		return;
 	}
+}
+
+/* Emit a small text/plain error response through the protocol op.
+ * Used for 4xx / 416 / 500 / 413 — bodies are pre-known short text
+ * strings. The op's file_io==NULL contract emits inline body off
+ * response_obj.
+ *
+ * Returns true if the protocol op accepted the request — in that
+ * case state will be freed via ss_on_protocol_done and the caller
+ * MUST NOT call ss_finalize. False means the op refused (no
+ * stream_ops or send_static_response==NULL); the caller falls
+ * back to ss_finalize, which still runs counters / dispose. */
+static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body, size_t body_len)
+{
+	zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+	http_response_static_set_status(response_obj, status);
+	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
+									25);
+	if (body != NULL && body_len > 0) {
+		zend_string *msg = zend_string_init(body, body_len, 0);
+		http_response_static_set_body_str(response_obj, msg);
+		zend_string_release(msg);
+	}
+	ss_set_content_length(response_obj, (uint64_t)body_len);
+	state->should_continue = state->conn->keep_alive;
+	ss_set_connection_header(response_obj, state->should_continue);
+
+	http_server_count_request(state->conn->counters);
+	return ss_delegate_to_protocol(state, NULL, 0, 0, true);
 }
 
 /* on_missing:Next rollback (#5c). Open failed on a mount configured to
@@ -914,21 +784,6 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 {
 	http_connection_t *const conn = state->conn;
 	http1_request_ctx_t *const ctx = state->ctx;
-
-	/* Restore the cork toggle ss_kick_off did. The coroutine path's
-	 * fire-and-forget writes don't expect cork. Idempotent on non-
-	 * Linux / non-corked sockets. */
-	ss_cork_set(conn, 0);
-
-#ifdef HAVE_OPENSSL
-	/* Defensive: rollback only fires on OPEN failure today, so the
-	 * observer hook hasn't been installed yet. Clearing here keeps
-	 * us safe if the rollback path widens later. */
-	if (state->is_tls && conn->tls_zc_write_done_cb_data == state) {
-		conn->tls_zc_write_done_cb = NULL;
-		conn->tls_zc_write_done_cb_data = NULL;
-	}
-#endif
 
 	/* Drop the file_io + persistent callback (mirrors ss_finalize but
 	 * without on_request_dispose / http_request_finalize — those happen
@@ -948,12 +803,10 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 	state->phase = SS_PHASE_DONE;
 
 	/* Spawn the PHP handler coroutine (mirrors the dispatch tail in
-	 * http_connection_dispatch_request).  conn->scope is alive because
+	 * http_connection_dispatch_request). conn->scope is alive because
 	 * ss_kick_off pinned conn->handler_refcount. */
 	zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
 	if (UNEXPECTED(coroutine == NULL)) {
-		/* Out of memory / scope torn down. Same fallback as the regular
-		 * dispatch tail: drop ctx and destroy the conn. */
 		zval_ptr_dtor(&ctx->request_zv);
 		zval_ptr_dtor(&ctx->response_zv);
 		efree(ctx);
@@ -962,9 +815,6 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 		return;
 	}
 
-	/* If the static-only deployment had no PHP handler, http_handler_
-	 * coroutine_entry would dereference NULL conn->handler. Synthesise
-	 * the same 404 the regular dispatch tail does in that case. */
 	if (conn->handler == NULL) {
 		http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
 		http_response_static_set_header(Z_OBJ(ctx->response_zv), "content-type", 12,
@@ -983,10 +833,6 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 		ctx->request->coroutine = coroutine;
 	}
 
-	/* The dispatch counter + handler_refcount were already bumped in
-	 * ss_kick_off. Skip the bump in the regular dispatch tail — the
-	 * coroutine's dispose still decrements once, balancing the books. */
-
 	ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
 
 	/* state lifetime ends here — ctx is owned by the coroutine. */
@@ -995,23 +841,20 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 
 static void ss_handle_open(ss_state_t *state, zend_object *exception)
 {
-	/* libuv flips READABLE on success or CLOSED on error before
-	 * NOTIFY fires. The exception arg is a redundant signal; either
-	 * one shipping back to us means the open failed. */
 	if (UNEXPECTED(exception != NULL || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
 		if (state->mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 			ss_rollback_to_php_handler(state);
 			return;
 		}
-
-		ss_emit_error(state, 404, "Not Found");
-		ss_finalize(state);
+		if (!ss_emit_error_via_op(state, 404, "Not Found", 9)) {
+			ss_finalize(state);
+		}
 		return;
 	}
 
-	/* Open-file-cache hit: state->st is pre-populated (and validated
-	 * at insert time inside the TTL window). Skip the IO_STAT submit
-	 * entirely — straight into header build with cached etag/MIME/lm. */
+	/* Open-file-cache hit: state->st is pre-populated. Skip the
+	 * IO_STAT submit entirely — straight into header build with
+	 * cached etag/MIME/lm. */
 	if (state->has_cached_meta) {
 		ss_handle_stat(state);
 		return;
@@ -1020,31 +863,33 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
 	state->phase = SS_PHASE_STAT;
 	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
 	if (UNEXPECTED(state->pending_req == NULL)) {
-		ss_emit_error(state, 500, "Internal Server Error");
-		ss_finalize(state);
+		if (!ss_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+			ss_finalize(state);
+		}
 	}
 }
 
 static void ss_handle_stat(ss_state_t *state)
 {
+	zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+
 	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
-		ss_emit_error(state, 404, "Not Found");
-		ss_finalize(state);
+		if (!ss_emit_error_via_op(state, 404, "Not Found", 9)) {
+			ss_finalize(state);
+		}
 		return;
 	}
 
 	if (UNEXPECTED((uint64_t)state->st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
-		ss_emit_error(state, 413, "Payload Too Large");
-		ss_finalize(state);
+		if (!ss_emit_error_via_op(state, 413, "Payload Too Large", 17)) {
+			ss_finalize(state);
+		}
 		return;
 	}
 
 	/* On a cache hit ss_kick_off pre-rendered etag/lm into the state
-	 * scratch buffers and copied content_type out of the entry — every
-	 * format/lookup helper below collapses to a memory read. On a miss
-	 * we synthesise everything from the freshly-stat'd inode and (at
-	 * the bottom) hand it to the cache so the next miss-or-hit cycle
-	 * for this path goes through the fast path. */
+	 * scratch buffers. On a miss we synthesise everything from the
+	 * freshly-stat'd inode and (at the bottom) hand it to the cache. */
 	char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
 	char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
 	bool etag_enabled;
@@ -1056,7 +901,6 @@ static void ss_handle_stat(ss_state_t *state)
 		if (etag_enabled) {
 			memcpy(etag_buf, state->cached_etag_buf, HTTP_STATIC_ETAG_BUF_LEN);
 		}
-
 		memcpy(last_modified_buf, state->cached_lm_buf, HTTP_STATIC_DATE_BUF_LEN);
 		content_type = state->cached_content_type;
 		content_type_len = state->cached_content_type_len;
@@ -1065,13 +909,8 @@ static void ss_handle_stat(ss_state_t *state)
 		if (etag_enabled) {
 			http_static_etag_format(&state->st, etag_buf);
 		}
-
 		http_static_format_http_date(state->st.st_mtime, last_modified_buf);
 		if (state->override_content_type != NULL) {
-			/* Precompressed sidecar: state->fs_path now points at
-			 * "<orig>.gz/.br/.zst", so MIME-by-extension would mis-fire.
-			 * Use the type derived from the original path before the
-			 * suffix was appended in the pre-flight. */
 			content_type = state->override_content_type;
 			content_type_len = state->override_content_type_len;
 		} else if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
@@ -1092,10 +931,7 @@ static void ss_handle_stat(ss_state_t *state)
 		if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0, etag_enabled ? etag_buf : NULL,
 		etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, state->st.st_mtime);
 
-	/* Cache insert (only on miss path — the hit case already has the
-	 * entry). content_type is borrowed from the persistent MIME table
-	 * or the "application/octet-stream" literal; both are safe to
-	 * alias for the entry's lifetime. */
+	/* Cache insert (only on miss path). */
 	if (!state->has_cached_meta && state->conn != NULL && state->conn->server != NULL) {
 		http_static_cache_t *cache = http_static_cache_acquire(state->conn->server);
 		if (cache != NULL) {
@@ -1106,31 +942,17 @@ static void ss_handle_stat(ss_state_t *state)
 		}
 	}
 
-	/* Range support (RFC 9110 §14.2). If the request carries a
-	 * single-range Range header (and either no If-Range or one that
-	 * matches the strong validator), we slice the response to a 206.
-	 * Multi-range / unparsable / multipart syntax falls through to a
-	 * full 200 — RFC-permitted (§14.2 paragraph 1: "a server MAY
-	 * ignore Range"). 416 is mandatory for syntactically valid but
-	 * unsatisfiable ranges (e.g. start past EOF). */
+	/* Range support (RFC 9110 §14.2). */
 	state->range_total = (uint64_t)state->st.st_size;
 	state->is_range = false;
-	/* TLS body path uses ZEND_ASYNC_IO_READ which has no offset
-	 * argument — supporting Range there needs an lseek-or-pread
-	 * extension to the async API. Skip Range on TLS for now and
-	 * serve the full body; clients that need Range over TLS retry
-	 * via plain HTTP or fall back to whole-file download. */
-	if (!not_modified && !state->is_tls) {
+	if (!not_modified) {
 		const zend_string *range_hdr = find_first_request_header(state->ctx->request, "range", 5);
 		const zend_string *if_range = find_first_request_header(state->ctx->request, "if-range", 8);
 		bool range_allowed = true;
 		if (if_range != NULL && etag_enabled) {
-			/* Strong-equal compare per §13.1.5; the cheap path is
-			 * exact memcmp against the ETag we already formatted. */
 			range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN &&
 							 memcmp(ZSTR_VAL(if_range), etag_buf, HTTP_STATIC_ETAG_LEN) == 0);
 		} else if (if_range != NULL) {
-			/* No etag to compare against → conservatively ignore Range. */
 			range_allowed = false;
 		}
 		if (range_hdr != NULL && range_allowed) {
@@ -1142,23 +964,23 @@ static void ss_handle_stat(ss_state_t *state)
 				state->range_first = first;
 				state->range_last = last;
 			} else if (rc == -1) {
+				/* 416. Carry "Content-Range: bytes [star]/size" per RFC 9110 sec 14.1.2. */
 				state->should_continue = state->conn->keep_alive;
-				/* 416 carries `Content-Range: bytes [star]/size` per §14.1.2. */
-				smart_str h = {0};
-				ss_append_header(&h, "Content-Type", 12, "text/plain; charset=utf-8", 25);
+				http_response_static_set_status(response_obj, 416);
+				http_response_static_set_header(response_obj, "content-type", 12,
+												"text/plain; charset=utf-8", 25);
 				char cr[48];
 				const int crn = snprintf(cr, sizeof(cr), "bytes */%" PRIu64, state->range_total);
 				if (crn > 0 && (size_t)crn < sizeof(cr)) {
-					ss_append_header(&h, "Content-Range", 13, cr, (size_t)crn);
+					http_response_static_set_header(response_obj, "content-range", 13, cr,
+													(size_t)crn);
 				}
-				ss_append_header(&h, "Content-Length", 14, "0", 1);
-				ss_append_header(&h, "Connection", 10,
-								 state->conn->keep_alive ? "keep-alive" : "close",
-								 state->conn->keep_alive ? 10 : 5);
-				(void)ss_send_response(state, 416, &h, NULL, 0);
-				smart_str_free(&h);
+				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
+				ss_set_connection_header(response_obj, state->should_continue);
 				http_server_count_request(state->conn->counters);
-				ss_finalize(state);
+				if (!ss_delegate_to_protocol(state, NULL, 0, 0, true)) {
+					ss_finalize(state);
+				}
 				return;
 			}
 		}
@@ -1166,258 +988,110 @@ static void ss_handle_stat(ss_state_t *state)
 
 	state->should_continue = state->conn->keep_alive;
 
-	smart_str headers = {0};
+	/* === Build the response onto response_obj ============================
+	 *
+	 * The protocol op serializes status + headers verbatim — we
+	 * write every header here, including Content-Length / Content-
+	 * Range, so the wire output is byte-identical to what the
+	 * pre-refactor inline helpers produced. */
+
+	const bool include_content_headers = !not_modified;
+	const int status_code = not_modified ? 304 : (state->is_range ? 206 : 200);
+
+	http_response_static_set_status(response_obj, status_code);
+
+	if (include_content_headers && content_type != NULL) {
+		http_response_static_set_header(response_obj, "content-type", 12, content_type,
+										content_type_len);
+	}
+
+	const uint64_t body_len = not_modified
+								  ? 0
+								  : (state->is_range
+										 ? (state->range_last - state->range_first + 1)
+										 : (uint64_t)state->st.st_size);
+
+	if (include_content_headers) {
+		ss_set_content_length(response_obj, body_len);
+	}
+
+	if (etag_enabled) {
+		http_response_static_set_header(response_obj, "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
+	}
+	http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
+									HTTP_STATIC_DATE_LEN);
+
+	/* Precompressed sidecar served: tell intermediaries the
+	 * representation depends on Accept-Encoding. Vary is added
+	 * unconditionally on Content-Encoding-bearing responses; no
+	 * harm in extra Vary on the 304 path either. */
+	if (state->content_encoding != NULL && include_content_headers) {
+		http_response_static_set_header(response_obj, "content-encoding", 16,
+										state->content_encoding, state->content_encoding_len);
+	}
+	if (state->content_encoding != NULL) {
+		http_response_static_set_header(response_obj, "vary", 4, "Accept-Encoding", 15);
+	}
+
+	/* Range advertise / commit. Accept-Ranges goes on every
+	 * 200/206 (and 304); a 206 response also gets Content-Range. */
+	if (include_content_headers) {
+		http_response_static_set_header(response_obj, "accept-ranges", 13, "bytes", 5);
+	}
+	if (state->is_range && include_content_headers) {
+		char cr[64];
+		const int n = snprintf(cr, sizeof(cr), "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
+							   state->range_first, state->range_last, state->range_total);
+		if (n > 0 && (size_t)n < sizeof(cr)) {
+			http_response_static_set_header(response_obj, "content-range", 13, cr, (size_t)n);
+		}
+	}
+
+	ss_apply_mount_headers(response_obj, state->mount, include_content_headers);
+	ss_set_connection_header(response_obj, state->should_continue);
+
+	/* === Hand off to the protocol's send_static_response ============== */
+
+	zend_async_io_t *const file_io = state->file_io;
 
 	if (not_modified) {
-		ss_build_headers(state, &headers, content_type, content_type_len, etag_buf, etag_enabled,
-						 last_modified_buf, (uint64_t)state->st.st_size, false);
-		(void)ss_send_response(state, 304, &headers, NULL, 0);
-		smart_str_free(&headers);
 		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
+		if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, 0, 0, true))) {
+			ss_finalize(state);
+		}
 		return;
 	}
-
-	const uint64_t body_len = state->is_range ? (state->range_last - state->range_first + 1)
-											  : (uint64_t)state->st.st_size;
-	const int status_code = state->is_range ? 206 : 200;
-
-	ss_build_headers(state, &headers, content_type, content_type_len, etag_buf, etag_enabled,
-					 last_modified_buf, body_len, true);
 
 	if (state->is_head || state->st.st_size == 0) {
-		(void)ss_send_response(state, status_code, &headers, NULL, 0);
-		smart_str_free(&headers);
 		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return;
-	}
-
-	/* 200 GET with body. Headers go through the right channel:
-	 *   - plain TCP: fire-and-forget zero-copy uv_write, body rides
-	 *     ZEND_ASYNC_IO_SENDFILE for kernel-resident transfer.
-	 *   - TLS: encrypt+kick through tls_fsm_send_plaintext_atomic for
-	 *     headers, then the chunked TLS_READ→SSL_write→drain loop
-	 *     handles the body.
-	 * Both branches converge in ss_finalize. */
-	if (UNEXPECTED(!ss_send_response(state, status_code, &headers, NULL, 0))) {
-		smart_str_free(&headers);
-		ss_finalize(state);
-		return;
-	}
-	smart_str_free(&headers);
-
-#ifdef HAVE_OPENSSL
-	if (state->is_tls) {
-		/* TLS body path: chunked IO_READ + SSL_write + drain loop.
-		 * chunk_buf is emalloc'd lazily; one buffer reused across
-		 * every iteration of the loop. */
-		if (state->chunk_buf == NULL) {
-			state->chunk_buf = emalloc(SS_TLS_CHUNK_BYTES);
-		}
-
-		/* Hook the cipher-write completion observer so the FSM-send
-		 * free_cb wakes us when wbio drains. Cleared in ss_finalize. */
-		state->conn->tls_zc_write_done_cb = ss_tls_drain_done_cb;
-		state->conn->tls_zc_write_done_cb_data = state;
-
-		/* Headers atomic-send may have left a write in flight. If so,
-		 * park in DRAIN and let the cb call ss_tls_submit_next_read
-		 * once the BIO ring has drained. Sync-complete: jump in
-		 * directly. */
-		if (state->conn->tls_zc_write_n != 0) {
-			state->phase = SS_PHASE_TLS_DRAIN;
-			return;
-		}
-		if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
-			http_server_count_request(state->conn->counters);
+		if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			ss_finalize(state);
 		}
 		return;
 	}
-#endif
 
-	/* Plain TCP body path: zero-copy kernel sendfile. On a 206 we
-	 * pass range_first as offset and slice the length to body_len —
-	 * uv_fs_sendfile honours both. */
-	state->phase = SS_PHASE_SENDFILE;
-	const uint64_t sf_offset = state->is_range ? state->range_first : 0;
-	state->pending_req =
-		ZEND_ASYNC_IO_SENDFILE(state->conn->io, state->file_io, (off_t)sf_offset, (size_t)body_len);
-	if (UNEXPECTED(state->pending_req == NULL)) {
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-	}
-}
-
-static void ss_handle_sendfile_done(ss_state_t *state)
-{
-	/* Body sent (or partially sent on error). On error we still
-	 * finalize — bytes already on the wire are out of our control. */
+	const uint64_t body_offset = state->is_range ? state->range_first : 0;
 	http_server_count_request(state->conn->counters);
-	ss_finalize(state);
+	if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
+		ss_finalize(state);
+	}
 }
 
-#ifdef HAVE_OPENSSL
-/* === TLS chunked-encrypt path =====================================
- *
- * For user-space TLS connections the kernel-zero-copy sendfile path
- * is unsafe (it would put plaintext on the wire), so the body rides
- * a callback FSM that loops:
- *
- *     ZEND_ASYNC_IO_READ(file_io, chunk_buf, SS_TLS_CHUNK_BYTES)
- *       → on completion (SS_PHASE_TLS_READ → ss_handle_tls_read_done)
- *           SSL_write(chunk_buf, n) via tls_fsm_send_plaintext_atomic
- *               → tls_fsm_send_kick submits ciphertext fire-and-forget
- *                 to libuv (zero-copy peek out of the BIO ring)
- *           if (zc_write_n == 0)            sync-complete: loop again
- *           else                            park in SS_PHASE_TLS_DRAIN
- *               → on cipher write completion (tls_zc_write_done_cb
- *                 ↦ ss_tls_drain_done_cb)   loop again
- *     EOF (transferred == 0)               finalize
- *
- * No coroutine spawned; everything lives in event-loop callback
- * context. SS_TLS_CHUNK_BYTES (16 KiB) ≤ HTTP_TLS_PLAINTEXT_RING_BYTES
- * (32 KiB) so a single SSL_write never stalls on WANT_WRITE — the
- * atomic helper succeeds in one shot every iteration.
- * ================================================================= */
-
-static bool ss_tls_submit_next_read(ss_state_t *state)
+/* Protocol op completion. status==0 success; non-zero abort (peer
+ * reset / write error). Either way we run the static-side finalize:
+ * file_io is already disposed by the op (or by the early-error
+ * path), so finalize just runs counters + http_request_finalize. */
+static void ss_on_protocol_done(void *user, int status)
 {
-	const uint64_t total = (uint64_t)state->st.st_size;
-	if (state->bytes_sent >= total) {
-		/* Body fully shipped. Wait for any trailing in-flight cipher
-		 * write to finish before finalizing — but if it's already
-		 * settled, finalize now. The DRAIN cb path handles the not-
-		 * yet-settled case. */
-		if (state->conn->tls_zc_write_n != 0) {
-			state->phase = SS_PHASE_TLS_DRAIN;
-			return true;
-		}
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return true;
-	}
-
-	state->phase = SS_PHASE_TLS_READ;
-	const size_t remaining = (size_t)(total - state->bytes_sent);
-	const size_t want = remaining < SS_TLS_CHUNK_BYTES ? remaining : SS_TLS_CHUNK_BYTES;
-	state->pending_req = ZEND_ASYNC_IO_READ(state->file_io, state->chunk_buf, want);
-	return state->pending_req != NULL;
-}
-
-static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read, bool err)
-{
-	if (UNEXPECTED(err) || bytes_read < 0) {
-		/* Read error mid-stream — bytes already on the wire belong
-		 * to the client, finalize and let keep-alive policy decide. */
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return;
-	}
-	if (bytes_read == 0) {
-		/* EOF before st_size — file truncated under us. Same
-		 * recovery as the read-error path: drop, finalize. */
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return;
-	}
-
-	/* Conn went into shutdown (peer FIN / worker stop) between our
-	 * IO_READ submit and its completion. Don't push more encrypt+
-	 * write traffic into a half-torn session — bail through the
-	 * normal finalize path. */
-	if (state->conn->state == CONN_STATE_CLOSING || state->conn->destroy_pending ||
-		state->conn->tls_write_error) {
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return;
-	}
-
-	/* Encrypt + queue. Atomic helper bails on partial writes; with
-	 * SS_TLS_CHUNK_BYTES ≤ ring it always succeeds for a healthy
-	 * session. A failure here means the session itself is wedged
-	 * (sticky tls_write_error) — bail. */
-	if (UNEXPECTED(!http_connection_tls_fsm_send_plaintext_atomic(state->conn, state->chunk_buf,
-																  (size_t)bytes_read))) {
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return;
-	}
-	state->bytes_sent += (uint64_t)bytes_read;
-
-	/* Sync-complete cipher write (rare on Linux, common on Windows
-	 * try-write fast path): zc_write_n already back to 0, no DRAIN
-	 * wait needed. Loop directly. */
-	if (state->conn->tls_zc_write_n == 0) {
-		if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
-			http_server_count_request(state->conn->counters);
-			ss_finalize(state);
-		}
-		return;
-	}
-
-	/* Async cipher write: park until tls_zc_write_done_cb fires. */
-	state->phase = SS_PHASE_TLS_DRAIN;
-}
-
-static void ss_tls_drain_done_cb(void *data)
-{
-	ss_state_t *state = (ss_state_t *)data;
+	(void)status;
+	ss_state_t *const state = (ss_state_t *)user;
 	if (state == NULL) {
 		return;
 	}
-
-	/* Only act when we're actually parked waiting on drain. The cb
-	 * also fires for non-static FSM-send completions (post-handshake
-	 * messages) — ignore those. */
-	if (state->phase != SS_PHASE_TLS_DRAIN) {
-		return;
-	}
-
-	/* Peer FIN (or worker stop) flipped the conn into CLOSING /
-	 * destroy_pending while we were parked on drain. Don't push
-	 * another encrypt+write into a torn-down session — finalize
-	 * cleanly and let the destroy chain run on the next refcount
-	 * drop. http_server_count_request stays paired with the
-	 * dispatch hand-off either way. */
-	if (state->conn->state == CONN_STATE_CLOSING || state->conn->destroy_pending ||
-		state->conn->tls_write_error) {
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-		return;
-	}
-
-	if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
-		http_server_count_request(state->conn->counters);
-		ss_finalize(state);
-	}
+	ss_finalize(state);
 }
-#endif /* HAVE_OPENSSL */
 
 /* === Hard-zero kick-off =========================================== */
-
-/* Plain-TCP fast path: zero-copy sendfile straight from the page
- * cache to the socket. TLS connections cannot use this (the sendfile
- * bytes would bypass OpenSSL — wire would carry plaintext) and take
- * the chunked-encrypt path below instead.
- *
- * kTLS would let TLS connections back into sendfile (kernel encrypts
- * in-place), but our SSL is bound to a BIO_pair so kTLS never engages
- * — see PLAN_STATIC_HANDLER §5a "kTLS fast-path — заблокирован
- * архитектурой BIO". */
-#ifdef HAVE_OPENSSL
-static inline bool conn_supports_sendfile(const http_connection_t *conn)
-{
-	return conn->tls == NULL;
-}
-#else
-static inline bool conn_supports_sendfile(const http_connection_t *conn)
-{
-	(void)conn;
-	return true;
-}
-#endif
 
 /* Take the dispatch hand-off and start the async chain. Returns true
  * on success — caller must return HARD_ZERO. False = setup failed,
@@ -1436,12 +1110,20 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 		return false;
 	}
 
+	/* Protocol must implement send_static_response. H2/H3 leave it
+	 * NULL today, in which case we fall back to the synchronous-
+	 * populate path so the regular dispatch tail handles delivery. */
+	zend_object *const response_obj = Z_OBJ(ctx->response_zv);
+	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+	if (ops == NULL || ops->send_static_response == NULL) {
+		return false;
+	}
+
 	ss_state_t *state = ecalloc(1, sizeof(*state));
 	state->conn = conn;
 	state->ctx = ctx;
 	state->mount = mount;
 	state->is_head = is_head;
-	state->is_tls = !conn_supports_sendfile(conn);
 	state->fs_path = emalloc(fs_path_len + 1);
 	memcpy(state->fs_path, fs_path, fs_path_len);
 	state->fs_path[fs_path_len] = '\0';
@@ -1457,11 +1139,6 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 	}
 
 	if (cv != NULL) {
-		/* Trust-within-TTL: every metadata field needed past stat is
-		 * already in the entry. We still need FS_OPEN — sendfile /
-		 * IO_READ require an async fd — but the IO_STAT submit and
-		 * the format/lookup helpers in ss_handle_stat all collapse
-		 * to memory reads. */
 		state->has_cached_meta = true;
 		state->st = cv->st;
 		state->cached_content_type = cv->content_type;
@@ -1485,7 +1162,8 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 		return false;
 	}
 
-	/* One persistent callback for the whole chain. */
+	/* One persistent callback for the OPEN/STAT phases. The protocol
+	 * op replaces it with its own once we delegate. */
 	ss_cb_t *cb = (ss_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(ss_dispatch, sizeof(ss_cb_t));
 	if (UNEXPECTED(cb == NULL)) {
 		if (state->file_io->event.dispose != NULL) {
@@ -1513,21 +1191,8 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 	conn->state = CONN_STATE_PROCESSING;
 	http_server_on_request_dispatch(conn->counters);
 
-	/* Telemetry — see http_server_counters_t::static_zero_coroutine_total.
-	 * Counted on commit (we hold the refcount), not on completion: the
-	 * sendfile may still ENOENT-rollback for on_missing:Next mounts, but
-	 * the kick-off itself is the metric's anchor (cache-friendly path
-	 * was selected). */
+	/* Telemetry — see http_server_counters_t::static_zero_coroutine_total. */
 	http_server_on_static_zero_coroutine(conn->counters);
-
-	/* Cork now so the headers write (about to be queued from
-	 * ss_handle_stat) and the subsequent sendfile bytes coalesce on
-	 * the wire. Uncorked unconditionally in ss_finalize. Plain TCP
-	 * only — TLS rides the BIO ring and benefits no further from
-	 * cork (records already self-frame). */
-	if (!state->is_tls) {
-		ss_cork_set(conn, 1);
-	}
 
 	return true;
 }

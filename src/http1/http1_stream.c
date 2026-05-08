@@ -36,6 +36,7 @@
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "http1/http1_stream.h"
+#include "http1/http1_sendfile.h"
 
 /* Maximum hex chunk-size line (16 hex digits for 64-bit len) + CRLF. */
 #define H1_CHUNK_HEADER_MAX  18
@@ -166,7 +167,8 @@ static zend_async_event_t *h1_stream_get_wait_event(void *const ctx)
 }
 
 const http_response_stream_ops_t h1_stream_ops = {
-    .append_chunk   = h1_stream_append_chunk,
-    .mark_ended     = h1_stream_mark_ended,
-    .get_wait_event = h1_stream_get_wait_event,
+    .append_chunk         = h1_stream_append_chunk,
+    .mark_ended           = h1_stream_mark_ended,
+    .get_wait_event       = h1_stream_get_wait_event,
+    .send_static_response = h1_stream_send_static_response,
 };

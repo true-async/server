@@ -588,6 +588,49 @@ struct http_response_stream_ops_t {
      * below threshold. Returns NULL only on alloc failure — callers
      * must NULL-check. */
     zend_async_event_t *(*get_wait_event)(void *ctx);
+
+    /* Protocol-owned static-file body delivery.
+     *
+     * Preconditions:
+     *  - response_obj already has status code and headers set
+     *    (Content-Type, Content-Length, ETag, Last-Modified,
+     *    Content-Range, Content-Encoding, Vary, Cache-Control,
+     *    extra headers, Connection — caller's responsibility). The
+     *    op MUST NOT auto-add Content-Length; whatever the caller
+     *    placed on response_obj is what goes on the wire.
+     *  - file_io, when non-NULL, is an ALREADY-OPEN async file io
+     *    handle (post-OPEN, post-STAT). Ownership transfers to the
+     *    op: it disposes file_io on completion (success or failure).
+     *  - body_offset / body_length define the slice to send. For
+     *    HEAD, 304 and small error responses the caller passes
+     *    head_only=true; the op writes only the head. file_io is
+     *    still owned and disposed in that case.
+     *  - file_io == NULL is allowed and means "no separate body
+     *    source". Any inline body the caller put on response_obj
+     *    (small 4xx/5xx text, etc.) is emitted as part of the head
+     *    write. body_offset / body_length / head_only are then
+     *    ignored. This is how short error pages travel through the
+     *    same path without re-introducing H1 specifics in the
+     *    static handler.
+     *
+     * The op fires on_done(user, status) exactly once after the head
+     * (and body, if any) has been pushed onto the wire and any
+     * underlying drain has settled. status==0 means success; non-zero
+     * means abort (peer reset / write error). Returns 0 on synchronous
+     * accept of the request. Non-zero return means the op could not
+     * be initiated and on_done WILL NOT fire — in that case the
+     * caller still owns file_io and must dispose it.
+     *
+     * Implemented by HTTP/1 today. H2 / H3 strategies leave this NULL
+     * pending follow-up plumbing through their stream machinery. */
+    int     (*send_static_response)(void *ctx,
+                                    zend_object *response_obj,
+                                    zend_async_io_t *file_io,
+                                    uint64_t body_offset,
+                                    uint64_t body_length,
+                                    bool head_only,
+                                    void (*on_done)(void *user, int status),
+                                    void *user);
 };
 
 /* Install the streaming vtable + ctx on a response object. The
