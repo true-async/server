@@ -71,6 +71,13 @@ enum StaticSymlinks: int
  * are served via libuv async fs ops directly into the response stream.
  * No PHP callbacks fire on the static path.
  *
+ * Note: a request whose URL maps to a directory and whose configured
+ * index files all 404 returns 404 (or falls through per StaticOnMissing
+ * for `Next`). This handler does NOT issue the 301 redirect that nginx
+ * / Apache emit when a directory URL is missing the trailing slash;
+ * call `setIndexFiles([])` / `disableIndex()` if your deployment relies
+ * on a real catch-all on directory paths.
+ *
  * @strict-properties
  * @not-serializable
  */

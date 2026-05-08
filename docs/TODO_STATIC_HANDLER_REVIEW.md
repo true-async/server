@@ -460,7 +460,20 @@ Replace with `validate_segments(mount, decoded, decoded_len)`. Saves
 NUL right after `relative`'s end (see `:193`). Pass `relative` straight
 to `fnmatch`. Saves a per-request memcpy proportional to path length.
 
-### 10. Status-line table duplication
+### ~~10. Status-line table duplication~~ ✅ done
+
+`http_response_status_line_http11(code, *len)` exposed from
+`http_response.c`; `ss_status_line` is a one-line wrapper that defers
+to it (with a 500 fallback for codes outside the table). The static
+handler's hard-coded mini-table is gone.
+
+### ~~14. Directory request → 301 redirect~~ ✅ documented
+
+The deviation from nginx/Apache (we 404 on directory URLs whose
+indexes all miss; nginx/Apache 301 to the trailing-slash variant) is
+now called out in the StaticHandler stub doc-block.
+
+### 10. (original) Status-line table duplication
 
 `ss_status_line` (http_static.c:341-352) hard-codes 6 status strings.
 `http11_status_lines[]` in `src/http_response.c:1207-1229` has the same

@@ -394,19 +394,18 @@ static void ss_finalize(ss_state_t *state)
     http_request_finalize(conn, ctx, should_continue);
 }
 
-/* The narrow set of status lines the static handler ever emits. Pre-
- * baked so we skip a smart_str dance per response. */
-static const char *ss_status_line(const int status)
+/* Borrow the pre-rendered HTTP/1.1 status line from the shared table
+ * in http_response.c (single source of truth — see #10 in
+ * TODO_STATIC_HANDLER_REVIEW). The static handler only ever emits a
+ * narrow subset of codes (200/304/4xx/413/500) so falling back to
+ * 500 on an unknown code preserves the previous behaviour. */
+static const char *ss_status_line(const int status, size_t *out_len)
 {
-    switch (status) {
-        case 200: return "HTTP/1.1 200 OK\r\n";
-        case 304: return "HTTP/1.1 304 Not Modified\r\n";
-        case 400: return "HTTP/1.1 400 Bad Request\r\n";
-        case 403: return "HTTP/1.1 403 Forbidden\r\n";
-        case 404: return "HTTP/1.1 404 Not Found\r\n";
-        case 413: return "HTTP/1.1 413 Payload Too Large\r\n";
-        default:  return "HTTP/1.1 500 Internal Server Error\r\n";
+    const char *line = http_response_status_line_http11(status, out_len);
+    if (UNEXPECTED(line == NULL)) {
+        line = http_response_status_line_http11(500, out_len);
     }
+    return line;
 }
 
 /* Build the full response head (status + headers + optional inline
@@ -420,7 +419,9 @@ static bool ss_send_response(ss_state_t *state, const int status_code,
                              const char *body, const size_t body_len)
 {
     smart_str line = {0};
-    smart_str_appends(&line, ss_status_line(status_code));
+    size_t status_line_len = 0;
+    const char *const status_line = ss_status_line(status_code, &status_line_len);
+    smart_str_appendl(&line, status_line, status_line_len);
     if (headers != NULL && headers->s != NULL) {
         smart_str_append_smart_str(&line, headers);
     }

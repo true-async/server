@@ -938,6 +938,12 @@ void http_response_static_set_header   (zend_object *obj,
                                         const char *value, size_t value_len);
 void http_response_static_set_body_str (zend_object *obj, zend_string *body);
 
+/* Borrow a pre-rendered "HTTP/1.1 <code> <reason>\r\n" status line.
+ * Returns NULL when the code is outside the known table — the caller
+ * is expected to fall back to the piecewise builder. The returned
+ * pointer + length live in static const memory; do not free. */
+const char *http_response_status_line_http11(int code, size_t *out_len);
+
 /* Response-state helpers used by handler-dispose paths (HTTP/1 in
  * http_connection.c, HTTP/2 in src/http2/http2_strategy.c). */
 bool  http_response_is_committed   (zend_object *obj);

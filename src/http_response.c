@@ -1231,6 +1231,21 @@ static const http_status_line_t http11_status_lines[] = {
 #define HTTP11_STATUS_LINES_CNT \
     (sizeof(http11_status_lines) / sizeof(http11_status_lines[0]))
 
+const char *http_response_status_line_http11(const int code, size_t *out_len)
+{
+    if (code <= 0 || (size_t) code >= HTTP11_STATUS_LINES_CNT) {
+        return NULL;
+    }
+    const http_status_line_t *const e = &http11_status_lines[code];
+    if (e->line == NULL) {
+        return NULL;
+    }
+    if (out_len != NULL) {
+        *out_len = e->len;
+    }
+    return e->line;
+}
+
 /* Emit status line into result. Fast path: HTTP/1.1 + no custom reason
  * phrase + code in the pre-baked table → single memcpy. Everything
  * else falls back to the piecewise builder. */
