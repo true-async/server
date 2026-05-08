@@ -400,6 +400,18 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
   - **TLS chunked SSL_write**: 4843 req/s, 303 MB/s, 12.7 ms median
   Соотношение 25% — ожидаемый user-space AES baseline на debug-
   build; release-build даст 1.5-2× благодаря AES-NI inlining.
+- ✅ **Open file cache** (commits 81bc752, 0aab165, 8f05e8d, e328522
+  + perf 35e4963). Per-handler конфиг `StaticHandler::setOpenFileCache(
+  maxEntries, ttlSeconds=60)` (off by default). Реализация: HashTable
+  + LRU + TTL, hit/miss telemetry counters, hand-formatted IMF date /
+  ETag (snprintf убран из hot path). На cache hit FSM пропускает
+  IO_STAT, etag-format, MIME lookup, IMF-date format — open остаётся
+  ради async fd для sendfile. Bench (debug-zts, 64 KiB файл,
+  wrk -c64 -t4 -d5s, warm dentry, 3-run avg):
+  - cache **off** : ~16287 req/s
+  - cache **on**  : ~19622 req/s (~99.98% hits) — **+20%**
+  Согласуется с Open Question 1: «defer until bench shows it matters»
+  — теперь bench подтверждает, на opt-in базе.
 
 ### Осталось
 
@@ -408,7 +420,6 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
 | Symlink owner-match (`OwnerMatch`) | aliased to `Reject` | post-open uid compare не реализован; политика не слабее заявленной |
 | Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | partial | bench tooling готов, цифры выше для file-static; entry.php сравнение out-of-codebase |
 | TLS streaming abrupt-close race | known issue | wrk-style массовый abrupt close с in-flight TLS streaming → assertion в `conn_arena_cleanup` (alive list не пустой при teardown). PHPT 007 чистый, штатный keep-alive close — чистый. Только при `wrk --timeout 0` с десятками одновременных RST. Требует pass над shutdown chain — отдельный fix. |
-| Open file cache (HashTable+LRU) | not started | nginx-style open_file_cache: путь→(stat, fd, mtime), LRU bound 512, TTL 60s, mtime invalidation on hit. Сэкономит realpath+stat на hot serving. Отдельный PR. |
 | **PR #2** H2/H3 интеграция | not started | nghttp2/nghttp3 data-provider hookup |
 | **PR #3** Range support | not started | single + multipart/byteranges + If-Range |
 | **PR #4** Precompressed sidecars `.br/.gz/.zst` | not started | reuse `http_compression_negotiate.c` |

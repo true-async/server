@@ -102,17 +102,117 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
     int flags = O_RDONLY | O_CLOEXEC;
 #ifdef O_NOFOLLOW
-    /* OWNER mode is documented as "follow if owner-of-link == owner-
-     * of-target" but the post-open uid comparison isn't implemented
-     * yet — alias to REJECT so the policy is no weaker than the
-     * advertised security promise. The real owner-match check lands
-     * with the async serve path. */
-    if (mount->flags & (HTTP_STATIC_FLAG_SYMLINKS_REJECT
-                      | HTTP_STATIC_FLAG_SYMLINKS_OWNER)) {
+    /* REJECT: kernel-level — any symlink on the final component fails
+     * with ELOOP. Intermediate components are still followed by
+     * open(2); resolved_under_root() catches escapes via realpath.
+     *
+     * OWNER: pre-flight path_segments_owner_match runs an explicit
+     * lstat/stat sweep across every segment and bans owner-mismatched
+     * symlinks. We DO want open() to follow links here (the sweep
+     * already approved them), so no O_NOFOLLOW. */
+    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
         flags |= O_NOFOLLOW;
     }
 #endif
     return open(path, flags);
+}
+
+static bool path_segments_owner_match(const http_static_handler_t *mount,
+                                      const char *fs_path);
+
+/* REJECT pre-flight check. The sync fallback open() uses O_NOFOLLOW
+ * (kernel rejects symlinks on the final component); the async hard-zero
+ * path goes through ZEND_ASYNC_FS_OPEN which doesn't expose that flag.
+ * resolved_under_root() catches symlinks pointing outside the mount but
+ * NOT inside-mount-to-inside-mount links, leaving a hole in REJECT
+ * semantics on the hot path. lstat the final component here to close
+ * it. Cost: one syscall per request, only on cache miss; cache hits
+ * skip this entirely (entry was already validated). */
+static bool symlink_policy_admits(const http_static_handler_t *mount,
+                                  const char *fs_path)
+{
+    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
+        struct stat ls;
+        if (UNEXPECTED(lstat(fs_path, &ls) != 0)) {
+            return false;
+        }
+        if (S_ISLNK(ls.st_mode)) {
+            return false;
+        }
+        return true;
+    }
+    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_OWNER) {
+        return path_segments_owner_match(mount, fs_path);
+    }
+    /* FOLLOW (default fallthrough): no symlink-specific policy. */
+    return true;
+}
+
+/* OwnerMatch (issue #13 acceptance §6) — walk the resolved path one
+ * segment at a time from mount root to the final component. For each
+ * segment that is a symlink, lstat() yields the link's uid, stat()
+ * yields the target's uid; mismatched uids fail the policy.
+ *
+ * Called only when the mount runs in OWNER mode. Cost is one lstat per
+ * segment plus one stat per symlink; for typical 2-4 segment paths
+ * that's a handful of microseconds on warm dentry. The open-file cache
+ * piggybacks on this validation: an entry was inserted only after this
+ * sweep approved the path within the same TTL window, so cache hits
+ * skip the sweep too.
+ *
+ * Returns true on accept. Stops at the first denying segment. */
+static bool path_segments_owner_match(const http_static_handler_t *mount,
+                                      const char *fs_path)
+{
+    const size_t root_len = ZSTR_LEN(mount->root_directory);
+    if (UNEXPECTED(strncmp(fs_path,
+                           ZSTR_VAL(mount->root_directory),
+                           root_len) != 0)) {
+        return false;
+    }
+
+    char        buf[PATH_MAX];
+    size_t      len = root_len;
+    if (UNEXPECTED(root_len >= sizeof(buf))) {
+        return false;
+    }
+    memcpy(buf, ZSTR_VAL(mount->root_directory), root_len);
+    buf[len] = '\0';
+
+    const char *seg = fs_path + root_len;
+    while (*seg == '/') seg++;
+
+    while (*seg != '\0') {
+        const char  *next    = strchr(seg, '/');
+        const size_t seg_len = (next != NULL) ? (size_t)(next - seg)
+                                              : strlen(seg);
+        /* "+2" — '/' separator + NUL. */
+        if (UNEXPECTED(len + 1 + seg_len + 1 > sizeof(buf))) {
+            return false;
+        }
+        buf[len++] = '/';
+        memcpy(buf + len, seg, seg_len);
+        len += seg_len;
+        buf[len] = '\0';
+
+        struct stat ls;
+        if (UNEXPECTED(lstat(buf, &ls) != 0)) {
+            return false;
+        }
+        if (S_ISLNK(ls.st_mode)) {
+            struct stat ts;
+            if (UNEXPECTED(stat(buf, &ts) != 0)) {
+                return false;
+            }
+            if (ls.st_uid != ts.st_uid) {
+                return false;
+            }
+        }
+
+        if (next == NULL) break;
+        seg = next + 1;
+    }
+    return true;
 }
 
 /* After try_open_candidate succeeds we know the FINAL component is
@@ -1392,12 +1492,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
                 have_view = true;
             } else {
                 http_server_on_static_cache_miss(conn->counters);
-                gate_ok = resolved_under_root(mount, fs_path);
+                gate_ok = symlink_policy_admits(mount, fs_path)
+                       && resolved_under_root(mount, fs_path);
                 /* Insertion happens in ss_handle_stat once st / etag /
                  * content_type / Last-Modified are all in hand. */
             }
         } else {
-            gate_ok = resolved_under_root(mount, fs_path);
+            gate_ok = symlink_policy_admits(mount, fs_path)
+                   && resolved_under_root(mount, fs_path);
         }
         if (gate_ok) {
             if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head,
@@ -1427,7 +1529,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
          * leaves open: realpath() canonicalises every segment, so a
          * symlink anywhere on the path that points outside the mount
          * surfaces here as a prefix mismatch. */
-        if (UNEXPECTED(!resolved_under_root(mount, fs_path))) {
+        if (UNEXPECTED(!resolved_under_root(mount, fs_path)
+                || !symlink_policy_admits(mount, fs_path))) {
             close(fd);
             emit_status(response_obj, 404, "Not Found", 9);
             ctx->skip_php_handler = true;
