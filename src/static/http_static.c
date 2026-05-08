@@ -6,17 +6,21 @@
   +----------------------------------------------------------------------+
 */
 
-/* Static-handler dispatch. Resolves the request URL
- * against the configured mounts, opens the file synchronously, and
- * populates the response object so the existing handler dispose path
- * flushes it on the wire. The PHP coroutine entry sees
- * ctx->skip_php_handler and short-circuits without entering the VM —
- * no zend_call_function, no zend_try, no fcall_info_cache lookup.
+/* Static-handler dispatch — protocol-agnostic. Resolves the request
+ * URL against the configured mounts, opens the file (sync or async via
+ * ZEND_ASYNC_FS_OPEN depending on the path), populates `response_obj`
+ * with status + headers + (for short error bodies) inline body, and
+ * delegates body delivery to the protocol's send_static_response op
+ * (see http_response_stream_ops_t in php_http_server.h).
  *
- * The synchronous open/read is intentional for the first cut. PR #5 in
- * docs/PLAN_STATIC_HANDLER.md upgrades the read to a libuv thread-pool
- * async chain (or sendfile/splice). The interface here — single
- * http_static_try_serve entrypoint — is stable across that change. */
+ * The protocol layer (HTTP/1, HTTP/2, HTTP/3) supplies dispatch
+ * callbacks via http_static_dispatch_cbs_t — counters / refcount
+ * pinning at HARD_ZERO arm time, finalize at on_static_done, spawn-
+ * the-PHP-handler-coroutine for on_missing:Next rollback, keep-alive
+ * verdict for the Connection header. Nothing in this module touches
+ * http_connection_t / http1_request_ctx_t / http2_stream_t directly —
+ * the protocol-specific lifecycle lives entirely behind those four
+ * callbacks. */
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -26,8 +30,7 @@
 #include "zend_smart_str.h"
 #include "Zend/zend_async_API.h"
 #include "php_http_server.h"
-#include "core/http_connection.h"
-#include "core/http_connection_internal.h"
+#include "http1/http_parser.h" /* http_request_t */
 #include "static/static_handler.h"
 #include "static/http_static_mime.h"
 #include "static/http_static_path.h"
@@ -411,8 +414,25 @@ typedef enum
 
 typedef struct
 {
-	http_connection_t *conn;
-	http1_request_ctx_t *ctx;
+	/* Protocol-agnostic dispatch hooks. Callbacks fire on completion /
+	 * rollback / keep-alive query. user is opaque to the static module. */
+	http_static_dispatch_cbs_t cbs;
+	void *user;
+	bool armed; /* on_hard_zero_armed already fired — pair with on_static_done */
+
+	/* Telemetry sink. May be NULL (offline tests). */
+	http_server_counters_t *counters;
+
+	/* Server (for cache_acquire). */
+	http_server_object *server;
+
+	/* Inbound request — used for header lookups (Range, If-*). */
+	http_request_t *request;
+
+	/* Response object — populated with status + headers + (for inline
+	 * error bodies) body before delegation. */
+	zend_object *response_obj;
+
 	const http_static_handler_t *mount;
 
 	/* Resolved on-disk path. emalloc'd in ss_kick_off, freed by
@@ -429,7 +449,6 @@ typedef struct
 	struct stat st;
 
 	bool is_head;
-	bool should_continue; /* keep-alive verdict, set before hand-off */
 
 	/* State machine cursor. */
 	ss_phase_t phase;
@@ -511,17 +530,16 @@ static inline void ss_state_free(ss_state_t *state)
 /* Forward decl for on_done callback wired into the protocol op. */
 static void ss_on_protocol_done(void *user, int status);
 
-/* Tear down the state machine and run http_request_finalize. After
- * this the conn is either keep-alive-armed for the next request or
- * closed; either way nothing more touches `state`. Used on the
- * early-error paths (open failed before we delegated, stat error)
- * AND as the tail of ss_on_protocol_done once the protocol op is
- * finished. */
-static void ss_finalize(ss_state_t *state)
+/* Tear down the state machine and fire the caller's on_static_done
+ * callback. After that, the caller owns post-request bookkeeping
+ * (counters, finalize, keep-alive) — the static module does not touch
+ * conn/ctx because it has neither.
+ *
+ * Used on the early-error paths (open failed before we delegated,
+ * stat error) AND as the tail of ss_on_protocol_done once the
+ * protocol op is finished. `status` is 0 on success, non-zero abort. */
+static void ss_finalize(ss_state_t *state, int status)
 {
-	http_connection_t *const conn = state->conn;
-	http1_request_ctx_t *const ctx = state->ctx;
-
 	state->phase = SS_PHASE_DONE;
 
 	if (state->cb != NULL && state->file_io != NULL) {
@@ -536,23 +554,14 @@ static void ss_finalize(ss_state_t *state)
 		state->file_io = NULL;
 	}
 
-	/* Pair the on_request_dispatch fired at hand-off. */
-	http_server_on_request_dispose(conn->counters);
-
-	/* Mirror the dispose-side bookkeeping that the coroutine path
-	 * normally handles for us. */
-	if (ctx->request != NULL) {
-		ctx->request->coroutine = NULL;
-	}
-
-	if (conn->current_request == ctx->request) {
-		conn->current_request = NULL;
-	}
-
-	const bool should_continue = state->should_continue;
+	const http_static_dispatch_cbs_t cbs_copy = state->cbs;
+	void *const user = state->user;
+	const bool armed = state->armed;
 	ss_state_free(state);
 
-	http_request_finalize(conn, ctx, should_continue);
+	if (armed && cbs_copy.on_static_done != NULL) {
+		cbs_copy.on_static_done(user, status);
+	}
 }
 
 /* Helper: format a uint64 as a decimal string into `out`. Returns
@@ -576,7 +585,19 @@ static void ss_set_content_length(zend_object *response_obj, uint64_t len)
 	}
 }
 
-/* Set Connection header tracking the keep-alive verdict. */
+/* Set Connection header tracking the keep-alive verdict. The verdict
+ * is queried via the protocol callback; H1 reads conn->keep_alive,
+ * H2/H3 always returns true (multiplex transports — Connection header
+ * is filtered out at submit time anyway, see http2_strategy.c's
+ * response_header_allowed). */
+static bool ss_keep_alive(const ss_state_t *state)
+{
+	if (state->cbs.keep_alive != NULL) {
+		return state->cbs.keep_alive(state->user);
+	}
+	return true;
+}
+
 static void ss_set_connection_header(zend_object *response_obj, bool keep_alive)
 {
 	if (keep_alive) {
@@ -631,7 +652,7 @@ static void ss_apply_mount_headers(zend_object *response_obj,
 static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 									uint64_t body_offset, uint64_t body_length, bool head_only)
 {
-	zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+	zend_object *const response_obj = state->response_obj;
 	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
 	void *const op_ctx = http_response_get_stream_ctx(response_obj);
 
@@ -720,7 +741,7 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 			/* Map to a 500 emitted through the protocol op (so the
 			 * H1 wire write goes through the right channel for plain
 			 * vs TLS). */
-			zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+			zend_object *const response_obj = state->response_obj;
 			http_response_static_set_status(response_obj, 500);
 			http_response_static_set_header(response_obj, "content-type", 12,
 											"text/plain; charset=utf-8", 25);
@@ -728,11 +749,10 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 			http_response_static_set_body_str(response_obj, msg);
 			zend_string_release(msg);
 			ss_set_content_length(response_obj, 21);
-			state->should_continue = state->conn->keep_alive;
-			ss_set_connection_header(response_obj, state->should_continue);
-			http_server_count_request(state->conn->counters);
+			ss_set_connection_header(response_obj, ss_keep_alive(state));
+			http_server_count_request(state->counters);
 			if (!ss_delegate_to_protocol(state, NULL, 0, 0, true)) {
-				ss_finalize(state);
+				ss_finalize(state, -1);
 			}
 			return;
 		}
@@ -758,7 +778,7 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
  * back to ss_finalize, which still runs counters / dispose. */
 static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body, size_t body_len)
 {
-	zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+	zend_object *const response_obj = state->response_obj;
 	http_response_static_set_status(response_obj, status);
 	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
 									25);
@@ -768,26 +788,24 @@ static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body
 		zend_string_release(msg);
 	}
 	ss_set_content_length(response_obj, (uint64_t)body_len);
-	state->should_continue = state->conn->keep_alive;
-	ss_set_connection_header(response_obj, state->should_continue);
+	ss_set_connection_header(response_obj, ss_keep_alive(state));
 
-	http_server_count_request(state->conn->counters);
+	http_server_count_request(state->counters);
 	return ss_delegate_to_protocol(state, NULL, 0, 0, true);
 }
 
 /* on_missing:Next rollback (#5c). Open failed on a mount configured to
- * fall through. Tear down the static FSM and hand ctx to a fresh PHP-
- * handler coroutine. Counters and refcounts already bumped in
- * ss_kick_off are left in place — the new coroutine's dispose path will
- * decrement them, balancing the bookkeeping. */
+ * fall through. Tear down the static FSM scratch state and hand off to
+ * the protocol-supplied callback so it can spawn its handler
+ * coroutine. The caller's on_passthrough_to_php is responsible for
+ * dropping whatever resources the matching on_hard_zero_armed pinned —
+ * conceptually the static path no longer owns this request, the
+ * caller's PHP-handler coroutine does. */
 static void ss_rollback_to_php_handler(ss_state_t *state)
 {
-	http_connection_t *const conn = state->conn;
-	http1_request_ctx_t *const ctx = state->ctx;
-
 	/* Drop the file_io + persistent callback (mirrors ss_finalize but
-	 * without on_request_dispose / http_request_finalize — those happen
-	 * later via the coroutine's dispose). */
+	 * without firing on_static_done — the caller treats the request as
+	 * if static had never claimed it). */
 	if (state->cb != NULL && state->file_io != NULL) {
 		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
 		state->cb = NULL;
@@ -802,41 +820,13 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 
 	state->phase = SS_PHASE_DONE;
 
-	/* Spawn the PHP handler coroutine (mirrors the dispatch tail in
-	 * http_connection_dispatch_request). conn->scope is alive because
-	 * ss_kick_off pinned conn->handler_refcount. */
-	zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
-	if (UNEXPECTED(coroutine == NULL)) {
-		zval_ptr_dtor(&ctx->request_zv);
-		zval_ptr_dtor(&ctx->response_zv);
-		efree(ctx);
-		ss_state_free(state);
-		http_connection_destroy(conn);
-		return;
-	}
-
-	if (conn->handler == NULL) {
-		http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
-		http_response_static_set_header(Z_OBJ(ctx->response_zv), "content-type", 12,
-										"text/plain; charset=utf-8", 25);
-		zend_string *msg = zend_string_init("Not Found", 9, 0);
-		http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
-		zend_string_release(msg);
-		ctx->skip_php_handler = true;
-	}
-
-	coroutine->internal_entry = http_handler_coroutine_entry;
-	coroutine->extended_data = ctx;
-	coroutine->extended_dispose = http_handler_coroutine_dispose;
-
-	if (ctx->request != NULL) {
-		ctx->request->coroutine = coroutine;
-	}
-
-	ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
-
-	/* state lifetime ends here — ctx is owned by the coroutine. */
+	const http_static_dispatch_cbs_t cbs_copy = state->cbs;
+	void *const user = state->user;
 	ss_state_free(state);
+
+	if (cbs_copy.on_passthrough_to_php != NULL) {
+		cbs_copy.on_passthrough_to_php(user);
+	}
 }
 
 static void ss_handle_open(ss_state_t *state, zend_object *exception)
@@ -847,7 +837,7 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
 			return;
 		}
 		if (!ss_emit_error_via_op(state, 404, "Not Found", 9)) {
-			ss_finalize(state);
+			ss_finalize(state, -1);
 		}
 		return;
 	}
@@ -864,25 +854,25 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
 	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
 	if (UNEXPECTED(state->pending_req == NULL)) {
 		if (!ss_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-			ss_finalize(state);
+			ss_finalize(state, -1);
 		}
 	}
 }
 
 static void ss_handle_stat(ss_state_t *state)
 {
-	zend_object *const response_obj = Z_OBJ(state->ctx->response_zv);
+	zend_object *const response_obj = state->response_obj;
 
 	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
 		if (!ss_emit_error_via_op(state, 404, "Not Found", 9)) {
-			ss_finalize(state);
+			ss_finalize(state, -1);
 		}
 		return;
 	}
 
 	if (UNEXPECTED((uint64_t)state->st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
 		if (!ss_emit_error_via_op(state, 413, "Payload Too Large", 17)) {
-			ss_finalize(state);
+			ss_finalize(state, -1);
 		}
 		return;
 	}
@@ -921,9 +911,9 @@ static void ss_handle_stat(ss_state_t *state)
 	}
 
 	const zend_string *if_none_match =
-		find_first_request_header(state->ctx->request, "if-none-match", 13);
+		find_first_request_header(state->request, "if-none-match", 13);
 	const zend_string *if_modified_since =
-		find_first_request_header(state->ctx->request, "if-modified-since", 17);
+		find_first_request_header(state->request, "if-modified-since", 17);
 	const bool not_modified = http_static_conditional_match(
 		if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
 		if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
@@ -932,8 +922,8 @@ static void ss_handle_stat(ss_state_t *state)
 		etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, state->st.st_mtime);
 
 	/* Cache insert (only on miss path). */
-	if (!state->has_cached_meta && state->conn != NULL && state->conn->server != NULL) {
-		http_static_cache_t *cache = http_static_cache_acquire(state->conn->server);
+	if (!state->has_cached_meta && state->server != NULL) {
+		http_static_cache_t *cache = http_static_cache_acquire(state->server);
 		if (cache != NULL) {
 			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
 									 content_type, content_type_len, etag_enabled ? etag_buf : NULL,
@@ -946,8 +936,8 @@ static void ss_handle_stat(ss_state_t *state)
 	state->range_total = (uint64_t)state->st.st_size;
 	state->is_range = false;
 	if (!not_modified) {
-		const zend_string *range_hdr = find_first_request_header(state->ctx->request, "range", 5);
-		const zend_string *if_range = find_first_request_header(state->ctx->request, "if-range", 8);
+		const zend_string *range_hdr = find_first_request_header(state->request, "range", 5);
+		const zend_string *if_range = find_first_request_header(state->request, "if-range", 8);
 		bool range_allowed = true;
 		if (if_range != NULL && etag_enabled) {
 			range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN &&
@@ -965,7 +955,6 @@ static void ss_handle_stat(ss_state_t *state)
 				state->range_last = last;
 			} else if (rc == -1) {
 				/* 416. Carry "Content-Range: bytes [star]/size" per RFC 9110 sec 14.1.2. */
-				state->should_continue = state->conn->keep_alive;
 				http_response_static_set_status(response_obj, 416);
 				http_response_static_set_header(response_obj, "content-type", 12,
 												"text/plain; charset=utf-8", 25);
@@ -976,17 +965,17 @@ static void ss_handle_stat(ss_state_t *state)
 													(size_t)crn);
 				}
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
-				ss_set_connection_header(response_obj, state->should_continue);
-				http_server_count_request(state->conn->counters);
+				ss_set_connection_header(response_obj, ss_keep_alive(state));
+				http_server_count_request(state->counters);
 				if (!ss_delegate_to_protocol(state, NULL, 0, 0, true)) {
-					ss_finalize(state);
+					ss_finalize(state, -1);
 				}
 				return;
 			}
 		}
 	}
 
-	state->should_continue = state->conn->keep_alive;
+	const bool keep_alive = ss_keep_alive(state);
 
 	/* === Build the response onto response_obj ============================
 	 *
@@ -1048,47 +1037,45 @@ static void ss_handle_stat(ss_state_t *state)
 	}
 
 	ss_apply_mount_headers(response_obj, state->mount, include_content_headers);
-	ss_set_connection_header(response_obj, state->should_continue);
+	ss_set_connection_header(response_obj, keep_alive);
 
 	/* === Hand off to the protocol's send_static_response ============== */
 
 	zend_async_io_t *const file_io = state->file_io;
 
 	if (not_modified) {
-		http_server_count_request(state->conn->counters);
+		http_server_count_request(state->counters);
 		if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, 0, 0, true))) {
-			ss_finalize(state);
+			ss_finalize(state, -1);
 		}
 		return;
 	}
 
 	if (state->is_head || state->st.st_size == 0) {
-		http_server_count_request(state->conn->counters);
+		http_server_count_request(state->counters);
 		if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, 0, 0, true))) {
-			ss_finalize(state);
+			ss_finalize(state, -1);
 		}
 		return;
 	}
 
 	const uint64_t body_offset = state->is_range ? state->range_first : 0;
-	http_server_count_request(state->conn->counters);
+	http_server_count_request(state->counters);
 	if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
-		ss_finalize(state);
+		ss_finalize(state, -1);
 	}
 }
 
 /* Protocol op completion. status==0 success; non-zero abort (peer
- * reset / write error). Either way we run the static-side finalize:
- * file_io is already disposed by the op (or by the early-error
- * path), so finalize just runs counters + http_request_finalize. */
+ * reset / write error). The protocol op has disposed the file_io;
+ * finalize fires the caller's on_static_done with the same status. */
 static void ss_on_protocol_done(void *user, int status)
 {
-	(void)status;
 	ss_state_t *const state = (ss_state_t *)user;
 	if (state == NULL) {
 		return;
 	}
-	ss_finalize(state);
+	ss_finalize(state, status);
 }
 
 /* === Hard-zero kick-off =========================================== */
@@ -1100,7 +1087,9 @@ static void ss_on_protocol_done(void *user, int status)
  * `cv` is non-NULL when the pre-flight had an open-file-cache hit:
  * the FSM will skip IO_STAT (state->st pre-filled), etag formatting,
  * MIME lookup and IMF-date formatting on the way to ss_handle_stat. */
-static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
+static bool ss_kick_off(http_server_object *server, http_request_t *request,
+						zend_object *response_obj, http_server_counters_t *counters,
+						const http_static_dispatch_cbs_t *cbs, void *user,
 						const http_static_handler_t *mount, const char *fs_path, size_t fs_path_len,
 						const bool is_head, const http_static_cache_view_t *cv,
 						const char *encoding, size_t encoding_len, const char *override_ct,
@@ -1113,15 +1102,20 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 	/* Protocol must implement send_static_response. H2/H3 leave it
 	 * NULL today, in which case we fall back to the synchronous-
 	 * populate path so the regular dispatch tail handles delivery. */
-	zend_object *const response_obj = Z_OBJ(ctx->response_zv);
 	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
 	if (ops == NULL || ops->send_static_response == NULL) {
 		return false;
 	}
 
 	ss_state_t *state = ecalloc(1, sizeof(*state));
-	state->conn = conn;
-	state->ctx = ctx;
+	state->server = server;
+	state->request = request;
+	state->response_obj = response_obj;
+	state->counters = counters;
+	if (cbs != NULL) {
+		state->cbs = *cbs;
+	}
+	state->user = user;
 	state->mount = mount;
 	state->is_head = is_head;
 	state->fs_path = emalloc(fs_path_len + 1);
@@ -1185,14 +1179,16 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 	}
 	state->cb = &cb->base;
 
-	/* Pin the conn for the duration of the chain — paired with
-	 * http_request_finalize's --refcount inside ss_finalize. */
-	conn->handler_refcount++;
-	conn->state = CONN_STATE_PROCESSING;
-	http_server_on_request_dispatch(conn->counters);
+	/* Tell the caller the FSM has armed — it pins protocol-side
+	 * resources (refcount conn / bump in-flight counter / set
+	 * processing state) here. Paired with on_static_done. */
+	if (cbs != NULL && cbs->on_hard_zero_armed != NULL) {
+		cbs->on_hard_zero_armed(user);
+	}
+	state->armed = true;
 
 	/* Telemetry — see http_server_counters_t::static_zero_coroutine_total. */
-	http_server_on_static_zero_coroutine(conn->counters);
+	http_server_on_static_zero_coroutine(counters);
 
 	return true;
 }
@@ -1403,17 +1399,21 @@ static bool try_select_precompressed(const http_static_handler_t *mount, http_re
 	return false;
 }
 
-http_static_result_t http_static_try_serve(http_server_object *server, http_connection_t *conn,
-										   void *ctx_void, http_request_t *request)
+http_static_result_t http_static_try_serve(http_server_object *server,
+										   http_request_t *request,
+										   zend_object *response_obj,
+										   http_server_counters_t *counters,
+										   const http_static_dispatch_cbs_t *cbs,
+										   void *user)
 {
 	const size_t mount_count = http_static_handler_count(server);
 	if (UNEXPECTED(mount_count == 0)) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
-	(void)conn; /* will be used by the future async serve path. */
 
-	http1_request_ctx_t *const ctx = (http1_request_ctx_t *)ctx_void;
-	zend_object *const response_obj = Z_OBJ(ctx->response_zv);
+	if (UNEXPECTED(response_obj == NULL || request == NULL)) {
+		return HTTP_STATIC_PASSTHROUGH;
+	}
 
 	/* GET/HEAD only — operators can overlay POST/PUT endpoints on the
 	 * same prefix without the static layer turning them into 405s. */
@@ -1452,14 +1452,12 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 		}
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_BAD_REQUEST)) {
 			emit_status(response_obj, 400, "Bad Request", 11);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 		/* Dotfile-deny / traversal escape: 404 (not 403) so existence
 		 * of the restricted resource isn't disclosed. */
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_FORBIDDEN)) {
 			emit_status(response_obj, 404, "Not Found", 9);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_HIDE)) {
@@ -1467,7 +1465,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 				return HTTP_STATIC_PASSTHROUGH;
 			}
 			emit_status(response_obj, 404, "Not Found", 9);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1479,7 +1476,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 				return HTTP_STATIC_PASSTHROUGH;
 			}
 			emit_status(response_obj, 404, "Not Found", 9);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1518,7 +1514,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 					return HTTP_STATIC_PASSTHROUGH;
 				}
 				emit_status(response_obj, 404, "Not Found", 9);
-				ctx->skip_php_handler = true;
 				return HTTP_STATIC_HANDLED;
 			}
 		}
@@ -1576,11 +1571,11 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 				 * stat/etag/MIME/Last-Modified are pre-rendered. The
 				 * FSM will skip every one of those derivations on the
 				 * way through ss_handle_open → ss_handle_stat. */
-				http_server_on_static_cache_hit(conn->counters);
+				http_server_on_static_cache_hit(counters);
 				gate_ok = true;
 				have_view = true;
 			} else {
-				http_server_on_static_cache_miss(conn->counters);
+				http_server_on_static_cache_miss(counters);
 				gate_ok =
 					symlink_policy_admits(mount, fs_path) && resolved_under_root(mount, fs_path);
 				/* Insertion happens in ss_handle_stat once st / etag /
@@ -1590,8 +1585,9 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 			gate_ok = symlink_policy_admits(mount, fs_path) && resolved_under_root(mount, fs_path);
 		}
 		if (gate_ok) {
-			if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head, have_view ? &cv : NULL,
-							picked_encoding, picked_encoding_len, override_ct, override_ct_len)) {
+			if (ss_kick_off(server, request, response_obj, counters, cbs, user, mount, fs_path,
+							fs_path_len, is_head, have_view ? &cv : NULL, picked_encoding,
+							picked_encoding_len, override_ct, override_ct_len)) {
 				return HTTP_STATIC_HARD_ZERO;
 			}
 		}
@@ -1609,7 +1605,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 				return HTTP_STATIC_PASSTHROUGH;
 			}
 			emit_status(response_obj, 404, "Not Found", 9);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1621,7 +1616,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 					   !symlink_policy_admits(mount, fs_path))) {
 			close(fd);
 			emit_status(response_obj, 404, "Not Found", 9);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1630,7 +1624,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 		if (UNEXPECTED((uint64_t)st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
 			close(fd);
 			emit_status(response_obj, 413, "Payload Too Large", 17);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1668,7 +1661,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 												ZSTR_LEN(mount->cache_control));
 			}
 			apply_extra_headers(response_obj, mount, false);
-			ctx->skip_php_handler = true;
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1678,7 +1670,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 			if (UNEXPECTED(body == NULL)) {
 				close(fd);
 				emit_status(response_obj, 500, "Internal Server Error", 21);
-				ctx->skip_php_handler = true;
 				return HTTP_STATIC_HANDLED;
 			}
 		}
@@ -1724,7 +1715,6 @@ http_static_result_t http_static_try_serve(http_server_object *server, http_conn
 			zend_string_release(body);
 		}
 
-		ctx->skip_php_handler = true;
 		return HTTP_STATIC_HANDLED;
 	}
 

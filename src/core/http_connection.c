@@ -1555,6 +1555,111 @@ bool http_connection_send_error(http_connection_t *conn, const int status_code, 
 }
 /* }}} */
 
+/* {{{ HTTP/1 static-handler dispatch callbacks
+ *
+ * Plug into http_static_try_serve. The user pointer is the
+ * http1_request_ctx_t for the request; conn is reachable as ctx->conn.
+ * These four callbacks are the entire H1-side surface area the
+ * (otherwise protocol-agnostic) static handler needs.
+ *
+ *   on_hard_zero_armed   — pin conn / bump dispatch counter to mirror
+ *                          what the regular coroutine path does.
+ *   on_static_done       — drop the pin / counter, run the shared
+ *                          finalize (keep-alive re-arm or close).
+ *   on_passthrough_to_php — open ENOENT on `on_missing: Next`: spawn
+ *                          the regular handler coroutine as if the
+ *                          static handler had never claimed the
+ *                          request.
+ *   keep_alive           — query conn->keep_alive (decided by parser).
+ */
+static void h1_static_on_hard_zero_armed(void *user)
+{
+    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
+    http_connection_t *const conn = ctx->conn;
+    /* Pin the conn for the duration of the static FSM — paired with
+     * the drop in h1_static_on_static_done. Mirrors the bracket the
+     * coroutine path puts around its handler invocation. */
+    conn->handler_refcount++;
+    conn->state = CONN_STATE_PROCESSING;
+    http_server_on_request_dispatch(conn->counters);
+}
+
+static void h1_static_on_static_done(void *user, int status)
+{
+    (void)status;
+    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
+    http_connection_t *const conn = ctx->conn;
+
+    /* Pair the on_request_dispatch fired in on_hard_zero_armed. */
+    http_server_on_request_dispose(conn->counters);
+
+    if (ctx->request != NULL) {
+        ctx->request->coroutine = NULL;
+    }
+    if (conn->current_request == ctx->request) {
+        conn->current_request = NULL;
+    }
+
+    const bool should_continue = conn->keep_alive;
+    http_request_finalize(conn, ctx, should_continue);
+}
+
+static void h1_static_on_passthrough_to_php(void *user)
+{
+    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
+    http_connection_t *const conn = ctx->conn;
+
+    /* Spawn the regular PHP-handler coroutine — same shape as the
+     * dispatch tail below, but as a continuation from the FSM. Counters
+     * / handler_refcount were NOT pinned (on_hard_zero_armed never
+     * fired), so we bump them here to match the normal path. */
+    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+    if (UNEXPECTED(coroutine == NULL)) {
+        zval_ptr_dtor(&ctx->request_zv);
+        zval_ptr_dtor(&ctx->response_zv);
+        efree(ctx);
+        http_connection_destroy(conn);
+        return;
+    }
+
+    if (conn->handler == NULL) {
+        http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
+        http_response_static_set_header(Z_OBJ(ctx->response_zv), "content-type", 12,
+                                        "text/plain; charset=utf-8", 25);
+        zend_string *msg = zend_string_init("Not Found", 9, 0);
+        http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
+        zend_string_release(msg);
+        ctx->skip_php_handler = true;
+    }
+
+    coroutine->internal_entry = http_handler_coroutine_entry;
+    coroutine->extended_data = ctx;
+    coroutine->extended_dispose = http_handler_coroutine_dispose;
+
+    if (ctx->request != NULL) {
+        ctx->request->coroutine = coroutine;
+    }
+
+    http_server_on_request_dispatch(conn->counters);
+    conn->handler_refcount++;
+
+    ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
+}
+
+static bool h1_static_keep_alive(void *user)
+{
+    const http1_request_ctx_t *const ctx = (const http1_request_ctx_t *)user;
+    return ctx->conn->keep_alive;
+}
+
+const http_static_dispatch_cbs_t h1_static_dispatch_cbs = {
+    .on_hard_zero_armed   = h1_static_on_hard_zero_armed,
+    .on_static_done       = h1_static_on_static_done,
+    .on_passthrough_to_php = h1_static_on_passthrough_to_php,
+    .keep_alive           = h1_static_keep_alive,
+};
+/* }}} */
+
 /* {{{ http_connection_dispatch_request
  *
  * Called from on_request_ready (inside the read callback). Prepares
@@ -1618,24 +1723,29 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     /* Static handler dispatch (issue #13). When any mount is
      * configured, give the C handler the first chance to claim the
      * request: it resolves the URL, opens + reads the file, and
-     * populates ctx->response_zv / sets skip_php_handler so the
-     * coroutine entry below short-circuits without entering the PHP
-     * VM. Falls through to the PHP handler on PASSTHROUGH (no mount
-     * matched, non-GET method, on_missing: Next, ...). */
+     * populates ctx->response_zv. Falls through to the PHP handler on
+     * PASSTHROUGH (no mount matched, non-GET method, on_missing: Next,
+     * ...). The static handler is protocol-agnostic — H1 supplies the
+     * lifecycle callbacks via http_static_dispatch_cbs_t. */
     if (UNEXPECTED(http_static_handler_count(conn->server) > 0)) {
+        extern const http_static_dispatch_cbs_t h1_static_dispatch_cbs;
         const http_static_result_t static_rc =
-            http_static_try_serve(conn->server, conn, ctx, req);
-        /* HARD_ZERO → state machine has the request lifecycle and
-         *   already pinned conn / counted dispatch. We MUST NOT
-         *   spawn a coroutine; finalize fires from the sendfile
-         *   completion callback.
-         * HANDLED → ctx->skip_php_handler is set, response is
-         *   populated; fall through and spawn the coroutine so
-         *   dispose runs the normal flush path.
+            http_static_try_serve(conn->server, req, Z_OBJ(ctx->response_zv),
+                                  conn->counters,
+                                  &h1_static_dispatch_cbs, ctx);
+        /* HARD_ZERO → state machine has the request lifecycle and the
+         *   on_hard_zero_armed callback has pinned conn / bumped the
+         *   dispatch counter. We MUST NOT spawn a coroutine; on_static_
+         *   done fires once delivery completes.
+         * HANDLED → response is populated; flag skip_php_handler and
+         *   fall through to spawn the dispose coroutine.
          * PASSTHROUGH → nothing was populated; coroutine + PHP
          *   handler runs as usual. */
         if (static_rc == HTTP_STATIC_HARD_ZERO) {
             return;
+        }
+        if (static_rc == HTTP_STATIC_HANDLED) {
+            ctx->skip_php_handler = true;
         }
     }
 

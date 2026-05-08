@@ -20,6 +20,7 @@
 
 #include "php.h"
 #include "zend_smart_str.h"
+#include "php_http_server.h" /* http_server_counters_t */
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -119,10 +120,11 @@ typedef struct
  *               through). Dispatcher continues with the regular
  *               coroutine + PHP handler path.
  *
- * HANDLED     — populated ctx->response_zv synchronously (4xx error
- *               body, or a soft-skip mode). Dispatcher proceeds with
- *               the normal coroutine path; ctx->skip_php_handler is
- *               set so the entry short-circuits and dispose flushes.
+ * HANDLED     — response_obj populated synchronously (4xx error body,
+ *               or a soft-skip mode). Dispatcher proceeds with the
+ *               normal coroutine path / dispose flush; the caller is
+ *               responsible for skipping its user handler (e.g. set
+ *               ctx->skip_php_handler on H1).
  *
  * HARD_ZERO   — owns the request lifecycle from here on. Dispatcher
  *               MUST NOT spawn a coroutine: a callback chain is
@@ -146,7 +148,6 @@ typedef enum
  * php_http_server.h. */
 struct http_request_t;
 struct _http_connection_t;
-struct http_server_object;
 
 /* PHP class entries — filled in by the static_handler_class_register()
  * call from MINIT. */
@@ -194,23 +195,78 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 void http_static_handler_shared_addref(http_static_handler_t *mount);
 void http_static_handler_shared_release(http_static_handler_t *mount);
 
-/* Dispatch hook entrypoint — declared here so http_connection.c can
- * call it without needing the full implementation header. */
-http_static_result_t http_static_try_serve(struct http_server_object *server,
-										   struct _http_connection_t *conn, void *ctx,
-										   struct http_request_t *request);
+/* Protocol-agnostic dispatch callbacks. The static handler resolves
+ * the mount, opens + stats the file, populates response_obj headers/
+ * status/inline body, then either:
+ *   - HARD_ZERO: arms the protocol's send_static_response op for body
+ *     delivery; on_hard_zero_armed fires before the op is kicked,
+ *     on_static_done fires once delivery completes (success or error).
+ *   - HANDLED: response_obj is populated and the caller's normal flush
+ *     path emits it.
+ *   - PASSTHROUGH: nothing claimed; caller runs its PHP handler.
+ *   - ENOENT on `on_missing: Next` mount: the static FSM tears down its
+ *     scratch state and fires on_passthrough_to_php so the caller
+ *     spawns its handler coroutine.
+ *
+ * Callbacks are invoked from various points inside try_serve and from
+ * the FSM continuations rooted at ZEND_ASYNC_FS_OPEN. The user pointer
+ * is passed back to every callback verbatim. */
+typedef struct {
+	/* Called once the static FSM has kicked off its async chain (the
+	 * synchronous tail of try_serve that returns HARD_ZERO). The caller
+	 * pins protocol-side resources (refcount the conn, bump in-flight
+	 * dispatch counter, etc.) — these stay pinned until on_static_done
+	 * fires. NULL = nothing to do. */
+	void (*on_hard_zero_armed)(void *user);
+
+	/* Called once the protocol's send_static_response op has finished
+	 * (or the static handler failed before delegating). status==0 ok,
+	 * non-zero abort. The caller drops the resources it pinned in
+	 * on_hard_zero_armed and runs whatever post-request bookkeeping it
+	 * needs (finalize / keep-alive). NULL = nothing to do, but in that
+	 * case file_io leaks unless the protocol op took ownership.
+	 *
+	 * After this call returns, `user` should be considered freed by
+	 * the caller — the static handler will not touch it again. */
+	void (*on_static_done)(void *user, int status);
+
+	/* on_missing:Next rollback. The mount said ENOENT-falls-through;
+	 * the FSM has torn down its scratch state and is asking the caller
+	 * to spawn its PHP-handler coroutine as if try_serve had returned
+	 * PASSTHROUGH from the start. NULL is invalid for mounts that opt
+	 * into HTTP_STATIC_FLAG_ON_MISSING_NEXT (the static handler has no
+	 * other way to recover); for callers that don't support fallthrough
+	 * the safest stub closes the request as 404. */
+	void (*on_passthrough_to_php)(void *user);
+
+	/* Per-protocol keep-alive verdict — H1 reads conn->keep_alive, H2/
+	 * H3 always returns true (multiplexed transport). The static handler
+	 * uses this to decide whether to set Connection: keep-alive vs
+	 * close. NULL → assume true. */
+	bool (*keep_alive)(void *user);
+} http_static_dispatch_cbs_t;
+
+/* Dispatch hook entrypoint. Protocol-agnostic — caller supplies the
+ * response object, the counters block (for telemetry, may be NULL on
+ * test paths), the callback set, and a verbatim user pointer. */
+http_static_result_t http_static_try_serve(http_server_object *server,
+										   struct http_request_t *request,
+										   zend_object *response_obj,
+										   http_server_counters_t *counters,
+										   const http_static_dispatch_cbs_t *cbs,
+										   void *user);
 
 /* Out-of-line "is any mount registered" helper. The struct layout
  * lives in http_server_class.c so the count is not directly visible to
  * the dispatcher TU; this getter is the single authority and is cheap
  * (one load on the hot path). Returns 0 when server is NULL. */
-size_t http_static_handler_count(const struct http_server_object *server);
+size_t http_static_handler_count(const http_server_object *server);
 
 /* Borrow the read-only mount descriptor at `index` (0-based, must be
  * < http_static_handler_count). Pointer is stable for the lifetime of
  * the server. Used by the dispatch FSM to iterate without seeing the
  * server-object struct layout. */
-const http_static_handler_t *http_static_handler_get(const struct http_server_object *server,
+const http_static_handler_t *http_static_handler_get(const http_server_object *server,
 													 size_t index);
 
 /* Open file cache accessor — lazily creates the cache on first call,
@@ -220,7 +276,7 @@ const http_static_handler_t *http_static_handler_get(const struct http_server_ob
  * their own copy after worker-pool transfer. See
  * include/static/http_static_cache.h for cache semantics. */
 struct http_static_cache_s;
-struct http_static_cache_s *http_static_cache_acquire(struct http_server_object *server);
+struct http_static_cache_s *http_static_cache_acquire(http_server_object *server);
 
 /* Maximum file size served on the synchronous read path. Larger files
  * passthrough to the regular handler (or in a future iteration, to a
