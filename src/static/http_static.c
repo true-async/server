@@ -38,6 +38,7 @@
 #include "static/http_static_cache.h"
 #include "compression/http_compression_negotiate.h"
 #include "compression/http_encoder.h"
+#include "http_response_internal.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -45,15 +46,6 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
-
-/* Pull the streaming vtable accessor — we read response_obj's
- * stream_ops to delegate body delivery to the H1 protocol module
- * without re-exposing http_response_get_stream_ops in a public
- * header (it's an internal cross-TU contract — same pattern as
- * compression's response wrapper). */
-extern const http_response_stream_ops_t *
-                  http_response_get_stream_ops(zend_object *obj);
-extern void      *http_response_get_stream_ctx(zend_object *obj);
 
 static void emit_status(zend_object *response_obj, int status, const char *body_msg,
 						size_t body_msg_len)
@@ -374,13 +366,15 @@ static inline bool path_targets_directory(const char *relative, const size_t rel
  * its own). Spurious fires (a callback registered mid-NOTIFY can
  * re-enter the same NOTIFY iteration) are filtered by phase versus
  * expected-req identity. */
+/* The FSM only observes events during OPEN/STAT — once we delegate
+ * to the protocol op, the persistent callback is removed and any
+ * subsequent NOTIFY on file_io is silently dropped (we go to DONE). */
 typedef enum
 {
-	SS_PHASE_OPEN = 0,	  /* awaiting fs_open completion (result=NULL) */
-	SS_PHASE_STAT = 1,	  /* awaiting io_stat completion (result=stat req) */
-	SS_PHASE_DELEGATED = 2, /* protocol op owns delivery; awaiting on_done */
-	SS_PHASE_DONE = 3,
-} ss_phase_t;
+	STATIC_FSM_PHASE_OPEN = 0,	/* awaiting fs_open completion (result=NULL) */
+	STATIC_FSM_PHASE_STAT = 1,	/* awaiting io_stat completion (result=stat req) */
+	STATIC_FSM_PHASE_DONE = 2,
+} static_fsm_phase_t;
 
 typedef struct
 {
@@ -405,8 +399,8 @@ typedef struct
 
 	const http_static_handler_t *mount;
 
-	/* Resolved on-disk path. emalloc'd in ss_kick_off, freed by
-	 * ss_state_free. */
+	/* Resolved on-disk path. emalloc'd in static_fsm_kick_off, freed by
+	 * static_fsm_state_free. */
 	char *fs_path;
 	size_t fs_path_len;
 
@@ -421,7 +415,7 @@ typedef struct
 	bool is_head;
 
 	/* State machine cursor. */
-	ss_phase_t phase;
+	static_fsm_phase_t phase;
 
 	/* Identity of the currently-pending op's req. NOTIFY may fire our
 	 * cb spuriously (registration during NOTIFY iteration races) —
@@ -436,8 +430,8 @@ typedef struct
 	/* Open-file cache pre-population. When the
 	 * pre-flight finds a fresh entry for this path, it copies the
 	 * cached metadata into the slots below and sets has_cached_meta.
-	 * ss_handle_open then skips IO_STAT (state->st pre-filled);
-	 * ss_handle_stat skips etag formatting / MIME lookup / IMF-date
+	 * static_fsm_handle_open then skips IO_STAT (state->st pre-filled);
+	 * static_fsm_handle_stat skips etag formatting / MIME lookup / IMF-date
 	 * formatting (the buffers below are pre-rendered). content_type
 	 * stays a borrowed pointer into the persistent MIME table — same
 	 * lifetime invariant as the cache entry. */
@@ -467,25 +461,25 @@ typedef struct
 	uint64_t range_first;
 	uint64_t range_last;
 	uint64_t range_total;
-} ss_state_t;
+} static_fsm_state_t;
 
 typedef struct
 {
 	zend_async_event_callback_t base;
-	ss_state_t *state;
-} ss_cb_t;
+	static_fsm_state_t *state;
+} static_fsm_cb_t;
 
-static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+static void static_fsm_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
 						void *result, zend_object *exception);
 
-static void ss_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *event)
+static void static_fsm_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *event)
 {
 	(void)event;
 	efree(cb);
 }
 
 /* Single owner of state lifetime. */
-static inline void ss_state_free(ss_state_t *state)
+static inline void static_fsm_state_free(static_fsm_state_t *state)
 {
 	if (state == NULL) {
 		return;
@@ -498,7 +492,7 @@ static inline void ss_state_free(ss_state_t *state)
 }
 
 /* Forward decl for on_done callback wired into the protocol op. */
-static void ss_on_protocol_done(void *user, int status);
+static void static_fsm_on_protocol_done(void *user, int status);
 
 /* Tear down the state machine and fire the caller's on_static_done
  * callback. After that, the caller owns post-request bookkeeping
@@ -506,11 +500,11 @@ static void ss_on_protocol_done(void *user, int status);
  * conn/ctx because it has neither.
  *
  * Used on the early-error paths (open failed before we delegated,
- * stat error) AND as the tail of ss_on_protocol_done once the
+ * stat error) AND as the tail of static_fsm_on_protocol_done once the
  * protocol op is finished. `status` is 0 on success, non-zero abort. */
-static void ss_finalize(ss_state_t *state, int status)
+static void static_fsm_finalize(static_fsm_state_t *state, int status)
 {
-	state->phase = SS_PHASE_DONE;
+	state->phase = STATIC_FSM_PHASE_DONE;
 
 	if (state->cb != NULL && state->file_io != NULL) {
 		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
@@ -527,7 +521,7 @@ static void ss_finalize(ss_state_t *state, int status)
 	const http_static_dispatch_cbs_t cbs_copy = state->cbs;
 	void *const user = state->user;
 	const bool armed = state->armed;
-	ss_state_free(state);
+	static_fsm_state_free(state);
 
 	if (armed && cbs_copy.on_static_done != NULL) {
 		cbs_copy.on_static_done(user, status);
@@ -538,7 +532,7 @@ static void ss_finalize(ss_state_t *state, int status)
  * digit-by-digit beats snprintf("%" PRIu64) by ~15× on hot paths
  * (no parse-format-string overhead, no locale lookup). Returns the
  * byte count written (excluding the NUL). */
-static inline size_t ss_fmt_u64(char *out, uint64_t v)
+static inline size_t static_fsm_fmt_u64(char *out, uint64_t v)
 {
 	/* Worst case for uint64 is 20 digits ("18446744073709551615"). */
 	char tmp[20];
@@ -556,16 +550,16 @@ static inline size_t ss_fmt_u64(char *out, uint64_t v)
 
 /* The protocol op serializes headers verbatim — no auto-Content-Length
  * — so we own writing the number on every response that needs one. */
-static void ss_set_content_length(zend_object *response_obj, uint64_t len)
+static void static_fsm_set_content_length(zend_object *response_obj, uint64_t len)
 {
 	char buf[24];
-	const size_t n = ss_fmt_u64(buf, len);
+	const size_t n = static_fsm_fmt_u64(buf, len);
 	http_response_static_set_header(response_obj, "content-length", 14, buf, n);
 }
 
 /* H1 reads conn->keep_alive; H2/H3 return true (multiplex transports
  * filter out Connection headers at submit time anyway). */
-static bool ss_keep_alive(const ss_state_t *state)
+static bool static_fsm_keep_alive(const static_fsm_state_t *state)
 {
 	if (state->cbs.keep_alive != NULL) {
 		return state->cbs.keep_alive(state->user);
@@ -573,7 +567,7 @@ static bool ss_keep_alive(const ss_state_t *state)
 	return true;
 }
 
-static void ss_set_connection_header(zend_object *response_obj, bool keep_alive)
+static void static_fsm_set_connection_header(zend_object *response_obj, bool keep_alive)
 {
 	if (keep_alive) {
 		http_response_static_set_header(response_obj, "connection", 10, "keep-alive", 10);
@@ -633,7 +627,7 @@ static void apply_mount_headers(zend_object *response_obj,
  * On rc != 0 the op refused (contract: on_done NOT fired). Restore
  * state->file_io to the param so the caller's finalize disposes
  * whatever the caller still owned. NULL stays NULL. */
-static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
+static bool static_fsm_delegate_to_protocol(static_fsm_state_t *state, zend_async_io_t *file_io,
 									uint64_t body_offset, uint64_t body_length, bool head_only)
 {
 	zend_object *const response_obj = state->response_obj;
@@ -660,11 +654,11 @@ static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 		}
 	}
 
-	state->phase = SS_PHASE_DELEGATED;
+	state->phase = STATIC_FSM_PHASE_DONE;
 	state->file_io = NULL; /* op now owns whatever was passed (incl. NULL) */
 
 	const int rc = ops->send_static_response(op_ctx, response_obj, file_io, body_offset, body_length,
-											  head_only, ss_on_protocol_done, state);
+											  head_only, static_fsm_on_protocol_done, state);
 
 	/* WARNING: on rc == 0 with synchronous on_done the op may have
 	 * already freed `state` by the time we reach here — read no fields
@@ -673,7 +667,7 @@ static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 		/* Op refused. on_done did not fire → state is still valid.
 		 * Restore file_io so finalize disposes what the caller held. */
 		state->file_io = file_io;
-		state->phase = SS_PHASE_DONE;
+		state->phase = STATIC_FSM_PHASE_DONE;
 		return false;
 	}
 
@@ -682,32 +676,32 @@ static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 
 /* === Single dispatch callback ===================================== */
 
-static void ss_handle_open(ss_state_t *state, zend_object *exception);
-static void ss_handle_stat(ss_state_t *state);
-static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body, size_t body_len);
+static void static_fsm_handle_open(static_fsm_state_t *state, zend_object *exception);
+static void static_fsm_handle_stat(static_fsm_state_t *state);
+static bool static_fsm_emit_error_via_op(static_fsm_state_t *state, int status, const char *body, size_t body_len);
 
 /* The persistent callback. Registered at kick-off, fires for every
  * NOTIFY on file_io->event during OPEN/STAT. Once we delegate to
  * the protocol op the callback is removed. */
-static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+static void static_fsm_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
 						void *result, zend_object *exception)
 {
 	(void)event;
-	ss_state_t *const state = ((ss_cb_t *)callback)->state;
+	static_fsm_state_t *const state = ((static_fsm_cb_t *)callback)->state;
 	zend_async_io_req_t *const req = (zend_async_io_req_t *)result;
 
 	switch (state->phase) {
-	case SS_PHASE_OPEN:
+	case STATIC_FSM_PHASE_OPEN:
 		/* libuv_fs_open notifies with result=NULL — the only valid
 		 * signal during this phase. Any non-NULL result is a re-
 		 * entrant fire from a later phase's submit, ignore. */
 		if (req != NULL) {
 			return;
 		}
-		ss_handle_open(state, exception);
+		static_fsm_handle_open(state, exception);
 		return;
 
-	case SS_PHASE_STAT:
+	case STATIC_FSM_PHASE_STAT:
 		if (req == NULL || req != state->pending_req) {
 			return;
 		}
@@ -719,16 +713,15 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 			/* Map to a 500 emitted through the protocol op (so the
 			 * H1 wire write goes through the right channel for plain
 			 * vs TLS). */
-			if (!ss_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-				ss_finalize(state, -1);
+			if (!static_fsm_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+				static_fsm_finalize(state, -1);
 			}
 			return;
 		}
-		ss_handle_stat(state);
+		static_fsm_handle_stat(state);
 		return;
 
-	case SS_PHASE_DELEGATED:
-	case SS_PHASE_DONE:
+	case STATIC_FSM_PHASE_DONE:
 	default:
 		return;
 	}
@@ -738,9 +731,9 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
  * protocol op via the file_io==NULL contract.
  *
  * Returns true on accept — `state` is then owned by the op chain and
- * the caller MUST NOT call ss_finalize. False on refusal: caller
- * runs ss_finalize for counters / dispose. */
-static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body, size_t body_len)
+ * the caller MUST NOT call static_fsm_finalize. False on refusal: caller
+ * runs static_fsm_finalize for counters / dispose. */
+static bool static_fsm_emit_error_via_op(static_fsm_state_t *state, int status, const char *body, size_t body_len)
 {
 	zend_object *const response_obj = state->response_obj;
 	http_response_static_set_status(response_obj, status);
@@ -749,11 +742,11 @@ static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body
 	if (body != NULL && body_len > 0) {
 		http_response_static_set_body_cstr(response_obj, body, body_len);
 	}
-	ss_set_content_length(response_obj, (uint64_t)body_len);
-	ss_set_connection_header(response_obj, ss_keep_alive(state));
+	static_fsm_set_content_length(response_obj, (uint64_t)body_len);
+	static_fsm_set_connection_header(response_obj, static_fsm_keep_alive(state));
 
 	http_server_count_request(state->counters);
-	return ss_delegate_to_protocol(state, NULL, 0, 0, true);
+	return static_fsm_delegate_to_protocol(state, NULL, 0, 0, true);
 }
 
 /* on_missing:Next rollback. Open failed on a mount configured to fall
@@ -761,9 +754,9 @@ static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body
  * spawn its PHP handler coroutine. on_hard_zero_armed-pinned resources
  * are dropped by the caller's on_passthrough_to_php — once we hand
  * off, the request belongs to the PHP path. */
-static void ss_rollback_to_php_handler(ss_state_t *state)
+static void static_fsm_rollback_to_php_handler(static_fsm_state_t *state)
 {
-	/* Drop the file_io + persistent callback (mirrors ss_finalize but
+	/* Drop the file_io + persistent callback (mirrors static_fsm_finalize but
 	 * without firing on_static_done — the caller treats the request as
 	 * if static had never claimed it). */
 	if (state->cb != NULL && state->file_io != NULL) {
@@ -778,26 +771,26 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 		state->file_io = NULL;
 	}
 
-	state->phase = SS_PHASE_DONE;
+	state->phase = STATIC_FSM_PHASE_DONE;
 
 	const http_static_dispatch_cbs_t cbs_copy = state->cbs;
 	void *const user = state->user;
-	ss_state_free(state);
+	static_fsm_state_free(state);
 
 	if (cbs_copy.on_passthrough_to_php != NULL) {
 		cbs_copy.on_passthrough_to_php(user);
 	}
 }
 
-static void ss_handle_open(ss_state_t *state, zend_object *exception)
+static void static_fsm_handle_open(static_fsm_state_t *state, zend_object *exception)
 {
 	if (UNEXPECTED(exception != NULL || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
 		if (state->mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
-			ss_rollback_to_php_handler(state);
+			static_fsm_rollback_to_php_handler(state);
 			return;
 		}
-		if (!ss_emit_error_via_op(state, 404, "Not Found", 9)) {
-			ss_finalize(state, -1);
+		if (!static_fsm_emit_error_via_op(state, 404, "Not Found", 9)) {
+			static_fsm_finalize(state, -1);
 		}
 		return;
 	}
@@ -806,38 +799,38 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
 	 * IO_STAT submit entirely — straight into header build with
 	 * cached etag/MIME/lm. */
 	if (state->has_cached_meta) {
-		ss_handle_stat(state);
+		static_fsm_handle_stat(state);
 		return;
 	}
 
-	state->phase = SS_PHASE_STAT;
+	state->phase = STATIC_FSM_PHASE_STAT;
 	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
 	if (UNEXPECTED(state->pending_req == NULL)) {
-		if (!ss_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-			ss_finalize(state, -1);
+		if (!static_fsm_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+			static_fsm_finalize(state, -1);
 		}
 	}
 }
 
-static void ss_handle_stat(ss_state_t *state)
+static void static_fsm_handle_stat(static_fsm_state_t *state)
 {
 	zend_object *const response_obj = state->response_obj;
 
 	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
-		if (!ss_emit_error_via_op(state, 404, "Not Found", 9)) {
-			ss_finalize(state, -1);
+		if (!static_fsm_emit_error_via_op(state, 404, "Not Found", 9)) {
+			static_fsm_finalize(state, -1);
 		}
 		return;
 	}
 
 	if (UNEXPECTED((uint64_t)state->st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
-		if (!ss_emit_error_via_op(state, 413, "Payload Too Large", 17)) {
-			ss_finalize(state, -1);
+		if (!static_fsm_emit_error_via_op(state, 413, "Payload Too Large", 17)) {
+			static_fsm_finalize(state, -1);
 		}
 		return;
 	}
 
-	/* On a cache hit ss_kick_off pre-rendered etag/lm into the state
+	/* On a cache hit static_fsm_kick_off pre-rendered etag/lm into the state
 	 * scratch buffers. On a miss we synthesise everything from the
 	 * freshly-stat'd inode and (at the bottom) hand it to the cache. */
 	char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
@@ -925,17 +918,17 @@ static void ss_handle_stat(ss_state_t *state)
 													(size_t)crn);
 				}
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
-				ss_set_connection_header(response_obj, ss_keep_alive(state));
+				static_fsm_set_connection_header(response_obj, static_fsm_keep_alive(state));
 				http_server_count_request(state->counters);
-				if (!ss_delegate_to_protocol(state, NULL, 0, 0, true)) {
-					ss_finalize(state, -1);
+				if (!static_fsm_delegate_to_protocol(state, NULL, 0, 0, true)) {
+					static_fsm_finalize(state, -1);
 				}
 				return;
 			}
 		}
 	}
 
-	const bool keep_alive = ss_keep_alive(state);
+	const bool keep_alive = static_fsm_keep_alive(state);
 
 	/* === Build the response onto response_obj ============================
 	 *
@@ -961,7 +954,7 @@ static void ss_handle_stat(ss_state_t *state)
 										 : (uint64_t)state->st.st_size);
 
 	if (include_content_headers) {
-		ss_set_content_length(response_obj, body_len);
+		static_fsm_set_content_length(response_obj, body_len);
 	}
 
 	if (etag_enabled) {
@@ -997,7 +990,7 @@ static void ss_handle_stat(ss_state_t *state)
 	}
 
 	apply_mount_headers(response_obj, state->mount, include_content_headers);
-	ss_set_connection_header(response_obj, keep_alive);
+	static_fsm_set_connection_header(response_obj, keep_alive);
 
 	/* === Hand off to the protocol's send_static_response ============== */
 
@@ -1005,37 +998,37 @@ static void ss_handle_stat(ss_state_t *state)
 
 	if (not_modified) {
 		http_server_count_request(state->counters);
-		if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, 0, 0, true))) {
-			ss_finalize(state, -1);
+		if (UNEXPECTED(!static_fsm_delegate_to_protocol(state, file_io, 0, 0, true))) {
+			static_fsm_finalize(state, -1);
 		}
 		return;
 	}
 
 	if (state->is_head || state->st.st_size == 0) {
 		http_server_count_request(state->counters);
-		if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, 0, 0, true))) {
-			ss_finalize(state, -1);
+		if (UNEXPECTED(!static_fsm_delegate_to_protocol(state, file_io, 0, 0, true))) {
+			static_fsm_finalize(state, -1);
 		}
 		return;
 	}
 
 	const uint64_t body_offset = state->is_range ? state->range_first : 0;
 	http_server_count_request(state->counters);
-	if (UNEXPECTED(!ss_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
-		ss_finalize(state, -1);
+	if (UNEXPECTED(!static_fsm_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
+		static_fsm_finalize(state, -1);
 	}
 }
 
 /* Protocol op completion. status==0 success; non-zero abort (peer
  * reset / write error). The protocol op has disposed the file_io;
  * finalize fires the caller's on_static_done with the same status. */
-static void ss_on_protocol_done(void *user, int status)
+static void static_fsm_on_protocol_done(void *user, int status)
 {
-	ss_state_t *const state = (ss_state_t *)user;
+	static_fsm_state_t *const state = (static_fsm_state_t *)user;
 	if (state == NULL) {
 		return;
 	}
-	ss_finalize(state, status);
+	static_fsm_finalize(state, status);
 }
 
 /* === Hard-zero kick-off =========================================== */
@@ -1046,8 +1039,8 @@ static void ss_on_protocol_done(void *user, int status)
  *
  * `cv` is non-NULL when the pre-flight had an open-file-cache hit:
  * the FSM will skip IO_STAT (state->st pre-filled), etag formatting,
- * MIME lookup and IMF-date formatting on the way to ss_handle_stat. */
-static bool ss_kick_off(http_server_object *server, http_request_t *request,
+ * MIME lookup and IMF-date formatting on the way to static_fsm_handle_stat. */
+static bool static_fsm_kick_off(http_server_object *server, http_request_t *request,
 						zend_object *response_obj, http_server_counters_t *counters,
 						const http_static_dispatch_cbs_t *cbs, void *user,
 						const http_static_handler_t *mount, const char *fs_path, size_t fs_path_len,
@@ -1067,7 +1060,7 @@ static bool ss_kick_off(http_server_object *server, http_request_t *request,
 		return false;
 	}
 
-	ss_state_t *state = ecalloc(1, sizeof(*state));
+	static_fsm_state_t *state = ecalloc(1, sizeof(*state));
 	state->server = server;
 	state->request = request;
 	state->response_obj = response_obj;
@@ -1108,25 +1101,25 @@ static bool ss_kick_off(http_server_object *server, http_request_t *request,
 		}
 	}
 
-	state->phase = SS_PHASE_OPEN;
+	state->phase = STATIC_FSM_PHASE_OPEN;
 
 	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
 	if (UNEXPECTED(state->file_io == NULL)) {
-		ss_state_free(state);
+		static_fsm_state_free(state);
 		return false;
 	}
 
 	/* One persistent callback for the OPEN/STAT phases. The protocol
 	 * op replaces it with its own once we delegate. */
-	ss_cb_t *cb = (ss_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(ss_dispatch, sizeof(ss_cb_t));
+	static_fsm_cb_t *cb = (static_fsm_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(static_fsm_dispatch, sizeof(static_fsm_cb_t));
 	if (UNEXPECTED(cb == NULL)) {
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
-		ss_state_free(state);
+		static_fsm_state_free(state);
 		return false;
 	}
-	cb->base.dispose = ss_cb_dispose;
+	cb->base.dispose = static_fsm_cb_dispose;
 	cb->state = state;
 
 	if (UNEXPECTED(!state->file_io->event.add_callback(&state->file_io->event, &cb->base))) {
@@ -1134,7 +1127,7 @@ static bool ss_kick_off(http_server_object *server, http_request_t *request,
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
-		ss_state_free(state);
+		static_fsm_state_free(state);
 		return false;
 	}
 	state->cb = &cb->base;
@@ -1281,7 +1274,7 @@ static int parse_byte_range(const char *hdr, size_t hdr_len, uint64_t size, uint
  * On success: rewrites *fs_path_buf to "<original>.<suffix>", sets
  * *fs_path_len to the new length, and writes the codec token (literal
  * "gzip" / "br" / "zstd" — owned by the codec table) into
- * *out_encoding. Caller passes both into ss_kick_off so the FSM serves
+ * *out_encoding. Caller passes both into static_fsm_kick_off so the FSM serves
  * the compressed bytes but emits the original Content-Type plus
  * Content-Encoding.
  *
@@ -1489,7 +1482,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		 * warm cache; on hot serving we skip it entirely via the
 		 * open-file cache (TTL-bound, evicts oldest first).
 		 *
-		 * On open-error the on_missing:Next rollback in ss_handle_open
+		 * On open-error the on_missing:Next rollback in static_fsm_handle_open
 		 * detaches state and hands ctx over to a regular PHP-handler
 		 * coroutine, so on_missing:Next mounts also ride this path on
 		 * the success path (#5c). */
@@ -1500,7 +1493,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		 * lookups for the same compressed variant skip the sidecar
 		 * stat too — the cache key is the rewritten path. The MIME
 		 * type stays derived from the original (computed pre-rewrite
-		 * and carried as override_ct so ss_handle_stat doesn't redo
+		 * and carried as override_ct so static_fsm_handle_stat doesn't redo
 		 * the lookup against the .gz extension). */
 		const char *picked_encoding = NULL;
 		size_t picked_encoding_len = 0;
@@ -1530,7 +1523,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				/* Trust-within-TTL: realpath was validated at insert,
 				 * stat/etag/MIME/Last-Modified are pre-rendered. The
 				 * FSM will skip every one of those derivations on the
-				 * way through ss_handle_open → ss_handle_stat. */
+				 * way through static_fsm_handle_open → static_fsm_handle_stat. */
 				http_server_on_static_cache_hit(counters);
 				gate_ok = true;
 				have_view = true;
@@ -1538,14 +1531,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				http_server_on_static_cache_miss(counters);
 				gate_ok =
 					symlink_policy_admits(mount, fs_path) && resolved_under_root(mount, fs_path);
-				/* Insertion happens in ss_handle_stat once st / etag /
+				/* Insertion happens in static_fsm_handle_stat once st / etag /
 				 * content_type / Last-Modified are all in hand. */
 			}
 		} else {
 			gate_ok = symlink_policy_admits(mount, fs_path) && resolved_under_root(mount, fs_path);
 		}
 		if (gate_ok) {
-			if (ss_kick_off(server, request, response_obj, counters, cbs, user, mount, fs_path,
+			if (static_fsm_kick_off(server, request, response_obj, counters, cbs, user, mount, fs_path,
 							fs_path_len, is_head, have_view ? &cv : NULL, picked_encoding,
 							picked_encoding_len, override_ct, override_ct_len)) {
 				return HTTP_STATIC_HARD_ZERO;
@@ -1654,7 +1647,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			/* The format-time path computes Content-Length from the
 			 * body smart_str; with an empty body we have to advertise
 			 * the would-be size explicitly. */
-			ss_set_content_length(response_obj, (uint64_t)st.st_size);
+			static_fsm_set_content_length(response_obj, (uint64_t)st.st_size);
 		} else {
 			http_response_static_set_body_str(response_obj, body);
 			zend_string_release(body);

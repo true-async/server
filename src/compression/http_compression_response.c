@@ -54,19 +54,8 @@ typedef struct {
     bool                              wrapper_first_chunk;
 } http_compression_state_t;
 
-/* http_response.c owns the response struct; we reach the field through
- * a tiny accessor it exports for us. Using a void** keeps the response
- * layout opaque outside the response TU. */
-extern void  *http_response_get_compression_slot(zend_object *obj);
-extern void   http_response_set_compression_slot(zend_object *obj, void *p);
-extern HashTable *http_response_get_headers(zend_object *obj);
-extern int        http_response_get_status(zend_object *obj);
-extern const http_response_stream_ops_t *
-                  http_response_get_stream_ops(zend_object *obj);
-extern void      *http_response_get_stream_ctx(zend_object *obj);
-extern void       http_response_replace_stream_ops(zend_object *obj,
-                                  const http_response_stream_ops_t *ops,
-                                  void *ctx);
+/* Cross-TU contract for response-internal accessors. */
+#include "http_response_internal.h"
 extern smart_str *http_response_get_body_smart_str(zend_object *obj);
 
 static inline http_compression_state_t *state_of(zend_object *obj)

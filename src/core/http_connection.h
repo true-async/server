@@ -155,8 +155,8 @@ struct _http_connection_t {
      * post-handshake bytes the FSM produced ride the same kick chain).
      * NULL = no observer. data field is opaque to the TLS layer.
      *
-     * Lifetime: registered by the static FSM at ss_kick_off, cleared
-     * at ss_finalize. Only one consumer at a time — destroy paths
+     * Lifetime: registered by the H1 sendfile FSM at kick-off,
+     * cleared at finalize. Only one consumer at a time — destroy paths
      * already serialise the static FSM behind handler_refcount. */
     void                         (*tls_zc_write_done_cb)(void *data);
     void                          *tls_zc_write_done_cb_data;

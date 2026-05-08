@@ -692,9 +692,9 @@ typedef struct {
     uint64_t total_requests;
 
     /* StaticHandler hard-zero hits — bumped on every successful
-     * ss_kick_off (issue #13). Hard-zero is the open → stat → headers
-     * → sendfile → close chain that bypasses the PHP coroutine entirely;
-     * the counter shows the cache-friendly fast path's hit rate. */
+     * dispatch into the no-coroutine FSM (open → stat → headers →
+     * sendfile → close, bypassing the PHP coroutine entirely). The
+     * counter shows the cache-friendly fast path's hit rate. */
     uint64_t static_zero_coroutine_total;
 
     /* Open-file cache hit/miss (issue #13 §5a follow-up). Bumped from

@@ -55,6 +55,7 @@
 #include "core/tls_layer.h"
 #endif
 #include "http1/http1_sendfile.h"
+#include "http_response_internal.h"
 
 #include <inttypes.h>
 #ifdef __linux__
@@ -197,14 +198,6 @@ static const char *h1_send_status_line(const int status, size_t *out_len)
     }
     return line;
 }
-
-/* Direct accessors into http_response_object: we serialize verbatim
- * what the static handler put on the response, bypassing
- * http_response_format which would auto-add Content-Length and run
- * the compression hook (neither appropriate here). */
-extern int    http_response_get_status_code(zend_object *obj);
-extern HashTable *http_response_get_headers_table(zend_object *obj);
-extern zend_string *http_response_get_body_string(zend_object *obj);
 
 /* Single-grow header writer. smart_str_appendl does its own size-
  * check + memcpy; chaining 4 of them per header pays the bookkeeping

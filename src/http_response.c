@@ -17,6 +17,7 @@
 #include "ext/json/php_json.h"
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
 #include "php_http_server.h"
+#include "http_response_internal.h"
 #include "smart_str_scalable.h"
 
 /* Include generated arginfo */
