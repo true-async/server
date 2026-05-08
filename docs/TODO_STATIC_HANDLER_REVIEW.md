@@ -324,7 +324,17 @@ Acceptance:
 Open API questions:
 [See "API questions to verify".]
 
-### 6. Per-request HashTable foreach for `extra_headers` / `cache_control`
+### ~~6. Per-request HashTable foreach for `extra_headers` / `cache_control`~~ ✅ done
+
+`http_static_handler_t` gains two persistent zend_strings —
+`prebaked_headers_full` / `prebaked_headers_no_content` — populated at
+`http_static_handler_freeze` time. The hard-zero hot path
+(`ss_build_headers`) replaces the per-request iterator with one
+`smart_str_append`. The 304 variant excludes `Content-*` per RFC 9110
+§15.4.5. Sync path still iterates (it goes through the response object's
+HashTable, not a smart_str), but that's the slower path anyway.
+
+### 6. (original) Per-request HashTable foreach for `extra_headers` / `cache_control`
 
 `apply_extra_headers` (sync path) and `ss_build_headers` (hard-zero
 path) both do `ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, ...)`

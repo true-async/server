@@ -209,6 +209,49 @@ static zend_string *zstr_dup_persistent(const zend_string *src)
     return zend_string_init(ZSTR_VAL(src), ZSTR_LEN(src), /*persistent*/ 1);
 }
 
+/* Render the immutable extra-header block at freeze time so the
+ * hard-zero hot path can splice it in with a single append instead of
+ * walking extra_headers + Cache-Control per request. include_content
+ * gates Content-* on the 304 path (RFC 9110 §15.4.5). Returns NULL when
+ * nothing would be written, so the caller can skip the append entirely. */
+static zend_string *render_prebaked_headers_persistent(
+    const http_static_handler_t *src, bool include_content)
+{
+    smart_str buf = {0};
+    if (src->cache_control != NULL && ZSTR_LEN(src->cache_control) > 0) {
+        smart_str_appendl(&buf, "Cache-Control: ", 15);
+        smart_str_append(&buf, src->cache_control);
+        smart_str_appendl(&buf, "\r\n", 2);
+    }
+    if (src->extra_headers != NULL) {
+        zend_string *name;
+        zval        *value;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(src->extra_headers, name, value) {
+            if (name == NULL || Z_TYPE_P(value) != IS_STRING) continue;
+            if (!include_content
+                && ZSTR_LEN(name) >= 8
+                && strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
+                continue;
+            }
+            smart_str_append(&buf, name);
+            smart_str_appendl(&buf, ": ", 2);
+            smart_str_append(&buf, Z_STR_P(value));
+            smart_str_appendl(&buf, "\r\n", 2);
+        } ZEND_HASH_FOREACH_END();
+    }
+    if (buf.s == NULL || ZSTR_LEN(buf.s) == 0) {
+        smart_str_free(&buf);
+        return NULL;
+    }
+    smart_str_0(&buf);
+    /* Move the rendered bytes into a persistent zend_string so it can
+     * outlive the smart_str (which uses emalloc) and be referenced
+     * across worker threads via the persistent shared snapshot. */
+    zend_string *out = zend_string_init(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s), 1);
+    smart_str_free(&buf);
+    return out;
+}
+
 http_static_handler_t *http_static_handler_freeze(
     const http_static_handler_t *draft)
 {
@@ -271,6 +314,14 @@ http_static_handler_t *http_static_handler_freeze(
         } ZEND_HASH_FOREACH_END();
     }
 
+    /* Pre-render the immutable extra-header block (one alloc each, both
+     * persistent zend_strings). NULL when nothing would be appended — the
+     * dispatch hot path checks for that. Build from the draft's
+     * (emalloc'd) tables; the resulting bytes are copied into a fresh
+     * persistent string so they're owned by the snapshot. */
+    m->prebaked_headers_full       = render_prebaked_headers_persistent(draft, true);
+    m->prebaked_headers_no_content = render_prebaked_headers_persistent(draft, false);
+
     /* Always locked from freeze onwards — the snapshot is read-only. */
     m->flags = draft->flags | HTTP_STATIC_FLAG_LOCKED;
 
@@ -317,6 +368,12 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
     if (m->mime_overrides != NULL) {
         zend_hash_destroy(m->mime_overrides);
         pefree(m->mime_overrides, 1);
+    }
+    if (m->prebaked_headers_full != NULL) {
+        zend_string_release(m->prebaked_headers_full);
+    }
+    if (m->prebaked_headers_no_content != NULL) {
+        zend_string_release(m->prebaked_headers_no_content);
     }
     pefree(sh, 1);
 }

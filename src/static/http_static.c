@@ -458,22 +458,17 @@ static void ss_build_headers(ss_state_t *state, smart_str *out,
     }
     ss_append_header(out, "Last-Modified", 13,
                      last_modified_buf, HTTP_STATIC_DATE_LEN);
-    if (state->mount->cache_control != NULL) {
-        ss_append_header(out, "Cache-Control", 13,
-                         ZSTR_VAL(state->mount->cache_control),
-                         ZSTR_LEN(state->mount->cache_control));
-    }
-    if (state->mount->extra_headers != NULL) {
-        zend_string *name;
-        zval        *value;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(state->mount->extra_headers, name, value) {
-            if (name == NULL || Z_TYPE_P(value) != IS_STRING) continue;
-            if (!include_content_headers
-                && ZSTR_LEN(name) >= 8
-                && strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) continue;
-            ss_append_header(out, ZSTR_VAL(name), ZSTR_LEN(name),
-                             Z_STRVAL_P(value), Z_STRLEN_P(value));
-        } ZEND_HASH_FOREACH_END();
+
+    /* Cache-Control + extra_headers are pre-rendered into one persistent
+     * string at freeze-time (#6 in TODO_STATIC_HANDLER_REVIEW). Splice
+     * the right variant in with a single append; falling back to the
+     * iterator path is only needed if freeze somehow ran with prebakes
+     * NULL (shouldn't happen post-lock, but stays correct if it does). */
+    zend_string *const prebaked = include_content_headers
+        ? state->mount->prebaked_headers_full
+        : state->mount->prebaked_headers_no_content;
+    if (prebaked != NULL) {
+        smart_str_append(out, prebaked);
     }
     if (state->conn->keep_alive) {
         ss_append_header(out, "Connection", 10, "keep-alive", 10);
