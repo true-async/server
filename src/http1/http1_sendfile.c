@@ -218,6 +218,10 @@ static zend_string *h1_send_build_head(zend_object *response_obj,
                                        bool include_inline_body)
 {
     smart_str out = {0};
+    /* Pre-allocate a typical static-response head (~400-600 B for 10-15
+     * headers). Skips 2-3 realloc rounds on the smart_str grow path —
+     * cheap one-line win since we know the rough upper bound. */
+    smart_str_alloc(&out, 512, 0);
 
     const int status_code = http_response_get_status_code(response_obj);
     size_t status_line_len = 0;
