@@ -25,8 +25,7 @@
  * `*out` is set to the content-type. `*out_len` is its byte length.
  * Returns true on hit, false when nothing matched (caller falls back
  * to "application/octet-stream"). */
-bool http_static_mime_lookup(const http_static_handler_t *mount,
-                             const char *path, size_t path_len,
-                             const char **out, size_t *out_len);
+bool http_static_mime_lookup(const http_static_handler_t *mount, const char *path, size_t path_len,
+							 const char **out, size_t *out_len);
 
 #endif

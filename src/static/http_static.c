@@ -6,7 +6,7 @@
   +----------------------------------------------------------------------+
 */
 
-/* Static-handler dispatch (issue #13). Resolves the request URL
+/* Static-handler dispatch. Resolves the request URL
  * against the configured mounts, opens the file synchronously, and
  * populates the response object so the existing handler dispose path
  * flushes it on the wire. The PHP coroutine entry sees
@@ -19,7 +19,7 @@
  * http_static_try_serve entrypoint — is stable across that change. */
 
 #ifdef HAVE_CONFIG_H
-# include <config.h>
+#include <config.h>
 #endif
 
 #include "php.h"
@@ -29,7 +29,7 @@
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
 #ifdef HAVE_OPENSSL
-# include "core/tls_layer.h"
+#include "core/tls_layer.h"
 #endif
 #include "static/static_handler.h"
 #include "static/http_static_mime.h"
@@ -46,84 +46,80 @@
 #include <errno.h>
 #include <string.h>
 #ifdef __linux__
-# include <sys/socket.h>
-# include <netinet/in.h>
-# include <netinet/tcp.h>   /* TCP_CORK */
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h> /* TCP_CORK */
 #endif
 
-static void emit_status(zend_object *response_obj, int status,
-                        const char *body_msg, size_t body_msg_len)
+static void emit_status(zend_object *response_obj, int status, const char *body_msg,
+						size_t body_msg_len)
 {
-    http_response_static_set_status(response_obj, status);
-    http_response_static_set_header(response_obj,
-        "content-type", 12, "text/plain; charset=utf-8", 25);
-    if (body_msg != NULL && body_msg_len > 0) {
-        zend_string *const msg = zend_string_init(body_msg, body_msg_len, 0);
-        http_response_static_set_body_str(response_obj, msg);
-        zend_string_release(msg);
-    }
+	http_response_static_set_status(response_obj, status);
+	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
+									25);
+	if (body_msg != NULL && body_msg_len > 0) {
+		zend_string *const msg = zend_string_init(body_msg, body_msg_len, 0);
+		http_response_static_set_body_str(response_obj, msg);
+		zend_string_release(msg);
+	}
 }
 
 static inline bool method_is_get(const http_request_t *req)
 {
-    return req != NULL && req->method != NULL
-        && ZSTR_LEN(req->method) == 3
-        && memcmp(ZSTR_VAL(req->method), "GET", 3) == 0;
+	return req != NULL && req->method != NULL && ZSTR_LEN(req->method) == 3 &&
+		   memcmp(ZSTR_VAL(req->method), "GET", 3) == 0;
 }
 
 static inline bool method_is_head(const http_request_t *req)
 {
-    return req != NULL && req->method != NULL
-        && ZSTR_LEN(req->method) == 4
-        && memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
+	return req != NULL && req->method != NULL && ZSTR_LEN(req->method) == 4 &&
+		   memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
 }
 
-static const zend_string *find_request_header(const http_request_t *req,
-                                              const char *name, size_t name_len)
+static const zend_string *find_first_request_header(const http_request_t *req, const char *name,
+											  size_t name_len)
 {
-    if (req == NULL || req->headers == NULL) {
-        return NULL;
-    }
-    const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
-    if (zv == NULL) {
-        return NULL;
-    }
-    if (Z_TYPE_P(zv) == IS_STRING) {
-        return Z_STR_P(zv);
-    }
-    if (Z_TYPE_P(zv) == IS_ARRAY) {
-        const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
-        if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
-            return Z_STR_P(first);
-        }
-    }
-    return NULL;
+	if (req == NULL || req->headers == NULL) {
+		return NULL;
+	}
+	const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
+	if (zv == NULL) {
+		return NULL;
+	}
+	if (Z_TYPE_P(zv) == IS_STRING) {
+		return Z_STR_P(zv);
+	}
+	if (Z_TYPE_P(zv) == IS_ARRAY) {
+		const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
+		if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
+			return Z_STR_P(first);
+		}
+	}
+	return NULL;
 }
 
 static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
-    int flags = O_RDONLY | O_CLOEXEC;
+	int flags = O_RDONLY | O_CLOEXEC;
 #ifdef O_NOFOLLOW
-    /* REJECT: kernel-level — any symlink on the final component fails
-     * with ELOOP. Intermediate components are still followed by
-     * open(2); resolved_under_root() catches escapes via realpath.
-     *
-     * OWNER: pre-flight path_segments_owner_match runs an explicit
-     * lstat/stat sweep across every segment and bans owner-mismatched
-     * symlinks. We DO want open() to follow links here (the sweep
-     * already approved them), so no O_NOFOLLOW. */
-    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
-        flags |= O_NOFOLLOW;
-    }
+	/* REJECT: kernel-level — any symlink on the final component fails
+	 * with ELOOP. Intermediate components are still followed by
+	 * open(2); resolved_under_root() catches escapes via realpath.
+	 *
+	 * OWNER: pre-flight verify_path_owner_chain runs an explicit
+	 * lstat/stat sweep across every segment and bans owner-mismatched
+	 * symlinks. We DO want open() to follow links here (the sweep
+	 * already approved them), so no O_NOFOLLOW. */
+	if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
+		flags |= O_NOFOLLOW;
+	}
 #endif
-    return open(path, flags);
+	return open(path, flags);
 }
 
-static bool path_segments_owner_match(const http_static_handler_t *mount,
-                                      const char *fs_path);
-static int  parse_byte_range(const char *hdr, size_t hdr_len,
-                             uint64_t size,
-                             uint64_t *out_first, uint64_t *out_last);
+static bool verify_path_owner_chain(const http_static_handler_t *mount, const char *fs_path);
+static int parse_byte_range(const char *hdr, size_t hdr_len, uint64_t size, uint64_t *out_first,
+							uint64_t *out_last);
 
 /* REJECT pre-flight check. The sync fallback open() uses O_NOFOLLOW
  * (kernel rejects symlinks on the final component); the async hard-zero
@@ -133,27 +129,26 @@ static int  parse_byte_range(const char *hdr, size_t hdr_len,
  * semantics on the hot path. lstat the final component here to close
  * it. Cost: one syscall per request, only on cache miss; cache hits
  * skip this entirely (entry was already validated). */
-static bool symlink_policy_admits(const http_static_handler_t *mount,
-                                  const char *fs_path)
+static bool symlink_policy_admits(const http_static_handler_t *mount, const char *fs_path)
 {
-    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
-        struct stat ls;
-        if (UNEXPECTED(lstat(fs_path, &ls) != 0)) {
-            return false;
-        }
-        if (S_ISLNK(ls.st_mode)) {
-            return false;
-        }
-        return true;
-    }
-    if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_OWNER) {
-        return path_segments_owner_match(mount, fs_path);
-    }
-    /* FOLLOW (default fallthrough): no symlink-specific policy. */
-    return true;
+	if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
+		struct stat ls;
+		if (UNEXPECTED(lstat(fs_path, &ls) != 0)) {
+			return false;
+		}
+		if (S_ISLNK(ls.st_mode)) {
+			return false;
+		}
+		return true;
+	}
+	if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_OWNER) {
+		return verify_path_owner_chain(mount, fs_path);
+	}
+	/* FOLLOW (default fallthrough): no symlink-specific policy. */
+	return true;
 }
 
-/* OwnerMatch (issue #13 acceptance §6) — walk the resolved path one
+/* OwnerMatch — walk the resolved path one
  * segment at a time from mount root to the final component. For each
  * segment that is a symlink, lstat() yields the link's uid, stat()
  * yields the target's uid; mismatched uids fail the policy.
@@ -166,58 +161,58 @@ static bool symlink_policy_admits(const http_static_handler_t *mount,
  * skip the sweep too.
  *
  * Returns true on accept. Stops at the first denying segment. */
-static bool path_segments_owner_match(const http_static_handler_t *mount,
-                                      const char *fs_path)
+static bool verify_path_owner_chain(const http_static_handler_t *mount, const char *fs_path)
 {
-    const size_t root_len = ZSTR_LEN(mount->root_directory);
-    if (UNEXPECTED(strncmp(fs_path,
-                           ZSTR_VAL(mount->root_directory),
-                           root_len) != 0)) {
-        return false;
-    }
+	const size_t root_len = ZSTR_LEN(mount->root_directory);
+	if (UNEXPECTED(strncmp(fs_path, ZSTR_VAL(mount->root_directory), root_len) != 0)) {
+		return false;
+	}
 
-    char        buf[PATH_MAX];
-    size_t      len = root_len;
-    if (UNEXPECTED(root_len >= sizeof(buf))) {
-        return false;
-    }
-    memcpy(buf, ZSTR_VAL(mount->root_directory), root_len);
-    buf[len] = '\0';
+	char buf[MAXPATHLEN];
+	size_t len = root_len;
+	if (UNEXPECTED(root_len >= sizeof(buf))) {
+		return false;
+	}
+	memcpy(buf, ZSTR_VAL(mount->root_directory), root_len);
+	buf[len] = '\0';
 
-    const char *seg = fs_path + root_len;
-    while (*seg == '/') seg++;
+	const char *seg = fs_path + root_len;
+	while (*seg == '/') {
+		seg++;
+	}
 
-    while (*seg != '\0') {
-        const char  *next    = strchr(seg, '/');
-        const size_t seg_len = (next != NULL) ? (size_t)(next - seg)
-                                              : strlen(seg);
-        /* "+2" — '/' separator + NUL. */
-        if (UNEXPECTED(len + 1 + seg_len + 1 > sizeof(buf))) {
-            return false;
-        }
-        buf[len++] = '/';
-        memcpy(buf + len, seg, seg_len);
-        len += seg_len;
-        buf[len] = '\0';
+	while (*seg != '\0') {
+		const char *next = strchr(seg, '/');
+		const size_t seg_len = (next != NULL) ? (size_t)(next - seg) : strlen(seg);
+		/* "+2" — '/' separator + NUL. */
+		if (UNEXPECTED(len + 1 + seg_len + 1 > sizeof(buf))) {
+			return false;
+		}
+		buf[len++] = '/';
+		memcpy(buf + len, seg, seg_len);
+		len += seg_len;
+		buf[len] = '\0';
 
-        struct stat ls;
-        if (UNEXPECTED(lstat(buf, &ls) != 0)) {
-            return false;
-        }
-        if (S_ISLNK(ls.st_mode)) {
-            struct stat ts;
-            if (UNEXPECTED(stat(buf, &ts) != 0)) {
-                return false;
-            }
-            if (ls.st_uid != ts.st_uid) {
-                return false;
-            }
-        }
+		struct stat ls;
+		if (UNEXPECTED(lstat(buf, &ls) != 0)) {
+			return false;
+		}
+		if (S_ISLNK(ls.st_mode)) {
+			struct stat ts;
+			if (UNEXPECTED(stat(buf, &ts) != 0)) {
+				return false;
+			}
+			if (ls.st_uid != ts.st_uid) {
+				return false;
+			}
+		}
 
-        if (next == NULL) break;
-        seg = next + 1;
-    }
-    return true;
+		if (next == NULL) {
+			break;
+		}
+		seg = next + 1;
+	}
+	return true;
 }
 
 /* After try_open_candidate succeeds we know the FINAL component is
@@ -227,107 +222,129 @@ static bool path_segments_owner_match(const http_static_handler_t *mount,
  * verification closes that gap. The TOCTOU between realpath() and
  * the open we already did is acceptable — exploiting it requires
  * filesystem write access on the host. */
-static bool resolved_under_root(const http_static_handler_t *mount,
-                                const char *path)
+static bool resolved_under_root(const http_static_handler_t *mount, const char *path)
 {
-    char canonical[PATH_MAX];
-    if (UNEXPECTED(realpath(path, canonical) == NULL)) {
-        return false;
-    }
-    const char *const root     = ZSTR_VAL(mount->root_directory);
-    const size_t      root_len = ZSTR_LEN(mount->root_directory);
+	char canonical[MAXPATHLEN];
+	if (UNEXPECTED(realpath(path, canonical) == NULL)) {
+		return false;
+	}
+	const char *const root = ZSTR_VAL(mount->root_directory);
+	const size_t root_len = ZSTR_LEN(mount->root_directory);
 
-    if (strncmp(canonical, root, root_len) != 0) {
-        return false;
-    }
-    /* canonical == root exactly, or canonical[root_len] is a separator
-     * (subpath). Otherwise canonical only happens to share a prefix
-     * (e.g. root="/srv/foo", canonical="/srv/foobar/x"). */
-    const char tail = canonical[root_len];
-    return tail == '\0' || tail == '/';
+	if (strncmp(canonical, root, root_len) != 0) {
+		return false;
+	}
+	/* canonical == root exactly, or canonical[root_len] is a separator
+	 * (subpath). Otherwise canonical only happens to share a prefix
+	 * (e.g. root="/srv/foo", canonical="/srv/foobar/x"). */
+	const char tail = canonical[root_len];
+	return tail == '\0' || tail == '/';
 }
 
 static zend_string *slurp_fd(const int fd, const size_t size)
 {
-    if (size == 0) {
-        return ZSTR_EMPTY_ALLOC();
-    }
-    zend_string *const out = zend_string_alloc(size, 0);
-    size_t total = 0;
-    while (total < size) {
-        const ssize_t n = read(fd, ZSTR_VAL(out) + total, size - total);
-        if (EXPECTED(n > 0)) {
-            total += (size_t)n;
-            continue;
-        }
-        if (n == 0) break;                /* premature EOF */
-        if (errno == EINTR) continue;
-        zend_string_release(out);
-        return NULL;
-    }
-    if (UNEXPECTED(total != size)) {
-        zend_string_release(out);
-        return NULL;
-    }
-    ZSTR_VAL(out)[size] = '\0';
-    return out;
+	if (size == 0) {
+		return ZSTR_EMPTY_ALLOC();
+	}
+	zend_string *const out = zend_string_alloc(size, 0);
+	size_t total = 0;
+	while (total < size) {
+		const ssize_t n = read(fd, ZSTR_VAL(out) + total, size - total);
+		if (EXPECTED(n > 0)) {
+			total += (size_t)n;
+			continue;
+		}
+		if (n == 0) {
+			break; /* premature EOF */
+		}
+		if (errno == EINTR) {
+			continue;
+		}
+		zend_string_release(out);
+		return NULL;
+	}
+	if (UNEXPECTED(total != size)) {
+		zend_string_release(out);
+		return NULL;
+	}
+	ZSTR_VAL(out)[size] = '\0';
+	return out;
 }
 
 /* RFC 9110 §15.4.5: 304 must NOT carry Content-* headers — pass
  * include_content_headers=false on the not-modified path. */
-static void apply_extra_headers(zend_object *response_obj,
-                                const http_static_handler_t *mount,
-                                const bool include_content_headers)
+static void apply_extra_headers(zend_object *response_obj, const http_static_handler_t *mount,
+								const bool include_content_headers)
 {
-    if (mount->extra_headers == NULL) {
-        return;
-    }
-    zend_string *name;
-    zval        *value;
-    ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, name, value) {
-        if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
-            continue;
-        }
-        if (!include_content_headers
-            && ZSTR_LEN(name) >= 8
-            && strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
-            continue;
-        }
-        http_response_static_set_header(response_obj,
-            ZSTR_VAL(name), ZSTR_LEN(name),
-            Z_STRVAL_P(value), Z_STRLEN_P(value));
-    } ZEND_HASH_FOREACH_END();
+	if (mount->extra_headers == NULL) {
+		return;
+	}
+	zend_string *name;
+	zval *value;
+	ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, name, value)
+	{
+		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
+			continue;
+		}
+		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
+			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
+			continue;
+		}
+		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
+										Z_STRVAL_P(value), Z_STRLEN_P(value));
+	}
+	ZEND_HASH_FOREACH_END();
 }
 
 /* Try open + fstat. On a non-regular file, surface ENOENT so the
- * caller's fallthrough mirrors the missing-file path uniformly. */
-static bool try_open_candidate(const http_static_handler_t *mount,
-                               const char *path,
-                               int *out_fd, struct stat *st)
+ * caller's fallthrough mirrors the missing-file path uniformly.
+ *
+ * §13d TOCTOU retrofit: between symlink_policy_admits()'s lstat-walk
+ * and open() here, an attacker with write access on an intermediate
+ * directory could swap a name. We catch that by re-stat'ing the path
+ * after open and comparing dev/ino against fstat(fd). A swap that
+ * lands on a different inode is rejected with EPERM. This is the
+ * cheapest portable defense; the openat-chain rewrite remains
+ * future work. */
+static bool try_open_candidate(const http_static_handler_t *mount, const char *path, int *out_fd,
+							   struct stat *st)
 {
-    const int fd = open_for_policy(mount, path);
-    if (fd < 0) {
-        return false;
-    }
-    if (UNEXPECTED(fstat(fd, st) != 0)) {
-        const int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
-        return false;
-    }
-    if (UNEXPECTED(!S_ISREG(st->st_mode))) {
-        close(fd);
-        errno = ENOENT;
-        return false;
-    }
-    *out_fd = fd;
-    return true;
+	const int fd = open_for_policy(mount, path);
+	if (fd < 0) {
+		return false;
+	}
+	if (UNEXPECTED(fstat(fd, st) != 0)) {
+		const int saved_errno = errno;
+		close(fd);
+		errno = saved_errno;
+		return false;
+	}
+	if (UNEXPECTED(!S_ISREG(st->st_mode))) {
+		close(fd);
+		errno = ENOENT;
+		return false;
+	}
+
+	struct stat path_st;
+	if (UNEXPECTED(lstat(path, &path_st) != 0)) {
+		const int saved_errno = errno;
+		close(fd);
+		errno = saved_errno;
+		return false;
+	}
+	if (UNEXPECTED(path_st.st_dev != st->st_dev || path_st.st_ino != st->st_ino)) {
+		close(fd);
+		errno = EPERM;
+		return false;
+	}
+
+	*out_fd = fd;
+	return true;
 }
 
-static inline bool path_targets_directory(const char *relative,
-                                          const size_t relative_len)
+static inline bool path_targets_directory(const char *relative, const size_t relative_len)
 {
-    return relative_len == 0 || relative[relative_len - 1] == '/';
+	return relative_len == 0 || relative[relative_len - 1] == '/';
 }
 
 /* ===== Hard-zero async path =========================================
@@ -351,13 +368,14 @@ static inline bool path_targets_directory(const char *relative,
  * each completion. Spurious fires (a callback registered mid-NOTIFY
  * can re-enter the same NOTIFY iteration) are filtered by phase
  * versus expected-req identity, mirroring http_log's writer_cb. */
-typedef enum {
-    SS_PHASE_OPEN          = 0,  /* awaiting fs_open completion (result=NULL) */
-    SS_PHASE_STAT          = 1,  /* awaiting io_stat completion (result=stat req) */
-    SS_PHASE_SENDFILE      = 2,  /* awaiting sendfile completion (result=sendfile req) */
-    SS_PHASE_TLS_READ      = 3,  /* awaiting ZEND_ASYNC_IO_READ chunk on file_io */
-    SS_PHASE_TLS_DRAIN     = 4,  /* awaiting tls_zc_write_done_cb (cipher BIO drained) */
-    SS_PHASE_DONE          = 5,
+typedef enum
+{
+	SS_PHASE_OPEN = 0,		/* awaiting fs_open completion (result=NULL) */
+	SS_PHASE_STAT = 1,		/* awaiting io_stat completion (result=stat req) */
+	SS_PHASE_SENDFILE = 2,	/* awaiting sendfile completion (result=sendfile req) */
+	SS_PHASE_TLS_READ = 3,	/* awaiting ZEND_ASYNC_IO_READ chunk on file_io */
+	SS_PHASE_TLS_DRAIN = 4, /* awaiting tls_zc_write_done_cb (cipher BIO drained) */
+	SS_PHASE_DONE = 5,
 } ss_phase_t;
 
 /* TLS chunked-stream chunk size. Must be ≤ HTTP_TLS_PLAINTEXT_RING_BYTES
@@ -366,119 +384,121 @@ typedef enum {
  * size, so each chunk encrypts to one record + framing overhead. */
 #define SS_TLS_CHUNK_BYTES (16 * 1024)
 
-typedef struct {
-    http_connection_t   *conn;
-    http1_request_ctx_t *ctx;
-    const http_static_handler_t *mount;
+typedef struct
+{
+	http_connection_t *conn;
+	http1_request_ctx_t *ctx;
+	const http_static_handler_t *mount;
 
-    /* Resolved on-disk path. emalloc'd in ss_kick_off, freed by
-     * ss_state_free.  Used to be a 4 KiB inline scratch — with 10 K
-     * concurrent in-flight static requests that would have been 40 MiB
-     * just for path strings, most of which fit comfortably in <100
-     * bytes (#13 in TODO_STATIC_HANDLER_REVIEW). */
-    char                *fs_path;
-    size_t               fs_path_len;
+	/* Resolved on-disk path. emalloc'd in ss_kick_off, freed by
+	 * ss_state_free.  Used to be a 4 KiB inline scratch — with 10 K
+	 * concurrent in-flight static requests that would have been 40 MiB
+	 * just for path strings, most of which fit comfortably in <100
+	 * bytes (#13 in TODO_STATIC_HANDLER_REVIEW). */
+	char *fs_path;
+	size_t fs_path_len;
 
-    /* Async file io. Acquired by ZEND_ASYNC_FS_OPEN, disposed at the
-     * end of the chain. Pending until SS_PHASE_OPEN fires. */
-    zend_async_io_t     *file_io;
+	/* Async file io. Acquired by ZEND_ASYNC_FS_OPEN, disposed at the
+	 * end of the chain. Pending until SS_PHASE_OPEN fires. */
+	zend_async_io_t *file_io;
 
-    /* Cached fstat. */
-    struct stat          st;
+	/* Cached fstat. */
+	struct stat st;
 
-    bool                 is_head;
-    bool                 should_continue;  /* keep-alive verdict */
-    bool                 is_tls;           /* picks chunked-encrypt path over sendfile */
+	bool is_head;
+	bool should_continue; /* keep-alive verdict */
+	bool is_tls;		  /* picks chunked-encrypt path over sendfile */
 
-    /* State machine cursor. */
-    ss_phase_t           phase;
+	/* State machine cursor. */
+	ss_phase_t phase;
 
-    /* Identity of the currently-pending op's req. NOTIFY may fire our
-     * cb spuriously (registration during NOTIFY iteration races) —
-     * we ignore any result that doesn't match. NULL during the OPEN
-     * phase because libuv_fs_open notifies with result=NULL. */
-    zend_async_io_req_t *pending_req;
+	/* Identity of the currently-pending op's req. NOTIFY may fire our
+	 * cb spuriously (registration during NOTIFY iteration races) —
+	 * we ignore any result that doesn't match. NULL during the OPEN
+	 * phase because libuv_fs_open notifies with result=NULL. */
+	zend_async_io_req_t *pending_req;
 
-    /* Persistent cb registered once on file_io->event at kick-off,
-     * removed once at finalize. */
-    zend_async_event_callback_t *cb;
+	/* Persistent cb registered once on file_io->event at kick-off,
+	 * removed once at finalize. */
+	zend_async_event_callback_t *cb;
 
-    /* TLS chunked path scratch. chunk_buf is emalloc'd once per
-     * request (16 KiB); reused across every TLS_READ→TLS_DRAIN cycle.
-     * NULL on the plain-TCP sendfile path. bytes_sent tracks the
-     * file offset for the next IO_READ submit; capped at st.st_size. */
-    char                *chunk_buf;
-    uint64_t             bytes_sent;
+	/* TLS chunked path scratch. chunk_buf is emalloc'd once per
+	 * request (16 KiB); reused across every TLS_READ→TLS_DRAIN cycle.
+	 * NULL on the plain-TCP sendfile path. bytes_sent tracks the
+	 * file offset for the next IO_READ submit; capped at st.st_size. */
+	char *chunk_buf;
+	uint64_t bytes_sent;
 
-    /* Open-file cache pre-population (issue #13 §5a). When the
-     * pre-flight finds a fresh entry for this path, it copies the
-     * cached metadata into the slots below and sets has_cached_meta.
-     * ss_handle_open then skips IO_STAT (state->st pre-filled);
-     * ss_handle_stat skips etag formatting / MIME lookup / IMF-date
-     * formatting (the buffers below are pre-rendered). content_type
-     * stays a borrowed pointer into the persistent MIME table — same
-     * lifetime invariant as the cache entry. */
-    bool                 has_cached_meta;
-    bool                 cached_etag_enabled;
-    char                 cached_etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
-    char                 cached_lm_buf[HTTP_STATIC_DATE_BUF_LEN];
-    const char          *cached_content_type;
-    size_t               cached_content_type_len;
+	/* Open-file cache pre-population. When the
+	 * pre-flight finds a fresh entry for this path, it copies the
+	 * cached metadata into the slots below and sets has_cached_meta.
+	 * ss_handle_open then skips IO_STAT (state->st pre-filled);
+	 * ss_handle_stat skips etag formatting / MIME lookup / IMF-date
+	 * formatting (the buffers below are pre-rendered). content_type
+	 * stays a borrowed pointer into the persistent MIME table — same
+	 * lifetime invariant as the cache entry. */
+	bool has_cached_meta;
+	bool cached_etag_enabled;
+	char cached_etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
+	char cached_lm_buf[HTTP_STATIC_DATE_BUF_LEN];
+	const char *cached_content_type;
+	size_t cached_content_type_len;
 
-    /* Precompressed sidecar support (issue #13 PR #4). When the
-     * pre-flight selects a `.gz` / `.br` / `.zst` sibling that
-     * matches Accept-Encoding, fs_path is rewritten to the sidecar
-     * (so open/sendfile target the compressed bytes) and these
-     * fields carry the *original* file's content type plus the
-     * Content-Encoding token to emit. content_encoding is a static
-     * string ("gzip" / "br" / "zstd") owned by the codec table —
-     * never freed by the FSM. */
-    const char          *override_content_type;
-    size_t               override_content_type_len;
-    const char          *content_encoding;     /* NULL = identity */
-    size_t               content_encoding_len;
+	/* Precompressed sidecar support. When the
+	 * pre-flight selects a `.gz` / `.br` / `.zst` sibling that
+	 * matches Accept-Encoding, fs_path is rewritten to the sidecar
+	 * (so open/sendfile target the compressed bytes) and these
+	 * fields carry the *original* file's content type plus the
+	 * Content-Encoding token to emit. content_encoding is a static
+	 * string ("gzip" / "br" / "zstd") owned by the codec table —
+	 * never freed by the FSM. */
+	const char *override_content_type;
+	size_t override_content_type_len;
+	const char *content_encoding; /* NULL = identity */
+	size_t content_encoding_len;
 
-    /* Range support (issue #13 PR #3, single-range). is_range flips
-     * when the pre-flight accepted a `Range: bytes=A-B` header — the
-     * FSM emits 206 Partial Content with a sliced body. range_first /
-     * range_last are inclusive byte offsets; range_total carries the
-     * unmodified file size for the Content-Range header. */
-    bool                 is_range;
-    uint64_t             range_first;
-    uint64_t             range_last;
-    uint64_t             range_total;
+	/* Range support. is_range flips
+	 * when the pre-flight accepted a `Range: bytes=A-B` header — the
+	 * FSM emits 206 Partial Content with a sliced body. range_first /
+	 * range_last are inclusive byte offsets; range_total carries the
+	 * unmodified file size for the Content-Range header. */
+	bool is_range;
+	uint64_t range_first;
+	uint64_t range_last;
+	uint64_t range_total;
 } ss_state_t;
 
-typedef struct {
-    zend_async_event_callback_t base;
-    ss_state_t *state;
+typedef struct
+{
+	zend_async_event_callback_t base;
+	ss_state_t *state;
 } ss_cb_t;
 
-static void ss_dispatch(zend_async_event_t *event,
-                        zend_async_event_callback_t *callback,
-                        void *result, zend_object *exception);
+static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+						void *result, zend_object *exception);
 
-static void ss_cb_dispose(zend_async_event_callback_t *cb,
-                          zend_async_event_t *event)
+static void ss_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *event)
 {
-    (void)event;
-    efree(cb);
+	(void)event;
+	efree(cb);
 }
 
 /* Single owner of state lifetime. Always frees fs_path (NULL-safe via
  * efree) before efree'ing the state struct. */
 static inline void ss_state_free(ss_state_t *state)
 {
-    if (state == NULL) return;
-    if (state->fs_path != NULL) {
-        efree(state->fs_path);
-        state->fs_path = NULL;
-    }
-    if (state->chunk_buf != NULL) {
-        efree(state->chunk_buf);
-        state->chunk_buf = NULL;
-    }
-    efree(state);
+	if (state == NULL) {
+		return;
+	}
+	if (state->fs_path != NULL) {
+		efree(state->fs_path);
+		state->fs_path = NULL;
+	}
+	if (state->chunk_buf != NULL) {
+		efree(state->chunk_buf);
+		state->chunk_buf = NULL;
+	}
+	efree(state);
 }
 
 /* TCP_CORK gate (Linux). Headers are submitted fire-and-forget through
@@ -494,21 +514,22 @@ static inline void ss_state_free(ss_state_t *state)
 static inline void ss_cork_set(http_connection_t *conn, const int on)
 {
 #ifdef TCP_CORK
-    if (UNEXPECTED(conn == NULL || conn->io == NULL)) {
-        return;
-    }
-    if (conn->io->type != ZEND_ASYNC_IO_TYPE_TCP) {
-        return;
-    }
-    const int fd = (int) conn->io->descriptor.socket;
-    if (UNEXPECTED(fd < 0)) {
-        return;
-    }
-    /* setsockopt failure here is non-fatal: worst case we skip the
-     * coalescing optimisation. Sendfile + headers still go out. */
-    (void) setsockopt(fd, IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+	if (UNEXPECTED(conn == NULL || conn->io == NULL)) {
+		return;
+	}
+	if (conn->io->type != ZEND_ASYNC_IO_TYPE_TCP) {
+		return;
+	}
+	const int fd = (int)conn->io->descriptor.socket;
+	if (UNEXPECTED(fd < 0)) {
+		return;
+	}
+	/* setsockopt failure here is non-fatal: worst case we skip the
+	 * coalescing optimisation. Sendfile + headers still go out. */
+	(void)setsockopt(fd, IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
 #else
-    (void) conn; (void) on;
+	(void)conn;
+	(void)on;
 #endif
 }
 
@@ -517,56 +538,54 @@ static inline void ss_cork_set(http_connection_t *conn, const int on)
  * closed; either way nothing more touches `state`. */
 static void ss_finalize(ss_state_t *state)
 {
-    http_connection_t *const conn = state->conn;
-    http1_request_ctx_t *const ctx = state->ctx;
+	http_connection_t *const conn = state->conn;
+	http1_request_ctx_t *const ctx = state->ctx;
 
-    state->phase = SS_PHASE_DONE;
+	state->phase = SS_PHASE_DONE;
 
-    /* Uncork before tearing down so the kernel flushes whatever's left
-     * (typically the trailing chunk of the sendfile body). Issued
-     * unconditionally — TCP_CORK off is a no-op on a non-corked socket
-     * and a no-op on non-Linux. Pairs with the cork in ss_kick_off. */
-    ss_cork_set(conn, 0);
+	/* Uncork before tearing down so the kernel flushes whatever's left
+	 * (typically the trailing chunk of the sendfile body). Issued
+	 * unconditionally — TCP_CORK off is a no-op on a non-corked socket
+	 * and a no-op on non-Linux. Pairs with the cork in ss_kick_off. */
+	ss_cork_set(conn, 0);
 
 #ifdef HAVE_OPENSSL
-    /* Detach the static-FSM observer from the cipher write completion
-     * chain. Done before we efree state — otherwise a late free_cb
-     * fire would deref a freed pointer. */
-    if (state->is_tls
-        && conn->tls_zc_write_done_cb_data == state) {
-        conn->tls_zc_write_done_cb      = NULL;
-        conn->tls_zc_write_done_cb_data = NULL;
-    }
+	/* Detach the static-FSM observer from the cipher write completion
+	 * chain. Done before we efree state — otherwise a late free_cb
+	 * fire would deref a freed pointer. */
+	if (state->is_tls && conn->tls_zc_write_done_cb_data == state) {
+		conn->tls_zc_write_done_cb = NULL;
+		conn->tls_zc_write_done_cb_data = NULL;
+	}
 #endif
 
-    if (state->cb != NULL && state->file_io != NULL) {
-        (void) state->file_io->event.del_callback(
-            &state->file_io->event, state->cb);
-        state->cb = NULL;
-    }
-    if (state->file_io != NULL) {
-        if (state->file_io->event.dispose != NULL) {
-            state->file_io->event.dispose(&state->file_io->event);
-        }
-        state->file_io = NULL;
-    }
+	if (state->cb != NULL && state->file_io != NULL) {
+		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
+		state->cb = NULL;
+	}
+	if (state->file_io != NULL) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		state->file_io = NULL;
+	}
 
-    /* Pair the on_request_dispatch fired at hand-off. */
-    http_server_on_request_dispose(conn->counters);
+	/* Pair the on_request_dispatch fired at hand-off. */
+	http_server_on_request_dispose(conn->counters);
 
-    /* Mirror the dispose-side bookkeeping that the coroutine path
-     * normally handles for us. */
-    if (ctx->request != NULL) {
-        ctx->request->coroutine = NULL;
-    }
-    if (conn->current_request == ctx->request) {
-        conn->current_request = NULL;
-    }
+	/* Mirror the dispose-side bookkeeping that the coroutine path
+	 * normally handles for us. */
+	if (ctx->request != NULL) {
+		ctx->request->coroutine = NULL;
+	}
+	if (conn->current_request == ctx->request) {
+		conn->current_request = NULL;
+	}
 
-    const bool should_continue = state->should_continue;
-    ss_state_free(state);
+	const bool should_continue = state->should_continue;
+	ss_state_free(state);
 
-    http_request_finalize(conn, ctx, should_continue);
+	http_request_finalize(conn, ctx, should_continue);
 }
 
 /* Borrow the pre-rendered HTTP/1.1 status line from the shared table
@@ -576,11 +595,11 @@ static void ss_finalize(ss_state_t *state)
  * 500 on an unknown code preserves the previous behaviour. */
 static const char *ss_status_line(const int status, size_t *out_len)
 {
-    const char *line = http_response_status_line_http11(status, out_len);
-    if (UNEXPECTED(line == NULL)) {
-        line = http_response_status_line_http11(500, out_len);
-    }
-    return line;
+	const char *line = http_response_status_line_http11(status, out_len);
+	if (UNEXPECTED(line == NULL)) {
+		line = http_response_status_line_http11(500, out_len);
+	}
+	return line;
 }
 
 /* Build the full response head (status + headers + optional inline
@@ -598,152 +617,142 @@ static const char *ss_status_line(const int status, size_t *out_len)
  * loop instead.
  *
  * Returns false on submit failure (string already released). */
-static bool ss_send_response(ss_state_t *state, const int status_code,
-                             const smart_str *headers,
-                             const char *body, const size_t body_len)
+static bool ss_send_response(ss_state_t *state, const int status_code, const smart_str *headers,
+							 const char *body, const size_t body_len)
 {
-    smart_str line = {0};
-    size_t status_line_len = 0;
-    const char *const status_line = ss_status_line(status_code, &status_line_len);
-    smart_str_appendl(&line, status_line, status_line_len);
-    if (headers != NULL && headers->s != NULL) {
-        smart_str_append_smart_str(&line, headers);
-    }
-    smart_str_appends(&line, "\r\n");
-    if (body != NULL && body_len > 0) {
-        smart_str_appendl(&line, body, body_len);
-    }
-    smart_str_0(&line);
+	smart_str line = {0};
+	size_t status_line_len = 0;
+	const char *const status_line = ss_status_line(status_code, &status_line_len);
+	smart_str_appendl(&line, status_line, status_line_len);
+	if (headers != NULL && headers->s != NULL) {
+		smart_str_append_smart_str(&line, headers);
+	}
+	smart_str_appends(&line, "\r\n");
+	if (body != NULL && body_len > 0) {
+		smart_str_appendl(&line, body, body_len);
+	}
+	smart_str_0(&line);
 
-    zend_string *const owned = line.s;
-    line.s = NULL;
+	zend_string *const owned = line.s;
+	line.s = NULL;
 
 #ifdef HAVE_OPENSSL
-    if (state->conn->tls != NULL) {
-        /* TLS path: encrypt+kick instead of bypassing the layer.
-         * atomic helper bails when the buffer doesn't fully fit in
-         * one SSL_write — with our size invariants it always does. */
-        const bool ok = http_connection_tls_fsm_send_plaintext_atomic(
-                state->conn, ZSTR_VAL(owned), ZSTR_LEN(owned));
-        zend_string_release(owned);
-        return ok;
-    }
+	if (state->conn->tls != NULL) {
+		/* TLS path: encrypt+kick instead of bypassing the layer.
+		 * atomic helper bails when the buffer doesn't fully fit in
+		 * one SSL_write — with our size invariants it always does. */
+		const bool ok = http_connection_tls_fsm_send_plaintext_atomic(state->conn, ZSTR_VAL(owned),
+																	  ZSTR_LEN(owned));
+		zend_string_release(owned);
+		return ok;
+	}
 #endif
 
-    /* Plain TCP: zero-copy fire-and-forget. */
-    return http_connection_send_str_owned(state->conn, owned);
+	/* Plain TCP: zero-copy fire-and-forget. */
+	return http_connection_send_str_owned(state->conn, owned);
 }
 
 /* Append one header line to `out`. Avoids string-init churn. */
-static void ss_append_header(smart_str *out,
-                             const char *name, size_t name_len,
-                             const char *value, size_t value_len)
+static void ss_append_header(smart_str *out, const char *name, size_t name_len, const char *value,
+							 size_t value_len)
 {
-    smart_str_appendl(out, name, name_len);
-    smart_str_appends(out, ": ");
-    smart_str_appendl(out, value, value_len);
-    smart_str_appends(out, "\r\n");
+	smart_str_appendl(out, name, name_len);
+	smart_str_appends(out, ": ");
+	smart_str_appendl(out, value, value_len);
+	smart_str_appends(out, "\r\n");
 }
 
 /* Build the response headers block (without the leading status line
  * and without the trailing CRLF — ss_send_response adds those).
  * include_content_headers gates Content-* on the 304 path
  * (RFC 9110 §15.4.5). */
-static void ss_build_headers(ss_state_t *state, smart_str *out,
-                             const char *content_type, size_t content_type_len,
-                             const char *etag_buf, bool etag_enabled,
-                             const char *last_modified_buf,
-                             const uint64_t content_length,
-                             const bool include_content_headers)
+static void ss_build_headers(ss_state_t *state, smart_str *out, const char *content_type,
+							 size_t content_type_len, const char *etag_buf, bool etag_enabled,
+							 const char *last_modified_buf, const uint64_t content_length,
+							 const bool include_content_headers)
 {
-    if (include_content_headers && content_type != NULL) {
-        ss_append_header(out, "Content-Type", 12,
-                         content_type, content_type_len);
-    }
-    if (include_content_headers) {
-        char clen[32];
-        const int n = snprintf(clen, sizeof(clen), "%" PRIu64, content_length);
-        if (n > 0 && (size_t)n < sizeof(clen)) {
-            ss_append_header(out, "Content-Length", 14, clen, (size_t)n);
-        }
-    }
-    if (etag_enabled) {
-        ss_append_header(out, "ETag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
-    }
-    ss_append_header(out, "Last-Modified", 13,
-                     last_modified_buf, HTTP_STATIC_DATE_LEN);
+	if (include_content_headers && content_type != NULL) {
+		ss_append_header(out, "Content-Type", 12, content_type, content_type_len);
+	}
+	if (include_content_headers) {
+		char clen[32];
+		const int n = snprintf(clen, sizeof(clen), "%" PRIu64, content_length);
+		if (n > 0 && (size_t)n < sizeof(clen)) {
+			ss_append_header(out, "Content-Length", 14, clen, (size_t)n);
+		}
+	}
+	if (etag_enabled) {
+		ss_append_header(out, "ETag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
+	}
+	ss_append_header(out, "Last-Modified", 13, last_modified_buf, HTTP_STATIC_DATE_LEN);
 
-    /* Precompressed sidecar served (PR #4): tell intermediaries the
-     * representation depends on Accept-Encoding so a cache that saw
-     * the gzip variant won't replay it to a client that didn't ask
-     * for compression. Vary is added unconditionally on
-     * Content-Encoding-bearing responses; no harm in extra Vary on
-     * the 304 path either. */
-    if (state->content_encoding != NULL && include_content_headers) {
-        ss_append_header(out, "Content-Encoding", 16,
-                         state->content_encoding,
-                         state->content_encoding_len);
-    }
-    if (state->content_encoding != NULL) {
-        ss_append_header(out, "Vary", 4, "Accept-Encoding", 15);
-    }
+	/* Precompressed sidecar served: tell intermediaries the
+	 * representation depends on Accept-Encoding so a cache that saw
+	 * the gzip variant won't replay it to a client that didn't ask
+	 * for compression. Vary is added unconditionally on
+	 * Content-Encoding-bearing responses; no harm in extra Vary on
+	 * the 304 path either. */
+	if (state->content_encoding != NULL && include_content_headers) {
+		ss_append_header(out, "Content-Encoding", 16, state->content_encoding,
+						 state->content_encoding_len);
+	}
+	if (state->content_encoding != NULL) {
+		ss_append_header(out, "Vary", 4, "Accept-Encoding", 15);
+	}
 
-    /* Range advertise / commit (PR #3). Accept-Ranges goes on every
-     * 200/206 (and 304); a 206 response also gets Content-Range. */
-    if (include_content_headers) {
-        ss_append_header(out, "Accept-Ranges", 13, "bytes", 5);
-    }
-    if (state->is_range && include_content_headers) {
-        char cr[64];
-        const int n = snprintf(cr, sizeof(cr),
-            "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
-            state->range_first, state->range_last, state->range_total);
-        if (n > 0 && (size_t)n < sizeof(cr)) {
-            ss_append_header(out, "Content-Range", 13, cr, (size_t)n);
-        }
-    }
+	/* Range advertise / commit. Accept-Ranges goes on every
+	 * 200/206 (and 304); a 206 response also gets Content-Range. */
+	if (include_content_headers) {
+		ss_append_header(out, "Accept-Ranges", 13, "bytes", 5);
+	}
+	if (state->is_range && include_content_headers) {
+		char cr[64];
+		const int n = snprintf(cr, sizeof(cr), "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
+							   state->range_first, state->range_last, state->range_total);
+		if (n > 0 && (size_t)n < sizeof(cr)) {
+			ss_append_header(out, "Content-Range", 13, cr, (size_t)n);
+		}
+	}
 
-    /* Cache-Control + extra_headers are pre-rendered into one persistent
-     * string at freeze-time (#6 in TODO_STATIC_HANDLER_REVIEW). Splice
-     * the right variant in with a single append; falling back to the
-     * iterator path is only needed if freeze somehow ran with prebakes
-     * NULL (shouldn't happen post-lock, but stays correct if it does). */
-    zend_string *const prebaked = include_content_headers
-        ? state->mount->prebaked_headers_full
-        : state->mount->prebaked_headers_no_content;
-    if (prebaked != NULL) {
-        smart_str_append(out, prebaked);
-    }
-    if (state->conn->keep_alive) {
-        ss_append_header(out, "Connection", 10, "keep-alive", 10);
-    } else {
-        ss_append_header(out, "Connection", 10, "close", 5);
-    }
+	/* Cache-Control + extra_headers are pre-rendered into one persistent
+	 * string at freeze-time (#6 in TODO_STATIC_HANDLER_REVIEW). Splice
+	 * the right variant in with a single append; falling back to the
+	 * iterator path is only needed if freeze somehow ran with prebakes
+	 * NULL (shouldn't happen post-lock, but stays correct if it does). */
+	zend_string *const prebaked = include_content_headers
+									  ? state->mount->prebaked_headers_full
+									  : state->mount->prebaked_headers_no_content;
+	if (prebaked != NULL) {
+		smart_str_append(out, prebaked);
+	}
+	if (state->conn->keep_alive) {
+		ss_append_header(out, "Connection", 10, "keep-alive", 10);
+	} else {
+		ss_append_header(out, "Connection", 10, "close", 5);
+	}
 }
 
 /* Synchronous error emission shortcut. Used when something fails
  * mid-chain (open ENOENT, stat error, sendfile error). */
-static void ss_emit_error(ss_state_t *state, const int status_code,
-                          const char *body)
+static void ss_emit_error(ss_state_t *state, const int status_code, const char *body)
 {
-    smart_str h = {0};
-    ss_append_header(&h, "Content-Type", 12, "text/plain; charset=utf-8", 25);
-    char clen[32];
-    const size_t body_len = body != NULL ? strlen(body) : 0;
-    const int n = snprintf(clen, sizeof(clen), "%zu", body_len);
-    if (n > 0 && (size_t)n < sizeof(clen)) {
-        ss_append_header(&h, "Content-Length", 14, clen, (size_t)n);
-    }
-    ss_append_header(&h, "Connection", 10,
-            state->conn->keep_alive ? "keep-alive" : "close",
-            state->conn->keep_alive ? 10 : 5);
+	smart_str h = {0};
+	ss_append_header(&h, "Content-Type", 12, "text/plain; charset=utf-8", 25);
+	char clen[32];
+	const size_t body_len = body != NULL ? strlen(body) : 0;
+	const int n = snprintf(clen, sizeof(clen), "%zu", body_len);
+	if (n > 0 && (size_t)n < sizeof(clen)) {
+		ss_append_header(&h, "Content-Length", 14, clen, (size_t)n);
+	}
+	ss_append_header(&h, "Connection", 10, state->conn->keep_alive ? "keep-alive" : "close",
+					 state->conn->keep_alive ? 10 : 5);
 
-    state->should_continue = state->conn->keep_alive;
-    (void) ss_send_response(state, status_code, &h, body, body_len);
-    smart_str_free(&h);
+	state->should_continue = state->conn->keep_alive;
+	(void)ss_send_response(state, status_code, &h, body, body_len);
+	smart_str_free(&h);
 
-    /* Telemetry — pair on_request_dispatch from hand-off. */
-    http_server_count_request(state->conn->counters);
+	/* Telemetry — pair on_request_dispatch from hand-off. */
+	http_server_count_request(state->conn->counters);
 }
 
 /* === Single dispatch callback ===================================== */
@@ -752,8 +761,7 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception);
 static void ss_handle_stat(ss_state_t *state);
 static void ss_handle_sendfile_done(ss_state_t *state);
 #ifdef HAVE_OPENSSL
-static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read,
-                                    bool err);
+static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read, bool err);
 static void ss_tls_drain_done_cb(void *data);
 static bool ss_tls_submit_next_read(ss_state_t *state);
 #endif
@@ -763,75 +771,88 @@ static bool ss_tls_submit_next_read(ss_state_t *state);
  * (phase, req identity) — a callback registered during a NOTIFY
  * iteration can re-enter the same iteration, so an unexpected
  * (result, phase) tuple is silently ignored. */
-static void ss_dispatch(zend_async_event_t *event,
-                        zend_async_event_callback_t *callback,
-                        void *result, zend_object *exception)
+static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+						void *result, zend_object *exception)
 {
-    (void) event;
-    ss_state_t *const state = ((ss_cb_t *) callback)->state;
-    zend_async_io_req_t *const req = (zend_async_io_req_t *) result;
+	(void)event;
+	ss_state_t *const state = ((ss_cb_t *)callback)->state;
+	zend_async_io_req_t *const req = (zend_async_io_req_t *)result;
 
-    switch (state->phase) {
-        case SS_PHASE_OPEN:
-            /* libuv_fs_open notifies with result=NULL — the only
-             * valid signal during this phase. Any non-NULL result is
-             * a re-entrant fire from a later phase's submit, ignore. */
-            if (req != NULL) return;
-            ss_handle_open(state, exception);
-            return;
+	switch (state->phase) {
+	case SS_PHASE_OPEN:
+		/* libuv_fs_open notifies with result=NULL — the only
+		 * valid signal during this phase. Any non-NULL result is
+		 * a re-entrant fire from a later phase's submit, ignore. */
+		if (req != NULL) {
+			return;
+		}
+		ss_handle_open(state, exception);
+		return;
 
-        case SS_PHASE_STAT:
-            /* The stat-req identity match guards against a reentrant
-             * fire that arrived before our pending_req was set. */
-            if (req == NULL || req != state->pending_req) return;
-            state->pending_req = NULL;
-            if (req->dispose != NULL) req->dispose(req);
-            if (UNEXPECTED(exception != NULL)) {
-                ss_emit_error(state, 500, "Internal Server Error");
-                ss_finalize(state);
-                return;
-            }
-            ss_handle_stat(state);
-            return;
+	case SS_PHASE_STAT:
+		/* The stat-req identity match guards against a reentrant
+		 * fire that arrived before our pending_req was set. */
+		if (req == NULL || req != state->pending_req) {
+			return;
+		}
+		state->pending_req = NULL;
+		if (req->dispose != NULL) {
+			req->dispose(req);
+		}
+		if (UNEXPECTED(exception != NULL)) {
+			ss_emit_error(state, 500, "Internal Server Error");
+			ss_finalize(state);
+			return;
+		}
+		ss_handle_stat(state);
+		return;
 
-        case SS_PHASE_SENDFILE:
-            if (req == NULL || req != state->pending_req) return;
-            state->pending_req = NULL;
-            if (req->dispose != NULL) req->dispose(req);
-            ss_handle_sendfile_done(state);
-            return;
+	case SS_PHASE_SENDFILE:
+		if (req == NULL || req != state->pending_req) {
+			return;
+		}
+		state->pending_req = NULL;
+		if (req->dispose != NULL) {
+			req->dispose(req);
+		}
+		ss_handle_sendfile_done(state);
+		return;
 
 #ifdef HAVE_OPENSSL
-        case SS_PHASE_TLS_READ:
-            /* IO_READ on file_io completed. result points at the req,
-             * exception non-NULL on EBADF / read errors. transferred
-             * == 0 means EOF (early or truncated file). */
-            if (req == NULL || req != state->pending_req) return;
-            state->pending_req = NULL;
-            {
-                const ssize_t got = req->transferred;
-                const bool err = (exception != NULL || req->exception != NULL);
-                if (req->exception != NULL) {
-                    OBJ_RELEASE(req->exception);
-                    req->exception = NULL;
-                }
-                if (req->dispose != NULL) req->dispose(req);
-                ss_handle_tls_read_done(state, got, err);
-            }
-            return;
+	case SS_PHASE_TLS_READ:
+		/* IO_READ on file_io completed. result points at the req,
+		 * exception non-NULL on EBADF / read errors. transferred
+		 * == 0 means EOF (early or truncated file). */
+		if (req == NULL || req != state->pending_req) {
+			return;
+		}
+		state->pending_req = NULL;
+		{
+			const ssize_t got = req->transferred;
+			const bool err = (exception != NULL || req->exception != NULL);
+			if (req->exception != NULL) {
+				OBJ_RELEASE(req->exception);
+				req->exception = NULL;
+			}
+			if (req->dispose != NULL) {
+				req->dispose(req);
+			}
+			ss_handle_tls_read_done(state, got, err);
+		}
+		return;
 
-        case SS_PHASE_TLS_DRAIN:
-            /* Drain wakeup arrives via the conn->tls_zc_write_done_cb
-             * direct callback, not through ss_dispatch — we never
-             * register a pending_req for the drain wait. Spurious
-             * notifies on file_io while parked in DRAIN are ignored. */
-            return;
+	case SS_PHASE_TLS_DRAIN:
+		/* Drain wakeup arrives via the conn->tls_zc_write_done_cb
+		 * direct callback, not through ss_dispatch — we never
+		 * register a pending_req for the drain wait. Spurious
+		 * notifies on file_io while parked in DRAIN are ignored. */
+		return;
 #endif
 
-        case SS_PHASE_DONE:
-        default:
-            return;
-    }
+	case SS_PHASE_DONE:
+	default:
+		return;
+	}
 }
 
 /* on_missing:Next rollback (#5c). Open failed on a mount configured to
@@ -841,367 +862,345 @@ static void ss_dispatch(zend_async_event_t *event,
  * decrement them, balancing the bookkeeping. */
 static void ss_rollback_to_php_handler(ss_state_t *state)
 {
-    http_connection_t   *const conn = state->conn;
-    http1_request_ctx_t *const ctx  = state->ctx;
+	http_connection_t *const conn = state->conn;
+	http1_request_ctx_t *const ctx = state->ctx;
 
-    /* Restore the cork toggle ss_kick_off did. The coroutine path's
-     * fire-and-forget writes don't expect cork. Idempotent on non-
-     * Linux / non-corked sockets. */
-    ss_cork_set(conn, 0);
+	/* Restore the cork toggle ss_kick_off did. The coroutine path's
+	 * fire-and-forget writes don't expect cork. Idempotent on non-
+	 * Linux / non-corked sockets. */
+	ss_cork_set(conn, 0);
 
 #ifdef HAVE_OPENSSL
-    /* Defensive: rollback only fires on OPEN failure today, so the
-     * observer hook hasn't been installed yet. Clearing here keeps
-     * us safe if the rollback path widens later. */
-    if (state->is_tls
-        && conn->tls_zc_write_done_cb_data == state) {
-        conn->tls_zc_write_done_cb      = NULL;
-        conn->tls_zc_write_done_cb_data = NULL;
-    }
+	/* Defensive: rollback only fires on OPEN failure today, so the
+	 * observer hook hasn't been installed yet. Clearing here keeps
+	 * us safe if the rollback path widens later. */
+	if (state->is_tls && conn->tls_zc_write_done_cb_data == state) {
+		conn->tls_zc_write_done_cb = NULL;
+		conn->tls_zc_write_done_cb_data = NULL;
+	}
 #endif
 
-    /* Drop the file_io + persistent callback (mirrors ss_finalize but
-     * without on_request_dispose / http_request_finalize — those happen
-     * later via the coroutine's dispose). */
-    if (state->cb != NULL && state->file_io != NULL) {
-        (void) state->file_io->event.del_callback(
-            &state->file_io->event, state->cb);
-        state->cb = NULL;
-    }
-    if (state->file_io != NULL) {
-        if (state->file_io->event.dispose != NULL) {
-            state->file_io->event.dispose(&state->file_io->event);
-        }
-        state->file_io = NULL;
-    }
+	/* Drop the file_io + persistent callback (mirrors ss_finalize but
+	 * without on_request_dispose / http_request_finalize — those happen
+	 * later via the coroutine's dispose). */
+	if (state->cb != NULL && state->file_io != NULL) {
+		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
+		state->cb = NULL;
+	}
+	if (state->file_io != NULL) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		state->file_io = NULL;
+	}
 
-    state->phase = SS_PHASE_DONE;
+	state->phase = SS_PHASE_DONE;
 
-    /* Spawn the PHP handler coroutine (mirrors the dispatch tail in
-     * http_connection_dispatch_request).  conn->scope is alive because
-     * ss_kick_off pinned conn->handler_refcount. */
-    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
-    if (UNEXPECTED(coroutine == NULL)) {
-        /* Out of memory / scope torn down. Same fallback as the regular
-         * dispatch tail: drop ctx and destroy the conn. */
-        zval_ptr_dtor(&ctx->request_zv);
-        zval_ptr_dtor(&ctx->response_zv);
-        efree(ctx);
-        ss_state_free(state);
-        http_connection_destroy(conn);
-        return;
-    }
+	/* Spawn the PHP handler coroutine (mirrors the dispatch tail in
+	 * http_connection_dispatch_request).  conn->scope is alive because
+	 * ss_kick_off pinned conn->handler_refcount. */
+	zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+	if (UNEXPECTED(coroutine == NULL)) {
+		/* Out of memory / scope torn down. Same fallback as the regular
+		 * dispatch tail: drop ctx and destroy the conn. */
+		zval_ptr_dtor(&ctx->request_zv);
+		zval_ptr_dtor(&ctx->response_zv);
+		efree(ctx);
+		ss_state_free(state);
+		http_connection_destroy(conn);
+		return;
+	}
 
-    /* If the static-only deployment had no PHP handler, http_handler_
-     * coroutine_entry would dereference NULL conn->handler. Synthesise
-     * the same 404 the regular dispatch tail does in that case. */
-    if (conn->handler == NULL) {
-        http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
-        http_response_static_set_header(Z_OBJ(ctx->response_zv),
-            "content-type", 12, "text/plain; charset=utf-8", 25);
-        zend_string *msg = zend_string_init("Not Found", 9, 0);
-        http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
-        zend_string_release(msg);
-        ctx->skip_php_handler = true;
-    }
+	/* If the static-only deployment had no PHP handler, http_handler_
+	 * coroutine_entry would dereference NULL conn->handler. Synthesise
+	 * the same 404 the regular dispatch tail does in that case. */
+	if (conn->handler == NULL) {
+		http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
+		http_response_static_set_header(Z_OBJ(ctx->response_zv), "content-type", 12,
+										"text/plain; charset=utf-8", 25);
+		zend_string *msg = zend_string_init("Not Found", 9, 0);
+		http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
+		zend_string_release(msg);
+		ctx->skip_php_handler = true;
+	}
 
-    coroutine->internal_entry   = http_handler_coroutine_entry;
-    coroutine->extended_data    = ctx;
-    coroutine->extended_dispose = http_handler_coroutine_dispose;
+	coroutine->internal_entry = http_handler_coroutine_entry;
+	coroutine->extended_data = ctx;
+	coroutine->extended_dispose = http_handler_coroutine_dispose;
 
-    if (ctx->request != NULL) {
-        ctx->request->coroutine = coroutine;
-    }
+	if (ctx->request != NULL) {
+		ctx->request->coroutine = coroutine;
+	}
 
-    /* The dispatch counter + handler_refcount were already bumped in
-     * ss_kick_off. Skip the bump in the regular dispatch tail — the
-     * coroutine's dispose still decrements once, balancing the books. */
+	/* The dispatch counter + handler_refcount were already bumped in
+	 * ss_kick_off. Skip the bump in the regular dispatch tail — the
+	 * coroutine's dispose still decrements once, balancing the books. */
 
-    ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
+	ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
 
-    /* state lifetime ends here — ctx is owned by the coroutine. */
-    ss_state_free(state);
+	/* state lifetime ends here — ctx is owned by the coroutine. */
+	ss_state_free(state);
 }
 
 static void ss_handle_open(ss_state_t *state, zend_object *exception)
 {
-    /* libuv flips READABLE on success or CLOSED on error before
-     * NOTIFY fires. The exception arg is a redundant signal; either
-     * one shipping back to us means the open failed. */
-    if (UNEXPECTED(exception != NULL
-            || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
-        if (state->mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
-            ss_rollback_to_php_handler(state);
-            return;
-        }
-        ss_emit_error(state, 404, "Not Found");
-        ss_finalize(state);
-        return;
-    }
+	/* libuv flips READABLE on success or CLOSED on error before
+	 * NOTIFY fires. The exception arg is a redundant signal; either
+	 * one shipping back to us means the open failed. */
+	if (UNEXPECTED(exception != NULL || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
+		if (state->mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+			ss_rollback_to_php_handler(state);
+			return;
+		}
+		ss_emit_error(state, 404, "Not Found");
+		ss_finalize(state);
+		return;
+	}
 
-    /* Open-file-cache hit: state->st is pre-populated (and validated
-     * at insert time inside the TTL window). Skip the IO_STAT submit
-     * entirely — straight into header build with cached etag/MIME/lm. */
-    if (state->has_cached_meta) {
-        ss_handle_stat(state);
-        return;
-    }
+	/* Open-file-cache hit: state->st is pre-populated (and validated
+	 * at insert time inside the TTL window). Skip the IO_STAT submit
+	 * entirely — straight into header build with cached etag/MIME/lm. */
+	if (state->has_cached_meta) {
+		ss_handle_stat(state);
+		return;
+	}
 
-    state->phase       = SS_PHASE_STAT;
-    state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
-    if (UNEXPECTED(state->pending_req == NULL)) {
-        ss_emit_error(state, 500, "Internal Server Error");
-        ss_finalize(state);
-    }
+	state->phase = SS_PHASE_STAT;
+	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
+	if (UNEXPECTED(state->pending_req == NULL)) {
+		ss_emit_error(state, 500, "Internal Server Error");
+		ss_finalize(state);
+	}
 }
 
 static void ss_handle_stat(ss_state_t *state)
 {
-    if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
-        ss_emit_error(state, 404, "Not Found");
-        ss_finalize(state);
-        return;
-    }
-    if (UNEXPECTED((uint64_t) state->st.st_size > (uint64_t) HTTP_STATIC_MAX_FILE_SIZE)) {
-        ss_emit_error(state, 413, "Payload Too Large");
-        ss_finalize(state);
-        return;
-    }
+	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
+		ss_emit_error(state, 404, "Not Found");
+		ss_finalize(state);
+		return;
+	}
+	if (UNEXPECTED((uint64_t)state->st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
+		ss_emit_error(state, 413, "Payload Too Large");
+		ss_finalize(state);
+		return;
+	}
 
-    /* On a cache hit ss_kick_off pre-rendered etag/lm into the state
-     * scratch buffers and copied content_type out of the entry — every
-     * format/lookup helper below collapses to a memory read. On a miss
-     * we synthesise everything from the freshly-stat'd inode and (at
-     * the bottom) hand it to the cache so the next miss-or-hit cycle
-     * for this path goes through the fast path. */
-    char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
-    char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
-    bool etag_enabled;
-    const char *content_type     = NULL;
-    size_t      content_type_len = 0;
+	/* On a cache hit ss_kick_off pre-rendered etag/lm into the state
+	 * scratch buffers and copied content_type out of the entry — every
+	 * format/lookup helper below collapses to a memory read. On a miss
+	 * we synthesise everything from the freshly-stat'd inode and (at
+	 * the bottom) hand it to the cache so the next miss-or-hit cycle
+	 * for this path goes through the fast path. */
+	char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
+	char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
+	bool etag_enabled;
+	const char *content_type = NULL;
+	size_t content_type_len = 0;
 
-    if (state->has_cached_meta) {
-        etag_enabled = state->cached_etag_enabled;
-        if (etag_enabled) {
-            memcpy(etag_buf, state->cached_etag_buf, HTTP_STATIC_ETAG_BUF_LEN);
-        }
-        memcpy(last_modified_buf, state->cached_lm_buf, HTTP_STATIC_DATE_BUF_LEN);
-        content_type     = state->cached_content_type;
-        content_type_len = state->cached_content_type_len;
-    } else {
-        etag_enabled = (state->mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
-        if (etag_enabled) {
-            http_static_etag_format(&state->st, etag_buf);
-        }
-        http_static_format_http_date(state->st.st_mtime, last_modified_buf);
-        if (state->override_content_type != NULL) {
-            /* Precompressed sidecar: state->fs_path now points at
-             * "<orig>.gz/.br/.zst", so MIME-by-extension would mis-fire.
-             * Use the type derived from the original path before the
-             * suffix was appended in the pre-flight. */
-            content_type     = state->override_content_type;
-            content_type_len = state->override_content_type_len;
-        } else if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
-                                     &content_type, &content_type_len)) {
-            content_type     = "application/octet-stream";
-            content_type_len = sizeof("application/octet-stream") - 1;
-        }
-    }
+	if (state->has_cached_meta) {
+		etag_enabled = state->cached_etag_enabled;
+		if (etag_enabled) {
+			memcpy(etag_buf, state->cached_etag_buf, HTTP_STATIC_ETAG_BUF_LEN);
+		}
+		memcpy(last_modified_buf, state->cached_lm_buf, HTTP_STATIC_DATE_BUF_LEN);
+		content_type = state->cached_content_type;
+		content_type_len = state->cached_content_type_len;
+	} else {
+		etag_enabled = (state->mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
+		if (etag_enabled) {
+			http_static_etag_format(&state->st, etag_buf);
+		}
+		http_static_format_http_date(state->st.st_mtime, last_modified_buf);
+		if (state->override_content_type != NULL) {
+			/* Precompressed sidecar: state->fs_path now points at
+			 * "<orig>.gz/.br/.zst", so MIME-by-extension would mis-fire.
+			 * Use the type derived from the original path before the
+			 * suffix was appended in the pre-flight. */
+			content_type = state->override_content_type;
+			content_type_len = state->override_content_type_len;
+		} else if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
+											&content_type, &content_type_len)) {
+			content_type = "application/octet-stream";
+			content_type_len = sizeof("application/octet-stream") - 1;
+		}
+	}
 
-    const zend_string *if_none_match     = find_request_header(
-            state->ctx->request, "if-none-match", 13);
-    const zend_string *if_modified_since = find_request_header(
-            state->ctx->request, "if-modified-since", 17);
-    const bool not_modified = http_static_conditional_match(
-            if_none_match     != NULL ? ZSTR_VAL(if_none_match)     : NULL,
-            if_none_match     != NULL ? ZSTR_LEN(if_none_match)     : 0,
-            if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
-            if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0,
-            etag_enabled ? etag_buf : NULL,
-            etag_enabled ? HTTP_STATIC_ETAG_LEN : 0,
-            state->st.st_mtime);
+	const zend_string *if_none_match =
+		find_first_request_header(state->ctx->request, "if-none-match", 13);
+	const zend_string *if_modified_since =
+		find_first_request_header(state->ctx->request, "if-modified-since", 17);
+	const bool not_modified = http_static_conditional_match(
+		if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
+		if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
+		if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
+		if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0, etag_enabled ? etag_buf : NULL,
+		etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, state->st.st_mtime);
 
-    /* Cache insert (only on miss path — the hit case already has the
-     * entry). content_type is borrowed from the persistent MIME table
-     * or the "application/octet-stream" literal; both are safe to
-     * alias for the entry's lifetime. */
-    if (!state->has_cached_meta
-        && state->conn != NULL && state->conn->server != NULL) {
-        http_static_cache_t *cache =
-                http_static_cache_acquire(state->conn->server);
-        if (cache != NULL) {
-            http_static_cache_insert(cache,
-                    state->fs_path, state->fs_path_len,
-                    &state->st,
-                    content_type, content_type_len,
-                    etag_enabled ? etag_buf : NULL,
-                    etag_enabled ? HTTP_STATIC_ETAG_LEN : 0,
-                    last_modified_buf, HTTP_STATIC_DATE_LEN);
-        }
-    }
+	/* Cache insert (only on miss path — the hit case already has the
+	 * entry). content_type is borrowed from the persistent MIME table
+	 * or the "application/octet-stream" literal; both are safe to
+	 * alias for the entry's lifetime. */
+	if (!state->has_cached_meta && state->conn != NULL && state->conn->server != NULL) {
+		http_static_cache_t *cache = http_static_cache_acquire(state->conn->server);
+		if (cache != NULL) {
+			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
+									 content_type, content_type_len, etag_enabled ? etag_buf : NULL,
+									 etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, last_modified_buf,
+									 HTTP_STATIC_DATE_LEN);
+		}
+	}
 
-    /* Range support (PR #3, RFC 9110 §14.2). If the request carries a
-     * single-range Range header (and either no If-Range or one that
-     * matches the strong validator), we slice the response to a 206.
-     * Multi-range / unparsable / multipart syntax falls through to a
-     * full 200 — RFC-permitted (§14.2 paragraph 1: "a server MAY
-     * ignore Range"). 416 is mandatory for syntactically valid but
-     * unsatisfiable ranges (e.g. start past EOF). */
-    state->range_total = (uint64_t) state->st.st_size;
-    state->is_range    = false;
-    /* TLS body path uses ZEND_ASYNC_IO_READ which has no offset
-     * argument — supporting Range there needs an lseek-or-pread
-     * extension to the async API. Skip Range on TLS for now and
-     * serve the full body; clients that need Range over TLS retry
-     * via plain HTTP or fall back to whole-file download. */
-    if (!not_modified && !state->is_tls) {
-        const zend_string *range_hdr = find_request_header(
-                state->ctx->request, "range", 5);
-        const zend_string *if_range  = find_request_header(
-                state->ctx->request, "if-range", 8);
-        bool range_allowed = true;
-        if (if_range != NULL && etag_enabled) {
-            /* Strong-equal compare per §13.1.5; the cheap path is
-             * exact memcmp against the ETag we already formatted. */
-            range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN
-                          && memcmp(ZSTR_VAL(if_range), etag_buf,
-                                    HTTP_STATIC_ETAG_LEN) == 0);
-        } else if (if_range != NULL) {
-            /* No etag to compare against → conservatively ignore Range. */
-            range_allowed = false;
-        }
-        if (range_hdr != NULL && range_allowed) {
-            uint64_t first = 0, last = 0;
-            const int rc = parse_byte_range(
-                ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr),
-                state->range_total, &first, &last);
-            if (rc == 1) {
-                state->is_range    = true;
-                state->range_first = first;
-                state->range_last  = last;
-            } else if (rc == -1) {
-                state->should_continue = state->conn->keep_alive;
-                /* 416 carries `Content-Range: bytes [star]/size` per §14.1.2. */
-                smart_str h = {0};
-                ss_append_header(&h, "Content-Type", 12,
-                                 "text/plain; charset=utf-8", 25);
-                char cr[48];
-                const int crn = snprintf(cr, sizeof(cr),
-                    "bytes */%" PRIu64, state->range_total);
-                if (crn > 0 && (size_t)crn < sizeof(cr)) {
-                    ss_append_header(&h, "Content-Range", 13, cr, (size_t)crn);
-                }
-                ss_append_header(&h, "Content-Length", 14, "0", 1);
-                ss_append_header(&h, "Connection", 10,
-                                 state->conn->keep_alive ? "keep-alive" : "close",
-                                 state->conn->keep_alive ? 10 : 5);
-                (void) ss_send_response(state, 416, &h, NULL, 0);
-                smart_str_free(&h);
-                http_server_count_request(state->conn->counters);
-                ss_finalize(state);
-                return;
-            }
-        }
-    }
+	/* Range support (RFC 9110 §14.2). If the request carries a
+	 * single-range Range header (and either no If-Range or one that
+	 * matches the strong validator), we slice the response to a 206.
+	 * Multi-range / unparsable / multipart syntax falls through to a
+	 * full 200 — RFC-permitted (§14.2 paragraph 1: "a server MAY
+	 * ignore Range"). 416 is mandatory for syntactically valid but
+	 * unsatisfiable ranges (e.g. start past EOF). */
+	state->range_total = (uint64_t)state->st.st_size;
+	state->is_range = false;
+	/* TLS body path uses ZEND_ASYNC_IO_READ which has no offset
+	 * argument — supporting Range there needs an lseek-or-pread
+	 * extension to the async API. Skip Range on TLS for now and
+	 * serve the full body; clients that need Range over TLS retry
+	 * via plain HTTP or fall back to whole-file download. */
+	if (!not_modified && !state->is_tls) {
+		const zend_string *range_hdr = find_first_request_header(state->ctx->request, "range", 5);
+		const zend_string *if_range = find_first_request_header(state->ctx->request, "if-range", 8);
+		bool range_allowed = true;
+		if (if_range != NULL && etag_enabled) {
+			/* Strong-equal compare per §13.1.5; the cheap path is
+			 * exact memcmp against the ETag we already formatted. */
+			range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN &&
+							 memcmp(ZSTR_VAL(if_range), etag_buf, HTTP_STATIC_ETAG_LEN) == 0);
+		} else if (if_range != NULL) {
+			/* No etag to compare against → conservatively ignore Range. */
+			range_allowed = false;
+		}
+		if (range_hdr != NULL && range_allowed) {
+			uint64_t first = 0, last = 0;
+			const int rc = parse_byte_range(ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr),
+											state->range_total, &first, &last);
+			if (rc == 1) {
+				state->is_range = true;
+				state->range_first = first;
+				state->range_last = last;
+			} else if (rc == -1) {
+				state->should_continue = state->conn->keep_alive;
+				/* 416 carries `Content-Range: bytes [star]/size` per §14.1.2. */
+				smart_str h = {0};
+				ss_append_header(&h, "Content-Type", 12, "text/plain; charset=utf-8", 25);
+				char cr[48];
+				const int crn = snprintf(cr, sizeof(cr), "bytes */%" PRIu64, state->range_total);
+				if (crn > 0 && (size_t)crn < sizeof(cr)) {
+					ss_append_header(&h, "Content-Range", 13, cr, (size_t)crn);
+				}
+				ss_append_header(&h, "Content-Length", 14, "0", 1);
+				ss_append_header(&h, "Connection", 10,
+								 state->conn->keep_alive ? "keep-alive" : "close",
+								 state->conn->keep_alive ? 10 : 5);
+				(void)ss_send_response(state, 416, &h, NULL, 0);
+				smart_str_free(&h);
+				http_server_count_request(state->conn->counters);
+				ss_finalize(state);
+				return;
+			}
+		}
+	}
 
-    state->should_continue = state->conn->keep_alive;
+	state->should_continue = state->conn->keep_alive;
 
-    smart_str headers = {0};
+	smart_str headers = {0};
 
-    if (not_modified) {
-        ss_build_headers(state, &headers,
-                         content_type, content_type_len,
-                         etag_buf, etag_enabled, last_modified_buf,
-                         (uint64_t) state->st.st_size, false);
-        (void) ss_send_response(state, 304, &headers, NULL, 0);
-        smart_str_free(&headers);
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
+	if (not_modified) {
+		ss_build_headers(state, &headers, content_type, content_type_len, etag_buf, etag_enabled,
+						 last_modified_buf, (uint64_t)state->st.st_size, false);
+		(void)ss_send_response(state, 304, &headers, NULL, 0);
+		smart_str_free(&headers);
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
 
-    const uint64_t body_len = state->is_range
-        ? (state->range_last - state->range_first + 1)
-        : (uint64_t) state->st.st_size;
-    const int      status_code = state->is_range ? 206 : 200;
+	const uint64_t body_len = state->is_range ? (state->range_last - state->range_first + 1)
+											  : (uint64_t)state->st.st_size;
+	const int status_code = state->is_range ? 206 : 200;
 
-    ss_build_headers(state, &headers,
-                     content_type, content_type_len,
-                     etag_buf, etag_enabled, last_modified_buf,
-                     body_len, true);
+	ss_build_headers(state, &headers, content_type, content_type_len, etag_buf, etag_enabled,
+					 last_modified_buf, body_len, true);
 
-    if (state->is_head || state->st.st_size == 0) {
-        (void) ss_send_response(state, status_code, &headers, NULL, 0);
-        smart_str_free(&headers);
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
+	if (state->is_head || state->st.st_size == 0) {
+		(void)ss_send_response(state, status_code, &headers, NULL, 0);
+		smart_str_free(&headers);
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
 
-    /* 200 GET with body. Headers go through the right channel:
-     *   - plain TCP: fire-and-forget zero-copy uv_write, body rides
-     *     ZEND_ASYNC_IO_SENDFILE for kernel-resident transfer.
-     *   - TLS: encrypt+kick through tls_fsm_send_plaintext_atomic for
-     *     headers, then the chunked TLS_READ→SSL_write→drain loop
-     *     handles the body.
-     * Both branches converge in ss_finalize. */
-    if (UNEXPECTED(!ss_send_response(state, status_code, &headers, NULL, 0))) {
-        smart_str_free(&headers);
-        ss_finalize(state);
-        return;
-    }
-    smart_str_free(&headers);
+	/* 200 GET with body. Headers go through the right channel:
+	 *   - plain TCP: fire-and-forget zero-copy uv_write, body rides
+	 *     ZEND_ASYNC_IO_SENDFILE for kernel-resident transfer.
+	 *   - TLS: encrypt+kick through tls_fsm_send_plaintext_atomic for
+	 *     headers, then the chunked TLS_READ→SSL_write→drain loop
+	 *     handles the body.
+	 * Both branches converge in ss_finalize. */
+	if (UNEXPECTED(!ss_send_response(state, status_code, &headers, NULL, 0))) {
+		smart_str_free(&headers);
+		ss_finalize(state);
+		return;
+	}
+	smart_str_free(&headers);
 
 #ifdef HAVE_OPENSSL
-    if (state->is_tls) {
-        /* TLS body path: chunked IO_READ + SSL_write + drain loop.
-         * chunk_buf is emalloc'd lazily; one buffer reused across
-         * every iteration of the loop. */
-        if (state->chunk_buf == NULL) {
-            state->chunk_buf = emalloc(SS_TLS_CHUNK_BYTES);
-        }
+	if (state->is_tls) {
+		/* TLS body path: chunked IO_READ + SSL_write + drain loop.
+		 * chunk_buf is emalloc'd lazily; one buffer reused across
+		 * every iteration of the loop. */
+		if (state->chunk_buf == NULL) {
+			state->chunk_buf = emalloc(SS_TLS_CHUNK_BYTES);
+		}
 
-        /* Hook the cipher-write completion observer so the FSM-send
-         * free_cb wakes us when wbio drains. Cleared in ss_finalize. */
-        state->conn->tls_zc_write_done_cb      = ss_tls_drain_done_cb;
-        state->conn->tls_zc_write_done_cb_data = state;
+		/* Hook the cipher-write completion observer so the FSM-send
+		 * free_cb wakes us when wbio drains. Cleared in ss_finalize. */
+		state->conn->tls_zc_write_done_cb = ss_tls_drain_done_cb;
+		state->conn->tls_zc_write_done_cb_data = state;
 
-        /* Headers atomic-send may have left a write in flight. If so,
-         * park in DRAIN and let the cb call ss_tls_submit_next_read
-         * once the BIO ring has drained. Sync-complete: jump in
-         * directly. */
-        if (state->conn->tls_zc_write_n != 0) {
-            state->phase = SS_PHASE_TLS_DRAIN;
-            return;
-        }
-        if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
-            http_server_count_request(state->conn->counters);
-            ss_finalize(state);
-        }
-        return;
-    }
+		/* Headers atomic-send may have left a write in flight. If so,
+		 * park in DRAIN and let the cb call ss_tls_submit_next_read
+		 * once the BIO ring has drained. Sync-complete: jump in
+		 * directly. */
+		if (state->conn->tls_zc_write_n != 0) {
+			state->phase = SS_PHASE_TLS_DRAIN;
+			return;
+		}
+		if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
+			http_server_count_request(state->conn->counters);
+			ss_finalize(state);
+		}
+		return;
+	}
 #endif
 
-    /* Plain TCP body path: zero-copy kernel sendfile. On a 206 we
-     * pass range_first as offset and slice the length to body_len —
-     * uv_fs_sendfile honours both. */
-    state->phase       = SS_PHASE_SENDFILE;
-    const uint64_t sf_offset = state->is_range ? state->range_first : 0;
-    state->pending_req = ZEND_ASYNC_IO_SENDFILE(
-            state->conn->io, state->file_io, (off_t) sf_offset,
-            (size_t) body_len);
-    if (UNEXPECTED(state->pending_req == NULL)) {
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-    }
+	/* Plain TCP body path: zero-copy kernel sendfile. On a 206 we
+	 * pass range_first as offset and slice the length to body_len —
+	 * uv_fs_sendfile honours both. */
+	state->phase = SS_PHASE_SENDFILE;
+	const uint64_t sf_offset = state->is_range ? state->range_first : 0;
+	state->pending_req =
+		ZEND_ASYNC_IO_SENDFILE(state->conn->io, state->file_io, (off_t)sf_offset, (size_t)body_len);
+	if (UNEXPECTED(state->pending_req == NULL)) {
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+	}
 }
 
 static void ss_handle_sendfile_done(ss_state_t *state)
 {
-    /* Body sent (or partially sent on error). On error we still
-     * finalize — bytes already on the wire are out of our control. */
-    http_server_count_request(state->conn->counters);
-    ss_finalize(state);
+	/* Body sent (or partially sent on error). On error we still
+	 * finalize — bytes already on the wire are out of our control. */
+	http_server_count_request(state->conn->counters);
+	ss_finalize(state);
 }
 
 #ifdef HAVE_OPENSSL
@@ -1230,117 +1229,114 @@ static void ss_handle_sendfile_done(ss_state_t *state)
 
 static bool ss_tls_submit_next_read(ss_state_t *state)
 {
-    const uint64_t total = (uint64_t) state->st.st_size;
-    if (state->bytes_sent >= total) {
-        /* Body fully shipped. Wait for any trailing in-flight cipher
-         * write to finish before finalizing — but if it's already
-         * settled, finalize now. The DRAIN cb path handles the not-
-         * yet-settled case. */
-        if (state->conn->tls_zc_write_n != 0) {
-            state->phase = SS_PHASE_TLS_DRAIN;
-            return true;
-        }
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return true;
-    }
+	const uint64_t total = (uint64_t)state->st.st_size;
+	if (state->bytes_sent >= total) {
+		/* Body fully shipped. Wait for any trailing in-flight cipher
+		 * write to finish before finalizing — but if it's already
+		 * settled, finalize now. The DRAIN cb path handles the not-
+		 * yet-settled case. */
+		if (state->conn->tls_zc_write_n != 0) {
+			state->phase = SS_PHASE_TLS_DRAIN;
+			return true;
+		}
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return true;
+	}
 
-    state->phase = SS_PHASE_TLS_READ;
-    const size_t remaining = (size_t)(total - state->bytes_sent);
-    const size_t want = remaining < SS_TLS_CHUNK_BYTES
-                            ? remaining : SS_TLS_CHUNK_BYTES;
-    state->pending_req = ZEND_ASYNC_IO_READ(
-            state->file_io, state->chunk_buf, want);
-    return state->pending_req != NULL;
+	state->phase = SS_PHASE_TLS_READ;
+	const size_t remaining = (size_t)(total - state->bytes_sent);
+	const size_t want = remaining < SS_TLS_CHUNK_BYTES ? remaining : SS_TLS_CHUNK_BYTES;
+	state->pending_req = ZEND_ASYNC_IO_READ(state->file_io, state->chunk_buf, want);
+	return state->pending_req != NULL;
 }
 
-static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read,
-                                    bool err)
+static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read, bool err)
 {
-    if (UNEXPECTED(err) || bytes_read < 0) {
-        /* Read error mid-stream — bytes already on the wire belong
-         * to the client, finalize and let keep-alive policy decide. */
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
-    if (bytes_read == 0) {
-        /* EOF before st_size — file truncated under us. Same
-         * recovery as the read-error path: drop, finalize. */
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
+	if (UNEXPECTED(err) || bytes_read < 0) {
+		/* Read error mid-stream — bytes already on the wire belong
+		 * to the client, finalize and let keep-alive policy decide. */
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
+	if (bytes_read == 0) {
+		/* EOF before st_size — file truncated under us. Same
+		 * recovery as the read-error path: drop, finalize. */
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
 
-    /* Conn went into shutdown (peer FIN / worker stop) between our
-     * IO_READ submit and its completion. Don't push more encrypt+
-     * write traffic into a half-torn session — bail through the
-     * normal finalize path. */
-    if (state->conn->state == CONN_STATE_CLOSING
-        || state->conn->destroy_pending
-        || state->conn->tls_write_error) {
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
+	/* Conn went into shutdown (peer FIN / worker stop) between our
+	 * IO_READ submit and its completion. Don't push more encrypt+
+	 * write traffic into a half-torn session — bail through the
+	 * normal finalize path. */
+	if (state->conn->state == CONN_STATE_CLOSING || state->conn->destroy_pending ||
+		state->conn->tls_write_error) {
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
 
-    /* Encrypt + queue. Atomic helper bails on partial writes; with
-     * SS_TLS_CHUNK_BYTES ≤ ring it always succeeds for a healthy
-     * session. A failure here means the session itself is wedged
-     * (sticky tls_write_error) — bail. */
-    if (UNEXPECTED(!http_connection_tls_fsm_send_plaintext_atomic(
-            state->conn, state->chunk_buf, (size_t) bytes_read))) {
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
-    state->bytes_sent += (uint64_t) bytes_read;
+	/* Encrypt + queue. Atomic helper bails on partial writes; with
+	 * SS_TLS_CHUNK_BYTES ≤ ring it always succeeds for a healthy
+	 * session. A failure here means the session itself is wedged
+	 * (sticky tls_write_error) — bail. */
+	if (UNEXPECTED(!http_connection_tls_fsm_send_plaintext_atomic(state->conn, state->chunk_buf,
+																  (size_t)bytes_read))) {
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
+	state->bytes_sent += (uint64_t)bytes_read;
 
-    /* Sync-complete cipher write (rare on Linux, common on Windows
-     * try-write fast path): zc_write_n already back to 0, no DRAIN
-     * wait needed. Loop directly. */
-    if (state->conn->tls_zc_write_n == 0) {
-        if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
-            http_server_count_request(state->conn->counters);
-            ss_finalize(state);
-        }
-        return;
-    }
+	/* Sync-complete cipher write (rare on Linux, common on Windows
+	 * try-write fast path): zc_write_n already back to 0, no DRAIN
+	 * wait needed. Loop directly. */
+	if (state->conn->tls_zc_write_n == 0) {
+		if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
+			http_server_count_request(state->conn->counters);
+			ss_finalize(state);
+		}
+		return;
+	}
 
-    /* Async cipher write: park until tls_zc_write_done_cb fires. */
-    state->phase = SS_PHASE_TLS_DRAIN;
+	/* Async cipher write: park until tls_zc_write_done_cb fires. */
+	state->phase = SS_PHASE_TLS_DRAIN;
 }
 
 static void ss_tls_drain_done_cb(void *data)
 {
-    ss_state_t *state = (ss_state_t *) data;
-    if (state == NULL) return;
+	ss_state_t *state = (ss_state_t *)data;
+	if (state == NULL) {
+		return;
+	}
 
-    /* Only act when we're actually parked waiting on drain. The cb
-     * also fires for non-static FSM-send completions (post-handshake
-     * messages) — ignore those. */
-    if (state->phase != SS_PHASE_TLS_DRAIN) {
-        return;
-    }
+	/* Only act when we're actually parked waiting on drain. The cb
+	 * also fires for non-static FSM-send completions (post-handshake
+	 * messages) — ignore those. */
+	if (state->phase != SS_PHASE_TLS_DRAIN) {
+		return;
+	}
 
-    /* Peer FIN (or worker stop) flipped the conn into CLOSING /
-     * destroy_pending while we were parked on drain. Don't push
-     * another encrypt+write into a torn-down session — finalize
-     * cleanly and let the destroy chain run on the next refcount
-     * drop. http_server_count_request stays paired with the
-     * dispatch hand-off either way. */
-    if (state->conn->state == CONN_STATE_CLOSING
-        || state->conn->destroy_pending
-        || state->conn->tls_write_error) {
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-        return;
-    }
+	/* Peer FIN (or worker stop) flipped the conn into CLOSING /
+	 * destroy_pending while we were parked on drain. Don't push
+	 * another encrypt+write into a torn-down session — finalize
+	 * cleanly and let the destroy chain run on the next refcount
+	 * drop. http_server_count_request stays paired with the
+	 * dispatch hand-off either way. */
+	if (state->conn->state == CONN_STATE_CLOSING || state->conn->destroy_pending ||
+		state->conn->tls_write_error) {
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+		return;
+	}
 
-    if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
-        http_server_count_request(state->conn->counters);
-        ss_finalize(state);
-    }
+	if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
+		http_server_count_request(state->conn->counters);
+		ss_finalize(state);
+	}
 }
 #endif /* HAVE_OPENSSL */
 
@@ -1358,13 +1354,13 @@ static void ss_tls_drain_done_cb(void *data)
 #ifdef HAVE_OPENSSL
 static inline bool conn_supports_sendfile(const http_connection_t *conn)
 {
-    return conn->tls == NULL;
+	return conn->tls == NULL;
 }
 #else
 static inline bool conn_supports_sendfile(const http_connection_t *conn)
 {
-    (void) conn;
-    return true;
+	(void)conn;
+	return true;
 }
 #endif
 
@@ -1376,118 +1372,112 @@ static inline bool conn_supports_sendfile(const http_connection_t *conn)
  * the FSM will skip IO_STAT (state->st pre-filled), etag formatting,
  * MIME lookup and IMF-date formatting on the way to ss_handle_stat. */
 static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
-                        const http_static_handler_t *mount,
-                        const char *fs_path, size_t fs_path_len,
-                        const bool is_head,
-                        const http_static_cache_view_t *cv,
-                        const char *encoding, size_t encoding_len,
-                        const char *override_ct, size_t override_ct_len)
+						const http_static_handler_t *mount, const char *fs_path, size_t fs_path_len,
+						const bool is_head, const http_static_cache_view_t *cv,
+						const char *encoding, size_t encoding_len, const char *override_ct,
+						size_t override_ct_len)
 {
-    if (UNEXPECTED(fs_path_len + 1 >= PATH_MAX)) {
-        return false;
-    }
+	if (UNEXPECTED(fs_path_len + 1 >= MAXPATHLEN)) {
+		return false;
+	}
 
-    ss_state_t *state = ecalloc(1, sizeof(*state));
-    state->conn       = conn;
-    state->ctx        = ctx;
-    state->mount      = mount;
-    state->is_head    = is_head;
-    state->is_tls     = !conn_supports_sendfile(conn);
-    state->fs_path    = emalloc(fs_path_len + 1);
-    memcpy(state->fs_path, fs_path, fs_path_len);
-    state->fs_path[fs_path_len] = '\0';
-    state->fs_path_len = fs_path_len;
+	ss_state_t *state = ecalloc(1, sizeof(*state));
+	state->conn = conn;
+	state->ctx = ctx;
+	state->mount = mount;
+	state->is_head = is_head;
+	state->is_tls = !conn_supports_sendfile(conn);
+	state->fs_path = emalloc(fs_path_len + 1);
+	memcpy(state->fs_path, fs_path, fs_path_len);
+	state->fs_path[fs_path_len] = '\0';
+	state->fs_path_len = fs_path_len;
 
-    if (encoding != NULL && encoding_len > 0) {
-        state->content_encoding     = encoding;
-        state->content_encoding_len = encoding_len;
-    }
-    if (override_ct != NULL && override_ct_len > 0) {
-        state->override_content_type     = override_ct;
-        state->override_content_type_len = override_ct_len;
-    }
+	if (encoding != NULL && encoding_len > 0) {
+		state->content_encoding = encoding;
+		state->content_encoding_len = encoding_len;
+	}
+	if (override_ct != NULL && override_ct_len > 0) {
+		state->override_content_type = override_ct;
+		state->override_content_type_len = override_ct_len;
+	}
 
-    if (cv != NULL) {
-        /* Trust-within-TTL: every metadata field needed past stat is
-         * already in the entry. We still need FS_OPEN — sendfile /
-         * IO_READ require an async fd — but the IO_STAT submit and
-         * the format/lookup helpers in ss_handle_stat all collapse
-         * to memory reads. */
-        state->has_cached_meta = true;
-        state->st              = cv->st;
-        state->cached_content_type     = cv->content_type;
-        state->cached_content_type_len = cv->content_type_len;
-        if (cv->etag != NULL && cv->etag_len == HTTP_STATIC_ETAG_LEN) {
-            memcpy(state->cached_etag_buf, cv->etag, HTTP_STATIC_ETAG_LEN);
-            state->cached_etag_buf[HTTP_STATIC_ETAG_LEN] = '\0';
-            state->cached_etag_enabled = true;
-        }
-        if (cv->last_modified != NULL
-            && cv->last_modified_len == HTTP_STATIC_DATE_LEN) {
-            memcpy(state->cached_lm_buf,
-                   cv->last_modified, HTTP_STATIC_DATE_LEN);
-            state->cached_lm_buf[HTTP_STATIC_DATE_LEN] = '\0';
-        }
-    }
+	if (cv != NULL) {
+		/* Trust-within-TTL: every metadata field needed past stat is
+		 * already in the entry. We still need FS_OPEN — sendfile /
+		 * IO_READ require an async fd — but the IO_STAT submit and
+		 * the format/lookup helpers in ss_handle_stat all collapse
+		 * to memory reads. */
+		state->has_cached_meta = true;
+		state->st = cv->st;
+		state->cached_content_type = cv->content_type;
+		state->cached_content_type_len = cv->content_type_len;
+		if (cv->etag != NULL && cv->etag_len == HTTP_STATIC_ETAG_LEN) {
+			memcpy(state->cached_etag_buf, cv->etag, HTTP_STATIC_ETAG_LEN);
+			state->cached_etag_buf[HTTP_STATIC_ETAG_LEN] = '\0';
+			state->cached_etag_enabled = true;
+		}
+		if (cv->last_modified != NULL && cv->last_modified_len == HTTP_STATIC_DATE_LEN) {
+			memcpy(state->cached_lm_buf, cv->last_modified, HTTP_STATIC_DATE_LEN);
+			state->cached_lm_buf[HTTP_STATIC_DATE_LEN] = '\0';
+		}
+	}
 
-    state->phase = SS_PHASE_OPEN;
+	state->phase = SS_PHASE_OPEN;
 
-    state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
-    if (UNEXPECTED(state->file_io == NULL)) {
-        ss_state_free(state);
-        return false;
-    }
+	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
+	if (UNEXPECTED(state->file_io == NULL)) {
+		ss_state_free(state);
+		return false;
+	}
 
-    /* One persistent callback for the whole chain. */
-    ss_cb_t *cb = (ss_cb_t *)
-        ZEND_ASYNC_EVENT_CALLBACK_EX(ss_dispatch, sizeof(ss_cb_t));
-    if (UNEXPECTED(cb == NULL)) {
-        if (state->file_io->event.dispose != NULL) {
-            state->file_io->event.dispose(&state->file_io->event);
-        }
-        ss_state_free(state);
-        return false;
-    }
-    cb->base.dispose = ss_cb_dispose;
-    cb->state        = state;
+	/* One persistent callback for the whole chain. */
+	ss_cb_t *cb = (ss_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(ss_dispatch, sizeof(ss_cb_t));
+	if (UNEXPECTED(cb == NULL)) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		ss_state_free(state);
+		return false;
+	}
+	cb->base.dispose = ss_cb_dispose;
+	cb->state = state;
 
-    if (UNEXPECTED(!state->file_io->event.add_callback(
-            &state->file_io->event, &cb->base))) {
-        efree(cb);
-        if (state->file_io->event.dispose != NULL) {
-            state->file_io->event.dispose(&state->file_io->event);
-        }
-        ss_state_free(state);
-        return false;
-    }
-    state->cb = &cb->base;
+	if (UNEXPECTED(!state->file_io->event.add_callback(&state->file_io->event, &cb->base))) {
+		efree(cb);
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		ss_state_free(state);
+		return false;
+	}
+	state->cb = &cb->base;
 
-    /* Pin the conn for the duration of the chain — paired with
-     * http_request_finalize's --refcount inside ss_finalize. */
-    conn->handler_refcount++;
-    conn->state = CONN_STATE_PROCESSING;
-    http_server_on_request_dispatch(conn->counters);
+	/* Pin the conn for the duration of the chain — paired with
+	 * http_request_finalize's --refcount inside ss_finalize. */
+	conn->handler_refcount++;
+	conn->state = CONN_STATE_PROCESSING;
+	http_server_on_request_dispatch(conn->counters);
 
-    /* Telemetry — see http_server_counters_t::static_zero_coroutine_total.
-     * Counted on commit (we hold the refcount), not on completion: the
-     * sendfile may still ENOENT-rollback for on_missing:Next mounts, but
-     * the kick-off itself is the metric's anchor (cache-friendly path
-     * was selected). */
-    http_server_on_static_zero_coroutine(conn->counters);
+	/* Telemetry — see http_server_counters_t::static_zero_coroutine_total.
+	 * Counted on commit (we hold the refcount), not on completion: the
+	 * sendfile may still ENOENT-rollback for on_missing:Next mounts, but
+	 * the kick-off itself is the metric's anchor (cache-friendly path
+	 * was selected). */
+	http_server_on_static_zero_coroutine(conn->counters);
 
-    /* Cork now so the headers write (about to be queued from
-     * ss_handle_stat) and the subsequent sendfile bytes coalesce on
-     * the wire. Uncorked unconditionally in ss_finalize. Plain TCP
-     * only — TLS rides the BIO ring and benefits no further from
-     * cork (records already self-frame). */
-    if (!state->is_tls) {
-        ss_cork_set(conn, 1);
-    }
+	/* Cork now so the headers write (about to be queued from
+	 * ss_handle_stat) and the subsequent sendfile bytes coalesce on
+	 * the wire. Uncorked unconditionally in ss_finalize. Plain TCP
+	 * only — TLS rides the BIO ring and benefits no further from
+	 * cork (records already self-frame). */
+	if (!state->is_tls) {
+		ss_cork_set(conn, 1);
+	}
 
-    return true;
+	return true;
 }
 
-/* Single Byte-Range parser (issue #13 PR #3). RFC 9110 §14.1.2.
+/* Single Byte-Range parser. RFC 9110 §14.1.2.
  *
  * Accepts:
  *   bytes=A-B      first..last (inclusive)
@@ -1505,78 +1495,107 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
  *   0  header malformed or multi-range — caller serves 200 full body.
  *  -1  syntactically valid but unsatisfiable (start past EOF, etc) —
  *      caller MUST emit 416 Range Not Satisfiable per §14.1.2. */
-static int parse_byte_range(const char *hdr, size_t hdr_len,
-                            uint64_t size,
-                            uint64_t *out_first, uint64_t *out_last)
+static int parse_byte_range(const char *hdr, size_t hdr_len, uint64_t size, uint64_t *out_first,
+							uint64_t *out_last)
 {
-    if (hdr == NULL || hdr_len < 7) return 0;
-    if (memcmp(hdr, "bytes=", 6) != 0) return 0;
-    const char *p   = hdr + 6;
-    const char *end = hdr + hdr_len;
-    while (p < end && (*p == ' ' || *p == '\t')) p++;
-    /* Reject multi-range: scan for ',' before the dash. */
-    for (const char *q = p; q < end; q++) {
-        if (*q == ',') return 0;
-    }
-    if (p >= end) return 0;
+	if (hdr == NULL || hdr_len < 7) {
+		return 0;
+	}
+	if (memcmp(hdr, "bytes=", 6) != 0) {
+		return 0;
+	}
+	const char *p = hdr + 6;
+	const char *end = hdr + hdr_len;
+	while (p < end && (*p == ' ' || *p == '\t')) {
+		p++;
+	}
+	/* Reject multi-range: scan for ',' before the dash. */
+	for (const char *q = p; q < end; q++) {
+		if (*q == ',') {
+			return 0;
+		}
+	}
+	if (p >= end) {
+		return 0;
+	}
 
-    bool   suffix_form = false;
-    uint64_t first = 0;
-    bool   first_set = false;
-    if (*p == '-') {
-        suffix_form = true;
-        p++;
-    } else {
-        while (p < end && *p >= '0' && *p <= '9') {
-            if (first > UINT64_MAX / 10) return 0;
-            first = first * 10 + (uint64_t)(*p - '0');
-            first_set = true;
-            p++;
-        }
-        if (!first_set || p >= end || *p != '-') return 0;
-        p++;
-    }
+	bool suffix_form = false;
+	uint64_t first = 0;
+	bool first_set = false;
+	if (*p == '-') {
+		suffix_form = true;
+		p++;
+	} else {
+		while (p < end && *p >= '0' && *p <= '9') {
+			if (first > UINT64_MAX / 10) {
+				return 0;
+			}
+			first = first * 10 + (uint64_t)(*p - '0');
+			first_set = true;
+			p++;
+		}
+		if (!first_set || p >= end || *p != '-') {
+			return 0;
+		}
+		p++;
+	}
 
-    uint64_t last = 0;
-    bool     last_set = false;
-    while (p < end && *p >= '0' && *p <= '9') {
-        if (last > UINT64_MAX / 10) return 0;
-        last = last * 10 + (uint64_t)(*p - '0');
-        last_set = true;
-        p++;
-    }
-    while (p < end && (*p == ' ' || *p == '\t')) p++;
-    if (p != end) return 0;     /* trailing garbage */
+	uint64_t last = 0;
+	bool last_set = false;
+	while (p < end && *p >= '0' && *p <= '9') {
+		if (last > UINT64_MAX / 10) {
+			return 0;
+		}
+		last = last * 10 + (uint64_t)(*p - '0');
+		last_set = true;
+		p++;
+	}
+	while (p < end && (*p == ' ' || *p == '\t')) {
+		p++;
+	}
+	if (p != end) {
+		return 0; /* trailing garbage */
+	}
 
-    if (size == 0) return -1;   /* nothing to slice from */
+	if (size == 0) {
+		return -1; /* nothing to slice from */
+	}
 
-    if (suffix_form) {
-        if (!last_set || last == 0) return 0;
-        if (last >= size) {
-            /* "last N where N >= size" → whole file (RFC 9110: a
-             * suffix-length larger than the resource length is
-             * treated as the whole resource, status still 206). */
-            *out_first = 0;
-        } else {
-            *out_first = size - last;
-        }
-        *out_last  = size - 1;
-        return 1;
-    }
-    if (first >= size) return -1;
-    if (!last_set) {
-        *out_first = first;
-        *out_last  = size - 1;
-        return 1;
-    }
-    if (last < first) return 0;
-    if (last >= size) last = size - 1;
-    *out_first = first;
-    *out_last  = last;
-    return 1;
+	if (suffix_form) {
+		if (!last_set || last == 0) {
+			return 0;
+		}
+		if (last >= size) {
+			/* "last N where N >= size" → whole file (RFC 9110: a
+			 * suffix-length larger than the resource length is
+			 * treated as the whole resource, status still 206). */
+			*out_first = 0;
+		} else {
+			*out_first = size - last;
+		}
+		*out_last = size - 1;
+		return 1;
+	}
+	if (first >= size) {
+		return -1;
+	}
+	if (!last_set) {
+		*out_first = first;
+		*out_last = size - 1;
+		return 1;
+	}
+	if (last < first) {
+		return 0;
+	}
+	if (last >= size) {
+		last = size - 1;
+	}
+	*out_first = first;
+	*out_last = last;
+	return 1;
 }
 
-/* Precompressed sidecar selection (issue #13 PR #4). Picks a `.zst` /
+/* Precompressed sidecar selection. Picks a `.zst` /
  * `.br` / `.gz` sibling next to `fs_path` if (a) the mount opted in via
  * enablePrecompressed for that encoding, (b) the request's
  * Accept-Encoding lists it (via the existing http_compression_negotiate
@@ -1592,413 +1611,402 @@ static int parse_byte_range(const char *hdr, size_t hdr_len,
  *
  * On no-match: returns false, leaves fs_path untouched. The caller
  * proceeds to serve the original file. */
-static bool try_select_precompressed(const http_static_handler_t *mount,
-                                     http_request_t *request,
-                                     char *fs_path_buf, size_t buf_cap,
-                                     size_t *fs_path_len,
-                                     const char **out_encoding,
-                                     size_t *out_encoding_len)
+static bool try_select_precompressed(const http_static_handler_t *mount, http_request_t *request,
+									 char *fs_path_buf, size_t buf_cap, size_t *fs_path_len,
+									 const char **out_encoding, size_t *out_encoding_len)
 {
-    if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR
-                       | HTTP_STATIC_FLAG_PRECOMP_GZIP
-                       | HTTP_STATIC_FLAG_PRECOMP_ZSTD)) == 0) {
-        return false;
-    }
+	if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR | HTTP_STATIC_FLAG_PRECOMP_GZIP |
+						 HTTP_STATIC_FLAG_PRECOMP_ZSTD)) == 0) {
+		return false;
+	}
 
-    const zend_string *ae = find_request_header(request, "accept-encoding", 15);
-    if (ae == NULL) return false;
+	const zend_string *ae = find_first_request_header(request, "accept-encoding", 15);
+	if (ae == NULL) {
+		return false;
+	}
 
-    http_accept_encoding_t parsed;
-    http_accept_encoding_parse(ZSTR_VAL(ae), ZSTR_LEN(ae), &parsed);
+	http_accept_encoding_t parsed;
+	http_accept_encoding_parse(ZSTR_VAL(ae), ZSTR_LEN(ae), &parsed);
 
-    /* Server preference: zstd > brotli > gzip. Mirrors the dynamic
-     * compression path's negotiate(). identity_acceptable doesn't gate
-     * us — we always have the original file as the identity fallback. */
-    static const struct {
-        uint32_t    flag;
-        const char *suffix;
-        size_t      suffix_len;
-        const char *token;
-        size_t      token_len;
-    } codecs[] = {
-        { HTTP_STATIC_FLAG_PRECOMP_ZSTD,   ".zst", 4, "zstd", 4 },
-        { HTTP_STATIC_FLAG_PRECOMP_BR,     ".br",  3, "br",   2 },
-        { HTTP_STATIC_FLAG_PRECOMP_GZIP,   ".gz",  3, "gzip", 4 },
-    };
-    const bool acceptable[] = {
-        parsed.zstd_acceptable,
-        parsed.brotli_acceptable,
-        parsed.gzip_acceptable,
-    };
+	/* Server preference: zstd > brotli > gzip. Mirrors the dynamic
+	 * compression path's negotiate(). identity_acceptable doesn't gate
+	 * us — we always have the original file as the identity fallback. */
+	static const struct
+	{
+		uint32_t flag;
+		const char *suffix;
+		size_t suffix_len;
+		const char *token;
+		size_t token_len;
+	} codecs[] = {
+		{HTTP_STATIC_FLAG_PRECOMP_ZSTD, ".zst", 4, "zstd", 4},
+		{HTTP_STATIC_FLAG_PRECOMP_BR, ".br", 3, "br", 2},
+		{HTTP_STATIC_FLAG_PRECOMP_GZIP, ".gz", 3, "gzip", 4},
+	};
+	const bool acceptable[] = {
+		parsed.zstd_acceptable,
+		parsed.brotli_acceptable,
+		parsed.gzip_acceptable,
+	};
 
-    for (size_t i = 0; i < sizeof(codecs)/sizeof(codecs[0]); i++) {
-        if ((mount->flags & codecs[i].flag) == 0) continue;
-        if (!acceptable[i]) continue;
+	for (size_t i = 0; i < sizeof(codecs) / sizeof(codecs[0]); i++) {
+		if ((mount->flags & codecs[i].flag) == 0) {
+			continue;
+		}
+		if (!acceptable[i]) {
+			continue;
+		}
 
-        if (UNEXPECTED(*fs_path_len + codecs[i].suffix_len + 1 > buf_cap)) {
-            continue;
-        }
-        char candidate[PATH_MAX];
-        memcpy(candidate, fs_path_buf, *fs_path_len);
-        memcpy(candidate + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
-        candidate[*fs_path_len + codecs[i].suffix_len] = '\0';
+		if (UNEXPECTED(*fs_path_len + codecs[i].suffix_len + 1 > buf_cap)) {
+			continue;
+		}
+		char candidate[MAXPATHLEN];
+		memcpy(candidate, fs_path_buf, *fs_path_len);
+		memcpy(candidate + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
+		candidate[*fs_path_len + codecs[i].suffix_len] = '\0';
 
-        struct stat st;
-        if (stat(candidate, &st) != 0) continue;
-        if (!S_ISREG(st.st_mode)) continue;
+		struct stat st;
+		if (stat(candidate, &st) != 0) {
+			continue;
+		}
+		if (!S_ISREG(st.st_mode)) {
+			continue;
+		}
 
-        memcpy(fs_path_buf + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
-        *fs_path_len += codecs[i].suffix_len;
-        fs_path_buf[*fs_path_len] = '\0';
-        *out_encoding     = codecs[i].token;
-        *out_encoding_len = codecs[i].token_len;
-        return true;
-    }
-    return false;
+		memcpy(fs_path_buf + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
+		*fs_path_len += codecs[i].suffix_len;
+		fs_path_buf[*fs_path_len] = '\0';
+		*out_encoding = codecs[i].token;
+		*out_encoding_len = codecs[i].token_len;
+		return true;
+	}
+	return false;
 }
 
-http_static_result_t http_static_try_serve(http_server_object *server,
-                                           http_connection_t *conn,
-                                           void *ctx_void,
-                                           http_request_t *request)
+http_static_result_t http_static_try_serve(http_server_object *server, http_connection_t *conn,
+										   void *ctx_void, http_request_t *request)
 {
-    const size_t mount_count = http_static_handler_count(server);
-    if (UNEXPECTED(mount_count == 0)) {
-        return HTTP_STATIC_PASSTHROUGH;
-    }
-    (void)conn;  /* will be used by the future async serve path. */
+	const size_t mount_count = http_static_handler_count(server);
+	if (UNEXPECTED(mount_count == 0)) {
+		return HTTP_STATIC_PASSTHROUGH;
+	}
+	(void)conn; /* will be used by the future async serve path. */
 
-    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)ctx_void;
-    zend_object *const response_obj = Z_OBJ(ctx->response_zv);
+	http1_request_ctx_t *const ctx = (http1_request_ctx_t *)ctx_void;
+	zend_object *const response_obj = Z_OBJ(ctx->response_zv);
 
-    /* GET/HEAD only — operators can overlay POST/PUT endpoints on the
-     * same prefix without the static layer turning them into 405s. */
-    const bool is_head = method_is_head(request);
-    const bool is_get  = method_is_get(request);
-    if (!is_get && !is_head) {
-        return HTTP_STATIC_PASSTHROUGH;
-    }
+	/* GET/HEAD only — operators can overlay POST/PUT endpoints on the
+	 * same prefix without the static layer turning them into 405s. */
+	const bool is_head = method_is_head(request);
+	const bool is_get = method_is_get(request);
+	if (!is_get && !is_head) {
+		return HTTP_STATIC_PASSTHROUGH;
+	}
 
-    /* request->path is built lazily by the PHP-side getter; req->uri is
-     * always populated by the parser. http_static_path_resolve strips
-     * '?' and '#' so the whole URI is safe to feed in. */
-    const char  *const req_path     = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
-    const size_t       req_path_len = (request->uri != NULL) ? ZSTR_LEN(request->uri) : 0;
-    if (UNEXPECTED(req_path == NULL || req_path_len == 0)) {
-        return HTTP_STATIC_PASSTHROUGH;
-    }
+	/* request->path is built lazily by the PHP-side getter; req->uri is
+	 * always populated by the parser. http_static_path_resolve strips
+	 * '?' and '#' so the whole URI is safe to feed in. */
+	const char *const req_path = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
+	const size_t req_path_len = (request->uri != NULL) ? ZSTR_LEN(request->uri) : 0;
+	if (UNEXPECTED(req_path == NULL || req_path_len == 0)) {
+		return HTTP_STATIC_PASSTHROUGH;
+	}
 
-    for (size_t mi = 0; mi < mount_count; mi++) {
-        const http_static_handler_t *const mount =
-            http_static_handler_get(server, mi);
-        if (UNEXPECTED(mount == NULL)) continue;
+	for (size_t mi = 0; mi < mount_count; mi++) {
+		const http_static_handler_t *const mount = http_static_handler_get(server, mi);
+		if (UNEXPECTED(mount == NULL)) {
+			continue;
+		}
 
-        char fs_path[PATH_MAX];
-        size_t fs_path_len = 0;
-        const char *relative = NULL;
-        size_t relative_len = 0;
+		char fs_path[MAXPATHLEN];
+		size_t fs_path_len = 0;
+		const char *relative = NULL;
+		size_t relative_len = 0;
 
-        const http_static_path_result_t rc = http_static_path_resolve(
-            mount, req_path, req_path_len,
-            fs_path, sizeof(fs_path), &fs_path_len,
-            &relative, &relative_len);
+		const http_static_path_result_t rc =
+			http_static_path_resolve(mount, req_path, req_path_len, fs_path, sizeof(fs_path),
+									 &fs_path_len, &relative, &relative_len);
 
-        if (rc == HTTP_STATIC_PATH_NO_MATCH) {
-            continue;
-        }
-        if (UNEXPECTED(rc == HTTP_STATIC_PATH_BAD_REQUEST)) {
-            emit_status(response_obj, 400, "Bad Request", 11);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
-        /* Dotfile-deny / traversal escape: 404 (not 403) so existence
-         * of the restricted resource isn't disclosed. */
-        if (UNEXPECTED(rc == HTTP_STATIC_PATH_FORBIDDEN)) {
-            emit_status(response_obj, 404, "Not Found", 9);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
-        if (UNEXPECTED(rc == HTTP_STATIC_PATH_HIDE)) {
-            if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
-                return HTTP_STATIC_PASSTHROUGH;
-            }
-            emit_status(response_obj, 404, "Not Found", 9);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
+		if (rc == HTTP_STATIC_PATH_NO_MATCH) {
+			continue;
+		}
+		if (UNEXPECTED(rc == HTTP_STATIC_PATH_BAD_REQUEST)) {
+			emit_status(response_obj, 400, "Bad Request", 11);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
+		/* Dotfile-deny / traversal escape: 404 (not 403) so existence
+		 * of the restricted resource isn't disclosed. */
+		if (UNEXPECTED(rc == HTTP_STATIC_PATH_FORBIDDEN)) {
+			emit_status(response_obj, 404, "Not Found", 9);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
+		if (UNEXPECTED(rc == HTTP_STATIC_PATH_HIDE)) {
+			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+				return HTTP_STATIC_PASSTHROUGH;
+			}
+			emit_status(response_obj, 404, "Not Found", 9);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
 
-        /* Hide-globs match against the relative path so operator-
-         * authored patterns target what they see. */
-        if (UNEXPECTED(relative_len > 0
-                && http_static_path_is_hidden(mount, relative, relative_len))) {
-            if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
-                return HTTP_STATIC_PASSTHROUGH;
-            }
-            emit_status(response_obj, 404, "Not Found", 9);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
+		/* Hide-globs match against the relative path so operator-
+		 * authored patterns target what they see. */
+		if (UNEXPECTED(relative_len > 0 &&
+					   http_static_path_is_hidden(mount, relative, relative_len))) {
+			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+				return HTTP_STATIC_PASSTHROUGH;
+			}
+			emit_status(response_obj, 404, "Not Found", 9);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
 
-        /* Resolve directory→index synchronously before the hard-zero
-         * gate (#5b in TODO_STATIC_HANDLER_REVIEW). Cold-cache stat is
-         * a single inode lookup (microseconds); it's the read+send that
-         * we want async, and that's what hard-zero already gives us.
-         *
-         * On hit, fs_path_len is promoted to the joined path so MIME
-         * lookup sees the index file's extension (.html etc) rather
-         * than the directory's. On miss, the request resolves to 404
-         * uniformly — on_missing:Next mounts return PASSTHROUGH so the
-         * PHP handler can take over. */
-        const bool was_directory = path_targets_directory(relative, relative_len);
-        if (was_directory) {
-            bool index_resolved = false;
-            for (size_t ii = 0; ii < mount->index_count; ii++) {
-                const zend_string *const idx = mount->index_files[ii];
-                size_t cand_len = fs_path_len;
-                if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path),
-                                                      &cand_len,
-                                                      ZSTR_VAL(idx),
-                                                      ZSTR_LEN(idx)))) {
-                    continue;
-                }
-                struct stat sb;
-                if (stat(fs_path, &sb) == 0 && S_ISREG(sb.st_mode)) {
-                    fs_path_len    = cand_len;
-                    index_resolved = true;
-                    break;
-                }
-                /* Truncate back so the next candidate starts from the
-                 * pristine directory prefix. */
-                fs_path[fs_path_len] = '\0';
-            }
-            if (!index_resolved) {
-                if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
-                    return HTTP_STATIC_PASSTHROUGH;
-                }
-                emit_status(response_obj, 404, "Not Found", 9);
-                ctx->skip_php_handler = true;
-                return HTTP_STATIC_HANDLED;
-            }
-        }
+		/* Resolve directory→index synchronously before the hard-zero
+		 * gate (#5b in TODO_STATIC_HANDLER_REVIEW). Cold-cache stat is
+		 * a single inode lookup (microseconds); it's the read+send that
+		 * we want async, and that's what hard-zero already gives us.
+		 *
+		 * On hit, fs_path_len is promoted to the joined path so MIME
+		 * lookup sees the index file's extension (.html etc) rather
+		 * than the directory's. On miss, the request resolves to 404
+		 * uniformly — on_missing:Next mounts return PASSTHROUGH so the
+		 * PHP handler can take over. */
+		const bool was_directory = path_targets_directory(relative, relative_len);
+		if (was_directory) {
+			bool index_resolved = false;
+			for (size_t ii = 0; ii < mount->index_count; ii++) {
+				const zend_string *const idx = mount->index_files[ii];
+				size_t cand_len = fs_path_len;
+				if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path), &cand_len,
+													  ZSTR_VAL(idx), ZSTR_LEN(idx)))) {
+					continue;
+				}
+				struct stat sb;
+				if (stat(fs_path, &sb) == 0 && S_ISREG(sb.st_mode)) {
+					fs_path_len = cand_len;
+					index_resolved = true;
+					break;
+				}
+				/* Truncate back so the next candidate starts from the
+				 * pristine directory prefix. */
+				fs_path[fs_path_len] = '\0';
+			}
+			if (!index_resolved) {
+				if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+					return HTTP_STATIC_PASSTHROUGH;
+				}
+				emit_status(response_obj, 404, "Not Found", 9);
+				ctx->skip_php_handler = true;
+				return HTTP_STATIC_HANDLED;
+			}
+		}
 
-        /* Hard-zero async path — both plain TCP and TLS rides this:
-         *  - plain TCP: kernel zero-copy via ZEND_ASYNC_IO_SENDFILE.
-         *  - TLS (issue #13 §5a): chunked IO_READ → SSL_write →
-         *    cipher-drain loop driven by tls_zc_write_done_cb. No
-         *    coroutine spawned.
-         *
-         * Eligibility: resolved path must stay inside the mount root
-         * after canonicalisation. realpath here is sync but cheap on
-         * warm cache; on hot serving we skip it entirely via the
-         * open-file cache (TTL-bound, evicts oldest first).
-         *
-         * On open-error the on_missing:Next rollback in ss_handle_open
-         * detaches state and hands ctx over to a regular PHP-handler
-         * coroutine, so on_missing:Next mounts also ride this path on
-         * the success path (#5c). */
-        /* Precompressed sidecar (PR #4): if the mount opted in via
-         * enablePrecompressed and the client lists a matching coding
-         * in Accept-Encoding, swap fs_path to the .gz/.br/.zst sibling
-         * before cache lookup. On a hit-flow this means subsequent
-         * lookups for the same compressed variant skip the sidecar
-         * stat too — the cache key is the rewritten path. The MIME
-         * type stays derived from the original (computed pre-rewrite
-         * and carried as override_ct so ss_handle_stat doesn't redo
-         * the lookup against the .gz extension). */
-        const char *picked_encoding = NULL;
-        size_t      picked_encoding_len = 0;
-        const char *override_ct = NULL;
-        size_t      override_ct_len = 0;
-        if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR
-                           | HTTP_STATIC_FLAG_PRECOMP_GZIP
-                           | HTTP_STATIC_FLAG_PRECOMP_ZSTD)) != 0) {
-            const char *pre_ct     = NULL;
-            size_t      pre_ct_len = 0;
-            if (!http_static_mime_lookup(mount, fs_path, fs_path_len,
-                                         &pre_ct, &pre_ct_len)) {
-                pre_ct     = "application/octet-stream";
-                pre_ct_len = sizeof("application/octet-stream") - 1;
-            }
-            if (try_select_precompressed(mount, request, fs_path,
-                                         sizeof(fs_path), &fs_path_len,
-                                         &picked_encoding, &picked_encoding_len)) {
-                override_ct     = pre_ct;
-                override_ct_len = pre_ct_len;
-            }
-        }
+		/* Hard-zero async path — both plain TCP and TLS rides this:
+		 *  - plain TCP: kernel zero-copy via ZEND_ASYNC_IO_SENDFILE.
+		 *  - TLS: chunked IO_READ → SSL_write →
+		 *    cipher-drain loop driven by tls_zc_write_done_cb. No
+		 *    coroutine spawned.
+		 *
+		 * Eligibility: resolved path must stay inside the mount root
+		 * after canonicalisation. realpath here is sync but cheap on
+		 * warm cache; on hot serving we skip it entirely via the
+		 * open-file cache (TTL-bound, evicts oldest first).
+		 *
+		 * On open-error the on_missing:Next rollback in ss_handle_open
+		 * detaches state and hands ctx over to a regular PHP-handler
+		 * coroutine, so on_missing:Next mounts also ride this path on
+		 * the success path (#5c). */
+		/* Precompressed sidecar: if the mount opted in via
+		 * enablePrecompressed and the client lists a matching coding
+		 * in Accept-Encoding, swap fs_path to the .gz/.br/.zst sibling
+		 * before cache lookup. On a hit-flow this means subsequent
+		 * lookups for the same compressed variant skip the sidecar
+		 * stat too — the cache key is the rewritten path. The MIME
+		 * type stays derived from the original (computed pre-rewrite
+		 * and carried as override_ct so ss_handle_stat doesn't redo
+		 * the lookup against the .gz extension). */
+		const char *picked_encoding = NULL;
+		size_t picked_encoding_len = 0;
+		const char *override_ct = NULL;
+		size_t override_ct_len = 0;
+		if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR | HTTP_STATIC_FLAG_PRECOMP_GZIP |
+							 HTTP_STATIC_FLAG_PRECOMP_ZSTD)) != 0) {
+			const char *pre_ct = NULL;
+			size_t pre_ct_len = 0;
+			if (!http_static_mime_lookup(mount, fs_path, fs_path_len, &pre_ct, &pre_ct_len)) {
+				pre_ct = "application/octet-stream";
+				pre_ct_len = sizeof("application/octet-stream") - 1;
+			}
+			if (try_select_precompressed(mount, request, fs_path, sizeof(fs_path), &fs_path_len,
+										 &picked_encoding, &picked_encoding_len)) {
+				override_ct = pre_ct;
+				override_ct_len = pre_ct_len;
+			}
+		}
 
-        http_static_cache_t *cache = http_static_cache_acquire(server);
-        bool gate_ok;
-        bool have_view = false;
-        http_static_cache_view_t cv;
-        if (cache != NULL) {
-            if (http_static_cache_lookup(cache, fs_path, fs_path_len, &cv)) {
-                /* Trust-within-TTL: realpath was validated at insert,
-                 * stat/etag/MIME/Last-Modified are pre-rendered. The
-                 * FSM will skip every one of those derivations on the
-                 * way through ss_handle_open → ss_handle_stat. */
-                http_server_on_static_cache_hit(conn->counters);
-                gate_ok   = true;
-                have_view = true;
-            } else {
-                http_server_on_static_cache_miss(conn->counters);
-                gate_ok = symlink_policy_admits(mount, fs_path)
-                       && resolved_under_root(mount, fs_path);
-                /* Insertion happens in ss_handle_stat once st / etag /
-                 * content_type / Last-Modified are all in hand. */
-            }
-        } else {
-            gate_ok = symlink_policy_admits(mount, fs_path)
-                   && resolved_under_root(mount, fs_path);
-        }
-        if (gate_ok) {
-            if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head,
-                            have_view ? &cv : NULL,
-                            picked_encoding, picked_encoding_len,
-                            override_ct, override_ct_len)) {
-                return HTTP_STATIC_HARD_ZERO;
-            }
-        }
+		http_static_cache_t *cache = http_static_cache_acquire(server);
+		bool gate_ok;
+		bool have_view = false;
+		http_static_cache_view_t cv;
+		if (cache != NULL) {
+			if (http_static_cache_lookup(cache, fs_path, fs_path_len, &cv)) {
+				/* Trust-within-TTL: realpath was validated at insert,
+				 * stat/etag/MIME/Last-Modified are pre-rendered. The
+				 * FSM will skip every one of those derivations on the
+				 * way through ss_handle_open → ss_handle_stat. */
+				http_server_on_static_cache_hit(conn->counters);
+				gate_ok = true;
+				have_view = true;
+			} else {
+				http_server_on_static_cache_miss(conn->counters);
+				gate_ok =
+					symlink_policy_admits(mount, fs_path) && resolved_under_root(mount, fs_path);
+				/* Insertion happens in ss_handle_stat once st / etag /
+				 * content_type / Last-Modified are all in hand. */
+			}
+		} else {
+			gate_ok = symlink_policy_admits(mount, fs_path) && resolved_under_root(mount, fs_path);
+		}
+		if (gate_ok) {
+			if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head, have_view ? &cv : NULL,
+							picked_encoding, picked_encoding_len, override_ct, override_ct_len)) {
+				return HTTP_STATIC_HARD_ZERO;
+			}
+		}
 
-        int fd = -1;
-        struct stat st;
-        bool opened = try_open_candidate(mount, fs_path, &fd, &st);
+		int fd = -1;
+		struct stat st;
+		bool opened = try_open_candidate(mount, fs_path, &fd, &st);
 
-        if (UNEXPECTED(!opened)) {
-            /* ENOENT / ELOOP (symlink rejected) / ENOTDIR / EACCES /
-             * EPERM all collapse to "not available". 404 (rather than
-             * 403 on EACCES) avoids disclosing whether a restricted
-             * file actually exists, matching the dotfile-deny path. */
-            if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
-                return HTTP_STATIC_PASSTHROUGH;
-            }
-            emit_status(response_obj, 404, "Not Found", 9);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
+		if (UNEXPECTED(!opened)) {
+			/* ENOENT / ELOOP (symlink rejected) / ENOTDIR / EACCES /
+			 * EPERM all collapse to "not available". 404 (rather than
+			 * 403 on EACCES) avoids disclosing whether a restricted
+			 * file actually exists, matching the dotfile-deny path. */
+			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+				return HTTP_STATIC_PASSTHROUGH;
+			}
+			emit_status(response_obj, 404, "Not Found", 9);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
 
-        /* Closes the intermediate-symlink-traversal gap that O_NOFOLLOW
-         * leaves open: realpath() canonicalises every segment, so a
-         * symlink anywhere on the path that points outside the mount
-         * surfaces here as a prefix mismatch. */
-        if (UNEXPECTED(!resolved_under_root(mount, fs_path)
-                || !symlink_policy_admits(mount, fs_path))) {
-            close(fd);
-            emit_status(response_obj, 404, "Not Found", 9);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
+		/* Closes the intermediate-symlink-traversal gap that O_NOFOLLOW
+		 * leaves open: realpath() canonicalises every segment, so a
+		 * symlink anywhere on the path that points outside the mount
+		 * surfaces here as a prefix mismatch. */
+		if (UNEXPECTED(!resolved_under_root(mount, fs_path) ||
+					   !symlink_policy_admits(mount, fs_path))) {
+			close(fd);
+			emit_status(response_obj, 404, "Not Found", 9);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
 
-        /* Synchronous slurp cap — protects the loop from a stray giant
-         * file. PR #5 (sendfile / async) removes the limit. */
-        if (UNEXPECTED((uint64_t)st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
-            close(fd);
-            emit_status(response_obj, 413, "Payload Too Large", 17);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
+		/* Synchronous slurp cap — protects the loop from a stray giant
+		 * file. The async sendfile path will remove this limit. */
+		if (UNEXPECTED((uint64_t)st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
+			close(fd);
+			emit_status(response_obj, 413, "Payload Too Large", 17);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
 
-        char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
-        const bool etag_enabled = (mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
-        if (etag_enabled) {
-            http_static_etag_format(&st, etag_buf);
-        }
+		char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
+		const bool etag_enabled = (mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
+		if (etag_enabled) {
+			http_static_etag_format(&st, etag_buf);
+		}
 
-        char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
-        http_static_format_http_date(st.st_mtime, last_modified_buf);
+		char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
+		http_static_format_http_date(st.st_mtime, last_modified_buf);
 
-        const zend_string *const if_none_match     =
-            find_request_header(request, "if-none-match", 13);
-        const zend_string *const if_modified_since =
-            find_request_header(request, "if-modified-since", 17);
-        const bool not_modified = http_static_conditional_match(
-            if_none_match     != NULL ? ZSTR_VAL(if_none_match)     : NULL,
-            if_none_match     != NULL ? ZSTR_LEN(if_none_match)     : 0,
-            if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
-            if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0,
-            etag_enabled ? etag_buf : NULL,
-            etag_enabled ? HTTP_STATIC_ETAG_LEN : 0,
-            st.st_mtime);
+		const zend_string *const if_none_match = find_first_request_header(request, "if-none-match", 13);
+		const zend_string *const if_modified_since =
+			find_first_request_header(request, "if-modified-since", 17);
+		const bool not_modified = http_static_conditional_match(
+			if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
+			if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
+			if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
+			if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0,
+			etag_enabled ? etag_buf : NULL, etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, st.st_mtime);
 
-        if (not_modified) {
-            close(fd);
-            http_response_static_set_status(response_obj, 304);
-            if (etag_enabled) {
-                http_response_static_set_header(response_obj,
-                    "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
-            }
-            http_response_static_set_header(response_obj,
-                "last-modified", 13,
-                last_modified_buf, HTTP_STATIC_DATE_LEN);
-            if (mount->cache_control != NULL) {
-                http_response_static_set_header(response_obj,
-                    "cache-control", 13,
-                    ZSTR_VAL(mount->cache_control),
-                    ZSTR_LEN(mount->cache_control));
-            }
-            apply_extra_headers(response_obj, mount, false);
-            ctx->skip_php_handler = true;
-            return HTTP_STATIC_HANDLED;
-        }
+		if (not_modified) {
+			close(fd);
+			http_response_static_set_status(response_obj, 304);
+			if (etag_enabled) {
+				http_response_static_set_header(response_obj, "etag", 4, etag_buf,
+												HTTP_STATIC_ETAG_LEN);
+			}
+			http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
+											HTTP_STATIC_DATE_LEN);
+			if (mount->cache_control != NULL) {
+				http_response_static_set_header(response_obj, "cache-control", 13,
+												ZSTR_VAL(mount->cache_control),
+												ZSTR_LEN(mount->cache_control));
+			}
+			apply_extra_headers(response_obj, mount, false);
+			ctx->skip_php_handler = true;
+			return HTTP_STATIC_HANDLED;
+		}
 
-        zend_string *body = NULL;
-        if (is_get) {
-            body = slurp_fd(fd, (size_t)st.st_size);
-            if (UNEXPECTED(body == NULL)) {
-                close(fd);
-                emit_status(response_obj, 500, "Internal Server Error", 21);
-                ctx->skip_php_handler = true;
-                return HTTP_STATIC_HANDLED;
-            }
-        }
-        close(fd);
+		zend_string *body = NULL;
+		if (is_get) {
+			body = slurp_fd(fd, (size_t)st.st_size);
+			if (UNEXPECTED(body == NULL)) {
+				close(fd);
+				emit_status(response_obj, 500, "Internal Server Error", 21);
+				ctx->skip_php_handler = true;
+				return HTTP_STATIC_HANDLED;
+			}
+		}
+		close(fd);
 
-        http_response_static_set_status(response_obj, 200);
+		http_response_static_set_status(response_obj, 200);
 
-        const char *content_type     = NULL;
-        size_t      content_type_len = 0;
-        if (!http_static_mime_lookup(mount, fs_path, fs_path_len,
-                                     &content_type, &content_type_len)) {
-            content_type     = "application/octet-stream";
-            content_type_len = sizeof("application/octet-stream") - 1;
-        }
-        http_response_static_set_header(response_obj,
-            "content-type", 12, content_type, content_type_len);
+		const char *content_type = NULL;
+		size_t content_type_len = 0;
+		if (!http_static_mime_lookup(mount, fs_path, fs_path_len, &content_type,
+									 &content_type_len)) {
+			content_type = "application/octet-stream";
+			content_type_len = sizeof("application/octet-stream") - 1;
+		}
+		http_response_static_set_header(response_obj, "content-type", 12, content_type,
+										content_type_len);
 
-        if (etag_enabled) {
-            http_response_static_set_header(response_obj,
-                "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
-        }
-        http_response_static_set_header(response_obj,
-            "last-modified", 13,
-            last_modified_buf, HTTP_STATIC_DATE_LEN);
-        if (mount->cache_control != NULL) {
-            http_response_static_set_header(response_obj,
-                "cache-control", 13,
-                ZSTR_VAL(mount->cache_control),
-                ZSTR_LEN(mount->cache_control));
-        }
-        apply_extra_headers(response_obj, mount, true);
+		if (etag_enabled) {
+			http_response_static_set_header(response_obj, "etag", 4, etag_buf,
+											HTTP_STATIC_ETAG_LEN);
+		}
+		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
+										HTTP_STATIC_DATE_LEN);
+		if (mount->cache_control != NULL) {
+			http_response_static_set_header(response_obj, "cache-control", 13,
+											ZSTR_VAL(mount->cache_control),
+											ZSTR_LEN(mount->cache_control));
+		}
+		apply_extra_headers(response_obj, mount, true);
 
-        if (is_head) {
-            /* The format-time path computes Content-Length from the
-             * body smart_str; with an empty body we have to advertise
-             * the would-be size explicitly. */
-            char clen[32];
-            const int n = snprintf(clen, sizeof(clen), "%" PRIu64,
-                                   (uint64_t)st.st_size);
-            if (EXPECTED(n > 0 && (size_t)n < sizeof(clen))) {
-                http_response_static_set_header(response_obj,
-                    "content-length", 14, clen, (size_t)n);
-            }
-        } else {
-            http_response_static_set_body_str(response_obj, body);
-            zend_string_release(body);
-        }
+		if (is_head) {
+			/* The format-time path computes Content-Length from the
+			 * body smart_str; with an empty body we have to advertise
+			 * the would-be size explicitly. */
+			char clen[32];
+			const int n = snprintf(clen, sizeof(clen), "%" PRIu64, (uint64_t)st.st_size);
+			if (EXPECTED(n > 0 && (size_t)n < sizeof(clen))) {
+				http_response_static_set_header(response_obj, "content-length", 14, clen,
+												(size_t)n);
+			}
+		} else {
+			http_response_static_set_body_str(response_obj, body);
+			zend_string_release(body);
+		}
 
-        ctx->skip_php_handler = true;
-        return HTTP_STATIC_HANDLED;
-    }
+		ctx->skip_php_handler = true;
+		return HTTP_STATIC_HANDLED;
+	}
 
-    return HTTP_STATIC_PASSTHROUGH;
+	return HTTP_STATIC_PASSTHROUGH;
 }

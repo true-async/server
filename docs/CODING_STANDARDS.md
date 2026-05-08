@@ -277,6 +277,8 @@ the rest of the file.
 The project must build and run on **Linux, macOS, and Windows**. POSIX-only
 patterns are bugs.
 
+### 9.1 Sockets and signals
+
 - Socket descriptors: use `php_socket_t` (from `main/php_network.h`),
   compare against `SOCK_ERR` / `-1` via helpers — not `>= 0`. On Windows,
   `SOCKET` is unsigned `UINT_PTR`.
@@ -291,6 +293,64 @@ patterns are bugs.
   Use `SO_NOSIGPIPE` on platforms that have it.
 - Any networking / fd / signal code change must be reviewed against the
   Windows build before submission.
+
+### 9.2 Filesystem and paths
+
+POSIX FS APIs are not portable. Do not call them directly when a PHP
+or platform-neutral wrapper exists.
+
+- **stat / lstat:** use `php_sys_lstat`, `php_sys_stat`, `VCWD_STAT`,
+  `VCWD_LSTAT`, and the `zend_stat_t` / `php_win32_ioutil_stat_t` types.
+  Raw `struct stat` plus `lstat()` will not link on MSVC and produces
+  wrong field semantics under `php_win32_ioutil`.
+- **realpath:** use `tsrm_realpath` / `virtual_realpath`. Plain libc
+  `realpath()` is POSIX-only and ignores VCWD.
+- **open:** wrap flags. `O_CLOEXEC`, `O_NOFOLLOW`, `O_NONBLOCK` do
+  not exist on Windows. Always guard with `#ifdef`. The Win32
+  inheritance equivalent is `O_NOINHERIT`; for binary mode add
+  `O_BINARY` on `_WIN32`.
+- **HTTP-date parsing:** `strptime()` and `timegm()` are POSIX-only
+  and absent on MSVC. Use timelib (`timelib_strtotime`) — it parses
+  IMF-fixdate, RFC 850, and asctime portably.
+- **fnmatch:** `<fnmatch.h>` and `fnmatch()` do not exist on MSVC.
+  PHP ships an internal port in `ext/standard/fnmatch.c` but does not
+  export it. Either guard the feature with `#ifdef HAVE_FNMATCH` and
+  document the win32 behavior, or vendor a minimal port.
+- **PATH_MAX:** not portable. On MSVC it is either absent or
+  `MAX_PATH = 260`, which is too small for long paths. Use
+  `MAXPATHLEN` from `main/php.h`.
+- **gmtime / localtime:** `gmtime_r` (POSIX) / `gmtime_s` (Win32);
+  always behind `#ifdef _WIN32`. Bare `gmtime()` is unsafe (TLS-shared
+  static buffer).
+- **timespec fields in `struct stat`:** `st_mtim` (Linux),
+  `st_mtimespec` (macOS), `st_mtime` only (Win32 default). Wrap reads
+  in a helper that returns `uint64_t` nanoseconds and falls back to
+  seconds × 1e9 on Win32. Document the lower entropy on Win32 if it
+  affects correctness (e.g. ETag salt).
+- **inode (`st_ino`):** meaningless on Win32 unless populated from
+  `BY_HANDLE_FILE_INFORMATION`. Do not rely on it as an entropy source
+  in cross-platform code without a Win32 fallback.
+- **Path separators:** on Windows both `'/'` and `'\\'` are valid
+  separators. Segment walks, extension finders, and basename helpers
+  must use `IS_SLASH(c)` (which checks both) or be guarded
+  `#if !defined(_WIN32)`. Bailing only on `'/'` will silently treat
+  `a\b\c` as one segment and bypass per-segment validation. URL
+  decoders MUST reject literal `\` and `%5C` to keep this from being
+  a smuggling vector regardless of segment-walker portability.
+- **POSIX file ownership (`st_uid` / `st_gid`):** not meaningful on
+  Win32. Any feature gated on owner equality (anti-symlink-attack
+  walks, suid-style checks) must either be `#if !defined(_WIN32)`
+  with a documented fallback policy, or implemented through Win32
+  ACLs. Silent fail-open or fail-closed is unacceptable.
+
+### 9.3 Compiler intrinsics
+
+- `__builtin_expect`, `__attribute__((...))`, `typeof`, statement
+  expressions are GCC/Clang-only. Either go through the Zend macro
+  (`EXPECTED`, `UNEXPECTED`, `ZEND_ATTRIBUTE_*`) or wrap in a
+  `_MSC_VER` fallback.
+- `__thread`: GCC/Clang. MSVC uses `__declspec(thread)`. Use the
+  project macro, not the raw spelling.
 
 ---
 
@@ -338,7 +398,263 @@ record on its own. CI and local builds always include both when H3 is on.
 
 ---
 
-## 13. OpenSSL on dev hosts
+## 13a. Formatting and block structure
+
+The mechanical layout is owned by `.clang-format` (LLVM base, 4-space
+tabs, 100-column limit, K&R braces on control statements,
+`AllowShortIfStatementsOnASingleLine: false`). Run clang-format on
+every commit; PR review will reject manual deviations. Beyond what the
+formatter enforces:
+
+### 13a.1 Blank lines between logical blocks
+
+Pack-the-lines style is unreadable. Insert one blank line between
+logically distinct steps inside a function:
+
+- between local declarations and the first statement that uses them,
+- between a guard clause and the work that follows it,
+- between a syscall / lookup and its result-check,
+- between independent state mutations.
+
+Bad:
+
+```c
+if (req == NULL || req->headers == NULL) {
+    return NULL;
+}
+const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
+if (zv == NULL) {
+    return NULL;
+}
+```
+
+Good:
+
+```c
+if (UNEXPECTED(req == NULL || req->headers == NULL)) {
+    return NULL;
+}
+
+const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
+if (zv == NULL) {
+    return NULL;
+}
+```
+
+Two consecutive blank lines is the cap (`MaxEmptyLinesToKeep: 2`).
+
+### 13a.2 Braces are mandatory
+
+Every `if` / `else` / `for` / `while` / `do` body uses braces, even if
+it is a single statement and even if it fits on one line. This rule
+predates clang-format in the codebase; the formatter just enforces it.
+The reason is the Apple `goto fail` class of bug — a future edit that
+adds a line under a brace-less `if` silently changes control flow.
+
+```c
+if (state == NULL) return;          /* no */
+if (state == NULL) {                /* yes */
+    return;
+}
+```
+
+### 13a.3 Function length
+
+A function over ~80 lines is a smell. Split state machines by phase
+(`*_validate`, `*_dispatch`, `*_finalize`) rather than nesting one
+600-line `case` switch. Keep the main body at one indentation level
+(see §5).
+
+### 13a.4 Comments — additional rules
+
+Beyond §4:
+
+- Never reference current-task PR numbers / fix IDs *inside the
+  function body*. Issue references in **module-header banners** (top
+  of `.h` / `.c`) are acceptable for traceability of large features
+  and stay out of the hot reading path. Per-line "fix for #123"
+  comments rot.
+- A comment that restates the next line in English is noise. Delete.
+- Multi-paragraph comments are justified only for: a published
+  invariant the type system cannot express; a non-obvious security
+  argument; a measured performance trade-off with a number attached.
+  Anything else collapses to one line or is removed.
+
+---
+
+## 13b. Naming for security predicates and partial returns
+
+Extends §3.
+
+### 13b.1 Type / variable parity
+
+A local of type `foo_handler_t` is named `handler` (or `handler_*`),
+not `mount`, not `h`, not `x`. If the variable name disagrees with
+the type's domain word, one of them is wrong — fix it before merging.
+The type rename is usually the right answer: if every call site
+spells the variable `mount`, the type wants to be `foo_mount_t`.
+
+### 13b.2 Security predicates state the failure mode
+
+A function whose return value gates access (allow / reject) must read
+as a verb-of-decision, not a neutral comparison.
+
+Bad: `path_segments_owner_match()` — the reader cannot tell whether a
+return of `false` means "ownership differed (reject)" or "no
+ownership data available (don't know)". Both are plausible from the
+name.
+
+Good: `verify_path_owner_chain()`, `path_owner_chain_is_trusted()`,
+`reject_if_path_owner_foreign()`. The decision the predicate makes is
+in the verb.
+
+This rule is mandatory for any function called from a security gate
+(symlink policy, open-basedir, auth check, sandbox enter).
+
+### 13b.3 First-of-many returns
+
+A function that returns *one* value from a multi-valued resource —
+HTTP headers like `Set-Cookie` / `Via` / `Forwarded`, env keys with
+duplicates, hash-table buckets with collisions — must say so:
+`get_first_*`, `find_first_*`. A bare `find_request_header` that
+silently drops every value past index 0 is a footgun: the next
+developer will use it for `Accept-Encoding` and ship a bug.
+
+If both shapes are needed, ship both: `find_first_request_header` and
+`find_all_request_headers`.
+
+---
+
+## 13c. Decoders and validation of user-controlled input
+
+Every parser / decoder / validator that consumes bytes from the wire
+or from a config file is a security boundary.
+
+### 13c.1 Length and depth caps
+
+Cap the input *before* you start the work, not in the middle of the
+loop:
+
+- maximum total length (request URI, header value, body),
+- maximum segment / element count (path depth, header count,
+  comma-list entries),
+- maximum nesting / recursion depth.
+
+`PATH_MAX` is not a cap — it is a buffer size. If your decoder
+overflows the buffer and returns 400 BAD_REQUEST, that is an
+acceptable failure mode but it does not replace an explicit cap.
+
+### 13c.2 Reject, do not normalize, ambiguous bytes
+
+In a decoder for a security-relevant grammar:
+
+- reject `%00` and literal NUL,
+- reject literal `\\` and `%5C` (Windows separator) when path
+  semantics are at stake,
+- reject overlong UTF-8 / non-shortest forms,
+- reject `..` and `.` segments — do not collapse them silently,
+- reject zero-length segments (`//`).
+
+"Forgiving" decoders create smuggling between the layer that decodes
+and the layer that uses the result.
+
+### 13c.3 Do not reinvent without checking PHP-core, then check
+portability of what you find
+
+Before writing a new decoder / formatter, look in PHP first:
+
+- `php_url_decode` exists — but **decodes `%00` and accepts `\\`**.
+  Not safe for path use; use a hand-rolled stricter decoder.
+- `timelib` (ext/date) parses HTTP-date portably — prefer it over
+  `strptime` + `timegm` (which do not exist on MSVC).
+- `tsrm_realpath` / `virtual_realpath` over libc `realpath`.
+- `MAXPATHLEN` over `PATH_MAX`.
+- `php_sys_lstat` / `VCWD_STAT` over raw `lstat` / `stat`.
+- ext-based MIME tables: not in core. Hand-rolled is the canonical
+  approach (see `sapi/cli/php_cli_server.c` for prior art); align
+  the table with cli-server where overlap exists.
+
+Document in the file header which PHP utility was rejected and why
+(safety / portability / measured cost), so the next reviewer does
+not propose the swap again.
+
+### 13c.4 C unit tests are mandatory for decoders
+
+Every byte-consuming function in a `.c` whose name contains
+`decode`, `parse`, `validate`, `match`, `lookup` against
+user-controlled input MUST have a cmocka unit test in `tests/unit/`
+covering at minimum:
+
+- empty input,
+- minimum-length valid input,
+- maximum-length valid input,
+- one byte past the buffer cap,
+- every documented rejection (NUL, `\`, `..`, malformed escape,
+  truncated escape, overflow),
+- mixed case where case-insensitivity is claimed,
+- platform-divergent inputs (separator `\` on Windows; locale-
+  affected bytes when `strftime`-class APIs are involved).
+
+A new decoder without these tests does not pass review.
+
+---
+
+## 13d. Filesystem access and TOCTOU
+
+A `lstat`-walk followed by a plain `open(path, ...)` is the textbook
+TOCTOU pattern and is forbidden in any code path that is reachable
+from the network.
+
+Acceptable forms:
+
+- **Linux 5.6+:** `openat2()` with
+  `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH` against an open root fd —
+  the kernel enforces containment atomically.
+- **Portable:** `openat(O_NOFOLLOW)` per segment, advancing through
+  parent fds opened with `O_DIRECTORY | O_NOFOLLOW`. The root fd is
+  obtained once at startup.
+- **Last-resort post-open verification:** open the file, then
+  `fstat` it, then re-`stat` the path and compare `dev`/`ino`. If
+  they diverge — reject. This catches the swap that happened between
+  walk and open.
+
+Plain `lstat` plus plain `open(path)` does not qualify, even with
+`O_NOFOLLOW` on the open: the intermediate components were already
+followed by `open`, and the lstat-walk is a separate syscall sequence
+from the open.
+
+A defensive `realpath` after open is good in addition to one of the
+above, never instead.
+
+---
+
+## 13e. Defensive checks: where they belong
+
+Extends §10.
+
+A NULL check at the top of an internal helper that is never called
+with NULL is dead code: it costs an instruction per call, masks bugs
+(use-after-free returns silently instead of crashing in the
+debugger), and mis-signals the contract. Three rules:
+
+1. **System-boundary functions** (called from PHP userland, from
+   network parsers, from config loaders) — keep the check, emit a
+   diagnostic, return an error.
+2. **Cross-TU public helpers** that document a NULL contract in the
+   header (`free`-style: NULL is a no-op) — keep the check; the
+   contract is part of the API.
+3. **Internal helpers** (file-static, no external callers, invariants
+   already guaranteed by callers) — replace `if (p == NULL) return;`
+   with `ZEND_ASSERT(p != NULL);`. Asserts vanish in release and
+   crash loudly in debug, which is the correct trade.
+
+The `_free`-shaped function is a special case: if the function
+documents "NULL is a no-op", the check stays at the top regardless
+of caller invariants — that is the contract. Document it.
+
+---
+
+## 14. OpenSSL on dev hosts
 
 OpenSSL 3.5 with ngtcp2 / nghttp3 is installed system-wide into
 `/usr/local/` on the canonical dev host, intentionally overriding the

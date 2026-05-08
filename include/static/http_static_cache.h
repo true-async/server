@@ -39,29 +39,28 @@ typedef struct http_static_cache_s http_static_cache_t;
 /* Allocate a cache. max_entries == 0 makes lookup/insert no-ops
  * (caching disabled). ttl_seconds <= 0 also disables. Returned
  * pointer is freed by http_static_cache_destroy. */
-http_static_cache_t *http_static_cache_create(size_t max_entries,
-                                              time_t ttl_seconds);
-void                 http_static_cache_destroy(http_static_cache_t *cache);
+http_static_cache_t *http_static_cache_create(size_t max_entries, time_t ttl_seconds);
+void http_static_cache_destroy(http_static_cache_t *cache);
 
 /* Cache entry view returned to the caller on hit. All const-pointed
  * data is owned by the cache and lives until eviction; caller must
  * NOT free or retain past the current request. */
-typedef struct {
-    struct stat  st;
-    const char  *content_type;        /* persistent — points into MIME table */
-    size_t       content_type_len;
-    const char  *etag;                /* NULL if etag disabled at insert time */
-    size_t       etag_len;            /* 0 if no etag */
-    const char  *last_modified;       /* persistent for entry lifetime */
-    size_t       last_modified_len;
+typedef struct
+{
+	struct stat st;
+	const char *content_type; /* persistent — points into MIME table */
+	size_t content_type_len;
+	const char *etag;		   /* NULL if etag disabled at insert time */
+	size_t etag_len;		   /* 0 if no etag */
+	const char *last_modified; /* persistent for entry lifetime */
+	size_t last_modified_len;
 } http_static_cache_view_t;
 
 /* Lookup. Returns true on hit + populates *out_view. False on miss
  * or expired entry (entry is removed in that case). path is the
  * absolute resolved on-disk path (post-realpath). */
-bool http_static_cache_lookup(http_static_cache_t *cache,
-                              const char *path, size_t path_len,
-                              http_static_cache_view_t *out_view);
+bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size_t path_len,
+							  http_static_cache_view_t *out_view);
 
 /* Insert / replace. Caller passes pre-computed metadata; the cache
  * copies/owns everything. mime/etag/last_modified buffers are
@@ -69,12 +68,10 @@ bool http_static_cache_lookup(http_static_cache_t *cache,
  * lives in the persistent MIME table or is the literal
  * "application/octet-stream" — both safe to alias). Eviction picks
  * the LRU tail when at capacity. */
-void http_static_cache_insert(http_static_cache_t *cache,
-                              const char *path, size_t path_len,
-                              const struct stat *st,
-                              const char *content_type, size_t content_type_len,
-                              const char *etag,          size_t etag_len,
-                              const char *last_modified, size_t last_modified_len);
+void http_static_cache_insert(http_static_cache_t *cache, const char *path, size_t path_len,
+							  const struct stat *st, const char *content_type,
+							  size_t content_type_len, const char *etag, size_t etag_len,
+							  const char *last_modified, size_t last_modified_len);
 
 /* Forcibly drop all entries — used at shutdown / config reload. */
 void http_static_cache_clear(http_static_cache_t *cache);

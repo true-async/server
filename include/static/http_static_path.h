@@ -22,12 +22,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-typedef enum {
-    HTTP_STATIC_PATH_OK             = 0,
-    HTTP_STATIC_PATH_BAD_REQUEST    = 1,  /* 400: malformed encoding, NUL, etc. */
-    HTTP_STATIC_PATH_FORBIDDEN      = 2,  /* 403: traversal escapes root, dotfile deny */
-    HTTP_STATIC_PATH_HIDE           = 3,  /* matched a hide glob → 404 (or passthrough) */
-    HTTP_STATIC_PATH_NO_MATCH       = 4,  /* prefix didn't match this mount */
+typedef enum
+{
+	HTTP_STATIC_PATH_OK = 0,
+	HTTP_STATIC_PATH_BAD_REQUEST = 1, /* 400: malformed encoding, NUL, etc. */
+	HTTP_STATIC_PATH_FORBIDDEN = 2,	  /* 403: traversal escapes root, dotfile deny */
+	HTTP_STATIC_PATH_HIDE = 3,		  /* matched a hide glob → 404 (or passthrough) */
+	HTTP_STATIC_PATH_NO_MATCH = 4,	  /* prefix didn't match this mount */
 } http_static_path_result_t;
 
 /* Resolve `request_path` against `mount`. On HTTP_STATIC_PATH_OK,
@@ -41,21 +42,19 @@ typedef enum {
  * pointing INTO `out_buf` after `mount->root_directory`. Useful for
  * hide-glob matching and for the index-file directory join. */
 http_static_path_result_t
-http_static_path_resolve(const http_static_handler_t *mount,
-                         const char *request_path, size_t request_path_len,
-                         char *out_buf, size_t out_buf_cap, size_t *out_len,
-                         const char **out_relative, size_t *out_relative_len);
+http_static_path_resolve(const http_static_handler_t *mount, const char *request_path,
+						 size_t request_path_len, char *out_buf, size_t out_buf_cap,
+						 size_t *out_len, const char **out_relative, size_t *out_relative_len);
 
 /* Append `name` to an already-resolved directory path stored in
  * `buf` (with current length `*len`). Returns false on overflow.
  * Used by the index-file resolution loop. */
-bool http_static_path_join(char *buf, size_t cap, size_t *len,
-                           const char *name, size_t name_len);
+bool http_static_path_join(char *buf, size_t cap, size_t *len, const char *name, size_t name_len);
 
 /* Returns true when the relative path matches one of the mount's
  * hide globs. Uses fnmatch-style matching (FNM_PATHNAME so '/'
  * doesn't match through '*'). */
-bool http_static_path_is_hidden(const http_static_handler_t *mount,
-                                const char *relative, size_t relative_len);
+bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *relative,
+								size_t relative_len);
 
 #endif

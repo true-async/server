@@ -25,19 +25,19 @@
 
 /* Behaviour bits packed into http_static_handler_t::flags. One cache-line
  * load on the dispatch fast path; no per-bool loads. */
-#define HTTP_STATIC_FLAG_DOTFILES_DENY        (1u << 0)  /* default */
-#define HTTP_STATIC_FLAG_DOTFILES_ALLOW       (1u << 1)
-#define HTTP_STATIC_FLAG_DOTFILES_IGNORE      (1u << 2)
-#define HTTP_STATIC_FLAG_SYMLINKS_REJECT      (1u << 3)  /* default */
-#define HTTP_STATIC_FLAG_SYMLINKS_FOLLOW      (1u << 4)
-#define HTTP_STATIC_FLAG_SYMLINKS_OWNER       (1u << 5)
-#define HTTP_STATIC_FLAG_PRECOMP_BR           (1u << 6)
-#define HTTP_STATIC_FLAG_PRECOMP_GZIP         (1u << 7)
-#define HTTP_STATIC_FLAG_PRECOMP_ZSTD         (1u << 8)
-#define HTTP_STATIC_FLAG_ETAG                 (1u << 9)  /* default on */
-#define HTTP_STATIC_FLAG_BROWSE               (1u << 10)
-#define HTTP_STATIC_FLAG_ON_MISSING_NEXT      (1u << 11)
-#define HTTP_STATIC_FLAG_LOCKED               (1u << 12)
+#define HTTP_STATIC_FLAG_DOTFILES_DENY (1u << 0) /* default */
+#define HTTP_STATIC_FLAG_DOTFILES_ALLOW (1u << 1)
+#define HTTP_STATIC_FLAG_DOTFILES_IGNORE (1u << 2)
+#define HTTP_STATIC_FLAG_SYMLINKS_REJECT (1u << 3) /* default */
+#define HTTP_STATIC_FLAG_SYMLINKS_FOLLOW (1u << 4)
+#define HTTP_STATIC_FLAG_SYMLINKS_OWNER (1u << 5)
+#define HTTP_STATIC_FLAG_PRECOMP_BR (1u << 6)
+#define HTTP_STATIC_FLAG_PRECOMP_GZIP (1u << 7)
+#define HTTP_STATIC_FLAG_PRECOMP_ZSTD (1u << 8)
+#define HTTP_STATIC_FLAG_ETAG (1u << 9) /* default on */
+#define HTTP_STATIC_FLAG_BROWSE (1u << 10)
+#define HTTP_STATIC_FLAG_ON_MISSING_NEXT (1u << 11)
+#define HTTP_STATIC_FLAG_LOCKED (1u << 12)
 
 /* Persistent mount descriptor. One copy lives inside each StaticHandler
  * PHP object; addStaticHandler() locks the object and the server stores
@@ -48,68 +48,69 @@
  * setter takes its own ref). hide_globs / index_files are heap arrays of
  * refcounted zend_strings. extra_headers / mime_overrides are HashTables
  * (pointer-stable across pre-lock mutations). */
-typedef struct {
-    /* URL prefix (always starts and ends with '/') and its length, kept
-     * separately so the dispatch fast path can do a single memcmp. */
-    zend_string  *url_prefix;
-    size_t        url_prefix_len;
+typedef struct
+{
+	/* URL prefix (always starts and ends with '/') and its length, kept
+	 * separately so the dispatch fast path can do a single memcmp. */
+	zend_string *url_prefix;
+	size_t url_prefix_len;
 
-    /* Filesystem root, canonicalised at attach time. */
-    zend_string  *root_directory;
+	/* Filesystem root, canonicalised at attach time. */
+	zend_string *root_directory;
 
-    /* Optional pre-formatted Cache-Control header value. NULL = no header. */
-    zend_string  *cache_control;
+	/* Optional pre-formatted Cache-Control header value. NULL = no header. */
+	zend_string *cache_control;
 
-    /* Index file candidates. NULL pointer + index_count == 0 means
-     * "directory request → 404 / passthrough". */
-    zend_string **index_files;
-    size_t        index_count;
+	/* Index file candidates. NULL pointer + index_count == 0 means
+	 * "directory request → 404 / passthrough". */
+	zend_string **index_files;
+	size_t index_count;
 
-    /* Hide-glob array. Matched against the path RELATIVE to root. */
-    zend_string **hide_globs;
-    size_t        hide_count;
+	/* Hide-glob array. Matched against the path RELATIVE to root. */
+	zend_string **hide_globs;
+	size_t hide_count;
 
-    /* Extra response headers (set via setHeader). HashTable<lower-name,
-     * IS_STRING value>. NULL until the first setHeader call. */
-    HashTable    *extra_headers;
+	/* Extra response headers (set via setHeader). HashTable<lower-name,
+	 * IS_STRING value>. NULL until the first setHeader call. */
+	HashTable *extra_headers;
 
-    /* Per-mount MIME overrides: HashTable<lower-extension, IS_STRING
-     * content-type>. NULL until the first setMimeType call. Looked up
-     * BEFORE the built-in table so an operator can override a default
-     * mapping (e.g. force `application/wasm` on a host whose built-in
-     * table is older). */
-    HashTable    *mime_overrides;
+	/* Per-mount MIME overrides: HashTable<lower-extension, IS_STRING
+	 * content-type>. NULL until the first setMimeType call. Looked up
+	 * BEFORE the built-in table so an operator can override a default
+	 * mapping (e.g. force `application/wasm` on a host whose built-in
+	 * table is older). */
+	HashTable *mime_overrides;
 
-    /* Pre-rendered extra-header block (Cache-Control + every entry of
-     * extra_headers, joined as "Name: value\r\n"). Populated only on
-     * frozen snapshots — NULL on the user-side draft. The hot path on
-     * the hard-zero serve splices these in with one smart_str_append
-     * instead of re-iterating extra_headers per request:
-     *
-     *   prebaked_headers_full        — used on 200/206/etc.
-     *   prebaked_headers_no_content  — used on 304 (RFC 9110 §15.4.5
-     *                                  bars Content-* on Not Modified).
-     *
-     * NULL when neither extra_headers nor cache_control is set. */
-    zend_string  *prebaked_headers_full;
-    zend_string  *prebaked_headers_no_content;
+	/* Pre-rendered extra-header block (Cache-Control + every entry of
+	 * extra_headers, joined as "Name: value\r\n"). Populated only on
+	 * frozen snapshots — NULL on the user-side draft. The hot path on
+	 * the hard-zero serve splices these in with one smart_str_append
+	 * instead of re-iterating extra_headers per request:
+	 *
+	 *   prebaked_headers_full        — used on 200/206/etc.
+	 *   prebaked_headers_no_content  — used on 304 (RFC 9110 §15.4.5
+	 *                                  bars Content-* on Not Modified).
+	 *
+	 * NULL when neither extra_headers nor cache_control is set. */
+	zend_string *prebaked_headers_full;
+	zend_string *prebaked_headers_no_content;
 
-    uint32_t      flags;
+	uint32_t flags;
 
-    /* Open-file cache configuration (issue #13 §5a, nginx-style
-     * open_file_cache). Per-mount setters write here; the server-side
-     * cache instance (one per worker) takes the effective settings on
-     * first request — see http_static_cache_acquire() for the merge
-     * across multiple mounts.
-     *
-     * cache_max_entries == 0 disables for this mount.
-     * cache_ttl_seconds  == 0 disables for this mount (an entry would
-     *                         be evicted on every lookup, pointless).
-     *
-     * Defaults at construction time: both 0 (cache off). Operators
-     * opt in via StaticHandler::setOpenFileCache($max, $ttl). */
-    int32_t       cache_max_entries;
-    int32_t       cache_ttl_seconds;
+	/* Open-file cache configuration (issue #13 §5a, nginx-style
+	 * open_file_cache). Per-mount setters write here; the server-side
+	 * cache instance (one per worker) takes the effective settings on
+	 * first request — see http_static_cache_acquire() for the merge
+	 * across multiple mounts.
+	 *
+	 * cache_max_entries == 0 disables for this mount.
+	 * cache_ttl_seconds  == 0 disables for this mount (an entry would
+	 *                         be evicted on every lookup, pointless).
+	 *
+	 * Defaults at construction time: both 0 (cache off). Operators
+	 * opt in via StaticHandler::setOpenFileCache($max, $ttl). */
+	int32_t cache_max_entries;
+	int32_t cache_ttl_seconds;
 } http_static_handler_t;
 
 /* Result of the dispatch attempt.
@@ -132,11 +133,12 @@ typedef struct {
  *
  * ERROR       — reserved.
  */
-typedef enum {
-    HTTP_STATIC_PASSTHROUGH = 0,
-    HTTP_STATIC_HANDLED     = 1,
-    HTTP_STATIC_ERROR       = 2,
-    HTTP_STATIC_HARD_ZERO   = 3,
+typedef enum
+{
+	HTTP_STATIC_PASSTHROUGH = 0,
+	HTTP_STATIC_HANDLED = 1,
+	HTTP_STATIC_ERROR = 2,
+	HTTP_STATIC_HARD_ZERO = 3,
 } http_static_result_t;
 
 /* Forward decls — concrete types live in C TUs that include this.
@@ -184,8 +186,7 @@ void http_static_handler_descriptor_destroy(http_static_handler_t *handler);
  * points to the http_static_handler_t embedded inside the wrapper —
  * cast-compatible with all reader code on the dispatch hot path.
  * Returns NULL on allocation failure. */
-http_static_handler_t *http_static_handler_freeze(
-    const http_static_handler_t *draft);
+http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *draft);
 
 /* Atomic-addref / release on the shared snapshot. The mount pointer
  * MUST have been produced by http_static_handler_freeze. release() on
@@ -196,9 +197,8 @@ void http_static_handler_shared_release(http_static_handler_t *mount);
 /* Dispatch hook entrypoint — declared here so http_connection.c can
  * call it without needing the full implementation header. */
 http_static_result_t http_static_try_serve(struct http_server_object *server,
-                                           struct _http_connection_t *conn,
-                                           void *ctx,
-                                           struct http_request_t *request);
+										   struct _http_connection_t *conn, void *ctx,
+										   struct http_request_t *request);
 
 /* Out-of-line "is any mount registered" helper. The struct layout
  * lives in http_server_class.c so the count is not directly visible to
@@ -210,8 +210,8 @@ size_t http_static_handler_count(const struct http_server_object *server);
  * < http_static_handler_count). Pointer is stable for the lifetime of
  * the server. Used by the dispatch FSM to iterate without seeing the
  * server-object struct layout. */
-const http_static_handler_t *
-http_static_handler_get(const struct http_server_object *server, size_t index);
+const http_static_handler_t *http_static_handler_get(const struct http_server_object *server,
+													 size_t index);
 
 /* Open file cache accessor — lazily creates the cache on first call,
  * returns it on subsequent calls. NULL if the server is NULL or
@@ -220,14 +220,13 @@ http_static_handler_get(const struct http_server_object *server, size_t index);
  * their own copy after worker-pool transfer. See
  * include/static/http_static_cache.h for cache semantics. */
 struct http_static_cache_s;
-struct http_static_cache_s *
-http_static_cache_acquire(struct http_server_object *server);
+struct http_static_cache_s *http_static_cache_acquire(struct http_server_object *server);
 
 /* Maximum file size served on the synchronous read path. Larger files
  * passthrough to the regular handler (or in a future iteration, to a
  * streaming async path). 256 MiB is a comfortable upper bound for
  * typical static asset deployments and protects against a stray giant
  * file blocking the loop on a synchronous read. */
-#define HTTP_STATIC_MAX_FILE_SIZE  ((size_t)256u * 1024u * 1024u)
+#define HTTP_STATIC_MAX_FILE_SIZE ((size_t)256u * 1024u * 1024u)
 
 #endif /* TRUE_ASYNC_STATIC_HANDLER_H */
