@@ -14,10 +14,12 @@
 #include "zend_exceptions.h"
 #include "Zend/zend_enum.h"
 #include "Zend/zend_virtual_cwd.h"
+#include "Zend/zend_atomic.h"
 #include "php_http_server.h"
 #include "static/static_handler.h"
 
 #include <stdint.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include "../../stubs/StaticHandler.php_arginfo.h"
@@ -138,8 +140,11 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
     return zend_string_init(resolved, strlen(resolved), 0);
 }
 
-static void mount_release_owned(http_static_handler_t *mount)
+void http_static_handler_descriptor_destroy(http_static_handler_t *mount)
 {
+    if (mount == NULL) {
+        return;
+    }
     if (mount->url_prefix != NULL) {
         zend_string_release(mount->url_prefix);
         mount->url_prefix = NULL;
@@ -178,6 +183,142 @@ static void mount_release_owned(http_static_handler_t *mount)
         FREE_HASHTABLE(mount->mime_overrides);
         mount->mime_overrides = NULL;
     }
+}
+
+/* === Persistent shared snapshot ====================================== */
+
+/* Wrapper allocated in pemalloc; the embedded http_static_handler_t is
+ * the public handle (first member, cast-compatible). */
+typedef struct {
+    http_static_handler_t mount;       /* MUST be first — pointer cast */
+    zend_atomic_int       ref_count;
+} http_static_handler_shared_t;
+
+static inline http_static_handler_shared_t *
+shared_from_mount(http_static_handler_t *mount)
+{
+    /* mount is the first member, so the addresses coincide. */
+    return (http_static_handler_shared_t *) mount;
+}
+
+static zend_string *zstr_dup_persistent(const zend_string *src)
+{
+    if (src == NULL || ZSTR_LEN(src) == 0) {
+        return NULL;
+    }
+    return zend_string_init(ZSTR_VAL(src), ZSTR_LEN(src), /*persistent*/ 1);
+}
+
+http_static_handler_t *http_static_handler_freeze(
+    const http_static_handler_t *draft)
+{
+    http_static_handler_shared_t *sh = pecalloc(1, sizeof(*sh), /*persistent*/ 1);
+    zend_atomic_int_store(&sh->ref_count, 1);
+
+    http_static_handler_t *m = &sh->mount;
+
+    m->url_prefix     = zstr_dup_persistent(draft->url_prefix);
+    m->url_prefix_len = (m->url_prefix != NULL) ? ZSTR_LEN(m->url_prefix) : 0;
+    m->root_directory = zstr_dup_persistent(draft->root_directory);
+    m->cache_control  = zstr_dup_persistent(draft->cache_control);
+
+    if (draft->index_count > 0) {
+        m->index_files = pemalloc(sizeof(zend_string *) * draft->index_count, 1);
+        for (size_t i = 0; i < draft->index_count; i++) {
+            m->index_files[i] = zstr_dup_persistent(draft->index_files[i]);
+        }
+        m->index_count = draft->index_count;
+    }
+    if (draft->hide_count > 0) {
+        m->hide_globs = pemalloc(sizeof(zend_string *) * draft->hide_count, 1);
+        for (size_t i = 0; i < draft->hide_count; i++) {
+            m->hide_globs[i] = zstr_dup_persistent(draft->hide_globs[i]);
+        }
+        m->hide_count = draft->hide_count;
+    }
+    if (draft->extra_headers != NULL
+        && zend_hash_num_elements(draft->extra_headers) > 0) {
+        m->extra_headers = pemalloc(sizeof(HashTable), 1);
+        zend_hash_init(m->extra_headers,
+                       zend_hash_num_elements(draft->extra_headers),
+                       NULL, ZVAL_PTR_DTOR, /*persistent*/ 1);
+        zend_string *k;
+        zval        *v;
+        ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(draft->extra_headers, k, v) {
+            if (k == NULL || Z_TYPE_P(v) != IS_STRING) continue;
+            zend_string *pk = zstr_dup_persistent(k);
+            zval entry;
+            ZVAL_STR(&entry, zstr_dup_persistent(Z_STR_P(v)));
+            zend_hash_update(m->extra_headers, pk, &entry);
+            zend_string_release(pk);
+        } ZEND_HASH_FOREACH_END();
+    }
+    if (draft->mime_overrides != NULL
+        && zend_hash_num_elements(draft->mime_overrides) > 0) {
+        m->mime_overrides = pemalloc(sizeof(HashTable), 1);
+        zend_hash_init(m->mime_overrides,
+                       zend_hash_num_elements(draft->mime_overrides),
+                       NULL, ZVAL_PTR_DTOR, /*persistent*/ 1);
+        zend_string *k;
+        zval        *v;
+        ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(draft->mime_overrides, k, v) {
+            if (k == NULL || Z_TYPE_P(v) != IS_STRING) continue;
+            zend_string *pk = zstr_dup_persistent(k);
+            zval entry;
+            ZVAL_STR(&entry, zstr_dup_persistent(Z_STR_P(v)));
+            zend_hash_update(m->mime_overrides, pk, &entry);
+            zend_string_release(pk);
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    /* Always locked from freeze onwards — the snapshot is read-only. */
+    m->flags = draft->flags | HTTP_STATIC_FLAG_LOCKED;
+
+    return m;
+}
+
+void http_static_handler_shared_addref(http_static_handler_t *mount)
+{
+    if (mount == NULL) return;
+    zend_atomic_int_fetch_add(&shared_from_mount(mount)->ref_count, 1);
+}
+
+void http_static_handler_shared_release(http_static_handler_t *mount)
+{
+    if (mount == NULL) return;
+    http_static_handler_shared_t *sh = shared_from_mount(mount);
+    /* fetch_sub returns the prior value. */
+    if (zend_atomic_int_fetch_sub(&sh->ref_count, 1) != 1) {
+        return;
+    }
+    /* Last ref — destroy persistent fields. zend_string_release is
+     * persistent-aware via GC_FLAGS_PERSISTENT; for HashTables we must
+     * pefree the struct ourselves (zend_hash_destroy walks values). */
+    http_static_handler_t *m = &sh->mount;
+    if (m->url_prefix != NULL)     zend_string_release(m->url_prefix);
+    if (m->root_directory != NULL) zend_string_release(m->root_directory);
+    if (m->cache_control != NULL)  zend_string_release(m->cache_control);
+    if (m->index_files != NULL) {
+        for (size_t i = 0; i < m->index_count; i++) {
+            if (m->index_files[i] != NULL) zend_string_release(m->index_files[i]);
+        }
+        pefree(m->index_files, 1);
+    }
+    if (m->hide_globs != NULL) {
+        for (size_t i = 0; i < m->hide_count; i++) {
+            if (m->hide_globs[i] != NULL) zend_string_release(m->hide_globs[i]);
+        }
+        pefree(m->hide_globs, 1);
+    }
+    if (m->extra_headers != NULL) {
+        zend_hash_destroy(m->extra_headers);
+        pefree(m->extra_headers, 1);
+    }
+    if (m->mime_overrides != NULL) {
+        zend_hash_destroy(m->mime_overrides);
+        pefree(m->mime_overrides, 1);
+    }
+    pefree(sh, 1);
 }
 
 ZEND_METHOD(TrueAsync_StaticHandler, __construct)
@@ -701,7 +842,7 @@ static zend_object *http_static_handler_create(zend_class_entry *ce)
 static void http_static_handler_free(zend_object *obj)
 {
     http_static_handler_php_t *php_obj = http_static_handler_php_from_obj(obj);
-    mount_release_owned(&php_obj->mount);
+    http_static_handler_descriptor_destroy(&php_obj->mount);
     zend_object_std_dtor(&php_obj->std);
 }
 

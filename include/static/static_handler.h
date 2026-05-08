@@ -134,6 +134,34 @@ http_static_handler_t *http_static_handler_from_obj(zend_object *obj);
  * setter throws HttpServerRuntimeException. */
 void http_static_handler_lock(http_static_handler_t *handler);
 
+/* Release every refcounted/owned field on the descriptor in-place. Used by
+ * the StaticHandler PHP object's free_obj. Frees emalloc-side fields. */
+void http_static_handler_descriptor_destroy(http_static_handler_t *handler);
+
+/* === Persistent shared snapshot ========================================
+ *
+ * On addStaticHandler the user-side draft mount is "frozen" into a
+ * persistent (pemalloc) refcounted snapshot. The server stores a
+ * pointer to the embedded http_static_handler_t inside the snapshot;
+ * worker-pool TRANSFER then becomes a pointer copy + addref. Cross-
+ * thread sharing is safe because every owned field (zend_strings,
+ * HashTables) is allocated persistent (refcount frozen at 1) and the
+ * snapshot is read-only after the locked-flag is set on freeze. */
+
+/* Allocate and populate a persistent refcounted snapshot from a
+ * (locked) draft descriptor. The returned pointer has refcount=1 and
+ * points to the http_static_handler_t embedded inside the wrapper —
+ * cast-compatible with all reader code on the dispatch hot path.
+ * Returns NULL on allocation failure. */
+http_static_handler_t *http_static_handler_freeze(
+    const http_static_handler_t *draft);
+
+/* Atomic-addref / release on the shared snapshot. The mount pointer
+ * MUST have been produced by http_static_handler_freeze. release() on
+ * the last ref destroys all owned fields and pefrees the snapshot. */
+void http_static_handler_shared_addref(http_static_handler_t *mount);
+void http_static_handler_shared_release(http_static_handler_t *mount);
+
 /* Dispatch hook entrypoint — declared here so http_connection.c can
  * call it without needing the full implementation header. */
 http_static_result_t http_static_try_serve(struct http_server_object *server,

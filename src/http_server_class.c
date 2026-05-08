@@ -272,6 +272,12 @@ struct http_server_object {
      * Always NULL in the source thread's emalloc object. */
     void                    *transit_handlers;
 
+    /* Pemalloc'd http_server_transit_static_t side-car (issue #13).
+     * Holds pre-addref'd shared mount pointers from TRANSFER; the LOAD
+     * path addrefs once more into the worker's emalloc array. NULL
+     * outside the worker-pool fan-out. */
+    void                    *transit_static_mounts;
+
     /* Built-in static file mounts (issue #13). Each entry references a
      * locked TrueAsync\StaticHandler PHP object whose embedded
      * descriptor we read on the dispatch fast path. The array is
@@ -1033,13 +1039,23 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
         server->static_handler_capacity = new_cap;
     }
 
-    /* Lock and pin the handler so subsequent mutations throw and the
-     * descriptor can't be freed while requests are in flight. */
+    /* Lock the draft, then freeze it into a refcounted persistent
+     * shared snapshot. The server stores the snapshot pointer; worker-
+     * pool TRANSFER then becomes pointer-copy + addref (issue #13). The
+     * userland StaticHandler PHP object is pinned solely so callers can
+     * keep a handle without invalidating the snapshot it produced. */
     http_static_handler_lock(mount);
+
+    http_static_handler_t *frozen = http_static_handler_freeze(mount);
+    if (UNEXPECTED(frozen == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "StaticHandler freeze failed (out of memory)", 0);
+        return;
+    }
 
     GC_ADDREF(handler_obj);
     server->static_handler_objects[server->static_handler_count] = handler_obj;
-    server->static_handler_mounts[server->static_handler_count]  = mount;
+    server->static_handler_mounts[server->static_handler_count]  = frozen;
     server->static_handler_count++;
 
     /* Mark H1 as a protocol this server speaks — symmetric with the
@@ -2446,6 +2462,13 @@ static HashTable *http_server_get_gc(zend_object *obj, zval **table, int *n)
     return zend_std_get_properties(obj);
 }
 
+/* Forward decls for the static-handler transit side-car (definition is
+ * in the transfer_obj section below — it's logically grouped with
+ * TRANSFER/LOAD but http_server_free needs to release it on destruction
+ * paths that never went through the pool). */
+typedef struct http_server_transit_static http_server_transit_static_t;
+static void http_server_transit_static_release(http_server_transit_static_t *t);
+
 static void http_server_free(zend_object *obj)
 {
     struct http_server_php *php = http_server_php_from_obj(obj);
@@ -2566,21 +2589,32 @@ static void http_server_free(zend_object *obj)
     /* Destroy protocol handlers */
     http_protocol_handlers_destroy(&server->protocol_handlers);
 
-    /* Release static handler refs (issue #13). The mounts pointer array
-     * is pemalloc'd, the descriptors are owned by the PHP objects we
-     * are releasing here. */
-    if (server->static_handler_objects != NULL) {
+    /* Release static handler refs (issue #13). Each entry in
+     * static_handler_mounts is a refcounted persistent shared snapshot;
+     * we hold one ref per slot. static_handler_objects holds the
+     * userland StaticHandler (one per slot, NULL on workers since they
+     * have no PHP-side handle). */
+    if (server->static_handler_mounts != NULL) {
         for (size_t i = 0; i < server->static_handler_count; i++) {
-            if (server->static_handler_objects[i] != NULL) {
+            if (server->static_handler_mounts[i] != NULL) {
+                http_static_handler_shared_release(server->static_handler_mounts[i]);
+            }
+            if (server->static_handler_objects != NULL
+                && server->static_handler_objects[i] != NULL) {
                 OBJ_RELEASE(server->static_handler_objects[i]);
             }
         }
+        efree(server->static_handler_mounts);
+        server->static_handler_mounts = NULL;
+    }
+    if (server->static_handler_objects != NULL) {
         efree(server->static_handler_objects);
         server->static_handler_objects = NULL;
     }
-    if (server->static_handler_mounts != NULL) {
-        efree(server->static_handler_mounts);
-        server->static_handler_mounts = NULL;
+    if (server->transit_static_mounts != NULL) {
+        http_server_transit_static_release(
+            (http_server_transit_static_t *) server->transit_static_mounts);
+        server->transit_static_mounts = NULL;
     }
     server->static_handler_count    = 0;
     server->static_handler_capacity = 0;
@@ -2640,6 +2674,29 @@ typedef struct {
     http_server_transit_handler_t entries[HTTP_SERVER_TRANSIT_MAX];
     size_t                        count;
 } http_server_transit_handlers_t;
+
+/* Persistent side-car for static-handler fan-out across worker threads
+ * (issue #13). Each entry is a pointer into a refcounted persistent
+ * snapshot built at addStaticHandler-time; TRANSFER addrefs once per
+ * shell, LOAD addrefs once per worker. */
+struct http_server_transit_static {
+    http_static_handler_t **mounts;   /* pemalloc array */
+    size_t                  count;
+};
+
+static void http_server_transit_static_release(http_server_transit_static_t *t)
+{
+    if (t == NULL) return;
+    if (t->mounts != NULL) {
+        for (size_t i = 0; i < t->count; i++) {
+            if (t->mounts[i] != NULL) {
+                http_static_handler_shared_release(t->mounts[i]);
+            }
+        }
+        pefree(t->mounts, 1);
+    }
+    pefree(t, 1);
+}
 
 static zend_object *http_server_transfer_obj(
     zend_object *object,
@@ -2709,6 +2766,22 @@ static zend_object *http_server_transfer_obj(
         } ZEND_HASH_FOREACH_END();
 
         dst_shell->transit_handlers = transit;
+
+        /* Static handlers (issue #13). Mounts are persistent +
+         * atomic-refcounted shared snapshots: the side-car owns one ref
+         * per shell, LOAD addrefs once more into each worker. */
+        if (src->static_handler_count > 0) {
+            http_server_transit_static_t *st_transit =
+                pecalloc(1, sizeof(*st_transit), 1);
+            st_transit->mounts = pemalloc(sizeof(http_static_handler_t *)
+                                          * src->static_handler_count, 1);
+            st_transit->count  = src->static_handler_count;
+            for (size_t i = 0; i < src->static_handler_count; i++) {
+                st_transit->mounts[i] = src->static_handler_mounts[i];
+                http_static_handler_shared_addref(st_transit->mounts[i]);
+            }
+            dst_shell->transit_static_mounts = st_transit;
+        }
 
         return dst;
     }
@@ -2802,6 +2875,27 @@ static zend_object *http_server_transfer_obj(
                     break;
             }
         }
+    }
+
+    /* Static handlers (issue #13). Worker addrefs each shared mount
+     * into its own emalloc'd array; the side-car keeps its own refs
+     * until the shell is freed. Workers don't materialise PHP
+     * StaticHandler objects — userland on a worker has no path to one. */
+    http_server_transit_static_t *st_transit =
+        (http_server_transit_static_t *) src_shell->transit_static_mounts;
+    if (st_transit != NULL && st_transit->count > 0) {
+        const size_t n = st_transit->count;
+        dst_obj->static_handler_mounts  = emalloc(sizeof(http_static_handler_t *) * n);
+        dst_obj->static_handler_objects = ecalloc(n, sizeof(zend_object *));
+        for (size_t i = 0; i < n; i++) {
+            dst_obj->static_handler_mounts[i] = st_transit->mounts[i];
+            http_static_handler_shared_addref(dst_obj->static_handler_mounts[i]);
+        }
+        dst_obj->static_handler_count    = n;
+        dst_obj->static_handler_capacity = n;
+        /* Mirror addStaticHandler's protocol-mask side effect so the
+         * dispatcher actually routes H1 traffic on the worker. */
+        dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
     }
 
     return dst;

@@ -626,6 +626,7 @@ static void ss_handle_stat(ss_state_t *state)
     state->pending_req = ZEND_ASYNC_IO_SENDFILE(
             state->conn->io, state->file_io, 0, (size_t) state->st.st_size);
     if (UNEXPECTED(state->pending_req == NULL)) {
+        http_server_count_request(state->conn->counters);
         ss_finalize(state);
     }
 }
