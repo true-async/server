@@ -142,6 +142,18 @@ http_connection_t *http2_session_get_conn(http2_session_t *const session)
     return session != NULL ? session->conn : NULL;
 }
 
+/* Internal accessor — exported (extern decl in callers) so the
+ * static-response module can call nghttp2_submit_response directly
+ * with a pre-built nv[] including its own :status. The wrapper APIs
+ * (http2_session_submit_response et al.) build :status themselves
+ * and do not accept a caller-supplied one. Not in the public header
+ * because the only callers are in-tree H2 modules. */
+nghttp2_session *http2_session_get_ng(http2_session_t *session);
+nghttp2_session *http2_session_get_ng(http2_session_t *const session)
+{
+    return session != NULL ? session->ng : NULL;
+}
+
 /* -------------------------------------------------------------------------
  * Header storage helpers
  *
@@ -688,6 +700,18 @@ static int cb_on_stream_close(nghttp2_session *const ng,
         stream->peer_closed = true;
     }
 
+    /* Static-delivery close hook. Fires before stream_table_remove so
+     * the FSM can read stream->stream_id / refcount the conn safely.
+     * Cleared after invocation — close_cb is one-shot per nghttp2's
+     * own contract (one stream-close per stream). */
+    if (stream != NULL && stream->on_close != NULL) {
+        void (*on_close)(void *, uint32_t) = stream->on_close;
+        void *const user = stream->on_close_user;
+        stream->on_close = NULL;
+        stream->on_close_user = NULL;
+        on_close(user, error_code);
+    }
+
     if (stream != NULL && stream->coroutine != NULL &&
         error_code != NGHTTP2_NO_ERROR && http_exception_ce != NULL) {
         zend_coroutine_t *const co = (zend_coroutine_t *)stream->coroutine;
@@ -1085,6 +1109,31 @@ static ssize_t http2_response_data_read(nghttp2_session *const ng,
         }
     }
     return (ssize_t)to_copy;
+}
+
+/* Public-ish trampoline so the static-response module can reuse the
+ * stream's buffered data_provider for inline-body responses without
+ * having to re-implement the chunk-queue / response_body machinery.
+ * Same identity as http2_response_data_read — kept as a separate
+ * symbol so the static_response TU doesn't need to know the static
+ * function's name. */
+ssize_t http2_static_buffered_data_read(nghttp2_session *ng,
+                                        int32_t stream_id,
+                                        uint8_t *buf,
+                                        size_t length,
+                                        uint32_t *data_flags,
+                                        nghttp2_data_source *source,
+                                        void *user_data);
+ssize_t http2_static_buffered_data_read(nghttp2_session *const ng,
+                                        const int32_t stream_id,
+                                        uint8_t *const buf,
+                                        const size_t length,
+                                        uint32_t *const data_flags,
+                                        nghttp2_data_source *const source,
+                                        void *const user_data)
+{
+    return http2_response_data_read(ng, stream_id, buf, length, data_flags,
+                                    source, user_data);
 }
 
 int http2_session_submit_response(http2_session_t *const session,

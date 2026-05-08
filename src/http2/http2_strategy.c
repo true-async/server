@@ -19,7 +19,9 @@
 #include "http_connection.h"
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
+#include "http2/http2_static_response.h"
 #include "http1/http_parser.h"   /* http_request_t */
+#include "static/static_handler.h"
 
 #include <string.h>
 
@@ -92,6 +94,78 @@ static void h2_stream_mark_ended(void *ctx);
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn);
 
+/* === Static-handler dispatch callbacks ============================
+ *
+ * The protocol-agnostic static FSM in src/static/http_static.c calls
+ * back through these to manage protocol-side bookkeeping (refcounts,
+ * counters, eventual cleanup). Mirrors h1_static_dispatch_cbs in
+ * src/core/http_connection.c, but the user pointer is the
+ * http2_stream_t and the lifecycle hooks differ:
+ *   - HARD_ZERO arms by pinning conn->handler_refcount + bumping the
+ *     stream refcount so the close hook can run after dispose.
+ *   - on_static_done releases the conn pin and lets the stream clean
+ *     up via http2_stream_release; no PHP-side coroutine to dispose.
+ *   - on_passthrough_to_php is unused (H2 currently doesn't expose
+ *     on_missing:Next on this code path — falling back to PHP from
+ *     a stream that armed-then-rolled is a follow-up). */
+static void h2_static_on_hard_zero_armed(void *const user)
+{
+    http2_stream_t *const stream = (http2_stream_t *)user;
+    if (stream == NULL || stream->session == NULL) {
+        return;
+    }
+    http_connection_t *const conn = http2_session_get_conn(stream->session);
+    if (conn != NULL) {
+        conn->handler_refcount++;
+        http_server_on_request_dispatch(conn->counters);
+    }
+    /* Pin the stream itself so cb_on_stream_close + the static FSM
+     * close hook can fire after the dispatch frame returns. Released
+     * in h2_static_on_static_done. */
+    stream->refcount++;
+}
+
+static void h2_static_on_static_done(void *const user, int status)
+{
+    (void)status;
+    http2_stream_t *const stream = (http2_stream_t *)user;
+    if (stream == NULL || stream->session == NULL) {
+        return;
+    }
+    http_connection_t *const conn = http2_session_get_conn(stream->session);
+
+    if (conn != NULL) {
+        http_server_on_request_dispose(conn->counters);
+        if (conn->handler_refcount > 0) {
+            conn->handler_refcount--;
+        }
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+            /* conn freed; stream lives until release. */
+        }
+    }
+
+    /* Release the dispatch-side refcount we took in on_hard_zero_armed.
+     * The session table still holds its own (released by stream_close). */
+    http2_stream_release(stream);
+}
+
+/* H2 multiplexes on one TCP connection; Connection / Keep-Alive are
+ * filtered out of every response anyway. Always keep-alive. */
+static bool h2_static_keep_alive(void *const user)
+{
+    (void)user;
+    return true;
+}
+
+static const http_static_dispatch_cbs_t h2_static_dispatch_cbs = {
+    .on_hard_zero_armed    = h2_static_on_hard_zero_armed,
+    .on_static_done        = h2_static_on_static_done,
+    .on_passthrough_to_php = NULL,
+    .keep_alive            = h2_static_keep_alive,
+};
+
 /* Session calls this on HEADERS + END_HEADERS for each new stream.
  * Per plan §3.6 this fires regardless of END_STREAM so gRPC bidi
  * handlers start running before the body arrives.
@@ -110,7 +184,16 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
 
     http2_stream_t *const stream = http2_session_find_stream(self->session,
                                                              stream_id);
-    if (stream == NULL || self->conn == NULL || self->conn->handler == NULL) {
+    if (stream == NULL || self->conn == NULL) {
+        return;
+    }
+    /* Static-only deployments register a static mount but no PHP
+     * handler — the static dispatch path below claims the request
+     * before we ever check conn->handler. The PHP-handler-required
+     * branches are guarded individually further down. */
+    const bool has_static_mount =
+        http_static_handler_count(self->conn->server) > 0;
+    if (self->conn->handler == NULL && !has_static_mount) {
         return;
     }
 
@@ -147,6 +230,47 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
         extern void http_response_set_default_json_flags(zend_object *, uint32_t);
         http_response_set_default_json_flags(
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
+    }
+
+    /* Static-handler dispatch (issue #13). Identical policy to the
+     * H1 site in http_connection_dispatch_request:
+     *   HARD_ZERO   — FSM owns the request; on_hard_zero_armed has
+     *                 pinned conn + stream. Return without spawning a
+     *                 coroutine; on_static_done eventually unpins.
+     *   HANDLED     — response_obj populated synchronously (small
+     *                 4xx body / soft skip). Mark stream->skip_handler
+     *                 so http2_handler_coroutine_entry skips the user
+     *                 handler; dispose still runs the regular
+     *                 buffered-commit path so the wire frames go out.
+     *   PASSTHROUGH — no mount matched; spawn the user handler. */
+    if (UNEXPECTED(has_static_mount)) {
+        const http_static_result_t static_rc =
+            http_static_try_serve(self->conn->server, stream->request,
+                                  Z_OBJ(stream->response_zv),
+                                  self->conn->counters,
+                                  &h2_static_dispatch_cbs, stream);
+        if (static_rc == HTTP_STATIC_HARD_ZERO) {
+            return;
+        }
+        if (static_rc == HTTP_STATIC_HANDLED) {
+            stream->skip_handler = true;
+        }
+    }
+
+    /* No PHP handler and the static path didn't claim the request:
+     * synthesise a 404 on the response so the dispose-side commit
+     * sends one. Otherwise the coroutine entry's handler==NULL
+     * guard would silently return and the stream would hang until
+     * the client times out. Mirrors the H1 path in
+     * http_connection_dispatch_request. */
+    if (self->conn->handler == NULL && !stream->skip_handler) {
+        http_response_static_set_status(Z_OBJ(stream->response_zv), 404);
+        http_response_static_set_header(Z_OBJ(stream->response_zv),
+            "content-type", 12, "text/plain; charset=utf-8", 25);
+        zend_string *msg = zend_string_init("Not Found", 9, 0);
+        http_response_static_set_body_str(Z_OBJ(stream->response_zv), msg);
+        zend_string_release(msg);
+        stream->skip_handler = true;
     }
 
     /* Spawn the handler coroutine. extended_data is the STREAM, not
@@ -214,7 +338,18 @@ static void http2_handler_coroutine_entry(void)
     if (stream == NULL || stream->session == NULL) { return; }
 
     http_connection_t *const conn = http2_session_get_conn(stream->session);
-    if (conn == NULL || conn->handler == NULL) { return; }
+    if (conn == NULL) { return; }
+
+    /* Static-handler HANDLED path: response_obj already carries the
+     * synchronous 4xx error body. Skip the user handler entirely;
+     * dispose runs the normal buffered commit and the wire frames go
+     * out the same way they would for any handler-set response. */
+    if (stream->skip_handler) {
+        http_server_count_request(conn->counters);
+        return;
+    }
+
+    if (conn->handler == NULL) { return; }
 
     const bool stamps = http_server_sample_stamps_enabled(conn->view);
     if (stream->request != NULL && stamps) {
@@ -1107,10 +1242,26 @@ static zend_async_event_t *h2_stream_get_wait_event(void *const ctx)
 }
 
 const http_response_stream_ops_t h2_stream_ops = {
-    .append_chunk   = h2_stream_append_chunk,
-    .mark_ended     = h2_stream_mark_ended,
-    .get_wait_event = h2_stream_get_wait_event,
+    .append_chunk        = h2_stream_append_chunk,
+    .mark_ended          = h2_stream_mark_ended,
+    .get_wait_event      = h2_stream_get_wait_event,
+    .send_static_response = h2_stream_send_static_response,
 };
+
+/* Public-by-extern entrypoint into h2_drain_to_socket, used by the
+ * static-response module after it submits a response. Kept as a
+ * thin trampoline rather than renaming h2_drain_to_socket to keep
+ * the existing handler-coroutine code-paths unchanged. */
+void http2_static_drain_to_socket(http_connection_t *conn,
+                                  http2_session_t *session);
+void http2_static_drain_to_socket(http_connection_t *const conn,
+                                  http2_session_t *const session)
+{
+    if (conn == NULL || session == NULL) {
+        return;
+    }
+    h2_drain_to_socket(conn, session);
+}
 
 static void http2_strategy_send_response(http_connection_t *conn, void *response)
 {

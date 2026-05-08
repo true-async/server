@@ -1115,10 +1115,13 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
     server->static_handler_mounts[server->static_handler_count]  = frozen;
     server->static_handler_count++;
 
-    /* Mark H1 as a protocol this server speaks — symmetric with the
-     * addHttpHandler convention. (H2/H3 land in PRs #2/#3.) The
-     * start() preflight uses static_handler_count separately. */
-    server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
+    /* Mark H1 + H2 as protocols this server speaks — symmetric with
+     * the addHttpHandler convention. With the H2 static fast-path
+     * landed (issue #13 step 2), a static-only deployment now serves
+     * the same mount uniformly over both versions on the same port.
+     * (H3 lands in PR #3.) start() preflight uses static_handler_count
+     * separately. */
+    server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2;
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }

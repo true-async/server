@@ -147,6 +147,24 @@ struct http2_stream_t {
     void                *coroutine;    /* zend_coroutine_t *; void to keep the
                                           zend_async header out of this TU */
 
+    /* Static-file delivery skips the user PHP handler — the static
+     * FSM has already populated response_obj and installed an
+     * on_stream_close hook below. http2_handler_coroutine_entry
+     * checks this and returns without calling conn->handler so the
+     * dispose path runs the normal flush logic (which then sees
+     * is_streaming==false / response committed and is a no-op for
+     * the static delivery). Mirrors h1_request_ctx_t::skip_php_handler. */
+    bool                 skip_handler;
+
+    /* Optional close hook for protocol-owned static delivery. Fires
+     * exactly once from cb_on_stream_close right after nghttp2 tears
+     * the stream's internal state down — the static FSM hooks here so
+     * it learns when the DATA frames have actually drained (or the
+     * peer RST'd) and can dispose file_io + fire its on_done. NULL
+     * for the regular handler-coroutine path. */
+    void               (*on_close)(void *user, uint32_t error_code);
+    void                *on_close_user;
+
     /* Lifecycle refcount. nghttp2's on_stream_close_cb
      * can fire while our handler dispose is mid-drain — e.g. the
      * terminal DATA frame triggers stream close inside the same

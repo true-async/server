@@ -498,6 +498,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/http2/http2_strategy.c
       src/http2/http2_session.c
       src/http2/http2_stream.c
+      src/http2/http2_static_response.c
     "
   fi
 
