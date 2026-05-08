@@ -146,6 +146,21 @@ struct _http_connection_t {
      * same bytes the in-flight write still owns). */
     size_t                         tls_zc_write_n;
 
+    /* Optional zero-copy write completion observer (issue #13 §5a).
+     * The static-handler TLS FSM uses this to pace its read→encrypt→
+     * write→read loop: after each ciphertext write completes it needs
+     * to know when wbio has drained so the next chunk can be encrypted
+     * without SSL_ERROR_WANT_WRITE. tls_zc_write_free_cb invokes this
+     * exactly once per completion (after tls_advance_state, so any
+     * post-handshake bytes the FSM produced ride the same kick chain).
+     * NULL = no observer. data field is opaque to the TLS layer.
+     *
+     * Lifetime: registered by the static FSM at ss_kick_off, cleared
+     * at ss_finalize. Only one consumer at a time — destroy paths
+     * already serialise the static FSM behind handler_refcount. */
+    void                         (*tls_zc_write_done_cb)(void *data);
+    void                          *tls_zc_write_done_cb_data;
+
     /* Bit-fields packed with the rest of the flag word at the end of
      * the struct to save padding. unsigned : 1 chosen over bool : 1 for
      * the broadest compiler portability; reads/writes use plain

@@ -246,11 +246,19 @@ static inline bool path_targets_directory(const char *relative,
  * can re-enter the same NOTIFY iteration) are filtered by phase
  * versus expected-req identity, mirroring http_log's writer_cb. */
 typedef enum {
-    SS_PHASE_OPEN     = 0,  /* awaiting fs_open completion (result=NULL) */
-    SS_PHASE_STAT     = 1,  /* awaiting io_stat completion (result=stat req) */
-    SS_PHASE_SENDFILE = 2,  /* awaiting sendfile completion (result=sendfile req) */
-    SS_PHASE_DONE     = 3,
+    SS_PHASE_OPEN          = 0,  /* awaiting fs_open completion (result=NULL) */
+    SS_PHASE_STAT          = 1,  /* awaiting io_stat completion (result=stat req) */
+    SS_PHASE_SENDFILE      = 2,  /* awaiting sendfile completion (result=sendfile req) */
+    SS_PHASE_TLS_READ      = 3,  /* awaiting ZEND_ASYNC_IO_READ chunk on file_io */
+    SS_PHASE_TLS_DRAIN     = 4,  /* awaiting tls_zc_write_done_cb (cipher BIO drained) */
+    SS_PHASE_DONE          = 5,
 } ss_phase_t;
+
+/* TLS chunked-stream chunk size. Must be ≤ HTTP_TLS_PLAINTEXT_RING_BYTES
+ * (32 KiB) so a single SSL_write never returns SSL_ERROR_WANT_WRITE in
+ * the strict-ping-pong loop. 16 KiB also matches the typical TLS record
+ * size, so each chunk encrypts to one record + framing overhead. */
+#define SS_TLS_CHUNK_BYTES (16 * 1024)
 
 typedef struct {
     http_connection_t   *conn;
@@ -274,6 +282,7 @@ typedef struct {
 
     bool                 is_head;
     bool                 should_continue;  /* keep-alive verdict */
+    bool                 is_tls;           /* picks chunked-encrypt path over sendfile */
 
     /* State machine cursor. */
     ss_phase_t           phase;
@@ -287,6 +296,13 @@ typedef struct {
     /* Persistent cb registered once on file_io->event at kick-off,
      * removed once at finalize. */
     zend_async_event_callback_t *cb;
+
+    /* TLS chunked path scratch. chunk_buf is emalloc'd once per
+     * request (16 KiB); reused across every TLS_READ→TLS_DRAIN cycle.
+     * NULL on the plain-TCP sendfile path. bytes_sent tracks the
+     * file offset for the next IO_READ submit; capped at st.st_size. */
+    char                *chunk_buf;
+    uint64_t             bytes_sent;
 } ss_state_t;
 
 typedef struct {
@@ -313,6 +329,10 @@ static inline void ss_state_free(ss_state_t *state)
     if (state->fs_path != NULL) {
         efree(state->fs_path);
         state->fs_path = NULL;
+    }
+    if (state->chunk_buf != NULL) {
+        efree(state->chunk_buf);
+        state->chunk_buf = NULL;
     }
     efree(state);
 }
@@ -364,6 +384,17 @@ static void ss_finalize(ss_state_t *state)
      * and a no-op on non-Linux. Pairs with the cork in ss_kick_off. */
     ss_cork_set(conn, 0);
 
+#ifdef HAVE_OPENSSL
+    /* Detach the static-FSM observer from the cipher write completion
+     * chain. Done before we efree state — otherwise a late free_cb
+     * fire would deref a freed pointer. */
+    if (state->is_tls
+        && conn->tls_zc_write_done_cb_data == state) {
+        conn->tls_zc_write_done_cb      = NULL;
+        conn->tls_zc_write_done_cb_data = NULL;
+    }
+#endif
+
     if (state->cb != NULL && state->file_io != NULL) {
         (void) state->file_io->event.del_callback(
             &state->file_io->event, state->cb);
@@ -409,11 +440,20 @@ static const char *ss_status_line(const int status, size_t *out_len)
 }
 
 /* Build the full response head (status + headers + optional inline
- * body) into a fresh zend_string and submit it fire-and-forget via
- * the existing fire-and-forget send. We MUST NOT suspend in this
- * callback chain — there is no coroutine to park — so the await-
- * style http_connection_send_raw is off-limits. The reactor takes
- * ownership of the string and releases on write completion. */
+ * body) into a fresh zend_string and submit it fire-and-forget.
+ *
+ * Plain TCP: ZEND_ASYNC_IO_WRITE_EX → libuv owns the string until
+ * write completion (fire-and-forget, single uv_write).
+ *
+ * TLS: encrypt through SSL_write into the BIO ring, then kick the
+ * existing FSM-send chain. Caller must ensure the head fits in
+ * one SSL_write — 16 KiB plaintext is the safe ceiling here (BIO
+ * ring is 32 KiB, OpenSSL wbio takes ~17 KiB before WANT_WRITE).
+ * Status + headers + small inline body for 304/HEAD/error always
+ * fit; large bodies skip this helper and ride the chunked TLS_READ
+ * loop instead.
+ *
+ * Returns false on submit failure (string already released). */
 static bool ss_send_response(ss_state_t *state, const int status_code,
                              const smart_str *headers,
                              const char *body, const size_t body_len)
@@ -431,9 +471,22 @@ static bool ss_send_response(ss_state_t *state, const int status_code,
     }
     smart_str_0(&line);
 
-    /* Transfer ownership of line.s to the reactor. */
     zend_string *const owned = line.s;
     line.s = NULL;
+
+#ifdef HAVE_OPENSSL
+    if (state->conn->tls != NULL) {
+        /* TLS path: encrypt+kick instead of bypassing the layer.
+         * atomic helper bails when the buffer doesn't fully fit in
+         * one SSL_write — with our size invariants it always does. */
+        const bool ok = http_connection_tls_fsm_send_plaintext_atomic(
+                state->conn, ZSTR_VAL(owned), ZSTR_LEN(owned));
+        zend_string_release(owned);
+        return ok;
+    }
+#endif
+
+    /* Plain TCP: zero-copy fire-and-forget. */
     return http_connection_send_str_owned(state->conn, owned);
 }
 
@@ -524,6 +577,12 @@ static void ss_emit_error(ss_state_t *state, const int status_code,
 static void ss_handle_open(ss_state_t *state, zend_object *exception);
 static void ss_handle_stat(ss_state_t *state);
 static void ss_handle_sendfile_done(ss_state_t *state);
+#ifdef HAVE_OPENSSL
+static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read,
+                                    bool err);
+static void ss_tls_drain_done_cb(void *data);
+static bool ss_tls_submit_next_read(ss_state_t *state);
+#endif
 
 /* The persistent callback. Registered once at kick-off, fires for
  * every NOTIFY on file_io->event. We discriminate completions by
@@ -568,6 +627,33 @@ static void ss_dispatch(zend_async_event_t *event,
             ss_handle_sendfile_done(state);
             return;
 
+#ifdef HAVE_OPENSSL
+        case SS_PHASE_TLS_READ:
+            /* IO_READ on file_io completed. result points at the req,
+             * exception non-NULL on EBADF / read errors. transferred
+             * == 0 means EOF (early or truncated file). */
+            if (req == NULL || req != state->pending_req) return;
+            state->pending_req = NULL;
+            {
+                const ssize_t got = req->transferred;
+                const bool err = (exception != NULL || req->exception != NULL);
+                if (req->exception != NULL) {
+                    OBJ_RELEASE(req->exception);
+                    req->exception = NULL;
+                }
+                if (req->dispose != NULL) req->dispose(req);
+                ss_handle_tls_read_done(state, got, err);
+            }
+            return;
+
+        case SS_PHASE_TLS_DRAIN:
+            /* Drain wakeup arrives via the conn->tls_zc_write_done_cb
+             * direct callback, not through ss_dispatch — we never
+             * register a pending_req for the drain wait. Spurious
+             * notifies on file_io while parked in DRAIN are ignored. */
+            return;
+#endif
+
         case SS_PHASE_DONE:
         default:
             return;
@@ -588,6 +674,17 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
      * fire-and-forget writes don't expect cork. Idempotent on non-
      * Linux / non-corked sockets. */
     ss_cork_set(conn, 0);
+
+#ifdef HAVE_OPENSSL
+    /* Defensive: rollback only fires on OPEN failure today, so the
+     * observer hook hasn't been installed yet. Clearing here keeps
+     * us safe if the rollback path widens later. */
+    if (state->is_tls
+        && conn->tls_zc_write_done_cb_data == state) {
+        conn->tls_zc_write_done_cb      = NULL;
+        conn->tls_zc_write_done_cb_data = NULL;
+    }
+#endif
 
     /* Drop the file_io + persistent callback (mirrors ss_finalize but
      * without on_request_dispose / http_request_finalize — those happen
@@ -747,10 +844,13 @@ static void ss_handle_stat(ss_state_t *state)
         return;
     }
 
-    /* 200 GET with body. Headers go fire-and-forget through the
-     * existing send pipeline (plain TCP only on this path — TLS would
-     * require a non-suspending TLS write helper); the body rides the
-     * zero-copy sendfile syscall. */
+    /* 200 GET with body. Headers go through the right channel:
+     *   - plain TCP: fire-and-forget zero-copy uv_write, body rides
+     *     ZEND_ASYNC_IO_SENDFILE for kernel-resident transfer.
+     *   - TLS: encrypt+kick through tls_fsm_send_plaintext_atomic for
+     *     headers, then the chunked TLS_READ→SSL_write→drain loop
+     *     handles the body.
+     * Both branches converge in ss_finalize. */
     if (UNEXPECTED(!ss_send_response(state, 200, &headers, NULL, 0))) {
         smart_str_free(&headers);
         ss_finalize(state);
@@ -758,6 +858,37 @@ static void ss_handle_stat(ss_state_t *state)
     }
     smart_str_free(&headers);
 
+#ifdef HAVE_OPENSSL
+    if (state->is_tls) {
+        /* TLS body path: chunked IO_READ + SSL_write + drain loop.
+         * chunk_buf is emalloc'd lazily; one buffer reused across
+         * every iteration of the loop. */
+        if (state->chunk_buf == NULL) {
+            state->chunk_buf = emalloc(SS_TLS_CHUNK_BYTES);
+        }
+
+        /* Hook the cipher-write completion observer so the FSM-send
+         * free_cb wakes us when wbio drains. Cleared in ss_finalize. */
+        state->conn->tls_zc_write_done_cb      = ss_tls_drain_done_cb;
+        state->conn->tls_zc_write_done_cb_data = state;
+
+        /* Headers atomic-send may have left a write in flight. If so,
+         * park in DRAIN and let the cb call ss_tls_submit_next_read
+         * once the BIO ring has drained. Sync-complete: jump in
+         * directly. */
+        if (state->conn->tls_zc_write_n != 0) {
+            state->phase = SS_PHASE_TLS_DRAIN;
+            return;
+        }
+        if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
+            http_server_count_request(state->conn->counters);
+            ss_finalize(state);
+        }
+        return;
+    }
+#endif
+
+    /* Plain TCP body path: zero-copy kernel sendfile. */
     state->phase       = SS_PHASE_SENDFILE;
     state->pending_req = ZEND_ASYNC_IO_SENDFILE(
             state->conn->io, state->file_io, 0, (size_t) state->st.st_size);
@@ -775,13 +906,157 @@ static void ss_handle_sendfile_done(ss_state_t *state)
     ss_finalize(state);
 }
 
+#ifdef HAVE_OPENSSL
+/* === TLS chunked-encrypt path =====================================
+ *
+ * For user-space TLS connections the kernel-zero-copy sendfile path
+ * is unsafe (it would put plaintext on the wire), so the body rides
+ * a callback FSM that loops:
+ *
+ *     ZEND_ASYNC_IO_READ(file_io, chunk_buf, SS_TLS_CHUNK_BYTES)
+ *       → on completion (SS_PHASE_TLS_READ → ss_handle_tls_read_done)
+ *           SSL_write(chunk_buf, n) via tls_fsm_send_plaintext_atomic
+ *               → tls_fsm_send_kick submits ciphertext fire-and-forget
+ *                 to libuv (zero-copy peek out of the BIO ring)
+ *           if (zc_write_n == 0)            sync-complete: loop again
+ *           else                            park in SS_PHASE_TLS_DRAIN
+ *               → on cipher write completion (tls_zc_write_done_cb
+ *                 ↦ ss_tls_drain_done_cb)   loop again
+ *     EOF (transferred == 0)               finalize
+ *
+ * No coroutine spawned; everything lives in event-loop callback
+ * context. SS_TLS_CHUNK_BYTES (16 KiB) ≤ HTTP_TLS_PLAINTEXT_RING_BYTES
+ * (32 KiB) so a single SSL_write never stalls on WANT_WRITE — the
+ * atomic helper succeeds in one shot every iteration.
+ * ================================================================= */
+
+static bool ss_tls_submit_next_read(ss_state_t *state)
+{
+    const uint64_t total = (uint64_t) state->st.st_size;
+    if (state->bytes_sent >= total) {
+        /* Body fully shipped. Wait for any trailing in-flight cipher
+         * write to finish before finalizing — but if it's already
+         * settled, finalize now. The DRAIN cb path handles the not-
+         * yet-settled case. */
+        if (state->conn->tls_zc_write_n != 0) {
+            state->phase = SS_PHASE_TLS_DRAIN;
+            return true;
+        }
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+        return true;
+    }
+
+    state->phase = SS_PHASE_TLS_READ;
+    const size_t remaining = (size_t)(total - state->bytes_sent);
+    const size_t want = remaining < SS_TLS_CHUNK_BYTES
+                            ? remaining : SS_TLS_CHUNK_BYTES;
+    state->pending_req = ZEND_ASYNC_IO_READ(
+            state->file_io, state->chunk_buf, want);
+    return state->pending_req != NULL;
+}
+
+static void ss_handle_tls_read_done(ss_state_t *state, ssize_t bytes_read,
+                                    bool err)
+{
+    if (UNEXPECTED(err) || bytes_read < 0) {
+        /* Read error mid-stream — bytes already on the wire belong
+         * to the client, finalize and let keep-alive policy decide. */
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+        return;
+    }
+    if (bytes_read == 0) {
+        /* EOF before st_size — file truncated under us. Same
+         * recovery as the read-error path: drop, finalize. */
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+        return;
+    }
+
+    /* Conn went into shutdown (peer FIN / worker stop) between our
+     * IO_READ submit and its completion. Don't push more encrypt+
+     * write traffic into a half-torn session — bail through the
+     * normal finalize path. */
+    if (state->conn->state == CONN_STATE_CLOSING
+        || state->conn->destroy_pending
+        || state->conn->tls_write_error) {
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+        return;
+    }
+
+    /* Encrypt + queue. Atomic helper bails on partial writes; with
+     * SS_TLS_CHUNK_BYTES ≤ ring it always succeeds for a healthy
+     * session. A failure here means the session itself is wedged
+     * (sticky tls_write_error) — bail. */
+    if (UNEXPECTED(!http_connection_tls_fsm_send_plaintext_atomic(
+            state->conn, state->chunk_buf, (size_t) bytes_read))) {
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+        return;
+    }
+    state->bytes_sent += (uint64_t) bytes_read;
+
+    /* Sync-complete cipher write (rare on Linux, common on Windows
+     * try-write fast path): zc_write_n already back to 0, no DRAIN
+     * wait needed. Loop directly. */
+    if (state->conn->tls_zc_write_n == 0) {
+        if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
+            http_server_count_request(state->conn->counters);
+            ss_finalize(state);
+        }
+        return;
+    }
+
+    /* Async cipher write: park until tls_zc_write_done_cb fires. */
+    state->phase = SS_PHASE_TLS_DRAIN;
+}
+
+static void ss_tls_drain_done_cb(void *data)
+{
+    ss_state_t *state = (ss_state_t *) data;
+    if (state == NULL) return;
+
+    /* Only act when we're actually parked waiting on drain. The cb
+     * also fires for non-static FSM-send completions (post-handshake
+     * messages) — ignore those. */
+    if (state->phase != SS_PHASE_TLS_DRAIN) {
+        return;
+    }
+
+    /* Peer FIN (or worker stop) flipped the conn into CLOSING /
+     * destroy_pending while we were parked on drain. Don't push
+     * another encrypt+write into a torn-down session — finalize
+     * cleanly and let the destroy chain run on the next refcount
+     * drop. http_server_count_request stays paired with the
+     * dispatch hand-off either way. */
+    if (state->conn->state == CONN_STATE_CLOSING
+        || state->conn->destroy_pending
+        || state->conn->tls_write_error) {
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+        return;
+    }
+
+    if (UNEXPECTED(!ss_tls_submit_next_read(state))) {
+        http_server_count_request(state->conn->counters);
+        ss_finalize(state);
+    }
+}
+#endif /* HAVE_OPENSSL */
+
 /* === Hard-zero kick-off =========================================== */
 
-/* Hard-zero is plain-TCP-only for now: the fire-and-forget write
- * path (http_connection_send_str_owned) writes directly to the
- * socket fd, bypassing the user-space TLS layer. A future iteration
- * can add a non-suspending TLS write helper to extend this to
- * kTLS-engaged sessions. */
+/* Plain-TCP fast path: zero-copy sendfile straight from the page
+ * cache to the socket. TLS connections cannot use this (the sendfile
+ * bytes would bypass OpenSSL — wire would carry plaintext) and take
+ * the chunked-encrypt path below instead.
+ *
+ * kTLS would let TLS connections back into sendfile (kernel encrypts
+ * in-place), but our SSL is bound to a BIO_pair so kTLS never engages
+ * — see PLAN_STATIC_HANDLER §5a "kTLS fast-path — заблокирован
+ * архитектурой BIO". */
 #ifdef HAVE_OPENSSL
 static inline bool conn_supports_sendfile(const http_connection_t *conn)
 {
@@ -812,6 +1087,7 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     state->ctx        = ctx;
     state->mount      = mount;
     state->is_head    = is_head;
+    state->is_tls     = !conn_supports_sendfile(conn);
     state->fs_path    = emalloc(fs_path_len + 1);
     memcpy(state->fs_path, fs_path, fs_path_len);
     state->fs_path[fs_path_len] = '\0';
@@ -864,8 +1140,12 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 
     /* Cork now so the headers write (about to be queued from
      * ss_handle_stat) and the subsequent sendfile bytes coalesce on
-     * the wire. Uncorked unconditionally in ss_finalize. */
-    ss_cork_set(conn, 1);
+     * the wire. Uncorked unconditionally in ss_finalize. Plain TCP
+     * only — TLS rides the BIO ring and benefits no further from
+     * cork (records already self-frame). */
+    if (!state->is_tls) {
+        ss_cork_set(conn, 1);
+    }
 
     return true;
 }
@@ -994,18 +1274,22 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             }
         }
 
-        /* Hard-zero async path — eligible when:
-         *  - destination socket can take zero-copy writes (plain TCP),
-         *  - the resolved path stays inside the mount root after
-         *    canonicalisation (sync realpath here, microseconds on
-         *    warm cache; sendfile/sync paths share the same security
-         *    check this way).
+        /* Hard-zero async path — both plain TCP and TLS rides this:
+         *  - plain TCP: kernel zero-copy via ZEND_ASYNC_IO_SENDFILE.
+         *  - TLS (issue #13 §5a): chunked IO_READ → SSL_write →
+         *    cipher-drain loop driven by tls_zc_write_done_cb. No
+         *    coroutine spawned.
+         *
+         * Eligibility check is identical for both: resolved path must
+         * stay inside the mount root after canonicalisation. realpath
+         * here is sync but cheap on warm cache. ss_kick_off picks the
+         * sub-path internally based on conn_supports_sendfile.
+         *
          * On open-error the on_missing:Next rollback in ss_handle_open
          * detaches state and hands ctx over to a regular PHP-handler
-         * coroutine, so on_missing:Next mounts now ride hard-zero on
-         * the success path too (#5c). */
-        if (conn_supports_sendfile(conn)
-            && resolved_under_root(mount, fs_path)) {
+         * coroutine, so on_missing:Next mounts also ride this path on
+         * the success path (#5c). */
+        if (resolved_under_root(mount, fs_path)) {
             if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head)) {
                 return HTTP_STATIC_HARD_ZERO;
             }

@@ -385,15 +385,30 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
   passthrough), 002-dotfile-and-onmissing, 003-static-security
   (symlink-escape, backslash, NUL, header injection, EACCES
   disclosure), 004-static-on-missing-next, 005-static-if-modified-
-  since, 006-static-zero-coroutine-counter.
+  since, 006-static-zero-coroutine-counter, 007-static-tls-streaming.
+- ✅ **TLS hard-zero (user-space) — chunked SSL_write FSM**
+  (этот коммит). `ss_kick_off` теперь принимает TLS-соединения
+  тоже: после headers (atomic_send через
+  `tls_fsm_send_plaintext_atomic`) FSM крутит loop
+  `ZEND_ASYNC_IO_READ(file_io, 16 KiB)` →
+  `tls_fsm_send_plaintext_atomic` (encrypt+kick) → ждать
+  `tls_zc_write_done_cb` (новый optional observer на zc-write
+  completion) → следующий read. Никакой корутины не
+  спавнится — всё в callback context.
+  Bench (16 cores WSL2, debug-build, 64 KiB файл, wrk -c64 -t4):
+  - **plain TCP sendfile**: 19327 req/s, 1.18 GB/s, 3.1 ms median
+  - **TLS chunked SSL_write**: 4843 req/s, 303 MB/s, 12.7 ms median
+  Соотношение 25% — ожидаемый user-space AES baseline на debug-
+  build; release-build даст 1.5-2× благодаря AES-NI inlining.
 
 ### Осталось
 
 | Acceptance / Plan item | Status | Notes |
 |---|---|---|
 | Symlink owner-match (`OwnerMatch`) | aliased to `Reject` | post-open uid compare не реализован; политика не слабее заявленной |
-| Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | not done | нужны цифры для подтверждения 5-15% gain — out-of-codebase |
-| TLS hard-zero (user-space) | not done | требует non-suspending TLS write helper + new SS_PHASE_TLS_READ/WRITE FSM. См. ниже про BIO архитектурный блокер на kTLS-вариант |
+| Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | partial | bench tooling готов, цифры выше для file-static; entry.php сравнение out-of-codebase |
+| TLS streaming abrupt-close race | known issue | wrk-style массовый abrupt close с in-flight TLS streaming → assertion в `conn_arena_cleanup` (alive list не пустой при teardown). PHPT 007 чистый, штатный keep-alive close — чистый. Только при `wrk --timeout 0` с десятками одновременных RST. Требует pass над shutdown chain — отдельный fix. |
+| Open file cache (HashTable+LRU) | not started | nginx-style open_file_cache: путь→(stat, fd, mtime), LRU bound 512, TTL 60s, mtime invalidation on hit. Сэкономит realpath+stat на hot serving. Отдельный PR. |
 | **PR #2** H2/H3 интеграция | not started | nghttp2/nghttp3 data-provider hookup |
 | **PR #3** Range support | not started | single + multipart/byteranges + If-Range |
 | **PR #4** Precompressed sidecars `.br/.gz/.zst` | not started | reuse `http_compression_negotiate.c` |
@@ -488,21 +503,31 @@ use case.
 3. `browse` (dir listing) — defer to PR #6, low priority.
 4. `setHeader` interaction with conditional GET — закрыт: extra
    headers fire on 304, кроме `Content-*` family (RFC 9110 §15.4.5).
-5. **TLS hard-zero (user-space)**: нужен non-suspending TLS write
-   helper в `tls_layer.c` (или новый chunked plaintext API поверх
-   существующего `http_connection_tls_fsm_send_plaintext_atomic`),
-   плюс новые фазы `SS_PHASE_TLS_READ` / `SS_PHASE_TLS_WRITE_DRAIN`
-   в static FSM с pacing на write-completion BIO ring. Без этого
-   hard-zero ограничен plain TCP, и user-space TLS ходит через
-   sync-slurp путь (см. `slurp_fd` в `http_static.c:144`),
-   блокирующий dispatch на чтении файла.
-6. **kTLS architectural rewire** (см. §5a выше): для активации
-   kTLS нужно переключить SSL с BIO_pair на socket BIO. Это
-   отдельный design open — read FSM и destroy-gating придётся
-   переписать.
-7. **`SYMLINKS_OWNER`** реальная реализация — fstat после open,
+5. ~~**TLS hard-zero (user-space)**~~ ✅ закрыто (этот PR).
+   Реализовано через chunked SSL_write FSM с новым phase'ом
+   `SS_PHASE_TLS_READ` / `SS_PHASE_TLS_DRAIN` и observer hook
+   `conn->tls_zc_write_done_cb` для pacing на write-completion.
+6. **TLS abrupt-close shutdown race**: при wrk-style массовых RST
+   с in-flight streaming, `conn_arena_cleanup` срабатывает
+   assertion `alive_head == NULL && "live conns at cleanup"`.
+   Static FSM в SS_PHASE_TLS_DRAIN не финализуется потому что
+   loop остановлен до ответа от `tls_zc_write_done_cb`. Нужен
+   cancellation pass на server stop: для каждого live conn в
+   static FSM — force ss_finalize. Не блокер для PHPT/штатного
+   serving.
+7. **kTLS architectural rewire**: для активации kTLS нужно
+   переключить SSL с BIO_pair на socket BIO. Отдельный design
+   open — read FSM и destroy-gating придётся переписать. См.
+   §5a "kTLS fast-path — заблокирован архитектурой BIO".
+8. **`SYMLINKS_OWNER`** реальная реализация — fstat после open,
    сравнение st_uid файла с st_uid lstat'а каждого segment'а.
    TOCTOU acceptable (требует write-access на хосте).
+9. **Open file cache** (HashTable + LRU): nginx-style
+   open_file_cache. Сейчас каждый запрос — sync stat + realpath
+   на hot path. Кеш `путь → (st, mtime, content_type)` с LRU
+   bound и mtime invalidation на hit сэкономит ~3-4 µs на
+   запрос на warm cache. Полезно при hot serving одних и тех же
+   файлов; на холодном set — нейтрально. Отдельный PR.
 
 ---
 

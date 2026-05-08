@@ -462,7 +462,20 @@ static void tls_zc_write_free_cb(void *data, zend_async_io_t *io)
      * keep the state machine moving (e.g. a queued close_notify after
      * the just-completed alert). */
     tls_advance_state(conn);
-    (void)tls_finalize_if_closing(conn);
+    if (tls_finalize_if_closing(conn)) {
+        return;
+    }
+
+    /* Static FSM observer hook: the static TLS path needs to know when
+     * wbio has drained so it can encrypt the next file chunk without
+     * SSL_ERROR_WANT_WRITE. Fire after tls_advance_state so any post-
+     * handshake bytes have already been re-kicked through this chain
+     * (and the observer sees a settled BIO state). */
+    if (conn->tls_zc_write_done_cb != NULL) {
+        void (*cb)(void *) = conn->tls_zc_write_done_cb;
+        void *cb_data      = conn->tls_zc_write_done_cb_data;
+        cb(cb_data);
+    }
 }
 
 /* Submit one ciphertext span from the BIO output ring zero-copy via
