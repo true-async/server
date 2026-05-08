@@ -92,6 +92,13 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
 void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
                            bool should_continue);
 
+/* PHP-handler coroutine entry + dispose. Exposed so the static-handler
+ * on_missing:Next rollback (issue #13 / TODO §5c) can hand a half-
+ * dispatched ctx over to a freshly-spawned coroutine without going
+ * back through the read path's dispatch entrypoint. */
+void http_handler_coroutine_entry(void);
+void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
+
 #ifdef HAVE_OPENSSL
 /* ===== TLS path entry points (defined in http_connection_tls.c) ===== */
 

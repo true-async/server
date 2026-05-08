@@ -73,8 +73,11 @@ struct _http_connection_read_cb {
 static bool http_connection_handle_read_completion(http_connection_t *conn,
                                                    bool *should_destroy_out);
 static void http_connection_dispatch_request(http_connection_t *conn, http_request_t *req);
-static void http_handler_coroutine_entry(void);
-static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
+/* No longer static — the static-handler on_missing:Next rollback in
+ * src/static/http_static.c spawns a coroutine bound to these two
+ * functions. */
+void http_handler_coroutine_entry(void);
+void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend_async_buf_t *out);
 static void http_connection_read_callback_fn(
     zend_async_event_t *event,
@@ -1747,7 +1750,7 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
  * Coroutine body: calls the user's PHP handler with (request, response).
  * Nothing else — all cleanup is in http_handler_coroutine_dispose.
  */
-static void http_handler_coroutine_entry(void)
+void http_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)coroutine->extended_data;
@@ -1886,7 +1889,7 @@ static void http_handler_coroutine_entry(void)
  * Handles response sending, request/response destruction, and
  * keep-alive re-arming.
  */
-static void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
+void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)coroutine->extended_data;
     if (ctx == NULL) {

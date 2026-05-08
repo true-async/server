@@ -287,7 +287,31 @@ Acceptance:
 Open API question:
 [See "API questions to verify".]
 
-#### 5c. on_missing:Next graceful-rollback from hard-zero
+#### ~~5c. on_missing:Next graceful-rollback from hard-zero~~ ✅ done
+
+The `!(mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT)` gate is gone.
+On open-error (`ZEND_ASYNC_IO_CLOSED` or non-NULL exception) for an
+`on_missing:Next` mount, `ss_handle_open` calls a new
+`ss_rollback_to_php_handler` that:
+
+1. Uncorks the socket (idempotent).
+2. Disposes file_io + the persistent callback (without
+   `on_request_dispose` / `http_request_finalize`).
+3. Spawns `ZEND_ASYNC_NEW_COROUTINE(conn->scope)` and binds it to the
+   exposed `http_handler_coroutine_entry` / `_dispose`.
+4. Synthesises the static-only-deployment 404 if no PHP handler is
+   registered (mirrors `http_connection_dispatch_request`'s tail).
+5. Sets `req->coroutine` and `ENQUEUE`s. The dispatch counter and
+   `handler_refcount` from `ss_kick_off` are intentionally left in
+   place — the new coroutine's dispose decrements once each.
+6. Frees `state` (ctx ownership transferred to the coroutine).
+
+`http_handler_coroutine_entry` and `_dispose` are now non-static and
+declared in `http_connection_internal.h` for cross-TU use. Existing
+PHPT 002 already exercises both paths (visible file via hard-zero,
+missing file via rollback to PHP).
+
+#### 5c. (original) on_missing:Next graceful-rollback from hard-zero
 
 The current `ss_kick_off` gate excludes `on_missing:Next` mounts
 because once we commit to hard-zero, falling back on ENOENT looks

@@ -557,6 +557,84 @@ static void ss_dispatch(zend_async_event_t *event,
     }
 }
 
+/* on_missing:Next rollback (#5c). Open failed on a mount configured to
+ * fall through. Tear down the static FSM and hand ctx to a fresh PHP-
+ * handler coroutine. Counters and refcounts already bumped in
+ * ss_kick_off are left in place — the new coroutine's dispose path will
+ * decrement them, balancing the bookkeeping. */
+static void ss_rollback_to_php_handler(ss_state_t *state)
+{
+    http_connection_t   *const conn = state->conn;
+    http1_request_ctx_t *const ctx  = state->ctx;
+
+    /* Restore the cork toggle ss_kick_off did. The coroutine path's
+     * fire-and-forget writes don't expect cork. Idempotent on non-
+     * Linux / non-corked sockets. */
+    ss_cork_set(conn, 0);
+
+    /* Drop the file_io + persistent callback (mirrors ss_finalize but
+     * without on_request_dispose / http_request_finalize — those happen
+     * later via the coroutine's dispose). */
+    if (state->cb != NULL && state->file_io != NULL) {
+        (void) state->file_io->event.del_callback(
+            &state->file_io->event, state->cb);
+        state->cb = NULL;
+    }
+    if (state->file_io != NULL) {
+        if (state->file_io->event.dispose != NULL) {
+            state->file_io->event.dispose(&state->file_io->event);
+        }
+        state->file_io = NULL;
+    }
+
+    state->phase = SS_PHASE_DONE;
+
+    /* Spawn the PHP handler coroutine (mirrors the dispatch tail in
+     * http_connection_dispatch_request).  conn->scope is alive because
+     * ss_kick_off pinned conn->handler_refcount. */
+    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+    if (UNEXPECTED(coroutine == NULL)) {
+        /* Out of memory / scope torn down. Same fallback as the regular
+         * dispatch tail: drop ctx and destroy the conn. */
+        zval_ptr_dtor(&ctx->request_zv);
+        zval_ptr_dtor(&ctx->response_zv);
+        efree(ctx);
+        efree(state);
+        http_connection_destroy(conn);
+        return;
+    }
+
+    /* If the static-only deployment had no PHP handler, http_handler_
+     * coroutine_entry would dereference NULL conn->handler. Synthesise
+     * the same 404 the regular dispatch tail does in that case. */
+    if (conn->handler == NULL) {
+        http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
+        http_response_static_set_header(Z_OBJ(ctx->response_zv),
+            "content-type", 12, "text/plain; charset=utf-8", 25);
+        zend_string *msg = zend_string_init("Not Found", 9, 0);
+        http_response_static_set_body_str(Z_OBJ(ctx->response_zv), msg);
+        zend_string_release(msg);
+        ctx->skip_php_handler = true;
+    }
+
+    coroutine->internal_entry   = http_handler_coroutine_entry;
+    coroutine->extended_data    = ctx;
+    coroutine->extended_dispose = http_handler_coroutine_dispose;
+
+    if (ctx->request != NULL) {
+        ctx->request->coroutine = coroutine;
+    }
+
+    /* The dispatch counter + handler_refcount were already bumped in
+     * ss_kick_off. Skip the bump in the regular dispatch tail — the
+     * coroutine's dispose still decrements once, balancing the books. */
+
+    ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
+
+    /* state lifetime ends here — ctx is owned by the coroutine. */
+    efree(state);
+}
+
 static void ss_handle_open(ss_state_t *state, zend_object *exception)
 {
     /* libuv flips READABLE on success or CLOSED on error before
@@ -564,6 +642,10 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
      * one shipping back to us means the open failed. */
     if (UNEXPECTED(exception != NULL
             || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
+        if (state->mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+            ss_rollback_to_php_handler(state);
+            return;
+        }
         ss_emit_error(state, 404, "Not Found");
         ss_finalize(state);
         return;
@@ -889,17 +971,15 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
         /* Hard-zero async path — eligible when:
          *  - destination socket can take zero-copy writes (plain TCP),
-         *  - mount does not require on_missing: Next fall-through to
-         *    PHP (we can't ENOENT from the callback chain back to a
-         *    coroutine spawn after committing),
          *  - the resolved path stays inside the mount root after
          *    canonicalisation (sync realpath here, microseconds on
          *    warm cache; sendfile/sync paths share the same security
          *    check this way).
-         * Fall through on any negative answer so the sync path
-         * continues to handle the corner cases. */
+         * On open-error the on_missing:Next rollback in ss_handle_open
+         * detaches state and hands ctx over to a regular PHP-handler
+         * coroutine, so on_missing:Next mounts now ride hard-zero on
+         * the success path too (#5c). */
         if (conn_supports_sendfile(conn)
-            && !(mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT)
             && resolved_under_root(mount, fs_path)) {
             if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head)) {
                 return HTTP_STATIC_HARD_ZERO;
