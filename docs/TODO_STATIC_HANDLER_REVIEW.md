@@ -119,7 +119,13 @@ Acceptance: code review only; not easy to PHPT a sendfile-submit failure.
 
 ## 🟠 Should-fix-soon
 
-### 3. Headers + sendfile ordering race on slow socket
+### ~~3. Headers + sendfile ordering race on slow socket~~ ✅ done
+
+Implemented via `TCP_CORK` (Linux) — `ss_cork_set` toggles in
+`ss_kick_off` / `ss_finalize`. Plain-TCP-only path (already gated by
+`conn_supports_sendfile`); on non-Linux platforms the helper is a no-op.
+
+### 3. (original) Headers + sendfile ordering race on slow socket
 
 Plan §7 open question 6 already names this. The handler currently does
 fire-and-forget `ZEND_ASYNC_IO_WRITE_EX` for headers (going through the

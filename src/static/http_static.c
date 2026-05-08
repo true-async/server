@@ -42,6 +42,11 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
+#ifdef __linux__
+# include <sys/socket.h>
+# include <netinet/in.h>
+# include <netinet/tcp.h>   /* TCP_CORK */
+#endif
 
 static void emit_status(zend_object *response_obj, int status,
                         const char *body_msg, size_t body_msg_len)
@@ -296,6 +301,37 @@ static void ss_cb_dispose(zend_async_event_callback_t *cb,
     efree(cb);
 }
 
+/* TCP_CORK gate (Linux). Headers are submitted fire-and-forget through
+ * the existing batched uv_write queue; sendfile then writes directly to
+ * the same fd via uv_fs_sendfile. Without serialisation, on a slow /
+ * congested socket the two could interleave on the wire. Corking the
+ * socket from kick-off through finalize forces the kernel to coalesce
+ * (and to NEVER reorder partial writes against sendfile output) at the
+ * cost of one extra setsockopt round trip per response.
+ *
+ * Plain-TCP only — the hard-zero path is already plain-TCP gated via
+ * conn_supports_sendfile, so we don't need to inspect TLS state here. */
+static inline void ss_cork_set(http_connection_t *conn, const int on)
+{
+#ifdef TCP_CORK
+    if (UNEXPECTED(conn == NULL || conn->io == NULL)) {
+        return;
+    }
+    if (conn->io->type != ZEND_ASYNC_IO_TYPE_TCP) {
+        return;
+    }
+    const int fd = (int) conn->io->descriptor.socket;
+    if (UNEXPECTED(fd < 0)) {
+        return;
+    }
+    /* setsockopt failure here is non-fatal: worst case we skip the
+     * coalescing optimisation. Sendfile + headers still go out. */
+    (void) setsockopt(fd, IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+#else
+    (void) conn; (void) on;
+#endif
+}
+
 /* Tear down the state machine and run http_request_finalize. After
  * this the conn is either keep-alive-armed for the next request or
  * closed; either way nothing more touches `state`. */
@@ -305,6 +341,12 @@ static void ss_finalize(ss_state_t *state)
     http1_request_ctx_t *const ctx = state->ctx;
 
     state->phase = SS_PHASE_DONE;
+
+    /* Uncork before tearing down so the kernel flushes whatever's left
+     * (typically the trailing chunk of the sendfile body). Issued
+     * unconditionally — TCP_CORK off is a no-op on a non-corked socket
+     * and a no-op on non-Linux. Pairs with the cork in ss_kick_off. */
+    ss_cork_set(conn, 0);
 
     if (state->cb != NULL && state->file_io != NULL) {
         (void) state->file_io->event.del_callback(
@@ -717,6 +759,11 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     conn->handler_refcount++;
     conn->state = CONN_STATE_PROCESSING;
     http_server_on_request_dispatch(conn->counters);
+
+    /* Cork now so the headers write (about to be queued from
+     * ss_handle_stat) and the subsequent sendfile bytes coalesce on
+     * the wire. Uncorked unconditionally in ss_finalize. */
+    ss_cork_set(conn, 1);
 
     return true;
 }
