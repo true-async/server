@@ -845,9 +845,49 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             return HTTP_STATIC_HANDLED;
         }
 
+        /* Resolve directory→index synchronously before the hard-zero
+         * gate (#5b in TODO_STATIC_HANDLER_REVIEW). Cold-cache stat is
+         * a single inode lookup (microseconds); it's the read+send that
+         * we want async, and that's what hard-zero already gives us.
+         *
+         * On hit, fs_path_len is promoted to the joined path so MIME
+         * lookup sees the index file's extension (.html etc) rather
+         * than the directory's. On miss, the request resolves to 404
+         * uniformly — on_missing:Next mounts return PASSTHROUGH so the
+         * PHP handler can take over. */
+        const bool was_directory = path_targets_directory(relative, relative_len);
+        if (was_directory) {
+            bool index_resolved = false;
+            for (size_t ii = 0; ii < mount->index_count; ii++) {
+                const zend_string *const idx = mount->index_files[ii];
+                size_t cand_len = fs_path_len;
+                if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path),
+                                                      &cand_len,
+                                                      ZSTR_VAL(idx),
+                                                      ZSTR_LEN(idx)))) {
+                    continue;
+                }
+                struct stat sb;
+                if (stat(fs_path, &sb) == 0 && S_ISREG(sb.st_mode)) {
+                    fs_path_len    = cand_len;
+                    index_resolved = true;
+                    break;
+                }
+                /* Truncate back so the next candidate starts from the
+                 * pristine directory prefix. */
+                fs_path[fs_path_len] = '\0';
+            }
+            if (!index_resolved) {
+                if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
+                    return HTTP_STATIC_PASSTHROUGH;
+                }
+                emit_status(response_obj, 404, "Not Found", 9);
+                ctx->skip_php_handler = true;
+                return HTTP_STATIC_HANDLED;
+            }
+        }
+
         /* Hard-zero async path — eligible when:
-         *  - request targets a concrete file (not a directory; index
-         *    walks stay on the sync path),
          *  - destination socket can take zero-copy writes (plain TCP),
          *  - mount does not require on_missing: Next fall-through to
          *    PHP (we can't ENOENT from the callback chain back to a
@@ -858,8 +898,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
          *    check this way).
          * Fall through on any negative answer so the sync path
          * continues to handle the corner cases. */
-        if (!path_targets_directory(relative, relative_len)
-            && conn_supports_sendfile(conn)
+        if (conn_supports_sendfile(conn)
             && !(mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT)
             && resolved_under_root(mount, fs_path)) {
             if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head)) {
@@ -869,32 +908,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
         int fd = -1;
         struct stat st;
-        bool opened = false;
-
-        if (path_targets_directory(relative, relative_len)) {
-            /* Build each index candidate in-place into fs_path; rewind
-             * by truncating back to the directory prefix on miss. */
-            for (size_t ii = 0; ii < mount->index_count; ii++) {
-                const zend_string *const idx = mount->index_files[ii];
-                size_t cand_len = fs_path_len;
-                if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path),
-                                                      &cand_len,
-                                                      ZSTR_VAL(idx),
-                                                      ZSTR_LEN(idx)))) {
-                    continue;
-                }
-                if (try_open_candidate(mount, fs_path, &fd, &st)) {
-                    opened = true;
-                    /* Promote the length so MIME lookup sees the index
-                     * file's extension, not the directory's. */
-                    fs_path_len = cand_len;
-                    break;
-                }
-                fs_path[fs_path_len] = '\0';
-            }
-        } else {
-            opened = try_open_candidate(mount, fs_path, &fd, &st);
-        }
+        bool opened = try_open_candidate(mount, fs_path, &fd, &st);
 
         if (UNEXPECTED(!opened)) {
             /* ENOENT / ELOOP (symlink rejected) / ENOTDIR / EACCES /

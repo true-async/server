@@ -240,7 +240,19 @@ Acceptance:
 Open API question to verify before starting:
 [See "API questions to verify" section at the end of this file.]
 
-#### 5b. Index-walk via sync stat-only offload + async open
+#### ~~5b. Index-walk via sync stat-only offload + async open~~ ✅ done
+
+Index resolution now happens synchronously via `stat(2)` *before* the
+hard-zero gate; on hit, `fs_path_len` is promoted to the joined path
+and downstream code treats it as a regular-file request. Once resolved
+the hard-zero gate kicks in, so directory→index requests now ride the
+async open + sendfile chain instead of the sync slurp. On miss the
+request resolves to 404 (or PASSTHROUGH for `on_missing:Next`) without
+touching the sync open. The sync `try_open_candidate` branch is now
+only used when the hard-zero gate fails (TLS, `on_missing:Next`, or a
+post-canonicalisation root-escape).
+
+#### 5b. (original) Index-walk via sync stat-only offload + async open
 
 Replace the current sync `try_open_candidate` loop with a sync
 **stat-only** helper, then a single async `ZEND_ASYNC_FS_OPEN` of the
