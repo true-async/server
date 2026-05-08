@@ -45,6 +45,13 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_StaticHandler_se
 	ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_StaticHandler_setOpenFileCache, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, maxEntries, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, ttlSeconds, IS_LONG, 0, "60")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_StaticHandler_disableOpenFileCache arginfo_class_TrueAsync_StaticHandler_disableIndex
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_StaticHandler_setHeader, 0, 2, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
@@ -77,6 +84,8 @@ ZEND_METHOD(TrueAsync_StaticHandler, setSymlinkPolicy);
 ZEND_METHOD(TrueAsync_StaticHandler, hide);
 ZEND_METHOD(TrueAsync_StaticHandler, setEtagEnabled);
 ZEND_METHOD(TrueAsync_StaticHandler, setCacheControl);
+ZEND_METHOD(TrueAsync_StaticHandler, setOpenFileCache);
+ZEND_METHOD(TrueAsync_StaticHandler, disableOpenFileCache);
 ZEND_METHOD(TrueAsync_StaticHandler, setHeader);
 ZEND_METHOD(TrueAsync_StaticHandler, setBrowseEnabled);
 ZEND_METHOD(TrueAsync_StaticHandler, setMimeType);
@@ -97,6 +106,8 @@ static const zend_function_entry class_TrueAsync_StaticHandler_methods[] = {
 	ZEND_ME(TrueAsync_StaticHandler, hide,                arginfo_class_TrueAsync_StaticHandler_hide,                ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_StaticHandler, setEtagEnabled,      arginfo_class_TrueAsync_StaticHandler_setEtagEnabled,      ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_StaticHandler, setCacheControl,     arginfo_class_TrueAsync_StaticHandler_setCacheControl,     ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_StaticHandler, setOpenFileCache,    arginfo_class_TrueAsync_StaticHandler_setOpenFileCache,    ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_StaticHandler, disableOpenFileCache,arginfo_class_TrueAsync_StaticHandler_disableOpenFileCache,ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_StaticHandler, setHeader,           arginfo_class_TrueAsync_StaticHandler_setHeader,           ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_StaticHandler, setBrowseEnabled,    arginfo_class_TrueAsync_StaticHandler_setBrowseEnabled,    ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_StaticHandler, setMimeType,         arginfo_class_TrueAsync_StaticHandler_setMimeType,         ZEND_ACC_PUBLIC)

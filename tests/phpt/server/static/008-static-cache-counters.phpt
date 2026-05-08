@@ -31,7 +31,11 @@ register_shutdown_function(function() use ($root) {
 $port = 19940 + getmypid() % 9;
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
 $server = new HttpServer($config);
-$server->addStaticHandler((new StaticHandler('/static/', $root))->disableIndex());
+$server->addStaticHandler(
+    (new StaticHandler('/static/', $root))
+        ->disableIndex()
+        ->setOpenFileCache(64, 60)   /* opt in — cache is off by default */
+);
 
 $client = spawn(function() use ($port, $server) {
     for ($i = 0; $i < 100; $i++) {

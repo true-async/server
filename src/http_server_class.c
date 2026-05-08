@@ -292,10 +292,13 @@ struct http_server_object {
     size_t                   static_handler_capacity;
 
     /* Open file cache (LRU, TTL-bound) — populated lazily on the
-     * first http_static_try_serve hit. Skips the realpath/stat hot
-     * path syscalls on warm cache. NULL until first use. Freed at
-     * server destroy. See include/static/http_static_cache.h. */
+     * first http_static_try_serve hit, when at least one StaticHandler
+     * has called setOpenFileCache. NULL when no mount opts in.
+     * static_cache_resolved disambiguates "still uninitialised" from
+     * "intentionally disabled". Freed at server destroy. See
+     * include/static/http_static_cache.h. */
     http_static_cache_t     *static_cache;
+    uint8_t                  static_cache_resolved;
 };
 
 /* PHP wrapper. The std handle is what Zend hands out to userland; the
@@ -794,17 +797,17 @@ http_static_handler_get(const http_server_object *server, size_t index)
     return server->static_handler_mounts[index];
 }
 
-/* Open file cache accessor. Created lazily on first call so servers
- * without static handlers don't pay for it.
+/* Open-file cache accessor. The cache instance is per-server (per-worker
+ * after worker-pool transfer — no cross-worker sharing, no locking).
  *
- * Defaults: 512 entries, 60-second TTL. Both match nginx
- * open_file_cache(_valid) defaults. The cache is per-worker-server
- * (after worker-pool transfer each worker has its own snapshot — no
- * cross-worker sharing, no locking).
+ * Effective settings derive from the registered StaticHandlers:
+ *   max_entries = max(mount->cache_max_entries) over enabled mounts
+ *   ttl_seconds = min(mount->cache_ttl_seconds) over enabled mounts
  *
- * env override: TRUE_ASYNC_STATIC_CACHE_ENTRIES /
- *               TRUE_ASYNC_STATIC_CACHE_TTL — set 0 in either to
- *               disable the cache without recompiling. */
+ * Disabled (returns NULL) when no mount opts in via
+ * StaticHandler::setOpenFileCache(). Mount config is append-only after
+ * start() so the merge runs once and is cached via static_cache_resolved
+ * — subsequent calls hit the EXPECTED branch. */
 http_static_cache_t *http_static_cache_acquire(http_server_object *server)
 {
     if (UNEXPECTED(server == NULL)) {
@@ -813,22 +816,31 @@ http_static_cache_t *http_static_cache_acquire(http_server_object *server)
     if (EXPECTED(server->static_cache != NULL)) {
         return server->static_cache;
     }
-
-    size_t  entries = 512;
-    time_t  ttl     = 60;
-
-    const char *env_entries = getenv("TRUE_ASYNC_STATIC_CACHE_ENTRIES");
-    if (env_entries != NULL && *env_entries != '\0') {
-        const long v = strtol(env_entries, NULL, 10);
-        entries = (v >= 0) ? (size_t) v : 0;
-    }
-    const char *env_ttl = getenv("TRUE_ASYNC_STATIC_CACHE_TTL");
-    if (env_ttl != NULL && *env_ttl != '\0') {
-        const long v = strtol(env_ttl, NULL, 10);
-        ttl = (v >= 0) ? (time_t) v : 0;
+    if (server->static_cache_resolved) {
+        return NULL;
     }
 
-    server->static_cache = http_static_cache_create(entries, ttl);
+    int32_t max_entries = 0;
+    int32_t ttl_seconds = 0;
+    const size_t mount_count = http_static_handler_count(server);
+    for (size_t i = 0; i < mount_count; i++) {
+        const http_static_handler_t *m = http_static_handler_get(server, i);
+        if (m == NULL || m->cache_max_entries <= 0 || m->cache_ttl_seconds <= 0) {
+            continue;
+        }
+        if (m->cache_max_entries > max_entries) {
+            max_entries = m->cache_max_entries;
+        }
+        if (ttl_seconds == 0 || m->cache_ttl_seconds < ttl_seconds) {
+            ttl_seconds = m->cache_ttl_seconds;
+        }
+    }
+
+    server->static_cache_resolved = 1;
+    if (max_entries > 0 && ttl_seconds > 0) {
+        server->static_cache = http_static_cache_create(
+            (size_t) max_entries, (time_t) ttl_seconds);
+    }
     return server->static_cache;
 }
 

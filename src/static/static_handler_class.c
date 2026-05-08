@@ -333,6 +333,13 @@ http_static_handler_t *http_static_handler_freeze(
     m->prebaked_headers_full       = render_prebaked_headers_persistent(draft, true);
     m->prebaked_headers_no_content = render_prebaked_headers_persistent(draft, false);
 
+    /* Open-file cache config travels with the snapshot. The actual
+     * cache instance lives on the server (per-worker), populated lazily
+     * on first request once mounts are registered. See
+     * http_static_cache_acquire(). */
+    m->cache_max_entries = draft->cache_max_entries;
+    m->cache_ttl_seconds = draft->cache_ttl_seconds;
+
     /* Always locked from freeze onwards — the snapshot is read-only. */
     m->flags = draft->flags | HTTP_STATIC_FLAG_LOCKED;
 
@@ -420,6 +427,15 @@ ZEND_METHOD(TrueAsync_StaticHandler, __construct)
     mount->flags = HTTP_STATIC_FLAG_DOTFILES_DENY
                  | HTTP_STATIC_FLAG_SYMLINKS_REJECT
                  | HTTP_STATIC_FLAG_ETAG;
+
+    /* Open-file cache: opt-in. Default off — on warm-dentry workloads
+     * (typical local-disk asset serving) the realpath / stat / mime
+     * walks already cost only a few microseconds, so the HashTable
+     * lookup overhead would be net-negative. Setters below let the
+     * operator enable it for cold-dentry / large-docroot / NFS-style
+     * workloads where the cache earns its keep. */
+    mount->cache_max_entries = 0;
+    mount->cache_ttl_seconds = 60;
 }
 
 ZEND_METHOD(TrueAsync_StaticHandler, setIndexFiles)
@@ -695,6 +711,51 @@ ZEND_METHOD(TrueAsync_StaticHandler, setEtagEnabled)
         mount->flags &= ~HTTP_STATIC_FLAG_ETAG;
     }
 
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+ZEND_METHOD(TrueAsync_StaticHandler, setOpenFileCache)
+{
+    zend_long max_entries = 0;
+    zend_long ttl_seconds = 60;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(max_entries)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(ttl_seconds)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+    if (handler_check_locked(mount)) {
+        return;
+    }
+
+    if (max_entries < 0 || max_entries > INT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "StaticHandler::setOpenFileCache(): maxEntries must be between 0 and INT32_MAX", 0);
+        return;
+    }
+    if (ttl_seconds < 0 || ttl_seconds > INT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "StaticHandler::setOpenFileCache(): ttlSeconds must be between 0 and INT32_MAX", 0);
+        return;
+    }
+
+    mount->cache_max_entries = (int32_t) max_entries;
+    mount->cache_ttl_seconds = (int32_t) ttl_seconds;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+ZEND_METHOD(TrueAsync_StaticHandler, disableOpenFileCache)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+    if (handler_check_locked(mount)) {
+        return;
+    }
+    mount->cache_max_entries = 0;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 

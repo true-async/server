@@ -95,6 +95,21 @@ typedef struct {
     zend_string  *prebaked_headers_no_content;
 
     uint32_t      flags;
+
+    /* Open-file cache configuration (issue #13 §5a, nginx-style
+     * open_file_cache). Per-mount setters write here; the server-side
+     * cache instance (one per worker) takes the effective settings on
+     * first request — see http_static_cache_acquire() for the merge
+     * across multiple mounts.
+     *
+     * cache_max_entries == 0 disables for this mount.
+     * cache_ttl_seconds  == 0 disables for this mount (an entry would
+     *                         be evicted on every lookup, pointless).
+     *
+     * Defaults at construction time: both 0 (cache off). Operators
+     * opt in via StaticHandler::setOpenFileCache($max, $ttl). */
+    int32_t       cache_max_entries;
+    int32_t       cache_ttl_seconds;
 } http_static_handler_t;
 
 /* Result of the dispatch attempt.

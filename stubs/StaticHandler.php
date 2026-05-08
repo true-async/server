@@ -175,6 +175,31 @@ final class StaticHandler
     public function setCacheControl(string $value): static {}
 
     /**
+     * Enable the nginx-style open-file cache for this mount. The cache
+     * stores the resolved path, fstat metadata, MIME content-type, ETag
+     * and Last-Modified bytes for the most recent $maxEntries requests;
+     * within $ttlSeconds, repeated requests hit the cache and skip the
+     * realpath/stat/MIME-lookup walk.
+     *
+     * Off by default. The cache earns its keep on cold-dentry / large-
+     * docroot / network-FS workloads; on warm-dentry local serving
+     * the syscalls being skipped are already only a few microseconds
+     * each so the HashTable lookup overhead is net-negative.
+     *
+     * Pass $maxEntries == 0 to disable.
+     *
+     * @return static
+     */
+    public function setOpenFileCache(int $maxEntries, int $ttlSeconds = 60): static {}
+
+    /**
+     * Sugar for setOpenFileCache(0).
+     *
+     * @return static
+     */
+    public function disableOpenFileCache(): static {}
+
+    /**
      * Add a fixed response header. Evaluated once at attach time and
      * emitted on every 200 response (and on 304 except for
      * Content-* headers per RFC 9110 §15.4.5).
