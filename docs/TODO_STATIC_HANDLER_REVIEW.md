@@ -187,11 +187,13 @@ unlocks the last remaining path.**
 
 #### 5a. TLS hard-zero via userspace SSL_write FSM
 
-No new `ext/async` API needed — the helper lives in `tls_layer.c`.
-Three branches replace the current `conn_supports_sendfile`:
+No new `ext/async` API needed — the helper lives in `tls_layer.c`
+(or as an extension of `http_connection_tls.c`).
+
+Original three-branch shape, with a correction noted below:
 
 ```
-if (kTLS TX engaged on this conn)
+if (kTLS TX engaged on this conn)        ← see ARCH NOTE; dead branch today
     → existing sendfile path (kernel encrypts in-place)
 else if (TLS user-space)
     → new READ → SSL_write → drain → uv_write FSM (this task)
@@ -199,25 +201,55 @@ else (plain TCP)
     → existing sendfile path
 ```
 
-The user-space FSM cycles per chunk (default 64 KiB):
+##### ARCH NOTE (added 2026-05-08)
+
+`tls_session_new` (`src/core/tls_layer.c:640`) wires SSL through a
+`BIO_pair` (memory BIOs), not a socket BIO. The existing comment at
+`tls_layer.c:944` already calls out that `BIO_get_ktls_send` returns
+0 in this layout — kTLS cannot engage, because OpenSSL never writes
+on the socket fd directly (ciphertext lands in `network_bio` and we
+ship it via fire-and-forget `uv_write`). So
+`tls_session_ktls_tx_active` is structurally false on this server,
+and the kTLS-engaged branch is dead code until/unless we re-architect
+the TLS layer to use a socket BIO. Treat the kTLS-fast-path bullet
+as a future-only sketch and focus the FSM work on the user-space TLS
+case.
+
+##### User-space FSM (the actual 5a)
+
+The user-space FSM cycles per chunk (default 16 KiB — see
+backpressure note):
 
 ```
-ZEND_ASYNC_IO_READ(file_io, buf, off, n) → on_read →
-    SSL_write(buf, n)                            (CPU-only, no syscall)
-    drain ciphertext_bio_app via BIO_read
-    fire-and-forget submit ciphertext to conn->io
+ZEND_ASYNC_IO_READ(file_io, buf, n)  → on_read →
+    encrypt via SSL_write into BIO              (CPU-only)
+    drain ciphertext from network_bio
+    fire-and-forget uv_write to conn->io
     on ciphertext-write completion → next ZEND_ASYNC_IO_READ
 ```
 
 Plumbing already in the codebase to leverage:
 
-- `conn->tls_plaintext_bio` / `tls_plaintext_bio_app` — the BIO_pair.
-  See `http_server_class.c:2216-2225`.
-- `tls_layer.c` already does `SSL_write` → drain → write. We need a
-  fire-and-forget version (the current path likely await-suspends on
-  ring fullness — verify).
+- `conn->tls_plaintext_bio` / `tls_plaintext_bio_app` — the BIO_pair
+  (32 KiB; see `HTTP_TLS_PLAINTEXT_RING_BYTES` in
+  `http_connection.h:29`). Set up in
+  `http_connection.c:2219-2225`.
+- `http_connection_tls.c::tls_fsm_send_kick` is the existing
+  fire-and-forget zero-copy ciphertext-out submit path
+  (`ZEND_ASYNC_IO_WRITE_EX` against the BIO ring slot, free_cb
+  consumes the slot and re-kicks via `tls_advance_state`). The new
+  static-FSM ciphertext drain should mirror this — the natural
+  approach is to call `tls_fsm_send_kick` directly after our
+  SSL_write so the existing free_cb chain owns completion.
+- `http_connection_tls_fsm_send_plaintext_atomic` already exists
+  for the parse-error path; it does `tls_write_plaintext` + kick
+  but bails when the whole len doesn't fit. The static FSM needs a
+  partial-friendly variant **or** strict ping-pong sizing such that
+  the buffer always fits in the BIO ring (current approach below).
 - `http_connection_send_str_owned` is the fire-and-forget plaintext
-  send model; mirror that for ciphertext.
+  send model — but it bypasses the TLS layer (writes directly on
+  `conn->io`), so it is **not** safe for the headers in this path.
+  Headers must go through `tls_write_plaintext` + kick.
 
 State machine extends `ss_phase_t` with two new phases:
 
@@ -225,27 +257,53 @@ State machine extends `ss_phase_t` with two new phases:
 SS_PHASE_TLS_READ        /* awaiting ZEND_ASYNC_IO_READ chunk */
 SS_PHASE_TLS_WRITE_DRAIN /* awaiting ciphertext socket write completion
                             before reading the next chunk — gates SSL_write
-                            to avoid BIO_pair fullness (SSL_ERROR_WANT_WRITE) */
+                            to avoid BIO ring fullness (SSL_ERROR_WANT_WRITE) */
 ```
 
-Backpressure gotcha: the BIO_pair is fixed at
-`HTTP_TLS_PLAINTEXT_RING_BYTES` (16 KiB plaintext). If we `SSL_write` a
-64 KiB chunk and the ciphertext hasn't drained, `SSL_write` returns
-`SSL_ERROR_WANT_WRITE`. So the FSM must size chunks to fit, or split
-within a single chunk. Simplest: 16 KiB read chunks (matches typical
-TLS record size and the BIO ring), one SSL_write per chunk, one
-ciphertext drain + uv_write per chunk, gated wait for completion.
+Coordination with the existing TLS layer:
+
+- The static FSM drives SSL_write and the ZC kick; while a ZC write
+  is in flight, `conn->tls_zc_write_n != 0` already gates re-entry
+  in `tls_fsm_send_kick`.
+- We need a hook so the static FSM is notified when a ZC write
+  completes (so it can submit the next IO_READ). The existing
+  `tls_zc_write_free_cb` calls `tls_advance_state` unconditionally;
+  add an optional `conn->tls_static_zc_write_done` callback that
+  runs *after* `tls_advance_state` so the static FSM observes
+  drain. The static FSM registers this at kick-off, clears at
+  finalize. (Alternative: a per-conn drain trigger event, mirroring
+  `conn->tls_drain_event` but for FSM-context observers.)
+- `tls_flushing` must remain false during this path — we are the
+  flusher. If the producer flusher (handler-coroutine path) ever
+  ran concurrently this would race, but the static FSM is the only
+  active writer for the lifetime of the chain, so the invariant
+  holds (handler_refcount is pinned).
+
+Backpressure: BIO_pair is 32 KiB, but a single SSL_write can fail
+with `SSL_ERROR_WANT_WRITE` once the BIO output side fills (TLS
+records, MAC framing — typically ~17 KiB headroom). With 16 KiB
+chunks and strict ping-pong (one write in flight at a time), one
+SSL_write always fits. Headers may exceed the chunk size in
+pathological mounts (huge `extra_headers`); split into ≤16 KiB
+sub-chunks before the body loop starts.
+
+Headers vs body ordering: with TCP_CORK off (TLS path doesn't
+benefit from cork — bytes are already framed by SSL records), the
+SSL_write of the header buffer must happen before the first body
+chunk's SSL_write. Single-flusher invariant guarantees that.
+Headers carry their own `Content-Length` so no chunked encoding is
+needed.
 
 Acceptance:
 
-- New PHPT under TLS that serves a 4 MiB file and verifies bytes match.
+- New PHPT under TLS that serves a ≥1 MiB file and verifies bytes
+  match (see existing TLS PHPT scaffolding for harness).
 - Concurrent ping request lands within ~1 RTT during the transfer
-  (loop not blocked).
-- `tls_ktls_tx_total` counter still bumps on kTLS-engaged sessions
-  (regression guard for the fast path).
-
-Open API question to verify before starting:
-[See "API questions to verify" section at the end of this file.]
+  (loop not blocked — currently it is, because of `slurp_fd`).
+- Telemetry counter `static_zero_coroutine_total` bumps on the TLS
+  path too once 5a lands (currently TLS goes through the
+  HANDLED-soft-skip branch and does not bump it).
+- Valgrind on the new PHPT — clean.
 
 #### ~~5b. Index-walk via sync stat-only offload + async open~~ ✅ done
 
@@ -580,21 +638,30 @@ For 5a (TLS hard-zero):
   No new ext/async API needed. The FSM uses `tls_write_plaintext` →
   `tls_peek_cipher_out` → fire-and-forget `ZEND_ASYNC_IO_WRITE_EX(conn->io,
   ciphertext, n, free_cb)`. Mirrors `http_connection_send_str_owned`.
-- **Q2 — kTLS TX detection.** ✅ `tls_session_ktls_tx_active(session)`
-  in `tls_layer.c:950-956`. Probes `BIO_get_ktls_send` runtime — true
-  iff kernel offload is engaged on this socket. Drop into
-  `conn_supports_sendfile`:
+- **Q2 — kTLS TX detection.** ⚠️ Architecturally blocked today.
+  `tls_session_ktls_tx_active(session)` in `tls_layer.c:950-956`
+  probes `BIO_get_ktls_send`, but the existing comment at
+  `tls_layer.c:944` already calls out that this **always returns 0**
+  in our layout: SSL is wired to a `BIO_pair` (memory BIOs), not a
+  socket BIO, so OpenSSL never gets to see the socket fd to engage
+  kTLS. Result: the proposed sketch
 
   ```c
   static inline bool conn_supports_sendfile(const http_connection_t *c) {
-      if (c->tls == NULL) return true;             /* plain TCP */
-      return tls_session_ktls_tx_active(c->tls);   /* kernel encrypts */
+      if (c->tls == NULL) return true;
+      return tls_session_ktls_tx_active(c->tls);   /* always false today */
   }
   ```
 
-  All three branches (plain TCP, kTLS, user-space TLS) collapse cleanly:
-  if `conn_supports_sendfile` → existing hard-zero. Otherwise →
-  user-space TLS FSM.
+  collapses to "plain TCP only" in practice. Engaging kTLS requires
+  re-architecting the TLS layer to expose a socket-backed BIO (or
+  switch to `SSL_set_fd`), which would invalidate the existing read
+  FSM (it currently feeds OpenSSL ciphertext via the network_bio).
+  That's a separate, larger PR — out of scope for 5a.
+
+  For 5a, treat the path matrix as just two branches:
+  - `conn->tls == NULL` → existing plain-TCP hard-zero (sendfile).
+  - `conn->tls != NULL` → user-space TLS FSM (this task).
 
 For 5b (Index-walk):
 

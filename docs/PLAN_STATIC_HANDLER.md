@@ -333,7 +333,7 @@ the static profiles. This closes FUTURES.md item #2.
 
 ---
 
-## 5a. Status — что сделано, что осталось (2026-05-07)
+## 5a. Status — что сделано, что осталось (2026-05-08)
 
 ### Закрыто
 
@@ -367,27 +367,62 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
   loop). Вместе с CHANGELOG'ом.
 - ✅ Soft-skip path (для TLS, on_missing: Next, directory + index
   walk) сохранён как always-correct fallback.
+- ✅ **Headers + sendfile ordering** — TCP_CORK gate в `ss_kick_off`
+  с unconditional uncork в `ss_finalize` (fix 67eadb9). Linux-only
+  через `#ifdef TCP_CORK`; на других платформах — no-op (race
+  теоретический там, поскольку без TCP_CORK кернел сериализует
+  uv_write/sendfile через одну очередь сокета).
+- ✅ **`If-Modified-Since`** PHPT — 005-static-if-modified-since.phpt
+  покрывает IMS strictly-after / before / equal-to mtime
+  (RFC 9110 §13.1.3) (commit 2c46937).
+- ✅ **Telemetry counter** `static_zero_coroutine_total`
+  (`http_server_counters_t`) бампается на каждом успешном
+  ss_kick_off, exposed через `getTelemetry()`, PHPT
+  006-static-zero-coroutine-counter.phpt (commit 2c46937).
+- ✅ **Valgrind sweep** — все 6 static PHPTs (001-006) проходят
+  под `TEST_PHP_ARGS=-m`, 0 leaked tests (commit 2c46937).
 - ✅ PHPT: 001-static-basic (200/304/404/HEAD/conditional/POST
   passthrough), 002-dotfile-and-onmissing, 003-static-security
   (symlink-escape, backslash, NUL, header injection, EACCES
-  disclosure). 154/155 общего suite passes (1 pre-existing skip).
+  disclosure), 004-static-on-missing-next, 005-static-if-modified-
+  since, 006-static-zero-coroutine-counter.
 
 ### Осталось
 
 | Acceptance / Plan item | Status | Notes |
 |---|---|---|
-| `If-Modified-Since` past mtime → 304 | partial | парсер реализован, PHPT покрывает только If-None-Match |
 | Symlink owner-match (`OwnerMatch`) | aliased to `Reject` | post-open uid compare не реализован; политика не слабее заявленной |
-| Telemetry counter zero-coroutine | not done | надо счётчик `static_zero_coroutine_total` + PHPT |
-| Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | not done | нужны цифры для подтверждения 5-15% gain |
-| Valgrind на 1M запросов | not done | существующий CI target надо натравить |
-| TLS+kTLS hard-zero | not done | нужен non-suspending TLS write helper |
-| Headers + sendfile ordering на slow-write | TBD | сейчас fire-and-forget headers, sendfile сразу после; теоретический race на EAGAIN партиальной записи. Нужен либо TCP_CORK, либо ожидание headers-completion перед submit sendfile |
+| Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | not done | нужны цифры для подтверждения 5-15% gain — out-of-codebase |
+| TLS hard-zero (user-space) | not done | требует non-suspending TLS write helper + new SS_PHASE_TLS_READ/WRITE FSM. См. ниже про BIO архитектурный блокер на kTLS-вариант |
 | **PR #2** H2/H3 интеграция | not started | nghttp2/nghttp3 data-provider hookup |
 | **PR #3** Range support | not started | single + multipart/byteranges + If-Range |
 | **PR #4** Precompressed sidecars `.br/.gz/.zst` | not started | reuse `http_compression_negotiate.c` |
 | **PR #6** Browse listing | not started | lowest priority |
 | Rewrite `entry.php` + flip `meta.json` to production | blocked | требует #2 + #3 + #4 |
+
+### kTLS fast-path — заблокирован архитектурой BIO
+
+TODO 5a description предполагает быстрый TLS-вариант: «если kTLS TX
+engaged, повторно использовать sendfile-путь, потому что ядро шифрует
+in-place». В текущей кодовой базе это **dead code**:
+
+- `tls_session_new` (`src/core/tls_layer.c:640`) привязывает SSL через
+  `BIO_pair` (memory BIOs), а не socket BIO. Comment в
+  `src/core/tls_layer.c:944` явно фиксирует, что в этой layout-е
+  `BIO_get_ktls_send` всегда возвращает 0 — ядро не может перехватить
+  записи, потому что OpenSSL вообще не пишет на сокет напрямую
+  (ciphertext попадает в network_bio, оттуда — fire-and-forget
+  uv_write).
+- Поэтому `tls_session_ktls_tx_active` всегда false → ветка
+  «engaged → sendfile» не срабатывает на этом сервере.
+- Включение настоящего kTLS требует переподключения SSL на socket BIO
+  (либо `SSL_set_fd`), что меняет всю модель read FSM (он живёт за
+  счёт того, что мы кормим OpenSSL ciphertext'ом из BIO pair). Это
+  отдельный архитектурный PR с последствиями для read-FSM и
+  destroy-gating.
+
+Counter `tls_ktls_tx_total` существует как hook на будущее, но в
+текущей конфигурации никогда не бампается.
 
 ### Что переехало в зависимый PR
 
@@ -427,16 +462,19 @@ use case.
       owner-match: aliased to Reject в MVP — реальный owner-check
       ждёт следующей итерации.
 - [x] `If-None-Match` matches → 304 with empty body, weak ETag echoed.
-- [~] `If-Modified-Since` past mtime → 304 — реализован, PHPT не
-      покрывает (только If-None-Match).
+- [x] `If-Modified-Since` past mtime → 304 — реализован, PHPT
+      покрывает (005-static-if-modified-since.phpt, commit 2c46937).
 - [x] Dotfile policy default `Deny` → 404 on `/.git/config`.
 - [x] `on_missing: Next` falls through to `addHttpHandler` callback;
       default `NotFound` returns 404 in C without PHP entry.
-- [ ] Telemetry counter confirms zero coroutines spawned for matched
-      static requests.
+- [x] Telemetry counter `static_zero_coroutine_total` confirms zero
+      coroutines spawned for matched static requests
+      (006-static-zero-coroutine-counter.phpt, commit 2c46937).
 - [ ] Bench: `wrk -c 256 -t 4 -d 30 /static/main.css` baseline vs
-      current `entry.php` map.
-- [ ] No new memory leaks under valgrind on a million-request run.
+      current `entry.php` map. (out-of-codebase)
+- [x] No new memory leaks under valgrind on the static PHPT suite
+      (`TEST_PHP_ARGS=-m`, commit 2c46937). 1M-request soak still
+      pending — needs dedicated harness.
 
 ---
 
@@ -450,17 +488,18 @@ use case.
 3. `browse` (dir listing) — defer to PR #6, low priority.
 4. `setHeader` interaction with conditional GET — закрыт: extra
    headers fire on 304, кроме `Content-*` family (RFC 9110 §15.4.5).
-5. **TLS hard-zero**: нужен non-suspending TLS write helper в
-   `tls_layer.c`. Без него hard-zero ограничен plain TCP. Дизайн
-   open: либо callback-based BIO drain, либо отдельный fire-and-
-   forget API через зашифрованный pipe.
-6. **Headers + sendfile ordering**: текущий fire-and-forget headers
-   + immediate sendfile submit оставляет теоретический race на
-   slow socket (EAGAIN partial write libuv → headers retry-flush
-   после того, как sendfile уже записал body bytes). Возможные
-   решения: TCP_CORK на entry в state machine, uncork в finalize;
-   или ждать headers-completion (uv_write callback) перед submit
-   sendfile. Для production надо выбрать один.
+5. **TLS hard-zero (user-space)**: нужен non-suspending TLS write
+   helper в `tls_layer.c` (или новый chunked plaintext API поверх
+   существующего `http_connection_tls_fsm_send_plaintext_atomic`),
+   плюс новые фазы `SS_PHASE_TLS_READ` / `SS_PHASE_TLS_WRITE_DRAIN`
+   в static FSM с pacing на write-completion BIO ring. Без этого
+   hard-zero ограничен plain TCP, и user-space TLS ходит через
+   sync-slurp путь (см. `slurp_fd` в `http_static.c:144`),
+   блокирующий dispatch на чтении файла.
+6. **kTLS architectural rewire** (см. §5a выше): для активации
+   kTLS нужно переключить SSL с BIO_pair на socket BIO. Это
+   отдельный design open — read FSM и destroy-gating придётся
+   переписать.
 7. **`SYMLINKS_OWNER`** реальная реализация — fstat после open,
    сравнение st_uid файла с st_uid lstat'а каждого segment'а.
    TOCTOU acceptable (требует write-access на хосте).
