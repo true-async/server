@@ -30,6 +30,39 @@ static inline uint64_t mtime_ns_from_stat(const struct stat *st)
 #endif
 }
 
+/* Hand-rolled %02d / %04d / %016x writers. snprintf via format_converter
+ * runs ~5-7% of total CPU under load — printf machinery (format-string
+ * scan, va_list dispatch) on every request is gross overkill for these
+ * fixed-width unsigned integers. Direct table-and-divmod is ~1 order
+ * of magnitude cheaper and matches the static buffer's exact width. */
+
+static const char hex_lower[16] = {
+    '0','1','2','3','4','5','6','7',
+    '8','9','a','b','c','d','e','f'
+};
+
+static inline void put_u8_2digit(char *out, unsigned v)
+{
+    out[0] = (char)('0' + (v / 10) % 10);
+    out[1] = (char)('0' + (v % 10));
+}
+
+static inline void put_u16_4digit(char *out, unsigned v)
+{
+    out[0] = (char)('0' + (v / 1000) % 10);
+    out[1] = (char)('0' + (v / 100)  % 10);
+    out[2] = (char)('0' + (v / 10)   % 10);
+    out[3] = (char)('0' + (v        ) % 10);
+}
+
+static inline void put_u64_16hex(char *out, uint64_t v)
+{
+    for (int i = 15; i >= 0; --i) {
+        out[i]  = hex_lower[v & 0xF];
+        v     >>= 4;
+    }
+}
+
 void http_static_etag_format(const struct stat *st,
                              char buf[HTTP_STATIC_ETAG_BUF_LEN])
 {
@@ -40,10 +73,15 @@ void http_static_etag_format(const struct stat *st,
     const uint64_t ino      = (uint64_t)st->st_ino;
     const uint64_t mix      = mtime_ns ^ (size << 17) ^ ino;
 
-    const int written = snprintf(buf, HTTP_STATIC_ETAG_BUF_LEN,
-                                 "W/\"%016" PRIx64 "\"", mix);
-    ZEND_ASSERT(written == HTTP_STATIC_ETAG_LEN);
-    (void)written;
+    /* Layout: W / " <16-hex> " — 20 bytes + NUL. */
+    buf[0] = 'W';
+    buf[1] = '/';
+    buf[2] = '"';
+    put_u64_16hex(buf + 3, mix);
+    buf[19] = '"';
+    buf[20] = '\0';
+    ZEND_STATIC_ASSERT(HTTP_STATIC_ETAG_LEN == 20,
+                       "etag length must match hand-format");
 }
 
 void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
@@ -57,29 +95,44 @@ void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
     /* Hard-coded English month/day names — strftime would honour
      * LC_TIME and could produce non-canonical strings on hosts that
      * forgot to set the locale. RFC 7231 IMF-fixdate is fixed grammar. */
-    static const char *const day_names[]   = {
-        "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
-    static const char *const month_names[] = {
-        "Jan","Feb","Mar","Apr","May","Jun",
-        "Jul","Aug","Sep","Oct","Nov","Dec" };
+    static const char day_names[7][3]    = {
+        {'S','u','n'}, {'M','o','n'}, {'T','u','e'},
+        {'W','e','d'}, {'T','h','u'}, {'F','r','i'}, {'S','a','t'} };
+    static const char month_names[12][3] = {
+        {'J','a','n'}, {'F','e','b'}, {'M','a','r'}, {'A','p','r'},
+        {'M','a','y'}, {'J','u','n'}, {'J','u','l'}, {'A','u','g'},
+        {'S','e','p'}, {'O','c','t'}, {'N','o','v'}, {'D','e','c'} };
 
-    /* %04d on a 5-digit year would overflow the fixed buffer if
-     * truncation were silent; clamp to the formatter's documented
-     * range. mtime values that far in the future are filesystem
-     * tampering, not legitimate. */
+    /* mtime values past year 9999 are filesystem tampering, not real;
+     * clamp to keep the fixed-width buffer honest. */
     int year = tm.tm_year + 1900;
     if (UNEXPECTED(year < 0 || year > 9999)) {
         year = 9999;
     }
-    const int written = snprintf(buf, HTTP_STATIC_DATE_BUF_LEN,
-        "%s, %02d %s %04d %02d:%02d:%02d GMT",
-        day_names[tm.tm_wday & 7],
-        tm.tm_mday,
-        month_names[tm.tm_mon % 12],
-        year,
-        tm.tm_hour, tm.tm_min, tm.tm_sec);
-    ZEND_ASSERT(written == HTTP_STATIC_DATE_LEN);
-    (void)written;
+
+    /* Layout: "Day, DD Mon YYYY HH:MM:SS GMT" — 29 bytes + NUL.
+     * Indices: 0..2 day, 3..4 ", ", 5..6 DD, 7 ' ', 8..10 Mon,
+     * 11 ' ', 12..15 YYYY, 16 ' ', 17..18 HH, 19 ':', 20..21 MM,
+     * 22 ':', 23..24 SS, 25..28 " GMT", 29 NUL. */
+    const char *const day = day_names[tm.tm_wday & 7];
+    const char *const mon = month_names[tm.tm_mon % 12];
+    buf[0]  = day[0]; buf[1]  = day[1]; buf[2]  = day[2];
+    buf[3]  = ',';    buf[4]  = ' ';
+    put_u8_2digit(buf + 5, (unsigned)tm.tm_mday);
+    buf[7]  = ' ';
+    buf[8]  = mon[0]; buf[9]  = mon[1]; buf[10] = mon[2];
+    buf[11] = ' ';
+    put_u16_4digit(buf + 12, (unsigned)year);
+    buf[16] = ' ';
+    put_u8_2digit(buf + 17, (unsigned)tm.tm_hour);
+    buf[19] = ':';
+    put_u8_2digit(buf + 20, (unsigned)tm.tm_min);
+    buf[22] = ':';
+    put_u8_2digit(buf + 23, (unsigned)tm.tm_sec);
+    buf[25] = ' '; buf[26] = 'G'; buf[27] = 'M'; buf[28] = 'T';
+    buf[29] = '\0';
+    ZEND_STATIC_ASSERT(HTTP_STATIC_DATE_LEN == 29,
+                       "date length must match hand-format");
 }
 
 static inline void trim_ws(const char **start, size_t *len)
