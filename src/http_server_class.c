@@ -2262,6 +2262,10 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     /* StaticHandler hard-zero hit counter (issue #13). */
     add_assoc_long(return_value, "static_zero_coroutine_total",
                    (zend_long)server->counters.static_zero_coroutine_total);
+    add_assoc_long(return_value, "static_cache_hits_total",
+                   (zend_long)server->counters.static_cache_hits_total);
+    add_assoc_long(return_value, "static_cache_misses_total",
+                   (zend_long)server->counters.static_cache_misses_total);
 
     /* HTTP/2 stream-level telemetry. */
     add_assoc_long(return_value, "h2_streams_active",
@@ -2292,6 +2296,8 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
 
     server->counters.total_requests = 0;
     server->counters.static_zero_coroutine_total = 0;
+    server->counters.static_cache_hits_total     = 0;
+    server->counters.static_cache_misses_total   = 0;
     server->sojourn_sum_ns       = 0;
     server->service_sum_ns       = 0;
     server->sojourn_max_ns       = 0;

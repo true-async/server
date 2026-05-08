@@ -816,6 +816,29 @@ static void ss_handle_stat(ss_state_t *state)
         content_type_len = sizeof("application/octet-stream") - 1;
     }
 
+    /* Open-file cache insert (issue #13 §5a follow-up). Now that the
+     * file passed every gate (regular, size in range, stat success)
+     * and we hold all the metadata a future request would compute,
+     * stash the entry. The pre-flight will short-circuit subsequent
+     * lookups for the same path to a single HashTable hit; the cached
+     * st/etag/MIME let the next iteration of this work skip IO_STAT
+     * (separate follow-up wiring). content_type points into the
+     * persistent MIME table or is the static "application/octet-stream"
+     * literal — both safe to alias for the entry's lifetime. */
+    if (state->conn != NULL && state->conn->server != NULL) {
+        http_static_cache_t *cache =
+                http_static_cache_acquire(state->conn->server);
+        if (cache != NULL) {
+            http_static_cache_insert(cache,
+                    state->fs_path, state->fs_path_len,
+                    &state->st,
+                    content_type, content_type_len,
+                    etag_enabled ? etag_buf : NULL,
+                    etag_enabled ? HTTP_STATIC_ETAG_LEN : 0,
+                    last_modified_buf, HTTP_STATIC_DATE_LEN);
+        }
+    }
+
     state->should_continue = state->conn->keep_alive;
 
     smart_str headers = {0};
@@ -1296,30 +1319,21 @@ http_static_result_t http_static_try_serve(http_server_object *server,
             http_static_cache_view_t cv;
             if (http_static_cache_lookup(cache, fs_path, fs_path_len, &cv)) {
                 /* Hit: realpath was already validated when this entry
-                 * was inserted, skip it. */
+                 * was inserted, skip it. The cached st/etag/MIME on
+                 * the view are not consumed here yet — that requires
+                 * piping the view through ss_kick_off so the FSM can
+                 * skip IO_STAT and short-circuit conditional GETs.
+                 * Tracked as a follow-up; this commit only restores
+                 * the cache to a state where it stores real metadata. */
+                http_server_on_static_cache_hit(conn->counters);
                 gate_ok = true;
             } else {
+                http_server_on_static_cache_miss(conn->counters);
                 gate_ok = resolved_under_root(mount, fs_path);
-                if (gate_ok) {
-                    /* Insert with the metadata we have right now. We
-                     * don't have st/etag/content_type here yet — the
-                     * async stat in ss_kick_off will produce them.
-                     * For the realpath-only cache, an entry with just
-                     * the resolved path being valid is enough. We
-                     * use the file's mtime epoch as a stable cached_at
-                     * placeholder — TTL is the real invalidation.
-                     * stat is not yet known; pass zero-filled and
-                     * leave content_type/etag NULL for now. The
-                     * follow-up that integrates conditional GET on
-                     * cache hit will populate the rest of the entry
-                     * after ss_handle_stat lands. */
-                    struct stat zero_st = {0};
-                    http_static_cache_insert(cache, fs_path, fs_path_len,
-                                             &zero_st,
-                                             NULL, 0,   /* content_type */
-                                             NULL, 0,   /* etag */
-                                             NULL, 0);  /* last_modified */
-                }
+                /* Insertion now happens in ss_handle_stat once st /
+                 * etag / content_type / Last-Modified are all in hand.
+                 * The pre-flight no longer plants a zero-stat
+                 * placeholder. */
             }
         } else {
             gate_ok = resolved_under_root(mount, fs_path);

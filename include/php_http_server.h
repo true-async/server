@@ -653,6 +653,14 @@ typedef struct {
      * → sendfile → close chain that bypasses the PHP coroutine entirely;
      * the counter shows the cache-friendly fast path's hit rate. */
     uint64_t static_zero_coroutine_total;
+
+    /* Open-file cache hit/miss (issue #13 §5a follow-up). Bumped from
+     * http_static_cache_lookup — hits skip the realpath() walk in the
+     * static pre-flight; misses go on to validate via realpath and
+     * (on success) insert the resolved entry. Both freshly-loaded
+     * paths and TTL-evicted re-lookups count as misses. */
+    uint64_t static_cache_hits_total;
+    uint64_t static_cache_misses_total;
 } http_server_counters_t;
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
@@ -741,6 +749,14 @@ static zend_always_inline void http_server_on_stream_backpressure(http_server_co
 static zend_always_inline void http_server_on_static_zero_coroutine(http_server_counters_t *c)
 {
     c->static_zero_coroutine_total++;
+}
+static zend_always_inline void http_server_on_static_cache_hit(http_server_counters_t *c)
+{
+    c->static_cache_hits_total++;
+}
+static zend_always_inline void http_server_on_static_cache_miss(http_server_counters_t *c)
+{
+    c->static_cache_misses_total++;
 }
 
 static zend_always_inline void http_server_on_h2_stream_opened(http_server_counters_t *c)

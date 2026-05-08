@@ -188,9 +188,11 @@ bool http_static_cache_lookup(http_static_cache_t *cache,
         return false;
     }
 
-    zend_string *key = zend_string_init(path, path_len, 0);
-    entry_t *e = (entry_t *) zend_hash_find_ptr(&cache->index, key);
-    zend_string_release(key);
+    /* Hot path: hash directly off the caller-supplied bytes. Avoids
+     * allocating a transient zend_string per lookup that we'd just
+     * release a syscall later. */
+    entry_t *e = (entry_t *) zend_hash_str_find_ptr(&cache->index,
+                                                    path, path_len);
     if (e == NULL) {
         return false;
     }
