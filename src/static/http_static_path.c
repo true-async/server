@@ -159,18 +159,13 @@ http_static_path_resolve(const http_static_handler_t *mount,
     }
 
     /* Empty tail (URL == prefix) is allowed — caller tries the index
-     * files. Otherwise validate the segment grammar. */
+     * files. Otherwise validate the segment grammar. validate_segments
+     * tolerates either a leading '/' or no leading '/' (it skips one
+     * if present), so feeding `decoded` directly avoids a 4 KiB stack
+     * scratch + a memcpy on every request. */
     if (decoded_len > 0) {
-        char prefixed[PATH_MAX];
-        if (UNEXPECTED(decoded_len + 1 >= sizeof(prefixed))) {
-            return HTTP_STATIC_PATH_BAD_REQUEST;
-        }
-        prefixed[0] = '/';
-        memcpy(prefixed + 1, decoded, decoded_len);
-        prefixed[decoded_len + 1] = '\0';
-
         const http_static_path_result_t seg_rc =
-            validate_segments(mount, prefixed, decoded_len + 1);
+            validate_segments(mount, decoded, decoded_len);
         if (UNEXPECTED(seg_rc != HTTP_STATIC_PATH_OK)) {
             return seg_rc;
         }
@@ -226,18 +221,14 @@ bool http_static_path_is_hidden(const http_static_handler_t *mount,
     if (mount == NULL || mount->hide_count == 0) {
         return false;
     }
-    /* fnmatch needs a NUL-terminated string; relative is a slice of a
-     * larger buffer, so copy. */
-    if (UNEXPECTED(relative_len >= PATH_MAX)) {
-        return false;
-    }
-    char scratch[PATH_MAX];
-    memcpy(scratch, relative, relative_len);
-    scratch[relative_len] = '\0';
-
+    /* http_static_path_resolve writes a NUL right after `relative`
+     * inside the caller's out_buf (out_buf[out + decoded_len] = '\0'),
+     * so `relative[relative_len] == '\0'` already.  Pass it straight
+     * to fnmatch and skip the per-request memcpy + 4 KiB scratch. */
+    (void) relative_len;
     for (size_t i = 0; i < mount->hide_count; i++) {
         const zend_string *const glob = mount->hide_globs[i];
-        if (fnmatch(ZSTR_VAL(glob), scratch, FNM_PATHNAME) == 0) {
+        if (fnmatch(ZSTR_VAL(glob), relative, FNM_PATHNAME) == 0) {
             return true;
         }
     }

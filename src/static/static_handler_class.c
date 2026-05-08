@@ -137,7 +137,18 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
             ZSTR_VAL(path));
         return NULL;
     }
-    return zend_string_init(resolved, strlen(resolved), 0);
+    /* Reject root="/" (and "//", which realpath collapses to "/"). The
+     * resolved_under_root check requires `canonical[root_len]` to be
+     * '\0' or '/', which never holds when root is exactly "/" — that
+     * would silently make the mount unusable for every request. Better
+     * to fail loudly at attach time (#15 in TODO_STATIC_HANDLER_REVIEW). */
+    const size_t resolved_len = strlen(resolved);
+    if (UNEXPECTED(resolved_len == 1 && resolved[0] == '/')) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "StaticHandler root directory must not be '/'", 0);
+        return NULL;
+    }
+    return zend_string_init(resolved, resolved_len, 0);
 }
 
 void http_static_handler_descriptor_destroy(http_static_handler_t *mount)

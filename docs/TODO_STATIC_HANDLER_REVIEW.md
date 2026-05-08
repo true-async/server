@@ -416,7 +416,36 @@ Fix: drop the req-identity guard entirely (phase alone is sufficient for
 a linear FSM), or use a sentinel like `(zend_async_io_req_t *)0x1`
 between the two assignments.
 
-### 8. `prefixed[PATH_MAX]` scratch buffer is unnecessary
+### ~~8. `prefixed[PATH_MAX]` scratch buffer is unnecessary~~ ✅ done
+
+`http_static_path_resolve` now feeds `decoded` straight into
+`validate_segments` (which already tolerates a missing leading '/').
+4 KiB stack + a memcpy gone per request.
+
+### ~~9. `is_hidden` scratch-buffer copy is unnecessary~~ ✅ done
+
+`http_static_path_is_hidden` passes `relative` directly to fnmatch —
+the caller's `out_buf[out + decoded_len] = '\0'` already terminates
+it. 4 KiB stack + a memcpy gone per request.
+
+### ~~12. MIME comment vs implementation~~ ✅ done
+
+Header comment now reflects the override-wins semantics
+(`mime_overrides` consulted before the built-in table).
+
+### ~~13. `ss_state_t.fs_path[PATH_MAX]` is fat~~ ✅ done
+
+`ss_state_t.fs_path` is now an emalloc'd `char *`, freed via the new
+`ss_state_free` helper. With 10 K concurrent in-flight static requests
+this is a 40 MiB working-set reduction in the worst case.
+
+### ~~15. `root="/"` silent failure~~ ✅ done
+
+`canonicalise_root_directory` rejects `realpath()` == "/" with a clear
+"StaticHandler root directory must not be '/'" exception — symmetric
+with the other directory-validation throws.
+
+### 8. (original) `prefixed[PATH_MAX]` scratch buffer is unnecessary
 
 `src/static/http_static_path.c:163-176`: builds `prefixed` solely to
 prepend a `/` before calling `validate_segments`. But `validate_segments`

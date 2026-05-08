@@ -74,8 +74,10 @@ typedef struct {
     HashTable    *extra_headers;
 
     /* Per-mount MIME overrides: HashTable<lower-extension, IS_STRING
-     * content-type>. NULL until the first setMimeType call. The built-in
-     * MIME table is consulted first; this is only the fallback. */
+     * content-type>. NULL until the first setMimeType call. Looked up
+     * BEFORE the built-in table so an operator can override a default
+     * mapping (e.g. force `application/wasm` on a host whose built-in
+     * table is older). */
     HashTable    *mime_overrides;
 
     /* Pre-rendered extra-header block (Cache-Control + every entry of

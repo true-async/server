@@ -257,8 +257,12 @@ typedef struct {
     http1_request_ctx_t *ctx;
     const http_static_handler_t *mount;
 
-    /* Resolved on-disk path. Lives until the chain disposes. */
-    char                 fs_path[PATH_MAX];
+    /* Resolved on-disk path. emalloc'd in ss_kick_off, freed by
+     * ss_state_free.  Used to be a 4 KiB inline scratch — with 10 K
+     * concurrent in-flight static requests that would have been 40 MiB
+     * just for path strings, most of which fit comfortably in <100
+     * bytes (#13 in TODO_STATIC_HANDLER_REVIEW). */
+    char                *fs_path;
     size_t               fs_path_len;
 
     /* Async file io. Acquired by ZEND_ASYNC_FS_OPEN, disposed at the
@@ -299,6 +303,18 @@ static void ss_cb_dispose(zend_async_event_callback_t *cb,
 {
     (void)event;
     efree(cb);
+}
+
+/* Single owner of state lifetime. Always frees fs_path (NULL-safe via
+ * efree) before efree'ing the state struct. */
+static inline void ss_state_free(ss_state_t *state)
+{
+    if (state == NULL) return;
+    if (state->fs_path != NULL) {
+        efree(state->fs_path);
+        state->fs_path = NULL;
+    }
+    efree(state);
 }
 
 /* TCP_CORK gate (Linux). Headers are submitted fire-and-forget through
@@ -373,7 +389,7 @@ static void ss_finalize(ss_state_t *state)
     }
 
     const bool should_continue = state->should_continue;
-    efree(state);
+    ss_state_free(state);
 
     http_request_finalize(conn, ctx, should_continue);
 }
@@ -599,7 +615,7 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
         efree(ctx);
-        efree(state);
+        ss_state_free(state);
         http_connection_destroy(conn);
         return;
     }
@@ -632,7 +648,7 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
     ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
 
     /* state lifetime ends here — ctx is owned by the coroutine. */
-    efree(state);
+    ss_state_free(state);
 }
 
 static void ss_handle_open(ss_state_t *state, zend_object *exception)
@@ -795,6 +811,7 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     state->ctx        = ctx;
     state->mount      = mount;
     state->is_head    = is_head;
+    state->fs_path    = emalloc(fs_path_len + 1);
     memcpy(state->fs_path, fs_path, fs_path_len);
     state->fs_path[fs_path_len] = '\0';
     state->fs_path_len = fs_path_len;
@@ -803,7 +820,7 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
 
     state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
     if (UNEXPECTED(state->file_io == NULL)) {
-        efree(state);
+        ss_state_free(state);
         return false;
     }
 
@@ -814,7 +831,7 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);
         }
-        efree(state);
+        ss_state_free(state);
         return false;
     }
     cb->base.dispose = ss_cb_dispose;
@@ -826,7 +843,7 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);
         }
-        efree(state);
+        ss_state_free(state);
         return false;
     }
     state->cb = &cb->base;
