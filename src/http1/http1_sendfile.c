@@ -79,7 +79,6 @@ typedef enum {
 
 typedef struct {
     http_connection_t       *conn;
-    http1_request_ctx_t     *ctx;
 
     /* Body source. NULL when caller passed file_io == NULL (head-only
      * inline-body responses). Disposed by this module — never by the
@@ -111,12 +110,6 @@ typedef struct {
      * actually engages; reused across every TLS_READ → TLS_DRAIN cycle.
      * NULL on plain-TCP and head-only paths. */
     char                    *chunk_buf;
-
-    /* Whether the head head-write was kicked synchronously (and we
-     * now know ownership of the head zend_string has been transferred
-     * to libuv / the BIO ring). Used so a teardown path can decide
-     * whether it still needs to release the string. */
-    bool                     head_committed;
 
     /* Outbound completion callback. Always fires exactly once. */
     void                   (*on_done)(void *user, int status);
@@ -580,7 +573,6 @@ int h1_stream_send_static_response(void *ctx_void,
 
     h1_send_state_t *state = ecalloc(1, sizeof(*state));
     state->conn = conn;
-    state->ctx = ctx;
     state->file_io = file_io;
     state->body_offset = body_offset;
     state->body_length = body_length;
@@ -624,8 +616,6 @@ int h1_stream_send_static_response(void *ctx_void,
         h1_send_state_free(state);
         return -1;
     }
-
-    state->head_committed = true;
 
     /* Head-only path (HEAD requests, 304, 4xx/5xx error pages with
      * inline body). No body source to drive — fire on_done once

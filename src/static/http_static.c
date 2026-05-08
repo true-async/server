@@ -300,34 +300,6 @@ static zend_string *slurp_fd(const int fd, const size_t size)
 	return out;
 }
 
-/* RFC 9110 §15.4.5: 304 must NOT carry Content-* headers — pass
- * include_content_headers=false on the not-modified path. */
-static void apply_extra_headers(zend_object *response_obj, const http_static_handler_t *mount,
-								const bool include_content_headers)
-{
-	if (mount->extra_headers == NULL) {
-		return;
-	}
-
-	zend_string *name;
-	zval *value;
-	ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, name, value)
-	{
-		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
-			continue;
-		}
-
-		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
-			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
-			continue;
-		}
-
-		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
-										Z_STRVAL_P(value), Z_STRLEN_P(value));
-	}
-	ZEND_HASH_FOREACH_END();
-}
-
 /* Try open + fstat. On a non-regular file, surface ENOENT so the
  * caller's fallthrough mirrors the missing-file path uniformly.
  *
@@ -607,13 +579,12 @@ static void ss_set_connection_header(zend_object *response_obj, bool keep_alive)
 	}
 }
 
-/* Push the mount's pre-rendered Cache-Control + extra headers onto
- * response_obj. Mirrors the synchronous-populate path: handler-set
- * Cache-Control wins over the per-mount default; the freeze step
- * pre-bakes the mount-side string into mount->cache_control. */
-static void ss_apply_mount_headers(zend_object *response_obj,
-								   const http_static_handler_t *mount,
-								   bool include_content_headers)
+/* Push the mount's Cache-Control + extra headers onto response_obj.
+ * include_content_headers=false on the 304 path (RFC 9110 §15.4.5
+ * bars Content-* on Not Modified). */
+static void apply_mount_headers(zend_object *response_obj,
+								const http_static_handler_t *mount,
+								bool include_content_headers)
 {
 	if (mount->cache_control != NULL) {
 		http_response_static_set_header(response_obj, "cache-control", 13,
@@ -1036,7 +1007,7 @@ static void ss_handle_stat(ss_state_t *state)
 		}
 	}
 
-	ss_apply_mount_headers(response_obj, state->mount, include_content_headers);
+	apply_mount_headers(response_obj, state->mount, include_content_headers);
 	ss_set_connection_header(response_obj, keep_alive);
 
 	/* === Hand off to the protocol's send_static_response ============== */
@@ -1655,12 +1626,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			}
 			http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
 											HTTP_STATIC_DATE_LEN);
-			if (mount->cache_control != NULL) {
-				http_response_static_set_header(response_obj, "cache-control", 13,
-												ZSTR_VAL(mount->cache_control),
-												ZSTR_LEN(mount->cache_control));
-			}
-			apply_extra_headers(response_obj, mount, false);
+			apply_mount_headers(response_obj, mount, false);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1693,12 +1659,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		}
 		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
 										HTTP_STATIC_DATE_LEN);
-		if (mount->cache_control != NULL) {
-			http_response_static_set_header(response_obj, "cache-control", 13,
-											ZSTR_VAL(mount->cache_control),
-											ZSTR_LEN(mount->cache_control));
-		}
-		apply_extra_headers(response_obj, mount, true);
+		apply_mount_headers(response_obj, mount, true);
 
 		if (is_head) {
 			/* The format-time path computes Content-Length from the

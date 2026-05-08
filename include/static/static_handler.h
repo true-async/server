@@ -82,20 +82,6 @@ typedef struct
 	 * table is older). */
 	HashTable *mime_overrides;
 
-	/* Pre-rendered extra-header block (Cache-Control + every entry of
-	 * extra_headers, joined as "Name: value\r\n"). Populated only on
-	 * frozen snapshots — NULL on the user-side draft. The hot path on
-	 * the hard-zero serve splices these in with one smart_str_append
-	 * instead of re-iterating extra_headers per request:
-	 *
-	 *   prebaked_headers_full        — used on 200/206/etc.
-	 *   prebaked_headers_no_content  — used on 304 (RFC 9110 §15.4.5
-	 *                                  bars Content-* on Not Modified).
-	 *
-	 * NULL when neither extra_headers nor cache_control is set. */
-	zend_string *prebaked_headers_full;
-	zend_string *prebaked_headers_no_content;
-
 	uint32_t flags;
 
 	/* Open-file cache configuration (issue #13 §5a, nginx-style
