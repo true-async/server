@@ -304,6 +304,21 @@ typedef struct {
      * file offset for the next IO_READ submit; capped at st.st_size. */
     char                *chunk_buf;
     uint64_t             bytes_sent;
+
+    /* Open-file cache pre-population (issue #13 §5a). When the
+     * pre-flight finds a fresh entry for this path, it copies the
+     * cached metadata into the slots below and sets has_cached_meta.
+     * ss_handle_open then skips IO_STAT (state->st pre-filled);
+     * ss_handle_stat skips etag formatting / MIME lookup / IMF-date
+     * formatting (the buffers below are pre-rendered). content_type
+     * stays a borrowed pointer into the persistent MIME table — same
+     * lifetime invariant as the cache entry. */
+    bool                 has_cached_meta;
+    bool                 cached_etag_enabled;
+    char                 cached_etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
+    char                 cached_lm_buf[HTTP_STATIC_DATE_BUF_LEN];
+    const char          *cached_content_type;
+    size_t               cached_content_type_len;
 } ss_state_t;
 
 typedef struct {
@@ -766,6 +781,14 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
         return;
     }
 
+    /* Open-file-cache hit: state->st is pre-populated (and validated
+     * at insert time inside the TTL window). Skip the IO_STAT submit
+     * entirely — straight into header build with cached etag/MIME/lm. */
+    if (state->has_cached_meta) {
+        ss_handle_stat(state);
+        return;
+    }
+
     state->phase       = SS_PHASE_STAT;
     state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
     if (UNEXPECTED(state->pending_req == NULL)) {
@@ -787,13 +810,38 @@ static void ss_handle_stat(ss_state_t *state)
         return;
     }
 
+    /* On a cache hit ss_kick_off pre-rendered etag/lm into the state
+     * scratch buffers and copied content_type out of the entry — every
+     * format/lookup helper below collapses to a memory read. On a miss
+     * we synthesise everything from the freshly-stat'd inode and (at
+     * the bottom) hand it to the cache so the next miss-or-hit cycle
+     * for this path goes through the fast path. */
     char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
-    const bool etag_enabled = (state->mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
-    if (etag_enabled) {
-        http_static_etag_format(&state->st, etag_buf);
-    }
     char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
-    http_static_format_http_date(state->st.st_mtime, last_modified_buf);
+    bool etag_enabled;
+    const char *content_type     = NULL;
+    size_t      content_type_len = 0;
+
+    if (state->has_cached_meta) {
+        etag_enabled = state->cached_etag_enabled;
+        if (etag_enabled) {
+            memcpy(etag_buf, state->cached_etag_buf, HTTP_STATIC_ETAG_BUF_LEN);
+        }
+        memcpy(last_modified_buf, state->cached_lm_buf, HTTP_STATIC_DATE_BUF_LEN);
+        content_type     = state->cached_content_type;
+        content_type_len = state->cached_content_type_len;
+    } else {
+        etag_enabled = (state->mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
+        if (etag_enabled) {
+            http_static_etag_format(&state->st, etag_buf);
+        }
+        http_static_format_http_date(state->st.st_mtime, last_modified_buf);
+        if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
+                                     &content_type, &content_type_len)) {
+            content_type     = "application/octet-stream";
+            content_type_len = sizeof("application/octet-stream") - 1;
+        }
+    }
 
     const zend_string *if_none_match     = find_request_header(
             state->ctx->request, "if-none-match", 13);
@@ -808,24 +856,12 @@ static void ss_handle_stat(ss_state_t *state)
             etag_enabled ? HTTP_STATIC_ETAG_LEN : 0,
             state->st.st_mtime);
 
-    const char *content_type = NULL;
-    size_t      content_type_len = 0;
-    if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
-                                 &content_type, &content_type_len)) {
-        content_type     = "application/octet-stream";
-        content_type_len = sizeof("application/octet-stream") - 1;
-    }
-
-    /* Open-file cache insert (issue #13 §5a follow-up). Now that the
-     * file passed every gate (regular, size in range, stat success)
-     * and we hold all the metadata a future request would compute,
-     * stash the entry. The pre-flight will short-circuit subsequent
-     * lookups for the same path to a single HashTable hit; the cached
-     * st/etag/MIME let the next iteration of this work skip IO_STAT
-     * (separate follow-up wiring). content_type points into the
-     * persistent MIME table or is the static "application/octet-stream"
-     * literal — both safe to alias for the entry's lifetime. */
-    if (state->conn != NULL && state->conn->server != NULL) {
+    /* Cache insert (only on miss path — the hit case already has the
+     * entry). content_type is borrowed from the persistent MIME table
+     * or the "application/octet-stream" literal; both are safe to
+     * alias for the entry's lifetime. */
+    if (!state->has_cached_meta
+        && state->conn != NULL && state->conn->server != NULL) {
         http_static_cache_t *cache =
                 http_static_cache_acquire(state->conn->server);
         if (cache != NULL) {
@@ -1096,11 +1132,16 @@ static inline bool conn_supports_sendfile(const http_connection_t *conn)
 
 /* Take the dispatch hand-off and start the async chain. Returns true
  * on success — caller must return HARD_ZERO. False = setup failed,
- * caller falls back to the synchronous-populate path. */
+ * caller falls back to the synchronous-populate path.
+ *
+ * `cv` is non-NULL when the pre-flight had an open-file-cache hit:
+ * the FSM will skip IO_STAT (state->st pre-filled), etag formatting,
+ * MIME lookup and IMF-date formatting on the way to ss_handle_stat. */
 static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
                         const http_static_handler_t *mount,
                         const char *fs_path, size_t fs_path_len,
-                        const bool is_head)
+                        const bool is_head,
+                        const http_static_cache_view_t *cv)
 {
     if (UNEXPECTED(fs_path_len + 1 >= PATH_MAX)) {
         return false;
@@ -1116,6 +1157,29 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     memcpy(state->fs_path, fs_path, fs_path_len);
     state->fs_path[fs_path_len] = '\0';
     state->fs_path_len = fs_path_len;
+
+    if (cv != NULL) {
+        /* Trust-within-TTL: every metadata field needed past stat is
+         * already in the entry. We still need FS_OPEN — sendfile /
+         * IO_READ require an async fd — but the IO_STAT submit and
+         * the format/lookup helpers in ss_handle_stat all collapse
+         * to memory reads. */
+        state->has_cached_meta = true;
+        state->st              = cv->st;
+        state->cached_content_type     = cv->content_type;
+        state->cached_content_type_len = cv->content_type_len;
+        if (cv->etag != NULL && cv->etag_len == HTTP_STATIC_ETAG_LEN) {
+            memcpy(state->cached_etag_buf, cv->etag, HTTP_STATIC_ETAG_LEN);
+            state->cached_etag_buf[HTTP_STATIC_ETAG_LEN] = '\0';
+            state->cached_etag_enabled = true;
+        }
+        if (cv->last_modified != NULL
+            && cv->last_modified_len == HTTP_STATIC_DATE_LEN) {
+            memcpy(state->cached_lm_buf,
+                   cv->last_modified, HTTP_STATIC_DATE_LEN);
+            state->cached_lm_buf[HTTP_STATIC_DATE_LEN] = '\0';
+        }
+    }
 
     state->phase = SS_PHASE_OPEN;
 
@@ -1315,31 +1379,29 @@ http_static_result_t http_static_try_serve(http_server_object *server,
          * the success path (#5c). */
         http_static_cache_t *cache = http_static_cache_acquire(server);
         bool gate_ok;
+        bool have_view = false;
+        http_static_cache_view_t cv;
         if (cache != NULL) {
-            http_static_cache_view_t cv;
             if (http_static_cache_lookup(cache, fs_path, fs_path_len, &cv)) {
-                /* Hit: realpath was already validated when this entry
-                 * was inserted, skip it. The cached st/etag/MIME on
-                 * the view are not consumed here yet — that requires
-                 * piping the view through ss_kick_off so the FSM can
-                 * skip IO_STAT and short-circuit conditional GETs.
-                 * Tracked as a follow-up; this commit only restores
-                 * the cache to a state where it stores real metadata. */
+                /* Trust-within-TTL: realpath was validated at insert,
+                 * stat/etag/MIME/Last-Modified are pre-rendered. The
+                 * FSM will skip every one of those derivations on the
+                 * way through ss_handle_open → ss_handle_stat. */
                 http_server_on_static_cache_hit(conn->counters);
-                gate_ok = true;
+                gate_ok   = true;
+                have_view = true;
             } else {
                 http_server_on_static_cache_miss(conn->counters);
                 gate_ok = resolved_under_root(mount, fs_path);
-                /* Insertion now happens in ss_handle_stat once st /
-                 * etag / content_type / Last-Modified are all in hand.
-                 * The pre-flight no longer plants a zero-stat
-                 * placeholder. */
+                /* Insertion happens in ss_handle_stat once st / etag /
+                 * content_type / Last-Modified are all in hand. */
             }
         } else {
             gate_ok = resolved_under_root(mount, fs_path);
         }
         if (gate_ok) {
-            if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head)) {
+            if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head,
+                            have_view ? &cv : NULL)) {
                 return HTTP_STATIC_HARD_ZERO;
             }
         }
