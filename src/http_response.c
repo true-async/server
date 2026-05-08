@@ -1221,6 +1221,7 @@ static const http_status_line_t http11_status_lines[] = {
     [409] = MK_LINE("HTTP/1.1 409 Conflict\r\n"),
     [413] = MK_LINE("HTTP/1.1 413 Payload Too Large\r\n"),
     [414] = MK_LINE("HTTP/1.1 414 URI Too Long\r\n"),
+    [416] = MK_LINE("HTTP/1.1 416 Range Not Satisfiable\r\n"),
     [429] = MK_LINE("HTTP/1.1 429 Too Many Requests\r\n"),
     [500] = MK_LINE("HTTP/1.1 500 Internal Server Error\r\n"),
     [502] = MK_LINE("HTTP/1.1 502 Bad Gateway\r\n"),

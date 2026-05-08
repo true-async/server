@@ -420,7 +420,7 @@ PR #1 + PR #5 фактически слились в одну ветку (sendfi
 | Bench `wrk -c 256 -t 4 -d 30 /static/...` vs `entry.php` | partial | bench tooling готов, цифры выше для file-static; entry.php сравнение out-of-codebase |
 | TLS streaming abrupt-close race | known issue | wrk-style массовый abrupt close с in-flight TLS streaming → assertion в `conn_arena_cleanup` (alive list не пустой при teardown). PHPT 007 чистый, штатный keep-alive close — чистый. Только при `wrk --timeout 0` с десятками одновременных RST. Требует pass над shutdown chain — отдельный fix. |
 | **PR #2** H2/H3 интеграция | not started | nghttp2/nghttp3 data-provider hookup |
-| **PR #3** Range support | not started | single + multipart/byteranges + If-Range |
+| ✅ **PR #3** Range support (single, plain TCP) | done (commit pending) | single byte-range, suffix-length, open-end; If-Range strong-match; 206 / 416. Multi-range / multipart-byteranges → fall through to 200 (RFC §14.2 permits). TLS Range пока NOT supported (ZEND_ASYNC_IO_READ без offset — нужна async-API extension); 200 full body. PHPT 011. |
 | ✅ **PR #4** Precompressed sidecars `.br/.gz/.zst` | done (commit pending) | reuse `http_compression_negotiate`; pre-flight stat per request на enabled mounts; cache key включает .gz суффикс; PHPT 010 |
 | ✅ Symlink owner-match (`OwnerMatch`) | done (commit 7302ea7) | per-segment lstat/stat sweep; за компанию закрыт REJECT-final-segment hole в hard-zero (was: O_NOFOLLOW не доступен через ZEND_ASYNC_FS_OPEN). PHPT 009 |
 | **PR #6** Browse listing | not started | lowest priority |

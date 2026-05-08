@@ -121,6 +121,9 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 
 static bool path_segments_owner_match(const http_static_handler_t *mount,
                                       const char *fs_path);
+static int  parse_byte_range(const char *hdr, size_t hdr_len,
+                             uint64_t size,
+                             uint64_t *out_first, uint64_t *out_last);
 
 /* REJECT pre-flight check. The sync fallback open() uses O_NOFOLLOW
  * (kernel rejects symlinks on the final component); the async hard-zero
@@ -434,6 +437,16 @@ typedef struct {
     size_t               override_content_type_len;
     const char          *content_encoding;     /* NULL = identity */
     size_t               content_encoding_len;
+
+    /* Range support (issue #13 PR #3, single-range). is_range flips
+     * when the pre-flight accepted a `Range: bytes=A-B` header — the
+     * FSM emits 206 Partial Content with a sliced body. range_first /
+     * range_last are inclusive byte offsets; range_total carries the
+     * unmodified file size for the Content-Range header. */
+    bool                 is_range;
+    uint64_t             range_first;
+    uint64_t             range_last;
+    uint64_t             range_total;
 } ss_state_t;
 
 typedef struct {
@@ -673,6 +686,21 @@ static void ss_build_headers(ss_state_t *state, smart_str *out,
     }
     if (state->content_encoding != NULL) {
         ss_append_header(out, "Vary", 4, "Accept-Encoding", 15);
+    }
+
+    /* Range advertise / commit (PR #3). Accept-Ranges goes on every
+     * 200/206 (and 304); a 206 response also gets Content-Range. */
+    if (include_content_headers) {
+        ss_append_header(out, "Accept-Ranges", 13, "bytes", 5);
+    }
+    if (state->is_range && include_content_headers) {
+        char cr[64];
+        const int n = snprintf(cr, sizeof(cr),
+            "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
+            state->range_first, state->range_last, state->range_total);
+        if (n > 0 && (size_t)n < sizeof(cr)) {
+            ss_append_header(out, "Content-Range", 13, cr, (size_t)n);
+        }
     }
 
     /* Cache-Control + extra_headers are pre-rendered into one persistent
@@ -1012,6 +1040,70 @@ static void ss_handle_stat(ss_state_t *state)
         }
     }
 
+    /* Range support (PR #3, RFC 9110 §14.2). If the request carries a
+     * single-range Range header (and either no If-Range or one that
+     * matches the strong validator), we slice the response to a 206.
+     * Multi-range / unparsable / multipart syntax falls through to a
+     * full 200 — RFC-permitted (§14.2 paragraph 1: "a server MAY
+     * ignore Range"). 416 is mandatory for syntactically valid but
+     * unsatisfiable ranges (e.g. start past EOF). */
+    state->range_total = (uint64_t) state->st.st_size;
+    state->is_range    = false;
+    /* TLS body path uses ZEND_ASYNC_IO_READ which has no offset
+     * argument — supporting Range there needs an lseek-or-pread
+     * extension to the async API. Skip Range on TLS for now and
+     * serve the full body; clients that need Range over TLS retry
+     * via plain HTTP or fall back to whole-file download. */
+    if (!not_modified && !state->is_tls) {
+        const zend_string *range_hdr = find_request_header(
+                state->ctx->request, "range", 5);
+        const zend_string *if_range  = find_request_header(
+                state->ctx->request, "if-range", 8);
+        bool range_allowed = true;
+        if (if_range != NULL && etag_enabled) {
+            /* Strong-equal compare per §13.1.5; the cheap path is
+             * exact memcmp against the ETag we already formatted. */
+            range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN
+                          && memcmp(ZSTR_VAL(if_range), etag_buf,
+                                    HTTP_STATIC_ETAG_LEN) == 0);
+        } else if (if_range != NULL) {
+            /* No etag to compare against → conservatively ignore Range. */
+            range_allowed = false;
+        }
+        if (range_hdr != NULL && range_allowed) {
+            uint64_t first = 0, last = 0;
+            const int rc = parse_byte_range(
+                ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr),
+                state->range_total, &first, &last);
+            if (rc == 1) {
+                state->is_range    = true;
+                state->range_first = first;
+                state->range_last  = last;
+            } else if (rc == -1) {
+                state->should_continue = state->conn->keep_alive;
+                /* 416 carries `Content-Range: bytes [star]/size` per §14.1.2. */
+                smart_str h = {0};
+                ss_append_header(&h, "Content-Type", 12,
+                                 "text/plain; charset=utf-8", 25);
+                char cr[48];
+                const int crn = snprintf(cr, sizeof(cr),
+                    "bytes */%" PRIu64, state->range_total);
+                if (crn > 0 && (size_t)crn < sizeof(cr)) {
+                    ss_append_header(&h, "Content-Range", 13, cr, (size_t)crn);
+                }
+                ss_append_header(&h, "Content-Length", 14, "0", 1);
+                ss_append_header(&h, "Connection", 10,
+                                 state->conn->keep_alive ? "keep-alive" : "close",
+                                 state->conn->keep_alive ? 10 : 5);
+                (void) ss_send_response(state, 416, &h, NULL, 0);
+                smart_str_free(&h);
+                http_server_count_request(state->conn->counters);
+                ss_finalize(state);
+                return;
+            }
+        }
+    }
+
     state->should_continue = state->conn->keep_alive;
 
     smart_str headers = {0};
@@ -1028,13 +1120,18 @@ static void ss_handle_stat(ss_state_t *state)
         return;
     }
 
+    const uint64_t body_len = state->is_range
+        ? (state->range_last - state->range_first + 1)
+        : (uint64_t) state->st.st_size;
+    const int      status_code = state->is_range ? 206 : 200;
+
     ss_build_headers(state, &headers,
                      content_type, content_type_len,
                      etag_buf, etag_enabled, last_modified_buf,
-                     (uint64_t) state->st.st_size, true);
+                     body_len, true);
 
     if (state->is_head || state->st.st_size == 0) {
-        (void) ss_send_response(state, 200, &headers, NULL, 0);
+        (void) ss_send_response(state, status_code, &headers, NULL, 0);
         smart_str_free(&headers);
         http_server_count_request(state->conn->counters);
         ss_finalize(state);
@@ -1048,7 +1145,7 @@ static void ss_handle_stat(ss_state_t *state)
      *     headers, then the chunked TLS_READ→SSL_write→drain loop
      *     handles the body.
      * Both branches converge in ss_finalize. */
-    if (UNEXPECTED(!ss_send_response(state, 200, &headers, NULL, 0))) {
+    if (UNEXPECTED(!ss_send_response(state, status_code, &headers, NULL, 0))) {
         smart_str_free(&headers);
         ss_finalize(state);
         return;
@@ -1085,10 +1182,14 @@ static void ss_handle_stat(ss_state_t *state)
     }
 #endif
 
-    /* Plain TCP body path: zero-copy kernel sendfile. */
+    /* Plain TCP body path: zero-copy kernel sendfile. On a 206 we
+     * pass range_first as offset and slice the length to body_len —
+     * uv_fs_sendfile honours both. */
     state->phase       = SS_PHASE_SENDFILE;
+    const uint64_t sf_offset = state->is_range ? state->range_first : 0;
     state->pending_req = ZEND_ASYNC_IO_SENDFILE(
-            state->conn->io, state->file_io, 0, (size_t) state->st.st_size);
+            state->conn->io, state->file_io, (off_t) sf_offset,
+            (size_t) body_len);
     if (UNEXPECTED(state->pending_req == NULL)) {
         http_server_count_request(state->conn->counters);
         ss_finalize(state);
@@ -1384,6 +1485,95 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     }
 
     return true;
+}
+
+/* Single Byte-Range parser (issue #13 PR #3). RFC 9110 §14.1.2.
+ *
+ * Accepts:
+ *   bytes=A-B      first..last (inclusive)
+ *   bytes=A-       first..size-1
+ *   bytes=-N       size-N..size-1 (suffix-length form)
+ *
+ * Multi-range syntax (comma-separated) is recognised but rejected
+ * here — the caller falls back to 200 with the full body, which
+ * is RFC-permitted ("a server MAY ignore the Range header field").
+ * Multipart/byteranges responses are a separate follow-up.
+ *
+ * Returns:
+ *   1  parsed successfully into *out_first / *out_last (inclusive,
+ *      already validated against `size`).
+ *   0  header malformed or multi-range — caller serves 200 full body.
+ *  -1  syntactically valid but unsatisfiable (start past EOF, etc) —
+ *      caller MUST emit 416 Range Not Satisfiable per §14.1.2. */
+static int parse_byte_range(const char *hdr, size_t hdr_len,
+                            uint64_t size,
+                            uint64_t *out_first, uint64_t *out_last)
+{
+    if (hdr == NULL || hdr_len < 7) return 0;
+    if (memcmp(hdr, "bytes=", 6) != 0) return 0;
+    const char *p   = hdr + 6;
+    const char *end = hdr + hdr_len;
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    /* Reject multi-range: scan for ',' before the dash. */
+    for (const char *q = p; q < end; q++) {
+        if (*q == ',') return 0;
+    }
+    if (p >= end) return 0;
+
+    bool   suffix_form = false;
+    uint64_t first = 0;
+    bool   first_set = false;
+    if (*p == '-') {
+        suffix_form = true;
+        p++;
+    } else {
+        while (p < end && *p >= '0' && *p <= '9') {
+            if (first > UINT64_MAX / 10) return 0;
+            first = first * 10 + (uint64_t)(*p - '0');
+            first_set = true;
+            p++;
+        }
+        if (!first_set || p >= end || *p != '-') return 0;
+        p++;
+    }
+
+    uint64_t last = 0;
+    bool     last_set = false;
+    while (p < end && *p >= '0' && *p <= '9') {
+        if (last > UINT64_MAX / 10) return 0;
+        last = last * 10 + (uint64_t)(*p - '0');
+        last_set = true;
+        p++;
+    }
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    if (p != end) return 0;     /* trailing garbage */
+
+    if (size == 0) return -1;   /* nothing to slice from */
+
+    if (suffix_form) {
+        if (!last_set || last == 0) return 0;
+        if (last >= size) {
+            /* "last N where N >= size" → whole file (RFC 9110: a
+             * suffix-length larger than the resource length is
+             * treated as the whole resource, status still 206). */
+            *out_first = 0;
+        } else {
+            *out_first = size - last;
+        }
+        *out_last  = size - 1;
+        return 1;
+    }
+    if (first >= size) return -1;
+    if (!last_set) {
+        *out_first = first;
+        *out_last  = size - 1;
+        return 1;
+    }
+    if (last < first) return 0;
+    if (last >= size) last = size - 1;
+    *out_first = first;
+    *out_last  = last;
+    return 1;
 }
 
 /* Precompressed sidecar selection (issue #13 PR #4). Picks a `.zst` /
