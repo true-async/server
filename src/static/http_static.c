@@ -76,31 +76,36 @@ static inline bool method_is_head(const http_request_t *req)
 		   memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
 }
 
-static const zend_string *find_first_request_header(const http_request_t *req, const char *name,
-											  size_t name_len)
+static const zend_string *find_first_request_header(const http_request_t *const req,
+													 const char *const name, const size_t name_len)
 {
 	if (req == NULL || req->headers == NULL) {
 		return NULL;
 	}
+
 	const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
 	if (zv == NULL) {
 		return NULL;
 	}
+
 	if (Z_TYPE_P(zv) == IS_STRING) {
 		return Z_STR_P(zv);
 	}
+
 	if (Z_TYPE_P(zv) == IS_ARRAY) {
 		const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
 		if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
 			return Z_STR_P(first);
 		}
 	}
+
 	return NULL;
 }
 
 static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
 	int flags = O_RDONLY | O_CLOEXEC;
+
 #ifdef O_NOFOLLOW
 	/* REJECT: kernel-level — any symlink on the final component fails
 	 * with ELOOP. Intermediate components are still followed by
@@ -114,6 +119,7 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 		flags |= O_NOFOLLOW;
 	}
 #endif
+
 	return open(path, flags);
 }
 
@@ -136,14 +142,18 @@ static bool symlink_policy_admits(const http_static_handler_t *mount, const char
 		if (UNEXPECTED(lstat(fs_path, &ls) != 0)) {
 			return false;
 		}
+
 		if (S_ISLNK(ls.st_mode)) {
 			return false;
 		}
+
 		return true;
 	}
+
 	if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_OWNER) {
 		return verify_path_owner_chain(mount, fs_path);
 	}
+
 	/* FOLLOW (default fallthrough): no symlink-specific policy. */
 	return true;
 }
@@ -173,6 +183,7 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 	if (UNEXPECTED(root_len >= sizeof(buf))) {
 		return false;
 	}
+
 	memcpy(buf, ZSTR_VAL(mount->root_directory), root_len);
 	buf[len] = '\0';
 
@@ -184,10 +195,12 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 	while (*seg != '\0') {
 		const char *next = strchr(seg, '/');
 		const size_t seg_len = (next != NULL) ? (size_t)(next - seg) : strlen(seg);
+
 		/* "+2" — '/' separator + NUL. */
 		if (UNEXPECTED(len + 1 + seg_len + 1 > sizeof(buf))) {
 			return false;
 		}
+
 		buf[len++] = '/';
 		memcpy(buf + len, seg, seg_len);
 		len += seg_len;
@@ -197,11 +210,13 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 		if (UNEXPECTED(lstat(buf, &ls) != 0)) {
 			return false;
 		}
+
 		if (S_ISLNK(ls.st_mode)) {
 			struct stat ts;
 			if (UNEXPECTED(stat(buf, &ts) != 0)) {
 				return false;
 			}
+
 			if (ls.st_uid != ts.st_uid) {
 				return false;
 			}
@@ -210,8 +225,10 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 		if (next == NULL) {
 			break;
 		}
+
 		seg = next + 1;
 	}
+
 	return true;
 }
 
@@ -228,12 +245,14 @@ static bool resolved_under_root(const http_static_handler_t *mount, const char *
 	if (UNEXPECTED(realpath(path, canonical) == NULL)) {
 		return false;
 	}
+
 	const char *const root = ZSTR_VAL(mount->root_directory);
 	const size_t root_len = ZSTR_LEN(mount->root_directory);
 
 	if (strncmp(canonical, root, root_len) != 0) {
 		return false;
 	}
+
 	/* canonical == root exactly, or canonical[root_len] is a separator
 	 * (subpath). Otherwise canonical only happens to share a prefix
 	 * (e.g. root="/srv/foo", canonical="/srv/foobar/x"). */
@@ -248,25 +267,31 @@ static zend_string *slurp_fd(const int fd, const size_t size)
 	}
 	zend_string *const out = zend_string_alloc(size, 0);
 	size_t total = 0;
+
 	while (total < size) {
 		const ssize_t n = read(fd, ZSTR_VAL(out) + total, size - total);
 		if (EXPECTED(n > 0)) {
 			total += (size_t)n;
 			continue;
 		}
+
 		if (n == 0) {
 			break; /* premature EOF */
 		}
+
 		if (errno == EINTR) {
 			continue;
 		}
+
 		zend_string_release(out);
 		return NULL;
 	}
+
 	if (UNEXPECTED(total != size)) {
 		zend_string_release(out);
 		return NULL;
 	}
+
 	ZSTR_VAL(out)[size] = '\0';
 	return out;
 }
@@ -279,6 +304,7 @@ static void apply_extra_headers(zend_object *response_obj, const http_static_han
 	if (mount->extra_headers == NULL) {
 		return;
 	}
+
 	zend_string *name;
 	zval *value;
 	ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, name, value)
@@ -286,10 +312,12 @@ static void apply_extra_headers(zend_object *response_obj, const http_static_han
 		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
 			continue;
 		}
+
 		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
 			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
 			continue;
 		}
+
 		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
 										Z_STRVAL_P(value), Z_STRLEN_P(value));
 	}
@@ -313,12 +341,14 @@ static bool try_open_candidate(const http_static_handler_t *mount, const char *p
 	if (fd < 0) {
 		return false;
 	}
+
 	if (UNEXPECTED(fstat(fd, st) != 0)) {
 		const int saved_errno = errno;
 		close(fd);
 		errno = saved_errno;
 		return false;
 	}
+
 	if (UNEXPECTED(!S_ISREG(st->st_mode))) {
 		close(fd);
 		errno = ENOENT;
@@ -332,6 +362,7 @@ static bool try_open_candidate(const http_static_handler_t *mount, const char *p
 		errno = saved_errno;
 		return false;
 	}
+
 	if (UNEXPECTED(path_st.st_dev != st->st_dev || path_st.st_ino != st->st_ino)) {
 		close(fd);
 		errno = EPERM;
@@ -517,13 +548,16 @@ static inline void ss_cork_set(http_connection_t *conn, const int on)
 	if (UNEXPECTED(conn == NULL || conn->io == NULL)) {
 		return;
 	}
+
 	if (conn->io->type != ZEND_ASYNC_IO_TYPE_TCP) {
 		return;
 	}
+
 	const int fd = (int)conn->io->descriptor.socket;
 	if (UNEXPECTED(fd < 0)) {
 		return;
 	}
+
 	/* setsockopt failure here is non-fatal: worst case we skip the
 	 * coalescing optimisation. Sendfile + headers still go out. */
 	(void)setsockopt(fd, IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
@@ -563,6 +597,7 @@ static void ss_finalize(ss_state_t *state)
 		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
 		state->cb = NULL;
 	}
+
 	if (state->file_io != NULL) {
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
@@ -578,6 +613,7 @@ static void ss_finalize(ss_state_t *state)
 	if (ctx->request != NULL) {
 		ctx->request->coroutine = NULL;
 	}
+
 	if (conn->current_request == ctx->request) {
 		conn->current_request = NULL;
 	}
@@ -599,6 +635,7 @@ static const char *ss_status_line(const int status, size_t *out_len)
 	if (UNEXPECTED(line == NULL)) {
 		line = http_response_status_line_http11(500, out_len);
 	}
+
 	return line;
 }
 
@@ -623,6 +660,7 @@ static bool ss_send_response(ss_state_t *state, const int status_code, const sma
 	smart_str line = {0};
 	size_t status_line_len = 0;
 	const char *const status_line = ss_status_line(status_code, &status_line_len);
+
 	smart_str_appendl(&line, status_line, status_line_len);
 	if (headers != NULL && headers->s != NULL) {
 		smart_str_append_smart_str(&line, headers);
@@ -738,12 +776,14 @@ static void ss_emit_error(ss_state_t *state, const int status_code, const char *
 {
 	smart_str h = {0};
 	ss_append_header(&h, "Content-Type", 12, "text/plain; charset=utf-8", 25);
+
 	char clen[32];
 	const size_t body_len = body != NULL ? strlen(body) : 0;
 	const int n = snprintf(clen, sizeof(clen), "%zu", body_len);
 	if (n > 0 && (size_t)n < sizeof(clen)) {
 		ss_append_header(&h, "Content-Length", 14, clen, (size_t)n);
 	}
+
 	ss_append_header(&h, "Connection", 10, state->conn->keep_alive ? "keep-alive" : "close",
 					 state->conn->keep_alive ? 10 : 5);
 
@@ -786,6 +826,7 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 		if (req != NULL) {
 			return;
 		}
+
 		ss_handle_open(state, exception);
 		return;
 
@@ -795,15 +836,18 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 		if (req == NULL || req != state->pending_req) {
 			return;
 		}
+
 		state->pending_req = NULL;
 		if (req->dispose != NULL) {
 			req->dispose(req);
 		}
+
 		if (UNEXPECTED(exception != NULL)) {
 			ss_emit_error(state, 500, "Internal Server Error");
 			ss_finalize(state);
 			return;
 		}
+
 		ss_handle_stat(state);
 		return;
 
@@ -811,10 +855,12 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 		if (req == NULL || req != state->pending_req) {
 			return;
 		}
+
 		state->pending_req = NULL;
 		if (req->dispose != NULL) {
 			req->dispose(req);
 		}
+
 		ss_handle_sendfile_done(state);
 		return;
 
@@ -826,17 +872,21 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 		if (req == NULL || req != state->pending_req) {
 			return;
 		}
+
 		state->pending_req = NULL;
 		{
 			const ssize_t got = req->transferred;
 			const bool err = (exception != NULL || req->exception != NULL);
+
 			if (req->exception != NULL) {
 				OBJ_RELEASE(req->exception);
 				req->exception = NULL;
 			}
+
 			if (req->dispose != NULL) {
 				req->dispose(req);
 			}
+
 			ss_handle_tls_read_done(state, got, err);
 		}
 		return;
@@ -887,6 +937,7 @@ static void ss_rollback_to_php_handler(ss_state_t *state)
 		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
 		state->cb = NULL;
 	}
+
 	if (state->file_io != NULL) {
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
@@ -952,6 +1003,7 @@ static void ss_handle_open(ss_state_t *state, zend_object *exception)
 			ss_rollback_to_php_handler(state);
 			return;
 		}
+
 		ss_emit_error(state, 404, "Not Found");
 		ss_finalize(state);
 		return;
@@ -980,6 +1032,7 @@ static void ss_handle_stat(ss_state_t *state)
 		ss_finalize(state);
 		return;
 	}
+
 	if (UNEXPECTED((uint64_t)state->st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
 		ss_emit_error(state, 413, "Payload Too Large");
 		ss_finalize(state);
@@ -1003,6 +1056,7 @@ static void ss_handle_stat(ss_state_t *state)
 		if (etag_enabled) {
 			memcpy(etag_buf, state->cached_etag_buf, HTTP_STATIC_ETAG_BUF_LEN);
 		}
+
 		memcpy(last_modified_buf, state->cached_lm_buf, HTTP_STATIC_DATE_BUF_LEN);
 		content_type = state->cached_content_type;
 		content_type_len = state->cached_content_type_len;
@@ -1011,6 +1065,7 @@ static void ss_handle_stat(ss_state_t *state)
 		if (etag_enabled) {
 			http_static_etag_format(&state->st, etag_buf);
 		}
+
 		http_static_format_http_date(state->st.st_mtime, last_modified_buf);
 		if (state->override_content_type != NULL) {
 			/* Precompressed sidecar: state->fs_path now points at

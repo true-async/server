@@ -58,9 +58,11 @@ static http_static_path_result_t percent_decode(const char *const src, const siz
 			if (byte == 0 || byte == '\\') {
 				return HTTP_STATIC_PATH_BAD_REQUEST;
 			}
+
 			if (out + 1 >= dst_cap) {
 				return HTTP_STATIC_PATH_BAD_REQUEST;
 			}
+
 			dst[out++] = (char)byte;
 			i += 3;
 			continue;
@@ -68,9 +70,11 @@ static http_static_path_result_t percent_decode(const char *const src, const siz
 		if (UNEXPECTED(src[i] == '\\')) {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
 		}
+
 		if (out + 1 >= dst_cap) {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
 		}
+
 		dst[out++] = src[i++];
 	}
 	dst[out] = '\0';
@@ -139,6 +143,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	if (UNEXPECTED(mount == NULL || mount->url_prefix == NULL || mount->root_directory == NULL)) {
 		return HTTP_STATIC_PATH_NO_MATCH;
 	}
+
 	/* Defensive: upstream parsers should already reject absolute-form
 	 * / authority-form / asterisk targets. */
 	if (UNEXPECTED(request_path_len == 0 || request_path[0] != '/')) {
@@ -149,6 +154,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	if (request_path_len < prefix_len) {
 		return HTTP_STATIC_PATH_NO_MATCH;
 	}
+
 	if (memcmp(request_path, ZSTR_VAL(mount->url_prefix), prefix_len) != 0) {
 		return HTTP_STATIC_PATH_NO_MATCH;
 	}

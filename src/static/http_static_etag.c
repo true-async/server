@@ -86,6 +86,7 @@ void http_static_format_http_date(time_t t, char buf[HTTP_STATIC_DATE_BUF_LEN])
 #else
 	gmtime_r(&t, &tm);
 #endif
+
 	/* Hard-coded English month/day names — strftime would honour
 	 * LC_TIME and could produce non-canonical strings on hosts that
 	 * forgot to set the locale. RFC 7231 IMF-fixdate is fixed grammar. */
@@ -206,21 +207,26 @@ static bool tm_fields_in_range(const struct tm *tm)
 	if (tm->tm_mon < 0 || tm->tm_mon > 11) {
 		return false;
 	}
+
 	if (tm->tm_mday < 1 || tm->tm_mday > 31) {
 		return false;
 	}
+
 	if (tm->tm_hour < 0 || tm->tm_hour > 23) {
 		return false;
 	}
+
 	if (tm->tm_min < 0 || tm->tm_min > 59) {
 		return false;
 	}
+
 	/* RFC 5322 / RFC 9110 do not require leap-second support; reject
 	 * sec=60 outright rather than feeding undefined behavior to
 	 * timegm. */
 	if (tm->tm_sec < 0 || tm->tm_sec > 59) {
 		return false;
 	}
+
 	return true;
 }
 
@@ -231,6 +237,7 @@ static time_t parse_http_date(const char *src, size_t src_len)
 	if (src_len == 0 || src_len >= sizeof(buf)) {
 		return (time_t)-1;
 	}
+
 	memcpy(buf, src, src_len);
 	buf[src_len] = '\0';
 
@@ -241,16 +248,19 @@ static time_t parse_http_date(const char *src, size_t src_len)
 	if (strptime(buf, "%a, %d %b %Y %H:%M:%S GMT", &tm) != NULL && tm_fields_in_range(&tm)) {
 		return timegm(&tm);
 	}
+
 	memset(&tm, 0, sizeof(tm));
 	/* RFC 850:    "Sunday, 06-Nov-94 08:49:37 GMT" */
 	if (strptime(buf, "%A, %d-%b-%y %H:%M:%S GMT", &tm) != NULL && tm_fields_in_range(&tm)) {
 		return timegm(&tm);
 	}
+
 	memset(&tm, 0, sizeof(tm));
 	/* asctime:    "Sun Nov  6 08:49:37 1994" */
 	if (strptime(buf, "%a %b %e %H:%M:%S %Y", &tm) != NULL && tm_fields_in_range(&tm)) {
 		return timegm(&tm);
 	}
+
 	return (time_t)-1;
 }
 
@@ -263,13 +273,16 @@ bool http_static_conditional_match(const char *if_none_match, size_t if_none_mat
 	if (if_none_match_len > 0 && if_none_match != NULL) {
 		return match_if_none_match(if_none_match, if_none_match_len, etag, etag_len);
 	}
+
 	if (if_modified_since_len > 0 && if_modified_since != NULL) {
 		const time_t since = parse_http_date(if_modified_since, if_modified_since_len);
 		if (since == (time_t)-1) {
 			return false;
 		}
+
 		/* "Not modified" iff last_modified <= since. */
 		return last_modified <= since;
 	}
+
 	return false;
 }

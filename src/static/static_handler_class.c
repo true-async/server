@@ -86,18 +86,21 @@ static bool validate_url_prefix(const zend_string *prefix)
 							 "StaticHandler url prefix must start and end with '/'", 0);
 		return false;
 	}
+
 	for (size_t i = 0; i < len; i++) {
 		if (val[i] == '\0') {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler url prefix must not contain NUL", 0);
 			return false;
 		}
+
 		if (i + 1 < len && val[i] == '/' && val[i + 1] == '/') {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler url prefix must not contain '//'", 0);
 			return false;
 		}
 	}
+
 	return true;
 }
 
@@ -111,6 +114,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 							 "StaticHandler root directory must not be empty", 0);
 		return NULL;
 	}
+
 	if (ZSTR_VAL(path)[0] != '/') {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler root directory must be an absolute path", 0);
@@ -123,6 +127,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 								"StaticHandler root directory not found: %s", ZSTR_VAL(path));
 		return NULL;
 	}
+
 	if (!S_ISDIR(sb.st_mode)) {
 		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
 								"StaticHandler root directory is not a directory: %s",
@@ -137,6 +142,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 								ZSTR_VAL(path));
 		return NULL;
 	}
+
 	/* Reject root="/" (and "//", which realpath collapses to "/"). The
 	 * resolved_under_root check requires `canonical[root_len]` to be
 	 * '\0' or '/', which never holds when root is exactly "/" — that
@@ -148,6 +154,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 							 "StaticHandler root directory must not be '/'", 0);
 		return NULL;
 	}
+
 	return zend_string_init(resolved, resolved_len, 0);
 }
 
@@ -156,18 +163,22 @@ void http_static_handler_descriptor_destroy(http_static_handler_t *mount)
 	if (mount == NULL) {
 		return;
 	}
+
 	if (mount->url_prefix != NULL) {
 		zend_string_release(mount->url_prefix);
 		mount->url_prefix = NULL;
 	}
+
 	if (mount->root_directory != NULL) {
 		zend_string_release(mount->root_directory);
 		mount->root_directory = NULL;
 	}
+
 	if (mount->cache_control != NULL) {
 		zend_string_release(mount->cache_control);
 		mount->cache_control = NULL;
 	}
+
 	if (mount->index_files != NULL) {
 		for (size_t i = 0; i < mount->index_count; i++) {
 			zend_string_release(mount->index_files[i]);
@@ -176,6 +187,7 @@ void http_static_handler_descriptor_destroy(http_static_handler_t *mount)
 		mount->index_files = NULL;
 		mount->index_count = 0;
 	}
+
 	if (mount->hide_globs != NULL) {
 		for (size_t i = 0; i < mount->hide_count; i++) {
 			zend_string_release(mount->hide_globs[i]);
@@ -184,11 +196,13 @@ void http_static_handler_descriptor_destroy(http_static_handler_t *mount)
 		mount->hide_globs = NULL;
 		mount->hide_count = 0;
 	}
+
 	if (mount->extra_headers != NULL) {
 		zend_hash_destroy(mount->extra_headers);
 		FREE_HASHTABLE(mount->extra_headers);
 		mount->extra_headers = NULL;
 	}
+
 	if (mount->mime_overrides != NULL) {
 		zend_hash_destroy(mount->mime_overrides);
 		FREE_HASHTABLE(mount->mime_overrides);
@@ -370,19 +384,24 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 	if (zend_atomic_int_fetch_sub(&sh->ref_count, 1) != 1) {
 		return;
 	}
+
 	/* Last ref — destroy persistent fields. zend_string_release is
 	 * persistent-aware via GC_FLAGS_PERSISTENT; for HashTables we must
 	 * pefree the struct ourselves (zend_hash_destroy walks values). */
 	http_static_handler_t *m = &sh->mount;
+
 	if (m->url_prefix != NULL) {
 		zend_string_release(m->url_prefix);
 	}
+
 	if (m->root_directory != NULL) {
 		zend_string_release(m->root_directory);
 	}
+
 	if (m->cache_control != NULL) {
 		zend_string_release(m->cache_control);
 	}
+
 	if (m->index_files != NULL) {
 		for (size_t i = 0; i < m->index_count; i++) {
 			if (m->index_files[i] != NULL) {
@@ -391,6 +410,7 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 		}
 		pefree(m->index_files, 1);
 	}
+
 	if (m->hide_globs != NULL) {
 		for (size_t i = 0; i < m->hide_count; i++) {
 			if (m->hide_globs[i] != NULL) {
@@ -399,20 +419,25 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 		}
 		pefree(m->hide_globs, 1);
 	}
+
 	if (m->extra_headers != NULL) {
 		zend_hash_destroy(m->extra_headers);
 		pefree(m->extra_headers, 1);
 	}
+
 	if (m->mime_overrides != NULL) {
 		zend_hash_destroy(m->mime_overrides);
 		pefree(m->mime_overrides, 1);
 	}
+
 	if (m->prebaked_headers_full != NULL) {
 		zend_string_release(m->prebaked_headers_full);
 	}
+
 	if (m->prebaked_headers_no_content != NULL) {
 		zend_string_release(m->prebaked_headers_no_content);
 	}
+
 	pefree(sh, 1);
 }
 

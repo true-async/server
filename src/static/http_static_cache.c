@@ -71,18 +71,22 @@ static void entry_free(entry_t *e)
 	if (e == NULL) {
 		return;
 	}
+
 	if (e->path_key != NULL) {
 		zend_string_release(e->path_key);
 		e->path_key = NULL;
 	}
+
 	if (e->etag != NULL) {
 		pefree(e->etag, 1);
 		e->etag = NULL;
 	}
+
 	if (e->last_modified != NULL) {
 		pefree(e->last_modified, 1);
 		e->last_modified = NULL;
 	}
+
 	pefree(e, 1);
 }
 
@@ -100,11 +104,13 @@ static void lru_unlink(http_static_cache_t *cache, entry_t *e)
 	} else {
 		cache->head = e->next;
 	}
+
 	if (e->next != NULL) {
 		e->next->prev = e->prev;
 	} else {
 		cache->tail = e->prev;
 	}
+
 	e->prev = e->next = NULL;
 }
 
@@ -118,6 +124,7 @@ static void lru_push_head(http_static_cache_t *cache, entry_t *e)
 		/* empty list: new entry is also the tail. */
 		cache->tail = e;
 	}
+
 	cache->head = e;
 }
 
@@ -126,6 +133,7 @@ static void lru_promote(http_static_cache_t *cache, entry_t *e)
 	if (cache->head == e) {
 		return;
 	}
+
 	lru_unlink(cache, e);
 	lru_push_head(cache, e);
 }
@@ -221,6 +229,7 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 	out_view->etag_len = e->etag_len;
 	out_view->last_modified = e->last_modified;
 	out_view->last_modified_len = e->last_modified_len;
+
 	return true;
 }
 
@@ -256,11 +265,13 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 	e->cached_at = time(NULL);
 	e->content_type = content_type;
 	e->content_type_len = content_type_len;
+
 	if (etag != NULL && etag_len > 0) {
 		e->etag = pemalloc(etag_len, 1);
 		memcpy(e->etag, etag, etag_len);
 		e->etag_len = etag_len;
 	}
+
 	if (last_modified != NULL && last_modified_len > 0) {
 		e->last_modified = pemalloc(last_modified_len, 1);
 		memcpy(e->last_modified, last_modified, last_modified_len);
@@ -269,6 +280,7 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 
 	lru_push_head(cache, e);
 	cache->count++;
+
 	/* HashTable takes ownership of the key via the entry pointer
 	 * struct. Release of key happens in entry_free via path_key. */
 	zend_hash_add_ptr(&cache->index, key, e);
