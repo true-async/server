@@ -1671,6 +1671,21 @@ void http_response_static_set_body_str(zend_object *obj, zend_string *body)
     smart_str_0(&r->body);
 }
 
+/* C-string variant — skips the zend_string init/release dance the
+ * static handler used to do for short literal bodies (404 "Not
+ * Found", 500 "Internal Server Error", etc.). Behaviourally
+ * identical to set_body_str: replaces any prior body. */
+void http_response_static_set_body_cstr(zend_object *obj,
+                                        const char *body, size_t body_len)
+{
+    http_response_object *const r = http_response_from_obj(obj);
+    smart_str_free(&r->body);
+    if (body != NULL && body_len > 0) {
+        smart_str_appendl(&r->body, body, body_len);
+    }
+    smart_str_0(&r->body);
+}
+
 void http_response_reset_to_error(zend_object *obj, int status_code, const char *message)
 {
     http_response_object *response = http_response_from_obj(obj);

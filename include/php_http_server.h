@@ -1006,6 +1006,8 @@ void http_response_static_set_header   (zend_object *obj,
                                         const char *name, size_t name_len,
                                         const char *value, size_t value_len);
 void http_response_static_set_body_str (zend_object *obj, zend_string *body);
+void http_response_static_set_body_cstr(zend_object *obj,
+                                        const char *body, size_t body_len);
 
 /* Borrow a pre-rendered "HTTP/1.1 <code> <reason>\r\n" status line.
  * Returns NULL when the code is outside the known table — the caller

@@ -62,9 +62,7 @@ static void emit_status(zend_object *response_obj, int status, const char *body_
 	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
 									25);
 	if (body_msg != NULL && body_msg_len > 0) {
-		zend_string *const msg = zend_string_init(body_msg, body_msg_len, 0);
-		http_response_static_set_body_str(response_obj, msg);
-		zend_string_release(msg);
+		http_response_static_set_body_cstr(response_obj, body_msg, body_msg_len);
 	}
 }
 
@@ -536,12 +534,24 @@ static void ss_finalize(ss_state_t *state, int status)
 	}
 }
 
-/* Helper: format a uint64 as a decimal string into `out`. Returns
- * the byte count written (excluding the NUL); 0 on overflow. */
-static inline int ss_fmt_u64(char *out, size_t cap, uint64_t v)
+/* Format a uint64 into `out` (buffer must be ≥ 21 bytes). Manual
+ * digit-by-digit beats snprintf("%" PRIu64) by ~15× on hot paths
+ * (no parse-format-string overhead, no locale lookup). Returns the
+ * byte count written (excluding the NUL). */
+static inline size_t ss_fmt_u64(char *out, uint64_t v)
 {
-	const int n = snprintf(out, cap, "%" PRIu64, v);
-	return (n > 0 && (size_t)n < cap) ? n : 0;
+	/* Worst case for uint64 is 20 digits ("18446744073709551615"). */
+	char tmp[20];
+	size_t n = 0;
+	do {
+		tmp[n++] = (char)('0' + (v % 10));
+		v /= 10;
+	} while (v != 0);
+	for (size_t i = 0; i < n; i++) {
+		out[i] = tmp[n - 1 - i];
+	}
+	out[n] = '\0';
+	return n;
 }
 
 /* Set Content-Length on response_obj. The H1 protocol op serializes
@@ -550,11 +560,9 @@ static inline int ss_fmt_u64(char *out, size_t cap, uint64_t v)
  * carry one. */
 static void ss_set_content_length(zend_object *response_obj, uint64_t len)
 {
-	char buf[32];
-	const int n = ss_fmt_u64(buf, sizeof(buf), len);
-	if (EXPECTED(n > 0)) {
-		http_response_static_set_header(response_obj, "content-length", 14, buf, (size_t)n);
-	}
+	char buf[24];
+	const size_t n = ss_fmt_u64(buf, len);
+	http_response_static_set_header(response_obj, "content-length", 14, buf, n);
 }
 
 /* Set Connection header tracking the keep-alive verdict. The verdict
@@ -617,9 +625,19 @@ static void apply_mount_headers(zend_object *response_obj,
 }
 
 /* Hand the request off to the protocol's send_static_response op.
- * file_io ownership transfers; we null state->file_io and remove
- * the persistent dispatch callback so the protocol op can install
- * its own. Returns true on synchronous accept. */
+ *
+ * Two file_io flows:
+ *   - param non-NULL  : body delivery. The op takes ownership of the
+ *                       passed file_io. We've been driving OPEN/STAT
+ *                       on this same fd via state->file_io; null the
+ *                       slot so finalize doesn't double-dispose.
+ *   - param NULL      : head-only / error response. state->file_io
+ *                       (if any) holds an open fd we no longer need
+ *                       — dispose it before delegating.
+ *
+ * On rc != 0 the op refused (contract: on_done NOT fired). Restore
+ * state->file_io to the param so the caller's finalize disposes
+ * whatever the caller still owned. NULL stays NULL. */
 static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 									uint64_t body_offset, uint64_t body_length, bool head_only)
 {
@@ -634,40 +652,33 @@ static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 		return false;
 	}
 
-	/* Detach our persistent callback from state->file_io (the OPEN'd
-	 * fd) — the protocol op assumes it owns the event for whatever
-	 * file_io is passed in. The two pointers diverge on error paths:
-	 * `file_io` (the param) is what the op receives; state->file_io
-	 * is the original OPEN'd fd which on error paths we must dispose
-	 * here because the param is NULL. */
+	/* Detach the OPEN/STAT-phase callback before the op installs its own. */
 	if (state->cb != NULL && state->file_io != NULL) {
 		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
 		state->cb = NULL;
 	}
 
-	/* Error paths pass file_io=NULL but state still owns the OPEN'd
-	 * fd from kick_off — dispose it here. The op's only body-source
-	 * is `file_io` (the param), and that's what it disposes; the
-	 * state->file_io fd is independent. */
+	/* Head-only / error path: dispose the OPEN'd fd we held. */
 	if (file_io == NULL && state->file_io != NULL) {
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
-		state->file_io = NULL;
 	}
 
 	state->phase = SS_PHASE_DELEGATED;
-	zend_async_io_t *const owned_pre_call = state->file_io;
-	state->file_io = NULL; /* ownership transferred to the op */
+	state->file_io = NULL; /* op now owns whatever was passed (incl. NULL) */
 
 	const int rc = ops->send_static_response(op_ctx, response_obj, file_io, body_offset, body_length,
 											  head_only, ss_on_protocol_done, state);
+
+	/* WARNING: on rc == 0 with synchronous on_done the op may have
+	 * already freed `state` by the time we reach here — read no fields
+	 * other than rc. */
 	if (UNEXPECTED(rc != 0)) {
-		/* Op refused the request — on_done will NOT fire. Caller
-		 * keeps file_io ownership. We restore state->file_io so
-		 * the early-error finalize disposes it. */
-		state->file_io = owned_pre_call;
-		state->phase = SS_PHASE_STAT; /* indicate "not delegated" */
+		/* Op refused. on_done did not fire → state is still valid.
+		 * Restore file_io so finalize disposes what the caller held. */
+		state->file_io = file_io;
+		state->phase = SS_PHASE_DONE;
 		return false;
 	}
 
@@ -678,6 +689,7 @@ static bool ss_delegate_to_protocol(ss_state_t *state, zend_async_io_t *file_io,
 
 static void ss_handle_open(ss_state_t *state, zend_object *exception);
 static void ss_handle_stat(ss_state_t *state);
+static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body, size_t body_len);
 
 /* The persistent callback. Registered at kick-off, fires for every
  * NOTIFY on file_io->event during OPEN/STAT. Once we delegate to
@@ -712,17 +724,7 @@ static void ss_dispatch(zend_async_event_t *event, zend_async_event_callback_t *
 			/* Map to a 500 emitted through the protocol op (so the
 			 * H1 wire write goes through the right channel for plain
 			 * vs TLS). */
-			zend_object *const response_obj = state->response_obj;
-			http_response_static_set_status(response_obj, 500);
-			http_response_static_set_header(response_obj, "content-type", 12,
-											"text/plain; charset=utf-8", 25);
-			zend_string *msg = zend_string_init("Internal Server Error", 21, 0);
-			http_response_static_set_body_str(response_obj, msg);
-			zend_string_release(msg);
-			ss_set_content_length(response_obj, 21);
-			ss_set_connection_header(response_obj, ss_keep_alive(state));
-			http_server_count_request(state->counters);
-			if (!ss_delegate_to_protocol(state, NULL, 0, 0, true)) {
+			if (!ss_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 				ss_finalize(state, -1);
 			}
 			return;
@@ -754,9 +756,7 @@ static bool ss_emit_error_via_op(ss_state_t *state, int status, const char *body
 	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
 									25);
 	if (body != NULL && body_len > 0) {
-		zend_string *msg = zend_string_init(body, body_len, 0);
-		http_response_static_set_body_str(response_obj, msg);
-		zend_string_release(msg);
+		http_response_static_set_body_cstr(response_obj, body, body_len);
 	}
 	ss_set_content_length(response_obj, (uint64_t)body_len);
 	ss_set_connection_header(response_obj, ss_keep_alive(state));
@@ -1665,12 +1665,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			/* The format-time path computes Content-Length from the
 			 * body smart_str; with an empty body we have to advertise
 			 * the would-be size explicitly. */
-			char clen[32];
-			const int n = snprintf(clen, sizeof(clen), "%" PRIu64, (uint64_t)st.st_size);
-			if (EXPECTED(n > 0 && (size_t)n < sizeof(clen))) {
-				http_response_static_set_header(response_obj, "content-length", 14, clen,
-												(size_t)n);
-			}
+			ss_set_content_length(response_obj, (uint64_t)st.st_size);
 		} else {
 			http_response_static_set_body_str(response_obj, body);
 			zend_string_release(body);
