@@ -36,6 +36,8 @@
 #include "static/http_static_path.h"
 #include "static/http_static_etag.h"
 #include "static/http_static_cache.h"
+#include "compression/http_compression_negotiate.h"
+#include "compression/http_encoder.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -419,6 +421,19 @@ typedef struct {
     char                 cached_lm_buf[HTTP_STATIC_DATE_BUF_LEN];
     const char          *cached_content_type;
     size_t               cached_content_type_len;
+
+    /* Precompressed sidecar support (issue #13 PR #4). When the
+     * pre-flight selects a `.gz` / `.br` / `.zst` sibling that
+     * matches Accept-Encoding, fs_path is rewritten to the sidecar
+     * (so open/sendfile target the compressed bytes) and these
+     * fields carry the *original* file's content type plus the
+     * Content-Encoding token to emit. content_encoding is a static
+     * string ("gzip" / "br" / "zstd") owned by the codec table —
+     * never freed by the FSM. */
+    const char          *override_content_type;
+    size_t               override_content_type_len;
+    const char          *content_encoding;     /* NULL = identity */
+    size_t               content_encoding_len;
 } ss_state_t;
 
 typedef struct {
@@ -644,6 +659,21 @@ static void ss_build_headers(ss_state_t *state, smart_str *out,
     }
     ss_append_header(out, "Last-Modified", 13,
                      last_modified_buf, HTTP_STATIC_DATE_LEN);
+
+    /* Precompressed sidecar served (PR #4): tell intermediaries the
+     * representation depends on Accept-Encoding so a cache that saw
+     * the gzip variant won't replay it to a client that didn't ask
+     * for compression. Vary is added unconditionally on
+     * Content-Encoding-bearing responses; no harm in extra Vary on
+     * the 304 path either. */
+    if (state->content_encoding != NULL && include_content_headers) {
+        ss_append_header(out, "Content-Encoding", 16,
+                         state->content_encoding,
+                         state->content_encoding_len);
+    }
+    if (state->content_encoding != NULL) {
+        ss_append_header(out, "Vary", 4, "Accept-Encoding", 15);
+    }
 
     /* Cache-Control + extra_headers are pre-rendered into one persistent
      * string at freeze-time (#6 in TODO_STATIC_HANDLER_REVIEW). Splice
@@ -936,7 +966,14 @@ static void ss_handle_stat(ss_state_t *state)
             http_static_etag_format(&state->st, etag_buf);
         }
         http_static_format_http_date(state->st.st_mtime, last_modified_buf);
-        if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
+        if (state->override_content_type != NULL) {
+            /* Precompressed sidecar: state->fs_path now points at
+             * "<orig>.gz/.br/.zst", so MIME-by-extension would mis-fire.
+             * Use the type derived from the original path before the
+             * suffix was appended in the pre-flight. */
+            content_type     = state->override_content_type;
+            content_type_len = state->override_content_type_len;
+        } else if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
                                      &content_type, &content_type_len)) {
             content_type     = "application/octet-stream";
             content_type_len = sizeof("application/octet-stream") - 1;
@@ -1241,7 +1278,9 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
                         const http_static_handler_t *mount,
                         const char *fs_path, size_t fs_path_len,
                         const bool is_head,
-                        const http_static_cache_view_t *cv)
+                        const http_static_cache_view_t *cv,
+                        const char *encoding, size_t encoding_len,
+                        const char *override_ct, size_t override_ct_len)
 {
     if (UNEXPECTED(fs_path_len + 1 >= PATH_MAX)) {
         return false;
@@ -1257,6 +1296,15 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     memcpy(state->fs_path, fs_path, fs_path_len);
     state->fs_path[fs_path_len] = '\0';
     state->fs_path_len = fs_path_len;
+
+    if (encoding != NULL && encoding_len > 0) {
+        state->content_encoding     = encoding;
+        state->content_encoding_len = encoding_len;
+    }
+    if (override_ct != NULL && override_ct_len > 0) {
+        state->override_content_type     = override_ct;
+        state->override_content_type_len = override_ct_len;
+    }
 
     if (cv != NULL) {
         /* Trust-within-TTL: every metadata field needed past stat is
@@ -1336,6 +1384,87 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     }
 
     return true;
+}
+
+/* Precompressed sidecar selection (issue #13 PR #4). Picks a `.zst` /
+ * `.br` / `.gz` sibling next to `fs_path` if (a) the mount opted in via
+ * enablePrecompressed for that encoding, (b) the request's
+ * Accept-Encoding lists it (via the existing http_compression_negotiate
+ * machinery — same q-prio + identity-only-by-default behaviour as the
+ * dynamic compression path), and (c) the file actually exists.
+ *
+ * On success: rewrites *fs_path_buf to "<original>.<suffix>", sets
+ * *fs_path_len to the new length, and writes the codec token (literal
+ * "gzip" / "br" / "zstd" — owned by the codec table) into
+ * *out_encoding. Caller passes both into ss_kick_off so the FSM serves
+ * the compressed bytes but emits the original Content-Type plus
+ * Content-Encoding.
+ *
+ * On no-match: returns false, leaves fs_path untouched. The caller
+ * proceeds to serve the original file. */
+static bool try_select_precompressed(const http_static_handler_t *mount,
+                                     http_request_t *request,
+                                     char *fs_path_buf, size_t buf_cap,
+                                     size_t *fs_path_len,
+                                     const char **out_encoding,
+                                     size_t *out_encoding_len)
+{
+    if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR
+                       | HTTP_STATIC_FLAG_PRECOMP_GZIP
+                       | HTTP_STATIC_FLAG_PRECOMP_ZSTD)) == 0) {
+        return false;
+    }
+
+    const zend_string *ae = find_request_header(request, "accept-encoding", 15);
+    if (ae == NULL) return false;
+
+    http_accept_encoding_t parsed;
+    http_accept_encoding_parse(ZSTR_VAL(ae), ZSTR_LEN(ae), &parsed);
+
+    /* Server preference: zstd > brotli > gzip. Mirrors the dynamic
+     * compression path's negotiate(). identity_acceptable doesn't gate
+     * us — we always have the original file as the identity fallback. */
+    static const struct {
+        uint32_t    flag;
+        const char *suffix;
+        size_t      suffix_len;
+        const char *token;
+        size_t      token_len;
+    } codecs[] = {
+        { HTTP_STATIC_FLAG_PRECOMP_ZSTD,   ".zst", 4, "zstd", 4 },
+        { HTTP_STATIC_FLAG_PRECOMP_BR,     ".br",  3, "br",   2 },
+        { HTTP_STATIC_FLAG_PRECOMP_GZIP,   ".gz",  3, "gzip", 4 },
+    };
+    const bool acceptable[] = {
+        parsed.zstd_acceptable,
+        parsed.brotli_acceptable,
+        parsed.gzip_acceptable,
+    };
+
+    for (size_t i = 0; i < sizeof(codecs)/sizeof(codecs[0]); i++) {
+        if ((mount->flags & codecs[i].flag) == 0) continue;
+        if (!acceptable[i]) continue;
+
+        if (UNEXPECTED(*fs_path_len + codecs[i].suffix_len + 1 > buf_cap)) {
+            continue;
+        }
+        char candidate[PATH_MAX];
+        memcpy(candidate, fs_path_buf, *fs_path_len);
+        memcpy(candidate + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
+        candidate[*fs_path_len + codecs[i].suffix_len] = '\0';
+
+        struct stat st;
+        if (stat(candidate, &st) != 0) continue;
+        if (!S_ISREG(st.st_mode)) continue;
+
+        memcpy(fs_path_buf + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
+        *fs_path_len += codecs[i].suffix_len;
+        fs_path_buf[*fs_path_len] = '\0';
+        *out_encoding     = codecs[i].token;
+        *out_encoding_len = codecs[i].token_len;
+        return true;
+    }
+    return false;
 }
 
 http_static_result_t http_static_try_serve(http_server_object *server,
@@ -1477,6 +1606,37 @@ http_static_result_t http_static_try_serve(http_server_object *server,
          * detaches state and hands ctx over to a regular PHP-handler
          * coroutine, so on_missing:Next mounts also ride this path on
          * the success path (#5c). */
+        /* Precompressed sidecar (PR #4): if the mount opted in via
+         * enablePrecompressed and the client lists a matching coding
+         * in Accept-Encoding, swap fs_path to the .gz/.br/.zst sibling
+         * before cache lookup. On a hit-flow this means subsequent
+         * lookups for the same compressed variant skip the sidecar
+         * stat too — the cache key is the rewritten path. The MIME
+         * type stays derived from the original (computed pre-rewrite
+         * and carried as override_ct so ss_handle_stat doesn't redo
+         * the lookup against the .gz extension). */
+        const char *picked_encoding = NULL;
+        size_t      picked_encoding_len = 0;
+        const char *override_ct = NULL;
+        size_t      override_ct_len = 0;
+        if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR
+                           | HTTP_STATIC_FLAG_PRECOMP_GZIP
+                           | HTTP_STATIC_FLAG_PRECOMP_ZSTD)) != 0) {
+            const char *pre_ct     = NULL;
+            size_t      pre_ct_len = 0;
+            if (!http_static_mime_lookup(mount, fs_path, fs_path_len,
+                                         &pre_ct, &pre_ct_len)) {
+                pre_ct     = "application/octet-stream";
+                pre_ct_len = sizeof("application/octet-stream") - 1;
+            }
+            if (try_select_precompressed(mount, request, fs_path,
+                                         sizeof(fs_path), &fs_path_len,
+                                         &picked_encoding, &picked_encoding_len)) {
+                override_ct     = pre_ct;
+                override_ct_len = pre_ct_len;
+            }
+        }
+
         http_static_cache_t *cache = http_static_cache_acquire(server);
         bool gate_ok;
         bool have_view = false;
@@ -1503,7 +1663,9 @@ http_static_result_t http_static_try_serve(http_server_object *server,
         }
         if (gate_ok) {
             if (ss_kick_off(conn, ctx, mount, fs_path, fs_path_len, is_head,
-                            have_view ? &cv : NULL)) {
+                            have_view ? &cv : NULL,
+                            picked_encoding, picked_encoding_len,
+                            override_ct, override_ct_len)) {
                 return HTTP_STATIC_HARD_ZERO;
             }
         }
