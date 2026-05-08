@@ -2214,6 +2214,10 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long(return_value, "stream_bytes_sent_total",
                    (zend_long)server->counters.stream_bytes_sent_total);
 
+    /* StaticHandler hard-zero hit counter (issue #13). */
+    add_assoc_long(return_value, "static_zero_coroutine_total",
+                   (zend_long)server->counters.static_zero_coroutine_total);
+
     /* HTTP/2 stream-level telemetry. */
     add_assoc_long(return_value, "h2_streams_active",
                    (zend_long)server->counters.h2_streams_active);
@@ -2242,6 +2246,7 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     server->counters.total_requests = 0;
+    server->counters.static_zero_coroutine_total = 0;
     server->sojourn_sum_ns       = 0;
     server->service_sum_ns       = 0;
     server->sojourn_max_ns       = 0;

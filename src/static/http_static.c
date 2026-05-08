@@ -855,6 +855,13 @@ static bool ss_kick_off(http_connection_t *conn, http1_request_ctx_t *ctx,
     conn->state = CONN_STATE_PROCESSING;
     http_server_on_request_dispatch(conn->counters);
 
+    /* Telemetry — see http_server_counters_t::static_zero_coroutine_total.
+     * Counted on commit (we hold the refcount), not on completion: the
+     * sendfile may still ENOENT-rollback for on_missing:Next mounts, but
+     * the kick-off itself is the metric's anchor (cache-friendly path
+     * was selected). */
+    http_server_on_static_zero_coroutine(conn->counters);
+
     /* Cork now so the headers write (about to be queued from
      * ss_handle_stat) and the subsequent sendfile bytes coalesce on
      * the wire. Uncorked unconditionally in ss_finalize. */

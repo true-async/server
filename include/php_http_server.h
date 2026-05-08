@@ -647,6 +647,12 @@ typedef struct {
      * http_server_count_request() helper hits one cache line shared with
      * the rest of the hot counters. Read by getStats / __debugInfo. */
     uint64_t total_requests;
+
+    /* StaticHandler hard-zero hits — bumped on every successful
+     * ss_kick_off (issue #13). Hard-zero is the open → stat → headers
+     * → sendfile → close chain that bypasses the PHP coroutine entirely;
+     * the counter shows the cache-friendly fast path's hit rate. */
+    uint64_t static_zero_coroutine_total;
 } http_server_counters_t;
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
@@ -731,6 +737,10 @@ static zend_always_inline void http_server_on_stream_send(http_server_counters_t
 static zend_always_inline void http_server_on_stream_backpressure(http_server_counters_t *c)
 {
     c->stream_send_backpressure_events_total++;
+}
+static zend_always_inline void http_server_on_static_zero_coroutine(http_server_counters_t *c)
+{
+    c->static_zero_coroutine_total++;
 }
 
 static zend_always_inline void http_server_on_h2_stream_opened(http_server_counters_t *c)

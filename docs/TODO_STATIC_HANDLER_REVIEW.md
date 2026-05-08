@@ -150,7 +150,14 @@ Acceptance: under `tc qdisc add dev lo root netem delay 50ms` plus
 small TCP send buffer, hammer with `wrk -c 1 -d 30 /static/big.bin` and
 verify response bytes are byte-identical to the file in 10/10 runs.
 
-### 4. ~~Suspected callback leak~~ → false alarm; valgrind verification only
+### ~~4. valgrind verification~~ ✅ done
+
+All 6 static PHPTs (001-006) run clean under
+`TEST_PHP_ARGS=-m make test`: 0 tests leaked. Confirms the new freeze
++ shared-snapshot lifecycle, the on_missing:Next rollback, and the
+fs_path emalloc switch all release cleanly.
+
+### 4. (original) ~~Suspected callback leak~~ → false alarm; valgrind verification only
 
 **Original suspicion was that `del_callback` only unhooks the callback
 without disposing it, so `event.dispose` later wouldn't free our `cb`.
@@ -527,11 +534,13 @@ With `root="/"` (root_len=1), `canonical="/etc/passwd"` has
 These are listed in the plan's Acceptance checklist as outstanding;
 fold them into this task file so they don't get lost:
 
-- `If-Modified-Since` past mtime → 304 (parser is implemented; PHPT
-  only covers `If-None-Match`). Add a phpt under `tests/phpt/server/static/`.
-- Telemetry counter `static_zero_coroutine_total` — needs the counter
-  itself plus a PHPT that hits a static URL and asserts the counter
-  bumped.
+- ~~`If-Modified-Since` past mtime → 304~~ ✅ — covered by
+  `tests/phpt/server/static/005-static-if-modified-since.phpt`.
+- ~~Telemetry counter `static_zero_coroutine_total`~~ ✅ — counter
+  added to `http_server_counters_t`, bumped on every successful
+  `ss_kick_off`, exposed via `getTelemetry()`, reset by
+  `resetTelemetry()`. Test:
+  `tests/phpt/server/static/006-static-zero-coroutine-counter.phpt`.
 - `wrk -c 256 -t 4 -d 30 /static/main.css` baseline vs `entry.php` map.
   Numbers need to land in the plan or in a new BENCH.md so the "5-15%
   gain" claim has evidence.
