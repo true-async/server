@@ -68,6 +68,7 @@ void http2_stream_release(http2_stream_t *stream)
     if (stream == NULL) {
         return;
     }
+
     if (--stream->refcount > 0) {
         return;
     }
@@ -85,6 +86,7 @@ void http2_stream_release(http2_stream_t *stream)
                 zend_string_release(stream->chunk_queue[i]);
             }
         }
+
         efree(stream->chunk_queue);
         stream->chunk_queue = NULL;
     }
@@ -95,9 +97,11 @@ void http2_stream_release(http2_stream_t *stream)
     if (stream->write_event != NULL) {
         zend_async_event_t *ev =
             &((zend_async_trigger_event_t *)stream->write_event)->base;
+
         if (ev->dispose != NULL) {
             ev->dispose(ev);
         }
+
         stream->write_event = NULL;
     }
 

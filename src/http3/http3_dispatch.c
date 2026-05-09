@@ -55,6 +55,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
 
     http_server_object *server =
         (http_server_object *)http3_listener_server_obj(c->listener);
+
     if (server == NULL) {
         return;          /* unit-test path — no PHP context to dispatch into */
     }
@@ -67,9 +68,11 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * registered only via addHttp2Handler still services H3. Symmetric
      * to how H2 strategy resolves it. */
     zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+
     if (fcall == NULL) {
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
     }
+
     if (fcall == NULL || scope == NULL) {
         return;
     }
@@ -83,18 +86,22 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * independently; the request is freed on the last release. */
     s->dispatched = true;
     s->conn = c;
+
     if (http_server_view(server)->telemetry_enabled) {
         http_request_parse_trace_context(s->request);
     }
+
     http_request_addref(s->request);
 
     zval *req_obj = http_request_create_from_parsed(s->request);
+
     if (req_obj == NULL) {
         /* PHP-side ownership transfer failed — release the addref. */
         http_request_destroy(s->request);
         s->dispatched = false;
         return;
     }
+
     ZVAL_COPY_VALUE(&s->request_zv, req_obj);
     efree(req_obj);
 
@@ -118,6 +125,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
         http_server_object *srv =
             (http_server_object *)http3_listener_server_obj(c->listener);
         http_server_config_t *cfg = http_server_get_config(srv);
+
         if (cfg != NULL) {
             http_compression_attach(Z_OBJ(s->response_zv),
                                     s->request, cfg);
@@ -132,12 +140,14 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * the same QUIC connection get N independent (request, response)
      * zval pairs. */
     zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(scope);
+
     if (co == NULL) {
         zval_ptr_dtor(&s->request_zv);  ZVAL_UNDEF(&s->request_zv);
         zval_ptr_dtor(&s->response_zv); ZVAL_UNDEF(&s->response_zv);
         s->dispatched = false;
         return;
     }
+
     co->internal_entry   = h3_handler_coroutine_entry;
     co->extended_data    = s;
     co->extended_dispose = h3_handler_coroutine_dispose;
@@ -151,6 +161,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_server_on_request_dispatch(s->conn->counters);
 
     s->request->coroutine   = co;
+
     if (http_server_sample_stamps_enabled(s->conn->view)) {
         s->request->enqueue_ns  = zend_hrtime();
     }
@@ -162,20 +173,24 @@ static void h3_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
+
     if (s == NULL || s->conn == NULL) return;
 
     http_server_object *server =
         (http_server_object *)http3_listener_server_obj(s->conn->listener);
     const bool stamps = http_server_sample_stamps_enabled(s->conn->view);
+
     if (s->request != NULL && stamps) {
         s->request->start_ns = zend_hrtime();
     }
 
     HashTable *handlers = http_server_get_protocol_handlers(server);
     zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+
     if (fcall == NULL) {
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
     }
+
     if (fcall == NULL) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -187,12 +202,14 @@ static void h3_handler_coroutine_entry(void)
         extern void http_response_set_error(zend_object *, int, const char *);
         http_server_config_t *cfg = http_server_get_config(server);
         int dec = http_compression_decode_request_body(s->request, cfg);
+
         if (dec != 0) {
             http_response_set_error(Z_OBJ(s->response_zv), dec,
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
             http_server_count_request(s->conn->counters);
+
             if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
             return;
         }
@@ -220,10 +237,12 @@ static void h3_handler_coroutine_entry(void)
     {
         zend_call_function(&fci, &fcall->fci_cache);
     }
+
     zend_catch
     {
         bailout = true;
     }
+
     zend_end_try();
 
     if (UNEXPECTED(bailout)) {
@@ -241,6 +260,7 @@ static void h3_handler_coroutine_entry(void)
      * and the sample call are gated on sample_stamps_enabled;
      * total_requests is still bumped. */
     http_server_count_request(s->conn->counters);
+
     if (s->request != NULL && server != NULL && stamps) {
         s->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
@@ -249,12 +269,14 @@ static void h3_handler_coroutine_entry(void)
             s->request->end_ns   - s->request->start_ns,
             s->request->end_ns);
     }
+
     zval_ptr_dtor(&retval);
 }
 
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http3_stream_t *s = (http3_stream_t *)coroutine->extended_data;
+
     if (s == NULL) return;
 
     /* Break back-pointers BEFORE doing anything else — a peer
@@ -263,6 +285,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * disposing. Same order as the H1/H2 dispose paths. */
     coroutine->extended_data = NULL;
     s->coroutine = NULL;
+
     if (s->request != NULL) s->request->coroutine = NULL;
 
     http3_connection_t *c = s->conn;
@@ -280,6 +303,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_reset_to_error(Z_OBJ(s->response_zv), 500,
                                      "Internal Server Error");
     }
+
     if (!Z_ISUNDEF(s->response_zv)
         && !http_response_is_committed(Z_OBJ(s->response_zv))) {
         http_response_set_committed(Z_OBJ(s->response_zv));
@@ -297,6 +321,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * single-slice body submit_response now. */
     const bool is_streaming = !Z_ISUNDEF(s->response_zv)
                               && http_response_is_streaming(Z_OBJ(s->response_zv));
+
     if (c != NULL && !c->closed && c->nghttp3_conn != NULL
         && !Z_ISUNDEF(s->response_zv)) {
         if (is_streaming) {
@@ -318,6 +343,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         zval_ptr_dtor(&s->request_zv);
         ZVAL_UNDEF(&s->request_zv);
     }
+
     if (!Z_ISUNDEF(s->response_zv)) {
         zval_ptr_dtor(&s->response_zv);
         ZVAL_UNDEF(&s->response_zv);
@@ -341,6 +367,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         c->drain_pending       = r.drain_pending;
         c->drain_not_before_ns = r.drain_not_before_ns;
         c->drain_epoch_seen    = r.drain_epoch_seen;
+
         if (r.should_drain) {
             (void)nghttp3_conn_shutdown((nghttp3_conn *)c->nghttp3_conn);
             c->drain_submitted = true;

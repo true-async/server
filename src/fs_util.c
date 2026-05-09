@@ -21,11 +21,13 @@ zend_string *fs_slurp_fd(const int fd, const size_t expected_size)
 	if (expected_size == 0) {
 		return ZSTR_EMPTY_ALLOC();
 	}
+
 	zend_string *out = zend_string_alloc(expected_size, 0);
 	size_t total = 0;
 
 	while (total < expected_size) {
 		const ssize_t n = read(fd, ZSTR_VAL(out) + total, expected_size - total);
+
 		if (EXPECTED(n > 0)) {
 			total += (size_t)n;
 			continue;

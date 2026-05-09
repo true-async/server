@@ -767,27 +767,35 @@ const http_server_view_t *http_server_view(const http_server_object *server);
 static inline uint32_t http_server_get_protocol_mask(const http_server_object *server) {
     return http_server_view(server)->protocol_mask;
 }
+
 static inline uint32_t http_server_get_write_timeout_s(const http_server_object *server) {
     return http_server_view(server)->write_timeout_s;
 }
+
 static inline uint32_t http_server_get_stream_write_buffer_bytes(const http_server_object *server) {
     return http_server_view(server)->stream_write_buffer_bytes;
 }
+
 static inline uint64_t http_server_get_drain_epoch_current(const http_server_object *server) {
     return http_server_view(server)->drain_epoch_current;
 }
+
 static inline uint32_t http_server_get_http3_idle_timeout_ms(const http_server_object *server) {
     return http_server_view(server)->http3_idle_timeout_ms;
 }
+
 static inline uint32_t http_server_get_http3_stream_window_bytes(const http_server_object *server) {
     return http_server_view(server)->http3_stream_window_bytes;
 }
+
 static inline uint32_t http_server_get_http3_max_concurrent_streams(const http_server_object *server) {
     return http_server_view(server)->http3_max_concurrent_streams;
 }
+
 static inline uint32_t http_server_get_http3_peer_connection_budget(const http_server_object *server) {
     return http_server_view(server)->http3_peer_connection_budget;
 }
+
 static inline bool http_server_get_http3_alt_svc_enabled(const http_server_object *server) {
     return http_server_view(server)->http3_alt_svc_enabled;
 }
@@ -799,23 +807,28 @@ static zend_always_inline void http_server_on_streaming_response_started(http_se
 {
     c->streaming_responses_total++;
 }
+
 static zend_always_inline void http_server_on_stream_send(http_server_counters_t *c, size_t bytes)
 {
     c->stream_send_calls_total++;
     c->stream_bytes_sent_total += bytes;
 }
+
 static zend_always_inline void http_server_on_stream_backpressure(http_server_counters_t *c)
 {
     c->stream_send_backpressure_events_total++;
 }
+
 static zend_always_inline void http_server_on_static_zero_coroutine(http_server_counters_t *c)
 {
     c->static_zero_coroutine_total++;
 }
+
 static zend_always_inline void http_server_on_static_cache_hit(http_server_counters_t *c)
 {
     c->static_cache_hits_total++;
 }
+
 static zend_always_inline void http_server_on_static_cache_miss(http_server_counters_t *c)
 {
     c->static_cache_misses_total++;
@@ -826,30 +839,37 @@ static zend_always_inline void http_server_on_h2_stream_opened(http_server_count
     c->h2_streams_active++;
     c->h2_streams_opened_total++;
 }
+
 static zend_always_inline void http_server_on_h2_stream_closed(http_server_counters_t *c)
 {
     if (c->h2_streams_active > 0) c->h2_streams_active--;
 }
+
 static zend_always_inline void http_server_on_h2_ping_rtt(http_server_counters_t *c, uint64_t rtt_ns)
 {
     c->h2_ping_rtt_ns = rtt_ns;
 }
+
 static zend_always_inline void http_server_on_h2_stream_reset_by_peer(http_server_counters_t *c)
 {
     c->h2_streams_reset_by_peer_total++;
 }
+
 static zend_always_inline void http_server_on_h2_goaway_recv(http_server_counters_t *c)
 {
     c->h2_goaway_recv_total++;
 }
+
 static zend_always_inline void http_server_on_h2_goaway_sent(http_server_counters_t *c)
 {
     c->h2_goaway_sent_total++;
 }
+
 static zend_always_inline void http_server_on_h2_data_recv(http_server_counters_t *c, size_t bytes)
 {
     c->h2_data_recv_bytes_total += bytes;
 }
+
 static zend_always_inline void http_server_on_h2_data_sent(http_server_counters_t *c, size_t bytes)
 {
     c->h2_data_sent_bytes_total += bytes;
@@ -859,6 +879,7 @@ static zend_always_inline void http_server_on_h1_connection_close_sent(http_serv
 {
     c->h1_connection_close_sent_total++;
 }
+
 static zend_always_inline void http_server_on_h3_goaway_sent(http_server_counters_t *c)
 {
     c->h3_goaway_sent_total++;
@@ -868,13 +889,16 @@ static zend_always_inline void http_server_on_request_dispatch(http_server_count
 {
     c->active_requests++;
 }
+
 static zend_always_inline void http_server_on_request_dispose(http_server_counters_t *c)
 {
     if (c->active_requests > 0) c->active_requests--;
 }
+
 static zend_always_inline void http_server_on_request_shed(http_server_counters_t *c, bool is_h2)
 {
     c->requests_shed_total++;
+
     if (is_h2) c->h2_streams_refused_total++;
 }
 

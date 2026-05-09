@@ -49,6 +49,7 @@ http_static_handler_t *http_static_handler_from_obj(zend_object *obj)
 	if (obj == NULL || obj->ce != http_static_handler_ce) {
 		return NULL;
 	}
+
 	return &http_static_handler_php_from_obj(obj)->mount;
 }
 
@@ -70,6 +71,7 @@ static inline bool handler_check_locked(const http_static_handler_t *mount)
 							 "Cannot modify StaticHandler after attachment to HttpServer", 0);
 		return true;
 	}
+
 	return false;
 }
 
@@ -122,6 +124,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 	}
 
 	zend_stat_t sb;
+
 	if (VCWD_STAT(ZSTR_VAL(path), &sb) != 0) {
 		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
 								"StaticHandler root directory not found: %s", ZSTR_VAL(path));
@@ -136,6 +139,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 	}
 
 	char resolved[MAXPATHLEN];
+
 	if (VCWD_REALPATH(ZSTR_VAL(path), resolved) == NULL) {
 		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
 								"StaticHandler root directory cannot be canonicalised: %s",
@@ -149,6 +153,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 	 * would silently make the mount unusable for every request. Better
 	 * to fail loudly at attach time (#15 in TODO_STATIC_HANDLER_REVIEW). */
 	const size_t resolved_len = strlen(resolved);
+
 	if (UNEXPECTED(resolved_len == 1 && resolved[0] == '/')) {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler root directory must not be '/'", 0);
@@ -183,6 +188,7 @@ void http_static_handler_descriptor_destroy(http_static_handler_t *mount)
 		for (size_t i = 0; i < mount->index_count; i++) {
 			zend_string_release(mount->index_files[i]);
 		}
+
 		efree(mount->index_files);
 		mount->index_files = NULL;
 		mount->index_count = 0;
@@ -192,6 +198,7 @@ void http_static_handler_descriptor_destroy(http_static_handler_t *mount)
 		for (size_t i = 0; i < mount->hide_count; i++) {
 			zend_string_release(mount->hide_globs[i]);
 		}
+
 		efree(mount->hide_globs);
 		mount->hide_globs = NULL;
 		mount->hide_count = 0;
@@ -231,6 +238,7 @@ static zend_string *zstr_dup_persistent(const zend_string *src)
 	if (src == NULL || ZSTR_LEN(src) == 0) {
 		return NULL;
 	}
+
 	return zend_string_init(ZSTR_VAL(src), ZSTR_LEN(src), /*persistent*/ 1);
 }
 
@@ -251,15 +259,19 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 		for (size_t i = 0; i < draft->index_count; i++) {
 			m->index_files[i] = zstr_dup_persistent(draft->index_files[i]);
 		}
+
 		m->index_count = draft->index_count;
 	}
+
 	if (draft->hide_count > 0) {
 		m->hide_globs = pemalloc(sizeof(zend_string *) * draft->hide_count, 1);
 		for (size_t i = 0; i < draft->hide_count; i++) {
 			m->hide_globs[i] = zstr_dup_persistent(draft->hide_globs[i]);
 		}
+
 		m->hide_count = draft->hide_count;
 	}
+
 	if (draft->extra_headers != NULL && zend_hash_num_elements(draft->extra_headers) > 0) {
 		m->extra_headers = pemalloc(sizeof(HashTable), 1);
 		zend_hash_init(m->extra_headers, zend_hash_num_elements(draft->extra_headers), NULL,
@@ -271,14 +283,17 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 			if (k == NULL || Z_TYPE_P(v) != IS_STRING) {
 				continue;
 			}
+
 			zend_string *pk = zstr_dup_persistent(k);
 			zval entry;
 			ZVAL_STR(&entry, zstr_dup_persistent(Z_STR_P(v)));
 			zend_hash_update(m->extra_headers, pk, &entry);
 			zend_string_release(pk);
 		}
+
 		ZEND_HASH_FOREACH_END();
 	}
+
 	if (draft->mime_overrides != NULL && zend_hash_num_elements(draft->mime_overrides) > 0) {
 		m->mime_overrides = pemalloc(sizeof(HashTable), 1);
 		zend_hash_init(m->mime_overrides, zend_hash_num_elements(draft->mime_overrides), NULL,
@@ -290,12 +305,14 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 			if (k == NULL || Z_TYPE_P(v) != IS_STRING) {
 				continue;
 			}
+
 			zend_string *pk = zstr_dup_persistent(k);
 			zval entry;
 			ZVAL_STR(&entry, zstr_dup_persistent(Z_STR_P(v)));
 			zend_hash_update(m->mime_overrides, pk, &entry);
 			zend_string_release(pk);
 		}
+
 		ZEND_HASH_FOREACH_END();
 	}
 
@@ -317,6 +334,7 @@ void http_static_handler_shared_addref(http_static_handler_t *mount)
 	if (mount == NULL) {
 		return;
 	}
+
 	zend_atomic_int_fetch_add(&shared_from_mount(mount)->ref_count, 1);
 }
 
@@ -325,6 +343,7 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 	if (mount == NULL) {
 		return;
 	}
+
 	http_static_handler_shared_t *sh = shared_from_mount(mount);
 	/* fetch_sub returns the prior value. */
 	if (zend_atomic_int_fetch_sub(&sh->ref_count, 1) != 1) {
@@ -354,6 +373,7 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 				zend_string_release(m->index_files[i]);
 			}
 		}
+
 		pefree(m->index_files, 1);
 	}
 
@@ -363,6 +383,7 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 				zend_string_release(m->hide_globs[i]);
 			}
 		}
+
 		pefree(m->hide_globs, 1);
 	}
 
@@ -395,7 +416,9 @@ ZEND_METHOD(TrueAsync_StaticHandler, __construct)
 	if (!validate_url_prefix(url_prefix)) {
 		return;
 	}
+
 	zend_string *root = canonicalise_root_directory(root_directory);
+
 	if (root == NULL) {
 		return;
 	}
@@ -431,6 +454,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setIndexFiles)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -442,12 +466,15 @@ ZEND_METHOD(TrueAsync_StaticHandler, setIndexFiles)
 								 "StaticHandler index files must be strings", 0);
 			return;
 		}
+
 		const zend_string *s = Z_STR(args[i]);
+
 		if (ZSTR_LEN(s) == 0) {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler index file name must not be empty", 0);
 			return;
 		}
+
 		if (memchr(ZSTR_VAL(s), '/', ZSTR_LEN(s)) != NULL) {
 			zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
 									"StaticHandler index file name must not contain '/': %s",
@@ -460,6 +487,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setIndexFiles)
 		for (size_t i = 0; i < mount->index_count; i++) {
 			zend_string_release(mount->index_files[i]);
 		}
+
 		efree(mount->index_files);
 		mount->index_files = NULL;
 		mount->index_count = 0;
@@ -470,6 +498,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setIndexFiles)
 		for (uint32_t i = 0; i < argc; i++) {
 			mount->index_files[i] = zend_string_copy(Z_STR(args[i]));
 		}
+
 		mount->index_count = argc;
 	}
 
@@ -480,6 +509,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, disableIndex)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -488,6 +518,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, disableIndex)
 		for (size_t i = 0; i < mount->index_count; i++) {
 			zend_string_release(mount->index_files[i]);
 		}
+
 		efree(mount->index_files);
 		mount->index_files = NULL;
 		mount->index_count = 0;
@@ -505,6 +536,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setOnMissing)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -531,6 +563,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, enablePrecompressed)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -542,7 +575,9 @@ ZEND_METHOD(TrueAsync_StaticHandler, enablePrecompressed)
 								 "StaticHandler precompressed encoding name must be a string", 0);
 			return;
 		}
+
 		const zend_string *s = Z_STR(args[i]);
+
 		if (zend_string_equals_literal(s, "br")) {
 			enabled_bits |= HTTP_STATIC_FLAG_PRECOMP_BR;
 		} else if (zend_string_equals_literal(s, "gzip")) {
@@ -567,6 +602,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, disablePrecompressed)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -586,6 +622,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setDotfilePolicy)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -621,6 +658,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setSymlinkPolicy)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -657,6 +695,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, hide)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -667,6 +706,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, hide)
 								 "StaticHandler hide pattern must be a string", 0);
 			return;
 		}
+
 		if (Z_STRLEN(args[i]) == 0) {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler hide pattern must not be empty", 0);
@@ -675,6 +715,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, hide)
 	}
 
 	const size_t new_count = mount->hide_count + argc;
+
 	if (new_count > 0) {
 		mount->hide_globs = mount->hide_globs
 								? erealloc(mount->hide_globs, sizeof(zend_string *) * new_count)
@@ -682,6 +723,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, hide)
 		for (uint32_t i = 0; i < argc; i++) {
 			mount->hide_globs[mount->hide_count + i] = zend_string_copy(Z_STR(args[i]));
 		}
+
 		mount->hide_count = new_count;
 	}
 
@@ -697,6 +739,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setEtagEnabled)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -722,6 +765,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setOpenFileCache)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -732,6 +776,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setOpenFileCache)
 			"StaticHandler::setOpenFileCache(): maxEntries must be between 0 and INT32_MAX", 0);
 		return;
 	}
+
 	if (ttl_seconds < 0 || ttl_seconds > INT32_MAX) {
 		zend_throw_exception(
 			http_server_invalid_argument_exception_ce,
@@ -750,9 +795,11 @@ ZEND_METHOD(TrueAsync_StaticHandler, disableOpenFileCache)
 	ZEND_PARSE_PARAMETERS_NONE();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
+
 	mount->cache_max_entries = 0;
 	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -766,6 +813,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setCacheControl)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -775,6 +823,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setCacheControl)
 	 * response split if an operator concatenated user input here. */
 	for (size_t i = 0; i < ZSTR_LEN(value); i++) {
 		const unsigned char c = (unsigned char)ZSTR_VAL(value)[i];
+
 		if (c == '\r' || c == '\n' || c == '\0') {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler cache-control value contains a control character",
@@ -787,6 +836,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setCacheControl)
 		zend_string_release(mount->cache_control);
 		mount->cache_control = NULL;
 	}
+
 	if (ZSTR_LEN(value) > 0) {
 		mount->cache_control = zend_string_copy(value);
 	}
@@ -805,6 +855,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setHeader)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -819,14 +870,17 @@ ZEND_METHOD(TrueAsync_StaticHandler, setHeader)
 	 * by upstream parsers. */
 	for (size_t i = 0; i < ZSTR_LEN(name); i++) {
 		const unsigned char c = (unsigned char)ZSTR_VAL(name)[i];
+
 		if (c < 0x20 || c == 0x7f || c == ':') {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler header name contains an invalid character", 0);
 			return;
 		}
 	}
+
 	for (size_t i = 0; i < ZSTR_LEN(value); i++) {
 		const unsigned char c = (unsigned char)ZSTR_VAL(value)[i];
+
 		if (c == '\r' || c == '\n' || c == '\0') {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler header value contains a control character", 0);
@@ -857,6 +911,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setBrowseEnabled)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -881,6 +936,7 @@ ZEND_METHOD(TrueAsync_StaticHandler, setMimeType)
 	ZEND_PARSE_PARAMETERS_END();
 
 	http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (handler_check_locked(mount)) {
 		return;
 	}
@@ -890,18 +946,22 @@ ZEND_METHOD(TrueAsync_StaticHandler, setMimeType)
 							 "StaticHandler MIME extension must not be empty", 0);
 		return;
 	}
+
 	if (ZSTR_VAL(extension)[0] == '.') {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler MIME extension must not include the leading '.'", 0);
 		return;
 	}
+
 	if (ZSTR_LEN(content_type) == 0) {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler content type must not be empty", 0);
 		return;
 	}
+
 	for (size_t i = 0; i < ZSTR_LEN(content_type); i++) {
 		const unsigned char c = (unsigned char)ZSTR_VAL(content_type)[i];
+
 		if (c == '\r' || c == '\n' || c == '\0') {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler content type contains a control character", 0);
@@ -927,9 +987,11 @@ ZEND_METHOD(TrueAsync_StaticHandler, getUrlPrefix)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 	const http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (mount->url_prefix == NULL) {
 		RETURN_EMPTY_STRING();
 	}
+
 	RETURN_STR_COPY(mount->url_prefix);
 }
 
@@ -937,9 +999,11 @@ ZEND_METHOD(TrueAsync_StaticHandler, getRootDirectory)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 	const http_static_handler_t *mount = Z_HTTP_STATIC_HANDLER_P(ZEND_THIS);
+
 	if (mount->root_directory == NULL) {
 		RETURN_EMPTY_STRING();
 	}
+
 	RETURN_STR_COPY(mount->root_directory);
 }
 

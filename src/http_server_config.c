@@ -178,14 +178,17 @@ static zend_string *http_compression_normalize_mime(const char *src, size_t len)
         if (src[i] == ';') { end = i; break; }
     }
     while (end > 0 && (src[end - 1] == ' ' || src[end - 1] == '\t')) end--;
+
     if (end == 0) return NULL;
 
     zend_string *out = zend_string_alloc(end, 0);
     for (size_t i = 0; i < end; i++) {
         char c = src[i];
+
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         ZSTR_VAL(out)[i] = c;
     }
+
     ZSTR_VAL(out)[end] = '\0';
     return out;
 }
@@ -226,6 +229,7 @@ static inline bool config_check_locked(const http_server_config_t *config)
             "Cannot modify HttpServerConfig after server has started", 0);
         return true;
     }
+
     return false;
 }
 
@@ -240,11 +244,13 @@ static inline bool config_validate_timeout(zend_long timeout)
             "Timeout cannot be negative", 0);
         return false;
     }
+
     if ((zend_ulong)timeout > UINT32_MAX) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Timeout is too large (max ~136 years in seconds)", 0);
         return false;
     }
+
     return true;
 }
 
@@ -264,11 +270,13 @@ static inline bool config_validate_timeout_positive(zend_long timeout)
             "not 'disabled'.", 0);
         return false;
     }
+
     if ((zend_ulong)timeout > UINT32_MAX) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Timeout is too large (max ~136 years in seconds)", 0);
         return false;
     }
+
     return true;
 }
 
@@ -283,22 +291,26 @@ static inline bool config_validate_readable_file(const zend_string *path,
                                                  const char *label)
 {
     zend_stat_t sb;
+
     if (VCWD_STAT(ZSTR_VAL(path), &sb) != 0) {
         zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
             "%s not found or not accessible: %s", label, ZSTR_VAL(path));
         return false;
     }
+
     if (!S_ISREG(sb.st_mode)) {
         zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
             "%s must be a regular file: %s", label, ZSTR_VAL(path));
         return false;
     }
+
     if (VCWD_ACCESS(ZSTR_VAL(path), R_OK) != 0) {
         zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
             "%s is not readable by the current process: %s",
             label, ZSTR_VAL(path));
         return false;
     }
+
     return true;
 }
 
@@ -368,6 +380,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
                 "Port must be between 1 and 65535", 0);
             return;
         }
+
         config_add_listener(config, LISTENER_TYPE_TCP, host, (int)port, false,
                             HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
     }
@@ -710,14 +723,17 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxInflightRequests)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) {
         return;
     }
+
     if (n < 0) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Max in-flight requests cannot be negative", 0);
         return;
     }
+
     config->max_inflight_requests = (size_t)n;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -946,6 +962,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnectionAgeMs)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (ms < 0 || (ms > 0 && ms < 1000)) {
@@ -953,6 +970,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnectionAgeMs)
             "MaxConnectionAge must be 0 (disabled) or >= 1000 ms", 0);
         return;
     }
+
     config->max_connection_age_ms = (uint32_t)ms;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -980,6 +998,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnectionAgeGraceMs)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (ms < 0 || (ms > 0 && ms < 1000)) {
@@ -987,6 +1006,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnectionAgeGraceMs)
             "MaxConnectionAgeGrace must be 0 (infinite) or >= 1000 ms", 0);
         return;
     }
+
     config->max_connection_age_grace_ms = (uint32_t)ms;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1013,6 +1033,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setDrainSpreadMs)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (ms < 100) {
@@ -1020,6 +1041,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setDrainSpreadMs)
             "DrainSpread must be >= 100 ms", 0);
         return;
     }
+
     config->drain_spread_ms = (uint32_t)ms;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1045,6 +1067,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setDrainCooldownMs)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (ms < 1000) {
@@ -1052,6 +1075,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setDrainCooldownMs)
             "DrainCooldown must be >= 1000 ms", 0);
         return;
     }
+
     config->drain_cooldown_ms = (uint32_t)ms;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1083,6 +1107,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (bytes < STREAM_WRITE_BUFFER_MIN_BYTES
@@ -1091,6 +1116,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes)
             "StreamWriteBufferBytes must be between 4096 and 67108864", 0);
         return;
     }
+
     config->stream_write_buffer_bytes = (uint32_t)bytes;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1119,6 +1145,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxBodySize)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (bytes < (zend_long)MAX_BODY_SIZE_MIN
@@ -1127,6 +1154,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxBodySize)
             "MaxBodySize must be between 1024 and 17179869184 (16 GiB)", 0);
         return;
     }
+
     config->max_body_size = (size_t)bytes;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1166,6 +1194,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (ms < 0) {
@@ -1173,11 +1202,13 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs)
             "Http3IdleTimeoutMs cannot be negative", 0);
         return;
     }
+
     if ((zend_ulong)ms > UINT32_MAX) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Http3IdleTimeoutMs is too large (max UINT32_MAX ms ~49 days)", 0);
         return;
     }
+
     config->http3_idle_timeout_ms = (uint32_t)ms;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1207,6 +1238,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3StreamWindowBytes)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (bytes < (zend_long)HTTP3_STREAM_WINDOW_MIN_BYTES
@@ -1215,6 +1247,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3StreamWindowBytes)
             "Http3StreamWindowBytes must be between 1024 and 1073741824 (1 GiB)", 0);
         return;
     }
+
     config->http3_stream_window_bytes = (uint32_t)bytes;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1243,6 +1276,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3MaxConcurrentStreams)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (n < 1 || (zend_ulong)n > HTTP3_MAX_CONCURRENT_STREAMS_MAX) {
@@ -1250,6 +1284,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3MaxConcurrentStreams)
             "Http3MaxConcurrentStreams must be between 1 and 1000000", 0);
         return;
     }
+
     config->http3_max_concurrent_streams = (uint32_t)n;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1279,6 +1314,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) { return; }
 
     if (n < 1 || (zend_ulong)n > HTTP3_PEER_BUDGET_MAX) {
@@ -1286,6 +1322,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget)
             "Http3PeerConnectionBudget must be between 1 and 4096", 0);
         return;
     }
+
     config->http3_peer_connection_budget = (uint32_t)n;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1317,9 +1354,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) {
         return;
     }
+
     config->http3_alt_svc_enabled = enable;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1348,6 +1387,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -1380,6 +1420,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -1389,6 +1430,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel)
             HTTP_COMPRESSION_LEVEL_MIN, HTTP_COMPRESSION_LEVEL_MAX);
         return;
     }
+
     config->compression_level = (uint8_t)level;
 #else
     (void)level;
@@ -1422,6 +1464,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setBrotliLevel)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -1432,6 +1475,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setBrotliLevel)
             HTTP_COMPRESSION_BROTLI_LEVEL_MIN, HTTP_COMPRESSION_BROTLI_LEVEL_MAX);
         return;
     }
+
     config->brotli_level = (uint8_t)level;
 #else
     (void)level;
@@ -1461,6 +1505,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setZstdLevel)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -1471,6 +1516,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setZstdLevel)
             HTTP_COMPRESSION_ZSTD_LEVEL_MIN, HTTP_COMPRESSION_ZSTD_LEVEL_MAX);
         return;
     }
+
     config->zstd_level = (uint8_t)level;
 #else
     (void)level;
@@ -1503,6 +1549,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setJsonEncodeFlags)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
     if (flags < 0 || flags > UINT32_MAX) {
@@ -1510,6 +1557,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setJsonEncodeFlags)
             "JSON encode flags must fit in 32 bits", 0);
         return;
     }
+
     config->json_encode_flags = (uint32_t)flags;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1555,6 +1603,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -1564,6 +1613,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMinSize)
             (unsigned)HTTP_COMPRESSION_MIN_SIZE_MAX);
         return;
     }
+
     config->compression_min_size = (size_t)bytes;
 #else
     (void)bytes;
@@ -1588,6 +1638,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMimeTypes)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -1605,14 +1656,17 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionMimeTypes)
                 "Compression MIME types must be strings", 0);
             return;
         }
+
         zend_string *norm = http_compression_normalize_mime(
             Z_STRVAL_P(entry), Z_STRLEN_P(entry));
+
         if (norm == NULL) {
             zend_hash_destroy(&staged);
             zend_throw_exception(http_server_invalid_argument_exception_ce,
                 "Compression MIME type is empty after stripping parameters", 0);
             return;
         }
+
         zval one;
         ZVAL_TRUE(&one);
         zend_hash_update(&staged, norm, &one);
@@ -1646,6 +1700,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getCompressionMimeTypes)
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
 
     array_init(return_value);
+
     if (config->compression_mime_types) {
         zend_string *key;
         ZEND_HASH_FOREACH_STR_KEY(config->compression_mime_types, key) {
@@ -1665,6 +1720,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setRequestMaxDecompressedSize)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
     if (config_check_locked(config)) return;
 
     if (bytes < 0) {
@@ -1673,6 +1729,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setRequestMaxDecompressedSize)
             "(0 = no cap, must be explicit)", 0);
         return;
     }
+
     config->request_max_decompressed_size = (size_t)bytes;
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -1883,6 +1940,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCertificate)
     if (config->tls_cert_path) {
         zend_string_release(config->tls_cert_path);
     }
+
     config->tls_cert_path = zend_string_copy(path);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -1898,6 +1956,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getCertificate)
     if (config->tls_cert_path) {
         RETURN_STR_COPY(config->tls_cert_path);
     }
+
     RETURN_NULL();
 }
 /* }}} */
@@ -1924,6 +1983,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setPrivateKey)
     if (config->tls_key_path) {
         zend_string_release(config->tls_key_path);
     }
+
     config->tls_key_path = zend_string_copy(path);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -1939,6 +1999,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getPrivateKey)
     if (config->tls_key_path) {
         RETURN_STR_COPY(config->tls_key_path);
     }
+
     RETURN_NULL();
 }
 /* }}} */
@@ -2019,6 +2080,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getLogSeverity)
     zend_result rc = zend_enum_get_case_by_value(&case_obj, http_log_severity_ce,
                                                  (zend_long)config->log_severity,
                                                  NULL, /* try_from */ false);
+
     if (rc != SUCCESS || case_obj == NULL) {
         /* Unreachable — log_severity is only ever assigned a sanctioned
          * enum value by setLogSeverity, and the default is OFF. */
@@ -2026,6 +2088,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getLogSeverity)
             "Internal: log severity value has no matching enum case", 0);
         return;
     }
+
     GC_ADDREF(case_obj);
     RETURN_OBJ(case_obj);
 }
@@ -2064,6 +2127,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setLogStream)
     /* Reject non-stream resources (curl handles, sockets, etc.). */
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
+
     if (stream == NULL) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "setLogStream() expects a php_stream resource (got "
@@ -2086,6 +2150,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getLogStream)
     if (Z_TYPE(config->log_stream) == IS_UNDEF) {
         RETURN_NULL();
     }
+
     ZVAL_COPY(return_value, &config->log_stream);
 }
 /* }}} */
@@ -2203,6 +2268,7 @@ static void http_server_config_free(zend_object *obj)
                 zend_string_release(config->listeners[i].host);
             }
         }
+
         efree(config->listeners);
     }
 
@@ -2288,6 +2354,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->compression_min_size          = src->compression_min_size;
     shared->request_max_decompressed_size = src->request_max_decompressed_size;
     shared->json_encode_flags             = src->json_encode_flags;
+
     if (src->compression_mime_types && zend_hash_num_elements(src->compression_mime_types) > 0) {
         size_t n = zend_hash_num_elements(src->compression_mime_types);
         shared->compression_mime_types = pecalloc(n, sizeof(zend_string *), 1);
@@ -2310,6 +2377,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
             ZSTR_VAL(src->tls_cert_path), ZSTR_LEN(src->tls_cert_path), 1);
         GC_MAKE_PERSISTENT_LOCAL(shared->tls_cert_path);
     }
+
     if (src->tls_key_path) {
         shared->tls_key_path = zend_string_init(
             ZSTR_VAL(src->tls_key_path), ZSTR_LEN(src->tls_key_path), 1);
@@ -2324,6 +2392,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
             shared->listeners[i].port          = src->listeners[i].port;
             shared->listeners[i].tls           = src->listeners[i].tls;
             shared->listeners[i].protocol_mask = src->listeners[i].protocol_mask;
+
             if (src->listeners[i].host) {
                 shared->listeners[i].host = zend_string_init(
                     ZSTR_VAL(src->listeners[i].host),
@@ -2364,12 +2433,15 @@ static void http_server_shared_config_release(http_server_shared_config_t *share
             zend_string_release_ex(shared->listeners[i].host, 1);
         }
     }
+
     if (shared->listeners) {
         pefree(shared->listeners, 1);
     }
+
     if (shared->tls_cert_path) {
         zend_string_release_ex(shared->tls_cert_path, 1);
     }
+
     if (shared->tls_key_path) {
         zend_string_release_ex(shared->tls_key_path, 1);
     }
@@ -2380,6 +2452,7 @@ static void http_server_shared_config_release(http_server_shared_config_t *share
                 zend_string_release_ex(shared->compression_mime_types[i], 1);
             }
         }
+
         pefree(shared->compression_mime_types, 1);
     }
 
@@ -2428,6 +2501,7 @@ static void http_server_config_populate_from_shared(
     dst->compression_min_size          = src->compression_min_size;
     dst->request_max_decompressed_size = src->request_max_decompressed_size;
     dst->json_encode_flags             = src->json_encode_flags;
+
     if (dst->compression_mime_types) {
         /* create_object pre-populated this with defaults; replace with the
          * actual locked snapshot. */
@@ -2446,6 +2520,7 @@ static void http_server_config_populate_from_shared(
         dst->tls_cert_path = zend_string_init(
             ZSTR_VAL(src->tls_cert_path), ZSTR_LEN(src->tls_cert_path), 0);
     }
+
     if (src->tls_key_path) {
         dst->tls_key_path = zend_string_init(
             ZSTR_VAL(src->tls_key_path), ZSTR_LEN(src->tls_key_path), 0);
@@ -2460,6 +2535,7 @@ static void http_server_config_populate_from_shared(
             dst->listeners[i].port          = src->listeners[i].port;
             dst->listeners[i].tls           = src->listeners[i].tls;
             dst->listeners[i].protocol_mask = src->listeners[i].protocol_mask;
+
             if (src->listeners[i].host) {
                 dst->listeners[i].host = zend_string_init(
                     ZSTR_VAL(src->listeners[i].host),
@@ -2501,6 +2577,7 @@ static zend_object *http_server_config_transfer_obj(
         }
 
         zend_object *dst = default_fn(object, ctx, sizeof(http_server_config_t));
+
         if (UNEXPECTED(dst == NULL)) {
             return NULL;
         }
@@ -2525,6 +2602,7 @@ static zend_object *http_server_config_transfer_obj(
     }
 
     zend_object *dst = default_fn(object, ctx, 0);
+
     if (UNEXPECTED(dst == NULL)) {
         return NULL;
     }

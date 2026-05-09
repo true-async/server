@@ -58,11 +58,13 @@ static void timer_fire_cb(zend_async_event_t *event,
     (void)event; (void)result; (void)exception;
     http3_timer_cb_t *tcb = (http3_timer_cb_t *)cb;
     http3_connection_t *c = tcb->conn;
+
     if (c == NULL || c->closed) {
         return;
     }
 
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
     if (stats != NULL) {
         stats->quic_timer_fired++;
     }
@@ -94,6 +96,7 @@ static void timer_fire_cb(zend_async_event_t *event,
     if (http3_connection_check_terminal(c)) {
         return;
     }
+
     if (rv == 0) {
         http3_connection_arm_timer(c);
     }
@@ -110,6 +113,7 @@ void http3_connection_detach_timer(http3_connection_t *c)
             c->timer->del_callback(c->timer, c->timer_cb);
             c->timer_cb = NULL;
         }
+
         c->timer->stop(c->timer);
         c->timer->dispose(c->timer);
         c->timer = NULL;
@@ -123,6 +127,7 @@ void http3_connection_arm_timer(http3_connection_t *c)
     }
 
     ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry((ngtcp2_conn *)c->ngtcp2_conn);
+
     if (expiry == UINT64_MAX) {
         /* ngtcp2 has nothing scheduled — drop any stale timer. */
         http3_connection_detach_timer(c);
@@ -152,6 +157,7 @@ void http3_connection_arm_timer(http3_connection_t *c)
 
     zend_async_event_t *timer =
         (zend_async_event_t *)ZEND_ASYNC_NEW_TIMER_EVENT_NS(ms, ns_rem, /*periodic*/ false);
+
     if (timer == NULL) {
         return;
     }
@@ -162,10 +168,12 @@ void http3_connection_arm_timer(http3_connection_t *c)
 
     http3_timer_cb_t *tcb = (http3_timer_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
         timer_fire_cb, sizeof(http3_timer_cb_t));
+
     if (UNEXPECTED(tcb == NULL)) {
         timer->dispose(timer);
         return;
     }
+
     tcb->conn = c;
 
     if (UNEXPECTED(!timer->add_callback(timer, &tcb->base))) {
@@ -283,6 +291,7 @@ void http3_connection_drain_out(http3_connection_t *c)
                 (nghttp3_conn *)c->nghttp3_conn,
                 &h3_stream_id, &h3_fin,
                 h3_vec, sizeof(h3_vec) / sizeof(h3_vec[0]));
+
             if (h3_veccnt < 0) {
                 /* nghttp3 hit an unrecoverable framing error. Bump the
                  * counter once, latch the dead-flag so we don't loop
@@ -329,8 +338,10 @@ void http3_connection_drain_out(http3_connection_t *c)
                     (nghttp3_conn *)c->nghttp3_conn,
                     h3_stream_id, (size_t)pdatalen);
             }
+
             continue;
         }
+
         if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED || n == NGTCP2_ERR_STREAM_SHUT_WR) {
             /* Flow-control or half-closed write side. Pause the stream
              * so nghttp3 stops handing us data on it until ngtcp2
@@ -339,8 +350,10 @@ void http3_connection_drain_out(http3_connection_t *c)
                 nghttp3_conn_block_stream(
                     (nghttp3_conn *)c->nghttp3_conn, h3_stream_id);
             }
+
             continue;
         }
+
         if (n == 0) {
             /* No outgoing datagram produced. If nghttp3 had data ready
              * and ngtcp2 still produced nothing, ack the bytes anyway
@@ -351,14 +364,17 @@ void http3_connection_drain_out(http3_connection_t *c)
                     h3_stream_id, (size_t)pdatalen);
                 continue;
             }
+
             H3_FLUSH_BATCH();
             break;
         }
+
         if (n < 0) {
             if (stats != NULL) stats->quic_write_error++;
             H3_FLUSH_BATCH();
             break;
         }
+
         if (c->nghttp3_conn != NULL && pdatalen > 0) {
             nghttp3_conn_add_write_offset(
                 (nghttp3_conn *)c->nghttp3_conn,
@@ -372,6 +388,7 @@ void http3_connection_drain_out(http3_connection_t *c)
          * (cmsg(IP_TOS) is per-sendmsg) — flush eagerly if it changes. */
         size_t pkt_len = (size_t)n;
         uint8_t pkt_ecn = pi.ecn;
+
         if (batch_count == 0) {
             seg_size  = pkt_len;
             batch_off = pkt_len;
@@ -430,6 +447,7 @@ void http3_connection_emit_close(http3_connection_t *c)
     if (c == NULL || c->sent_connection_close || c->ngtcp2_conn == NULL) {
         return;
     }
+
     ngtcp2_conn *qc = (ngtcp2_conn *)c->ngtcp2_conn;
 
     /* Already in draining: peer told us. Per ngtcp2 docs we MUST NOT emit
@@ -440,6 +458,7 @@ void http3_connection_emit_close(http3_connection_t *c)
     }
 
     ngtcp2_ccerr ccerr;
+
     if (c->nghttp3_conn != NULL) {
         ngtcp2_ccerr_set_application_error(
             &ccerr, NGHTTP3_H3_NO_ERROR, NULL, 0);
@@ -465,6 +484,7 @@ void http3_connection_emit_close(http3_connection_t *c)
      * produce (pre-handshake / already-in-closing-without-buffered-pkt),
      * which is fine: we still want to skip the second emit on teardown. */
     c->sent_connection_close = true;
+
     if (n <= 0) {
         return;
     }
@@ -472,6 +492,7 @@ void http3_connection_emit_close(http3_connection_t *c)
     (void)http3_listener_send_packet(c->listener, buf, (size_t)n, pi.ecn,
         (const struct sockaddr *)&c->peer, c->peer_len);
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
     if (stats != NULL) {
         stats->quic_connection_close_sent++;
         stats->quic_packets_sent++;
@@ -487,10 +508,13 @@ void http3_connection_reap(http3_connection_t *conn)
     if (conn == NULL || conn->closed) {
         return;
     }
+
     http3_packet_stats_t *stats = http3_listener_packet_stats(conn->listener);
+
     if (stats != NULL) {
         stats->quic_conn_reaped++;
     }
+
     http3_listener_remove_connection(conn->listener, conn);
     http3_connection_free(conn);
 }
@@ -504,15 +528,19 @@ bool http3_connection_check_terminal(http3_connection_t *c)
     if (c == NULL || c->closed || c->ngtcp2_conn == NULL) {
         return c == NULL || c->closed;
     }
+
     ngtcp2_conn *qc = (ngtcp2_conn *)c->ngtcp2_conn;
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
     bool draining = ngtcp2_conn_in_draining_period(qc);
     bool closing  = ngtcp2_conn_in_closing_period(qc);
+
     if (!draining && !closing) {
         return false;
     }
+
     if (stats != NULL) {
         if (closing)  stats->quic_conn_in_closing++;
+
         if (draining) stats->quic_conn_in_draining++;
     }
     /* Closing period: re-emit the close packet so retransmits are

@@ -94,10 +94,12 @@ static void merge_vary_accept_encoding(HashTable *ht)
     const size_t      AE_LEN = sizeof(AE) - 1;
 
     zval *existing = zend_hash_str_find(ht, V, sizeof(V) - 1);
+
     if (existing == NULL) {
         put_header_string(ht, V, sizeof(V) - 1, AE, AE_LEN);
         return;
     }
+
     if (EXPECTED(Z_TYPE_P(existing) == IS_STRING)) {
         const char *cur = Z_STRVAL_P(existing);
         const size_t      cl  = Z_STRLEN_P(existing);
@@ -150,6 +152,7 @@ static bool request_header_value(const http_request_t *req,
 {
     if (UNEXPECTED(req == NULL || req->headers == NULL)) return false;
     const zval *zv = zend_hash_str_find(req->headers, lower_name, lower_len);
+
     if (zv == NULL || Z_TYPE_P(zv) != IS_STRING) return false;
     *out_val = Z_STRVAL_P(zv);
     *out_len = Z_STRLEN_P(zv);
@@ -171,6 +174,7 @@ static size_t response_content_type(const HashTable *resp_headers,
                                     char *buf, size_t buf_cap)
 {
     const zval *zv = zend_hash_str_find(resp_headers, "content-type", 12);
+
     if (zv == NULL || Z_TYPE_P(zv) != IS_STRING) return 0;
     return http_compression_mime_normalize(
         Z_STRVAL_P(zv), Z_STRLEN_P(zv), buf, buf_cap);
@@ -197,13 +201,16 @@ static http_codec_id_t decide(http_compression_state_t *st,
     if (request_has_header(st->request, "range", 5)) {
         return HTTP_CODEC_IDENTITY;
     }
+
     const char *ae_val = NULL; size_t ae_len = 0;
     http_accept_encoding_t ae;
+
     if (request_header_value(st->request, "accept-encoding", 15, &ae_val, &ae_len)) {
         http_accept_encoding_parse(ae_val, ae_len, &ae);
     } else {
         http_accept_encoding_init_default(&ae);
     }
+
     http_codec_id_t chosen = http_accept_encoding_select(&ae);
     /* select() may return ZSTD, BROTLI, GZIP, IDENTITY, or COUNT. Anything
      * other than a real encodable codec falls back to identity — the 406
@@ -217,11 +224,13 @@ static http_codec_id_t decide(http_compression_state_t *st,
 
     /* --- response side --- */
     const int status = http_response_get_status(response_obj);
+
     if (status < 200 || status == 204 || status == 304) {
         return HTTP_CODEC_IDENTITY;
     }
 
     HashTable *resp_h = http_response_get_headers(response_obj);
+
     if (resp_h && has_header(resp_h, "content-encoding", 16)) {
         /* Handler already set its own coding (e.g. precompressed asset).
          * Don't double-encode. */
@@ -237,9 +246,11 @@ static http_codec_id_t decide(http_compression_state_t *st,
      * (whitelist semantics: compress only what we explicitly know is safe). */
     char ct_buf[128];
     const size_t ct_len = response_content_type(resp_h, ct_buf, sizeof(ct_buf));
+
     if (ct_len == 0) {
         return HTTP_CODEC_IDENTITY;
     }
+
     if (st->cfg->compression_mime_types == NULL ||
         !zend_hash_str_exists(st->cfg->compression_mime_types, ct_buf, ct_len)) {
         return HTTP_CODEC_IDENTITY;
@@ -269,13 +280,16 @@ void http_compression_attach(zend_object *response_obj,
                              http_server_config_t *cfg)
 {
     if (response_obj == NULL || cfg == NULL) return;
+
     if (!cfg->compression_enabled) return;
 
     http_compression_state_t *st = state_of(response_obj);
+
     if (st == NULL) {
         st = ecalloc(1, sizeof(*st));
         http_response_set_compression_slot(response_obj, st);
     }
+
     st->request = request;
     st->cfg     = cfg;
 }
@@ -283,13 +297,17 @@ void http_compression_attach(zend_object *response_obj,
 void http_compression_state_free(zend_object *response_obj)
 {
     http_compression_state_t *st = state_of(response_obj);
+
     if (st == NULL) return;
+
     if (st->encoder && st->encoder->vt && st->encoder->vt->destroy) {
         st->encoder->vt->destroy(st->encoder);
     }
+
     if (st->wrapper_ctx) {
         efree(st->wrapper_ctx);
     }
+
     efree(st);
     http_response_set_compression_slot(response_obj, NULL);
 }
@@ -298,12 +316,14 @@ void http_compression_mark_no_compression(zend_object *response_obj)
 {
     if (response_obj == NULL) return;
     http_compression_state_t *st = state_of(response_obj);
+
     if (st == NULL) {
         /* Allocate even without attach so the flag persists if attach
          * later discovers an enabled config (rare; safer than dropping). */
         st = ecalloc(1, sizeof(*st));
         http_response_set_compression_slot(response_obj, st);
     }
+
     st->no_compression = true;
 }
 
@@ -312,6 +332,7 @@ void http_compression_mark_no_compression(zend_object *response_obj)
 void http_compression_apply_buffered(zend_object *response_obj)
 {
     http_compression_state_t *st = state_of(response_obj);
+
     if (st == NULL || st->applied || st->wrapper_installed) {
         /* st->wrapper_installed: streaming path — body not used. */
         return;
@@ -328,8 +349,10 @@ void http_compression_apply_buffered(zend_object *response_obj)
     }
 
     const http_encoder_vtable_t *vt = http_compression_lookup(codec);
+
     if (UNEXPECTED(vt == NULL)) return;
     http_encoder_t *enc = vt->create(level_for_codec(st->cfg, codec));
+
     if (UNEXPECTED(enc == NULL)) return;
 
     /* Pre-size for the worst-case output: gzip overhead on text is
@@ -347,16 +370,19 @@ void http_compression_apply_buffered(zend_object *response_obj)
      * iteration so the common single-pass case is one alloc. */
     while (fed < body_len) {
         size_t avail = out.a - ZSTR_LEN(out.s);
+
         if (UNEXPECTED(avail < 64)) {
             smart_str_alloc(&out, 4096, 0);
             avail = out.a - ZSTR_LEN(out.s);
         }
+
         size_t consumed = 0, produced = 0;
         const http_encoder_status_t s = vt->write(enc,
             in + fed, body_len - fed, &consumed,
             ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
         ZSTR_LEN(out.s) += produced;
         fed             += consumed;
+
         if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
             vt->destroy(enc);
             smart_str_free(&out);
@@ -368,21 +394,26 @@ void http_compression_apply_buffered(zend_object *response_obj)
     /* finish() drain — emits gzip trailer (CRC32 + ISIZE). */
     for (;;) {
         size_t avail = out.a - ZSTR_LEN(out.s);
+
         if (UNEXPECTED(avail < 32)) {
             smart_str_alloc(&out, 64, 0);
             avail = out.a - ZSTR_LEN(out.s);
         }
+
         size_t produced = 0;
         const http_encoder_status_t s = vt->finish(enc,
             ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
         ZSTR_LEN(out.s) += produced;
+
         if (EXPECTED(s == HTTP_ENC_DONE))   break;
+
         if (s == HTTP_ENC_NEED_OUTPUT)      continue;
         /* Error mid-finish — abort, keep original body. */
         vt->destroy(enc);
         smart_str_free(&out);
         return;
     }
+
     vt->destroy(enc);
     smart_str_0(&out);
 
@@ -419,6 +450,7 @@ static int forward_compressed(ws_ctx_t *w, zend_string *zs)
         if (zs) zend_string_release(zs);
         return HTTP_STREAM_APPEND_OK;
     }
+
     return w->underlying_ops->append_chunk(w->underlying_ctx, zs);
 }
 
@@ -452,16 +484,19 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
     size_t fed = 0;
     while (fed < in_len) {
         size_t avail = out.a - ZSTR_LEN(out.s);
+
         if (UNEXPECTED(avail < 64)) {
             smart_str_alloc(&out, 4096, 0);
             avail = out.a - ZSTR_LEN(out.s);
         }
+
         size_t consumed = 0, produced = 0;
         const http_encoder_status_t s = w->encoder->vt->write(w->encoder,
             in + fed, in_len - fed, &consumed,
             ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
         ZSTR_LEN(out.s) += produced;
         fed             += consumed;
+
         if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
             smart_str_free(&out);
             zend_string_release(chunk);
@@ -469,6 +504,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
         }
         /* HTTP_ENC_OK with all input consumed → loop exits. */
     }
+
     zend_string_release(chunk);
 
     if (out.s == NULL || ZSTR_LEN(out.s) == 0) {
@@ -476,6 +512,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
         smart_str_free(&out);
         return HTTP_STREAM_APPEND_OK;
     }
+
     smart_str_0(&out);
     return forward_compressed(w, out.s);  /* transfers ownership */
 }
@@ -500,24 +537,30 @@ static void ws_mark_ended(void *ctx_opaque)
     smart_str_alloc(&out, 64, 0);
     for (;;) {
         size_t avail = out.a - ZSTR_LEN(out.s);
+
         if (UNEXPECTED(avail < 32)) {
             smart_str_alloc(&out, 4096, 0);
             avail = out.a - ZSTR_LEN(out.s);
         }
+
         size_t produced = 0;
         const http_encoder_status_t s = w->encoder->vt->finish(
             w->encoder, ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
         ZSTR_LEN(out.s) += produced;
+
         if (EXPECTED(s == HTTP_ENC_DONE))   break;
+
         if (s == HTTP_ENC_NEED_OUTPUT)      continue;
         break;  /* error — fall through, still close the underlying stream */
     }
+
     if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
         smart_str_0(&out);
         (void)forward_compressed(w, out.s);  /* transfers ownership */
     } else {
         smart_str_free(&out);
     }
+
     w->underlying_ops->mark_ended(w->underlying_ctx);
 }
 
@@ -536,22 +579,27 @@ static const http_response_stream_ops_t compressing_stream_ops = {
 void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
 {
     http_compression_state_t *st = state_of(response_obj);
+
     if (st == NULL || st->wrapper_installed) return;
 
     /* Streaming path: size unknown → pass 0 to skip the threshold check.
      * decide() only ever returns IDENTITY or one of the encodable codecs,
      * so a single inequality is enough to short-circuit. */
     const http_codec_id_t codec = decide(st, response_obj, 0);
+
     if (codec == HTTP_CODEC_IDENTITY) return;
 
     const http_encoder_vtable_t *vt = http_compression_lookup(codec);
+
     if (UNEXPECTED(vt == NULL)) return;
     http_encoder_t *enc = vt->create(level_for_codec(st->cfg, codec));
+
     if (UNEXPECTED(enc == NULL)) return;
 
     const http_response_stream_ops_t *under_ops =
         http_response_get_stream_ops(response_obj);
     void *under_ctx = http_response_get_stream_ctx(response_obj);
+
     if (under_ops == NULL) {
         /* No underlying ops to wrap — abort cleanly. */
         vt->destroy(enc);

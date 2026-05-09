@@ -88,9 +88,11 @@ static uint64_t now_realtime_ns(void)
     return t * 100ULL;
 #else
     struct timespec ts;
+
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
         return (uint64_t)time(NULL) * 1000000000ULL;
     }
+
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
@@ -110,6 +112,7 @@ size_t http_log_format_plain(const http_log_record_t *rec,
                              char *buf, size_t buf_len, void *ud)
 {
     (void)ud;
+
     if (buf_len < 2) {
         return 0;
     }
@@ -133,10 +136,13 @@ size_t http_log_format_plain(const http_log_record_t *rec,
                           ts, severity_text(rec->severity),
                           (int)rec->body_len,
                           rec->body != NULL ? rec->body : "");
+
     if (prefix < 0) {
         return 0;
     }
+
     size_t written = (size_t)prefix;
+
     if (written >= buf_len) {
         written = buf_len - 1;
     }
@@ -167,10 +173,13 @@ size_t http_log_format_plain(const http_log_record_t *rec,
                              a->key, a->v.f64);
                 break;
         }
+
         if (n < 0) {
             break;
         }
+
         written += (size_t)n;
+
         if (written >= buf_len) {
             written = buf_len - 1;
             break;
@@ -180,9 +189,11 @@ size_t http_log_format_plain(const http_log_record_t *rec,
     if (written < buf_len - 1) {
         buf[written++] = '\n';
     }
+
     if (written < buf_len) {
         buf[written] = '\0';
     }
+
     return written;
 }
 
@@ -191,9 +202,11 @@ size_t http_log_format_plain(const http_log_record_t *rec,
 static void emit_fallback_stderr(http_log_state_t *state, const char *reason)
 {
     uint64_t now_sec = now_realtime_ns() / 1000000000ULL;
+
     if (state == NULL || now_sec == state->last_fallback_sec) {
         return;
     }
+
     state->last_fallback_sec = now_sec;
     fprintf(stderr, "http_server log sink failed: %s, dropped=%llu\n",
             reason != NULL ? reason : "(unknown)",
@@ -222,16 +235,20 @@ static void writer_complete_cb(
     }
 
     zend_async_io_req_t *req = cb->active_req;
+
     if (UNEXPECTED(req->exception != NULL)) {
         if (cb->state != NULL) {
             cb->state->dropped_total++;
         }
+
         emit_fallback_stderr(cb->state, "write completion exception");
         OBJ_RELEASE(req->exception);
         req->exception = NULL;
     }
+
     cb->active_req = NULL;
     req->dispose(req);
+
     if (cb->active_buf != NULL) {
         efree(cb->active_buf);
         cb->active_buf = NULL;
@@ -258,6 +275,7 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
         || cb->pending_len == 0) {
         return;
     }
+
     char  *buf = cb->pending_buf;
     size_t len = cb->pending_len;
 
@@ -267,6 +285,7 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
 
     cb->active_buf = buf;
     cb->active_req = ZEND_ASYNC_IO_WRITE(cb->state->async_io, buf, len);
+
     if (UNEXPECTED(cb->active_req == NULL)) {
         efree(buf);
         cb->active_buf = NULL;
@@ -282,17 +301,21 @@ static void writer_append_pending(http_log_writer_cb_t *cb,
         if (cb->state != NULL) {
             cb->state->dropped_total++;
         }
+
         emit_fallback_stderr(cb->state, "pending overflow");
         return;
     }
+
     if (cb->pending_len + len > cb->pending_cap) {
         size_t new_cap = cb->pending_cap == 0 ? 1024 : cb->pending_cap;
         while (new_cap < cb->pending_len + len) {
             new_cap *= 2;
         }
+
         cb->pending_buf = erealloc(cb->pending_buf, new_cap);
         cb->pending_cap = new_cap;
     }
+
     memcpy(cb->pending_buf + cb->pending_len, src, len);
     cb->pending_len += len;
 }
@@ -302,6 +325,7 @@ static void default_writer(const http_log_record_t *rec, void *ud)
     (void)ud;
     http_log_state_t     *state = rec->state;
     http_log_writer_cb_t *cb    = state->writer_cb;
+
     if (cb == NULL || state->async_io == NULL) {
         /* The state was activated but lost its sink (mid-stop race
          * shouldn't happen single-thread, but defensive). */
@@ -312,6 +336,7 @@ static void default_writer(const http_log_record_t *rec, void *ud)
     http_log_formatter_fn fmt =
         g_formatter != NULL ? g_formatter : http_log_format_plain;
     size_t n = fmt(rec, buf, sizeof buf, g_formatter_ud);
+
     if (n == 0) {
         return;
     }
@@ -327,6 +352,7 @@ static void default_writer(const http_log_record_t *rec, void *ud)
     memcpy(out, buf, n);
     cb->active_buf = out;
     cb->active_req = ZEND_ASYNC_IO_WRITE(state->async_io, out, n);
+
     if (UNEXPECTED(cb->active_req == NULL)) {
         efree(out);
         cb->active_buf = NULL;
@@ -365,9 +391,11 @@ void http_log_emitf(http_log_state_t *state,
     va_start(ap, tmpl);
     int n = vsnprintf(body, sizeof body, tmpl, ap);
     va_end(ap);
+
     if (n < 0) {
         return;
     }
+
     if ((size_t)n >= sizeof body) {
         n = (int)sizeof body - 1;
     }
@@ -438,13 +466,16 @@ void http_log_server_start(http_log_state_t *state,
      * than silently no-op. */
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
+
     if (stream == NULL) {
         state->severity = HTTP_LOG_OFF;
         return;
     }
+
     int fd = -1;
     int rc = php_stream_cast(stream, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
                              (void *)&fd, 0);
+
     if (rc != SUCCESS || fd < 0) {
         fprintf(stderr,
                 "http_server: log stream has no underlying fd; "
@@ -459,6 +490,7 @@ void http_log_server_start(http_log_state_t *state,
         (zend_file_descriptor_t)fd,
         ZEND_ASYNC_IO_TYPE_FILE,
         ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
+
     if (io == NULL) {
         fprintf(stderr,
                 "http_server: failed to wrap log stream fd into async io; "
@@ -470,14 +502,17 @@ void http_log_server_start(http_log_state_t *state,
     http_log_writer_cb_t *cb = (http_log_writer_cb_t *)
         ZEND_ASYNC_EVENT_CALLBACK_EX(writer_complete_cb,
                                      sizeof(http_log_writer_cb_t));
+
     if (cb == NULL) {
         if (io->event.dispose != NULL) {
             io->event.dispose(&io->event);
         }
+
         fprintf(stderr, "http_server: failed to allocate log writer cb\n");
         state->severity = HTTP_LOG_OFF;
         return;
     }
+
     cb->base.dispose = writer_callback_dispose;
     cb->state        = state;
     cb->active_req   = NULL;
@@ -485,11 +520,14 @@ void http_log_server_start(http_log_state_t *state,
     cb->pending_buf  = NULL;
     cb->pending_len  = 0;
     cb->pending_cap  = 0;
+
     if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
         efree(cb);
+
         if (io->event.dispose != NULL) {
             io->event.dispose(&io->event);
         }
+
         fprintf(stderr, "http_server: failed to attach log writer cb\n");
         state->severity = HTTP_LOG_OFF;
         return;
@@ -540,14 +578,17 @@ void http_log_server_stop(http_log_state_t *state)
     if (state->writer_cb != NULL) {
         http_log_writer_cb_t *cb = state->writer_cb;
         state->writer_cb = NULL;
+
         if (state->async_io != NULL
             && state->async_io->event.del_callback != NULL) {
             state->async_io->event.del_callback(&state->async_io->event,
                                                 &cb->base);
         }
+
         if (cb->pending_buf != NULL) {
             efree(cb->pending_buf);
         }
+
         efree(cb);
     }
 
@@ -561,6 +602,7 @@ void http_log_server_stop(http_log_state_t *state)
             io->event.dispose(&io->event);
         }
     }
+
     if (state->stream_set) {
         zval_ptr_dtor(&state->stream_zv);
         state->stream_set = false;

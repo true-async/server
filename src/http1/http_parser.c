@@ -43,8 +43,10 @@ static int parse_content_length(const char *s, size_t len, uint64_t *out)
     uint64_t v = 0;
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)s[i];
+
         if (UNEXPECTED(c < '0' || c > '9')) return -1;
         unsigned d = (unsigned)(c - '0');
+
         if (UNEXPECTED(v > (UINT64_MAX - d) / 10)) return -1;
         v = v * 10 + d;
     }
@@ -66,6 +68,7 @@ static inline bool can_reuse_string_buffer(zend_string *str)
 static char* extract_boundary(const char *content_type)
 {
     const char *boundary_start = strstr(content_type, "boundary=");
+
     if (!boundary_start) {
         return NULL;
     }
@@ -76,9 +79,11 @@ static char* extract_boundary(const char *content_type)
     if (*boundary_start == '"') {
         boundary_start++;
         const char *boundary_end = strchr(boundary_start, '"');
+
         if (!boundary_end) {
             return NULL;
         }
+
         size_t len = boundary_end - boundary_start;
         char *boundary = emalloc(len + 1);
         memcpy(boundary, boundary_start, len);
@@ -93,6 +98,7 @@ static char* extract_boundary(const char *content_type)
     }
 
     size_t len = boundary_end - boundary_start;
+
     if (len == 0) {
         return NULL;
     }
@@ -107,6 +113,7 @@ static char* extract_boundary(const char *content_type)
 static void finalize_multipart(http1_parser_t *parser)
 {
     http_request_t *req = parser->request;
+
     if (!req || !req->multipart_proc) {
         return;
     }
@@ -123,6 +130,7 @@ static void finalize_multipart(http1_parser_t *parser)
 
     for (size_t i = 0; i < field_count; i++) {
         mp_field_info_t *field = &fields[i];
+
         if (!field->name) continue;
 
         zval zv;
@@ -143,6 +151,7 @@ static void finalize_multipart(http1_parser_t *parser)
 
     for (size_t i = 0; i < file_count; i++) {
         mp_file_info_t *file = &mp_files[i];
+
         if (!file->field_name) continue;
 
         /* Create UploadedFile object */
@@ -160,6 +169,7 @@ static void finalize_multipart(http1_parser_t *parser)
 
             /* Find or create array */
             zval *existing = zend_hash_str_find(req->files, clean_name, name_len - 2);
+
             if (existing && Z_TYPE_P(existing) == IS_ARRAY) {
                 /* Add to existing array */
                 zend_hash_next_index_insert(Z_ARRVAL_P(existing), file_obj);
@@ -172,6 +182,7 @@ static void finalize_multipart(http1_parser_t *parser)
                 efree(file_obj);
                 zend_hash_str_update(req->files, clean_name, name_len - 2, &arr);
             }
+
             efree(clean_name);
         } else {
             /* Single file */
@@ -226,6 +237,7 @@ static int on_url(llhttp_t* llhttp_parser, const char* at, size_t length)
 
     /* Check URI size limit */
     size_t current_len = parser->uri_builder.s ? ZSTR_LEN(parser->uri_builder.s) : 0;
+
     if (current_len + length > HTTP_MAX_URI_SIZE) {
         parser->parse_error = HTTP_PARSE_ERR_URI_TOO_LONG;
         return -1;  /* URI too long (414 URI Too Long) */
@@ -258,6 +270,7 @@ static int on_header_field(llhttp_t* llhttp_parser, const char* at, size_t lengt
 
     /* Check header name size limit */
     size_t current_len = parser->header_name_builder.s ? ZSTR_LEN(parser->header_name_builder.s) : 0;
+
     if (current_len + length > HTTP_MAX_HEADER_NAME) {
         parser->parse_error = HTTP_PARSE_ERR_HEADER_NAME_TOO_LARGE;
         return -1;  /* Header name too long */
@@ -281,6 +294,7 @@ static int on_header_value(llhttp_t* llhttp_parser, const char* at, size_t lengt
 
     /* Check header value size limit */
     size_t current_len = parser->header_value_builder.s ? ZSTR_LEN(parser->header_value_builder.s) : 0;
+
     if (current_len + length > HTTP_MAX_HEADER_VALUE) {
         parser->parse_error = HTTP_PARSE_ERR_HEADER_VALUE_TOO_LARGE;
         return -1;  /* Header value too long */
@@ -318,6 +332,7 @@ static void save_current_header(http1_parser_t *parser)
         parser->parse_error = HTTP_PARSE_ERR_TOO_MANY_HEADERS;
         return;
     }
+
     parser->header_count++;
 
     /* Finalize strings */
@@ -339,6 +354,7 @@ static void save_current_header(http1_parser_t *parser)
      * because zend_string_release is a no-op on interned strings. */
     zend_string *interned =
         http_known_header_lookup(ZSTR_VAL(name), ZSTR_LEN(name));
+
     if (interned != NULL) {
         zend_string_release(name);
         parser->header_name_builder.s = NULL;
@@ -358,6 +374,7 @@ static void save_current_header(http1_parser_t *parser)
          * Bare strtoul silently turned "-1" into UINT_MAX and accepted
          * "100abc"; we now bail out (S-01 audit fix). */
         uint64_t cl;
+
         if (UNEXPECTED(parse_content_length(ZSTR_VAL(value), ZSTR_LEN(value), &cl) != 0)) {
             parser->parse_error = HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH;
             return;
@@ -371,6 +388,7 @@ static void save_current_header(http1_parser_t *parser)
             parser->parse_error = HTTP_PARSE_ERR_CONFLICTING_HEADERS;
             return;
         }
+
         parser->cl_seen_count++;
         req->content_length = (size_t)cl;
     } else if (zend_string_equals_literal(name, "transfer-encoding")) {
@@ -483,6 +501,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     const char *method_name = llhttp_method_name(llhttp_parser->method);
     const size_t method_len = strlen(method_name);
     req->method = http_known_method_lookup(method_name, method_len);
+
     if (req->method == NULL) {
         req->method = zend_string_init(method_name, method_len, 0);
     }
@@ -490,6 +509,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     /* Default keep-alive behavior based on HTTP version */
     /* Check if Connection header was explicitly set */
     zval *connection_header = zend_hash_str_find(req->headers, "connection", sizeof("connection") - 1);
+
     if (!connection_header) {
         /* Connection header not seen, apply HTTP version defaults */
         if (req->http_major == 1 && req->http_minor >= 1) {
@@ -503,15 +523,20 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     /* Check for multipart/form-data */
     zval *content_type = zend_hash_str_find(req->headers, "content-type", sizeof("content-type") - 1);
+
     if (content_type && Z_TYPE_P(content_type) == IS_STRING) {
         const char *ct = Z_STRVAL_P(content_type);
+
         if (strncasecmp(ct, "multipart/form-data", 19) == 0) {
             char *boundary = extract_boundary(ct);
+
             if (boundary) {
                 req->multipart_proc = mp_processor_create(boundary, NULL);
+
                 if (req->multipart_proc != NULL && parser->conn != NULL) {
                     req->multipart_proc->log_state = parser->conn->log_state;
                 }
+
                 req->use_multipart = true;
                 efree(boundary);
             }
@@ -539,6 +564,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         } zend_catch {
             oom = true;
         } zend_end_try();
+
         if (UNEXPECTED(oom)) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
@@ -574,10 +600,12 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
     /* If multipart, feed to processor instead */
     if (req->use_multipart && req->multipart_proc) {
         ssize_t result = mp_processor_feed(req->multipart_proc, at, length);
+
         if (result < 0) {
             parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
             return -1;  /* Multipart parsing error */
         }
+
         return 0;
     }
 
@@ -623,6 +651,7 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
         } zend_catch {
             oom = true;
         } zend_end_try();
+
         if (UNEXPECTED(oom)) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
@@ -740,12 +769,14 @@ int http_parser_execute(http1_parser_t *parser, const char *data, size_t len, si
         if (parser->parse_error == HTTP_PARSE_OK) {
             parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
         }
+
         return -1;
     }
 #else
     if (consumed_out) {
         *consumed_out = 0;
     }
+
     return -1;  /* llhttp not available */
 #endif
 }
@@ -769,6 +800,7 @@ void http_parser_reset(http1_parser_t *parser)
     if (parser->owns_request && parser->request) {
         http_request_destroy(parser->request);
     }
+
     parser->request = NULL;
     parser->owns_request = false;
 
@@ -802,6 +834,7 @@ void http_parser_destroy(http1_parser_t *parser)
     if (parser->owns_request && parser->request) {
         http_request_destroy(parser->request);
     }
+
     parser->request = NULL;
     parser->owns_request = false;
 
@@ -862,6 +895,7 @@ void http_request_destroy(http_request_t *req)
         mp_processor_cleanup_temp_files(req->multipart_proc);
         mp_processor_destroy(req->multipart_proc);
     }
+
     if (req->post_data) {
         zend_hash_destroy(req->post_data);
         FREE_HASHTABLE(req->post_data);
@@ -894,6 +928,7 @@ void http_request_destroy(http_request_t *req)
      * via efree. Capture the callback before clearing — defensive in
      * case the cb does anything that might re-enter via field reads. */
     void (*release_cb)(http_request_t *) = req->release;
+
     if (release_cb != NULL) {
         req->release = NULL;
         release_cb(req);
@@ -973,6 +1008,7 @@ void http_parser_reset_for_reuse(http1_parser_t *parser)
     if (parser->owns_request && parser->request) {
         http_request_destroy(parser->request);
     }
+
     parser->request = NULL;
     parser->owns_request = false;
 

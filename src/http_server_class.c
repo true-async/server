@@ -335,8 +335,10 @@ void http_server_addref(http_server_object *server) {
     if (server == NULL) return;
     server->refcount++;
 }
+
 void http_server_release(http_server_object *server) {
     if (server == NULL) return;
+
     if (--server->refcount == 0) {
         http_server_state_finalize(server);
         pefree(server, /*persistent*/ 0);
@@ -376,17 +378,21 @@ static void http_server_deadline_tick_fn(zend_async_event_t *event,
     (void)event; (void)result; (void)exception;
     http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)callback;
     http_server_object *server = cb->server;
+
     if (UNEXPECTED(server == NULL)) {
         return;
     }
+
     const uint64_t now = ZEND_ASYNC_NOW();
     http_connection_t *c = server->conn_arena.alive_head;
     while (c != NULL) {
         /* `next` captured before destroy: arena_free unlinks `c`. */
         http_connection_t *next = c->next_conn;
+
         if (c->deadline_ms != 0 && now >= c->deadline_ms) {
             http_connection_destroy(c);
         }
+
         c = next;
     }
 }
@@ -398,14 +404,19 @@ static uint32_t http_server_deadline_tick_ms(const http_server_object *server)
     uint32_t w = server->view.write_timeout_s ? server->view.write_timeout_s * 1000 : UINT32_MAX;
     uint32_t k = server->keepalive_timeout_s ? server->keepalive_timeout_s * 1000 : UINT32_MAX;
     uint32_t m = r;
+
     if (w < m) m = w;
+
     if (k < m) m = k;
+
     if (m == UINT32_MAX) {
         /* All timeouts disabled — still tick at a slow cadence so a
          * broadcast / future graceful-shutdown walker has a heartbeat. */
         return 60000;
     }
+
     uint32_t tick = m / 2;
+
     if (tick < 250) tick = 250;
     return tick;
 }
@@ -417,8 +428,10 @@ static void http_server_deadline_tick_start(http_server_object *server)
     if (server->deadline_tick != NULL) {
         return;
     }
+
     const uint32_t tick_ms = http_server_deadline_tick_ms(server);
     zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)tick_ms, /*periodic*/ true);
+
     if (UNEXPECTED(t == NULL)) {
         return;
     }
@@ -428,19 +441,24 @@ static void http_server_deadline_tick_start(http_server_object *server)
 
     http_server_deadline_cb_t *cb = (http_server_deadline_cb_t *)
         ZEND_ASYNC_EVENT_CALLBACK_EX(http_server_deadline_tick_fn, sizeof(*cb));
+
     if (UNEXPECTED(cb == NULL)) {
         t->base.dispose(&t->base);
         return;
     }
+
     cb->base.dispose = http_server_deadline_cb_dispose;
     cb->server = server;
+
     if (!t->base.add_callback(&t->base, &cb->base)) {
         efree(cb);
         t->base.dispose(&t->base);
         return;
     }
+
     server->deadline_tick    = &t->base;
     server->deadline_tick_cb = &cb->base;
+
     if (!t->base.start(&t->base)) {
         zend_async_callbacks_remove(&t->base, &cb->base);
         t->base.dispose(&t->base);
@@ -459,12 +477,15 @@ static void http_server_deadline_tick_stop(http_server_object *server)
         } else if (server->deadline_tick_cb->dispose != NULL) {
             server->deadline_tick_cb->dispose(server->deadline_tick_cb, NULL);
         }
+
         server->deadline_tick_cb = NULL;
     }
+
     if (server->deadline_tick != NULL) {
         if (server->deadline_tick->loop_ref_count > 0) {
             server->deadline_tick->stop(server->deadline_tick);
         }
+
         server->deadline_tick->dispose(server->deadline_tick);
         server->deadline_tick = NULL;
     }
@@ -495,6 +516,7 @@ http_server_aggregate_sample(http_server_object *s,
     s->sojourn_sum_ns += sojourn_ns;
     s->service_sum_ns += service_ns;
     s->sojourn_samples++;
+
     if (sojourn_ns > s->sojourn_max_ns) {
         s->sojourn_max_ns = sojourn_ns;
     }
@@ -511,12 +533,15 @@ static void http_server_pause_listeners(http_server_object *server,
     if (server->listeners_paused) {
         return;
     }
+
     for (size_t i = 0; i < server->listener_count; i++) {
         zend_async_listen_event_t *le = server->listeners[i].listen_event;
+
         if (le) {
             le->base.stop(&le->base);
         }
     }
+
     server->listeners_paused = true;
     server->pause_count_total++;
     server->paused_since_ns = zend_hrtime();
@@ -531,16 +556,20 @@ static void http_server_resume_listeners(http_server_object *server)
     if (!server->listeners_paused) {
         return;
     }
+
     for (size_t i = 0; i < server->listener_count; i++) {
         zend_async_listen_event_t *le = server->listeners[i].listen_event;
+
         if (le) {
             le->base.start(&le->base);
         }
     }
+
     if (server->paused_since_ns) {
         server->paused_total_ns += zend_hrtime() - server->paused_since_ns;
         server->paused_since_ns = 0;
     }
+
     server->listeners_paused = false;
     /* Reset CoDel state so the next window starts clean — otherwise a
      * stale first_above_target deadline could trip pause on the very
@@ -580,6 +609,7 @@ void http_server_on_request_sample(http_server_object *server,
      * from the caller's already-taken stamp (req->end_ns) — no fresh
      * zend_hrtime on the hot path. */
     const uint64_t now = now_ns;
+
     if (server->codel_window_start_ns == 0
         || now - server->codel_window_start_ns >= CODEL_INTERVAL_NS) {
         server->codel_window_start_ns = now;
@@ -623,9 +653,11 @@ void http_server_on_tls_handshake_done(http_server_object *server,
     if (server == NULL) {
         return;
     }
+
     server->tls_handshakes_total++;
     server->tls_handshake_ns_sum   += duration_ns;
     server->tls_handshake_ns_count += 1;
+
     if (resumed) {
         server->tls_resumed_total++;
     }
@@ -636,6 +668,7 @@ void http_server_on_tls_handshake_failed(http_server_object *server)
     if (server == NULL) {
         return;
     }
+
     server->tls_handshake_failures_total++;
 }
 
@@ -648,7 +681,9 @@ void http_server_on_tls_ktls(http_server_object *server,
     if (server == NULL) {
         return;
     }
+
     if (tx_active) server->tls_ktls_tx_total++;
+
     if (rx_active) server->tls_ktls_rx_total++;
 }
 /* }}} */
@@ -666,6 +701,7 @@ void http_server_on_parse_error(http_server_object *server, const int status_cod
     if (server == NULL) {
         return;
     }
+
     server->parse_errors_4xx_total++;
     switch (status_code) {
         case 400: server->parse_errors_400_total++; break;
@@ -714,6 +750,7 @@ bool http_server_should_shed_request(const http_server_object *server)
         && server->counters.active_requests >= server->max_inflight_requests) {
         return true;
     }
+
     return false;
 }
 
@@ -794,6 +831,7 @@ http_static_handler_get(const http_server_object *server, size_t index)
     if (server == NULL || index >= server->static_handler_count) {
         return NULL;
     }
+
     return server->static_handler_mounts[index];
 }
 
@@ -813,9 +851,11 @@ http_static_cache_t *http_static_cache_acquire(http_server_object *server)
     if (UNEXPECTED(server == NULL)) {
         return NULL;
     }
+
     if (EXPECTED(server->static_cache != NULL)) {
         return server->static_cache;
     }
+
     if (server->static_cache_resolved) {
         return NULL;
     }
@@ -825,22 +865,27 @@ http_static_cache_t *http_static_cache_acquire(http_server_object *server)
     const size_t mount_count = http_static_handler_count(server);
     for (size_t i = 0; i < mount_count; i++) {
         const http_static_handler_t *m = http_static_handler_get(server, i);
+
         if (m == NULL || m->cache_max_entries <= 0 || m->cache_ttl_seconds <= 0) {
             continue;
         }
+
         if (m->cache_max_entries > max_entries) {
             max_entries = m->cache_max_entries;
         }
+
         if (ttl_seconds == 0 || m->cache_ttl_seconds < ttl_seconds) {
             ttl_seconds = m->cache_ttl_seconds;
         }
     }
 
     server->static_cache_resolved = 1;
+
     if (max_entries > 0 && ttl_seconds > 0) {
         server->static_cache = http_static_cache_create(
             (size_t) max_entries, (time_t) ttl_seconds);
     }
+
     return server->static_cache;
 }
 
@@ -857,6 +902,7 @@ zend_async_scope_t *http_server_get_scope(http_server_object *server)
 http_server_config_t *http_server_get_config(http_server_object *server)
 {
     if (server == NULL) return NULL;
+
     if (Z_TYPE(server->config) != IS_OBJECT) return NULL;
     return http_server_config_from_obj(Z_OBJ(server->config));
 }
@@ -908,6 +954,7 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
         .drain_not_before_ns = drain_not_before_ns,
         .drain_epoch_seen    = drain_epoch_seen,
     };
+
     if (server == NULL) {
         return r;
     }
@@ -925,6 +972,7 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
 
     if (r.drain_epoch_seen < server->view.drain_epoch_current) {
         r.drain_epoch_seen = server->view.drain_epoch_current;
+
         if (!r.drain_pending) {
             r.drain_pending       = true;
             r.drain_not_before_ns = now;   /* immediate */
@@ -945,6 +993,7 @@ bool http_server_should_drain_now(http_server_object *server,
     if (conn == NULL) {
         return false;
     }
+
     const http_server_drain_eval_t r = http_server_drain_evaluate(server,
         conn->drain_pending,
         conn->drain_not_before_ns,
@@ -978,6 +1027,7 @@ void http_server_bind_connection(http_server_object *server,
     if (server == NULL || conn == NULL) {
         return;
     }
+
     http_connection_t *real = (http_connection_t *)conn;
     real->counters  = &server->counters;
     real->view      = &server->view;
@@ -1076,6 +1126,7 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
 
     zend_object *handler_obj = Z_OBJ_P(handler_zv);
     http_static_handler_t *mount = http_static_handler_from_obj(handler_obj);
+
     if (UNEXPECTED(mount == NULL || mount->url_prefix == NULL)) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "StaticHandler is not initialised", 0);
@@ -1105,6 +1156,7 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
     http_static_handler_lock(mount);
 
     http_static_handler_t *frozen = http_static_handler_freeze(mount);
+
     if (UNEXPECTED(frozen == NULL)) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "StaticHandler freeze failed (out of memory)", 0);
@@ -1213,10 +1265,12 @@ static bool server_wait_event_start(zend_async_event_t *event)
     if (UNEXPECTED(ZEND_ASYNC_EVENT_IS_CLOSED(event))) {
         return true;
     }
+
     if (event->loop_ref_count > 0) {
         event->loop_ref_count++;
         return true;
     }
+
     event->loop_ref_count = 1;
     ZEND_ASYNC_INCREASE_EVENT_COUNT(event);
     return true;
@@ -1227,36 +1281,45 @@ static bool server_wait_event_stop(zend_async_event_t *event)
     if (event->loop_ref_count == 0) {
         return true;
     }
+
     if (event->loop_ref_count > 1) {
         event->loop_ref_count--;
         return true;
     }
+
     event->loop_ref_count = 0;
     ZEND_ASYNC_DECREASE_EVENT_COUNT(event);
     return true;
 }
+
 static bool server_wait_event_add_callback(zend_async_event_t *event, zend_async_event_callback_t *callback) {
     return zend_async_callbacks_push(event, callback);
 }
+
 static bool server_wait_event_del_callback(zend_async_event_t *event, zend_async_event_callback_t *callback) {
     return zend_async_callbacks_remove(event, callback);
 }
+
 static bool server_wait_event_replay(zend_async_event_t *event, zend_async_event_callback_t *callback, zval *result, zend_object **exception) {
     (void)event; (void)callback; (void)result; (void)exception;
     return false;
 }
+
 static zend_string *server_wait_event_info(zend_async_event_t *event) {
     (void)event;
     return zend_string_init("HttpServer waiting", sizeof("HttpServer waiting") - 1, 0);
 }
+
 static bool server_wait_event_dispose(zend_async_event_t *event) {
     if (ZEND_ASYNC_EVENT_REFCOUNT(event) > 1) {
         ZEND_ASYNC_EVENT_DEL_REF(event);
         return true;
     }
+
     if (ZEND_ASYNC_EVENT_REFCOUNT(event) == 1) {
         ZEND_ASYNC_EVENT_DEL_REF(event);
     }
+
     zend_async_callbacks_free(event);
     efree(event);
     return true;
@@ -1291,6 +1354,7 @@ static void http_server_accept_callback(
     (void)callback;
 
     http_server_object *server = current_server;
+
     if (!server || server->stopping) {
         return;
     }
@@ -1307,6 +1371,7 @@ static void http_server_accept_callback(
     }
 
     php_socket_t client_fd = *(const zend_socket_t *)result;
+
     if (client_fd == SOCK_ERR) {
         return;
     }
@@ -1329,6 +1394,7 @@ static void http_server_accept_callback(
             /* Race fallback — still counts as overload, drain existing. */
             http_server_pause_listeners(server, /*drain_connections=*/true);
         }
+
         return;
     }
 
@@ -1338,9 +1404,11 @@ static void http_server_accept_callback(
      * matches the connection to a specific strategy. */
     zend_fcall_t *handler =
         http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP1);
+
     if (handler == NULL) {
         handler = http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2);
     }
+
     if (UNEXPECTED(handler == NULL && server->static_handler_count == 0)) {
         closesocket(client_fd);
         return;
@@ -1431,6 +1499,7 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
             zend_clear_exception();
         }
     }
+
     zval_ptr_dtor(&server_zv);
     /* ctx is part of the parent's pool_worker_ctx array; freed once
      * by http_server_free when the parent server destructs. */
@@ -1445,6 +1514,7 @@ static void pool_worker_done_cb(zend_async_event_t *event,
      * already serialized by the reactor) — no atomicity needed. */
     pool_await_state_t *st = (pool_await_state_t *)
         ((char *)cb - XtOffsetOf(pool_await_state_t, cb));
+
     if (--st->pending == 0 && st->all_done != NULL) {
         ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
     }
@@ -1465,10 +1535,12 @@ static int http_server_start_pool(http_server_object *server,
      * parent than on worker threads. */
     zend_async_thread_pool_t *pool =
         ZEND_ASYNC_NEW_THREAD_POOL((int32_t)workers, (int32_t)workers);
+
     if (UNEXPECTED(pool == NULL || pool->submit_internal == NULL)) {
         if (pool != NULL) {
             ZEND_THREAD_POOL_DELREF(pool);
         }
+
         zend_throw_exception(http_server_runtime_exception_ce,
             "ThreadPool->submit_internal not available — true_async too old", 0);
         return FAILURE;
@@ -1480,16 +1552,19 @@ static int http_server_start_pool(http_server_object *server,
     for (int i = 0; i < workers; i++) {
         ZVAL_UNDEF(&ctxs[i].server_transit);
         ZEND_ASYNC_THREAD_TRANSFER_ZVAL_TOPLEVEL(&ctxs[i].server_transit, this_zv);
+
         if (UNEXPECTED(EG(exception))) {
             /* Roll back transfers we already did. */
             for (int j = 0; j <= i; j++) {
                 ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[j].server_transit);
             }
+
             pefree(ctxs, 1);
             ZEND_THREAD_POOL_DELREF(pool);
             return FAILURE;
         }
     }
+
     server->pool_worker_ctx       = ctxs;
     server->pool_worker_ctx_count = workers;
 
@@ -1502,6 +1577,7 @@ static int http_server_start_pool(http_server_object *server,
     for (int i = 0; i < workers; i++) {
         zend_async_event_t *worker_evt =
             pool->submit_internal(pool, pool_worker_handler, &ctxs[i]);
+
         if (UNEXPECTED(worker_evt == NULL)) {
             /* submit_internal failed mid-loop. Already-submitted workers
              * still hold &st->cb — we cannot free st right away without
@@ -1511,6 +1587,7 @@ static int http_server_start_pool(http_server_object *server,
             st->pending -= (workers - i);
             break;
         }
+
         zend_async_callbacks_push(worker_evt, &st->cb);
     }
 
@@ -1522,15 +1599,18 @@ static int http_server_start_pool(http_server_object *server,
      * notify all_done, so awaiting on it would deadlock. */
     if (st->pending > 0) {
         zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
         if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
             zend_throw_exception(http_server_runtime_exception_ce,
                 "Failed to create waker for pool parent", 0);
             goto cleanup;
         }
+
         zend_async_resume_when(coroutine, st->all_done, true,
                                zend_async_waker_callback_resolve, NULL);
         ZEND_ASYNC_SUSPEND();
         zend_async_waker_clean(coroutine);
+
         if (EG(exception)) {
             zend_clear_exception();
         }
@@ -1542,9 +1622,11 @@ cleanup:
     server->running = false;
     server->stopping = false;
     server->in_pool_mode = false;
+
     if (st->all_done != NULL) {
         st->all_done->dispose(st->all_done);
     }
+
     efree(st);
     ZEND_THREAD_POOL_DELREF(pool);
     return rc;
@@ -1608,10 +1690,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                                        "getWorkers", &workers_zv);
         const int workers_n = (Z_TYPE(workers_zv) == IS_LONG) ? (int)Z_LVAL(workers_zv) : 1;
         zval_ptr_dtor(&workers_zv);
+
         if (workers_n > 1) {
             if (http_server_start_pool(server, ZEND_THIS, workers_n) == SUCCESS) {
                 RETURN_TRUE;
             }
+
             RETURN_FALSE;
         }
     }
@@ -1635,9 +1719,11 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL,
                                    "getMaxInflightRequests", &retval);
     size_t cfg_inflight = (size_t)Z_LVAL(retval);
+
     if (cfg_inflight == 0 && server->max_connections > 0) {
         cfg_inflight = (size_t)server->max_connections * 10u;
     }
+
     server->max_inflight_requests = cfg_inflight;
     server->counters.active_requests = 0;
 
@@ -1648,6 +1734,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     if (server->max_connections > 0) {
         server->pause_high = (size_t)server->max_connections;
         server->pause_low  = (server->pause_high * BACKPRESSURE_PAUSE_LOW_RATIO) / 100;
+
         if (server->pause_low >= server->pause_high) {
             server->pause_low = server->pause_high > 0 ? server->pause_high - 1 : 0;
         }
@@ -1655,6 +1742,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         server->pause_high = 0;
         server->pause_low  = 0;
     }
+
     server->listeners_paused = false;
     server->codel_window_start_ns = 0;
     server->codel_min_sojourn_ns = 0;
@@ -1669,12 +1757,15 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                                    "getBackpressureTargetMs", &retval);
     uint64_t codel_target_ms = (uint64_t)Z_LVAL(retval);
     const char *codel_env = getenv("CODEL_TARGET_MS");
+
     if (codel_env && *codel_env) {
         const long parsed = strtol(codel_env, NULL, 10);
+
         if (parsed >= 0 && parsed <= 10000) {
             codel_target_ms = (uint64_t)parsed;
         }
     }
+
     server->codel_target_ns = codel_target_ms * 1000000ULL;
 
     /* Timeouts: config setters validate range, so zend_long fits into uint32_t here. */
@@ -1740,6 +1831,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * carry the older limit, but pool starts empty at server construction
      * so this is a clean cutover. */
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "getMaxBodySize", &retval);
+
     if (Z_LVAL(retval) > 0) {
         HTTP_SERVER_G(parser_pool).max_body_size = (size_t)Z_LVAL(retval);
     }
@@ -1782,6 +1874,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * triggers scope_destroy which cascades to proper scope cleanup
      * (cancels any leftover coroutines, then disposes the struct). */
     server->server_scope = ZEND_ASYNC_NEW_SCOPE_WITH_OBJECT(ZEND_ASYNC_CURRENT_SCOPE);
+
     if (!server->server_scope) {
         zval_ptr_dtor(&listeners_zval);
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -1808,8 +1901,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (Z_TYPE_P(tls_probe) != IS_ARRAY) {
                 continue;
             }
+
             zval *tls_flag =
                 zend_hash_str_find(Z_ARRVAL_P(tls_probe), "tls", 3);
+
             if (tls_flag != NULL && zend_is_true(tls_flag)) {
                 any_tls_listener = true;
                 break;
@@ -1857,8 +1952,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (Z_TYPE_P(tls_probe) != IS_ARRAY) {
                 continue;
             }
+
             zval *tls_flag =
                 zend_hash_str_find(Z_ARRVAL_P(tls_probe), "tls", 3);
+
             if (tls_flag != NULL && zend_is_true(tls_flag)) {
                 zval_ptr_dtor(&listeners_zval);
                 zend_throw_exception(http_server_runtime_exception_ce,
@@ -1884,6 +1981,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         }
 
         zval *type_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "type", 4);
+
         if (!type_zv || Z_TYPE_P(type_zv) != IS_STRING) {
             continue;
         }
@@ -1923,6 +2021,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                     server->listeners[i].listen_event->base.stop(&server->listeners[i].listen_event->base);
                     server->listeners[i].listen_event->base.dispose(&server->listeners[i].listen_event->base);
                 }
+
                 server->listener_count = 0;
 #ifdef HAVE_OPENSSL
                 /* Drop the TLS context so a subsequent start() rebuilds
@@ -1956,6 +2055,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
             zval *host_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "host", 4);
             zval *port_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "port", 4);
+
             if (!host_zv || !port_zv) continue;
 
             /* QUIC mandates TLS — we asserted any_tls_listener above and
@@ -1975,11 +2075,13 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                     server->listeners[i].listen_event->base.stop(&server->listeners[i].listen_event->base);
                     server->listeners[i].listen_event->base.dispose(&server->listeners[i].listen_event->base);
                 }
+
                 server->listener_count = 0;
                 for (size_t i = 0; i < server->http3_listener_count; i++) {
                     http3_listener_destroy(server->http3_listeners[i]);
                     server->http3_listeners[i] = NULL;
                 }
+
                 server->http3_listener_count = 0;
 # ifdef HAVE_OPENSSL
                 if (server->tls_ctx != NULL) {
@@ -2029,6 +2131,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         zend_string_release(server->alt_svc_header_value);
         server->alt_svc_header_value = NULL;
     }
+
     if (server->http3_listener_count > 0
         && http_server_get_http3_alt_svc_enabled(server)
         && getenv("PHP_HTTP3_DISABLE_ALT_SVC") == NULL) {
@@ -2036,6 +2139,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         char buf[64];
         const int n = snprintf(buf, sizeof(buf),
             "h3=\":%d\"; ma=86400", port);
+
         if (n > 0 && n < (int)sizeof(buf)) {
             server->alt_svc_header_value = zend_string_init(buf, (size_t)n, 0);
         }
@@ -2142,6 +2246,7 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
             server->http3_listeners[i] = NULL;
         }
     }
+
     server->http3_listener_count = 0;
 #endif
 
@@ -2398,6 +2503,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
 
     for (size_t i = 0; i < server->http3_listener_count; i++) {
         http3_listener_t *l = server->http3_listeners[i];
+
         if (l == NULL) continue;
 
         http3_listener_stats_t s;
@@ -2579,6 +2685,7 @@ static void http_server_free(zend_object *obj)
                 server->http3_listeners[i] = NULL;
             }
         }
+
         server->http3_listener_count = 0;
 #endif
 
@@ -2627,6 +2734,7 @@ static void http_server_free(zend_object *obj)
      * stops blocking, and scope_dispose runs cleanly — cancelling any
      * still-alive handler coroutines and freeing the struct. */
     server->server_scope = NULL;
+
     if (server->scope_object) {
         zend_object *scope_object = server->scope_object;
         server->scope_object = NULL;
@@ -2653,6 +2761,7 @@ static void http_server_free(zend_object *obj)
         for (int i = 0; i < server->pool_worker_ctx_count; i++) {
             ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[i].server_transit);
         }
+
         pefree(ctxs, 1);
         server->pool_worker_ctx = NULL;
         server->pool_worker_ctx_count = 0;
@@ -2671,11 +2780,13 @@ static void http_server_free(zend_object *obj)
             if (server->static_handler_mounts[i] != NULL) {
                 http_static_handler_shared_release(server->static_handler_mounts[i]);
             }
+
             if (server->static_handler_objects != NULL
                 && server->static_handler_objects[i] != NULL) {
                 OBJ_RELEASE(server->static_handler_objects[i]);
             }
         }
+
         efree(server->static_handler_mounts);
         server->static_handler_mounts = NULL;
     }
@@ -2684,11 +2795,13 @@ static void http_server_free(zend_object *obj)
         efree(server->static_handler_objects);
         server->static_handler_objects = NULL;
     }
+
     if (server->transit_static_mounts != NULL) {
         http_server_transit_static_release(
             (http_server_transit_static_t *) server->transit_static_mounts);
         server->transit_static_mounts = NULL;
     }
+
     server->static_handler_count    = 0;
     server->static_handler_capacity = 0;
 
@@ -2767,14 +2880,17 @@ struct http_server_transit_static {
 static void http_server_transit_static_release(http_server_transit_static_t *t)
 {
     if (t == NULL) return;
+
     if (t->mounts != NULL) {
         for (size_t i = 0; i < t->count; i++) {
             if (t->mounts[i] != NULL) {
                 http_static_handler_shared_release(t->mounts[i]);
             }
         }
+
         pefree(t->mounts, 1);
     }
+
     pefree(t, 1);
 }
 
@@ -2798,9 +2914,11 @@ static zend_object *http_server_transfer_obj(
          * Post-split: the wrapper holds only `server*` + `std`, the
          * full server fields live in the separately-allocated core. */
         zend_object *dst = default_fn(object, ctx, sizeof(struct http_server_php));
+
         if (UNEXPECTED(dst == NULL)) {
             return NULL;
         }
+
         struct http_server_php *dst_php = http_server_php_from_obj(dst);
         http_server_object *dst_shell = pecalloc(1, sizeof(*dst_shell), /*persistent*/ 1);
         dst_shell->refcount = 1;
@@ -2810,6 +2928,7 @@ static zend_object *http_server_transfer_obj(
          * which just addrefs the frozen shared snapshot — cheap. */
         if (Z_TYPE(src->config) == IS_OBJECT) {
             ZEND_ASYNC_THREAD_TRANSFER_ZVAL(ctx, &dst_shell->config, &src->config);
+
             if (UNEXPECTED(ctx->error)) {
                 return NULL;
             }
@@ -2824,6 +2943,7 @@ static zend_object *http_server_transfer_obj(
             if (Z_TYPE_P(entry) != IS_PTR) {
                 continue;
             }
+
             if (transit->count >= HTTP_SERVER_TRANSIT_MAX) {
                 break;
             }
@@ -2833,6 +2953,7 @@ static zend_object *http_server_transfer_obj(
             zval transferred;
             ZVAL_UNDEF(&transferred);
             ZEND_ASYNC_THREAD_TRANSFER_ZVAL(ctx, &transferred, &fcall->fci.function_name);
+
             if (UNEXPECTED(ctx->error)) {
                 /* Sidecar + partial transfers leak on this path. Rare: only
                  * happens on deep-transfer errors (depth, resource, ref). */
@@ -2860,6 +2981,7 @@ static zend_object *http_server_transfer_obj(
                 st_transit->mounts[i] = src->static_handler_mounts[i];
                 http_static_handler_shared_addref(st_transit->mounts[i]);
             }
+
             dst_shell->transit_static_mounts = st_transit;
         }
 
@@ -2873,9 +2995,11 @@ static zend_object *http_server_transfer_obj(
      * pathway (called by default_fn under LOAD) wires up its own core
      * via emalloc, so we don't need to allocate one here. */
     zend_object *dst = default_fn(object, ctx, 0);
+
     if (UNEXPECTED(dst == NULL)) {
         return NULL;
     }
+
     http_server_object *dst_obj = http_server_from_obj(dst);
     /* Worker-clone marker (issue #11). The C-state was just constructed
      * by the destination thread's create_object — when start() runs on
@@ -2894,6 +3018,7 @@ static zend_object *http_server_transfer_obj(
 
     http_server_transit_handlers_t *transit =
         (http_server_transit_handlers_t *) src_shell->transit_handlers;
+
     if (transit) {
         for (size_t i = 0; i < transit->count; i++) {
             zval closure_zv;
@@ -2911,11 +3036,13 @@ static zend_object *http_server_transfer_obj(
             /* zend_is_callable_ex populates fci_cache from the closure so
              * later http_protocol_get_handler + zend_call_function works. */
             char *error_str = NULL;
+
             if (!zend_is_callable_ex(&fcall->fci.function_name, NULL, 0, NULL,
                                      &fcall->fci_cache, &error_str)) {
                 if (error_str) {
                     efree(error_str);
                 }
+
                 zval_ptr_dtor(&fcall->fci.function_name);
                 efree(fcall);
                 continue;
@@ -2964,6 +3091,7 @@ static zend_object *http_server_transfer_obj(
      * StaticHandler objects — userland on a worker has no path to one. */
     http_server_transit_static_t *st_transit =
         (http_server_transit_static_t *) src_shell->transit_static_mounts;
+
     if (st_transit != NULL && st_transit->count > 0) {
         const size_t n = st_transit->count;
         dst_obj->static_handler_mounts  = emalloc(sizeof(http_static_handler_t *) * n);
@@ -2972,6 +3100,7 @@ static zend_object *http_server_transfer_obj(
             dst_obj->static_handler_mounts[i] = st_transit->mounts[i];
             http_static_handler_shared_addref(dst_obj->static_handler_mounts[i]);
         }
+
         dst_obj->static_handler_count    = n;
         dst_obj->static_handler_capacity = n;
         /* Mirror addStaticHandler's protocol-mask side effect so the

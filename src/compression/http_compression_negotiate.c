@@ -24,10 +24,12 @@ static inline char ascii_lower(char c)
 static bool ascii_eq_ci(const char *s, size_t slen, const char *lit)
 {
     size_t llen = strlen(lit);
+
     if (slen != llen) return false;
     for (size_t i = 0; i < slen; i++) {
         if (ascii_lower(s[i]) != lit[i]) return false;
     }
+
     return true;
 }
 
@@ -38,13 +40,17 @@ static bool q_is_zero(const char *s, size_t len)
 {
     while (len > 0 && (s[0] == ' ' || s[0] == '\t')) { s++; len--; }
     while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+
     if (len == 0)         return false;
+
     if (s[0] != '0')      return false;
+
     if (len == 1)         return true;       /* "0" */
     if (s[1] != '.')      return false;      /* "0xxx" — malformed → q=1 */
     for (size_t i = 2; i < len; i++) {
         if (s[i] != '0')  return false;      /* any non-zero digit → not zero */
     }
+
     return true;                             /* "0.", "0.0", "0.000" */
 }
 
@@ -72,6 +78,7 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
     while (i < len) {
         /* Skip LWS and stray commas. */
         while (i < len && (hdr[i] == ' ' || hdr[i] == '\t' || hdr[i] == ',')) i++;
+
         if (i >= len) break;
 
         size_t tok_start = i;
@@ -81,6 +88,7 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
                (hdr[tok_end - 1] == ' ' || hdr[tok_end - 1] == '\t')) {
             tok_end--;
         }
+
         if (tok_end == tok_start) continue;
 
         /* Coding name terminates at `;`, ` ` or `\t`. */
@@ -91,6 +99,7 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
                hdr[name_end] != '\t') {
             name_end++;
         }
+
         const char *name = hdr + tok_start;
         size_t      name_len = name_end - tok_start;
 
@@ -101,6 +110,7 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
                    (hdr[pi] == ' ' || hdr[pi] == '\t' || hdr[pi] == ';')) {
                 pi++;
             }
+
             if (pi >= tok_end) break;
             size_t param_start = pi;
             while (pi < tok_end && hdr[pi] != ';') pi++;
@@ -172,15 +182,19 @@ http_codec_id_t http_accept_encoding_select(const http_accept_encoding_t *ae)
     if (ae->zstd_acceptable && http_compression_lookup(HTTP_CODEC_ZSTD)) {
         return HTTP_CODEC_ZSTD;
     }
+
     if (ae->brotli_acceptable && http_compression_lookup(HTTP_CODEC_BROTLI)) {
         return HTTP_CODEC_BROTLI;
     }
+
     if (ae->gzip_acceptable && http_compression_lookup(HTTP_CODEC_GZIP)) {
         return HTTP_CODEC_GZIP;
     }
+
     if (ae->identity_acceptable) {
         return HTTP_CODEC_IDENTITY;
     }
+
     return HTTP_CODEC__COUNT;
 }
 
@@ -199,8 +213,10 @@ size_t http_compression_mime_normalize(const char *ct, size_t ct_len,
     if (end == 0 || end > dst_cap) {
         return 0;
     }
+
     for (size_t i = 0; i < end; i++) {
         dst[i] = ascii_lower(ct[i]);
     }
+
     return end;
 }

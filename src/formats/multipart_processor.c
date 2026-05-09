@@ -88,22 +88,28 @@ static int str_append(char** buf, size_t* len, size_t* cap, const char* data, si
     if (data_len >= SIZE_MAX - *len - 1) {
         return -1;
     }
+
     size_t need = *len + data_len + 1;
+
     if (need > *cap) {
         size_t new_cap = (*cap == 0) ? INITIAL_HEADER_CAP : (*cap * 2);
         while (new_cap < need) {
             if (new_cap > SIZE_MAX / 2) {
                 return -1;
             }
+
             new_cap *= 2;
         }
+
         char* new_buf = MP_REALLOC(*buf, new_cap);
+
         if (!new_buf) {
             return -1;
         }
         *buf = new_buf;
         *cap = new_cap;
     }
+
     memcpy(*buf + *len, data, data_len);
     *len += data_len;
     (*buf)[*len] = '\0';
@@ -127,10 +133,12 @@ static char* generate_tmp_path(mp_processor_t* proc, const char* original_filena
      * and reopen via fopen later — same pattern as before, just portable. */
     zend_string *opened_path = NULL;
     int fd = php_open_temporary_fd(tmp_dir, "trueasync_upload_", &opened_path);
+
     if (fd < 0) {
         if (opened_path) {
             zend_string_release(opened_path);
         }
+
         return NULL;
     }
 
@@ -160,6 +168,7 @@ static void parse_content_disposition(mp_processor_t* proc, const char* value)
 
     /* Skip "form-data" */
     while (*p && *p != ';') p++;
+
     if (*p == ';') p++;
 
     while (*p) {
@@ -173,27 +182,34 @@ static void parse_content_disposition(mp_processor_t* proc, const char* value)
                 p++;
                 const char* start = p;
                 while (*p && *p != '"') p++;
+
                 if (proc->field_name) MP_FREE(proc->field_name);
                 proc->field_name = MP_STRNDUP(start, p - start);
+
                 if (*p == '"') p++;
             } else {
                 const char* start = p;
                 while (*p && *p != ';' && *p != ' ') p++;
+
                 if (proc->field_name) MP_FREE(proc->field_name);
                 proc->field_name = MP_STRNDUP(start, p - start);
             }
         } else if (strncmp(p, "filename=", 9) == 0) {
             p += 9;
+
             if (*p == '"') {
                 p++;
                 const char* start = p;
                 while (*p && *p != '"') p++;
+
                 if (proc->filename) MP_FREE(proc->filename);
                 proc->filename = MP_STRNDUP(start, p - start);
+
                 if (*p == '"') p++;
             } else {
                 const char* start = p;
                 while (*p && *p != ';' && *p != ' ') p++;
+
                 if (proc->filename) MP_FREE(proc->filename);
                 proc->filename = MP_STRNDUP(start, p - start);
             }
@@ -202,8 +218,10 @@ static void parse_content_disposition(mp_processor_t* proc, const char* value)
             p += 10;
             /* Skip encoding (e.g., "UTF-8''") */
             while (*p && *p != '\'') p++;
+
             if (*p == '\'') p++;
             while (*p && *p != '\'') p++;
+
             if (*p == '\'') p++;
 
             const char* start = p;
@@ -213,12 +231,14 @@ static void parse_content_disposition(mp_processor_t* proc, const char* value)
             char *decoded = MP_MALLOC(enc_len + 1);
             const size_t dec_len = http_rfc5987_decode(decoded, start, enc_len);
             decoded[dec_len] = '\0';
+
             if (proc->filename) MP_FREE(proc->filename);
             proc->filename = decoded;
         }
 
         /* Skip to next parameter */
         while (*p && *p != ';') p++;
+
         if (*p == ';') p++;
     }
 }
@@ -244,18 +264,22 @@ static void parse_content_type(mp_processor_t* proc, const char* value)
 
         if (strncasecmp(p, "charset=", 8) == 0) {
             p += 8;
+
             if (*p == '"') {
                 p++;
                 start = p;
                 while (*p && *p != '"') p++;
+
                 if (proc->charset) MP_FREE(proc->charset);
                 proc->charset = MP_STRNDUP(start, p - start);
             } else {
                 start = p;
                 while (*p && *p != ';' && *p != ' ') p++;
+
                 if (proc->charset) MP_FREE(proc->charset);
                 proc->charset = MP_STRNDUP(start, p - start);
             }
+
             break;
         }
 
@@ -283,6 +307,7 @@ static bool has_path_traversal_or_nul(const char* filename, size_t len)
 
     /* Check for absolute paths */
     if (filename[0] == '/') return true;
+
     if (filename[0] == '\\') return true;
 
     /* Check for Windows drive letters */
@@ -302,23 +327,29 @@ static int on_part_begin(multipart_parser_t* parser)
         proc->current_header_name[0] = '\0';
         proc->current_header_name_len = 0;
     }
+
     if (proc->current_header_value) {
         proc->current_header_value[0] = '\0';
         proc->current_header_value_len = 0;
     }
 
     if (proc->field_name) { MP_FREE(proc->field_name); proc->field_name = NULL; }
+
     if (proc->filename) { MP_FREE(proc->filename); proc->filename = NULL; }
+
     if (proc->content_type) { MP_FREE(proc->content_type); proc->content_type = NULL; }
+
     if (proc->charset) { MP_FREE(proc->charset); proc->charset = NULL; }
 
     proc->file_handle = NULL;
+
     if (proc->tmp_path) { MP_FREE(proc->tmp_path); proc->tmp_path = NULL; }
     proc->file_size = 0;
 
     if (proc->field_value) {
         proc->field_value[0] = '\0';
     }
+
     proc->field_value_len = 0;
 
     proc->current_error = MP_UPLOAD_ERR_OK;
@@ -357,6 +388,7 @@ static int on_header_field(multipart_parser_t* parser, const char* at, size_t le
     if (!proc->current_header_name) {
         proc->current_header_name_cap = INITIAL_HEADER_CAP;
         proc->current_header_name = MP_MALLOC(proc->current_header_name_cap);
+
         if (!proc->current_header_name) return -1;
         proc->current_header_name[0] = '\0';
     }
@@ -372,6 +404,7 @@ static int on_header_value(multipart_parser_t* parser, const char* at, size_t le
     if (!proc->current_header_value) {
         proc->current_header_value_cap = INITIAL_HEADER_CAP;
         proc->current_header_value = MP_MALLOC(proc->current_header_value_cap);
+
         if (!proc->current_header_value) return -1;
         proc->current_header_value[0] = '\0';
     }
@@ -391,6 +424,7 @@ static int on_headers_complete(multipart_parser_t* parser)
         proc->current_header_name_len,
         proc->current_header_value ? proc->current_header_value : "(null)",
         proc->current_header_value_len);
+
     if (proc->current_header_name_len > 0 && proc->current_header_value_len > 0) {
         if (strcasecmp(proc->current_header_name, "Content-Disposition") == 0) {
             parse_content_disposition(proc, proc->current_header_value);
@@ -415,6 +449,7 @@ static int on_headers_complete(multipart_parser_t* parser)
          * depth: if any future change makes filename a length-prefixed
          * blob (e.g. proper RFC 5987 decoding), it stays robust. */
         size_t filename_len = strlen(proc->filename);
+
         if (filename_len > MP_MAX_FILENAME_LEN) {
             proc->current_error = MP_UPLOAD_ERR_INVALID_NAME;
             return 0;  /* Continue but mark as error */
@@ -427,6 +462,7 @@ static int on_headers_complete(multipart_parser_t* parser)
 
         /* Check file count limit */
         size_t max_files = proc->config.max_files > 0 ? proc->config.max_files : MP_MAX_FILES;
+
         if (proc->files_count >= max_files) {
             proc->current_error = MP_UPLOAD_ERR_TOO_MANY_FILES;
             return 0;
@@ -434,6 +470,7 @@ static int on_headers_complete(multipart_parser_t* parser)
 
         /* Generate temp file path */
         proc->tmp_path = generate_tmp_path(proc, proc->filename);
+
         if (!proc->tmp_path) {
             proc->current_error = MP_UPLOAD_ERR_NO_TMP_DIR;
             return 0;
@@ -441,6 +478,7 @@ static int on_headers_complete(multipart_parser_t* parser)
 
         /* Open file for writing */
         proc->file_handle = fopen(proc->tmp_path, "wb");
+
         if (!proc->file_handle) {
             proc->current_error = MP_UPLOAD_ERR_CANT_WRITE;
             MP_FREE(proc->tmp_path);
@@ -460,8 +498,10 @@ static int on_headers_complete(multipart_parser_t* parser)
         if (!proc->field_value) {
             proc->field_value_cap = INITIAL_FIELD_VALUE_CAP;
             proc->field_value = MP_MALLOC(proc->field_value_cap);
+
             if (!proc->field_value) return -1;
         }
+
         proc->field_value[0] = '\0';
         proc->field_value_len = 0;
     }
@@ -492,11 +532,13 @@ static int on_part_data(multipart_parser_t* parser, const char* at, size_t lengt
             if (proc->tmp_path) {
                 VCWD_UNLINK(proc->tmp_path);
             }
+
             return 0;  /* Continue parsing but don't write */
         }
 
         /* Write data to file (STREAMING!) */
         size_t written = fwrite(at, 1, length, proc->file_handle);
+
         if (written != length) {
             proc->current_error = MP_UPLOAD_ERR_CANT_WRITE;
             fclose(proc->file_handle);
@@ -556,8 +598,10 @@ static int on_part_end(multipart_parser_t* parser)
                 new_cap > SIZE_MAX / sizeof(mp_file_info_t)) {
                 return -1;
             }
+
             mp_file_info_t* new_files = MP_REALLOC(proc->files,
                                                     new_cap * sizeof(mp_file_info_t));
+
             if (!new_files) return -1;
             proc->files = new_files;
             proc->files_capacity = new_cap;
@@ -603,8 +647,10 @@ static int on_part_end(multipart_parser_t* parser)
                 new_cap > SIZE_MAX / sizeof(mp_field_info_t)) {
                 return -1;
             }
+
             mp_field_info_t* new_fields = MP_REALLOC(proc->fields,
                                                       new_cap * sizeof(mp_field_info_t));
+
             if (!new_fields) return -1;
             proc->fields = new_fields;
             proc->fields_capacity = new_cap;
@@ -634,9 +680,11 @@ static int on_body_end(multipart_parser_t* parser)
 mp_processor_t* mp_processor_create(const char* boundary, const mp_config_t* config)
 {
     mp_processor_t* proc = MP_CALLOC(1, sizeof(mp_processor_t));
+
     if (!proc) return NULL;
 
     proc->parser = multipart_parser_create(boundary);
+
     if (!proc->parser) {
         MP_FREE(proc);
         return NULL;
@@ -647,6 +695,7 @@ mp_processor_t* mp_processor_create(const char* boundary, const mp_config_t* con
 
     if (config) {
         proc->config = *config;
+
         if (config->tmp_dir) {
             proc->config.tmp_dir = MP_STRDUP(config->tmp_dir);
         }
@@ -674,6 +723,7 @@ bool mp_processor_has_error(const mp_processor_t* proc)
 const char* mp_processor_get_error(const mp_processor_t* proc)
 {
     if (!proc) return NULL;
+
     if (proc->error_message) return proc->error_message;
     return multipart_parser_get_error(proc->parser);
 }
@@ -684,6 +734,7 @@ mp_file_info_t* mp_processor_get_files(const mp_processor_t* proc, size_t* count
         if (count) *count = 0;
         return NULL;
     }
+
     if (count) *count = proc->files_count;
     return proc->files;
 }
@@ -694,6 +745,7 @@ mp_field_info_t* mp_processor_get_fields(const mp_processor_t* proc, size_t* cou
         if (count) *count = 0;
         return NULL;
     }
+
     if (count) *count = proc->fields_count;
     return proc->fields;
 }
@@ -722,10 +774,15 @@ void mp_processor_cleanup_temp_files(mp_processor_t* proc)
 void mp_file_info_free(mp_file_info_t* info)
 {
     if (!info) return;
+
     if (info->field_name) MP_FREE(info->field_name);
+
     if (info->client_filename) MP_FREE(info->client_filename);
+
     if (info->client_media_type) MP_FREE(info->client_media_type);
+
     if (info->client_charset) MP_FREE(info->client_charset);
+
     if (info->tmp_path) MP_FREE(info->tmp_path);
     memset(info, 0, sizeof(mp_file_info_t));
 }
@@ -733,7 +790,9 @@ void mp_file_info_free(mp_file_info_t* info)
 void mp_field_info_free(mp_field_info_t* info)
 {
     if (!info) return;
+
     if (info->name) MP_FREE(info->name);
+
     if (info->value) MP_FREE(info->value);
     memset(info, 0, sizeof(mp_field_info_t));
 }
@@ -747,12 +806,19 @@ void mp_processor_destroy(mp_processor_t* proc)
     }
 
     if (proc->current_header_name) MP_FREE(proc->current_header_name);
+
     if (proc->current_header_value) MP_FREE(proc->current_header_value);
+
     if (proc->field_name) MP_FREE(proc->field_name);
+
     if (proc->filename) MP_FREE(proc->filename);
+
     if (proc->content_type) MP_FREE(proc->content_type);
+
     if (proc->charset) MP_FREE(proc->charset);
+
     if (proc->tmp_path) MP_FREE(proc->tmp_path);
+
     if (proc->field_value) MP_FREE(proc->field_value);
 
     /* Close any open file */
@@ -763,14 +829,17 @@ void mp_processor_destroy(mp_processor_t* proc)
     for (size_t i = 0; i < proc->files_count; i++) {
         mp_file_info_free(&proc->files[i]);
     }
+
     if (proc->files) MP_FREE(proc->files);
 
     for (size_t i = 0; i < proc->fields_count; i++) {
         mp_field_info_free(&proc->fields[i]);
     }
+
     if (proc->fields) MP_FREE(proc->fields);
 
     if (proc->config.tmp_dir) MP_FREE(proc->config.tmp_dir);
+
     if (proc->error_message) MP_FREE(proc->error_message);
 
     MP_FREE(proc);

@@ -27,6 +27,7 @@ bool http_conditional_check(const char *if_none_match, size_t if_none_match_len,
 
 	if (if_modified_since_len > 0 && if_modified_since != NULL) {
 		const time_t since = http_date_parse_imf(if_modified_since, if_modified_since_len);
+
 		if (since == (time_t)-1) {
 			return false;
 		}

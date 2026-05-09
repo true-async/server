@@ -22,12 +22,15 @@ static inline int hex_value(const char c)
 	if (c >= '0' && c <= '9') {
 		return c - '0';
 	}
+
 	if (c >= 'a' && c <= 'f') {
 		return 10 + (c - 'a');
 	}
+
 	if (c >= 'A' && c <= 'F') {
 		return 10 + (c - 'A');
 	}
+
 	return -1;
 }
 
@@ -43,15 +46,19 @@ static http_static_path_result_t percent_decode(const char *src, const size_t sr
 		if (src[i] == '\0') {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
 		}
+
 		if (src[i] == '%') {
 			if (i + 2 >= src_len) {
 				return HTTP_STATIC_PATH_BAD_REQUEST;
 			}
+
 			const int hi = hex_value(src[i + 1]);
 			const int lo = hex_value(src[i + 2]);
+
 			if (hi < 0 || lo < 0) {
 				return HTTP_STATIC_PATH_BAD_REQUEST;
 			}
+
 			const unsigned char byte = (unsigned char)((hi << 4) | lo);
 			/* NUL ends C strings; backslash is a path separator on
 			 * Windows and would bypass the segment validator below. */
@@ -67,6 +74,7 @@ static http_static_path_result_t percent_decode(const char *src, const size_t sr
 			i += 3;
 			continue;
 		}
+
 		if (UNEXPECTED(src[i] == '\\')) {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
 		}
@@ -77,6 +85,7 @@ static http_static_path_result_t percent_decode(const char *src, const size_t sr
 
 		dst[out++] = src[i++];
 	}
+
 	dst[out] = '\0';
 	*dst_len_out = out;
 	return HTTP_STATIC_PATH_OK;
@@ -102,31 +111,38 @@ static http_static_path_result_t validate_segments(const http_static_handler_t *
 		if (UNEXPECTED(++segment_count > HTTP_STATIC_PATH_MAX_SEGMENTS)) {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
 		}
+
 		const size_t seg_start = i;
 		while (i < path_len && path[i] != '/') {
 			i++;
 		}
+
 		const size_t seg_len = i - seg_start;
 		const char *seg = path + seg_start;
 
 		if (seg_len == 0) {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
 		}
+
 		if (seg_len == 1 && seg[0] == '.') {
 			return HTTP_STATIC_PATH_FORBIDDEN;
 		}
+
 		if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') {
 			return HTTP_STATIC_PATH_FORBIDDEN;
 		}
+
 		if (seg[0] == '.') {
 			if (mount->flags & HTTP_STATIC_FLAG_DOTFILES_DENY) {
 				return HTTP_STATIC_PATH_FORBIDDEN;
 			}
+
 			if (mount->flags & HTTP_STATIC_FLAG_DOTFILES_IGNORE) {
 				return HTTP_STATIC_PATH_HIDE;
 			}
 			/* DOTFILES_ALLOW falls through. */
 		}
+
 		if (i < path_len) {
 			i++;
 		}
@@ -151,6 +167,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	}
 
 	const size_t prefix_len = mount->url_prefix_len;
+
 	if (request_path_len < prefix_len) {
 		return HTTP_STATIC_PATH_NO_MATCH;
 	}
@@ -174,6 +191,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	size_t decoded_len = 0;
 	const http_static_path_result_t decode_rc =
 		percent_decode(tail, tail_len, decoded, sizeof(decoded), &decoded_len);
+
 	if (UNEXPECTED(decode_rc != HTTP_STATIC_PATH_OK)) {
 		return decode_rc;
 	}
@@ -185,6 +203,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	 * scratch + a memcpy on every request. */
 	if (decoded_len > 0) {
 		const http_static_path_result_t seg_rc = validate_segments(mount, decoded, decoded_len);
+
 		if (UNEXPECTED(seg_rc != HTTP_STATIC_PATH_OK)) {
 			return seg_rc;
 		}
@@ -198,11 +217,14 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	if (UNEXPECTED(root_len + 1 + decoded_len + 1 > out_buf_cap)) {
 		return HTTP_STATIC_PATH_BAD_REQUEST;
 	}
+
 	memcpy(out_buf, root, root_len);
 	size_t out = root_len;
+
 	if (out > 0 && out_buf[out - 1] != '/') {
 		out_buf[out++] = '/';
 	}
+
 	memcpy(out_buf + out, decoded, decoded_len);
 	out_buf[out + decoded_len] = '\0';
 	*out_len = out + decoded_len;
@@ -221,12 +243,15 @@ bool http_static_path_join(char *buf, const size_t cap, size_t *len,
 	size_t cur = *len;
 	const bool need_sep = (cur == 0 || buf[cur - 1] != '/');
 	const size_t extra = (need_sep ? 1 : 0) + name_len + 1;
+
 	if (cur + extra > cap) {
 		return false;
 	}
+
 	if (need_sep) {
 		buf[cur++] = '/';
 	}
+
 	memcpy(buf + cur, name, name_len);
 	cur += name_len;
 	buf[cur] = '\0';
@@ -247,9 +272,11 @@ bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *
 	(void)relative_len;
 	for (size_t i = 0; i < mount->hide_count; i++) {
 		const zend_string *glob = mount->hide_globs[i];
+
 		if (fnmatch(ZSTR_VAL(glob), relative, FNM_PATHNAME) == 0) {
 			return true;
 		}
 	}
+
 	return false;
 }

@@ -118,6 +118,7 @@ static void lru_push_head(http_static_cache_t *cache, entry_t *e)
 {
 	e->prev = NULL;
 	e->next = cache->head;
+
 	if (cache->head != NULL) {
 		cache->head->prev = e;
 	} else {
@@ -205,6 +206,7 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 	 * allocating a transient zend_string per lookup that we'd just
 	 * release a syscall later. */
 	entry_t *e = (entry_t *)zend_hash_str_find_ptr(&cache->index, path, path_len);
+
 	if (e == NULL) {
 		return false;
 	}
@@ -212,6 +214,7 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 	/* TTL check. time(NULL) is a vDSO call on Linux — sub-100 ns,
 	 * still cheap relative to realpath we're avoiding. */
 	const time_t now = time(NULL);
+
 	if (now - e->cached_at > cache->ttl_seconds) {
 		evict_entry(cache, e);
 		return false;
@@ -241,6 +244,7 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 	ZEND_ASSERT(cache != NULL);
 	ZEND_ASSERT(path != NULL);
 	ZEND_ASSERT(st != NULL);
+
 	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
 		return;
 	}
@@ -251,6 +255,7 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 	 * in sync. */
 	zend_string *key = zend_string_init(path, path_len, 1); /* persistent */
 	entry_t *existing = (entry_t *)zend_hash_find_ptr(&cache->index, key);
+
 	if (existing != NULL) {
 		evict_entry(cache, existing);
 	}

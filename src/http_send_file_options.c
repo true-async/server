@@ -78,12 +78,15 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 
 	{
 		zval v;
+
 		if (content_type != NULL) ZVAL_STR_COPY(&v, content_type);
 		else                      ZVAL_NULL(&v);
 		WRITE_SLOT(0, &v);
 	}
+
 	{
 		zval v;
+
 		if (disposition != NULL) {
 			ZVAL_OBJ_COPY(&v, Z_OBJ_P(disposition));
 		} else {
@@ -93,20 +96,26 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 			zend_string_release(inline_name);
 			ZVAL_OBJ_COPY(&v, def);
 		}
+
 		WRITE_SLOT(1, &v);
 	}
+
 	{
 		zval v;
+
 		if (download_name != NULL) ZVAL_STR_COPY(&v, download_name);
 		else                       ZVAL_NULL(&v);
 		WRITE_SLOT(2, &v);
 	}
+
 	{
 		zval v;
+
 		if (cache_control != NULL) ZVAL_STR_COPY(&v, cache_control);
 		else                       ZVAL_NULL(&v);
 		WRITE_SLOT(3, &v);
 	}
+
 	{ zval v; ZVAL_BOOL(&v, etag);          WRITE_SLOT(4, &v); }
 	{ zval v; ZVAL_BOOL(&v, last_modified); WRITE_SLOT(5, &v); }
 	{ zval v; ZVAL_BOOL(&v, accept_ranges); WRITE_SLOT(6, &v); }
@@ -115,6 +124,7 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 	{ zval v; ZVAL_BOOL(&v, delete_after);  WRITE_SLOT(9, &v); }
 	{
 		zval v;
+
 		if (status_is_null) ZVAL_NULL(&v);
 		else                ZVAL_LONG(&v, status);
 		WRITE_SLOT(10, &v);
@@ -147,6 +157,7 @@ void http_send_file_options_snapshot(zend_object *obj,
                                      http_send_file_options_t *out)
 {
 	defaults(out);
+
 	if (obj == NULL || obj->ce != http_send_file_options_ce) {
 		return;
 	}
@@ -154,13 +165,16 @@ void http_send_file_options_snapshot(zend_object *obj,
 	zval rv, *zv;
 
 	zv = zend_read_property(http_send_file_options_ce, obj, "contentType", 11, 1, &rv);
+
 	if (zv != NULL) copy_str_arg(zv, &out->content_type);
 
 	zv = zend_read_property(http_send_file_options_ce, obj, "disposition", 11, 1, &rv);
+
 	if (zv != NULL && Z_TYPE_P(zv) == IS_OBJECT) {
 		zval rv2;
 		zval *backing = zend_read_property_ex(Z_OBJCE_P(zv), Z_OBJ_P(zv),
 			ZSTR_KNOWN(ZEND_STR_NAME), 1, &rv2);
+
 		if (backing != NULL && Z_TYPE_P(backing) == IS_STRING) {
 			out->disposition = (ZSTR_LEN(Z_STR_P(backing)) == 10
 				&& memcmp(ZSTR_VAL(Z_STR_P(backing)), "ATTACHMENT", 10) == 0)
@@ -171,9 +185,11 @@ void http_send_file_options_snapshot(zend_object *obj,
 	}
 
 	zv = zend_read_property(http_send_file_options_ce, obj, "downloadName", 12, 1, &rv);
+
 	if (zv != NULL) copy_str_arg(zv, &out->download_name);
 
 	zv = zend_read_property(http_send_file_options_ce, obj, "cacheControl", 12, 1, &rv);
+
 	if (zv != NULL) copy_str_arg(zv, &out->cache_control);
 
 #define READ_BOOL(prop, len, field) do { \
@@ -191,6 +207,7 @@ void http_send_file_options_snapshot(zend_object *obj,
 #undef READ_BOOL
 
 	zv = zend_read_property(http_send_file_options_ce, obj, "status", 6, 1, &rv);
+
 	if (zv != NULL && Z_TYPE_P(zv) == IS_LONG) {
 		out->status = (int)Z_LVAL_P(zv);
 	}
@@ -201,6 +218,7 @@ void http_send_file_options_destroy(http_send_file_options_t *opts)
 	if (opts == NULL) {
 		return;
 	}
+
 	if (opts->content_type != NULL) {
 		zend_string_release(opts->content_type);
 		opts->content_type = NULL;
@@ -227,6 +245,7 @@ void http_send_file_request_free(http_send_file_request_t *req)
 		zend_string_release(req->path);
 		req->path = NULL;
 	}
+
 	http_send_file_options_destroy(&req->opts);
 	efree(req);
 }

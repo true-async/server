@@ -104,14 +104,18 @@ static inline size_t find_extension_offset(const char *path, const size_t path_l
 	size_t i = path_len;
 	while (i > 0) {
 		const char c = path[i - 1];
+
 		if (is_path_separator(c)) {
 			return path_len;
 		}
+
 		if (c == '.') {
 			return i;
 		}
+
 		i--;
 	}
+
 	return path_len;
 }
 
@@ -122,13 +126,17 @@ static inline size_t lower_extension(const char *src, const size_t src_len, char
 	if (src_len == 0 || src_len >= buf_cap) {
 		return 0;
 	}
+
 	for (size_t i = 0; i < src_len; i++) {
 		char c = src[i];
+
 		if (c >= 'A' && c <= 'Z') {
 			c = (char)(c - 'A' + 'a');
 		}
+
 		buf[i] = c;
 	}
+
 	buf[src_len] = '\0';
 	return src_len;
 }
@@ -140,15 +148,18 @@ static const http_mime_entry_t *lookup_builtin(const char *ext)
 	while (lo < hi) {
 		const size_t mid = lo + (hi - lo) / 2;
 		const int cmp = strcmp(ext, builtin_table[mid].extension);
+
 		if (cmp == 0) {
 			return &builtin_table[mid];
 		}
+
 		if (cmp < 0) {
 			hi = mid;
 		} else {
 			lo = mid + 1;
 		}
 	}
+
 	return NULL;
 }
 
@@ -159,12 +170,15 @@ static const http_mime_entry_t *lookup_builtin(const char *ext)
 static void assert_builtin_table_sorted(void)
 {
 	static bool checked = false;
+
 	if (checked) {
 		return;
 	}
+
 	for (size_t i = 1; i < BUILTIN_TABLE_LEN; i++) {
 		ZEND_ASSERT(strcmp(builtin_table[i - 1].extension, builtin_table[i].extension) < 0);
 	}
+
 	checked = true;
 }
 #endif
@@ -172,9 +186,11 @@ static void assert_builtin_table_sorted(void)
 size_t http_mime_extract_lowered_ext(const char *path, size_t path_len, char *buf, size_t buf_cap)
 {
 	const size_t ext_offset = find_extension_offset(path, path_len);
+
 	if (ext_offset >= path_len) {
 		return 0;
 	}
+
 	return lower_extension(path + ext_offset, path_len - ext_offset, buf, buf_cap);
 }
 
@@ -185,6 +201,7 @@ bool http_mime_lookup_by_ext(const char *path, size_t path_len, const char **out
 #endif
 
 	const size_t ext_offset = find_extension_offset(path, path_len);
+
 	if (ext_offset >= path_len) {
 		return false;
 	}
@@ -194,11 +211,13 @@ bool http_mime_lookup_by_ext(const char *path, size_t path_len, const char **out
 
 	char ext_buf[32];
 	const size_t ext_len = lower_extension(ext_src, ext_src_len, ext_buf, sizeof(ext_buf));
+
 	if (UNEXPECTED(ext_len == 0)) {
 		return false;
 	}
 
 	const http_mime_entry_t *hit = lookup_builtin(ext_buf);
+
 	if (hit != NULL) {
 		*out = hit->content_type;
 		*out_len = hit->content_type_len;

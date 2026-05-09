@@ -73,9 +73,13 @@ extern void http2_static_drain_to_socket(http_connection_t *conn,
 static bool h2_static_header_allowed(const char *name, const size_t len)
 {
     if (len == 10 && strncasecmp(name, "connection",        10) == 0) return false;
+
     if (len == 10 && strncasecmp(name, "keep-alive",        10) == 0) return false;
+
     if (len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0) return false;
+
     if (len == 7  && strncasecmp(name, "upgrade",            7) == 0) return false;
+
     if (len == 14 && strncasecmp(name, "content-length",    14) == 0) return false;
     return true;
 }
@@ -98,10 +102,12 @@ static void h2_static_finalize(h2_static_state_t *state, int status)
     if (state == NULL) {
         return;
     }
+
     if (state->file_io != NULL) {
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);
         }
+
         state->file_io = NULL;
     }
 
@@ -115,6 +121,7 @@ static void h2_static_finalize(h2_static_state_t *state, int status)
             state->stream->on_close = NULL;
             state->stream->on_close_user = NULL;
         }
+
         state->stream = NULL;
     }
 
@@ -147,6 +154,7 @@ static ssize_t h2_static_data_read(nghttp2_session *ng,
     (void)user_data;
 
     h2_static_state_t *state = (h2_static_state_t *)source->ptr;
+
     if (state == NULL || state->file_fd < 0) {
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
@@ -154,6 +162,7 @@ static ssize_t h2_static_data_read(nghttp2_session *ng,
     const uint64_t remaining = state->bytes_sent < state->body_length
                                    ? state->body_length - state->bytes_sent
                                    : 0;
+
     if (remaining == 0) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
         return 0;
@@ -166,6 +175,7 @@ static ssize_t h2_static_data_read(nghttp2_session *ng,
     if (lseek(state->file_fd, pos, SEEK_SET) == (off_t)-1) {
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     }
+
     const ssize_t n = (ssize_t)read(state->file_fd, buf, want);
 #else
     ssize_t n;
@@ -179,9 +189,11 @@ static ssize_t h2_static_data_read(nghttp2_session *ng,
     }
 
     state->bytes_sent += (uint64_t)n;
+
     if (state->bytes_sent >= state->body_length) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
+
     return n;
 }
 
@@ -199,12 +211,15 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
     HashTable *headers = http_response_get_headers_table(response_obj);
 
     size_t total_values = 1;
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
+
             if (!h2_static_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
             } else if (Z_TYPE_P(values) == IS_ARRAY) {
@@ -218,6 +233,7 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
 
     nghttp2_nv *nv = scratch;
     nghttp2_nv *nv_heap = NULL;
+
     if (total_values > scratch_cap) {
         nv_heap = emalloc(total_values * sizeof(nghttp2_nv));
         nv = nv_heap;
@@ -239,12 +255,15 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
     nv[0].flags    = NGHTTP2_NV_FLAG_NONE;
 
     size_t i = 1;
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
+
             if (!h2_static_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv[i].name     = (uint8_t *)ZSTR_VAL(name);
                 nv[i].namelen  = ZSTR_LEN(name);
@@ -282,14 +301,19 @@ int h2_stream_send_static_response(void *ctx,
                                    void *user)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
+
     if (UNEXPECTED(stream == NULL || stream->session == NULL)) {
         return -1;
     }
+
     http_connection_t *conn = http2_session_get_conn(stream->session);
+
     if (UNEXPECTED(conn == NULL)) {
         return -1;
     }
+
     nghttp2_session *ng = http2_session_get_ng(stream->session);
+
     if (UNEXPECTED(ng == NULL)) {
         return -1;
     }

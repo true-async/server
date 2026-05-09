@@ -59,6 +59,7 @@ void http_date_format_imf(time_t t, char buf[HTTP_DATE_BUF_LEN])
 	/* mtime values past year 9999 are filesystem tampering, not real;
 	 * clamp to keep the fixed-width buffer honest. */
 	int year = tm.tm_year + 1900;
+
 	if (UNEXPECTED(year < 0 || year > 9999)) {
 		year = 9999;
 	}
@@ -128,6 +129,7 @@ static bool tm_fields_in_range(const struct tm *tm)
 time_t http_date_parse_imf(const char *src, size_t src_len)
 {
 	char buf[64];
+
 	if (src_len == 0 || src_len >= sizeof(buf)) {
 		return (time_t)-1;
 	}

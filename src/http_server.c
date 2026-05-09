@@ -68,6 +68,7 @@ ZEND_FUNCTION(TrueAsync_http_parse_request)
 
 	/* Acquire parser from pool */
 	http1_parser_t *parser_ctx = parser_pool_acquire();
+
 	if (!parser_ctx) {
 		RETURN_FALSE;
 	}
@@ -87,6 +88,7 @@ ZEND_FUNCTION(TrueAsync_http_parse_request)
 
 	/* Get parsed request */
 	http_request_t *req = http_parser_get_request(parser_ctx);
+
 	if (!req) {
 		parser_pool_return(parser_ctx);
 		RETURN_FALSE;
@@ -318,6 +320,7 @@ void parser_pool_clear(void)
 	for (size_t i = 0; i < HTTP_SERVER_G(parser_pool).count; i++) {
 		http_parser_destroy(HTTP_SERVER_G(parser_pool).parsers[i]);
 	}
+
 	HTTP_SERVER_G(parser_pool).count = 0;
 }
 /* }}} */

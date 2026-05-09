@@ -121,6 +121,7 @@ bool detect_and_assign_protocol(http_connection_t *conn)
                 conn->protocol_type = HTTP_PROTOCOL_HTTP1;
                 conn->strategy      = http_protocol_strategy_http1_create();
             }
+
             break;
 
         default:
@@ -131,12 +132,14 @@ bool detect_and_assign_protocol(http_connection_t *conn)
                 conn->protocol_type = HTTP_PROTOCOL_HTTP2;
                 conn->strategy      = http_protocol_strategy_http2_create();
             }
+
             break;
     }
 
     if (conn->strategy) {
         conn->strategy->on_request_ready = http_connection_on_request_ready;
     }
+
     conn->protocol_detected = true;
     return true;
 }
@@ -181,14 +184,17 @@ static int http1_feed(http_protocol_strategy_t *strategy,
      * http_parser_reset_for_reuse / destroy clears them. */
     if (!conn->parser) {
         conn->parser = parser_pool_acquire();
+
         if (!conn->parser) {
             if (consumed_out) { *consumed_out = 0; }
             return -1;
         }
+
         http_parser_attach(conn->parser, conn, strategy->on_request_ready);
     }
 
     int result = http_parser_execute(conn->parser, data, len, consumed_out);
+
     if (result != 0) {
         return -1;
     }

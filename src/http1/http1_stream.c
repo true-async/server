@@ -44,9 +44,11 @@
 static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 {
     http_connection_t *conn = ctx->conn;
+
     if (Z_ISUNDEF(ctx->response_zv)) {
         return false;
     }
+
     zend_object *response_obj = Z_OBJ(ctx->response_zv);
     /* Alt-Svc on streaming H1 responses too. Injected before
      * format_streaming_headers reads the header table; matches the
@@ -54,19 +56,24 @@ static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
      * the header or no H3 listener is up. */
     {
         zend_string *alt = http_server_get_alt_svc_value(conn->server);
+
         if (alt != NULL) {
             http_response_set_alt_svc_if_unset(
                 response_obj, ZSTR_VAL(alt), ZSTR_LEN(alt));
         }
     }
+
     zend_string *headers =
         http_response_format_streaming_headers(response_obj);
+
     if (headers == NULL || ZSTR_LEN(headers) == 0) {
         if (headers != NULL) {
             zend_string_release(headers);
         }
+
         return false;
     }
+
     const bool ok = http_connection_send(conn, ZSTR_VAL(headers),
                                          ZSTR_LEN(headers));
     zend_string_release(headers);
@@ -76,11 +83,14 @@ static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
+
     if (ctx == NULL || ctx->conn == NULL) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
+
     http_connection_t *conn = ctx->conn;
+
     if (Z_ISUNDEF(ctx->response_zv)) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
@@ -96,6 +106,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
             zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
+
         ctx->h1_stream_headers_sent = true;
     }
 
@@ -103,6 +114,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
      * from the zero-chunk EOF marker — drop it silently. mark_ended()
      * is the only place that emits the zero-chunk. */
     const size_t chunk_len = ZSTR_LEN(chunk);
+
     if (chunk_len == 0) {
         zend_string_release(chunk);
         http_server_on_stream_send(conn->counters, 0);
@@ -112,6 +124,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
     char header[H1_CHUNK_HEADER_MAX];
     const int header_len = snprintf(header, sizeof(header),
                                     "%zx\r\n", chunk_len);
+
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
@@ -123,6 +136,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
+
     zend_string_release(chunk);
 
     http_server_on_stream_send(conn->counters, chunk_len);
@@ -134,9 +148,11 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
 static void h1_stream_mark_ended(void *opaque)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
+
     if (ctx == NULL || ctx->conn == NULL || Z_ISUNDEF(ctx->response_zv)) {
         return;
     }
+
     http_connection_t *conn = ctx->conn;
 
     /* If send() was never called but mark_ended fires anyway (rare:
@@ -147,6 +163,7 @@ static void h1_stream_mark_ended(void *opaque)
         if (!h1_emit_headers_once(ctx)) {
             return;
         }
+
         ctx->h1_stream_headers_sent = true;
     }
 

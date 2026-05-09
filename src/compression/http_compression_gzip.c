@@ -49,6 +49,7 @@ extern const http_encoder_vtable_t http_compression_gzip_vt;
 static http_encoder_t *gz_create(int level)
 {
     if (level < 1) level = 1;
+
     if (level > 9) level = 9;
 
     gzip_encoder_t *enc = ecalloc(1, sizeof(*enc));
@@ -57,10 +58,12 @@ static http_encoder_t *gz_create(int level)
     /* windowBits = MAX_WBITS (15) + 16 → gzip wrapper. */
     int rc = ZS_DEFLATE_INIT2(&enc->stream, level, Z_DEFLATED,
                               MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY);
+
     if (rc != Z_OK) {
         efree(enc);
         return NULL;
     }
+
     enc->stream_initialised = true;
     return &enc->base;
 }
@@ -81,6 +84,7 @@ static http_encoder_status_t gz_write(http_encoder_t *base,
     int rc = ZS_DEFLATE(&enc->stream, Z_NO_FLUSH);
 
     if (in_consumed)  *in_consumed  = in_len  - enc->stream.avail_in;
+
     if (out_produced) *out_produced = out_cap - enc->stream.avail_out;
 
     if (rc != Z_OK) {
@@ -90,6 +94,7 @@ static http_encoder_status_t gz_write(http_encoder_t *base,
     if (enc->stream.avail_out == 0 && enc->stream.avail_in > 0) {
         return HTTP_ENC_NEED_OUTPUT;
     }
+
     return HTTP_ENC_OK;
 }
 
@@ -104,6 +109,7 @@ static http_encoder_status_t gz_finish(http_encoder_t *base,
     enc->stream.avail_out = (unsigned)out_cap;
 
     int rc = ZS_DEFLATE(&enc->stream, Z_FINISH);
+
     if (out_produced) *out_produced = out_cap - enc->stream.avail_out;
 
     if (rc == Z_STREAM_END) return HTTP_ENC_DONE;
@@ -117,10 +123,12 @@ static void gz_destroy(http_encoder_t *base)
 {
     if (base == NULL) return;
     gzip_encoder_t *enc = (gzip_encoder_t *)base;
+
     if (enc->stream_initialised) {
         (void)ZS_DEFLATE_END(&enc->stream);
         enc->stream_initialised = false;
     }
+
     efree(enc);
 }
 

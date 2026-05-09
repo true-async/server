@@ -95,6 +95,7 @@ static void tls_format_error(char *err_buf, size_t err_cap,
 
     const unsigned long openssl_err = ERR_peek_last_error();
     char openssl_msg[160] = {0};
+
     if (openssl_err != 0) {
         ERR_error_string_n(openssl_err, openssl_msg, sizeof(openssl_msg));
     }
@@ -128,6 +129,7 @@ int tls_layer_quic_ex_index(void)
     if (tls_quic_ex_idx == -1) {
         tls_quic_ex_idx = SSL_get_ex_new_index(0, (void *)"http3-quic", NULL, NULL, NULL);
     }
+
     return tls_quic_ex_idx;
 }
 
@@ -173,6 +175,7 @@ static int tls_alpn_select_cb(SSL *ssl,
     const int rc = SSL_select_next_proto(&selected, &selected_len,
                                          advertised, advertised_len,
                                          in, inlen);
+
     if (rc != OPENSSL_NPN_NEGOTIATED) {
         return SSL_TLSEXT_ERR_ALERT_FATAL;
     }
@@ -222,6 +225,7 @@ static bool tls_apply_security_defaults(SSL_CTX *ssl_ctx,
                          "Failed to set TLS 1.3 ciphersuites", NULL);
         return false;
     }
+
     if (SSL_CTX_set_cipher_list(ssl_ctx, tls_cipher_list_v12) != 1) {
         tls_format_error(err_buf, err_cap,
                          "Failed to set TLS 1.2 cipher list", NULL);
@@ -276,7 +280,9 @@ static int tls_ticket_ex_idx = -1;
 static bool tls_ticket_key_generate(tls_ticket_key_t *k)
 {
     if (RAND_bytes(k->name, sizeof(k->name)) != 1) return false;
+
     if (RAND_bytes(k->aes_key, sizeof(k->aes_key)) != 1) return false;
+
     if (RAND_bytes(k->hmac_key, sizeof(k->hmac_key)) != 1) return false;
     k->valid = true;
     return true;
@@ -291,23 +297,28 @@ static void tls_ticket_keys_rotate(tls_context_t *ctx)
     for (int i = TLS_TICKET_KEY_SLOTS - 1; i > 0; i--) {
         ctx->ticket_keys[i] = ctx->ticket_keys[i - 1];
     }
+
     memset(&ctx->ticket_keys[0], 0, sizeof(ctx->ticket_keys[0]));
+
     if (!tls_ticket_key_generate(&ctx->ticket_keys[0])) {
         /* Recover slot 0 from slot 1 so encrypt does not fail. */
         if (ctx->ticket_keys[1].valid) {
             ctx->ticket_keys[0] = ctx->ticket_keys[1];
         }
     }
+
     ctx->ticket_keys_last_rotation_ns = (uint64_t)zend_hrtime();
 }
 
 static void tls_maybe_rotate_ticket_keys(tls_context_t *ctx)
 {
     const uint64_t now = (uint64_t)zend_hrtime();
+
     if (ctx->ticket_keys_last_rotation_ns != 0
         && (now - ctx->ticket_keys_last_rotation_ns) < TLS_TICKET_ROTATE_PERIOD_NS) {
         return;
     }
+
     tls_ticket_keys_rotate(ctx);
 }
 
@@ -319,6 +330,7 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
     SSL_CTX *ssl_ctx = SSL_get_SSL_CTX(s);
     tls_context_t *ctx =
         (tls_context_t *)SSL_CTX_get_ex_data(ssl_ctx, tls_ticket_ex_idx);
+
     if (UNEXPECTED(ctx == NULL)) {
         return -1;
     }
@@ -329,24 +341,30 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
     if (enc == 1) {
         tls_maybe_rotate_ticket_keys(ctx);
         tls_ticket_key_t *k = &ctx->ticket_keys[0];
+
         if (!k->valid) return -1;
 
         memcpy(key_name, k->name, sizeof(k->name));
+
         if (RAND_bytes(iv, EVP_CIPHER_iv_length(EVP_aes_256_cbc())) != 1) {
             return -1;
         }
+
         if (EVP_EncryptInit_ex(cipher_ctx, EVP_aes_256_cbc(), NULL,
                                k->aes_key, iv) != 1) {
             return -1;
         }
+
         mac_params[0] = OSSL_PARAM_construct_octet_string(
             OSSL_MAC_PARAM_KEY, k->hmac_key, sizeof(k->hmac_key));
         mac_params[1] = OSSL_PARAM_construct_utf8_string(
             OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
         mac_params[2] = OSSL_PARAM_construct_end();
+
         if (EVP_MAC_CTX_set_params(mac_ctx, mac_params) != 1) {
             return -1;
         }
+
         return 1;
     }
 
@@ -354,25 +372,31 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
     int hit = -1;
     for (int i = 0; i < TLS_TICKET_KEY_SLOTS; i++) {
         if (!ctx->ticket_keys[i].valid) continue;
+
         if (CRYPTO_memcmp(key_name, ctx->ticket_keys[i].name,
                           sizeof(ctx->ticket_keys[i].name)) == 0) {
             hit = i;
             break;
         }
     }
+
     if (hit < 0) {
         return 0; /* unknown key — full handshake */
     }
+
     tls_ticket_key_t *k = &ctx->ticket_keys[hit];
+
     if (EVP_DecryptInit_ex(cipher_ctx, EVP_aes_256_cbc(), NULL,
                            k->aes_key, iv) != 1) {
         return -1;
     }
+
     mac_params[0] = OSSL_PARAM_construct_octet_string(
         OSSL_MAC_PARAM_KEY, k->hmac_key, sizeof(k->hmac_key));
     mac_params[1] = OSSL_PARAM_construct_utf8_string(
         OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
     mac_params[2] = OSSL_PARAM_construct_end();
+
     if (EVP_MAC_CTX_set_params(mac_ctx, mac_params) != 1) {
         return -1;
     }
@@ -386,22 +410,26 @@ static bool tls_install_ticket_key_cb(tls_context_t *ctx, char *err_buf,
 {
     if (tls_ticket_ex_idx < 0) {
         tls_ticket_ex_idx = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+
         if (tls_ticket_ex_idx < 0) {
             tls_format_error(err_buf, err_cap,
                 "SSL_CTX_get_ex_new_index failed for ticket-key slot", NULL);
             return false;
         }
     }
+
     if (SSL_CTX_set_ex_data(ctx->ctx, tls_ticket_ex_idx, ctx) != 1) {
         tls_format_error(err_buf, err_cap,
             "SSL_CTX_set_ex_data failed (ticket-key slot)", NULL);
         return false;
     }
+
     if (!tls_ticket_key_generate(&ctx->ticket_keys[0])) {
         tls_format_error(err_buf, err_cap,
             "OpenSSL RAND_bytes failed seeding ticket key", NULL);
         return false;
     }
+
     ctx->ticket_keys_last_rotation_ns = (uint64_t)zend_hrtime();
 
     if (SSL_CTX_set_tlsext_ticket_key_evp_cb(ctx->ctx, tls_ticket_key_cb) != 1) {
@@ -409,6 +437,7 @@ static bool tls_install_ticket_key_cb(tls_context_t *ctx, char *err_buf,
             "SSL_CTX_set_tlsext_ticket_key_evp_cb failed", NULL);
         return false;
     }
+
     return true;
 }
 
@@ -422,6 +451,7 @@ tls_context_t *tls_context_new(const char *cert_path,
                          "TLS certificate path is not configured", NULL);
         return NULL;
     }
+
     if (key_path == NULL || *key_path == '\0') {
         tls_format_error(err_buf, err_cap,
                          "TLS private key path is not configured", NULL);
@@ -443,6 +473,7 @@ tls_context_t *tls_context_new(const char *cert_path,
 #endif
 
     SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
+
     if (ssl_ctx == NULL) {
         tls_format_error(err_buf, err_cap, "SSL_CTX_new failed", NULL);
         return NULL;
@@ -501,6 +532,7 @@ void tls_context_free(tls_context_t *ctx)
         SSL_CTX_free(ctx->ctx);
         ctx->ctx = NULL;
     }
+
     if (ctx->cert_path != NULL) {
         zend_string_release(ctx->cert_path);
         ctx->cert_path = NULL;
@@ -535,6 +567,7 @@ const char *tls_op_name(const tls_op_t op)
     if ((size_t)op >= (sizeof(tls_op_names_table) / sizeof(tls_op_names_table[0]))) {
         return "unknown";
     }
+
     const char *name = tls_op_names_table[op];
     return name != NULL ? name : "unknown";
 }
@@ -561,6 +594,7 @@ static void tls_session_record_error(tls_session_t *session,
     if (session == NULL) {
         return;
     }
+
     tls_error_info_t *err = &session->last_error;
     err->op            = op;
     err->ssl_err       = ssl_err;
@@ -623,18 +657,23 @@ static tls_alpn_t tls_lookup_alpn(SSL *ssl)
     const unsigned char *proto = NULL;
     unsigned int proto_len = 0;
     SSL_get0_alpn_selected(ssl, &proto, &proto_len);
+
     if (proto == NULL || proto_len == 0) {
         return TLS_ALPN_NONE;
     }
+
     if (proto_len == 8 && memcmp(proto, "http/1.1", 8) == 0) {
         return TLS_ALPN_HTTP11;
     }
+
     if (proto_len == 2 && memcmp(proto, "h2", 2) == 0) {
         return TLS_ALPN_H2;
     }
+
     if (proto_len == 2 && memcmp(proto, "h3", 2) == 0) {
         return TLS_ALPN_H3;
     }
+
     return TLS_ALPN_NONE;
 }
 
@@ -645,6 +684,7 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
     }
 
     SSL *ssl = SSL_new(ctx->ctx);
+
     if (ssl == NULL) {
         ERR_clear_error();
         return NULL;
@@ -652,6 +692,7 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
 
     BIO *internal_bio = NULL;
     BIO *network_bio  = NULL;
+
     if (BIO_new_bio_pair(&internal_bio, TLS_BIO_RING_SIZE,
                          &network_bio,  TLS_BIO_RING_SIZE) != 1) {
         SSL_free(ssl);
@@ -689,6 +730,7 @@ void tls_session_free(tls_session_t *session)
         session->ssl = NULL;
         session->internal_bio = NULL;
     }
+
     if (session->network_bio != NULL) {
         BIO_free(session->network_bio);
         session->network_bio = NULL;
@@ -704,29 +746,35 @@ tls_io_result_t tls_feed_ciphertext(tls_session_t *session,
     if (consumed != NULL) {
         *consumed = 0;
     }
+
     if (session == NULL || session->network_bio == NULL) {
         return TLS_IO_ERROR;
     }
+
     if (len == 0) {
         return TLS_IO_OK;
     }
+
     if (len > INT_MAX) {
         len = INT_MAX;
     }
 
     const int written = BIO_write(session->network_bio, buf, (int)len);
+
     if (written <= 0) {
         /* BIO pair is full. Caller must drain plaintext (consuming
          * ciphertext from OpenSSL's side) before pushing more. */
         if (BIO_should_retry(session->network_bio)) {
             return TLS_IO_WANT_READ;
         }
+
         return TLS_IO_ERROR;
     }
 
     if (consumed != NULL) {
         *consumed = (size_t)written;
     }
+
     return TLS_IO_OK;
 }
 
@@ -737,29 +785,35 @@ tls_io_result_t tls_drain_ciphertext(tls_session_t *session,
     if (produced != NULL) {
         *produced = 0;
     }
+
     if (session == NULL || session->network_bio == NULL) {
         return TLS_IO_ERROR;
     }
+
     if (cap == 0) {
         return TLS_IO_OK;
     }
+
     if (cap > INT_MAX) {
         cap = INT_MAX;
     }
 
     const int read_n = BIO_read(session->network_bio, buf, (int)cap);
+
     if (read_n <= 0) {
         /* Nothing pending — not an error, OpenSSL simply has no
          * encrypted output right now. */
         if (BIO_should_retry(session->network_bio)) {
             return TLS_IO_OK;
         }
+
         return TLS_IO_ERROR;
     }
 
     if (produced != NULL) {
         *produced = (size_t)read_n;
     }
+
     return TLS_IO_OK;
 }
 
@@ -768,15 +822,18 @@ tls_io_result_t tls_handshake_step(tls_session_t *session)
     if (session == NULL || session->ssl == NULL) {
         return TLS_IO_ERROR;
     }
+
     if (session->state == TLS_ESTABLISHED) {
         return TLS_IO_OK;
     }
+
     if (session->state == TLS_CLOSED) {
         return TLS_IO_CLOSED;
     }
 
     ERR_clear_error();
     const int rc = SSL_do_handshake(session->ssl);
+
     if (rc == 1) {
         session->state = TLS_ESTABLISHED;
         session->alpn_selected = tls_lookup_alpn(session->ssl);
@@ -793,15 +850,19 @@ tls_io_result_t tls_read_plaintext(tls_session_t *session,
     if (produced != NULL) {
         *produced = 0;
     }
+
     if (session == NULL || session->ssl == NULL) {
         return TLS_IO_ERROR;
     }
+
     if (session->state == TLS_CLOSED) {
         return TLS_IO_CLOSED;
     }
+
     if (cap == 0) {
         return TLS_IO_OK;
     }
+
     if (cap > INT_MAX) {
         cap = INT_MAX;
     }
@@ -809,17 +870,21 @@ tls_io_result_t tls_read_plaintext(tls_session_t *session,
     ERR_clear_error();
     size_t read_n = 0;
     const int rc = SSL_read_ex(session->ssl, buf, cap, &read_n);
+
     if (rc == 1) {
         if (produced != NULL) {
             *produced = read_n;
         }
+
         return TLS_IO_OK;
     }
 
     const tls_io_result_t mapped = tls_classify_ssl_error(session, rc, TLS_OP_READ, read_n);
+
     if (mapped == TLS_IO_CLOSED) {
         session->state = TLS_CLOSED;
     }
+
     return mapped;
 }
 
@@ -830,15 +895,19 @@ tls_io_result_t tls_write_plaintext(tls_session_t *session,
     if (written != NULL) {
         *written = 0;
     }
+
     if (session == NULL || session->ssl == NULL) {
         return TLS_IO_ERROR;
     }
+
     if (session->state == TLS_CLOSED || session->state == TLS_SHUTTING_DOWN) {
         return TLS_IO_CLOSED;
     }
+
     if (len == 0) {
         return TLS_IO_OK;
     }
+
     if (len > INT_MAX) {
         len = INT_MAX;
     }
@@ -846,10 +915,12 @@ tls_io_result_t tls_write_plaintext(tls_session_t *session,
     ERR_clear_error();
     size_t wrote = 0;
     const int rc = SSL_write_ex(session->ssl, buf, len, &wrote);
+
     if (rc == 1) {
         if (written != NULL) {
             *written = wrote;
         }
+
         return TLS_IO_OK;
     }
 
@@ -875,8 +946,10 @@ size_t tls_reserve_cipher_in(tls_session_t *session, char **out_ptr)
     if (session == NULL || session->network_bio == NULL || out_ptr == NULL) {
         return 0;
     }
+
     char *slot = NULL;
     const int space = BIO_nwrite0(session->network_bio, &slot);
+
     if (space <= 0 || slot == NULL) {
         *out_ptr = NULL;
         return 0;
@@ -890,9 +963,11 @@ bool tls_commit_cipher_in(tls_session_t *session, const size_t n)
     if (session == NULL || session->network_bio == NULL) {
         return false;
     }
+
     if (n == 0) {
         return true;
     }
+
     char *dummy = NULL;
     int to_commit = (n > (size_t)INT_MAX) ? INT_MAX : (int)n;
     /* Caller reserved at least `n` bytes via tls_reserve_cipher_in and
@@ -907,6 +982,7 @@ bool tls_commit_cipher_in(tls_session_t *session, const size_t n)
     const int total = to_commit;
     while (to_commit > 0) {
         const int committed = BIO_nwrite(session->network_bio, &dummy, to_commit);
+
         if (committed <= 0) {
             tls_session_record_error(session, TLS_OP_COMMIT, -1,
                                      (size_t)(total - to_commit),
@@ -914,8 +990,10 @@ bool tls_commit_cipher_in(tls_session_t *session, const size_t n)
             session->state = TLS_CLOSED;
             return false;
         }
+
         to_commit -= committed;
     }
+
     return true;
 }
 
@@ -924,8 +1002,10 @@ size_t tls_peek_cipher_out(tls_session_t *session, char **out_ptr)
     if (session == NULL || session->network_bio == NULL || out_ptr == NULL) {
         return 0;
     }
+
     char *slot = NULL;
     const int avail = BIO_nread0(session->network_bio, &slot);
+
     if (avail <= 0 || slot == NULL) {
         *out_ptr = NULL;
         return 0;
@@ -939,6 +1019,7 @@ bool tls_session_was_resumed(const tls_session_t *session)
     if (session == NULL || session->ssl == NULL) {
         return false;
     }
+
     return SSL_session_reused(session->ssl) == 1;
 }
 
@@ -953,6 +1034,7 @@ bool tls_session_ktls_tx_active(const tls_session_t *session)
     if (session == NULL || session->internal_bio == NULL) {
         return false;
     }
+
     return BIO_get_ktls_send(session->internal_bio) != 0;
 }
 
@@ -961,6 +1043,7 @@ bool tls_session_ktls_rx_active(const tls_session_t *session)
     if (session == NULL || session->internal_bio == NULL) {
         return false;
     }
+
     return BIO_get_ktls_recv(session->internal_bio) != 0;
 }
 
@@ -969,9 +1052,11 @@ bool tls_consume_cipher_out(tls_session_t *session, const size_t n)
     if (session == NULL || session->network_bio == NULL) {
         return false;
     }
+
     if (n == 0) {
         return true;
     }
+
     char *dummy = NULL;
     int to_consume = (n > (size_t)INT_MAX) ? INT_MAX : (int)n;
     /* Mirror of tls_commit_cipher_in: caller peeked `n` bytes and sent
@@ -980,6 +1065,7 @@ bool tls_consume_cipher_out(tls_session_t *session, const size_t n)
     const int total = to_consume;
     while (to_consume > 0) {
         const int consumed = BIO_nread(session->network_bio, &dummy, to_consume);
+
         if (consumed <= 0) {
             tls_session_record_error(session, TLS_OP_CONSUME, -1,
                                      (size_t)(total - to_consume),
@@ -987,8 +1073,10 @@ bool tls_consume_cipher_out(tls_session_t *session, const size_t n)
             session->state = TLS_CLOSED;
             return false;
         }
+
         to_consume -= consumed;
     }
+
     return true;
 }
 
@@ -997,18 +1085,22 @@ tls_io_result_t tls_shutdown_step(tls_session_t *session)
     if (session == NULL || session->ssl == NULL) {
         return TLS_IO_ERROR;
     }
+
     if (session->state == TLS_CLOSED) {
         return TLS_IO_CLOSED;
     }
+
     session->state = TLS_SHUTTING_DOWN;
 
     ERR_clear_error();
     const int rc = SSL_shutdown(session->ssl);
+
     if (rc == 1) {
         /* Both close_notifys exchanged. */
         session->state = TLS_CLOSED;
         return TLS_IO_CLOSED;
     }
+
     if (rc == 0) {
         /* Our close_notify was sent; peer's has not arrived yet. Caller
          * should drain ciphertext, arm a read, and call us again. */
@@ -1023,5 +1115,6 @@ const tls_error_info_t *tls_session_last_error(const tls_session_t *session)
     if (session == NULL) {
         return NULL;
     }
+
     return &session->last_error;
 }

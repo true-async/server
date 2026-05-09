@@ -104,6 +104,7 @@ static void uploaded_file_free_object(zend_object *object)
         if (!intern->moved && intern->is_ready) {
             VCWD_UNLINK(ZSTR_VAL(intern->tmp_path));
         }
+
         zend_string_release(intern->tmp_path);
     }
 
@@ -149,6 +150,7 @@ static int mkdir_recursive(const char *path, mode_t mode)
             *p = saved;
         }
     }
+
     if (ret == 0
         && VCWD_MKDIR(path_copy, mode) != 0
         && errno != EEXIST
@@ -164,11 +166,13 @@ static int mkdir_recursive(const char *path, mode_t mode)
 static int copy_file(const char *src, const char *dst)
 {
     FILE *fsrc = fopen(src, "rb");
+
     if (!fsrc) {
         return -1;
     }
 
     FILE *fdst = fopen(dst, "wb");
+
     if (!fdst) {
         fclose(fsrc);
         return -1;
@@ -274,6 +278,7 @@ ZEND_METHOD(TrueAsync_UploadedFile, moveTo)
             RETURN_THROWS();
         }
     }
+
     efree(dir_copy);
 
     /* Try atomic rename first. VCWD_RENAME handles Windows UTF-8 paths. */
@@ -403,12 +408,15 @@ zval* uploaded_file_create_from_info(mp_file_info_t *info)
     if (info->client_filename) {
         intern->client_filename = zend_string_init(info->client_filename, strlen(info->client_filename), 0);
     }
+
     if (info->client_media_type) {
         intern->client_media_type = zend_string_init(info->client_media_type, strlen(info->client_media_type), 0);
     }
+
     if (info->client_charset) {
         intern->client_charset = zend_string_init(info->client_charset, strlen(info->client_charset), 0);
     }
+
     if (info->tmp_path) {
         intern->tmp_path = zend_string_init(info->tmp_path, strlen(info->tmp_path), 0);
     }

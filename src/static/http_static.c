@@ -61,8 +61,10 @@ static bool mount_resolve_content_type(const http_static_handler_t *mount, const
 	if (mount != NULL && mount->mime_overrides != NULL) {
 		char ext[32];
 		const size_t ext_len = http_mime_extract_lowered_ext(path, path_len, ext, sizeof(ext));
+
 		if (ext_len > 0) {
 			const zval *override = zend_hash_str_find(mount->mime_overrides, ext, ext_len);
+
 			if (override != NULL && Z_TYPE_P(override) == IS_STRING) {
 				*out = Z_STRVAL_P(override);
 				*out_len = Z_STRLEN_P(override);
@@ -109,6 +111,7 @@ static bool symlink_policy_admits(const http_static_handler_t *mount, const char
 {
 	if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {
 		struct stat ls;
+
 		if (UNEXPECTED(lstat(fs_path, &ls) != 0)) {
 			return false;
 		}
@@ -144,12 +147,14 @@ static bool symlink_policy_admits(const http_static_handler_t *mount, const char
 static bool verify_path_owner_chain(const http_static_handler_t *mount, const char *fs_path)
 {
 	const size_t root_len = ZSTR_LEN(mount->root_directory);
+
 	if (UNEXPECTED(strncmp(fs_path, ZSTR_VAL(mount->root_directory), root_len) != 0)) {
 		return false;
 	}
 
 	char buf[MAXPATHLEN];
 	size_t len = root_len;
+
 	if (UNEXPECTED(root_len >= sizeof(buf))) {
 		return false;
 	}
@@ -177,12 +182,14 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 		buf[len] = '\0';
 
 		struct stat ls;
+
 		if (UNEXPECTED(lstat(buf, &ls) != 0)) {
 			return false;
 		}
 
 		if (S_ISLNK(ls.st_mode)) {
 			struct stat ts;
+
 			if (UNEXPECTED(stat(buf, &ts) != 0)) {
 				return false;
 			}
@@ -212,6 +219,7 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 static bool resolved_under_root(const http_static_handler_t *mount, const char *path)
 {
 	char canonical[MAXPATHLEN];
+
 	if (UNEXPECTED(realpath(path, canonical) == NULL)) {
 		return false;
 	}
@@ -244,6 +252,7 @@ static bool try_open_candidate(const http_static_handler_t *mount, const char *p
 							   struct stat *st)
 {
 	const int fd = open_for_policy(mount, path);
+
 	if (fd < 0) {
 		return false;
 	}
@@ -262,6 +271,7 @@ static bool try_open_candidate(const http_static_handler_t *mount, const char *p
 	}
 
 	struct stat path_st;
+
 	if (UNEXPECTED(lstat(path, &path_st) != 0)) {
 		const int saved_errno = errno;
 		close(fd);
@@ -310,13 +320,16 @@ static void apply_mount_headers(zend_object *response_obj, const http_static_han
 		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
 			continue;
 		}
+
 		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
 			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
 			continue;
 		}
+
 		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
 										Z_STRVAL_P(value), Z_STRLEN_P(value));
 	}
+
 	ZEND_HASH_FOREACH_END();
 }
 
@@ -346,6 +359,7 @@ static bool try_select_precompressed(const http_static_handler_t *mount, http_re
 	}
 
 	const zend_string *ae = http_request_find_header(request, "accept-encoding", 15);
+
 	if (ae == NULL) {
 		return false;
 	}
@@ -378,6 +392,7 @@ static bool try_select_precompressed(const http_static_handler_t *mount, http_re
 		if ((mount->flags & codecs[i].flag) == 0) {
 			continue;
 		}
+
 		if (!acceptable[i]) {
 			continue;
 		}
@@ -385,15 +400,18 @@ static bool try_select_precompressed(const http_static_handler_t *mount, http_re
 		if (UNEXPECTED(*fs_path_len + codecs[i].suffix_len + 1 > buf_cap)) {
 			continue;
 		}
+
 		char candidate[MAXPATHLEN];
 		memcpy(candidate, fs_path_buf, *fs_path_len);
 		memcpy(candidate + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
 		candidate[*fs_path_len + codecs[i].suffix_len] = '\0';
 
 		struct stat st;
+
 		if (stat(candidate, &st) != 0) {
 			continue;
 		}
+
 		if (!S_ISREG(st.st_mode)) {
 			continue;
 		}
@@ -405,6 +423,7 @@ static bool try_select_precompressed(const http_static_handler_t *mount, http_re
 		*out_encoding_len = codecs[i].token_len;
 		return true;
 	}
+
 	return false;
 }
 
@@ -416,6 +435,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 										   void *user)
 {
 	const size_t mount_count = http_static_handler_count(server);
+
 	if (UNEXPECTED(mount_count == 0)) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
@@ -428,6 +448,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 	 * same prefix without the static layer turning them into 405s. */
 	const bool is_head = http_request_method_is_head(request);
 	const bool is_get = http_request_method_is_get(request);
+
 	if (!is_get && !is_head) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
@@ -437,12 +458,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 	 * '?' and '#' so the whole URI is safe to feed in. */
 	const char *req_path = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
 	const size_t req_path_len = (request->uri != NULL) ? ZSTR_LEN(request->uri) : 0;
+
 	if (UNEXPECTED(req_path == NULL || req_path_len == 0)) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
 
 	for (size_t mi = 0; mi < mount_count; mi++) {
 		const http_static_handler_t *mount = http_static_handler_get(server, mi);
+
 		if (UNEXPECTED(mount == NULL)) {
 			continue;
 		}
@@ -459,6 +482,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		if (rc == HTTP_STATIC_PATH_NO_MATCH) {
 			continue;
 		}
+
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_BAD_REQUEST)) {
 			http_response_emit_status_body(response_obj, 400, "Bad Request", 11);
 			return HTTP_STATIC_HANDLED;
@@ -469,10 +493,12 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
+
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_HIDE)) {
 			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 				return HTTP_STATIC_PASSTHROUGH;
 			}
+
 			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
@@ -484,6 +510,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 				return HTTP_STATIC_PASSTHROUGH;
 			}
+
 			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
@@ -499,16 +526,20 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		 * uniformly — on_missing:Next mounts return PASSTHROUGH so the
 		 * PHP handler can take over. */
 		const bool was_directory = path_targets_directory(relative, relative_len);
+
 		if (was_directory) {
 			bool index_resolved = false;
 			for (size_t ii = 0; ii < mount->index_count; ii++) {
 				const zend_string *idx = mount->index_files[ii];
 				size_t cand_len = fs_path_len;
+
 				if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path), &cand_len,
 													  ZSTR_VAL(idx), ZSTR_LEN(idx)))) {
 					continue;
 				}
+
 				struct stat sb;
+
 				if (stat(fs_path, &sb) == 0 && S_ISREG(sb.st_mode)) {
 					fs_path_len = cand_len;
 					index_resolved = true;
@@ -518,10 +549,12 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				 * pristine directory prefix. */
 				fs_path[fs_path_len] = '\0';
 			}
+
 			if (!index_resolved) {
 				if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 					return HTTP_STATIC_PASSTHROUGH;
 				}
+
 				http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 				return HTTP_STATIC_HANDLED;
 			}
@@ -555,14 +588,17 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		size_t picked_encoding_len = 0;
 		const char *override_ct = NULL;
 		size_t override_ct_len = 0;
+
 		if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR | HTTP_STATIC_FLAG_PRECOMP_GZIP |
 							 HTTP_STATIC_FLAG_PRECOMP_ZSTD)) != 0) {
 			const char *pre_ct = NULL;
 			size_t pre_ct_len = 0;
+
 			if (!mount_resolve_content_type(mount, fs_path, fs_path_len, &pre_ct, &pre_ct_len)) {
 				pre_ct = "application/octet-stream";
 				pre_ct_len = sizeof("application/octet-stream") - 1;
 			}
+
 			if (try_select_precompressed(mount, request, fs_path, sizeof(fs_path), &fs_path_len,
 										 &picked_encoding, &picked_encoding_len)) {
 				override_ct = pre_ct;
@@ -574,6 +610,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		bool gate_ok;
 		bool have_view = false;
 		http_static_cache_view_t cv;
+
 		if (cache != NULL) {
 			if (http_static_cache_lookup(cache, fs_path, fs_path_len, &cv)) {
 				/* Trust-within-TTL: realpath was validated at insert,
@@ -598,6 +635,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		 * the synchronous slurp path below. http_static_dispatch_cbs_t
 		 * is now an alias of send_file_cbs_t — pass it straight through. */
 		const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
+
 		if (gate_ok && ops != NULL && ops->send_static_response != NULL) {
 			send_file_config_t cfg = {0};
 			cfg.abs_path = fs_path;
@@ -614,6 +652,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			cfg.server = server;
 			cfg.content_encoding = picked_encoding;
 			cfg.content_encoding_len = picked_encoding_len;
+
 			if (override_ct != NULL && override_ct_len > 0) {
 				/* Sidecar-resolved Content-Type — synthesize a
 				 * non-refcounted view so the engine reads it via the
@@ -622,6 +661,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				 * of send_file(); the engine copies what it needs. */
 				cfg.content_type = zend_string_init(override_ct, override_ct_len, 0);
 			}
+
 			cfg.on_error = (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT)
 							   ? SEND_FILE_ERR_PASSTHROUGH_PHP
 							   : SEND_FILE_ERR_EMIT_VIA_OP;
@@ -641,6 +681,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				http_server_on_static_zero_coroutine(counters);
 				return HTTP_STATIC_HARD_ZERO;
 			}
+
 			if (r == SEND_FILE_PASSTHROUGH) {
 				/* engine fired on_passthrough — caller's hook already
 				 * released its pinned protocol-side resources. */
@@ -663,6 +704,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 				return HTTP_STATIC_PASSTHROUGH;
 			}
+
 			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
@@ -688,6 +730,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		char etag_buf[HTTP_ETAG_BUF_LEN];
 		const bool etag_enabled = (mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
+
 		if (etag_enabled) {
 			http_etag_format_strong(&st, etag_buf);
 		}
@@ -708,10 +751,12 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		if (not_modified) {
 			close(fd);
 			http_response_static_set_status(response_obj, 304);
+
 			if (etag_enabled) {
 				http_response_static_set_header(response_obj, "etag", 4, etag_buf,
 												HTTP_ETAG_LEN);
 			}
+
 			http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
 											HTTP_DATE_LEN);
 			apply_mount_headers(response_obj, mount, false);
@@ -719,25 +764,30 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		}
 
 		zend_string *body = NULL;
+
 		if (is_get) {
 			body = fs_slurp_fd(fd, (size_t)st.st_size);
+
 			if (UNEXPECTED(body == NULL)) {
 				close(fd);
 				http_response_emit_status_body(response_obj, 500, "Internal Server Error", 21);
 				return HTTP_STATIC_HANDLED;
 			}
 		}
+
 		close(fd);
 
 		http_response_static_set_status(response_obj, 200);
 
 		const char *content_type = NULL;
 		size_t content_type_len = 0;
+
 		if (!mount_resolve_content_type(mount, fs_path, fs_path_len, &content_type,
 										&content_type_len)) {
 			content_type = "application/octet-stream";
 			content_type_len = sizeof("application/octet-stream") - 1;
 		}
+
 		http_response_static_set_header(response_obj, "content-type", 12, content_type,
 										content_type_len);
 
@@ -745,6 +795,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			http_response_static_set_header(response_obj, "etag", 4, etag_buf,
 											HTTP_ETAG_LEN);
 		}
+
 		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
 										HTTP_DATE_LEN);
 		apply_mount_headers(response_obj, mount, true);

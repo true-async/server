@@ -91,6 +91,7 @@ bool http_etag_match_inm(const char *header, size_t header_len, const char *etag
 		while (i < header_len && header[i] != ',') {
 			i++;
 		}
+
 		size_t entry_len = i - start;
 		const char *entry = header + start;
 		trim_ws(&entry, &entry_len);
@@ -111,5 +112,6 @@ bool http_etag_match_inm(const char *header, size_t header_len, const char *etag
 			i++; /* skip the comma */
 		}
 	}
+
 	return false;
 }

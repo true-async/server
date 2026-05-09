@@ -44,9 +44,11 @@ extern const http_encoder_vtable_t http_compression_brotli_vt;
 static http_encoder_t *br_create(int level)
 {
     if (level < HTTP_COMPRESSION_BROTLI_LEVEL_MIN) level = HTTP_COMPRESSION_BROTLI_LEVEL_MIN;
+
     if (level > HTTP_COMPRESSION_BROTLI_LEVEL_MAX) level = HTTP_COMPRESSION_BROTLI_LEVEL_MAX;
 
     BrotliEncoderState *st = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+
     if (UNEXPECTED(st == NULL)) return NULL;
     /* BROTLI_PARAM_MODE left at default (BROTLI_MODE_GENERIC) — text-only
      * (BROTLI_MODE_TEXT) gives a ~1-2% better ratio on JSON/HTML but the
@@ -74,10 +76,12 @@ static size_t br_drain_output(BrotliEncoderState *st,
     while (BrotliEncoderHasMoreOutput(st) && produced < out_cap) {
         size_t avail = out_cap - produced;
         const uint8_t *p = BrotliEncoderTakeOutput(st, &avail);
+
         if (UNEXPECTED(p == NULL || avail == 0)) break;
         memcpy(out + produced, p, avail);
         produced += avail;
     }
+
     return produced;
 }
 
@@ -100,6 +104,7 @@ static http_encoder_status_t br_write(http_encoder_t *base,
                                                 &avail_in, &next_in,
                                                 &avail_out, &next_out, NULL))) {
         if (in_consumed)  *in_consumed  = in_len  - avail_in;
+
         if (out_produced) *out_produced = out_cap - avail_out;
         return HTTP_ENC_ERROR;
     }
@@ -113,11 +118,13 @@ static http_encoder_status_t br_write(http_encoder_t *base,
     }
 
     if (in_consumed)  *in_consumed  = in_len - avail_in;
+
     if (out_produced) *out_produced = produced;
 
     if (BrotliEncoderHasMoreOutput(enc->state)) {
         return HTTP_ENC_NEED_OUTPUT;
     }
+
     return HTTP_ENC_OK;
 }
 
@@ -134,27 +141,33 @@ static http_encoder_status_t br_finish(http_encoder_t *base,
         const uint8_t  *next_in   = NULL;
         size_t          avail_out = out_cap;
         uint8_t        *next_out  = (uint8_t *)out;
+
         if (UNEXPECTED(!BrotliEncoderCompressStream(enc->state, BROTLI_OPERATION_FINISH,
                                                     &avail_in, &next_in,
                                                     &avail_out, &next_out, NULL))) {
             if (out_produced) *out_produced = out_cap - avail_out;
             return HTTP_ENC_ERROR;
         }
+
         size_t produced = out_cap - avail_out;
+
         if (UNEXPECTED(BrotliEncoderHasMoreOutput(enc->state))) {
             produced += br_drain_output(enc->state,
                 (unsigned char *)out + produced, out_cap - produced);
         }
+
         if (out_produced) *out_produced = produced;
     } else {
         /* Already finished; just drain whatever is still buffered. */
         const size_t produced = br_drain_output(enc->state, (unsigned char *)out, out_cap);
+
         if (out_produced) *out_produced = produced;
     }
 
     if (BrotliEncoderHasMoreOutput(enc->state)) {
         return HTTP_ENC_NEED_OUTPUT;
     }
+
     if (EXPECTED(BrotliEncoderIsFinished(enc->state))) {
         return HTTP_ENC_DONE;
     }
@@ -167,10 +180,12 @@ static void br_destroy(http_encoder_t *base)
 {
     if (base == NULL) return;
     brotli_encoder_t *enc = (brotli_encoder_t *)base;
+
     if (enc->state) {
         BrotliEncoderDestroyInstance(enc->state);
         enc->state = NULL;
     }
+
     efree(enc);
 }
 
@@ -192,6 +207,7 @@ int http_compression_decode_request_brotli(http_request_t *req, size_t cap)
     }
 
     BrotliDecoderState *st = BrotliDecoderCreateInstance(NULL, NULL, NULL);
+
     if (UNEXPECTED(st == NULL)) {
         return HTTP_DECODE_MALFORMED;
     }
@@ -199,6 +215,7 @@ int http_compression_decode_request_brotli(http_request_t *req, size_t cap)
     /* Output buffer mirrors the gzip path: 4 KiB initial, doubling
      * (capped) until the decoder reports DONE or the cap is hit. */
     size_t out_cap = 4096;
+
     if (cap > 0 && cap < out_cap) out_cap = cap;
     zend_string *out = zend_string_alloc(out_cap, 0);
     size_t produced = 0;
@@ -214,6 +231,7 @@ int http_compression_decode_request_brotli(http_request_t *req, size_t cap)
         produced = out_cap - avail_out;
 
         if (EXPECTED(r == BROTLI_DECODER_RESULT_SUCCESS)) break;
+
         if (UNEXPECTED(r == BROTLI_DECODER_RESULT_ERROR ||
                        r == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)) {
             /* NEEDS_MORE_INPUT after we already passed the entire body
@@ -224,22 +242,27 @@ int http_compression_decode_request_brotli(http_request_t *req, size_t cap)
         }
         /* BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT — grow within cap. */
         size_t new_cap = out_cap * 2;
+
         if (cap > 0 && new_cap > cap) new_cap = cap;
+
         if (UNEXPECTED(new_cap == out_cap)) {
             BrotliDecoderDestroyInstance(st);
             zend_string_release(out);
             return HTTP_DECODE_TOO_LARGE;
         }
+
         out       = zend_string_realloc(out, new_cap, 0);
         next_out  = (uint8_t *)ZSTR_VAL(out) + produced;
         avail_out = new_cap - produced;
         out_cap   = new_cap;
     }
+
     BrotliDecoderDestroyInstance(st);
 
     if (produced != out_cap) {
         out = zend_string_truncate(out, produced, 0);
     }
+
     ZSTR_VAL(out)[produced] = '\0';
 
     zend_string_release(req->body);

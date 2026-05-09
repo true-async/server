@@ -42,6 +42,7 @@ void http3_stream_pool_cleanup(http3_stream_pool_t *pool)
         efree(c);
         c = next;
     }
+
     pool->chunks     = NULL;
     pool->free_head  = NULL;
     pool->slot_count = 0;
@@ -51,9 +52,11 @@ void http3_stream_pool_cleanup(http3_stream_pool_t *pool)
 static bool http3_stream_pool_grow(http3_stream_pool_t *pool)
 {
     http3_stream_chunk_t *chunk = emalloc(sizeof(*chunk));
+
     if (UNEXPECTED(chunk == NULL)) {
         return false;
     }
+
     chunk->next_chunk = pool->chunks;
     pool->chunks = chunk;
 
@@ -66,6 +69,7 @@ static bool http3_stream_pool_grow(http3_stream_pool_t *pool)
         slot->list_next = pool->free_head;
         pool->free_head = slot;
     }
+
     pool->slot_count += HTTP3_STREAM_POOL_CHUNK_SLOTS;
     return true;
 }

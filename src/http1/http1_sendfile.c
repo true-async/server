@@ -151,6 +151,7 @@ static inline void h1_send_state_free(h1_send_state_t *state)
         efree(state->chunk_buf);
         state->chunk_buf = NULL;
     }
+
     efree(state);
 }
 
@@ -170,10 +171,13 @@ static inline void h1_send_cork_set(http_connection_t *conn, const int on)
     if (UNEXPECTED(conn == NULL || conn->io == NULL)) {
         return;
     }
+
     if (conn->io->type != ZEND_ASYNC_IO_TYPE_TCP) {
         return;
     }
+
     const int fd = (int)conn->io->descriptor.socket;
+
     if (UNEXPECTED(fd < 0)) {
         return;
     }
@@ -244,6 +248,7 @@ static void h1_send_finalize(h1_send_state_t *state)
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);
         }
+
         state->file_io = NULL;
     }
 
@@ -275,13 +280,17 @@ static void h1_send_dispatch(zend_async_event_t *event,
         if (req == NULL || req != state->pending_req) {
             return;
         }
+
         state->pending_req = NULL;
+
         if (req->dispose != NULL) {
             req->dispose(req);
         }
+
         if (UNEXPECTED(exception != NULL)) {
             state->status = -1;
         }
+
         h1_send_handle_sendfile_done(state);
         return;
 
@@ -290,16 +299,20 @@ static void h1_send_dispatch(zend_async_event_t *event,
         if (req == NULL || req != state->pending_req) {
             return;
         }
+
         state->pending_req = NULL;
         const ssize_t got = req->transferred;
         const bool err = (exception != NULL || req->exception != NULL);
+
         if (req->exception != NULL) {
             OBJ_RELEASE(req->exception);
             req->exception = NULL;
         }
+
         if (req->dispose != NULL) {
             req->dispose(req);
         }
+
         h1_send_handle_tls_read_done(state, got, err);
         return;
     }
@@ -361,6 +374,7 @@ static bool h1_send_tls_submit_next_read(h1_send_state_t *state)
             state->phase = H1_SEND_PHASE_TLS_DRAIN;
             return true;
         }
+
         h1_send_finalize(state);
         return true;
     }
@@ -386,6 +400,7 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
         h1_send_finalize(state);
         return;
     }
+
     if (bytes_read == 0) {
         /* EOF before requested length — file truncated under us.
          * Same recovery as the read-error path. */
@@ -415,6 +430,7 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
         h1_send_finalize(state);
         return;
     }
+
     state->bytes_sent += (uint64_t)bytes_read;
 
     /* Sync-complete cipher write (rare on Linux, common on Windows
@@ -425,6 +441,7 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
             state->status = -1;
             h1_send_finalize(state);
         }
+
         return;
     }
 
@@ -435,6 +452,7 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
 static void h1_send_tls_drain_done_cb(void *data)
 {
     h1_send_state_t *state = (h1_send_state_t *)data;
+
     if (state == NULL) {
         return;
     }
@@ -484,6 +502,7 @@ int h1_stream_send_static_response(void *ctx_void,
                                    void *user)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)ctx_void;
+
     if (UNEXPECTED(ctx == NULL || ctx->conn == NULL)) {
         /* Pre-init failure: the caller still owns file_io. */
         return -1;
@@ -533,6 +552,7 @@ int h1_stream_send_static_response(void *ctx_void,
         if (!state->is_tls) {
             h1_send_cork_set(conn, 0);
         }
+
         state->file_io = NULL;
         h1_send_state_free(state);
         return -1;
@@ -568,19 +588,23 @@ int h1_stream_send_static_response(void *ctx_void,
      * us. */
     h1_send_cb_t *cb = (h1_send_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
         h1_send_dispatch, sizeof(h1_send_cb_t));
+
     if (UNEXPECTED(cb == NULL)) {
         state->status = -1;
         h1_send_finalize(state);
         return 0;
     }
+
     cb->base.dispose = h1_send_cb_dispose;
     cb->state = state;
+
     if (UNEXPECTED(!file_io->event.add_callback(&file_io->event, &cb->base))) {
         efree(cb);
         state->status = -1;
         h1_send_finalize(state);
         return 0;
     }
+
     state->cb = &cb->base;
 
 #ifdef HAVE_OPENSSL
@@ -604,10 +628,12 @@ int h1_stream_send_static_response(void *ctx_void,
             state->phase = H1_SEND_PHASE_TLS_DRAIN;
             return 0;
         }
+
         if (UNEXPECTED(!h1_send_tls_submit_next_read(state))) {
             state->status = -1;
             h1_send_finalize(state);
         }
+
         return 0;
     }
 #endif
@@ -619,9 +645,11 @@ int h1_stream_send_static_response(void *ctx_void,
     state->pending_req = ZEND_ASYNC_IO_SENDFILE(conn->io, file_io,
                                                 (off_t)body_offset,
                                                 (size_t)body_length);
+
     if (UNEXPECTED(state->pending_req == NULL)) {
         state->status = -1;
         h1_send_finalize(state);
     }
+
     return 0;
 }

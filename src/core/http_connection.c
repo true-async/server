@@ -149,10 +149,12 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
                                           struct http_server_object *server)
 {
     http_connection_t *conn = conn_arena_alloc(http_server_arena(server));
+
     if (UNEXPECTED(conn == NULL)) {
         closesocket(socket_fd);
         return NULL;
     }
+
     conn->server = server;
 
     conn->io = ZEND_ASYNC_IO_CREATE(
@@ -160,6 +162,7 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
         ZEND_ASYNC_IO_TYPE_TCP,
         ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_WRITABLE
     );
+
     if (!conn->io) {
         conn_arena_free(http_server_arena(server), conn);
         closesocket(socket_fd);
@@ -244,6 +247,7 @@ void http_connection_destroy(http_connection_t *conn)
         conn->destroy_pending = true;
         return;
     }
+
     if (conn->out_pending_buf != NULL) {
         efree(conn->out_pending_buf);
         conn->out_pending_buf = NULL;
@@ -272,11 +276,13 @@ void http_connection_destroy(http_connection_t *conn)
      * pointer rather than hard-coding the plaintext one. */
     if (conn->read_cb) {
         zend_async_event_callback_t *base_cb = &conn->read_cb->base;
+
         if (conn->io) {
             zend_async_callbacks_remove(&conn->io->event, base_cb);
         } else if (base_cb->dispose != NULL) {
             base_cb->dispose(base_cb, NULL);
         }
+
         conn->read_cb = NULL;
     }
 #ifdef HAVE_OPENSSL
@@ -285,11 +291,13 @@ void http_connection_destroy(http_connection_t *conn)
     if (conn->tls_fsm_send_cb) {
         zend_async_event_callback_t *send_cb_base =
             (zend_async_event_callback_t *)conn->tls_fsm_send_cb;
+
         if (conn->io) {
             zend_async_callbacks_remove(&conn->io->event, send_cb_base);
         } else if (send_cb_base->dispose != NULL) {
             send_cb_base->dispose(send_cb_base, NULL);
         }
+
         conn->tls_fsm_send_cb = NULL;
     }
 #endif
@@ -315,6 +323,7 @@ void http_connection_destroy(http_connection_t *conn)
         if (conn->strategy->cleanup) {
             conn->strategy->cleanup(conn);
         }
+
         http_protocol_strategy_destroy(conn->strategy);
         conn->strategy = NULL;
     }
@@ -346,10 +355,12 @@ void http_connection_destroy(http_connection_t *conn)
         BIO_free(conn->tls_plaintext_bio);
         conn->tls_plaintext_bio = NULL;
     }
+
     if (conn->tls_plaintext_bio_app) {
         BIO_free(conn->tls_plaintext_bio_app);
         conn->tls_plaintext_bio_app = NULL;
     }
+
     if (conn->tls_drain_event) {
         conn->tls_drain_event->base.dispose(&conn->tls_drain_event->base);
         conn->tls_drain_event = NULL;
@@ -450,6 +461,7 @@ static void http_io_req_event_detach_filter(http_io_req_event_t *ev)
     if (ev->filter_cb == NULL || ev->io == NULL) {
         return;
     }
+
     zend_async_event_t *io_event = &ev->io->event;
     (void)zend_async_callbacks_remove(io_event, &ev->filter_cb->base);
     ev->filter_cb = NULL;
@@ -481,11 +493,13 @@ static zend_string *http_io_req_event_info(zend_async_event_t *event)
         return zend_strpprintf(0, "IOReq(op=%s, req=%p)", op,
                                (void *)ev->expected_req);
     }
+
     if (io->type == ZEND_ASYNC_IO_TYPE_TCP || io->type == ZEND_ASYNC_IO_TYPE_UDP) {
         return zend_strpprintf(0, "IOReq(op=%s, socket=" ZEND_LONG_FMT ", req=%p)",
                                op, (zend_long)io->descriptor.socket,
                                (void *)ev->expected_req);
     }
+
     return zend_strpprintf(0, "IOReq(op=%s, fd=" ZEND_LONG_FMT ", req=%p)",
                            op, (zend_long)io->descriptor.fd,
                            (void *)ev->expected_req);
@@ -506,6 +520,7 @@ static void http_io_req_filter_cb_fn(zend_async_event_t *io_event,
     if (ev == NULL) {
         return;
     }
+
     if (exception == NULL && result != ev->expected_req) {
         return;
     }
@@ -552,6 +567,7 @@ static http_io_req_event_t *http_io_req_event_new(
         efree(ev);
         return NULL;
     }
+
     return ev;
 }
 /* }}} */
@@ -581,6 +597,7 @@ bool async_io_req_await(zend_async_io_req_t *req, zend_async_io_t *io,
     }
 
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
     if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
         return false;
     }
@@ -604,6 +621,7 @@ bool async_io_req_await(zend_async_io_req_t *req, zend_async_io_t *io,
     }
 
     http_io_req_event_t *wait_ev = http_io_req_event_new(io, req, op);
+
     if (UNEXPECTED(wait_ev == NULL)) {
         return false;
     }
@@ -648,6 +666,7 @@ bool async_io_req_await(zend_async_io_req_t *req, zend_async_io_t *io,
                             ZSTR_VAL(EG(exception)->ce->name), (int)op);
             zend_clear_exception();
         }
+
         return false;
     }
 
@@ -680,9 +699,11 @@ static void http_write_timer_cb_fn(zend_async_event_t *event,
 {
     (void)event; (void)result; (void)exception;
     http_write_timer_cb_t *cb = (http_write_timer_cb_t *)callback;
+
     if (cb->conn == NULL) {
         return;
     }
+
     cb->conn->write_timed_out = true;
     /* Force-fail in-flight write — closing io marks any pending req
      * with an error which wakes the suspended writer in
@@ -697,6 +718,7 @@ static bool http_write_timer_arm(http_connection_t *conn, const uint32_t ms)
     if (conn->write_timer == NULL) {
         zend_async_timer_event_t *t =
             ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)ms, false);
+
         if (UNEXPECTED(t == NULL)) {
             return false;
         }
@@ -711,22 +733,28 @@ static bool http_write_timer_arm(http_connection_t *conn, const uint32_t ms)
         ZEND_ASYNC_TIMER_SET_MULTISHOT(t);
         http_write_timer_cb_t *cb = (http_write_timer_cb_t *)
             ZEND_ASYNC_EVENT_CALLBACK_EX(http_write_timer_cb_fn, sizeof(*cb));
+
         if (UNEXPECTED(cb == NULL)) {
             t->base.dispose(&t->base);
             return false;
         }
+
         cb->base.dispose = http_write_timer_cb_dispose;
         cb->conn = conn;
+
         if (!t->base.add_callback(&t->base, &cb->base)) {
             efree(cb);
             t->base.dispose(&t->base);
             return false;
         }
+
         conn->write_timer    = &t->base;
         conn->write_timer_cb = &cb->base;
+
         if (!t->base.start(&t->base)) {
             return false;
         }
+
         return true;
     }
     /* Reuse: rearm to (now + ms). */
@@ -747,6 +775,7 @@ static void http_write_timer_stop(http_connection_t *conn)
     if (conn->write_timer->loop_ref_count == 0) {
         return;
     }
+
     conn->write_timer->stop(conn->write_timer);
 }
 
@@ -760,8 +789,10 @@ static void http_write_timer_dispose(http_connection_t *conn)
         } else if (conn->write_timer_cb->dispose != NULL) {
             conn->write_timer_cb->dispose(conn->write_timer_cb, NULL);
         }
+
         conn->write_timer_cb = NULL;
     }
+
     if (conn->write_timer != NULL) {
         conn->write_timer->dispose(conn->write_timer);
         conn->write_timer = NULL;
@@ -838,6 +869,7 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
             *should_destroy_out = (conn->current_request == NULL);
             return false;
         }
+
         if (conn->current_request != NULL) {
             /* Handler was dispatched. Two sub-cases:
              *   - coroutine != NULL: this is the first parse-error tick
@@ -854,6 +886,7 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
             *should_destroy_out = false;
             return false;
         }
+
         if (conn->parser != NULL) {
             (void)http_connection_emit_parse_error(conn, conn->parser);
         }
@@ -975,6 +1008,7 @@ static void http_connection_read_callback_fn(
             conn->keep_alive = false;
             return;
         }
+
         http_connection_destroy(conn);
         return;
     }
@@ -991,6 +1025,7 @@ static void http_connection_read_callback_fn(
     }
 
     bool should_destroy = false;
+
     if (!http_connection_handle_read_completion(conn, &should_destroy)) {
         if (should_destroy) {
             http_connection_destroy(conn);
@@ -1017,11 +1052,13 @@ static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend
 {
     (void)suggested;
     http_connection_t *conn = (http_connection_t *) io->user_data;
+
     if (UNEXPECTED(conn == NULL || conn->read_buffer_len >= conn->read_buffer_size)) {
         out->base = NULL;
         out->len  = 0;
         return;
     }
+
     out->base = conn->read_buffer + conn->read_buffer_len;
     out->len  = conn->read_buffer_size - conn->read_buffer_len;
 }
@@ -1038,6 +1075,7 @@ bool http_connection_read(http_connection_t *conn)
         conn->io,
         conn->read_buffer + conn->read_buffer_len,
         conn->read_buffer_size - conn->read_buffer_len);
+
     if (req == NULL) {
         http_connection_destroy(conn);
         return false;
@@ -1047,10 +1085,12 @@ bool http_connection_read(http_connection_t *conn)
     if (req->completed) {
         const bool err = (req->exception != NULL);
         const ssize_t bytes_read = req->transferred;
+
         if (req->exception != NULL) {
             OBJ_RELEASE(req->exception);
             req->exception = NULL;
         }
+
         req->dispose(req);
 
         if (err || bytes_read <= 0) {
@@ -1061,10 +1101,12 @@ bool http_connection_read(http_connection_t *conn)
         conn->read_buffer_len += bytes_read;
 
         bool should_destroy = false;
+
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {
             if (should_destroy) {
                 http_connection_destroy(conn);
             }
+
             return false;
         }
 
@@ -1085,11 +1127,13 @@ bool http_connection_read(http_connection_t *conn)
         http_connection_read_cb_t *rcb = (http_connection_read_cb_t *)
             ZEND_ASYNC_EVENT_CALLBACK_EX(http_connection_read_callback_fn,
                                           sizeof(http_connection_read_cb_t));
+
         if (rcb == NULL) {
             req->dispose(req);
             http_connection_destroy(conn);
             return false;
         }
+
         rcb->base.dispose = http_connection_read_callback_dispose;
         rcb->conn = conn;
         rcb->active_req = NULL;
@@ -1100,6 +1144,7 @@ bool http_connection_read(http_connection_t *conn)
             http_connection_destroy(conn);
             return false;
         }
+
         conn->read_cb = rcb;
     }
 
@@ -1127,6 +1172,7 @@ bool http_connection_send_raw(http_connection_t *conn,
     if (len == 0) {
         return true;
     }
+
     if (UNEXPECTED(conn->write_timed_out)) {
         return false;
     }
@@ -1148,15 +1194,18 @@ bool http_connection_send_raw(http_connection_t *conn,
      * + EPOLLOUT-driven drain). */
     bool ok_total = false;
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE(conn->io, data, len);
+
     if (req != NULL) {
         const bool ok = async_io_req_await(req, conn->io, write_timeout_ms,
                                            HTTP_IO_REQ_WRITE,
                                            conn->log_state);
         const bool had_exc = (req->exception != NULL);
+
         if (had_exc) {
             OBJ_RELEASE(req->exception);
             req->exception = NULL;
         }
+
         const ssize_t transferred = req->transferred;
         req->dispose(req);
         ok_total = ok && !had_exc && transferred == (ssize_t)len;
@@ -1165,9 +1214,11 @@ bool http_connection_send_raw(http_connection_t *conn,
     if (write_timeout_ms > 0) {
         http_write_timer_stop(conn);
     }
+
     if (UNEXPECTED(conn->write_timed_out)) {
         return false;
     }
+
     return ok_total;
 }
 /* }}} */
@@ -1219,9 +1270,11 @@ static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
+
     if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
         return;
     }
+
     http_connection_t *conn = (http_connection_t *)io->user_data;
 
     if (conn->out_pending_len > 0) {
@@ -1237,10 +1290,12 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
          * completion. */
         zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
+
         if (UNEXPECTED(req == NULL)) {
             /* Reactor already efree'd next_buf via the cb on submit failure. */
             conn->out_in_flight = false;
         }
+
         return;
     }
 
@@ -1271,14 +1326,17 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
         /* A uv_write is outstanding — append + return without dipping
          * back into libuv. The completion cb will pick this up. */
         const size_t need = conn->out_pending_len + len;
+
         if (need > conn->out_pending_cap) {
             size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
             while (new_cap < need) {
                 new_cap *= 2;
             }
+
             conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
             conn->out_pending_cap = new_cap;
         }
+
         memcpy(conn->out_pending_buf + conn->out_pending_len, buf, len);
         conn->out_pending_len += len;
         efree(buf);
@@ -1291,11 +1349,13 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
     conn->out_in_flight = true;
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, buf, len, http_send_batched_completion_cb);
+
     if (UNEXPECTED(req == NULL)) {
         /* Submit failed — reactor invoked the cb (efree'd buf), and
          * the cb sets out_in_flight = false / drains pending. */
         return false;
     }
+
     return true;
 }
 
@@ -1304,6 +1364,7 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
     if (body == NULL) {
         return true;
     }
+
     if (ZSTR_LEN(body) == 0) {
         zend_string_release(body);
         return true;
@@ -1318,6 +1379,7 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
                                                      ZSTR_VAL(body),
                                                      ZSTR_LEN(body),
                                                      http1_send_release_zstr_cb);
+
     if (UNEXPECTED(req == NULL)) {
         /* libuv_io_req_dispose ran free_cb on the partially-built req
          * and the body was released there. Caller must not touch body. */
@@ -1345,18 +1407,22 @@ bool http_connection_send_strv_owned(http_connection_t *conn,
     if (UNEXPECTED(nbufs == 0)) {
         return true;
     }
+
     if (UNEXPECTED(conn->write_timed_out)) {
         for (unsigned i = 0; i < nbufs; i++) {
             zend_string_release(bufs[i]);
         }
+
         return false;
     }
 
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV(conn->io, bufs, nbufs);
+
     if (UNEXPECTED(req == NULL)) {
         /* Reactor already released every slot on submit failure. */
         return false;
     }
+
     return true;
 }
 /* }}} */
@@ -1414,6 +1480,7 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
     if (conn->current_request == NULL || conn->current_request->coroutine == NULL) {
         return;
     }
+
     zend_coroutine_t *h = conn->current_request->coroutine;
     conn->current_request->coroutine = NULL;
 
@@ -1538,10 +1605,13 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
     if (conn->io == NULL) {
         return false;
     }
+
     const php_socket_t fd = (php_socket_t)conn->io->descriptor.socket;
+
     if (fd == (php_socket_t)-1) {
         return false;
     }
+
     const ssize_t sent = send(fd, response, (size_t)n, MSG_NOSIGNAL);
     return sent == (ssize_t)n;
 }
@@ -1590,6 +1660,7 @@ static void h1_static_on_static_done(void *user, int status)
     if (ctx->request != NULL) {
         ctx->request->coroutine = NULL;
     }
+
     if (conn->current_request == ctx->request) {
         conn->current_request = NULL;
     }
@@ -1608,6 +1679,7 @@ static void h1_static_on_passthrough_to_php(void *user)
      * / handler_refcount were NOT pinned (on_hard_zero_armed never
      * fired), so we bump them here to match the normal path. */
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+
     if (UNEXPECTED(coroutine == NULL)) {
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
@@ -1781,6 +1853,7 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
         if (static_rc == HTTP_STATIC_HARD_ZERO) {
             return;
         }
+
         if (static_rc == HTTP_STATIC_HANDLED) {
             ctx->skip_php_handler = true;
         }
@@ -1801,6 +1874,7 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     }
 
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+
     if (coroutine == NULL) {
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
@@ -1905,6 +1979,7 @@ void http_handler_coroutine_entry(void)
 
     http_request_t *req = ctx->request;
     const bool stamps = http_server_sample_stamps_enabled(conn->view);
+
     if (req && stamps) {
         req->start_ns = zend_hrtime();
     }
@@ -1916,6 +1991,7 @@ void http_handler_coroutine_entry(void)
      * place. */
     if (ctx->skip_php_handler) {
         http_server_count_request(conn->counters);
+
         if (req && stamps) {
             req->end_ns = zend_hrtime();
             http_server_on_request_sample(conn->server,
@@ -1923,6 +1999,7 @@ void http_handler_coroutine_entry(void)
                                           req->end_ns   - req->start_ns,
                                           req->end_ns);
         }
+
         return;
     }
 
@@ -1934,12 +2011,14 @@ void http_handler_coroutine_entry(void)
             http_request_t *, http_server_config_t *);
         extern void http_response_set_error(zend_object *, int, const char *);
         const int dec = http_compression_decode_request_body(req, conn->config);
+
         if (dec != 0) {
             http_response_set_error(Z_OBJ(ctx->response_zv), dec,
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
             http_server_count_request(conn->counters);
+
             if (req && stamps) req->end_ns = zend_hrtime();
             return;  /* Skip handler call; dispose emits the response. */
         }
@@ -1991,10 +2070,12 @@ void http_handler_coroutine_entry(void)
     {
         zend_call_function(&fci, &conn->handler->fci_cache);
     }
+
     zend_catch
     {
         ctx->handler_bailout = true;
     }
+
     zend_end_try();
 
     if (UNEXPECTED(ctx->handler_bailout)) {
@@ -2015,6 +2096,7 @@ void http_handler_coroutine_entry(void)
      * Skipped when no consumer is active (sample_stamps_enabled == false);
      * total_requests is still bumped via http_server_count_request. */
     http_server_count_request(conn->counters);
+
     if (req && stamps) {
         req->end_ns = zend_hrtime();
         /* Pass req->end_ns so on_request_sample's CoDel-window logic
@@ -2039,9 +2121,11 @@ void http_handler_coroutine_entry(void)
 void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)coroutine->extended_data;
+
     if (ctx == NULL) {
         return;
     }
+
     http_connection_t *conn = ctx->conn;
     coroutine->extended_data = NULL;
 
@@ -2086,6 +2170,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * — `throw new HttpException("Not Found", 404)` from a handler
      * Just Works without further plumbing. */
     bool should_continue = false;
+
     if (coroutine->exception != NULL
         && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {
         zval rv;
@@ -2098,6 +2183,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
         const char *reason = "Internal Server Error";
         zval *msg_zv = zend_read_property_ex(exc->ce, exc, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
+
         if (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING && Z_STRLEN_P(msg_zv) > 0) {
             reason = Z_STRVAL_P(msg_zv);
         } else if (status != 500) {
@@ -2120,6 +2206,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * hasn't supplied its own. */
     {
         zend_string *alt = http_server_get_alt_svc_value(conn->server);
+
         if (alt != NULL) {
             http_response_set_alt_svc_if_unset(
                 Z_OBJ(ctx->response_zv), ZSTR_VAL(alt), ZSTR_LEN(alt));
@@ -2148,6 +2235,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     const uint64_t drain_now_ns =
         (ctx->request != NULL && ctx->request->end_ns != 0)
             ? ctx->request->end_ns : zend_hrtime();
+
     if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;
@@ -2162,6 +2250,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     {
         http_send_file_request_t *sf_req =
             http_response_take_send_file(Z_OBJ(ctx->response_zv));
+
         if (sf_req != NULL) {
             if (h1_sendfile_arm(conn, ctx, sf_req, conn->keep_alive)) {
                 return;
@@ -2180,11 +2269,13 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * it was emitted already by mark_ended(). Skip http_response_format
      * entirely — re-serialising would double-commit. */
     conn->state = CONN_STATE_SENDING;
+
     if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
         if (!http_response_is_closed(Z_OBJ(ctx->response_zv))) {
             /* Handler fell through without end() — emit the terminator. */
             (void)http_connection_send(conn, "0\r\n\r\n", 5);
         }
+
         should_continue = conn->keep_alive;
     } else {
         bool sent;
@@ -2194,6 +2285,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
              * encryption ring needs a contiguous payload, so vectored
              * write would only force an extra copy. */
             zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
+
             if (response_str) {
                 sent = http_connection_send(conn, ZSTR_VAL(response_str),
                                             ZSTR_LEN(response_str));
@@ -2213,6 +2305,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
              * hot load (smart_str header), branch is one cmp + jmp. */
             const size_t body_len =
                     http_response_get_body_len(Z_OBJ(ctx->response_zv));
+
             if (body_len < HTTP_WRITEV_THRESHOLD) {
                 zend_string *response_str =
                         http_response_format(Z_OBJ(ctx->response_zv));
@@ -2227,17 +2320,21 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                                            &headers_str, &body_str);
                 zend_string *bufs[2];
                 unsigned nbufs = 0;
+
                 if (headers_str != NULL && ZSTR_LEN(headers_str) > 0) {
                     bufs[nbufs++] = headers_str;
                 } else if (headers_str != NULL) {
                     zend_string_release(headers_str);
                 }
+
                 if (body_str != NULL) {
                     bufs[nbufs++] = body_str;
                 }
+
                 sent = http_connection_send_strv_owned(conn, bufs, nbufs);
             }
         }
+
         if (sent) {
             /* Keep-alive is purely a transport decision — it mirrors the
              * request's Connection header (and HTTP version default).
@@ -2302,6 +2399,7 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
      * a parse error has already retired. */
     ZEND_ASSERT(conn->handler_refcount > 0);
     conn->handler_refcount--;
+
     if (conn->handler_refcount == 0 && conn->destroy_pending) {
         conn->destroy_pending = false;
         http_connection_destroy(conn);
@@ -2328,10 +2426,12 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
 
     if (conn->read_buffer_len > 0) {
         bool should_destroy = false;
+
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {
             if (should_destroy) {
                 http_connection_destroy(conn);
             }
+
             return;
         }
     }
@@ -2362,15 +2462,18 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
                            const uint32_t protocol_mask)
 {
     http_connection_t *conn = http_connection_create(client_fd, server);
+
     if (!conn) {
         return false;
     }
+
     conn->protocol_mask = protocol_mask;
     http_server_bind_connection(server, conn);
 
 #ifdef HAVE_OPENSSL
     if (tls_ctx != NULL) {
         conn->tls = tls_session_new(tls_ctx);
+
         if (conn->tls == NULL) {
             http_connection_destroy(conn);
             return false;
@@ -2398,6 +2501,7 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
             conn->read_buffer_size = TLS_BIO_RING_SIZE;
             conn->read_buffer = emalloc(conn->read_buffer_size);
         }
+
         conn->state = CONN_STATE_TLS_HANDSHAKE;
     }
 #else
@@ -2446,6 +2550,7 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
         /* Access server->max_connection_age_ns via the accessor —
          * http_server_object layout isn't visible in this TU. */
         const uint64_t base = http_server_get_max_connection_age_ns(server);
+
         if (base > 0) {
             /* ±10% jitter via deterministic hash of the connection
              * pointer — stable spread across connections without

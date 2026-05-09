@@ -16,6 +16,7 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
 {
     http3_stream_pool_t *pool = http3_listener_stream_pool(conn->listener);
     http3_stream_t *s = http3_stream_pool_alloc(pool);
+
     if (UNEXPECTED(s == NULL)) {
         return NULL;
     }
@@ -59,6 +60,7 @@ void http3_stream_release(http3_stream_t *s)
     if (s == NULL) {
         return;
     }
+
     if (--s->refcount > 0) {
         return;
     }
@@ -85,15 +87,18 @@ void http3_stream_release(http3_stream_t *s)
                 zend_string_release(s->chunk_queue[i]);
             }
         }
+
         efree(s->chunk_queue);
         s->chunk_queue = NULL;
     }
 
     if (s->write_event != NULL) {
         zend_async_event_t *ev = &s->write_event->base;
+
         if (ev->dispose != NULL) {
             ev->dispose(ev);
         }
+
         s->write_event = NULL;
     }
 
@@ -103,9 +108,11 @@ void http3_stream_release(http3_stream_t *s)
         while (*p != NULL && *p != s) {
             p = &(*p)->list_next;
         }
+
         if (*p == s) {
             *p = s->list_next;
         }
+
         s->conn = NULL;
     }
 

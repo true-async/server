@@ -32,12 +32,15 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 	if (header == NULL || header_len == 0) {
 		return HTTP_RANGE_ABSENT;
 	}
+
 	if (header_len < 7) {
 		return HTTP_RANGE_UNSUPPORTED;
 	}
+
 	if (memcmp(header, "bytes=", 6) != 0) {
 		return HTTP_RANGE_UNSUPPORTED;
 	}
+
 	const char *p = header + 6;
 	const char *end = header + header_len;
 	while (p < end && (*p == ' ' || *p == '\t')) {
@@ -49,6 +52,7 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 			return HTTP_RANGE_UNSUPPORTED;
 		}
 	}
+
 	if (p >= end) {
 		return HTTP_RANGE_UNSUPPORTED;
 	}
@@ -56,6 +60,7 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 	bool suffix_form = false;
 	uint64_t first = 0;
 	bool first_set = false;
+
 	if (*p == '-') {
 		suffix_form = true;
 		p++;
@@ -64,13 +69,16 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 			if (first > UINT64_MAX / 10) {
 				return HTTP_RANGE_UNSUPPORTED;
 			}
+
 			first = first * 10 + (uint64_t)(*p - '0');
 			first_set = true;
 			p++;
 		}
+
 		if (!first_set || p >= end || *p != '-') {
 			return HTTP_RANGE_UNSUPPORTED;
 		}
+
 		p++;
 	}
 
@@ -80,6 +88,7 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 		if (last > UINT64_MAX / 10) {
 			return HTTP_RANGE_UNSUPPORTED;
 		}
+
 		last = last * 10 + (uint64_t)(*p - '0');
 		last_set = true;
 		p++;
@@ -87,6 +96,7 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 	while (p < end && (*p == ' ' || *p == '\t')) {
 		p++;
 	}
+
 	if (p != end) {
 		return HTTP_RANGE_UNSUPPORTED;
 	}
@@ -99,6 +109,7 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 		if (!last_set || last == 0) {
 			return HTTP_RANGE_UNSUPPORTED;
 		}
+
 		if (last >= content_length) {
 			/* "last N where N >= size" → whole file (RFC 9110: a
 			 * suffix-length larger than the resource length is
@@ -110,17 +121,21 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 		*out_last = content_length - 1;
 		return HTTP_RANGE_OK;
 	}
+
 	if (first >= content_length) {
 		return HTTP_RANGE_NOT_SATISFIABLE;
 	}
+
 	if (!last_set) {
 		*out_first = first;
 		*out_last = content_length - 1;
 		return HTTP_RANGE_OK;
 	}
+
 	if (last < first) {
 		return HTTP_RANGE_UNSUPPORTED;
 	}
+
 	if (last >= content_length) {
 		last = content_length - 1;
 	}

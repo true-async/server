@@ -111,18 +111,22 @@ void http3_debug_logger(void *user_data, const char *fmt, ...)
 {
     http3_connection_t *c = (http3_connection_t *)user_data;
     http_log_state_t *st = (c != NULL) ? c->log_state : NULL;
+
     if (st == NULL || st->severity == HTTP_LOG_OFF
         || (int)HTTP_LOG_DEBUG < (int)st->severity) {
         return;
     }
+
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+
     if (n < 0) {
         return;
     }
+
     http_logf_debug(st, "h3.ngtcp2 %s", buf);
 }
 
@@ -143,12 +147,14 @@ int http3_build_listener_local(const http3_listener_t *l,
     memset(out, 0, sizeof(*out));
     const char *host = http3_listener_host(l);
     int port = http3_listener_port(l);
+
     if (host == NULL) host = (peer_family == AF_INET6) ? "::" : "0.0.0.0";
 
     if (peer_family == AF_INET6) {
         struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
         s6->sin6_family = AF_INET6;
         s6->sin6_port   = htons((uint16_t)port);
+
         if (inet_pton(AF_INET6, host, &s6->sin6_addr) != 1) {
             /* Listener bound to v4-only host but peer is v6 — use ::1. */
             inet_pton(AF_INET6, "::1", &s6->sin6_addr);
@@ -158,11 +164,13 @@ int http3_build_listener_local(const http3_listener_t *l,
         struct sockaddr_in *s4 = (struct sockaddr_in *)out;
         s4->sin_family = AF_INET;
         s4->sin_port   = htons((uint16_t)port);
+
         if (inet_pton(AF_INET, host, &s4->sin_addr) != 1) {
             s4->sin_addr.s_addr = htonl(INADDR_ANY);
         }
         *out_len = sizeof(*s4);
     }
+
     return 0;
 }
 
@@ -188,9 +196,11 @@ static bool http3_connection_attach_tls(http3_connection_t *c, SSL_CTX *ctx)
     if (ctx == NULL) {
         return false;
     }
+
     http3_ensure_ossl_crypto_init();
 
     SSL *ssl = SSL_new(ctx);
+
     if (ssl == NULL) {
         return false;
     }
@@ -198,13 +208,16 @@ static bool http3_connection_attach_tls(http3_connection_t *c, SSL_CTX *ctx)
      * ALPN selector advertises "h3" instead of the TCP list. Must happen
      * before any handshake activity. */
     tls_layer_mark_ssl_quic(ssl);
+
     if (ngtcp2_crypto_ossl_configure_server_session(ssl) != 0) {
         http_log_state_t *st = (c != NULL) ? c->log_state : NULL;
         http_logf_debug(st, "h3.configure_server_session.failed");
+
         if (st != NULL && (int)HTTP_LOG_DEBUG >= (int)st->severity
             && st->severity != HTTP_LOG_OFF) {
             ERR_print_errors_fp(stderr);
         }
+
         SSL_free(ssl);
         return false;
     }
@@ -221,6 +234,7 @@ static bool http3_connection_attach_tls(http3_connection_t *c, SSL_CTX *ctx)
     /* ngtcp2_crypto_ossl_ctx owns the SSL from here: ngtcp2_crypto_ossl_
      * ctx_del frees SSL too. */
     ngtcp2_crypto_ossl_ctx *octx = NULL;
+
     if (ngtcp2_crypto_ossl_ctx_new(&octx, ssl) != 0) {
         SSL_set_app_data(ssl, NULL);
         OPENSSL_cleanse(ref, sizeof(*ref));
@@ -253,6 +267,7 @@ static http3_connection_t *http3_connection_accept(
      * in http3_connection_free. */
     if (!http3_listener_peer_inc(listener, peer)) {
         http3_packet_stats_t *stats = http3_listener_packet_stats(listener);
+
         if (stats != NULL) stats->quic_conn_per_peer_rejected++;
         return NULL;
     }
@@ -291,6 +306,7 @@ static http3_connection_t *http3_connection_accept(
         efree(c);
         return NULL;
     }
+
     c->scidlen = HTTP3_SCID_LEN;
 
     /* Clamp to sockaddr_storage — a malformed peer_len from a hostile
@@ -336,6 +352,7 @@ static http3_connection_t *http3_connection_accept(
      * a textbook slow-loris vector. 10s is the same envelope the TCP
      * accept path uses for read-header timeouts in this server. */
     settings.handshake_timeout = 10 * NGTCP2_SECONDS;
+
     if (c != NULL && c->log_state != NULL
         && c->log_state->severity != HTTP_LOG_OFF
         && (int)HTTP_LOG_DEBUG >= (int)c->log_state->severity) {
@@ -377,9 +394,11 @@ static http3_connection_t *http3_connection_accept(
      * the config-API ceiling (UINT32_MAX) — same shape as the setter. */
     {
         const char *env = getenv("PHP_HTTP3_IDLE_TIMEOUT_MS");
+
         if (env != NULL && *env != '\0') {
             char *end = NULL;
             unsigned long ms = strtoul(env, &end, 10);
+
             if (end != env && *end == '\0' && ms > 0 && ms <= UINT32_MAX) {
                 idle_ms = (uint64_t)ms;
             }
@@ -396,9 +415,11 @@ static http3_connection_t *http3_connection_accept(
     params.initial_max_data    = window_bytes * streams_bidi;
     params.initial_max_streams_bidi = streams_bidi;
     params.initial_max_streams_uni  = 3;
+
     if (getenv("PHP_HTTP3_BENCH_FC") != NULL) {
         params.initial_max_streams_uni = 100;
     }
+
     params.max_idle_timeout = (ngtcp2_duration)idle_ms * NGTCP2_MILLISECONDS;
     params.active_connection_id_limit = 7;
     params.original_dcid = orig_dcid;
@@ -455,6 +476,7 @@ static http3_connection_t *http3_connection_accept(
      * Both lookups point to the same http3_connection_t; the hashtable
      * is non-owning so the double-key does not double-free on teardown. */
     HashTable *map = http3_listener_conn_map(listener);
+
     if (map != NULL) {
         zend_hash_str_add_ptr(map, (const char *)c->scid, c->scidlen, c);
         /* original_dcid == scid would be a degenerate 8-byte collision —
@@ -479,6 +501,7 @@ static http3_connection_t *http3_connection_accept(
         http_server_object *srv =
             (http_server_object *)http3_listener_server_obj(listener);
         const uint64_t base = http_server_get_max_connection_age_ns(srv);
+
         if (base > 0) {
             const uint64_t h          = (uintptr_t)c * 2654435761ULL;
             const uint64_t twenty_pct = base / 5;
@@ -510,6 +533,7 @@ bool http3_connection_dispatch(
     }
 
     http3_packet_stats_t *stats = http3_listener_packet_stats(listener);
+
     if (stats == NULL) {
         return false;
     }
@@ -523,8 +547,10 @@ bool http3_connection_dispatch(
                 peer, peer_len)) {
             stats->quic_version_negotiated++;
         }
+
         return true;
     }
+
     if (rv < 0) {
         stats->quic_parse_errors++;
         return false;
@@ -544,6 +570,7 @@ bool http3_connection_dispatch(
         if (vc.version == 0) {
             stats->quic_short_header++;
             const uint8_t *sr_key = http3_listener_sr_key(listener);
+
             if (sr_key != NULL && vc.dcidlen > 0) {
                 if (http3_packet_send_stateless_reset(
                         listener, sr_key,
@@ -552,6 +579,7 @@ bool http3_connection_dispatch(
                     stats->quic_stateless_reset_sent++;
                 }
             }
+
             return true;
         }
 
@@ -559,6 +587,7 @@ bool http3_connection_dispatch(
          * ngtcp2_conn_server_new. */
         ngtcp2_pkt_hd hd;
         ngtcp2_ssize n = ngtcp2_accept(&hd, data, datalen);
+
         if (n < 0) {
             /* Parseable by pkt_decode_version_cid but not a valid
              * INITIAL — could be a HANDSHAKE or 0-RTT from a forgotten
@@ -596,6 +625,7 @@ bool http3_connection_dispatch(
                         peer, peer_len)) {
                     stats->quic_retry_sent++;
                 }
+
                 return true;
             }
             /* Token present — only accept Retry-shaped tokens. Regular
@@ -606,14 +636,17 @@ bool http3_connection_dispatch(
                 stats->quic_retry_token_invalid++;
                 return true;
             }
+
             const int vrv = http3_packet_verify_retry_token(
                 retry_key, hd.version, hd.token, hd.tokenlen,
                 vc.dcid, vc.dcidlen, peer, peer_len,
                 odcid_buf, &odcid_buf_len);
+
             if (vrv != 0) {
                 stats->quic_retry_token_invalid++;
                 return true;
             }
+
             stats->quic_retry_token_ok++;
             have_odcid = true;
         }
@@ -622,11 +655,13 @@ bool http3_connection_dispatch(
             listener, &hd, peer, peer_len,
             have_odcid ? odcid_buf      : NULL,
             have_odcid ? odcid_buf_len  : 0);
+
         if (conn == NULL) {
             stats->quic_initial++;
             stats->quic_conn_rejected++;
             return true;
         }
+
         stats->quic_conn_accepted++;
     }
 
@@ -667,6 +702,7 @@ bool http3_connection_dispatch(
         http_log_state_t *st = conn->log_state;
         http_logf_debug(st, "h3.read_pkt.failed rv=%d datalen=%zu",
                         pkt_rv, datalen);
+
         if (st != NULL && st->severity != HTTP_LOG_OFF
             && (int)HTTP_LOG_DEBUG >= (int)st->severity) {
             ERR_print_errors_fp(stderr);
@@ -698,6 +734,7 @@ bool http3_connection_dispatch(
     if (http3_connection_check_terminal(conn)) {
         return true;
     }
+
     http3_connection_arm_timer(conn);
 
     return true;
@@ -758,28 +795,35 @@ void http3_connection_free(http3_connection_t *conn)
         while (s != NULL) {
             http3_stream_t *next = s->list_next;
             s->conn = NULL;
+
             if (conn->nghttp3_conn != NULL) {
                 nghttp3_conn_set_stream_user_data(
                     (nghttp3_conn *)conn->nghttp3_conn, s->stream_id, NULL);
             }
+
             if (conn->ngtcp2_conn != NULL) {
                 ngtcp2_conn_set_stream_user_data(
                     (ngtcp2_conn *)conn->ngtcp2_conn, s->stream_id, NULL);
             }
+
             http3_stream_release(s);
             s = next;
         }
     }
+
     if (conn->nghttp3_conn != NULL) {
         nghttp3_conn_del((nghttp3_conn *)conn->nghttp3_conn);
         conn->nghttp3_conn = NULL;
     }
+
     if (conn->ngtcp2_conn != NULL) {
         ngtcp2_conn_set_tls_native_handle((ngtcp2_conn *)conn->ngtcp2_conn, NULL);
     }
+
     if (conn->ssl != NULL) {
         SSL_set_app_data((SSL *)conn->ssl, NULL);
     }
+
     if (conn->crypto_conn_ref != NULL) {
         /* Cast through the concrete type so MSVC accepts sizeof(*p) — GCC
          * folds sizeof(void) to 1 silently, MSVC errors out (C2100). */
@@ -788,6 +832,7 @@ void http3_connection_free(http3_connection_t *conn)
         efree(conn->crypto_conn_ref);
         conn->crypto_conn_ref = NULL;
     }
+
     if (conn->crypto_ctx != NULL) {
         ngtcp2_crypto_ossl_ctx_del((ngtcp2_crypto_ossl_ctx *)conn->crypto_ctx);
         conn->crypto_ctx = NULL;
@@ -799,6 +844,7 @@ void http3_connection_free(http3_connection_t *conn)
         SSL_free((SSL *)conn->ssl);
         conn->ssl = NULL;
     }
+
     if (conn->ngtcp2_conn != NULL) {
         ngtcp2_conn_del((ngtcp2_conn *)conn->ngtcp2_conn);
         conn->ngtcp2_conn = NULL;

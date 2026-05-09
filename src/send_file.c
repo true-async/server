@@ -129,6 +129,7 @@ static bool engine_keep_alive(const engine_state_t *state)
 	if (state->cbs.keep_alive != NULL) {
 		return state->cbs.keep_alive(state->user);
 	}
+
 	return true;
 }
 
@@ -147,8 +148,10 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 		char ext[32];
 		const size_t ext_len =
 			http_mime_extract_lowered_ext(state->fs_path, state->fs_path_len, ext, sizeof(ext));
+
 		if (ext_len > 0) {
 			const zval *o = zend_hash_str_find(state->cfg.mime_overrides, ext, ext_len);
+
 			if (o != NULL && Z_TYPE_P(o) == IS_STRING) {
 				*out = Z_STRVAL_P(o);
 				*out_len = Z_STRLEN_P(o);
@@ -163,7 +166,7 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 /* Push cfg->extra_headers onto response_obj. include_content_headers=false
  * on the 304 path (RFC 9110 §15.4.5 bars Content-* on Not Modified). */
 static void engine_apply_extra_headers(zend_object *response_obj, const HashTable *extra,
-									   bool include_content_headers)
+									   const bool include_content_headers)
 {
 	if (extra == NULL) {
 		return;
@@ -185,6 +188,7 @@ static void engine_apply_extra_headers(zend_object *response_obj, const HashTabl
 		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
 										Z_STRVAL_P(value), Z_STRLEN_P(value));
 	}
+
 	ZEND_HASH_FOREACH_END();
 }
 
@@ -206,6 +210,7 @@ static void engine_finalize(engine_state_t *state, int status)
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
+
 		state->file_io = NULL;
 	}
 
@@ -267,9 +272,11 @@ static bool engine_emit_error_via_op(engine_state_t *state, int status, const ch
 	http_response_static_set_status(response_obj, status);
 	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
 									25);
+
 	if (body != NULL && body_len > 0) {
 		http_response_static_set_body_cstr(response_obj, body, body_len);
 	}
+
 	http_response_set_content_length(response_obj, (uint64_t)body_len);
 	http_response_set_connection(response_obj, engine_keep_alive(state));
 
@@ -289,6 +296,7 @@ static void engine_rollback_to_php(engine_state_t *state)
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
+
 		state->file_io = NULL;
 	}
 
@@ -319,6 +327,7 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 		if (req != NULL) {
 			return;
 		}
+
 		engine_handle_open(state, exception);
 		return;
 
@@ -326,16 +335,21 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 		if (req == NULL || req != state->pending_req) {
 			return;
 		}
+
 		state->pending_req = NULL;
+
 		if (req->dispose != NULL) {
 			req->dispose(req);
 		}
+
 		if (UNEXPECTED(exception != NULL)) {
 			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 				engine_finalize(state, -1);
 			}
+
 			return;
 		}
+
 		engine_handle_stat(state);
 		return;
 
@@ -356,12 +370,14 @@ static void engine_handle_open(engine_state_t *state, zend_object *exception)
 			if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
 				engine_finalize(state, -1);
 			}
+
 			return;
 		case SEND_FILE_ERR_INLINE_500:
 		default:
 			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 				engine_finalize(state, -1);
 			}
+
 			return;
 		}
 	}
@@ -374,6 +390,7 @@ static void engine_handle_open(engine_state_t *state, zend_object *exception)
 
 	state->phase = ENGINE_PHASE_STAT;
 	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
+
 	if (UNEXPECTED(state->pending_req == NULL)) {
 		if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 			engine_finalize(state, -1);
@@ -390,9 +407,11 @@ static void engine_handle_stat(engine_state_t *state)
 		const int status = (cfg->on_error == SEND_FILE_ERR_INLINE_500) ? 500 : 404;
 		const char *body = (status == 500) ? "Internal Server Error" : "Not Found";
 		const size_t body_len = (status == 500) ? 21 : 9;
+
 		if (!engine_emit_error_via_op(state, status, body, body_len)) {
 			engine_finalize(state, -1);
 		}
+
 		return;
 	}
 
@@ -408,25 +427,30 @@ static void engine_handle_stat(engine_state_t *state)
 
 	if (view != NULL) {
 		etag_enabled = view->etag != NULL && view->etag_len == HTTP_ETAG_LEN;
+
 		if (etag_enabled) {
 			memcpy(etag_buf, view->etag, HTTP_ETAG_LEN);
 			etag_buf[HTTP_ETAG_LEN] = '\0';
 		}
+
 		if (view->last_modified != NULL && view->last_modified_len == HTTP_DATE_LEN) {
 			memcpy(last_modified_buf, view->last_modified, HTTP_DATE_LEN);
 			last_modified_buf[HTTP_DATE_LEN] = '\0';
 		} else if (cfg->last_modified) {
 			http_date_format_imf(state->st.st_mtime, last_modified_buf);
 		}
+
 		content_type = view->content_type;
 		content_type_len = view->content_type_len;
 	} else {
 		if (etag_enabled) {
 			http_etag_format_strong(&state->st, etag_buf);
 		}
+
 		if (cfg->last_modified) {
 			http_date_format_imf(state->st.st_mtime, last_modified_buf);
 		}
+
 		if (!engine_resolve_content_type(state, &content_type, &content_type_len)) {
 			content_type = "application/octet-stream";
 			content_type_len = sizeof("application/octet-stream") - 1;
@@ -436,6 +460,7 @@ static void engine_handle_stat(engine_state_t *state)
 	/* === Conditional GET (304) ====================================== */
 
 	bool not_modified = false;
+
 	if (cfg->conditional) {
 		const zend_string *if_none_match =
 			http_request_find_header(state->request, "if-none-match", 13);
@@ -453,6 +478,7 @@ static void engine_handle_stat(engine_state_t *state)
 
 	if (view == NULL && cfg->server != NULL) {
 		http_static_cache_t *cache = http_static_cache_acquire(cfg->server);
+
 		if (cache != NULL) {
 			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
 									 content_type, content_type_len,
@@ -467,20 +493,24 @@ static void engine_handle_stat(engine_state_t *state)
 
 	state->range_total = (uint64_t)state->st.st_size;
 	state->is_range = false;
+
 	if (!not_modified && cfg->accept_ranges) {
 		const zend_string *range_hdr = http_request_find_header(state->request, "range", 5);
 		const zend_string *if_range = http_request_find_header(state->request, "if-range", 8);
 		bool range_allowed = true;
+
 		if (if_range != NULL && etag_enabled) {
 			range_allowed = (ZSTR_LEN(if_range) == HTTP_ETAG_LEN &&
 							 memcmp(ZSTR_VAL(if_range), etag_buf, HTTP_ETAG_LEN) == 0);
 		} else if (if_range != NULL) {
 			range_allowed = false;
 		}
+
 		if (range_hdr != NULL && range_allowed) {
 			uint64_t first = 0, last = 0;
 			const http_range_result_t rc = http_range_parse(
 				ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr), state->range_total, &first, &last);
+
 			if (rc == HTTP_RANGE_OK) {
 				state->is_range = true;
 				state->range_first = first;
@@ -491,16 +521,21 @@ static void engine_handle_stat(engine_state_t *state)
 												"text/plain; charset=utf-8", 25);
 				char cr[48];
 				const int crn = snprintf(cr, sizeof(cr), "bytes */%" PRIu64, state->range_total);
+
 				if (crn > 0 && (size_t)crn < sizeof(cr)) {
 					http_response_static_set_header(response_obj, "content-range", 13, cr,
 													(size_t)crn);
 				}
+
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
 				http_response_set_connection(response_obj, engine_keep_alive(state));
+
 				if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+
 				if (!engine_delegate_to_protocol(state, NULL, 0, 0, true)) {
 					engine_finalize(state, -1);
 				}
+
 				return;
 			}
 		}
@@ -512,6 +547,7 @@ static void engine_handle_stat(engine_state_t *state)
 
 	const bool include_content_headers = !not_modified;
 	int status_code = not_modified ? 304 : (state->is_range ? 206 : 200);
+
 	if (cfg->status_override != 0 && !not_modified && status_code < 400) {
 		status_code = cfg->status_override;
 	}
@@ -535,6 +571,7 @@ static void engine_handle_stat(engine_state_t *state)
 	if (etag_enabled) {
 		http_response_static_set_header(response_obj, "etag", 4, etag_buf, HTTP_ETAG_LEN);
 	}
+
 	if (cfg->last_modified) {
 		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
 										HTTP_DATE_LEN);
@@ -544,6 +581,7 @@ static void engine_handle_stat(engine_state_t *state)
 		http_response_static_set_header(response_obj, "content-encoding", 16, cfg->content_encoding,
 										cfg->content_encoding_len);
 	}
+
 	if (cfg->content_encoding != NULL) {
 		http_response_static_set_header(response_obj, "vary", 4, "Accept-Encoding", 15);
 	}
@@ -551,10 +589,12 @@ static void engine_handle_stat(engine_state_t *state)
 	if (cfg->accept_ranges && include_content_headers) {
 		http_response_static_set_header(response_obj, "accept-ranges", 13, "bytes", 5);
 	}
+
 	if (state->is_range && include_content_headers) {
 		char cr[64];
 		const int n = snprintf(cr, sizeof(cr), "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
 							   state->range_first, state->range_last, state->range_total);
+
 		if (n > 0 && (size_t)n < sizeof(cr)) {
 			http_response_static_set_header(response_obj, "content-range", 13, cr, (size_t)n);
 		}
@@ -581,22 +621,28 @@ static void engine_handle_stat(engine_state_t *state)
 
 	if (not_modified) {
 		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+
 		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			engine_finalize(state, -1);
 		}
+
 		return;
 	}
 
 	if (state->is_head || state->st.st_size == 0) {
 		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+
 		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			engine_finalize(state, -1);
 		}
+
 		return;
 	}
 
 	const uint64_t body_offset = state->is_range ? state->range_first : 0;
+
 	if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+
 	if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
 		engine_finalize(state, -1);
 	}
@@ -605,9 +651,11 @@ static void engine_handle_stat(engine_state_t *state)
 static void engine_on_protocol_done(void *user, int status)
 {
 	engine_state_t *state = (engine_state_t *)user;
+
 	if (state == NULL) {
 		return;
 	}
+
 	engine_finalize(state, status);
 }
 
@@ -625,6 +673,7 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	}
 
 	const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
+
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
 		/* Caller's responsibility — engine refuses to drive without a
 		 * protocol op. Either the adapter falls back to a synchronous
@@ -634,9 +683,11 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 
 	engine_state_t *state = ecalloc(1, sizeof(*state));
 	state->cfg = *config;
+
 	if (cbs != NULL) {
 		state->cbs = *cbs;
 	}
+
 	state->user = user;
 	state->request = request;
 	state->response_obj = response_obj;
@@ -658,14 +709,17 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	if (state->cfg.content_type != NULL) {
 		zend_string_addref((zend_string *)state->cfg.content_type);
 	}
+
 	if (state->cfg.content_disposition != NULL) {
 		zend_string_addref((zend_string *)state->cfg.content_disposition);
 	}
+
 	if (state->cfg.cache_control != NULL) {
 		zend_string_addref((zend_string *)state->cfg.cache_control);
 	}
 
 	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
+
 	if (UNEXPECTED(state->file_io == NULL)) {
 		engine_state_free(state);
 		return SEND_FILE_HANDLED;
@@ -673,29 +727,36 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 
 	engine_cb_t *cb =
 		(engine_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(engine_dispatch, sizeof(engine_cb_t));
+
 	if (UNEXPECTED(cb == NULL)) {
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
+
 		engine_state_free(state);
 		return SEND_FILE_HANDLED;
 	}
+
 	cb->base.dispose = engine_cb_dispose;
 	cb->state = state;
 
 	if (UNEXPECTED(!state->file_io->event.add_callback(&state->file_io->event, &cb->base))) {
 		efree(cb);
+
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
+
 		engine_state_free(state);
 		return SEND_FILE_HANDLED;
 	}
+
 	state->cb = &cb->base;
 
 	if (state->cbs.on_armed != NULL) {
 		state->cbs.on_armed(user);
 	}
+
 	state->armed = true;
 
 	return SEND_FILE_ASYNC;

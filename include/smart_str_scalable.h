@@ -60,6 +60,7 @@ http_smart_str_append_scalable(smart_str *buf,
             (void)smart_str_alloc(buf, reserve - cur, 0);
         }
     }
+
     smart_str_appendl(buf, data, len);
 }
 

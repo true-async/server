@@ -133,6 +133,7 @@ http2_stream_t *http2_session_find_stream(http2_session_t *session,
     if (session == NULL) {
         return NULL;
     }
+
     zval *zv = zend_hash_index_find(&session->streams, stream_id);
     return zv != NULL ? (http2_stream_t *)Z_PTR_P(zv) : NULL;
 }
@@ -184,9 +185,11 @@ static void store_header_value(http_request_t *req,
      * the per-request zend_string_init path. */
     zend_string *name_str = http_known_header_lookup(name, namelen);
     const bool name_owned = (name_str == NULL);
+
     if (name_owned) {
         name_str = zend_string_init(name, namelen, 0);
     }
+
     zend_string *val_str = zend_string_init(value, valuelen, 0);
 
     zval tmp;
@@ -226,6 +229,7 @@ static int cb_on_begin_frame(nghttp2_session *ng,
     if (hd->type != NGHTTP2_HEADERS || hd->stream_id == 0) {
         return 0;
     }
+
     const uint32_t stream_id = hd->stream_id;
 
     /* Trailer HEADERS reuse an open stream; nghttp2 tracks that for us,
@@ -243,6 +247,7 @@ static int cb_on_begin_frame(nghttp2_session *ng,
                                     NGHTTP2_PROTOCOL_ERROR, NULL, 0);
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
+
     return 0;
 }
 
@@ -296,6 +301,7 @@ static int cb_on_begin_headers(nghttp2_session *ng,
     }
 
     http2_stream_t *stream = http2_stream_new(session, stream_id);
+
     if (stream == NULL) {
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
@@ -307,6 +313,7 @@ static int cb_on_begin_headers(nghttp2_session *ng,
     if (session->conn != NULL) {
         http_server_on_h2_stream_opened(session->conn->counters);
     }
+
     return 0;
 }
 
@@ -329,6 +336,7 @@ static int cb_on_header(nghttp2_session *ng,
 
     http2_stream_t *stream = (http2_stream_t *)
         nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
+
     if (stream == NULL) {
         return 0;
     }
@@ -338,12 +346,14 @@ static int cb_on_header(nghttp2_session *ng,
      * own accumulator so any library regression still has a second
      * line of defence. RFC 7541 §4.1 overhead is 32 bytes per entry. */
     const size_t entry_cost = namelen + valuelen + 32;
+
     if (SIZE_MAX - stream->headers_total_bytes < entry_cost ||
         stream->headers_total_bytes + entry_cost > HTTP2_SETTINGS_MAX_HEADER_LIST) {
         /* Reset the stream but keep the connection alive for other
          * streams — RFC 9113 §5.4.2 stream-level error handling. */
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     }
+
     stream->headers_total_bytes += entry_cost;
 
     http_request_t *req = stream->request;
@@ -359,6 +369,7 @@ static int cb_on_header(nghttp2_session *ng,
                 /* Fast-path common methods via the interned pool; fall
                  * back for extension verbs. See src/core/http_known_strings.c. */
                 req->method = http_known_method_lookup(value_c, valuelen);
+
                 if (req->method == NULL) {
                     req->method = zend_string_init(value_c, valuelen, 0);
                 }
@@ -391,16 +402,19 @@ static int cb_on_header(nghttp2_session *ng,
      * uploads run concurrently. */
     if (namelen == 14 && strncasecmp(name_c, "content-length", 14) == 0) {
         char buf[32];
+
         if (valuelen < sizeof(buf)) {
             memcpy(buf, value_c, valuelen);
             buf[valuelen] = '\0';
             char *end = NULL;
             const unsigned long long cl = strtoull(buf, &end, 10);
+
             if (end != buf && *end == '\0' && cl <= SIZE_MAX) {
                 req->content_length = (size_t)cl;
             }
         }
     }
+
     return 0;
 }
 
@@ -422,6 +436,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 
     http2_stream_t *stream = (http2_stream_t *)
         nghttp2_session_get_stream_user_data(ng, stream_id);
+
     if (stream == NULL) {
         return 0;
     }
@@ -438,9 +453,11 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
      * default if the global was never initialised (e.g. server running
      * without having been started via http_server_class). */
     size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+
     if (body_cap == 0) {
         body_cap = HTTP2_MAX_BODY_SIZE;
     }
+
     if (SIZE_MAX - current < len ||
         current + len > body_cap) {
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
@@ -473,9 +490,11 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
     } zend_catch {
         oom = true;
     } zend_end_try();
+
     if (UNEXPECTED(oom)) {
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     }
+
     return 0;
 }
 
@@ -486,17 +505,20 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 static void finalize_request_body(http2_stream_t *stream)
 {
     http_request_t *req = stream->request;
+
     if (req == NULL) {
         return;
     }
 
     smart_str_0(&stream->request_body_buf);
+
     if (stream->request_body_buf.s != NULL) {
         /* Transfer ownership: smart_str's allocated buffer becomes
          * request->body. smart_str_extract clears the smart_str so
          * http2_stream_free's smart_str_free is a no-op. */
         req->body = smart_str_extract(&stream->request_body_buf);
     }
+
     req->complete = true;
 
     /* Wake handlers blocked on $request->awaitBody(). body_event is
@@ -505,6 +527,7 @@ static void finalize_request_body(http2_stream_t *stream)
     if (req->body_event != NULL) {
         zend_async_trigger_event_t *trig =
             (zend_async_trigger_event_t *)req->body_event;
+
         if (trig->trigger != NULL) {
             trig->trigger(trig);
         }
@@ -535,8 +558,10 @@ static int cb_on_frame_recv(nghttp2_session *ng,
         (frame->hd.flags & NGHTTP2_FLAG_END_HEADERS) != 0) {
         stream = (http2_stream_t *)
             nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
+
         if (stream != NULL && !stream->request_dispatched) {
             stream->request_dispatched = true;
+
             if (session->conn != NULL && session->conn->view != NULL
                 && session->conn->view->telemetry_enabled) {
                 http_request_parse_trace_context(stream->request);
@@ -547,6 +572,7 @@ static int cb_on_frame_recv(nghttp2_session *ng,
              * have released its HttpRequest ref; the addref guarantees
              * stream->request stays valid until http2_stream_release. */
             http_request_addref(stream->request);
+
             if (session->on_request_ready != NULL) {
                 session->on_request_ready(stream->request, stream->stream_id,
                                           session->on_request_ready_user_data);
@@ -562,6 +588,7 @@ static int cb_on_frame_recv(nghttp2_session *ng,
             stream = (http2_stream_t *)
                 nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
         }
+
         if (stream != NULL && stream->request != NULL &&
             !stream->request->complete) {
             finalize_request_body(stream);
@@ -595,9 +622,11 @@ static int cb_on_frame_recv(nghttp2_session *ng,
             uint64_t sent_ns = 0;
             memcpy(&sent_ns, frame->ping.opaque_data, 8);
             const uint64_t now_ns = (uint64_t)zend_hrtime();
+
             if (now_ns > sent_ns) {
                 const uint64_t rtt = now_ns - sent_ns;
                 session->last_ping_rtt_ns = rtt;
+
                 if (session->conn != NULL) {
                     http_server_on_h2_ping_rtt(session->conn->counters, rtt);
                 }
@@ -629,18 +658,22 @@ static int cb_on_frame_recv(nghttp2_session *ng,
         if (frame->hd.stream_id != 0) {
             http2_stream_t *s = (http2_stream_t *)
                 nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
+
             if (s != NULL && s->write_event != NULL) {
                 zend_async_trigger_event_t *trig =
                     (zend_async_trigger_event_t *)s->write_event;
+
                 if (trig->trigger != NULL) { trig->trigger(trig); }
             }
         } else {
             zval *zv;
             ZEND_HASH_FOREACH_VAL(&session->streams, zv) {
                 http2_stream_t *s = (http2_stream_t *)Z_PTR_P(zv);
+
                 if (s != NULL && s->write_event != NULL) {
                     zend_async_trigger_event_t *trig =
                         (zend_async_trigger_event_t *)s->write_event;
+
                     if (trig->trigger != NULL) { trig->trigger(trig); }
                 }
             } ZEND_HASH_FOREACH_END();
@@ -659,6 +692,7 @@ static int cb_on_stream_close(nghttp2_session *ng,
                               void *user_data)
 {
     http2_session_t *session = (http2_session_t *)user_data;
+
     if (stream_id <= 0) {
         /* Stream 0 is the connection itself — not a stream. */
         return 0;
@@ -720,6 +754,7 @@ static int cb_on_stream_close(nghttp2_session *ng,
          * sync so a re-entry (e.g. dispose's commit path triggers
          * another on_stream_close) can't double-cancel. */
         stream->coroutine = NULL;
+
         if (stream->request != NULL) {
             stream->request->coroutine = NULL;
         }
@@ -744,9 +779,11 @@ static int cb_on_stream_close(nghttp2_session *ng,
     }
 
     stream_table_remove(session, (uint32_t)stream_id);
+
     if (session->conn != NULL) {
         http_server_on_h2_stream_closed(session->conn->counters);
     }
+
     return 0;
 }
 
@@ -810,20 +847,24 @@ http2_session_t *http2_session_new(http_connection_t *conn,
                    NULL, stream_table_dtor, 0);
 
     nghttp2_option *opt = NULL;
+
     if (nghttp2_option_new(&opt) != 0) {
         zend_hash_destroy(&session->streams);
         efree(session);
         return NULL;
     }
+
     apply_hardened_options(opt);
 
     nghttp2_session_callbacks *cbs = NULL;
+
     if (nghttp2_session_callbacks_new(&cbs) != 0) {
         nghttp2_option_del(opt);
         zend_hash_destroy(&session->streams);
         efree(session);
         return NULL;
     }
+
     install_callbacks(cbs);
 
     const int rc = nghttp2_session_server_new2(
@@ -861,6 +902,7 @@ void http2_session_free(http2_session_t *session)
         nghttp2_session_del(session->ng);
         session->ng = NULL;
     }
+
     zend_hash_destroy(&session->streams);
     efree(session);
 }
@@ -873,6 +915,7 @@ int http2_session_feed(http2_session_t *session,
         if (consumed_out != NULL) { *consumed_out = 0; }
         return -1;
     }
+
     const ssize_t n = (ssize_t)nghttp2_session_mem_recv(
         session->ng, (const uint8_t *)data, len);
 
@@ -893,6 +936,7 @@ int http2_session_feed(http2_session_t *session,
              * stream; the caller writes these raw to the wire. */
             session->bad_preface_emit_goaway = true;
         }
+
         if (consumed_out != NULL) { *consumed_out = 0; }
         return -1;
     }
@@ -907,6 +951,7 @@ ssize_t http2_session_drain(http2_session_t *session,
     if (session == NULL || session->ng == NULL) {
         return -1;
     }
+
     if (cap == 0) {
         return 0;
     }
@@ -938,6 +983,7 @@ ssize_t http2_session_drain(http2_session_t *session,
         if (n < 0) {
             return -1;
         }
+
         if (n == 0) {
             session->send_pending = NULL;
             session->send_pending_len = 0;
@@ -985,9 +1031,11 @@ bool http2_session_want_write(const http2_session_t *session)
     if (session == NULL || session->ng == NULL) {
         return false;
     }
+
     if (session->send_pending_offset < session->send_pending_len) {
         return true;
     }
+
     return nghttp2_session_want_write(session->ng) != 0;
 }
 
@@ -1082,6 +1130,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
             http_server_on_h2_data_sent(ds_session->conn->counters,
                                         (size_t)written);
         }
+
         return (ssize_t)written;
     }
 
@@ -1094,6 +1143,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
         memcpy(buf, stream->response_body + stream->response_body_offset,
                to_copy);
         stream->response_body_offset += to_copy;
+
         if (ds_session != NULL && ds_session->conn != NULL) {
             http_server_on_h2_data_sent(ds_session->conn->counters, to_copy);
         }
@@ -1108,6 +1158,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
             *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
         }
     }
+
     return (ssize_t)to_copy;
 }
 
@@ -1147,12 +1198,14 @@ int http2_session_submit_response(http2_session_t *session,
     if (session == NULL || session->ng == NULL) {
         return -1;
     }
+
     if (status < 100 || status > 999) {
         return -1;
     }
 
     http2_stream_t *stream = http2_session_find_stream(session,
                                                              stream_id);
+
     if (stream == NULL) {
         return -1;
     }
@@ -1194,6 +1247,7 @@ int http2_session_submit_response(http2_session_t *session,
     }
 
     int rc;
+
     if (body_len == 0) {
         /* No DATA frame — HEADERS with END_STREAM does the whole
          * response (204, 304, HEAD-style). */
@@ -1223,11 +1277,13 @@ int http2_session_submit_response_streaming(http2_session_t *session,
     if (session == NULL || session->ng == NULL) {
         return -1;
     }
+
     if (status < 100 || status > 999) {
         return -1;
     }
 
     http2_stream_t *stream = http2_session_find_stream(session, stream_id);
+
     if (stream == NULL) {
         return -1;
     }
@@ -1239,6 +1295,7 @@ int http2_session_submit_response_streaming(http2_session_t *session,
     nghttp2_nv *nv_heap = NULL;
 
     const size_t total_nv = 1 + headers_len;
+
     if (total_nv > HTTP2_NV_SCRATCH) {
         nv_heap = emalloc(total_nv * sizeof(nghttp2_nv));
         nv = nv_heap;
@@ -1284,6 +1341,7 @@ int http2_session_resume_stream_data(http2_session_t *session,
     if (session == NULL || session->ng == NULL) {
         return -1;
     }
+
     return nghttp2_session_resume_data(session->ng, (int32_t)stream_id) == 0
                ? 0 : -1;
 }
@@ -1299,6 +1357,7 @@ int http2_session_submit_trailer(http2_session_t *session,
     }
 
     http2_stream_t *stream = http2_session_find_stream(session, stream_id);
+
     if (stream == NULL) {
         return -1;
     }
@@ -1329,6 +1388,7 @@ int http2_session_submit_trailer(http2_session_t *session,
 
     const int rc = nghttp2_submit_trailer(session->ng, (int32_t)stream_id,
                                           nv, trailers_len);
+
     if (nv_heap != NULL) { efree(nv_heap); }
 
     if (rc != 0) {
@@ -1337,6 +1397,7 @@ int http2_session_submit_trailer(http2_session_t *session,
         stream->has_trailers = false;
         return -1;
     }
+
     return 0;
 }
 

@@ -47,12 +47,15 @@ static void sf_adapter_free(sf_adapter_t *a)
 	if (a == NULL) {
 		return;
 	}
+
 	if (a->req != NULL) {
 		http_send_file_request_free(a->req);
 	}
+
 	if (a->content_disposition != NULL) {
 		zend_string_release(a->content_disposition);
 	}
+
 	efree(a);
 }
 
@@ -62,6 +65,7 @@ static void sf_adapter_on_done(void *user, int status)
 	void (*on_done)(void *, int) = a->on_done;
 	void *outer_user = a->user;
 	sf_adapter_free(a);
+
 	if (on_done != NULL) {
 		on_done(outer_user, status);
 	}
@@ -98,6 +102,7 @@ static zend_string *sf_build_content_disposition(const http_send_file_options_t 
 		bool ascii_clean = true;
 		for (size_t i = 0; i < dn_len; i++) {
 			const unsigned char c = (unsigned char)dn[i];
+
 			if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
 				ascii_clean = false;
 				break;
@@ -135,18 +140,23 @@ static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t
 	}
 
 	const zval *ae_zv = zend_hash_str_find(request->headers, "accept-encoding", 15);
+
 	if (ae_zv == NULL) {
 		return false;
 	}
+
 	const zend_string *ae = NULL;
+
 	if (Z_TYPE_P(ae_zv) == IS_STRING) {
 		ae = Z_STR_P(ae_zv);
 	} else if (Z_TYPE_P(ae_zv) == IS_ARRAY) {
 		const zval *first = zend_hash_index_find(Z_ARRVAL_P(ae_zv), 0);
+
 		if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
 			ae = Z_STR_P(first);
 		}
 	}
+
 	if (ae == NULL) {
 		return false;
 	}
@@ -175,6 +185,7 @@ static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t
 		if (!acceptable[i]) {
 			continue;
 		}
+
 		if (*path_len + codecs[i].suffix_len + 1 > buf_cap) {
 			continue;
 		}
@@ -185,6 +196,7 @@ static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t
 		candidate[*path_len + codecs[i].suffix_len] = '\0';
 
 		struct stat st;
+
 		if (stat(candidate, &st) != 0 || !S_ISREG(st.st_mode)) {
 			continue;
 		}
@@ -196,6 +208,7 @@ static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t
 		*out_encoding_len = codecs[i].token_len;
 		return true;
 	}
+
 	return false;
 }
 
@@ -207,11 +220,13 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 		if (req != NULL) {
 			http_send_file_request_free(req);
 		}
+
 		http_response_synth_error(response_obj, 500, "sendFile: invalid arguments");
 		return false;
 	}
 
 	const size_t path_len = ZSTR_LEN(req->path);
+
 	if (UNEXPECTED(path_len == 0 || path_len + 4 + 1 >= MAXPATHLEN ||
 				   ZSTR_VAL(req->path)[0] != '/')) {
 		http_send_file_request_free(req);
@@ -221,6 +236,7 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 
 	/* Engine refuses to drive without a protocol op — synthesize 500. */
 	const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
+
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
 		http_send_file_request_free(req);
 		http_response_synth_error(response_obj, 500,
@@ -240,6 +256,7 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 
 	const char *picked_encoding = NULL;
 	size_t picked_encoding_len = 0;
+
 	if (req->opts.precompressed) {
 		(void)sf_try_precompressed(request, fs_path, sizeof(fs_path), &fs_path_len,
 								   &picked_encoding, &picked_encoding_len);
@@ -277,6 +294,7 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	};
 
 	const send_file_result_t r = send_file(request, response_obj, &cfg, &cbs, adapter);
+
 	if (r == SEND_FILE_ASYNC) {
 		return true;
 	}
@@ -284,10 +302,12 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	/* Engine refused before kick-off (MAXPATHLEN, FS_OPEN failure,
 	 * cb alloc). adapter wasn't handed off; on_done not fired. */
 	sf_adapter_free(adapter);
+
 	if (r != SEND_FILE_HANDLED) {
 		http_response_synth_error(response_obj, 500, "sendFile: engine refused");
 	} else {
 		http_response_synth_error(response_obj, 500, "sendFile: cannot open file");
 	}
+
 	return false;
 }
