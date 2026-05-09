@@ -22,6 +22,8 @@
 #include "http_send_file.h"
 #include "smart_str_scalable.h"
 
+#include <strings.h>             /* strncasecmp */
+
 /* Include generated arginfo */
 #include "../stubs/HttpResponse.php_arginfo.h"
 
@@ -1984,6 +1986,30 @@ void http_response_set_content_length(zend_object *obj, uint64_t length)
     char buf[24];
     const size_t n = format_u64(buf, length);
     http_response_static_set_header(obj, "content-length", 14, buf, n);
+}
+
+void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
+                                       const bool include_content_headers)
+{
+    if (extra == NULL) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *value;
+    ZEND_HASH_FOREACH_STR_KEY_VAL((HashTable *)extra, name, value) {
+        if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
+            continue;
+        }
+
+        if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
+            strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
+            continue;
+        }
+
+        http_response_static_set_header(obj, ZSTR_VAL(name), ZSTR_LEN(name),
+                                        Z_STRVAL_P(value), Z_STRLEN_P(value));
+    } ZEND_HASH_FOREACH_END();
 }
 
 void http_response_set_connection(zend_object *obj, bool keep_alive)

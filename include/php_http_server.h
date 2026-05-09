@@ -1073,6 +1073,14 @@ void http_response_static_set_body_cstr(zend_object *obj,
  * snprintf overhead — Content-Length is on the hot path of every response. */
 void http_response_set_content_length(zend_object *obj, uint64_t length);
 
+/* Push a HashTable of operator-supplied headers (name → string) onto the
+ * response via http_response_static_set_header. With include_content_headers
+ * == false skips name starting with `content-` case-insensitively, matching
+ * RFC 9110 §15.4.5 for 304 Not Modified responses. NULL keys, non-string
+ * values, and an entirely NULL `extra` are tolerated and simply skipped. */
+void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
+                                       bool include_content_headers);
+
 /* Set Connection: keep-alive | close. Multiplex protocols (H2/H3) filter
  * Connection at submit time, so it is harmless to call on any response. */
 void http_response_set_connection(zend_object *obj, bool keep_alive);

@@ -163,35 +163,6 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 	return http_mime_lookup_by_ext(state->fs_path, state->fs_path_len, out, out_len);
 }
 
-/* Push cfg->extra_headers onto response_obj. include_content_headers=false
- * on the 304 path (RFC 9110 §15.4.5 bars Content-* on Not Modified). */
-static void engine_apply_extra_headers(zend_object *response_obj, const HashTable *extra,
-									   const bool include_content_headers)
-{
-	if (extra == NULL) {
-		return;
-	}
-
-	zend_string *name;
-	zval *value;
-	ZEND_HASH_FOREACH_STR_KEY_VAL(extra, name, value)
-	{
-		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
-			continue;
-		}
-
-		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
-			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
-			continue;
-		}
-
-		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
-										Z_STRVAL_P(value), Z_STRLEN_P(value));
-	}
-
-	ZEND_HASH_FOREACH_END();
-}
-
 static void engine_on_protocol_done(void *user, int status);
 
 /* Tear down + fire on_done. Used on early-error paths (open failed
@@ -612,7 +583,7 @@ static void engine_handle_stat(engine_state_t *state)
 										ZSTR_LEN(cfg->content_disposition));
 	}
 
-	engine_apply_extra_headers(response_obj, cfg->extra_headers, include_content_headers);
+	http_response_apply_extra_headers(response_obj, cfg->extra_headers, include_content_headers);
 	http_response_set_connection(response_obj, keep_alive);
 
 	/* === Hand off to the protocol op ================================= */

@@ -88,7 +88,7 @@ static inline bool path_targets_directory(const char *relative, const size_t rel
  * helper covers the path where the protocol op is missing entirely
  * (H3 today) and we serve the file synchronously. */
 static void apply_mount_headers(zend_object *response_obj, const http_static_handler_t *mount,
-								bool include_content_headers)
+								const bool include_content_headers)
 {
 	if (mount->cache_control != NULL) {
 		http_response_static_set_header(response_obj, "cache-control", 13,
@@ -96,28 +96,8 @@ static void apply_mount_headers(zend_object *response_obj, const http_static_han
 										ZSTR_LEN(mount->cache_control));
 	}
 
-	if (mount->extra_headers == NULL) {
-		return;
-	}
-
-	zend_string *name;
-	zval *value;
-	ZEND_HASH_FOREACH_STR_KEY_VAL(mount->extra_headers, name, value)
-	{
-		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
-			continue;
-		}
-
-		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
-			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
-			continue;
-		}
-
-		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
-										Z_STRVAL_P(value), Z_STRLEN_P(value));
-	}
-
-	ZEND_HASH_FOREACH_END();
+	http_response_apply_extra_headers(response_obj, mount->extra_headers,
+									  include_content_headers);
 }
 
 /* Translate mount-side enablePrecompressed bits into the codec mask
