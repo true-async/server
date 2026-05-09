@@ -62,7 +62,8 @@ $server = new HttpServer($config);
 
 $static = (new StaticHandler('/static/', $root))
     ->setEtagEnabled(true)
-    ->setCacheControl('public, max-age=60');
+    ->setCacheControl('public, max-age=60')
+    ->setOpenFileCache(1024, 60);
 $server->addStaticHandler($static);
 
 $server->addHttpHandler(function ($request, $response) {
