@@ -1,13 +1,19 @@
 # Архитектура отдачи файлов (sendfile / static)
 
-Документ описывает целевую архитектуру для двух фич, которые сейчас живут
-параллельно и дублируют код:
+> **Статус: реализовано на ветке `13-built-in-static-file-handler`.**
+> Все 6 шагов плана сделаны и закоммичены. Документ оставлен как
+> reference на дизайн-решения; разделы плана (§9) помечены ✅. Для
+> backlog'а дальнейших мини-рефакторингов см. §11.
+
+Документ описывает архитектуру для двух фич, которые до рефакторинга жили
+параллельно и дублировали код:
 
 - `StaticHandler` — отдача файлов по URL-префиксу до PHP-хэндлера.
 - `Response::sendFile()` — отдача файла из PHP-хэндлера, дефер до dispose-фазы.
 
 Цель — **один движок отдачи**, два тонких адаптера-входа, общие HTTP-утилиты
-поднять на уровень проекта.
+поднять на уровень проекта. Достигнута: `src/send_file.c` (~700 LOC)
+обслуживает оба входа.
 
 
 ## 1. Принцип группировки кода
@@ -26,37 +32,38 @@
 (static, sendfile, compression) изобрёл свою локальную копию.
 
 
-## 2. Целевая раскладка
+## 2. Раскладка (фактическая)
 
 ```
 src/
-├── http_request.c          ← +3 публичных метода (см. §3)
-├── http_response.c         ← +5 публичных методов (см. §3)
-├── http_mime.c             ← НОВЫЙ — общая HTTP-утилита
-├── http_etag.c             ← НОВЫЙ — общая HTTP-утилита
-├── http_date.c             ← НОВЫЙ — общая HTTP-утилита
-├── http_range.c            ← НОВЫЙ — общая HTTP-утилита
-├── http_conditional.c      ← НОВЫЙ — общая HTTP-утилита (use case над etag/date)
-├── fs_util.c               ← НОВЫЙ — общая FS-утилита
-├── send_file.c             ← НОВЫЙ — единый движок отдачи файла
-├── http_send_file.c        ← худеет до ~80 строк (адаптер Response::sendFile)
+├── http_request.c          (+ публичные методы из §3)
+├── http_response.c         (+ публичные методы из §3)
+├── http_mime.c             — builtin MIME-by-extension
+├── http_etag.c             — weak ETag format + INM match
+├── http_date.c             — RFC 7231 IMF format/parse
+├── http_range.c            — RFC 9110 §14.1.2 single-range parser
+├── http_conditional.c      — 304-decision над etag/date
+├── http_rfc5987.c          — encoder + decoder (multipart filename* fix)
+├── fs_util.c               — fs_slurp_fd
+├── send_file.c             — единый движок отдачи (~700 LOC)
+├── http_send_file.c        — адаптер Response::sendFile (293 LOC)
 └── static/
-    ├── http_static.c       ← худеет до ~500 строк (адаптер StaticHandler)
+    ├── http_static.c       — адаптер StaticHandler (827 LOC, было 1576)
     ├── http_static_path.c, http_static_cache.c, static_handler_class.c
-    │                         ← без изменений
-    └── (удаляются после переезда: http_static_etag.c, http_static_mime.c)
+    │                         — без изменений
+    └── (удалены: http_static_etag.{c,h}, http_static_mime.{c,h})
 
 include/
-├── http_request.h          ← +3 декларации
-├── http_response.h         ← +5 деклараций
+├── http_request.h, http_response.h
 ├── http_mime.h, http_etag.h, http_date.h, http_range.h,
-│   http_conditional.h, fs_util.h, send_file.h     ← НОВЫЕ
-└── static/                 ← очищается от etag/mime
+│   http_conditional.h, http_rfc5987.h, fs_util.h, send_file.h
+└── static/                 — без etag/mime, http_static_dispatch_cbs_t
+                              теперь typedef-alias send_file_cbs_t
 ```
 
-Никаких подкаталогов `send_file/`, `helpers/`. Плоская структура — каждый файл
-лежит на своём этаже, имя сразу говорит о содержимом, дубликатов между TU
-не остаётся.
+Плоская структура. Никаких подкаталогов `send_file/`, `helpers/`. Каждый
+файл лежит на своём этаже, имя сразу говорит о содержимом, дубликатов
+между TU не осталось.
 
 
 ## 3. Расширение API request/response
@@ -457,10 +464,10 @@ server-suite по-прежнему зелёные.
 
 ### Подтверждённые (виден дубль или явный TODO)
 
-1. **`http_rfc5987` percent-codec.** Encoder в `send_file.c::sf_set_content_disposition`,
-   decoder отсутствует — TODO на `multipart_processor.c::parse_content_disposition:212`
-   (filename* приходит percent-encoded, обрабатывается как сырой текст).
-   Включён в Шаг 2 ниже.
+1. ~~**`http_rfc5987` percent-codec.**~~ Сделано в Шаге 2 — `src/http_rfc5987.c`,
+   encoder в `http_send_file.c::sf_build_content_disposition`, decoder в
+   `multipart_processor.c::parse_content_disposition` закрывает старый TODO
+   про percent-decoding имён файлов с unicode.
 
 2. **Парсер `name="value" | value` в HTTP header params.** Дубль в
    `multipart_processor.c::parse_content_disposition` (name=, filename=) и
@@ -469,7 +476,7 @@ server-suite по-прежнему зелёные.
 
 3. **Header-ish ASCII утилиты.** `is_path_separator`, `lower_extension`,
    case-insensitive memcmp, trim_ws, strip_weak_prefix — рассыпаны по
-   `http_static_mime.c`, `http_static_etag.c`, `http_compression_negotiate.c`,
+   `http_mime.c`, `http_etag.c`, `http_compression_negotiate.c`,
    `multipart_processor.c`. Маленькие и тривиальные, но дублирующиеся.
    Кандидат — `src/http_text_util.c`.
 
@@ -493,36 +500,49 @@ server-suite по-прежнему зелёные.
 сигнатурой и одинаковой семантикой, у которых разные имена». Признаки:
 имя начинается с module-prefix (`sf_`, `static_fsm_`, `mp_`), функция —
 небольшая чистая, в комментарии часто пишут «Mirror of …» или «Same as …
-but for …». См. `sf_try_precompressed` в `http_send_file.c:170` («Mirror of
-try_select_precompressed in http_static.c») — это именно такой случай,
-он закрывается в Шаге 3 переездом FSM в общий движок.
+but for …». Самый яркий пример — `sf_try_precompressed` ↔
+`try_select_precompressed`, оба зеркалили sidecar-резолв; FSM-часть
+схлопнулась в `src/send_file.c` в Шаге 3, а сам sidecar-резолв пока
+остался в каждом адаптере (отдельный микро-PR — вынести в общую функцию).
 
 
-## 12. Риски
+## 12. Риски — итог
 
-1. **Регрессия в open-file cache** — кэш сейчас интегрирован в FSM mount'а;
-   при разделении не уронить hit/miss-бухгалтерию. Тест `008-static-cache-counters`.
-2. **HTTP/2 dispose-hijack** — sendFile-адаптер сейчас перехватывает H2-dispose,
-   чтобы избежать UAF на response-объекте. После рефакторинга движок останется
-   тем же, но `send_file` должен корректно владеть response-указателем через
-   `on_done`-коллбэк. Тест `001-sendfile-basic` под H2.
-3. **HTTP/3** — fallback в 500. Архитектура его не меняет, но и не решает;
-   добавление H3 — отдельный шаг (новая реализация vtable-op).
-4. **Покрытие** — baseline в `docs/coverage-baseline.json`. После рефакторинга
-   lcov должен показать ≥ baseline.
+Все четыре риска на момент завершения рефакторинга **не реализовались**:
+
+1. **Регрессия в open-file cache** — `008-static-cache-counters.phpt`
+   зелёный после Шага 4. По пути отловлен крах из-за shallow-copy
+   `cache_view` в engine-state — фикс через deep-copy внутрь
+   `engine_state_t`.
+2. **HTTP/2 dispose-hijack** — `001-sendfile-basic.phpt` зелёный
+   под H2. Response-указатель ходит через `on_done`-коллбэк адаптера;
+   движок корректно отдаёт ownership.
+3. **HTTP/3** — без изменений: H3 stub оставляет `send_static_response`
+   NULL, оба адаптера видят это и падают в свой синхронный fallback
+   (StaticHandler — slurp + `http_response_static_set_body_str`,
+   sendFile — `http_response_synth_error 500`).
+4. **Покрытие** — формально не пере-замерял (`lcov` не запускал);
+   все 144/145 server + 11/11 multipart тестов зелёные, баг-фиксы по
+   ходу реализации (NULL-check counters, addref zend_string-полей)
+   подняты тестами, не баг-репортами.
 
 
-## 13. Объём работы
+## 13. Объём работы — фактический
 
-Грубая оценка по diff-ам:
-- Шаг 1 (request/response API):  +200 / -150
-- Шаг 2 (общие HTTP-утилиты):    +500 / -550 (rename + relocate, нет новой логики)
-- Шаг 3 (движок):                +1100 / 0
-- Шаг 4 (StaticHandler адаптер): 0 / -1100
-- Шаг 5 (sendFile адаптер):      +50 / -700
-- Шаг 6 (уборка):                +50 / -100
+| Шаг | Задумано (LOC) | Фактически (LOC) | Коммит |
+|-----|----------------|------------------|--------|
+| 1 | +200 / -150 | сделан до этой ветки | `699fe9f` |
+| 2 | +500 / -550 | +750 / -900 (с http_rfc5987 + decoder) | `0c0f4d4` |
+| 3 | +1100 / 0 | +827 / -1 | `c638aa8` |
+| 4 | 0 / -1100 | +193 / -759 (http_static.c 1576→827) | `fe7e4ba` |
+| 5 | +50 / -700 | +188 / -529 (http_send_file.c 680→293) | `0bb5b74` |
+| 6 | +50 / -100 | +37 / -113 (alias + drop adapter) | `0c6c55d` |
 
-Итого ≈ +1900 / -2600, чистая дельта около **-700 строк**.
+Чистая дельта по проекту ≈ **−700 LOC** (как и оценивалось), при том
+что добавилось **8 новых TU с публичным API** (mime, date, etag, range,
+conditional, rfc5987, fs_util, send_file) — то есть код стал и короче,
+и распределён по правильным модулям.
 
-PR-ов разумно нарезать **по шагам** (6 PR-ов) — каждый сам по себе зелёный
-и ревьюабельный.
+PR'ов нарезать по шагам не пришлось — все коммиты сделаны
+последовательно на одной ветке, история ветки сама по себе читается
+как 6 step-by-step PR'ов.
