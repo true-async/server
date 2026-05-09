@@ -1879,7 +1879,7 @@ void http_handler_coroutine_entry(void)
         extern int http_compression_decode_request_body(
             http_request_t *, http_server_config_t *);
         extern void http_response_set_error(zend_object *, int, const char *);
-        int dec = http_compression_decode_request_body(req, conn->config);
+        const int dec = http_compression_decode_request_body(req, conn->config);
         if (dec != 0) {
             http_response_set_error(Z_OBJ(ctx->response_zv), dec,
                 dec == 415 ? "Unsupported Content-Encoding" :

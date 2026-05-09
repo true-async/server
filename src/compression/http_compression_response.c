@@ -223,7 +223,7 @@ static http_codec_id_t decide(http_compression_state_t *st,
     }
 
     /* --- response side --- */
-    int status = http_response_get_status(response_obj);
+    const int status = http_response_get_status(response_obj);
     if (status < 200 || status == 204 || status == 304) {
         return HTTP_CODEC_IDENTITY;
     }
@@ -243,7 +243,7 @@ static http_codec_id_t decide(http_compression_state_t *st,
     /* MIME whitelist match. No content-type → assume non-text and skip
      * (whitelist semantics: compress only what we explicitly know is safe). */
     char ct_buf[128];
-    size_t ct_len = response_content_type(resp_h, ct_buf, sizeof(ct_buf));
+    const size_t ct_len = response_content_type(resp_h, ct_buf, sizeof(ct_buf));
     if (ct_len == 0) {
         return HTTP_CODEC_IDENTITY;
     }
@@ -325,7 +325,7 @@ void http_compression_apply_buffered(zend_object *response_obj)
     }
 
     smart_str *body = http_response_get_body_smart_str(response_obj);
-    size_t body_len = (body && body->s) ? ZSTR_LEN(body->s) : 0;
+    const size_t body_len = (body && body->s) ? ZSTR_LEN(body->s) : 0;
 
     const http_codec_id_t codec = decide(st, response_obj, body_len);
     st->applied = true;  /* Whether or not we compress, never run twice. */

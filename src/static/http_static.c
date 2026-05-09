@@ -47,8 +47,8 @@
 #include <errno.h>
 #include <string.h>
 
-static void emit_status(zend_object *response_obj, int status, const char *body_msg,
-						size_t body_msg_len)
+static void emit_status(zend_object *response_obj, const int status, const char *body_msg,
+						const size_t body_msg_len)
 {
 	http_response_static_set_status(response_obj, status);
 	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",

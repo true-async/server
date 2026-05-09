@@ -56,7 +56,7 @@
  * ------------------------------------------------------------------------ */
 static bool tls_drain_ring_to_socket(http_connection_t *conn);
 static bool tls_ssl_write_and_drain(http_connection_t *conn,
-                                    const char *data, size_t len);
+                                    const char *data, const size_t len);
 static inline void trigger_tls_drain_event(http_connection_t *conn);
 static bool await_tls_drain_event(http_connection_t *conn);
 static bool tls_drain(http_connection_t *conn);
@@ -119,7 +119,7 @@ static bool tls_drain_ring_to_socket(http_connection_t *conn)
  * == true — callers without that invariant race with each other on
  * SSL_write. */
 static bool tls_ssl_write_and_drain(http_connection_t *conn,
-                                    const char *data, size_t len)
+                                    const char *data, const size_t len)
 {
     size_t offset = 0;
     while (offset < len) {

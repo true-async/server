@@ -129,7 +129,7 @@ static void h1_send_finalize(h1_send_state_t *state);
 static void h1_send_handle_sendfile_done(h1_send_state_t *state);
 #ifdef HAVE_OPENSSL
 static void h1_send_handle_tls_read_done(h1_send_state_t *state,
-                                         ssize_t bytes_read, bool err);
+                                         const ssize_t bytes_read, const bool err);
 static void h1_send_tls_drain_done_cb(void *data);
 static bool h1_send_tls_submit_next_read(h1_send_state_t *state);
 #endif
@@ -376,7 +376,7 @@ static bool h1_send_tls_submit_next_read(h1_send_state_t *state)
 }
 
 static void h1_send_handle_tls_read_done(h1_send_state_t *state,
-                                         ssize_t bytes_read, bool err)
+                                         const ssize_t bytes_read, const bool err)
 {
     if (UNEXPECTED(err) || bytes_read < 0) {
         /* Read error mid-stream — bytes already on the wire belong
