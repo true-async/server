@@ -23,7 +23,7 @@ MULTI="10"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$DIR/../.." && pwd)"
-EXT="$PROJECT/modules/http_server.so"
+EXT="$PROJECT/modules/true_async_server.so"
 
 [[ -f "$EXT" ]] || { echo "extension not built at $EXT" >&2; exit 1; }
 command -v h2load >/dev/null || { echo "h2load missing (apt install nghttp2-client)" >&2; exit 1; }
