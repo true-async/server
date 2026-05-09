@@ -320,52 +320,6 @@ static void apply_mount_headers(zend_object *response_obj, const http_static_han
 	ZEND_HASH_FOREACH_END();
 }
 
-/* Adapter: bridge http_static_dispatch_cbs_t (used by H1/H2 protocols
- * to drive the static dispatcher) to send_file_cbs_t (consumed by the
- * engine). The two structs have identical field shapes, only renamed.
- * The user pointer is forwarded verbatim. */
-typedef struct
-{
-	http_static_dispatch_cbs_t outer;
-	void *outer_user;
-} static_adapter_t;
-
-static void static_adapter_armed(void *user)
-{
-	static_adapter_t *const a = (static_adapter_t *)user;
-	if (a->outer.on_hard_zero_armed != NULL) {
-		a->outer.on_hard_zero_armed(a->outer_user);
-	}
-}
-
-static void static_adapter_done(void *user, int status)
-{
-	static_adapter_t *const a = (static_adapter_t *)user;
-	if (a->outer.on_static_done != NULL) {
-		a->outer.on_static_done(a->outer_user, status);
-	}
-	efree(a);
-}
-
-static void static_adapter_passthrough(void *user)
-{
-	static_adapter_t *const a = (static_adapter_t *)user;
-	if (a->outer.on_passthrough_to_php != NULL) {
-		a->outer.on_passthrough_to_php(a->outer_user);
-	}
-	efree(a);
-}
-
-static bool static_adapter_keep_alive(void *user)
-{
-	static_adapter_t *const a = (static_adapter_t *)user;
-	if (a->outer.keep_alive != NULL) {
-		return a->outer.keep_alive(a->outer_user);
-	}
-	return true;
-}
-
-
 /* Precompressed sidecar selection. Picks a `.zst` /
  * `.br` / `.gz` sibling next to `fs_path` if (a) the mount opted in via
  * enablePrecompressed for that encoding, (b) the request's
@@ -641,17 +595,10 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		/* Hand off to the single send_file engine when the protocol op
 		 * is wired (H1, H2). H3 stub leaves it NULL — fall through to
-		 * the synchronous slurp path below. */
+		 * the synchronous slurp path below. http_static_dispatch_cbs_t
+		 * is now an alias of send_file_cbs_t — pass it straight through. */
 		const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
 		if (gate_ok && ops != NULL && ops->send_static_response != NULL) {
-			static_adapter_t *adapter = emalloc(sizeof(*adapter));
-			if (cbs != NULL) {
-				adapter->outer = *cbs;
-			} else {
-				memset(&adapter->outer, 0, sizeof(adapter->outer));
-			}
-			adapter->outer_user = user;
-
 			send_file_config_t cfg = {0};
 			cfg.abs_path = fs_path;
 			cfg.abs_path_len = fs_path_len;
@@ -679,15 +626,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 							   ? SEND_FILE_ERR_PASSTHROUGH_PHP
 							   : SEND_FILE_ERR_EMIT_VIA_OP;
 
-			const send_file_cbs_t engine_cbs = {
-				.on_armed = static_adapter_armed,
-				.on_done = static_adapter_done,
-				.on_passthrough = static_adapter_passthrough,
-				.keep_alive = static_adapter_keep_alive,
-			};
-
 			const send_file_result_t r =
-				send_file(request, response_obj, &cfg, &engine_cbs, adapter);
+				send_file(request, response_obj, &cfg, cbs, user);
 
 			if (cfg.content_type != NULL) {
 				zend_string_release((zend_string *)cfg.content_type);
@@ -702,14 +642,13 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				return HTTP_STATIC_HARD_ZERO;
 			}
 			if (r == SEND_FILE_PASSTHROUGH) {
-				/* engine fired on_passthrough → adapter already freed */
+				/* engine fired on_passthrough — caller's hook already
+				 * released its pinned protocol-side resources. */
 				return HTTP_STATIC_PASSTHROUGH;
 			}
 			/* SEND_FILE_HANDLED — engine refused before kick-off (rare:
 			 * MAXPATHLEN, ZEND_ASYNC_FS_OPEN failure, ecalloc failure).
-			 * Free the orphaned adapter and fall through to the
-			 * synchronous fallback path below. */
-			efree(adapter);
+			 * Fall through to the synchronous fallback path below. */
 		}
 
 		int fd = -1;

@@ -1643,9 +1643,9 @@ static bool h1_static_keep_alive(void *user)
 }
 
 const http_static_dispatch_cbs_t h1_static_dispatch_cbs = {
-    .on_hard_zero_armed   = h1_static_on_hard_zero_armed,
-    .on_static_done       = h1_static_on_static_done,
-    .on_passthrough_to_php = h1_static_on_passthrough_to_php,
+    .on_armed   = h1_static_on_hard_zero_armed,
+    .on_done       = h1_static_on_static_done,
+    .on_passthrough = h1_static_on_passthrough_to_php,
     .keep_alive           = h1_static_keep_alive,
 };
 /* }}} */

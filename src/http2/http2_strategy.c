@@ -162,9 +162,9 @@ static bool h2_static_keep_alive(void *const user)
 }
 
 static const http_static_dispatch_cbs_t h2_static_dispatch_cbs = {
-    .on_hard_zero_armed    = h2_static_on_hard_zero_armed,
-    .on_static_done        = h2_static_on_static_done,
-    .on_passthrough_to_php = NULL,
+    .on_armed    = h2_static_on_hard_zero_armed,
+    .on_done        = h2_static_on_static_done,
+    .on_passthrough = NULL,
     .keep_alive            = h2_static_keep_alive,
 };
 

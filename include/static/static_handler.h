@@ -181,45 +181,22 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 void http_static_handler_shared_addref(http_static_handler_t *mount);
 void http_static_handler_shared_release(http_static_handler_t *mount);
 
-/* Protocol-side hooks for the dispatch FSM. Fire from try_serve and
- * from FSM continuations rooted at ZEND_ASYNC_FS_OPEN. The user
- * pointer is passed back verbatim to every callback. See
- * http_static_result_t for the dispatch outcomes these callbacks
- * cover. */
-typedef struct {
-	/* Called once the static FSM has kicked off its async chain (the
-	 * synchronous tail of try_serve that returns HARD_ZERO). The caller
-	 * pins protocol-side resources (refcount the conn, bump in-flight
-	 * dispatch counter, etc.) — these stay pinned until on_static_done
-	 * fires. NULL = nothing to do. */
-	void (*on_hard_zero_armed)(void *user);
-
-	/* Called once the protocol's send_static_response op has finished
-	 * (or the static handler failed before delegating). status==0 ok,
-	 * non-zero abort. The caller drops the resources it pinned in
-	 * on_hard_zero_armed and runs whatever post-request bookkeeping it
-	 * needs (finalize / keep-alive). NULL = nothing to do, but in that
-	 * case file_io leaks unless the protocol op took ownership.
-	 *
-	 * After this call returns, `user` should be considered freed by
-	 * the caller — the static handler will not touch it again. */
-	void (*on_static_done)(void *user, int status);
-
-	/* on_missing:Next rollback. The mount said ENOENT-falls-through;
-	 * the FSM has torn down its scratch state and is asking the caller
-	 * to spawn its PHP-handler coroutine as if try_serve had returned
-	 * PASSTHROUGH from the start. NULL is invalid for mounts that opt
-	 * into HTTP_STATIC_FLAG_ON_MISSING_NEXT (the static handler has no
-	 * other way to recover); for callers that don't support fallthrough
-	 * the safest stub closes the request as 404. */
-	void (*on_passthrough_to_php)(void *user);
-
-	/* Per-protocol keep-alive verdict — H1 reads conn->keep_alive, H2/
-	 * H3 always returns true (multiplexed transport). The static handler
-	 * uses this to decide whether to set Connection: keep-alive vs
-	 * close. NULL → assume true. */
-	bool (*keep_alive)(void *user);
-} http_static_dispatch_cbs_t;
+/* Protocol-side dispatch hooks. Aliased to send_file_cbs_t — the static
+ * dispatcher hands off to the same engine HttpResponse::sendFile() uses,
+ * so the cbs shape is identical. Field meanings (callback semantics):
+ *
+ * on_armed       — fires once the engine kicks off its async chain (the
+ *                  synchronous tail of try_serve that returns HARD_ZERO).
+ *                  The caller pins protocol-side resources here.
+ * on_done        — fires when the protocol's send_static_response op
+ *                  finishes (or engine failed before delegating).
+ *                  status==0 ok, non-zero abort. Drop pinned resources.
+ * on_passthrough — on_missing:Next rollback. Caller spawns its PHP
+ *                  handler coroutine. NULL is invalid for mounts that
+ *                  opt into HTTP_STATIC_FLAG_ON_MISSING_NEXT.
+ * keep_alive     — per-protocol keep-alive verdict. NULL → assume true. */
+#include "send_file.h"
+typedef send_file_cbs_t http_static_dispatch_cbs_t;
 
 /* Dispatch hook entrypoint. Protocol-agnostic — caller supplies the
  * response object, the counters block (for telemetry, may be NULL on

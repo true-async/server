@@ -416,7 +416,15 @@ server-suite по-прежнему зелёные.
 
 **Контрольная точка**: 4 sendfile + 12 static + 167 server тестов зелёные.
 
-### Шаг 6. Уборка
+### Шаг 6. Уборка ✅
+
+`http_static_dispatch_cbs_t` теперь typedef-alias `send_file_cbs_t`
+(одинаковая форма, имена полей унифицированы:
+`on_hard_zero_armed → on_armed`, `on_static_done → on_done`,
+`on_passthrough_to_php → on_passthrough`). Адаптер `static_adapter_t`
+в `http_static.c` удалён — cbs прокидывается прямо в `send_file()`.
+Обновлены H1 (`src/core/http_connection.c`) и H2
+(`src/http2/http2_strategy.c`) callback-структуры.
 
 1. Удалить устаревшие имена из `static_handler.h`: `http_static_dispatch_cbs_t`,
    `http_static_result_t` (живут как `send_file_*`).
