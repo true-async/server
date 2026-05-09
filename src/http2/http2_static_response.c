@@ -6,30 +6,63 @@
   +----------------------------------------------------------------------+
 */
 
-/* HTTP/2 static-file body delivery FSM. See header for the contract.
+/* HTTP/2 static-file body delivery FSM.
  *
- * Lifecycle:
- *   - send_static_response builds nghttp2_nv[], submits response (with
- *     a data_provider pointing at the per-stream FSM struct on the
- *     body branch, NULL on HEAD / 304 / inline-error), drains pending
- *     control + DATA frames to the socket through the session pump,
- *     and installs an on_close hook on the stream.
- *   - data_read callback: pread() the slice from file_io->fd at
- *     body_offset + bytes_sent. Advance, set NGHTTP2_DATA_FLAG_EOF
- *     when the slice is exhausted. We never return DEFERRED — the
- *     byte source is local. nghttp2 stops asking under flow-control
- *     stalls, then resumes naturally on inbound WINDOW_UPDATE bytes
- *     (which re-enter http2_feed, which drains again).
- *   - On stream close: cb_on_stream_close fires the per-stream
- *     on_close hook, which disposes file_io and fires on_done once.
+ * Body source is read asynchronously via ZEND_ASYNC_IO_READ into a
+ * per-stream 16 KiB buffer; the nghttp2 data_provider returns
+ * NGHTTP2_ERR_DEFERRED while a read is in flight and resumes via
+ * nghttp2_session_resume_data when the buffer is filled.
  *
- * pread vs ZEND_ASYNC_IO_READ: the data_provider runs in nghttp2
- * callback context (under nghttp2_session_mem_send), which is not a
- * coroutine and cannot suspend. pread() on a regular file fd hits
- * the page cache; the rare cold-cache stall is acceptable for
- * static-asset workloads — same trade-off nginx / lighttpd take. The
- * async OPEN/STAT in the static handler still avoids the truly
- * scary stalls (path resolution, NFS metadata).
+ *   Lifecycle:
+ *     - send_static_response builds nghttp2_nv[], submits response
+ *       (with a data_provider on the body branch, NULL on HEAD / 304
+ *       / inline-error), registers a persistent callback on
+ *       file_io->event, drains pending control + first DATA frames to
+ *       the socket, and installs an on_close hook on the stream.
+ *     - data_read callback: serves bytes out of the per-stream read
+ *       buffer if any are ready; otherwise submits a
+ *       ZEND_ASYNC_IO_READ for the next slice and returns
+ *       NGHTTP2_ERR_DEFERRED. Sets NGHTTP2_DATA_FLAG_EOF when the body
+ *       slice is exhausted or the underlying file hits EOF.
+ *     - dispatch callback (file_io completion): writes the bytes into
+ *       the read buffer, calls nghttp2_session_resume_data, and drives
+ *       http2_static_drain_to_socket so the freshly-readable DATA
+ *       frame actually leaves the wire.
+ *     - On stream close (cb_on_stream_close): the per-stream on_close
+ *       hook fires, which detaches the persistent cb, disposes
+ *       file_io, and fires on_done exactly once.
+ *
+ * Why async-read + DEFERRED instead of NO_COPY + sendfile(2):
+ *
+ *   nghttp2's `NGHTTP2_DATA_FLAG_NO_COPY` + `send_data_callback` is the
+ *   API that, in principle, would let an application splice
+ *   `sendfile(2)` directly into the wire instead of copying bytes
+ *   through nghttp2's output buffer. In practice it is incompatible
+ *   with `nghttp2_session_mem_send`-based servers (us): the callback
+ *   is invoked synchronously inside `mem_send` and must produce the
+ *   complete DATA frame "somewhere" — `mem_send`'s contract returns a
+ *   single contiguous slice, so there is no clean splice point for a
+ *   side-channel `sendfile(2)`. Real-world bugs against this combo:
+ *   nghttp2 issues #796 and #817. The h2o team explicitly rejected
+ *   libnghttp2 for this reason and wrote their own h2 framer
+ *   (h2o/h2o#671); nginx likewise hand-rolls h2 to mix
+ *   `writev()`/`sendfile(2)` chains in its socket layer
+ *   (`ngx_freebsd_sendfile_chain.c`, `ngx_http_v2_filter_module.c`).
+ *   nghttp2 itself recommends the data-provider read-into-buffer
+ *   pattern (examples/libevent-server.c, tutorial-server.rst).
+ *
+ *   Consequently we do what every other nghttp2-based server does:
+ *   data-provider reads into a small per-stream buffer. The only
+ *   improvement we add over the textbook is that the read is
+ *   asynchronous (ZEND_ASYNC_IO_READ + DEFERRED) so a cold-cache fault
+ *   does not stall the event loop the way a synchronous pread() would.
+ *
+ *   References:
+ *     - https://nghttp2.org/documentation/nghttp2_session_callbacks_set_send_data_callback.html
+ *     - https://github.com/nghttp2/nghttp2/issues/796
+ *     - https://github.com/nghttp2/nghttp2/issues/817
+ *     - https://github.com/h2o/h2o/issues/671
+ *     - https://github.com/nghttp2/nghttp2/blob/master/examples/libevent-server.c
  */
 
 #ifdef HAVE_CONFIG_H
@@ -51,16 +84,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef HAVE_UNISTD_H
-# include <unistd.h>
-#endif
-#ifndef _WIN32
-# include <sys/types.h>
-#endif
-
-#ifndef MSG_NOSIGNAL
-# define MSG_NOSIGNAL 0
-#endif
+/* Per-chunk read size. 16 KiB matches HTTP2_SETTINGS_MAX_FRAME so a
+ * single buffer fill always covers the largest DATA frame nghttp2 can
+ * emit between flow-control updates. */
+#define H2_STATIC_READ_CHUNK_BYTES (16u * 1024u)
 
 /* Submit + drain helpers exported from http2_session.c / strategy.
  * Local extern decls to keep the public headers free of these
@@ -70,22 +97,58 @@ extern void http2_static_drain_to_socket(http_connection_t *conn,
                                          http2_session_t *session);
 
 typedef struct {
-    http2_stream_t      *stream;
-    zend_async_io_t     *file_io;     /* owned; disposed on finalize */
-    int                  file_fd;
-    uint64_t             body_offset;
-    uint64_t             body_length;
-    uint64_t             bytes_sent;
+    http2_stream_t              *stream;
+    http2_session_t             *session;
+    http_connection_t           *conn;
 
-    void               (*on_done)(void *user, int status);
-    void                *user;
-    bool                 done_fired;
+    zend_async_io_t             *file_io;     /* owned; disposed on finalize */
+    uint64_t                     body_offset;
+    uint64_t                     body_length;
+    uint64_t                     bytes_sent;
+
+    /* Per-stream read buffer. Single in-flight read at a time —
+     * matches the pattern in http1_sendfile.c TLS chunked path. emalloc'd
+     * lazily on the first DEFERRED return so HEAD/304/inline never pays
+     * for it. */
+    char                        *read_buf;
+    size_t                       read_buf_filled;
+    size_t                       read_buf_consumed;
+    bool                         read_in_flight;
+    bool                         eof_reached;
+
+    /* Identity guard for spurious dispatch fires. A callback registered
+     * during a NOTIFY iteration can re-enter the same iteration with a
+     * stale result; matching req identity filters those out. */
+    zend_async_io_req_t         *pending_req;
+    zend_async_event_callback_t *cb;
+
+    void                       (*on_done)(void *user, int status);
+    void                        *user;
+    int                          status;       /* 0 ok, -1 error */
+    bool                         done_fired;
 } h2_static_state_t;
 
-static void h2_static_finalize(h2_static_state_t *state, int status)
+typedef struct {
+    zend_async_event_callback_t base;
+    h2_static_state_t          *state;
+} h2_static_cb_t;
+
+static void h2_static_finalize(h2_static_state_t *state, int status);
+static bool h2_static_submit_read(h2_static_state_t *state);
+
+static void h2_static_cb_dispose(zend_async_event_callback_t *cb,
+                                 zend_async_event_t *event)
 {
-    if (state == NULL) {
-        return;
+    (void)event;
+    efree(cb);
+}
+
+static void h2_static_finalize(h2_static_state_t *state, const int status)
+{
+    if (state->cb != NULL && state->file_io != NULL) {
+        (void)state->file_io->event.del_callback(&state->file_io->event,
+                                                 state->cb);
+        state->cb = NULL;
     }
 
     if (state->file_io != NULL) {
@@ -94,6 +157,11 @@ static void h2_static_finalize(h2_static_state_t *state, int status)
         }
 
         state->file_io = NULL;
+    }
+
+    if (state->read_buf != NULL) {
+        efree(state->read_buf);
+        state->read_buf = NULL;
     }
 
     void (*on_done)(void *, int) = state->on_done;
@@ -120,10 +188,110 @@ static void h2_static_finalize(h2_static_state_t *state, int status)
 /* Stream-close hook. Fires from cb_on_stream_close after nghttp2 is
  * done with the stream. Either DATA frames drained (NO_ERROR) or the
  * peer reset the stream (non-zero). Dispose file_io + fire on_done. */
-static void h2_static_on_stream_close(void *user, uint32_t error_code)
+static void h2_static_on_stream_close(void *user, const uint32_t error_code)
 {
     h2_static_state_t *state = (h2_static_state_t *)user;
     h2_static_finalize(state, error_code == NGHTTP2_NO_ERROR ? 0 : -1);
+}
+
+/* file_io completion dispatch. Identity-guarded against stale fires.
+ * On bytes: parks them in read_buf, wakes nghttp2's data_provider, and
+ * drives one drain so the freshly-available DATA frame leaves the
+ * wire. On error / EOF before slice end: marks state and lets the
+ * data_provider finalize through nghttp2_session_resume_data. */
+static void h2_static_dispatch(zend_async_event_t *event,
+                               zend_async_event_callback_t *callback,
+                               void *result,
+                               zend_object *exception)
+{
+    (void)event;
+    h2_static_state_t *state = ((h2_static_cb_t *)callback)->state;
+    zend_async_io_req_t *req = (zend_async_io_req_t *)result;
+
+    if (req == NULL || req != state->pending_req) {
+        return;
+    }
+
+    state->pending_req = NULL;
+    state->read_in_flight = false;
+
+    const ssize_t transferred = (ssize_t)req->transferred;
+    const bool err = (exception != NULL || req->exception != NULL);
+
+    if (req->exception != NULL) {
+        OBJ_RELEASE(req->exception);
+        req->exception = NULL;
+    }
+
+    if (req->dispose != NULL) {
+        req->dispose(req);
+    }
+
+    if (UNEXPECTED(err) || transferred < 0) {
+        state->status = -1;
+        state->eof_reached = true;
+    } else if (transferred == 0) {
+        state->eof_reached = true;
+    } else {
+        state->read_buf_filled = (size_t)transferred;
+        state->read_buf_consumed = 0;
+    }
+
+    if (state->session == NULL) {
+        return;
+    }
+
+    nghttp2_session *ng = http2_session_get_ng(state->session);
+
+    if (ng == NULL) {
+        return;
+    }
+
+    if (state->stream != NULL && !state->stream->peer_closed) {
+        (void)nghttp2_session_resume_data(ng,
+            (int32_t)state->stream->stream_id);
+
+        if (state->conn != NULL) {
+            http2_static_drain_to_socket(state->conn, state->session);
+        }
+    }
+}
+
+/* Submit the next ZEND_ASYNC_IO_READ. Lazy-allocates read_buf on
+ * first call. Sets read_in_flight on success. Returns false on submit
+ * failure — caller forwards as NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE. */
+static bool h2_static_submit_read(h2_static_state_t *state)
+{
+    if (state->file_io == NULL) {
+        return false;
+    }
+
+    if (state->read_buf == NULL) {
+        state->read_buf = emalloc(H2_STATIC_READ_CHUNK_BYTES);
+    }
+
+    const uint64_t remaining = state->body_length > state->bytes_sent
+                                   ? state->body_length - state->bytes_sent
+                                   : 0;
+
+    if (remaining == 0) {
+        state->eof_reached = true;
+        return true;
+    }
+
+    const size_t want = remaining < H2_STATIC_READ_CHUNK_BYTES
+                            ? (size_t)remaining
+                            : H2_STATIC_READ_CHUNK_BYTES;
+
+    state->pending_req = ZEND_ASYNC_IO_READ(state->file_io,
+                                            state->read_buf, want);
+
+    if (state->pending_req == NULL) {
+        return false;
+    }
+
+    state->read_in_flight = true;
+    return true;
 }
 
 static ssize_t h2_static_data_read(nghttp2_session *ng,
@@ -140,46 +308,76 @@ static ssize_t h2_static_data_read(nghttp2_session *ng,
 
     h2_static_state_t *state = (h2_static_state_t *)source->ptr;
 
-    if (state == NULL || state->file_fd < 0) {
+    if (state == NULL) {
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
 
-    const uint64_t remaining = state->bytes_sent < state->body_length
-                                   ? state->body_length - state->bytes_sent
-                                   : 0;
+    if (UNEXPECTED(state->status != 0)) {
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    }
 
-    if (remaining == 0) {
+    /* Serve out of the read buffer if any bytes are ready. */
+    const size_t avail =
+        state->read_buf_filled > state->read_buf_consumed
+            ? state->read_buf_filled - state->read_buf_consumed
+            : 0;
+
+    if (avail > 0) {
+        const size_t to_copy = avail < length ? avail : length;
+        memcpy(buf,
+               state->read_buf + state->read_buf_consumed,
+               to_copy);
+        state->read_buf_consumed += to_copy;
+        state->bytes_sent += (uint64_t)to_copy;
+
+        const bool buf_drained =
+            state->read_buf_consumed >= state->read_buf_filled;
+
+        if (buf_drained) {
+            state->read_buf_filled = 0;
+            state->read_buf_consumed = 0;
+        }
+
+        if (state->bytes_sent >= state->body_length) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            return (ssize_t)to_copy;
+        }
+
+        /* If the buffer is now drained and there's still body left,
+         * pre-arm the next read so the next data_provider invocation
+         * can return DEFERRED immediately rather than re-entering with
+         * stale buffer pointers. */
+        if (buf_drained && !state->read_in_flight) {
+            if (UNEXPECTED(!h2_static_submit_read(state))) {
+                state->status = -1;
+                /* Bytes already returned this call are valid; the
+                 * subsequent invocation will see status != 0 and bail. */
+            }
+        }
+
+        return (ssize_t)to_copy;
+    }
+
+    /* Buffer empty. Either EOF, in-flight, or we need to submit. */
+    if (state->eof_reached || state->bytes_sent >= state->body_length) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
         return 0;
     }
 
-    const size_t want = remaining < length ? (size_t)remaining : length;
-    const off_t pos = (off_t)(state->body_offset + state->bytes_sent);
+    if (state->read_in_flight) {
+        return NGHTTP2_ERR_DEFERRED;
+    }
 
-#ifdef _WIN32
-    if (lseek(state->file_fd, pos, SEEK_SET) == (off_t)-1) {
+    if (UNEXPECTED(!h2_static_submit_read(state))) {
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     }
 
-    const ssize_t n = (ssize_t)read(state->file_fd, buf, want);
-#else
-    ssize_t n;
-    do {
-        n = pread(state->file_fd, buf, want, pos);
-    } while (n < 0 && errno == EINTR);
-#endif
-
-    if (n <= 0) {
-        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
-    }
-
-    state->bytes_sent += (uint64_t)n;
-
-    if (state->bytes_sent >= state->body_length) {
+    if (state->eof_reached) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return 0;
     }
 
-    return n;
+    return NGHTTP2_ERR_DEFERRED;
 }
 
 /* Build nghttp2_nv[] (with leading :status) from response_obj. Returns
@@ -357,15 +555,41 @@ int h2_stream_send_static_response(void *ctx,
         }
     } else {
         /* Body branch: allocate FSM state, install close hook, register
-         * data_provider that pread()s out of file_io->fd. */
+         * persistent dispatch cb on file_io, register the async-read
+         * data_provider. */
         state = ecalloc(1, sizeof(*state));
         state->stream      = stream;
+        state->session     = stream->session;
+        state->conn        = conn;
         state->file_io     = file_io;
-        state->file_fd     = (int)file_io->descriptor.fd;
         state->body_offset = body_offset;
         state->body_length = body_length;
         state->on_done     = on_done;
         state->user        = user;
+
+        h2_static_cb_t *cb = (h2_static_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
+            h2_static_dispatch, sizeof(h2_static_cb_t));
+
+        if (UNEXPECTED(cb == NULL)) {
+            if (nv_heap != NULL) { efree(nv_heap); }
+            /* state owns file_io; finalize disposes + fires on_done(-1). */
+            h2_static_finalize(state, -1);
+            return 0;
+        }
+
+        cb->base.dispose = h2_static_cb_dispose;
+        cb->state        = state;
+
+        if (UNEXPECTED(!file_io->event.add_callback(&file_io->event, &cb->base))) {
+            efree(cb);
+
+            if (nv_heap != NULL) { efree(nv_heap); }
+
+            h2_static_finalize(state, -1);
+            return 0;
+        }
+
+        state->cb = &cb->base;
 
         stream->on_close      = h2_static_on_stream_close;
         stream->on_close_user = state;

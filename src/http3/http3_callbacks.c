@@ -636,7 +636,7 @@ headers_done:
  * the caller suspends on write_event, which extend_max_stream_data_cb
  * fires when the peer extends the window via MAX_STREAM_DATA.
  * ------------------------------------------------------------------- */
-static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
+int h3_stream_append_chunk(void *ctx, zend_string *chunk)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
 
@@ -797,7 +797,7 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
                           : HTTP_STREAM_APPEND_OK;
 }
 
-static void h3_stream_mark_ended(void *ctx)
+void h3_stream_mark_ended(void *ctx)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
 
@@ -835,9 +835,10 @@ static zend_async_event_t *h3_stream_get_wait_event(void *ctx)
 }
 
 const http_response_stream_ops_t h3_stream_ops = {
-    .append_chunk   = h3_stream_append_chunk,
-    .mark_ended     = h3_stream_mark_ended,
-    .get_wait_event = h3_stream_get_wait_event,
+    .append_chunk        = h3_stream_append_chunk,
+    .mark_ended          = h3_stream_mark_ended,
+    .get_wait_event      = h3_stream_get_wait_event,
+    .send_static_response = h3_stream_send_static_response,
 };
 
 /* ------------------------------------------------------------------------

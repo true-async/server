@@ -552,6 +552,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/http3/http3_io.c
       src/http3/http3_callbacks.c
       src/http3/http3_dispatch.c
+      src/http3/http3_static_response.c
       src/http3/http3_stream.c
       src/http3/http3_stream_pool.c
     "

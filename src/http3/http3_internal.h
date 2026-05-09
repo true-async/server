@@ -153,6 +153,25 @@ bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming);
 
+/* Streaming-vtable hooks reused by the static-file delivery TU
+ * (http3_static_response.c). Pumping a file through chunk_queue is
+ * exactly the streaming path: append chunks until EOF, then mark_ended.
+ * The static TU calls these from its coroutine entry. */
+int  h3_stream_append_chunk(void *ctx, zend_string *chunk);
+void h3_stream_mark_ended(void *ctx);
+
+/* Static-file body delivery for HTTP/3. Wired into h3_stream_ops via
+ * the .send_static_response slot. See http3_static_response.c for the
+ * lifecycle contract. */
+int h3_stream_send_static_response(void *ctx,
+                                   zend_object *response_obj,
+                                   zend_async_io_t *file_io,
+                                   uint64_t body_offset,
+                                   uint64_t body_length,
+                                   bool head_only,
+                                   void (*on_done)(void *user, int status),
+                                   void *user);
+
 
 
 #endif /* HTTP3_INTERNAL_H */
