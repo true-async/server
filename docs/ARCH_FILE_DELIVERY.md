@@ -399,7 +399,16 @@ server-suite по-прежнему зелёные.
 
 **Контрольная точка**: 12 static тестов зелёные, sendFile ещё на старой реализации.
 
-### Шаг 5. Перевод Response::sendFile на новый движок
+### Шаг 5. Перевод Response::sendFile на новый движок ✅
+
+Сделан. `http_send_file.c` 680 → 293 строки. Удалён `sf_*` FSM,
+осталось: валидация пути + Content-Disposition (RFC 5987) +
+прекомпрессированный sidecar + заполнение `send_file_config_t` с
+`on_error = INLINE_500`. `INLINE_500` теперь означает «open/stat fail →
+500 via op» (response object sealed sendFile'ом, transmission только
+через protocol op). Адаптер `sf_adapter_t` владеет
+`http_send_file_request_t` и Content-Disposition zend_string,
+освобождает в on_done.
 
 1. В `http_send_file.c` оставить ~80 строк: snapshot опций → конфиг → вызов.
 2. Удалить FSM из `http_send_file.c`.

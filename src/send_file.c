@@ -272,7 +272,7 @@ static bool engine_emit_error_via_op(engine_state_t *state, int status, const ch
 	http_response_set_content_length(response_obj, (uint64_t)body_len);
 	http_response_set_connection(response_obj, engine_keep_alive(state));
 
-	http_server_count_request(state->cfg.counters);
+	if (state->cfg.counters != NULL) { http_server_count_request(state->cfg.counters); }
 	return engine_delegate_to_protocol(state, NULL, 0, 0, true);
 }
 
@@ -302,14 +302,6 @@ static void engine_rollback_to_php(engine_state_t *state)
 	}
 }
 
-/* INLINE_500 inline error: synth body onto response_obj synchronously
- * via emit_status_body (no protocol op). Used by sendFile when open
- * fails — caller's on_done observes status=-1. */
-static void engine_inline_error_synth(engine_state_t *state, int status, const char *body,
-									  size_t body_len)
-{
-	http_response_emit_status_body(state->response_obj, status, body, body_len);
-}
 
 static void engine_handle_open(engine_state_t *state, zend_object *exception);
 static void engine_handle_stat(engine_state_t *state);
@@ -338,10 +330,7 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 			req->dispose(req);
 		}
 		if (UNEXPECTED(exception != NULL)) {
-			if (state->cfg.on_error == SEND_FILE_ERR_INLINE_500) {
-				engine_inline_error_synth(state, 500, "Internal Server Error", 21);
-				engine_finalize(state, -1);
-			} else if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 				engine_finalize(state, -1);
 			}
 			return;
@@ -369,8 +358,9 @@ static void engine_handle_open(engine_state_t *state, zend_object *exception)
 			return;
 		case SEND_FILE_ERR_INLINE_500:
 		default:
-			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
-			engine_finalize(state, -1);
+			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+				engine_finalize(state, -1);
+			}
 			return;
 		}
 	}
@@ -384,12 +374,7 @@ static void engine_handle_open(engine_state_t *state, zend_object *exception)
 	state->phase = ENGINE_PHASE_STAT;
 	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
 	if (UNEXPECTED(state->pending_req == NULL)) {
-		if (state->cfg.on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
-			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-				engine_finalize(state, -1);
-			}
-		} else {
-			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+		if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 			engine_finalize(state, -1);
 		}
 	}
@@ -401,10 +386,10 @@ static void engine_handle_stat(engine_state_t *state)
 	const send_file_config_t *const cfg = &state->cfg;
 
 	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
-		if (cfg->on_error == SEND_FILE_ERR_INLINE_500) {
-			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
-			engine_finalize(state, -1);
-		} else if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
+		const int status = (cfg->on_error == SEND_FILE_ERR_INLINE_500) ? 500 : 404;
+		const char *const body = (status == 500) ? "Internal Server Error" : "Not Found";
+		const size_t body_len = (status == 500) ? 21 : 9;
+		if (!engine_emit_error_via_op(state, status, body, body_len)) {
 			engine_finalize(state, -1);
 		}
 		return;
@@ -511,7 +496,7 @@ static void engine_handle_stat(engine_state_t *state)
 				}
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
 				http_response_set_connection(response_obj, engine_keep_alive(state));
-				http_server_count_request(cfg->counters);
+				if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
 				if (!engine_delegate_to_protocol(state, NULL, 0, 0, true)) {
 					engine_finalize(state, -1);
 				}
@@ -594,7 +579,7 @@ static void engine_handle_stat(engine_state_t *state)
 	zend_async_io_t *const file_io = state->file_io;
 
 	if (not_modified) {
-		http_server_count_request(cfg->counters);
+		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
 		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			engine_finalize(state, -1);
 		}
@@ -602,7 +587,7 @@ static void engine_handle_stat(engine_state_t *state)
 	}
 
 	if (state->is_head || state->st.st_size == 0) {
-		http_server_count_request(cfg->counters);
+		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
 		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			engine_finalize(state, -1);
 		}
@@ -610,7 +595,7 @@ static void engine_handle_stat(engine_state_t *state)
 	}
 
 	const uint64_t body_offset = state->is_range ? state->range_first : 0;
-	http_server_count_request(cfg->counters);
+	if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
 	if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
 		engine_finalize(state, -1);
 	}
