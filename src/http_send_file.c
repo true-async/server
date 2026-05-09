@@ -24,7 +24,7 @@
 #include "http_send_file.h"
 #include "send_file.h"
 #include "http_rfc5987.h"
-#include "compression/http_compression_negotiate.h"
+#include "http_precompressed.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -125,93 +125,6 @@ static zend_string *sf_build_content_disposition(const http_send_file_options_t 
 	return out;
 }
 
-/* Precompressed sidecar selection. When the caller opted in via
- * setPrecompressed and Accept-Encoding accepts at least one of the
- * supported codings, scan for the sibling and (on hit) rewrite
- * `*path_buf` to the sidecar path, emitting the encoding token via
- * `*out_encoding` (literal owned by the codec table). On miss the
- * buffer is left untouched. */
-static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t buf_cap,
-								 size_t *path_len, const char **out_encoding,
-								 size_t *out_encoding_len)
-{
-	if (request == NULL || request->headers == NULL) {
-		return false;
-	}
-
-	const zval *ae_zv = zend_hash_str_find(request->headers, "accept-encoding", 15);
-
-	if (ae_zv == NULL) {
-		return false;
-	}
-
-	const zend_string *ae = NULL;
-
-	if (Z_TYPE_P(ae_zv) == IS_STRING) {
-		ae = Z_STR_P(ae_zv);
-	} else if (Z_TYPE_P(ae_zv) == IS_ARRAY) {
-		const zval *first = zend_hash_index_find(Z_ARRVAL_P(ae_zv), 0);
-
-		if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
-			ae = Z_STR_P(first);
-		}
-	}
-
-	if (ae == NULL) {
-		return false;
-	}
-
-	http_accept_encoding_t parsed;
-	http_accept_encoding_parse(ZSTR_VAL(ae), ZSTR_LEN(ae), &parsed);
-
-	static const struct
-	{
-		const char *suffix;
-		size_t suffix_len;
-		const char *token;
-		size_t token_len;
-	} codecs[] = {
-		{".zst", 4, "zstd", 4},
-		{".br", 3, "br", 2},
-		{".gz", 3, "gzip", 4},
-	};
-	const bool acceptable[] = {
-		parsed.zstd_acceptable,
-		parsed.brotli_acceptable,
-		parsed.gzip_acceptable,
-	};
-
-	for (size_t i = 0; i < sizeof(codecs) / sizeof(codecs[0]); i++) {
-		if (!acceptable[i]) {
-			continue;
-		}
-
-		if (*path_len + codecs[i].suffix_len + 1 > buf_cap) {
-			continue;
-		}
-
-		char candidate[MAXPATHLEN];
-		memcpy(candidate, path_buf, *path_len);
-		memcpy(candidate + *path_len, codecs[i].suffix, codecs[i].suffix_len);
-		candidate[*path_len + codecs[i].suffix_len] = '\0';
-
-		struct stat st;
-
-		if (stat(candidate, &st) != 0 || !S_ISREG(st.st_mode)) {
-			continue;
-		}
-
-		memcpy(path_buf + *path_len, codecs[i].suffix, codecs[i].suffix_len);
-		*path_len += codecs[i].suffix_len;
-		path_buf[*path_len] = '\0';
-		*out_encoding = codecs[i].token;
-		*out_encoding_len = codecs[i].token_len;
-		return true;
-	}
-
-	return false;
-}
-
 bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 							 http_send_file_request_t *req,
 							 void (*on_done)(void *user, int status), void *user)
@@ -258,8 +171,8 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	size_t picked_encoding_len = 0;
 
 	if (req->opts.precompressed) {
-		(void)sf_try_precompressed(request, fs_path, sizeof(fs_path), &fs_path_len,
-								   &picked_encoding, &picked_encoding_len);
+		(void)http_precompressed_select(request, HTTP_PRECOMP_ALL, fs_path, sizeof(fs_path),
+										&fs_path_len, &picked_encoding, &picked_encoding_len);
 	}
 
 	zend_string *cd = sf_build_content_disposition(&req->opts);

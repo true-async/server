@@ -39,10 +39,9 @@
 #include "http_conditional.h"
 #include "http_range.h"
 #include "fs_util.h"
+#include "http_precompressed.h"
 #include "send_file.h"
 #include "static/http_static_cache.h"
-#include "compression/http_compression_negotiate.h"
-#include "compression/http_encoder.h"
 #include "http_response_internal.h"
 
 #include <fcntl.h>
@@ -333,98 +332,25 @@ static void apply_mount_headers(zend_object *response_obj, const http_static_han
 	ZEND_HASH_FOREACH_END();
 }
 
-/* Precompressed sidecar selection. Picks a `.zst` /
- * `.br` / `.gz` sibling next to `fs_path` if (a) the mount opted in via
- * enablePrecompressed for that encoding, (b) the request's
- * Accept-Encoding lists it (via the existing http_compression_negotiate
- * machinery — same q-prio + identity-only-by-default behaviour as the
- * dynamic compression path), and (c) the file actually exists.
- *
- * On success: rewrites *fs_path_buf to "<original>.<suffix>", sets
- * *fs_path_len to the new length, and writes the codec token (literal
- * "gzip" / "br" / "zstd" — owned by the codec table) into
- * *out_encoding. Caller passes both into static_fsm_kick_off so the FSM serves
- * the compressed bytes but emits the original Content-Type plus
- * Content-Encoding.
- *
- * On no-match: returns false, leaves fs_path untouched. The caller
- * proceeds to serve the original file. */
-static bool try_select_precompressed(const http_static_handler_t *mount, http_request_t *request,
-									 char *fs_path_buf, size_t buf_cap, size_t *fs_path_len,
-									 const char **out_encoding, size_t *out_encoding_len)
+/* Translate mount-side enablePrecompressed bits into the codec mask
+ * understood by http_precompressed_select(). */
+static inline uint32_t mount_precomp_mask(const uint32_t mount_flags)
 {
-	if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR | HTTP_STATIC_FLAG_PRECOMP_GZIP |
-						 HTTP_STATIC_FLAG_PRECOMP_ZSTD)) == 0) {
-		return false;
+	uint32_t mask = 0;
+
+	if (mount_flags & HTTP_STATIC_FLAG_PRECOMP_BR) {
+		mask |= HTTP_PRECOMP_BR;
 	}
 
-	const zend_string *ae = http_request_find_header(request, "accept-encoding", 15);
-
-	if (ae == NULL) {
-		return false;
+	if (mount_flags & HTTP_STATIC_FLAG_PRECOMP_GZIP) {
+		mask |= HTTP_PRECOMP_GZIP;
 	}
 
-	http_accept_encoding_t parsed;
-	http_accept_encoding_parse(ZSTR_VAL(ae), ZSTR_LEN(ae), &parsed);
-
-	/* Server preference: zstd > brotli > gzip. Mirrors the dynamic
-	 * compression path's negotiate(). identity_acceptable doesn't gate
-	 * us — we always have the original file as the identity fallback. */
-	static const struct
-	{
-		uint32_t flag;
-		const char *suffix;
-		size_t suffix_len;
-		const char *token;
-		size_t token_len;
-	} codecs[] = {
-		{HTTP_STATIC_FLAG_PRECOMP_ZSTD, ".zst", 4, "zstd", 4},
-		{HTTP_STATIC_FLAG_PRECOMP_BR, ".br", 3, "br", 2},
-		{HTTP_STATIC_FLAG_PRECOMP_GZIP, ".gz", 3, "gzip", 4},
-	};
-	const bool acceptable[] = {
-		parsed.zstd_acceptable,
-		parsed.brotli_acceptable,
-		parsed.gzip_acceptable,
-	};
-
-	for (size_t i = 0; i < sizeof(codecs) / sizeof(codecs[0]); i++) {
-		if ((mount->flags & codecs[i].flag) == 0) {
-			continue;
-		}
-
-		if (!acceptable[i]) {
-			continue;
-		}
-
-		if (UNEXPECTED(*fs_path_len + codecs[i].suffix_len + 1 > buf_cap)) {
-			continue;
-		}
-
-		char candidate[MAXPATHLEN];
-		memcpy(candidate, fs_path_buf, *fs_path_len);
-		memcpy(candidate + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
-		candidate[*fs_path_len + codecs[i].suffix_len] = '\0';
-
-		struct stat st;
-
-		if (stat(candidate, &st) != 0) {
-			continue;
-		}
-
-		if (!S_ISREG(st.st_mode)) {
-			continue;
-		}
-
-		memcpy(fs_path_buf + *fs_path_len, codecs[i].suffix, codecs[i].suffix_len);
-		*fs_path_len += codecs[i].suffix_len;
-		fs_path_buf[*fs_path_len] = '\0';
-		*out_encoding = codecs[i].token;
-		*out_encoding_len = codecs[i].token_len;
-		return true;
+	if (mount_flags & HTTP_STATIC_FLAG_PRECOMP_ZSTD) {
+		mask |= HTTP_PRECOMP_ZSTD;
 	}
 
-	return false;
+	return mask;
 }
 
 http_static_result_t http_static_try_serve(http_server_object *server,
@@ -589,8 +515,9 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		const char *override_ct = NULL;
 		size_t override_ct_len = 0;
 
-		if ((mount->flags & (HTTP_STATIC_FLAG_PRECOMP_BR | HTTP_STATIC_FLAG_PRECOMP_GZIP |
-							 HTTP_STATIC_FLAG_PRECOMP_ZSTD)) != 0) {
+		const uint32_t precomp_mask = mount_precomp_mask(mount->flags);
+
+		if (precomp_mask != 0) {
 			const char *pre_ct = NULL;
 			size_t pre_ct_len = 0;
 
@@ -599,8 +526,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				pre_ct_len = sizeof("application/octet-stream") - 1;
 			}
 
-			if (try_select_precompressed(mount, request, fs_path, sizeof(fs_path), &fs_path_len,
-										 &picked_encoding, &picked_encoding_len)) {
+			if (http_precompressed_select(request, precomp_mask, fs_path, sizeof(fs_path),
+										  &fs_path_len, &picked_encoding, &picked_encoding_len)) {
 				override_ct = pre_ct;
 				override_ct_len = pre_ct_len;
 			}
