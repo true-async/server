@@ -381,6 +381,7 @@ void http_static_handler_shared_release(http_static_handler_t *mount)
 
 ZEND_METHOD(TrueAsync_StaticHandler, __construct)
 {
+	(void)return_value;
 	zend_string *url_prefix = NULL;
 	zend_string *root_directory = NULL;
 

@@ -9,8 +9,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_COMPRESSION
-
 #include "compression/http_compression_defaults.h"
 
 const char *const http_compression_default_mime_types[] = {
@@ -25,5 +23,3 @@ const char *const http_compression_default_mime_types[] = {
     "text/xml",
     NULL,
 };
-
-#endif /* HAVE_HTTP_COMPRESSION */

@@ -138,7 +138,7 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
  * the listen socket inside libuv_socket_listen — we enable it per-client
  * via ZEND_ASYNC_IO_SET_OPTION for low-latency responses.
  */
-http_connection_t *http_connection_create(const php_socket_t socket_fd, zend_async_scope_t *parent_scope,
+http_connection_t *http_connection_create(const php_socket_t socket_fd,
                                           struct http_server_object *server)
 {
     http_connection_t *conn = conn_arena_alloc(http_server_arena(server));
@@ -2291,7 +2291,7 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
                            tls_context_t *tls_ctx,
                            const uint32_t protocol_mask)
 {
-    http_connection_t *conn = http_connection_create(client_fd, server_scope, server);
+    http_connection_t *conn = http_connection_create(client_fd, server);
     if (!conn) {
         return false;
     }

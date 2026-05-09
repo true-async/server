@@ -325,6 +325,7 @@ static void config_add_listener(http_server_config_t *config, http_listener_type
 /* {{{ proto HttpServerConfig::__construct(?string $host = null, int $port = 8080) */
 ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
 {
+    (void)return_value;
     zend_string *host = NULL;
     zend_long port = 8080;
 

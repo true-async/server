@@ -46,7 +46,6 @@
 #endif
 
 #include "php.h"
-#include "zend_smart_str.h"
 #include "Zend/zend_async_API.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
@@ -55,7 +54,6 @@
 #include "core/tls_layer.h"
 #endif
 #include "http1/http1_sendfile.h"
-#include "http_response_internal.h"
 
 #include <inttypes.h>
 #ifdef __linux__
@@ -185,90 +183,6 @@ static inline void h1_send_cork_set(http_connection_t *conn, const int on)
     (void)conn;
     (void)on;
 #endif
-}
-
-/* Borrow the pre-rendered HTTP/1.1 status line. Unknown codes fall
- * back to 500 — saner than emitting a malformed line, and the static
- * handler only ever emits a narrow subset (200/206/304/4xx/413/500). */
-static const char *h1_send_status_line(const int status, size_t *out_len)
-{
-    const char *line = http_response_status_line_http11(status, out_len);
-    if (UNEXPECTED(line == NULL)) {
-        line = http_response_status_line_http11(500, out_len);
-    }
-    return line;
-}
-
-/* Single-grow header writer. smart_str_appendl does its own size-
- * check + memcpy; chaining 4 of them per header pays the bookkeeping
- * 4×. smart_str_extend grows once, returns the tail to memcpy into. */
-static inline void h1_append_header_line(smart_str *out,
-                                         const char *name, size_t name_len,
-                                         const char *value, size_t value_len)
-{
-    const size_t need = name_len + 2 /* ": " */ + value_len + 2 /* "\r\n" */;
-    char *p = smart_str_extend(out, need);
-    memcpy(p, name, name_len);            p += name_len;
-    *p++ = ':'; *p++ = ' ';
-    memcpy(p, value, value_len);          p += value_len;
-    *p++ = '\r'; *p   = '\n';
-}
-
-/* Build status line + headers + CRLF + (optional) inline body into
- * one fresh zend_string. The caller's response_obj is read verbatim:
- * whatever Content-Length / Content-Type / etc. it carries goes onto
- * the wire as-is. No auto-Content-Length insertion — the static
- * handler is responsible for setting it (or omitting it on 304). */
-static zend_string *h1_send_build_head(zend_object *response_obj,
-                                       bool include_inline_body)
-{
-    smart_str out = {0};
-    /* Pre-size for a typical 10-15 header head — saves 2-3 realloc
-     * rounds on the smart_str grow path. */
-    smart_str_alloc(&out, 512, 0);
-
-    const int status_code = http_response_get_status_code(response_obj);
-    size_t status_line_len = 0;
-    const char *status_line = h1_send_status_line(status_code, &status_line_len);
-    smart_str_appendl(&out, status_line, status_line_len);
-
-    HashTable *const headers = http_response_get_headers_table(response_obj);
-    if (headers != NULL) {
-        zend_string *name;
-        zval *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (UNEXPECTED(name == NULL)) {
-                continue;
-            }
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                const zend_string *const v = Z_STR_P(values);
-                h1_append_header_line(&out, ZSTR_VAL(name), ZSTR_LEN(name),
-                                      ZSTR_VAL(v), ZSTR_LEN(v));
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *val;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                    if (Z_TYPE_P(val) != IS_STRING) {
-                        continue;
-                    }
-                    const zend_string *const v = Z_STR_P(val);
-                    h1_append_header_line(&out, ZSTR_VAL(name), ZSTR_LEN(name),
-                                          ZSTR_VAL(v), ZSTR_LEN(v));
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
-
-    smart_str_appendl(&out, "\r\n", 2);
-
-    if (include_inline_body) {
-        zend_string *const body = http_response_get_body_string(response_obj);
-        if (body != NULL && ZSTR_LEN(body) > 0) {
-            smart_str_append(&out, body);
-        }
-    }
-
-    smart_str_0(&out);
-    return out.s != NULL ? out.s : ZSTR_EMPTY_ALLOC();
 }
 
 /* Submit the constructed head for delivery. Plain TCP: zero-copy
@@ -600,14 +514,15 @@ int h1_stream_send_static_response(void *ctx_void,
         h1_send_cork_set(conn, 1);
     }
 
-    /* Build head off response_obj. include_inline_body=true when
-     * we have no separate body source — the response object's body
-     * smart_str (small 4xx text, 416 sentinel, etc.) rides along
-     * with the head. When we have a file body source the inline
-     * body is skipped (caller must NOT set both). */
+    /* Build head off response_obj via the shared HTTP/1 formatter.
+     * include_inline_body=true when we have no separate body source —
+     * the response object's body smart_str (small 4xx text, 416
+     * sentinel, etc.) rides along with the head. When we have a file
+     * body source the inline body is skipped (caller must NOT set
+     * both). */
     const bool include_inline_body = (file_io == NULL);
-    zend_string *const head = h1_send_build_head(response_obj,
-                                                  include_inline_body);
+    zend_string *const head = http_response_format_static_head(response_obj,
+                                                               include_inline_body);
 
     if (UNEXPECTED(!h1_send_submit_head(state, head))) {
         /* Head submit failed — nothing on the wire we need to roll

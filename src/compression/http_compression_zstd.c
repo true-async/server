@@ -12,8 +12,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_ZSTD
-
 #include "compression/http_encoder.h"
 #include "compression/http_compression_defaults.h"
 #include "compression/http_compression_request.h"
@@ -198,5 +196,3 @@ int http_compression_decode_request_zstd(http_request_t *req, size_t cap)
     req->content_length = produced;
     return HTTP_DECODE_OK;
 }
-
-#endif /* HAVE_HTTP_ZSTD */

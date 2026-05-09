@@ -20,8 +20,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_COMPRESSION
-
 #include "compression/http_encoder.h"
 
 #include "php.h"  /* emalloc / efree — unit tests provide a minimal Zend */
@@ -134,5 +132,3 @@ const http_encoder_vtable_t http_compression_gzip_vt = {
     .finish  = gz_finish,
     .destroy = gz_destroy,
 };
-
-#endif /* HAVE_HTTP_COMPRESSION */

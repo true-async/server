@@ -85,6 +85,7 @@ static void http_request_free_object(zend_object *object)
 /* Private constructor - prevents direct instantiation */
 ZEND_METHOD(TrueAsync_HttpRequest, __construct)
 {
+    (void)return_value;
     /* This constructor is private - instances are created internally */
     ZEND_PARSE_PARAMETERS_NONE();
 }

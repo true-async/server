@@ -23,8 +23,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_COMPRESSION
-
 #include "php.h"
 #include "Zend/zend_smart_str.h"
 #include "php_http_server.h"
@@ -584,20 +582,3 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     st->wrapper_ctx       = w;
     st->wrapper_installed = true;
 }
-
-#else /* HAVE_HTTP_COMPRESSION not defined: provide stubs so callers compile. */
-
-#include <stddef.h>
-struct _zend_object;
-struct http_request_t;
-struct _http_server_config_t;
-
-void http_compression_attach(struct _zend_object *o, struct http_request_t *r,
-                             struct _http_server_config_t *c)
-{ (void)o; (void)r; (void)c; }
-void http_compression_state_free(struct _zend_object *o) { (void)o; }
-void http_compression_mark_no_compression(struct _zend_object *o) { (void)o; }
-void http_compression_apply_buffered(struct _zend_object *o) { (void)o; }
-void http_compression_maybe_install_stream_wrapper(struct _zend_object *o) { (void)o; }
-
-#endif /* HAVE_HTTP_COMPRESSION */

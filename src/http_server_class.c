@@ -1014,6 +1014,7 @@ void http_server_on_connection_close(http_server_object *server)
 /* {{{ proto HttpServer::__construct(HttpServerConfig $config) */
 ZEND_METHOD(TrueAsync_HttpServer, __construct)
 {
+    (void)return_value;
     zval *config_zval;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)

@@ -6,8 +6,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_COMPRESSION
-
 #include "compression/http_compression_negotiate.h"
 
 #include <stddef.h>
@@ -206,5 +204,3 @@ size_t http_compression_mime_normalize(const char *ct, size_t ct_len,
     }
     return end;
 }
-
-#endif /* HAVE_HTTP_COMPRESSION */

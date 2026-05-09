@@ -977,6 +977,19 @@ size_t http_response_get_body_len(zend_object *obj);
  * still cashing in the win on real payload-sized responses. */
 #define HTTP_WRITEV_THRESHOLD 1024
 zend_string *http_response_format_streaming_headers(zend_object *obj);
+
+/* Static-handler (issue #13) head builder. Status line + verbatim
+ * headers + CRLF terminator + (optional) inline body, into a single
+ * zend_string the caller owns. Differs from http_response_format:
+ *   - NO auto-Content-Length insertion (static handler sets it from
+ *     file size, omits it on 304);
+ *   - NO compression hook (the file body rides separately via
+ *     sendfile / TLS chunked-encrypt);
+ * include_inline_body=true bundles the response object's small inline
+ * body (4xx text, 416 sentinel) onto the wire with the head; the file-
+ * body path passes false and ships the body via sendfile/IO_READ. */
+zend_string *http_response_format_static_head(zend_object *obj,
+                                              bool include_inline_body);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
 void http_response_set_protocol_version(zend_object *obj, const char *version);
 bool http_response_is_closed(zend_object *obj);

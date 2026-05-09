@@ -17,8 +17,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_COMPRESSION
-
 #include "php.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
@@ -150,5 +148,3 @@ int http_compression_decode_request_body(http_request_t *req,
 
     return HTTP_DECODE_UNKNOWN_CODING;
 }
-
-#endif /* HAVE_HTTP_COMPRESSION */

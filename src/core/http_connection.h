@@ -337,7 +337,7 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
  * without an owning server). The arena's alive list ownership of the
  * slot starts here. */
 struct http_server_object;
-http_connection_t *http_connection_create(php_socket_t socket_fd, zend_async_scope_t *parent_scope,
+http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 

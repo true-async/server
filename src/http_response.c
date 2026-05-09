@@ -233,6 +233,7 @@ static void add_header_value(HashTable *headers, zend_string *name, zval *value,
 /* {{{ proto private HttpResponse::__construct() */
 ZEND_METHOD(TrueAsync_HttpResponse, __construct)
 {
+    (void)return_value;
     /* This constructor is private - instances are created internally by server */
     ZEND_PARSE_PARAMETERS_NONE();
 }
@@ -704,6 +705,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getBodyStream)
 /* {{{ proto HttpResponse::setBodyStream(mixed $stream): static */
 ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream)
 {
+    (void)return_value;
     zval *stream;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -974,6 +976,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 /* {{{ proto HttpResponse::end(?string $data = null): void */
 ZEND_METHOD(TrueAsync_HttpResponse, end)
 {
+    (void)return_value;
     zend_string *data = NULL;
 
     ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -1307,6 +1310,49 @@ static inline void emit_status_line(smart_str *result,
     smart_str_appends(result, "\r\n");
 }
 
+/* Single-grow header line writer. "name: value\r\n" written with one
+ * smart_str_extend (one grow-check + tail pointer) instead of 4×
+ * smart_str_append* which pays the size-check+memcpy bookkeeping per
+ * call. The two memcpy's (name, value) are inherent — name and value
+ * live in separate zend_strings. */
+static inline void append_header_line(smart_str *out,
+                                      const char *name, size_t name_len,
+                                      const char *value, size_t value_len)
+{
+    const size_t need = name_len + 2 /* ": " */ + value_len + 2 /* "\r\n" */;
+    char *p = smart_str_extend(out, need);
+    memcpy(p, name, name_len);            p += name_len;
+    *p++ = ':'; *p++ = ' ';
+    memcpy(p, value, value_len);          p += value_len;
+    *p++ = '\r'; *p   = '\n';
+}
+
+/* Iterate the headers table emitting "name: value\r\n" for each entry.
+ * Flat IS_STRING fast path (single-value, common case) + IS_ARRAY
+ * multi-value fallback. Does NOT emit the trailing CRLF that ends the
+ * header block — caller appends that. */
+static void emit_headers_only(smart_str *out, HashTable *headers)
+{
+    zend_string *name;
+    zval *values;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
+        if (UNEXPECTED(name == NULL)) continue;
+        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
+            const zend_string *const v = Z_STR_P(values);
+            append_header_line(out, ZSTR_VAL(name), ZSTR_LEN(name),
+                               ZSTR_VAL(v), ZSTR_LEN(v));
+        } else if (Z_TYPE_P(values) == IS_ARRAY) {
+            zval *val;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
+                if (Z_TYPE_P(val) != IS_STRING) continue;
+                const zend_string *const v = Z_STR_P(val);
+                append_header_line(out, ZSTR_VAL(name), ZSTR_LEN(name),
+                                   ZSTR_VAL(v), ZSTR_LEN(v));
+            } ZEND_HASH_FOREACH_END();
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
 /* Internal: append status line + Content-Length + headers + CRLF terminator
  * into @p result. Body is NOT appended — callers either append it themselves
  * (legacy http_response_format) or send it as a separate iov entry
@@ -1327,30 +1373,10 @@ static void emit_headers_block(smart_str *result, http_response_object *response
         smart_str_appendl(result, "\r\n", 2);
     }
 
-    /* Headers — flat IS_STRING avoids nested foreach for the
-     * single-value common case (§4.4 perf). */
-    zend_string *name;
-    zval *values;
-    ZEND_HASH_FOREACH_STR_KEY_VAL(response->headers, name, values) {
-        if (UNEXPECTED(name == NULL)) continue;
-        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            smart_str_append(result, name);
-            smart_str_appends(result, ": ");
-            smart_str_append(result, Z_STR_P(values));
-            smart_str_appends(result, "\r\n");
-        } else if (Z_TYPE_P(values) == IS_ARRAY) {
-            zval *val;
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                smart_str_append(result, name);
-                smart_str_appends(result, ": ");
-                smart_str_append(result, Z_STR_P(val));
-                smart_str_appends(result, "\r\n");
-            } ZEND_HASH_FOREACH_END();
-        }
-    } ZEND_HASH_FOREACH_END();
+    emit_headers_only(result, response->headers);
 
     /* End of headers */
-    smart_str_appends(result, "\r\n");
+    smart_str_appendl(result, "\r\n", 2);
 }
 
 /* Body length for the threshold branch in the dispose hot path. Reads
@@ -1375,6 +1401,10 @@ void http_response_format_parts(zend_object *obj,
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+    /* Pre-size for a typical 10-15 header block (~500 bytes) plus
+     * comfortable headroom — saves the realloc rounds on the
+     * smart_str grow path. */
+    smart_str_alloc(&result, 1024, 0);
 
 #ifdef HAVE_HTTP_COMPRESSION
     {
@@ -1407,6 +1437,7 @@ zend_string *http_response_format(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+    smart_str_alloc(&result, 1024, 0);
 
 #ifdef HAVE_HTTP_COMPRESSION
     {
@@ -1442,9 +1473,11 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+    smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
-    smart_str_appends(&result, "Transfer-Encoding: chunked\r\n");
+    smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
+                      sizeof("Transfer-Encoding: chunked\r\n") - 1);
 
     zend_string *name;
     zval        *values;
@@ -1464,23 +1497,52 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
             continue;
         }
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            smart_str_append(&result, name);
-            smart_str_appends(&result, ": ");
-            smart_str_append(&result, Z_STR_P(values));
-            smart_str_appends(&result, "\r\n");
+            const zend_string *const v = Z_STR_P(values);
+            append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
+                               ZSTR_VAL(v), ZSTR_LEN(v));
         } else if (Z_TYPE_P(values) == IS_ARRAY) {
             zval *val;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                if (Z_TYPE_P(val) != IS_STRING) { continue; }
-                smart_str_append(&result, name);
-                smart_str_appends(&result, ": ");
-                smart_str_append(&result, Z_STR_P(val));
-                smart_str_appends(&result, "\r\n");
+                if (Z_TYPE_P(val) != IS_STRING) continue;
+                const zend_string *const v = Z_STR_P(val);
+                append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
+                                   ZSTR_VAL(v), ZSTR_LEN(v));
             } ZEND_HASH_FOREACH_END();
         }
     } ZEND_HASH_FOREACH_END();
 
-    smart_str_appends(&result, "\r\n");
+    smart_str_appendl(&result, "\r\n", 2);
+    smart_str_0(&result);
+    return result.s ? result.s : zend_empty_string;
+}
+
+/* Static-handler head builder (issue #13 sendfile path). Status line +
+ * verbatim headers (NO auto-Content-Length — caller is responsible:
+ * the static handler sets it from file size, omits it on 304) +
+ * terminator + optional inline body (small 4xx/416 text). Does NOT
+ * run the compression hook (file body rides separately via sendfile;
+ * the inline body buffer is tiny error text where compression would
+ * be wasteful).
+ *
+ * Returned zend_string is owned by the caller. */
+zend_string *http_response_format_static_head(zend_object *obj,
+                                              bool include_inline_body)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    smart_str result = {0};
+    smart_str_alloc(&result, 1024, 0);
+
+    emit_status_line(&result, response);
+    emit_headers_only(&result, response->headers);
+    smart_str_appendl(&result, "\r\n", 2);
+
+    if (include_inline_body) {
+        smart_str_0(&response->body);
+        if (response->body.s != NULL && ZSTR_LEN(response->body.s) > 0) {
+            smart_str_append(&result, response->body.s);
+        }
+    }
+
     smart_str_0(&result);
     return result.s ? result.s : zend_empty_string;
 }
