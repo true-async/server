@@ -83,6 +83,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Per-chunk read size. 16 KiB matches HTTP2_SETTINGS_MAX_FRAME so a
  * single buffer fill always covers the largest DATA frame nghttp2 can
@@ -152,6 +153,19 @@ static void h2_static_finalize(h2_static_state_t *state, const int status)
     }
 
     if (state->file_io != NULL) {
+        /* libuv reactor's FILE-type io_close is a no-op (see
+         * libuv_io_close in php-src ext/async/libuv_reactor.c — comment
+         * "FILE type: no uv handle to close"), and it never pairs the
+         * fs_open with a uv_fs_close. Without an explicit close here
+         * the fd survives every dispose, leaking ~1 fd per request
+         * until EMFILE. Synchronous close on a regular file is a free
+         * syscall — no I/O — so doing it on the loop thread is fine. */
+        const int fd = state->file_io->descriptor.fd;
+
+        if (fd >= 0) {
+            (void)close(fd);
+        }
+
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);
         }

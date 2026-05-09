@@ -165,6 +165,29 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 
 static void engine_on_protocol_done(void *user, int status);
 
+/* libuv reactor's FILE-type io_close in php-src is a no-op (see
+ * libuv_io_close in ext/async/libuv_reactor.c — comment "FILE type:
+ * no uv handle to close"), and there is no fs_open / fs_close pairing
+ * either. Without an explicit close here the fd survives every
+ * dispose, leaking ~1 fd per request until EMFILE. close() on a
+ * regular file is a no-I/O syscall — safe on the loop thread. */
+static inline void engine_dispose_file_io(zend_async_io_t *file_io)
+{
+	if (file_io == NULL) {
+		return;
+	}
+
+	const int fd = file_io->descriptor.fd;
+
+	if (fd >= 0) {
+		(void)close(fd);
+	}
+
+	if (file_io->event.dispose != NULL) {
+		file_io->event.dispose(&file_io->event);
+	}
+}
+
 /* Tear down + fire on_done. Used on early-error paths (open failed
  * before we delegated, stat error) AND as the tail of
  * engine_on_protocol_done. status==0 ok, non-zero abort. */
@@ -178,10 +201,7 @@ static void engine_finalize(engine_state_t *state, int status)
 	}
 
 	if (state->file_io != NULL) {
-		if (state->file_io->event.dispose != NULL) {
-			state->file_io->event.dispose(&state->file_io->event);
-		}
-
+		engine_dispose_file_io(state->file_io);
 		state->file_io = NULL;
 	}
 
@@ -216,9 +236,7 @@ static bool engine_delegate_to_protocol(engine_state_t *state, zend_async_io_t *
 	}
 
 	if (file_io == NULL && state->file_io != NULL) {
-		if (state->file_io->event.dispose != NULL) {
-			state->file_io->event.dispose(&state->file_io->event);
-		}
+		engine_dispose_file_io(state->file_io);
 	}
 
 	state->phase = ENGINE_PHASE_DONE;
@@ -264,10 +282,7 @@ static void engine_rollback_to_php(engine_state_t *state)
 	}
 
 	if (state->file_io != NULL) {
-		if (state->file_io->event.dispose != NULL) {
-			state->file_io->event.dispose(&state->file_io->event);
-		}
-
+		engine_dispose_file_io(state->file_io);
 		state->file_io = NULL;
 	}
 

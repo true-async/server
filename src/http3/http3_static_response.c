@@ -68,6 +68,7 @@
 
 #include <errno.h>
 #include <string.h>
+#include <unistd.h>
 
 #define H3_STATIC_READ_CHUNK_BYTES (16u * 1024u)
 
@@ -89,6 +90,14 @@ typedef struct {
 static void h3_static_finalize(h3_static_state_t *state)
 {
     if (state->file_io != NULL) {
+        /* php-src libuv reactor leaks the fs_open fd on dispose
+         * (libuv_io_close is a no-op for FILE type). Close ourselves. */
+        const int fd = state->file_io->descriptor.fd;
+
+        if (fd >= 0) {
+            (void)close(fd);
+        }
+
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);
         }
