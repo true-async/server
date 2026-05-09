@@ -1,0 +1,680 @@
+/*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/* Single file-delivery engine — protocol-agnostic, mount-agnostic.
+ * Drives the async chain
+ *
+ *     fs_open → fstat → headers → protocol send_static_response → finalize
+ *
+ * Behaviour decisions (etag / range / conditional / mount-side overrides /
+ * inline error vs PHP passthrough) all flow from `send_file_config_t`.
+ * Protocol-side coupling lives behind `send_file_cbs_t`. */
+
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#include "php.h"
+#include "Zend/zend_async_API.h"
+#include "php_http_server.h"
+#include "http1/http_parser.h" /* http_request_t */
+#include "http_response_internal.h"
+#include "send_file.h"
+#include "http_mime.h"
+#include "http_etag.h"
+#include "http_date.h"
+#include "http_conditional.h"
+#include "http_range.h"
+#include "fs_util.h"
+#include "static/http_static_cache.h"
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <string.h>
+#include <inttypes.h>
+#include <stdio.h>
+
+typedef enum
+{
+	ENGINE_PHASE_OPEN = 0,
+	ENGINE_PHASE_STAT = 1,
+	ENGINE_PHASE_DONE = 2,
+} engine_phase_t;
+
+typedef struct
+{
+	send_file_config_t cfg;
+	send_file_cbs_t cbs;
+	void *user;
+
+	bool armed;
+
+	struct http_request_t *request;
+	zend_object *response_obj;
+
+	/* On-disk path. emalloc'd in kick_off, freed by state_free. */
+	char *fs_path;
+	size_t fs_path_len;
+
+	zend_async_io_t *file_io;
+	struct stat st;
+
+	bool is_head;
+	engine_phase_t phase;
+
+	zend_async_io_req_t *pending_req;
+	zend_async_event_callback_t *cb;
+
+	/* Range support. */
+	bool is_range;
+	uint64_t range_first;
+	uint64_t range_last;
+	uint64_t range_total;
+} engine_state_t;
+
+typedef struct
+{
+	zend_async_event_callback_t base;
+	engine_state_t *state;
+} engine_cb_t;
+
+static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+							void *result, zend_object *exception);
+
+static void engine_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *event)
+{
+	(void)event;
+	efree(cb);
+}
+
+static inline void engine_state_free(engine_state_t *state)
+{
+	if (state == NULL) {
+		return;
+	}
+	if (state->fs_path != NULL) {
+		efree(state->fs_path);
+		state->fs_path = NULL;
+	}
+	efree(state);
+}
+
+static bool engine_keep_alive(const engine_state_t *state)
+{
+	if (state->cbs.keep_alive != NULL) {
+		return state->cbs.keep_alive(state->user);
+	}
+	return true;
+}
+
+/* Apply per-extension MIME override from cfg->mime_overrides if set;
+ * otherwise fall back to the builtin. */
+static bool engine_resolve_content_type(const engine_state_t *state, const char **out,
+										size_t *out_len)
+{
+	if (state->cfg.content_type != NULL) {
+		*out = ZSTR_VAL(state->cfg.content_type);
+		*out_len = ZSTR_LEN(state->cfg.content_type);
+		return true;
+	}
+
+	if (state->cfg.mime_overrides != NULL) {
+		char ext[32];
+		const size_t ext_len =
+			http_mime_extract_lowered_ext(state->fs_path, state->fs_path_len, ext, sizeof(ext));
+		if (ext_len > 0) {
+			const zval *const o = zend_hash_str_find(state->cfg.mime_overrides, ext, ext_len);
+			if (o != NULL && Z_TYPE_P(o) == IS_STRING) {
+				*out = Z_STRVAL_P(o);
+				*out_len = Z_STRLEN_P(o);
+				return true;
+			}
+		}
+	}
+
+	return http_mime_lookup_by_ext(state->fs_path, state->fs_path_len, out, out_len);
+}
+
+/* Push cfg->extra_headers onto response_obj. include_content_headers=false
+ * on the 304 path (RFC 9110 §15.4.5 bars Content-* on Not Modified). */
+static void engine_apply_extra_headers(zend_object *response_obj, const HashTable *extra,
+									   bool include_content_headers)
+{
+	if (extra == NULL) {
+		return;
+	}
+
+	zend_string *name;
+	zval *value;
+	ZEND_HASH_FOREACH_STR_KEY_VAL(extra, name, value)
+	{
+		if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
+			continue;
+		}
+
+		if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
+			strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
+			continue;
+		}
+
+		http_response_static_set_header(response_obj, ZSTR_VAL(name), ZSTR_LEN(name),
+										Z_STRVAL_P(value), Z_STRLEN_P(value));
+	}
+	ZEND_HASH_FOREACH_END();
+}
+
+static void engine_on_protocol_done(void *user, int status);
+
+/* Tear down + fire on_done. Used on early-error paths (open failed
+ * before we delegated, stat error) AND as the tail of
+ * engine_on_protocol_done. status==0 ok, non-zero abort. */
+static void engine_finalize(engine_state_t *state, int status)
+{
+	state->phase = ENGINE_PHASE_DONE;
+
+	if (state->cb != NULL && state->file_io != NULL) {
+		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
+		state->cb = NULL;
+	}
+
+	if (state->file_io != NULL) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		state->file_io = NULL;
+	}
+
+	if (state->cfg.delete_after_send && status == 0 && state->fs_path != NULL) {
+		(void)unlink(state->fs_path);
+	}
+
+	const send_file_cbs_t cbs_copy = state->cbs;
+	void *const user = state->user;
+	const bool armed = state->armed;
+	engine_state_free(state);
+
+	if (armed && cbs_copy.on_done != NULL) {
+		cbs_copy.on_done(user, status);
+	}
+}
+
+static bool engine_delegate_to_protocol(engine_state_t *state, zend_async_io_t *file_io,
+										uint64_t body_offset, uint64_t body_length, bool head_only)
+{
+	zend_object *const response_obj = state->response_obj;
+	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+	void *const op_ctx = http_response_get_stream_ctx(response_obj);
+
+	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
+		return false;
+	}
+
+	if (state->cb != NULL && state->file_io != NULL) {
+		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
+		state->cb = NULL;
+	}
+
+	if (file_io == NULL && state->file_io != NULL) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+	}
+
+	state->phase = ENGINE_PHASE_DONE;
+	state->file_io = NULL;
+
+	const int rc = ops->send_static_response(op_ctx, response_obj, file_io, body_offset, body_length,
+											  head_only, engine_on_protocol_done, state);
+
+	if (UNEXPECTED(rc != 0)) {
+		state->file_io = file_io;
+		state->phase = ENGINE_PHASE_DONE;
+		return false;
+	}
+
+	return true;
+}
+
+static bool engine_emit_error_via_op(engine_state_t *state, int status, const char *body,
+									 size_t body_len)
+{
+	zend_object *const response_obj = state->response_obj;
+	http_response_static_set_status(response_obj, status);
+	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
+									25);
+	if (body != NULL && body_len > 0) {
+		http_response_static_set_body_cstr(response_obj, body, body_len);
+	}
+	http_response_set_content_length(response_obj, (uint64_t)body_len);
+	http_response_set_connection(response_obj, engine_keep_alive(state));
+
+	http_server_count_request(state->cfg.counters);
+	return engine_delegate_to_protocol(state, NULL, 0, 0, true);
+}
+
+/* PASSTHROUGH_PHP rollback. */
+static void engine_rollback_to_php(engine_state_t *state)
+{
+	if (state->cb != NULL && state->file_io != NULL) {
+		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
+		state->cb = NULL;
+	}
+
+	if (state->file_io != NULL) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		state->file_io = NULL;
+	}
+
+	state->phase = ENGINE_PHASE_DONE;
+
+	const send_file_cbs_t cbs_copy = state->cbs;
+	void *const user = state->user;
+	engine_state_free(state);
+
+	if (cbs_copy.on_passthrough != NULL) {
+		cbs_copy.on_passthrough(user);
+	}
+}
+
+/* INLINE_500 inline error: synth body onto response_obj synchronously
+ * via emit_status_body (no protocol op). Used by sendFile when open
+ * fails — caller's on_done observes status=-1. */
+static void engine_inline_error_synth(engine_state_t *state, int status, const char *body,
+									  size_t body_len)
+{
+	http_response_emit_status_body(state->response_obj, status, body, body_len);
+}
+
+static void engine_handle_open(engine_state_t *state, zend_object *exception);
+static void engine_handle_stat(engine_state_t *state);
+
+static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+							void *result, zend_object *exception)
+{
+	(void)event;
+	engine_state_t *const state = ((engine_cb_t *)callback)->state;
+	zend_async_io_req_t *const req = (zend_async_io_req_t *)result;
+
+	switch (state->phase) {
+	case ENGINE_PHASE_OPEN:
+		if (req != NULL) {
+			return;
+		}
+		engine_handle_open(state, exception);
+		return;
+
+	case ENGINE_PHASE_STAT:
+		if (req == NULL || req != state->pending_req) {
+			return;
+		}
+		state->pending_req = NULL;
+		if (req->dispose != NULL) {
+			req->dispose(req);
+		}
+		if (UNEXPECTED(exception != NULL)) {
+			if (state->cfg.on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
+				if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+					engine_finalize(state, -1);
+				}
+			} else {
+				engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+				engine_finalize(state, -1);
+			}
+			return;
+		}
+		engine_handle_stat(state);
+		return;
+
+	case ENGINE_PHASE_DONE:
+	default:
+		return;
+	}
+}
+
+static void engine_handle_open(engine_state_t *state, zend_object *exception)
+{
+	if (UNEXPECTED(exception != NULL || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
+		if (state->cfg.on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
+			engine_rollback_to_php(state);
+			return;
+		}
+		/* INLINE_500: caller wants a synthetic 500. Open failure on
+		 * a path the user supplied is "not found from their view" —
+		 * but the existing http_send_file behavior synthesizes 500,
+		 * not 404. Preserve. */
+		engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+		engine_finalize(state, -1);
+		return;
+	}
+
+	if (state->cfg.cache_view != NULL) {
+		state->st = state->cfg.cache_view->st;
+		engine_handle_stat(state);
+		return;
+	}
+
+	state->phase = ENGINE_PHASE_STAT;
+	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
+	if (UNEXPECTED(state->pending_req == NULL)) {
+		if (state->cfg.on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
+			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
+				engine_finalize(state, -1);
+			}
+		} else {
+			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+			engine_finalize(state, -1);
+		}
+	}
+}
+
+static void engine_handle_stat(engine_state_t *state)
+{
+	zend_object *const response_obj = state->response_obj;
+	const send_file_config_t *const cfg = &state->cfg;
+
+	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
+		if (cfg->on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
+			if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
+				engine_finalize(state, -1);
+			}
+		} else {
+			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+			engine_finalize(state, -1);
+		}
+		return;
+	}
+
+	/* === Build derived metadata (cache hit short-circuits) =========== */
+
+	char etag_buf[HTTP_ETAG_BUF_LEN];
+	char last_modified_buf[HTTP_DATE_BUF_LEN];
+	bool etag_enabled = cfg->etag;
+	const char *content_type = NULL;
+	size_t content_type_len = 0;
+
+	if (cfg->cache_view != NULL) {
+		etag_enabled = cfg->cache_view->etag != NULL && cfg->cache_view->etag_len == HTTP_ETAG_LEN;
+		if (etag_enabled) {
+			memcpy(etag_buf, cfg->cache_view->etag, HTTP_ETAG_LEN);
+			etag_buf[HTTP_ETAG_LEN] = '\0';
+		}
+		if (cfg->cache_view->last_modified != NULL &&
+			cfg->cache_view->last_modified_len == HTTP_DATE_LEN) {
+			memcpy(last_modified_buf, cfg->cache_view->last_modified, HTTP_DATE_LEN);
+			last_modified_buf[HTTP_DATE_LEN] = '\0';
+		} else if (cfg->last_modified) {
+			http_date_format_imf(state->st.st_mtime, last_modified_buf);
+		}
+		content_type = cfg->cache_view->content_type;
+		content_type_len = cfg->cache_view->content_type_len;
+	} else {
+		if (etag_enabled) {
+			http_etag_format_strong(&state->st, etag_buf);
+		}
+		if (cfg->last_modified) {
+			http_date_format_imf(state->st.st_mtime, last_modified_buf);
+		}
+		if (!engine_resolve_content_type(state, &content_type, &content_type_len)) {
+			content_type = "application/octet-stream";
+			content_type_len = sizeof("application/octet-stream") - 1;
+		}
+	}
+
+	/* === Conditional GET (304) ====================================== */
+
+	bool not_modified = false;
+	if (cfg->conditional) {
+		const zend_string *if_none_match =
+			http_request_find_header(state->request, "if-none-match", 13);
+		const zend_string *if_modified_since =
+			http_request_find_header(state->request, "if-modified-since", 17);
+		not_modified = http_conditional_check(
+			if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
+			if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
+			if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
+			if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0,
+			etag_enabled ? etag_buf : NULL, etag_enabled ? HTTP_ETAG_LEN : 0, state->st.st_mtime);
+	}
+
+	/* === Cache insert (only on miss path) =========================== */
+
+	if (cfg->cache_view == NULL && cfg->server != NULL) {
+		http_static_cache_t *cache = http_static_cache_acquire(cfg->server);
+		if (cache != NULL) {
+			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
+									 content_type, content_type_len,
+									 etag_enabled ? etag_buf : NULL,
+									 etag_enabled ? HTTP_ETAG_LEN : 0,
+									 cfg->last_modified ? last_modified_buf : NULL,
+									 cfg->last_modified ? HTTP_DATE_LEN : 0);
+		}
+	}
+
+	/* === Range support (RFC 9110 §14.2) ============================= */
+
+	state->range_total = (uint64_t)state->st.st_size;
+	state->is_range = false;
+	if (!not_modified && cfg->accept_ranges) {
+		const zend_string *range_hdr = http_request_find_header(state->request, "range", 5);
+		const zend_string *if_range = http_request_find_header(state->request, "if-range", 8);
+		bool range_allowed = true;
+		if (if_range != NULL && etag_enabled) {
+			range_allowed = (ZSTR_LEN(if_range) == HTTP_ETAG_LEN &&
+							 memcmp(ZSTR_VAL(if_range), etag_buf, HTTP_ETAG_LEN) == 0);
+		} else if (if_range != NULL) {
+			range_allowed = false;
+		}
+		if (range_hdr != NULL && range_allowed) {
+			uint64_t first = 0, last = 0;
+			const http_range_result_t rc = http_range_parse(
+				ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr), state->range_total, &first, &last);
+			if (rc == HTTP_RANGE_OK) {
+				state->is_range = true;
+				state->range_first = first;
+				state->range_last = last;
+			} else if (rc == HTTP_RANGE_NOT_SATISFIABLE) {
+				http_response_static_set_status(response_obj, 416);
+				http_response_static_set_header(response_obj, "content-type", 12,
+												"text/plain; charset=utf-8", 25);
+				char cr[48];
+				const int crn = snprintf(cr, sizeof(cr), "bytes */%" PRIu64, state->range_total);
+				if (crn > 0 && (size_t)crn < sizeof(cr)) {
+					http_response_static_set_header(response_obj, "content-range", 13, cr,
+													(size_t)crn);
+				}
+				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
+				http_response_set_connection(response_obj, engine_keep_alive(state));
+				http_server_count_request(cfg->counters);
+				if (!engine_delegate_to_protocol(state, NULL, 0, 0, true)) {
+					engine_finalize(state, -1);
+				}
+				return;
+			}
+		}
+	}
+
+	const bool keep_alive = engine_keep_alive(state);
+
+	/* === Build response headers ===================================== */
+
+	const bool include_content_headers = !not_modified;
+	int status_code = not_modified ? 304 : (state->is_range ? 206 : 200);
+	if (cfg->status_override != 0 && !not_modified && status_code < 400) {
+		status_code = cfg->status_override;
+	}
+
+	http_response_static_set_status(response_obj, status_code);
+
+	if (include_content_headers && content_type != NULL) {
+		http_response_static_set_header(response_obj, "content-type", 12, content_type,
+										content_type_len);
+	}
+
+	const uint64_t body_len = not_modified
+								  ? 0
+								  : (state->is_range ? (state->range_last - state->range_first + 1)
+													 : (uint64_t)state->st.st_size);
+
+	if (include_content_headers) {
+		http_response_set_content_length(response_obj, body_len);
+	}
+
+	if (etag_enabled) {
+		http_response_static_set_header(response_obj, "etag", 4, etag_buf, HTTP_ETAG_LEN);
+	}
+	if (cfg->last_modified) {
+		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
+										HTTP_DATE_LEN);
+	}
+
+	if (cfg->content_encoding != NULL && include_content_headers) {
+		http_response_static_set_header(response_obj, "content-encoding", 16, cfg->content_encoding,
+										cfg->content_encoding_len);
+	}
+	if (cfg->content_encoding != NULL) {
+		http_response_static_set_header(response_obj, "vary", 4, "Accept-Encoding", 15);
+	}
+
+	if (cfg->accept_ranges && include_content_headers) {
+		http_response_static_set_header(response_obj, "accept-ranges", 13, "bytes", 5);
+	}
+	if (state->is_range && include_content_headers) {
+		char cr[64];
+		const int n = snprintf(cr, sizeof(cr), "bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
+							   state->range_first, state->range_last, state->range_total);
+		if (n > 0 && (size_t)n < sizeof(cr)) {
+			http_response_static_set_header(response_obj, "content-range", 13, cr, (size_t)n);
+		}
+	}
+
+	if (cfg->cache_control != NULL) {
+		http_response_static_set_header(response_obj, "cache-control", 13,
+										ZSTR_VAL(cfg->cache_control),
+										ZSTR_LEN(cfg->cache_control));
+	}
+
+	if (cfg->content_disposition != NULL) {
+		http_response_static_set_header(response_obj, "content-disposition", 19,
+										ZSTR_VAL(cfg->content_disposition),
+										ZSTR_LEN(cfg->content_disposition));
+	}
+
+	engine_apply_extra_headers(response_obj, cfg->extra_headers, include_content_headers);
+	http_response_set_connection(response_obj, keep_alive);
+
+	/* === Hand off to the protocol op ================================= */
+
+	zend_async_io_t *const file_io = state->file_io;
+
+	if (not_modified) {
+		http_server_count_request(cfg->counters);
+		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
+			engine_finalize(state, -1);
+		}
+		return;
+	}
+
+	if (state->is_head || state->st.st_size == 0) {
+		http_server_count_request(cfg->counters);
+		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
+			engine_finalize(state, -1);
+		}
+		return;
+	}
+
+	const uint64_t body_offset = state->is_range ? state->range_first : 0;
+	http_server_count_request(cfg->counters);
+	if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
+		engine_finalize(state, -1);
+	}
+}
+
+static void engine_on_protocol_done(void *user, int status)
+{
+	engine_state_t *const state = (engine_state_t *)user;
+	if (state == NULL) {
+		return;
+	}
+	engine_finalize(state, status);
+}
+
+send_file_result_t send_file(struct http_request_t *request, zend_object *response_obj,
+							 const send_file_config_t *config, const send_file_cbs_t *cbs,
+							 void *user)
+{
+	if (UNEXPECTED(request == NULL || response_obj == NULL || config == NULL ||
+				   config->abs_path == NULL || config->abs_path_len == 0)) {
+		return SEND_FILE_HANDLED;
+	}
+
+	if (UNEXPECTED(config->abs_path_len + 1 >= MAXPATHLEN)) {
+		return SEND_FILE_HANDLED;
+	}
+
+	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
+		/* Caller's responsibility — engine refuses to drive without a
+		 * protocol op. Either the adapter falls back to a synchronous
+		 * path or it surfaces 500. */
+		return SEND_FILE_HANDLED;
+	}
+
+	engine_state_t *state = ecalloc(1, sizeof(*state));
+	state->cfg = *config;
+	if (cbs != NULL) {
+		state->cbs = *cbs;
+	}
+	state->user = user;
+	state->request = request;
+	state->response_obj = response_obj;
+	state->fs_path_len = config->abs_path_len;
+	state->fs_path = emalloc(config->abs_path_len + 1);
+	memcpy(state->fs_path, config->abs_path, config->abs_path_len);
+	state->fs_path[config->abs_path_len] = '\0';
+	state->is_head = http_request_method_is_head(request);
+	state->phase = ENGINE_PHASE_OPEN;
+
+	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
+	if (UNEXPECTED(state->file_io == NULL)) {
+		engine_state_free(state);
+		return SEND_FILE_HANDLED;
+	}
+
+	engine_cb_t *cb =
+		(engine_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(engine_dispatch, sizeof(engine_cb_t));
+	if (UNEXPECTED(cb == NULL)) {
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		engine_state_free(state);
+		return SEND_FILE_HANDLED;
+	}
+	cb->base.dispose = engine_cb_dispose;
+	cb->state = state;
+
+	if (UNEXPECTED(!state->file_io->event.add_callback(&state->file_io->event, &cb->base))) {
+		efree(cb);
+		if (state->file_io->event.dispose != NULL) {
+			state->file_io->event.dispose(&state->file_io->event);
+		}
+		engine_state_free(state);
+		return SEND_FILE_HANDLED;
+	}
+	state->cb = &cb->base;
+
+	if (state->cbs.on_armed != NULL) {
+		state->cbs.on_armed(user);
+	}
+	state->armed = true;
+
+	return SEND_FILE_ASYNC;
+}

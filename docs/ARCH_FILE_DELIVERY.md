@@ -355,7 +355,17 @@ server-suite (133 PASS / 1 SKIP) зелёные.
 **Контрольная точка**: все тесты зелёные. `src/static/` содержит только
 mount-policy и cache, без HTTP-утилит общего назначения.
 
-### Шаг 3. Создание движка
+### Шаг 3. Создание движка ✅
+
+Сделан. `include/send_file.h` + `src/send_file.c`. Движок принимает
+`send_file_config_t` (mount-агностичный — `extra_headers` /
+`mime_overrides` / `cache_control` / `content_disposition` /
+`content_encoding` приходят как поля, NULL = пропустить); на ошибку
+ветвится по `cfg.on_error` (`PASSTHROUGH_PHP` для StaticHandler,
+`INLINE_500` для sendFile). Прекомпрессированный sidecar выбирает
+caller (engine просто эмитит `Content-Encoding` + `Vary`). Сборка
+зелёная, движок никем пока не вызывается; 27 целевых тестов и полный
+server-suite по-прежнему зелёные.
 
 1. Создать `include/send_file.h` с API из §6.
 2. Создать `src/send_file.c`. Перенести FSM из `http_static.c`
