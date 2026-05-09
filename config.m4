@@ -492,6 +492,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/static/http_static_path.c
     src/static/http_static_cache.c
     src/static/http_static.c
+    src/static/http_static_safety.c
   "
 
   dnl TLS-only TU split out of http_connection.c (BIO ring writer +
