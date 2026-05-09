@@ -137,10 +137,10 @@ static zend_class_entry *register_class_TrueAsync_StaticOnMissing(void)
 	zend_class_entry *class_entry = zend_register_internal_enum(
 		"TrueAsync\\StaticOnMissing", IS_LONG, NULL);
 
-	zval case_NotFound_value; ZVAL_LONG(&case_NotFound_value, 0);
-	zval case_Next_value;     ZVAL_LONG(&case_Next_value,     1);
-	zend_enum_add_case_cstr(class_entry, "NotFound", &case_NotFound_value);
-	zend_enum_add_case_cstr(class_entry, "Next",     &case_Next_value);
+	zval case_NOT_FOUND_value; ZVAL_LONG(&case_NOT_FOUND_value, 0);
+	zval case_NEXT_value;      ZVAL_LONG(&case_NEXT_value,      1);
+	zend_enum_add_case_cstr(class_entry, "NOT_FOUND", &case_NOT_FOUND_value);
+	zend_enum_add_case_cstr(class_entry, "NEXT",      &case_NEXT_value);
 
 	return class_entry;
 }
@@ -150,12 +150,12 @@ static zend_class_entry *register_class_TrueAsync_StaticDotfiles(void)
 	zend_class_entry *class_entry = zend_register_internal_enum(
 		"TrueAsync\\StaticDotfiles", IS_LONG, NULL);
 
-	zval case_Deny_value;   ZVAL_LONG(&case_Deny_value,   0);
-	zval case_Allow_value;  ZVAL_LONG(&case_Allow_value,  1);
-	zval case_Ignore_value; ZVAL_LONG(&case_Ignore_value, 2);
-	zend_enum_add_case_cstr(class_entry, "Deny",   &case_Deny_value);
-	zend_enum_add_case_cstr(class_entry, "Allow",  &case_Allow_value);
-	zend_enum_add_case_cstr(class_entry, "Ignore", &case_Ignore_value);
+	zval case_DENY_value;   ZVAL_LONG(&case_DENY_value,   0);
+	zval case_ALLOW_value;  ZVAL_LONG(&case_ALLOW_value,  1);
+	zval case_IGNORE_value; ZVAL_LONG(&case_IGNORE_value, 2);
+	zend_enum_add_case_cstr(class_entry, "DENY",   &case_DENY_value);
+	zend_enum_add_case_cstr(class_entry, "ALLOW",  &case_ALLOW_value);
+	zend_enum_add_case_cstr(class_entry, "IGNORE", &case_IGNORE_value);
 
 	return class_entry;
 }
@@ -165,12 +165,12 @@ static zend_class_entry *register_class_TrueAsync_StaticSymlinks(void)
 	zend_class_entry *class_entry = zend_register_internal_enum(
 		"TrueAsync\\StaticSymlinks", IS_LONG, NULL);
 
-	zval case_Reject_value;     ZVAL_LONG(&case_Reject_value,     0);
-	zval case_Follow_value;     ZVAL_LONG(&case_Follow_value,     1);
-	zval case_OwnerMatch_value; ZVAL_LONG(&case_OwnerMatch_value, 2);
-	zend_enum_add_case_cstr(class_entry, "Reject",     &case_Reject_value);
-	zend_enum_add_case_cstr(class_entry, "Follow",     &case_Follow_value);
-	zend_enum_add_case_cstr(class_entry, "OwnerMatch", &case_OwnerMatch_value);
+	zval case_REJECT_value;      ZVAL_LONG(&case_REJECT_value,      0);
+	zval case_FOLLOW_value;      ZVAL_LONG(&case_FOLLOW_value,      1);
+	zval case_OWNER_MATCH_value; ZVAL_LONG(&case_OWNER_MATCH_value, 2);
+	zend_enum_add_case_cstr(class_entry, "REJECT",      &case_REJECT_value);
+	zend_enum_add_case_cstr(class_entry, "FOLLOW",      &case_FOLLOW_value);
+	zend_enum_add_case_cstr(class_entry, "OWNER_MATCH", &case_OWNER_MATCH_value);
 
 	return class_entry;
 }

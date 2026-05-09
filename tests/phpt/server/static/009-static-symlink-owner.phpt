@@ -44,12 +44,12 @@ $server = new HttpServer($config);
 $server->addStaticHandler(
     (new StaticHandler('/owner/', $root))
         ->disableIndex()
-        ->setSymlinkPolicy(StaticSymlinks::OwnerMatch)
+        ->setSymlinkPolicy(StaticSymlinks::OWNER_MATCH)
 );
 $server->addStaticHandler(
     (new StaticHandler('/reject/', $root))
         ->disableIndex()
-        ->setSymlinkPolicy(StaticSymlinks::Reject)
+        ->setSymlinkPolicy(StaticSymlinks::REJECT)
 );
 
 $client = spawn(function() use ($port, $server) {

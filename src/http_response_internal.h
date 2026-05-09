@@ -41,4 +41,12 @@ void  http_response_set_compression_slot(zend_object *obj, void *p);
 HashTable *http_response_get_headers(zend_object *obj);
 int        http_response_get_status(zend_object *obj);
 
+/* Pending sendFile descriptor accessor (issue #13). After
+ * HttpResponse::sendFile(), a snapshot of the path + options sits on
+ * the response object until the dispose path takes ownership and
+ * dispatches it through the per-protocol FSM. */
+#include "http_send_file.h"
+http_send_file_request_t *http_response_take_send_file(zend_object *obj);
+bool                       http_response_has_send_file(zend_object *obj);
+
 #endif /* HTTP_RESPONSE_INTERNAL_H */

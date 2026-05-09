@@ -30,7 +30,7 @@ $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
 $server = new HttpServer($config);
 
 $h = (new StaticHandler('/static/', $root))
-    ->setOnMissing(StaticOnMissing::Next);
+    ->setOnMissing(StaticOnMissing::NEXT);
 $server->addStaticHandler($h);
 
 /* Catch-all: return a sentinel any time the static path falls through. */

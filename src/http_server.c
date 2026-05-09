@@ -19,6 +19,7 @@
 #include "http_known_strings.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
+#include "http_send_file.h"
 
 #ifdef HAVE_HTTP2
 # include <nghttp2/nghttp2.h>
@@ -170,6 +171,7 @@ PHP_MINIT_FUNCTION(http_server)
 	http_server_exceptions_register();
 	http_server_config_class_register();
 	http_response_class_register();
+	http_send_file_options_class_register();
 	http_static_handler_class_register();
 	http_server_class_register();
 

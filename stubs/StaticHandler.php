@@ -10,17 +10,17 @@ namespace TrueAsync;
  * Behavior when a requested path does not resolve to a regular file
  * inside the static handler's root directory.
  *
- * NotFound (default): the static handler emits a 404 in C and the
- *                     request never enters the PHP VM.
- * Next:               the static handler returns control to the
- *                     dispatcher, which spawns the regular handler
- *                     coroutine — the request is delivered to
- *                     {@see HttpServer::addHttpHandler()}.
+ * NOT_FOUND (default): the static handler emits a 404 in C and the
+ *                      request never enters the PHP VM.
+ * NEXT:                the static handler returns control to the
+ *                      dispatcher, which spawns the regular handler
+ *                      coroutine — the request is delivered to
+ *                      {@see HttpServer::addHttpHandler()}.
  */
 enum StaticOnMissing: int
 {
-    case NotFound = 0;
-    case Next     = 1;
+    case NOT_FOUND = 0;
+    case NEXT      = 1;
 }
 
 /**
@@ -28,36 +28,36 @@ enum StaticOnMissing: int
  * a literal `.` — including `..` (which is also rejected by the
  * traversal guard regardless of this policy).
  *
- * Deny  (default): 404 on any request whose resolved path traverses
- *                  a dotfile component.
- * Allow:           dotfiles are served like any other file.
- * Ignore:          treat as if the file does not exist (passthrough
- *                  per {@see StaticOnMissing}).
+ * DENY   (default): 404 on any request whose resolved path traverses
+ *                   a dotfile component.
+ * ALLOW:            dotfiles are served like any other file.
+ * IGNORE:           treat as if the file does not exist (passthrough
+ *                   per {@see StaticOnMissing}).
  */
 enum StaticDotfiles: int
 {
-    case Deny   = 0;
-    case Allow  = 1;
-    case Ignore = 2;
+    case DENY   = 0;
+    case ALLOW  = 1;
+    case IGNORE = 2;
 }
 
 /**
  * Symlink policy applied during path resolution.
  *
- * Reject     (default): symlinks anywhere on the resolved path yield
- *                       404. Implemented via O_NOFOLLOW + per-segment
- *                       lstat — no symlink is ever traversed.
- * Follow:               symlinks are followed normally; the post-
- *                       realpath() target must still live inside the
- *                       configured root directory.
- * OwnerMatch:           follow only if the symlink and its final
- *                       target are owned by the same uid.
+ * REJECT      (default): symlinks anywhere on the resolved path yield
+ *                        404. Implemented via O_NOFOLLOW + per-segment
+ *                        lstat — no symlink is ever traversed.
+ * FOLLOW:                symlinks are followed normally; the post-
+ *                        realpath() target must still live inside the
+ *                        configured root directory.
+ * OWNER_MATCH:           follow only if the symlink and its final
+ *                        target are owned by the same uid.
  */
 enum StaticSymlinks: int
 {
-    case Reject     = 0;
-    case Follow     = 1;
-    case OwnerMatch = 2;
+    case REJECT      = 0;
+    case FOLLOW      = 1;
+    case OWNER_MATCH = 2;
 }
 
 /**

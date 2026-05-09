@@ -469,6 +469,8 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/formats/multipart_processor.c
     src/http_request.c
     src/http_response.c
+    src/http_send_file.c
+    src/http_send_file_options.c
     src/uploaded_file.c
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c

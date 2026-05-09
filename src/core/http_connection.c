@@ -22,6 +22,13 @@
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
 #include "static/static_handler.h"  /* issue #13 — dispatch hook */
+#include "http_send_file.h"          /* issue #13 — Response::sendFile() */
+#include "http_response_internal.h"  /* http_response_take_send_file */
+
+static bool h1_sendfile_arm(http_connection_t *conn,
+                            http1_request_ctx_t *ctx,
+                            http_send_file_request_t *req,
+                            bool should_continue);
 
 /* php_network.h (pulled in via http_connection.h) supplies socket
  * types and closesocket on both POSIX and Windows. No direct POSIX
@@ -1643,6 +1650,51 @@ const http_static_dispatch_cbs_t h1_static_dispatch_cbs = {
 };
 /* }}} */
 
+/* {{{ HttpResponse::sendFile() — H1 dispose hand-off (issue #13).
+ *
+ * Wraps http_send_file_dispatch with H1 lifecycle bookkeeping. The
+ * dispatch pin (handler_refcount + on_request_dispatch) is already in
+ * place from coroutine entry; we hand control to the sendfile FSM and
+ * resume http_request_finalize once it fires on_done. */
+typedef struct {
+    http_connection_t   *conn;
+    http1_request_ctx_t *ctx;
+    bool                 should_continue;
+} h1_sendfile_user_t;
+
+static void h1_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h1_sendfile_user_t *const u = (h1_sendfile_user_t *)user;
+    http_connection_t *const conn = u->conn;
+    http1_request_ctx_t *const ctx = u->ctx;
+    const bool should_continue = u->should_continue;
+    efree(u);
+
+    http_request_finalize(conn, ctx, should_continue);
+}
+
+bool h1_sendfile_arm(http_connection_t *conn,
+                     http1_request_ctx_t *ctx,
+                     http_send_file_request_t *req,
+                     bool should_continue)
+{
+    h1_sendfile_user_t *const u = ecalloc(1, sizeof(*u));
+    u->conn = conn;
+    u->ctx  = ctx;
+    u->should_continue = should_continue;
+
+    if (http_send_file_dispatch(ctx->request, Z_OBJ(ctx->response_zv),
+                                 req, h1_sendfile_on_done, u)) {
+        return true;
+    }
+    /* Dispatch failed; response_obj already carries a 500. Caller
+     * falls through to the regular format+send path. */
+    efree(u);
+    return false;
+}
+/* }}} */
+
 /* {{{ http_connection_dispatch_request
  *
  * Called from on_request_ready (inside the read callback). Prepares
@@ -2098,6 +2150,22 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;
         http_server_on_h1_connection_close_sent(conn->counters);
+    }
+
+    /* sendFile() handoff (issue #13): handler called $res->sendFile()
+     * which sealed the response with a path + options snapshot. The
+     * regular flush path is bypassed; a dedicated FSM opens the file,
+     * stat's it, writes the head + body via send_static_response, and
+     * runs http_request_finalize on completion. */
+    {
+        http_send_file_request_t *const sf_req =
+            http_response_take_send_file(Z_OBJ(ctx->response_zv));
+        if (sf_req != NULL) {
+            if (h1_sendfile_arm(conn, ctx, sf_req, conn->keep_alive)) {
+                return;
+            }
+            /* arm() failed and synthesized a 500 on response — fall through. */
+        }
     }
 
     /* HTTP/1 format + send. HTTP/2 has its own dispatch path

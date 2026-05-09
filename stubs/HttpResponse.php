@@ -280,6 +280,23 @@ final class HttpResponse
      */
     public function end(?string $data = null): void {}
 
+    /**
+     * Send a file as the response body. Defers actual transmission to
+     * the dispose phase — this method records the path + options on
+     * the response and returns immediately.
+     *
+     * After this call the response is sealed: every other mutating
+     * method throws {@see HttpServerRuntimeException}.
+     *
+     * Path is treated as trusted (the handler made the access decision).
+     * Errors during open / fstat (ENOENT, EACCES, oversize, non-regular)
+     * surface as a 500 response since headers are not yet on the wire.
+     *
+     * @param string                $path    Absolute filesystem path.
+     * @param SendFileOptions|null  $options Per-call options. NULL = defaults.
+     */
+    public function sendFile(string $path, ?SendFileOptions $options = null): void {}
+
     // === State methods ===
 
     /**

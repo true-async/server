@@ -22,6 +22,8 @@
 #include "http2/http2_static_response.h"
 #include "http1/http_parser.h"   /* http_request_t */
 #include "static/static_handler.h"
+#include "http_send_file.h"
+#include "http_response_internal.h"
 
 #include <string.h>
 
@@ -445,6 +447,11 @@ static void http2_handler_coroutine_entry(void)
 static bool http2_commit_stream_response(http_connection_t *conn,
                                          http2_stream_t *stream);
 
+/* HttpResponse::sendFile() — H2 dispose hand-off (issue #13). Hijacks
+ * dispose: pin stream + conn, kick the sendfile FSM, defer the
+ * response-zval dtor + refcount drop tail to h2_sendfile_on_done. */
+static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream);
+
 /* Guaranteed cleanup — runs on normal return, exception, or
  * cancellation (peer RST_STREAM / server stop). The stream remains
  * in nghttp2's table until on_stream_close_cb tears it down; we
@@ -506,6 +513,17 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_set_committed(Z_OBJ(stream->response_zv));
     }
 
+    /* sendFile() handoff (issue #13). Take the descriptor before
+     * the streaming/buffered branch so the FSM owns delivery; the
+     * regular zval-dtor + refcount tail runs from h2_sendfile_on_done
+     * after the FSM finalizes. Return early — dispose will resume
+     * via on_done. */
+    if (!Z_ISUNDEF(stream->response_zv) && conn != NULL
+        && http_response_has_send_file(Z_OBJ(stream->response_zv))) {
+        h2_sendfile_arm(conn, stream);
+        return;
+    }
+
     /* Streaming path (send() was called): HEADERS + DATA already
      * committed via h2_stream_ops. Just make sure the stream is
      * marked ended — if the handler forgot to call end(), we do it
@@ -542,6 +560,92 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         if (conn->handler_refcount > 0) {
             conn->handler_refcount--;
         }
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+        }
+    }
+}
+
+typedef struct {
+    http_connection_t *conn;
+    http2_stream_t    *stream;
+} h2_sendfile_user_t;
+
+static void h2_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h2_sendfile_user_t *const u = (h2_sendfile_user_t *)user;
+    http_connection_t *const conn = u->conn;
+    http2_stream_t *const stream = u->stream;
+    efree(u);
+
+    /* Mirror the original dispose tail: dtor zvals, release stream,
+     * release conn handler ref. Counters were retired in dispose. */
+    if (!Z_ISUNDEF(stream->request_zv)) {
+        zval_ptr_dtor(&stream->request_zv);
+        ZVAL_UNDEF(&stream->request_zv);
+    }
+    if (!Z_ISUNDEF(stream->response_zv)) {
+        zval_ptr_dtor(&stream->response_zv);
+        ZVAL_UNDEF(&stream->response_zv);
+    }
+    http2_stream_release(stream);
+
+    if (conn != NULL) {
+        if (conn->handler_refcount > 0) {
+            conn->handler_refcount--;
+        }
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+        }
+    }
+}
+
+static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
+{
+    /* Counters paired with the original dispatch's on_request_dispatch.
+     * h2_handler_coroutine_dispose's tail would have done this; do it
+     * now so dispose's early-return doesn't leak the in-flight count. */
+    if (conn->counters != NULL) {
+        http_server_on_request_dispose(conn->counters);
+    }
+
+    http_send_file_request_t *const sf_req =
+        http_response_take_send_file(Z_OBJ(stream->response_zv));
+    if (sf_req == NULL) {
+        /* Race / accounting bug — fall through to commit. */
+        (void)http2_commit_stream_response(conn, stream);
+        zval_ptr_dtor(&stream->request_zv);
+        ZVAL_UNDEF(&stream->request_zv);
+        zval_ptr_dtor(&stream->response_zv);
+        ZVAL_UNDEF(&stream->response_zv);
+        http2_stream_release(stream);
+        if (conn->handler_refcount > 0) conn->handler_refcount--;
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+        }
+        return;
+    }
+
+    h2_sendfile_user_t *const u = ecalloc(1, sizeof(*u));
+    u->conn   = conn;
+    u->stream = stream;
+
+    if (!http_send_file_dispatch(stream->request, Z_OBJ(stream->response_zv),
+                                  sf_req, h2_sendfile_on_done, u)) {
+        /* Dispatch failed — response now carries a 500. Commit the
+         * synthesized error response, then run the standard tail. */
+        efree(u);
+        (void)http2_commit_stream_response(conn, stream);
+        zval_ptr_dtor(&stream->request_zv);
+        ZVAL_UNDEF(&stream->request_zv);
+        zval_ptr_dtor(&stream->response_zv);
+        ZVAL_UNDEF(&stream->response_zv);
+        http2_stream_release(stream);
+        if (conn->handler_refcount > 0) conn->handler_refcount--;
         if (conn->handler_refcount == 0 && conn->destroy_pending) {
             conn->destroy_pending = false;
             http_connection_destroy(conn);

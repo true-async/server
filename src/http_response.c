@@ -18,6 +18,7 @@
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
 #include "php_http_server.h"
 #include "http_response_internal.h"
+#include "http_send_file.h"
 #include "smart_str_scalable.h"
 
 /* Include generated arginfo */
@@ -108,6 +109,11 @@ typedef struct {
      * which makes ::json() fall back to ext/json's own zero-flag default. */
     uint32_t         default_json_flags;
 
+    /* sendFile() handoff: when non-NULL, every mutating PHP method
+     * throws and the dispose path consumes it through the per-protocol
+     * sendfile FSM. Owned by the response until take_send_file pulls it. */
+    http_send_file_request_t *send_file_req;
+
     zend_object      std;
 } http_response_object;
 
@@ -138,6 +144,11 @@ static inline bool response_check_closed(const http_response_object *response)
     if (response->streaming) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot modify response — headers already committed by send()", 0);
+        return true;
+    }
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
         return true;
     }
     return false;
@@ -923,6 +934,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
             "Response already closed — cannot send() after end()", 0);
         return;
     }
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return;
+    }
     if (response->stream_ops == NULL) {
         /* No stream ops installed — response is detached from a
          * connection (e.g. constructed standalone in user code). */
@@ -973,6 +989,90 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
+/* {{{ proto HttpResponse::sendFile(string $path, ?SendFileOptions $options = null): void
+ *
+ * Records a path + options pair on the response and seals it. Returns
+ * immediately; the dispose path calls into the per-protocol sendfile
+ * FSM. Path must be absolute; the handler is treated as the trust
+ * boundary (no symlink/dotfile policy is applied here). */
+ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
+{
+    zend_string *path;
+    zval        *options_zv = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_OBJECT_OF_CLASS_OR_NULL(options_zv, http_send_file_options_ce)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response has already been closed", 0);
+        return;
+    }
+    if (response->streaming || response->headers_sent) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): headers already committed", 0);
+        return;
+    }
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — sendFile already called", 0);
+        return;
+    }
+    if (UNEXPECTED(ZSTR_LEN(path) == 0)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): path must not be empty", 0);
+        return;
+    }
+    if (UNEXPECTED(ZSTR_VAL(path)[0] != '/')) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): path must be absolute", 0);
+        return;
+    }
+
+    http_send_file_request_t *req = ecalloc(1, sizeof(*req));
+    req->path = zend_string_copy(path);
+    http_send_file_options_snapshot(
+        options_zv != NULL ? Z_OBJ_P(options_zv) : NULL,
+        &req->opts);
+
+    /* Per-call validation. RFC says no CR/LF in header values; status
+     * range matches the rest of the API. */
+    const http_send_file_options_t *const opts = &req->opts;
+    if (opts->status != 0 && (opts->status < 100 || opts->status > 599)) {
+        http_send_file_request_free(req);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): status must be between 100 and 599", 0);
+        return;
+    }
+#define HAS_CRLF(zs) ((zs) != NULL && \
+        (memchr(ZSTR_VAL(zs), '\r', ZSTR_LEN(zs)) != NULL \
+         || memchr(ZSTR_VAL(zs), '\n', ZSTR_LEN(zs)) != NULL))
+    if (HAS_CRLF(opts->content_type) || HAS_CRLF(opts->download_name)
+        || HAS_CRLF(opts->cache_control)) {
+        http_send_file_request_free(req);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): option strings must not contain CR or LF", 0);
+        return;
+    }
+#undef HAS_CRLF
+
+    response->send_file_req = req;
+
+    /* Sendfile body bypasses the compression module — never wrap. */
+#ifdef HAVE_HTTP_COMPRESSION
+    {
+        extern void http_compression_mark_no_compression(zend_object *);
+        http_compression_mark_no_compression(Z_OBJ_P(ZEND_THIS));
+    }
+#endif
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::end(?string $data = null): void */
 ZEND_METHOD(TrueAsync_HttpResponse, end)
 {
@@ -989,6 +1089,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Response has already been closed", 0);
+        return;
+    }
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
         return;
     }
 
@@ -1071,6 +1176,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->stream_ctx = NULL;
     response->compression_state = NULL;
     response->default_json_flags = 0;
+    response->send_file_req = NULL;
     response->socket_fd = SOCK_ERR;
     memset(&response->body, 0, sizeof(smart_str));
 
@@ -1112,6 +1218,12 @@ static void http_response_free(zend_object *obj)
     }
 
     smart_str_free(&response->body);
+
+    /* Aborted-request safety: dispose never picked up the descriptor. */
+    if (response->send_file_req != NULL) {
+        http_send_file_request_free(response->send_file_req);
+        response->send_file_req = NULL;
+    }
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* Compression state is owned by the compression TU; reach in only
@@ -1189,6 +1301,20 @@ zend_string *http_response_get_body_string(zend_object *obj)
     }
     smart_str_0(b);
     return b->s;
+}
+
+/* sendFile descriptor accessors used by the dispose path (issue #13). */
+http_send_file_request_t *http_response_take_send_file(zend_object *obj)
+{
+    http_response_object *const r = http_response_from_obj(obj);
+    http_send_file_request_t *const req = r->send_file_req;
+    r->send_file_req = NULL;
+    return req;
+}
+
+bool http_response_has_send_file(zend_object *obj)
+{
+    return http_response_from_obj(obj)->send_file_req != NULL;
 }
 
 /* Internal "set canned error" — used when the dispatch layer rejects

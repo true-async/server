@@ -152,7 +152,7 @@ static bool symlink_policy_admits(const http_static_handler_t *mount, const char
 	return true;
 }
 
-/* OwnerMatch — walk the resolved path one
+/* OWNER_MATCH — walk the resolved path one
  * segment at a time from mount root to the final component. For each
  * segment that is a symlink, lstat() yields the link's uid, stat()
  * yields the target's uid; mismatched uids fail the policy.

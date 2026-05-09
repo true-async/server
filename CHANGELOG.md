@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `HttpResponse::sendFile(string $path, ?SendFileOptions $options = null): void`
+  — handler-driven file delivery. Records path + options on the response
+  and returns immediately; the protocol's `send_static_response` op
+  runs the actual transfer in the dispose phase, reusing the static
+  module's open-stat-sendfile FSM (MIME detection, ETag, IMF date,
+  Range, conditional GET, precompressed sidecars). Path is treated as
+  trusted (handler made the access decision). Open / fstat errors
+  surface as a 500 since headers aren't on the wire yet.
+  After `sendFile()` the response is sealed: `setHeader` / `setStatus*` /
+  `write` / `send` / `setBody` / `json` / `html` / `redirect` / `end` /
+  a second `sendFile()` throw `HttpServerRuntimeException`.
+  New value-object `TrueAsync\SendFileOptions` (`final readonly class`,
+  named-args constructor) carries `contentType`, `disposition`
+  (`SendFileDisposition::INLINE | ATTACHMENT`), `downloadName`,
+  `cacheControl`, `etag`, `lastModified`, `acceptRanges`,
+  `precompressed`, `conditional`, `deleteAfterSend`, `status` overrides.
+  Compression middleware is bypassed for sendFile bodies (own
+  delivery pipeline). HTTP/3 path is follow-up — the dispose hook
+  refuses with 500 for now.
+
+### Changed
+
+- Static-handler PHP enum cases renamed to UPPER_CASE for project-wide
+  consistency: `StaticOnMissing::{NotFound→NOT_FOUND, Next→NEXT}`,
+  `StaticDotfiles::{Deny→DENY, Allow→ALLOW, Ignore→IGNORE}`,
+  `StaticSymlinks::{Reject→REJECT, Follow→FOLLOW, OwnerMatch→OWNER_MATCH}`.
+  Breaking for any existing user code that referenced the old casings.
+
 ### Fixed
 
 - Proactive drain mis-fired on the first response when CoDel/telemetry
