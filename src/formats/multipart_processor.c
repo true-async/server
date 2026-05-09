@@ -22,6 +22,7 @@
 #include "Zend/zend_virtual_cwd.h"         /* VCWD_UNLINK */
 #include "log/http_log.h"
 #include "http_rfc5987.h"
+#include "http_param_parse.h"
 
 /* Memory allocation macros */
 #ifdef PHP_WIN32
@@ -157,133 +158,82 @@ static char* generate_tmp_path(mp_processor_t* proc, const char* original_filena
     return result;
 }
 
-/* Helper: Parse Content-Disposition header */
+/* Decode RFC 5987 ext-value (charset'lang'percent-encoded) into a
+ * freshly MP_MALLOC'd NUL-terminated buffer. Returns NULL if the input
+ * doesn't have the two single-quote separators. */
+static char *decode_rfc5987_value(const char *src, const size_t src_len)
+{
+    const char *p = src;
+    const char *const end = src + src_len;
+
+    while (p < end && *p != '\'') p++;
+
+    if (p == end) return NULL;
+    p++;
+
+    while (p < end && *p != '\'') p++;
+
+    if (p == end) return NULL;
+    p++;
+
+    const size_t enc_len = (size_t)(end - p);
+    char *out = MP_MALLOC(enc_len + 1);
+    const size_t dec_len = http_rfc5987_decode(out, p, enc_len);
+    out[dec_len] = '\0';
+    return out;
+}
+
+/* Helper: Parse Content-Disposition header.
+ * Format: form-data; name="field_name"; filename="file.txt"
+ * filename* (RFC 5987) takes precedence over filename when both appear. */
 static void parse_content_disposition(mp_processor_t* proc, const char* value)
 {
-    /*
-     * Format: form-data; name="field_name"; filename="file.txt"
-     * Note: filename is optional (only for file uploads)
-     */
-    const char* p = value;
+    const char *p = value;
 
-    /* Skip "form-data" */
+    /* Skip the disposition token ("form-data") up to the first ';'. */
     while (*p && *p != ';') p++;
 
-    if (*p == ';') p++;
+    http_param_t param;
 
-    while (*p) {
-        /* Skip whitespace */
-        while (*p == ' ' || *p == '\t') p++;
-
-        if (strncmp(p, "name=", 5) == 0) {
-            p += 5;
-            /* Parse quoted or unquoted value */
-            if (*p == '"') {
-                p++;
-                const char* start = p;
-                while (*p && *p != '"') p++;
-
-                if (proc->field_name) MP_FREE(proc->field_name);
-                proc->field_name = MP_STRNDUP(start, p - start);
-
-                if (*p == '"') p++;
-            } else {
-                const char* start = p;
-                while (*p && *p != ';' && *p != ' ') p++;
-
-                if (proc->field_name) MP_FREE(proc->field_name);
-                proc->field_name = MP_STRNDUP(start, p - start);
-            }
-        } else if (strncmp(p, "filename=", 9) == 0) {
-            p += 9;
-
-            if (*p == '"') {
-                p++;
-                const char* start = p;
-                while (*p && *p != '"') p++;
-
-                if (proc->filename) MP_FREE(proc->filename);
-                proc->filename = MP_STRNDUP(start, p - start);
-
-                if (*p == '"') p++;
-            } else {
-                const char* start = p;
-                while (*p && *p != ';' && *p != ' ') p++;
-
-                if (proc->filename) MP_FREE(proc->filename);
-                proc->filename = MP_STRNDUP(start, p - start);
-            }
-        } else if (strncmp(p, "filename*=", 10) == 0) {
-            /* RFC 5987 encoded filename: filename*=UTF-8''encoded_name */
-            p += 10;
-            /* Skip encoding (e.g., "UTF-8''") */
-            while (*p && *p != '\'') p++;
-
-            if (*p == '\'') p++;
-            while (*p && *p != '\'') p++;
-
-            if (*p == '\'') p++;
-
-            const char* start = p;
-            while (*p && *p != ';' && *p != ' ') p++;
-
-            const size_t enc_len = (size_t)(p - start);
-            char *decoded = MP_MALLOC(enc_len + 1);
-            const size_t dec_len = http_rfc5987_decode(decoded, start, enc_len);
-            decoded[dec_len] = '\0';
-
+    while (http_header_param_next(&p, NULL, &param)) {
+        if (param.name_len == 4 && memcmp(param.name, "name", 4) == 0) {
+            if (proc->field_name) MP_FREE(proc->field_name);
+            proc->field_name = MP_STRNDUP(param.value, param.value_len);
+        } else if (param.name_len == 8 && memcmp(param.name, "filename", 8) == 0) {
             if (proc->filename) MP_FREE(proc->filename);
-            proc->filename = decoded;
+            proc->filename = MP_STRNDUP(param.value, param.value_len);
+        } else if (param.name_len == 9 && memcmp(param.name, "filename*", 9) == 0) {
+            char *decoded = decode_rfc5987_value(param.value, param.value_len);
+
+            if (decoded != NULL) {
+                if (proc->filename) MP_FREE(proc->filename);
+                proc->filename = decoded;
+            }
         }
-
-        /* Skip to next parameter */
-        while (*p && *p != ';') p++;
-
-        if (*p == ';') p++;
     }
 }
 
-/* Helper: Parse Content-Type header */
+/* Helper: Parse Content-Type header.
+ * Format: text/plain; charset=utf-8 */
 static void parse_content_type(mp_processor_t* proc, const char* value)
 {
-    /*
-     * Format: text/plain; charset=utf-8
-     */
-    const char* p = value;
+    const char *p = value;
 
-    /* Get media type */
-    const char* start = p;
-    while (*p && *p != ';' && *p != ' ') p++;
+    /* Media type up to ';' or whitespace. */
+    const char *start = p;
+    while (*p && *p != ';' && *p != ' ' && *p != '\t') p++;
 
     if (proc->content_type) MP_FREE(proc->content_type);
     proc->content_type = MP_STRNDUP(start, p - start);
 
-    /* Look for charset */
-    while (*p) {
-        while (*p == ';' || *p == ' ' || *p == '\t') p++;
+    http_param_t param;
 
-        if (strncasecmp(p, "charset=", 8) == 0) {
-            p += 8;
-
-            if (*p == '"') {
-                p++;
-                start = p;
-                while (*p && *p != '"') p++;
-
-                if (proc->charset) MP_FREE(proc->charset);
-                proc->charset = MP_STRNDUP(start, p - start);
-            } else {
-                start = p;
-                while (*p && *p != ';' && *p != ' ') p++;
-
-                if (proc->charset) MP_FREE(proc->charset);
-                proc->charset = MP_STRNDUP(start, p - start);
-            }
-
+    while (http_header_param_next(&p, NULL, &param)) {
+        if (param.name_len == 7 && strncasecmp(param.name, "charset", 7) == 0) {
+            if (proc->charset) MP_FREE(proc->charset);
+            proc->charset = MP_STRNDUP(param.value, param.value_len);
             break;
         }
-
-        while (*p && *p != ';') p++;
     }
 }
 

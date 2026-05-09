@@ -477,6 +477,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/fs_util.c
     src/http_rfc5987.c
     src/http_precompressed.c
+    src/http_param_parse.c
     src/send_file.c
     src/http_send_file.c
     src/http_send_file_options.c
