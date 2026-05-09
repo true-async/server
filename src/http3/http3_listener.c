@@ -1169,6 +1169,7 @@ void http3_listener_destroy(http3_listener_t *listener)
         FREE_HASHTABLE(listener->conn_map);
         listener->conn_map = NULL;
     }
+
     if (listener->peer_count_map != NULL) {
         zend_hash_destroy(listener->peer_count_map);
         FREE_HASHTABLE(listener->peer_count_map);

@@ -63,7 +63,7 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 		Z_PARAM_LONG_OR_NULL(status, status_is_null)
 	ZEND_PARSE_PARAMETERS_END();
 
-	zend_object *const this_obj = Z_OBJ_P(ZEND_THIS);
+	zend_object *this_obj = Z_OBJ_P(ZEND_THIS);
 
 	/* Direct slot writes — readonly flag on these props rejects normal
 	 * setter writes, but the slots already carry the
@@ -71,7 +71,7 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 	 * old zval and place the new one in. Slot order matches the
 	 * register_class_TrueAsync_SendFileOptions declaration order. */
 #define WRITE_SLOT(num, src) do { \
-		zval *const _slot = OBJ_PROP_NUM(this_obj, (num)); \
+		zval *_slot = OBJ_PROP_NUM(this_obj, (num)); \
 		zval_ptr_dtor(_slot); \
 		ZVAL_COPY_VALUE(_slot, (src)); \
 	} while (0)
@@ -87,8 +87,8 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 		if (disposition != NULL) {
 			ZVAL_OBJ_COPY(&v, Z_OBJ_P(disposition));
 		} else {
-			zend_string *const inline_name = zend_string_init("INLINE", 6, 0);
-			zend_object *const def =
+			zend_string *inline_name = zend_string_init("INLINE", 6, 0);
+			zend_object *def =
 				zend_enum_get_case(http_send_file_disposition_ce, inline_name);
 			zend_string_release(inline_name);
 			ZVAL_OBJ_COPY(&v, def);
@@ -205,10 +205,12 @@ void http_send_file_options_destroy(http_send_file_options_t *opts)
 		zend_string_release(opts->content_type);
 		opts->content_type = NULL;
 	}
+
 	if (opts->download_name != NULL) {
 		zend_string_release(opts->download_name);
 		opts->download_name = NULL;
 	}
+
 	if (opts->cache_control != NULL) {
 		zend_string_release(opts->cache_control);
 		opts->cache_control = NULL;
@@ -220,6 +222,7 @@ void http_send_file_request_free(http_send_file_request_t *req)
 	if (req == NULL) {
 		return;
 	}
+
 	if (req->path != NULL) {
 		zend_string_release(req->path);
 		req->path = NULL;

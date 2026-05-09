@@ -64,8 +64,8 @@ void http_date_format_imf(time_t t, char buf[HTTP_DATE_BUF_LEN])
 	}
 
 	/* Layout: "Day, DD Mon YYYY HH:MM:SS GMT" — 29 bytes + NUL. */
-	const char *const day = day_names[tm.tm_wday & 7];
-	const char *const mon = month_names[tm.tm_mon % 12];
+	const char *day = day_names[tm.tm_wday & 7];
+	const char *mon = month_names[tm.tm_mon % 12];
 	buf[0] = day[0];
 	buf[1] = day[1];
 	buf[2] = day[2];

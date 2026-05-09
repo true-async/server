@@ -158,7 +158,7 @@ static bool await_tls_drain_event(http_connection_t *conn)
         }
     }
 
-    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
         return false;
     }
@@ -601,7 +601,7 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
     if (UNEXPECTED(!tls_fsm_io_cb_attach(conn))) {
         return false;
     }
-    tls_fsm_io_cb_t *const cb = conn->tls_fsm_send_cb;
+    tls_fsm_io_cb_t *cb = conn->tls_fsm_send_cb;
     if (UNEXPECTED(cb->read_req != NULL)) {
         return true;   /* already armed */
     }
@@ -798,9 +798,9 @@ static void tls_absorb_io_submission_exception(const http_connection_t *conn,
     if (EG(exception) == NULL) {
         return;
     }
-    zend_object *const exc = EG(exception);
+    zend_object *exc = EG(exception);
     zval rv;
-    zval *const msg_zv = zend_read_property_ex(
+    zval *msg_zv = zend_read_property_ex(
         exc->ce, exc, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
     const char *msg = "(no message)";
     if (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING && Z_STRLEN_P(msg_zv) > 0) {
@@ -819,7 +819,7 @@ static void tls_log_error(const http_connection_t *conn, const char *context)
     if (conn == NULL || conn->tls == NULL) {
         return;
     }
-    const tls_error_info_t *const err = tls_session_last_error(conn->tls);
+    const tls_error_info_t *err = tls_session_last_error(conn->tls);
     if (err == NULL || err->op == TLS_OP_NONE) {
         return;
     }

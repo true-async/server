@@ -104,22 +104,23 @@ static void engine_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_
 
 static inline void engine_state_free(engine_state_t *state)
 {
-	if (state == NULL) {
-		return;
-	}
 	if (state->fs_path != NULL) {
 		efree(state->fs_path);
 		state->fs_path = NULL;
 	}
+
 	if (state->cfg.content_type != NULL) {
 		zend_string_release((zend_string *)state->cfg.content_type);
 	}
+
 	if (state->cfg.content_disposition != NULL) {
 		zend_string_release((zend_string *)state->cfg.content_disposition);
 	}
+
 	if (state->cfg.cache_control != NULL) {
 		zend_string_release((zend_string *)state->cfg.cache_control);
 	}
+
 	efree(state);
 }
 
@@ -147,7 +148,7 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 		const size_t ext_len =
 			http_mime_extract_lowered_ext(state->fs_path, state->fs_path_len, ext, sizeof(ext));
 		if (ext_len > 0) {
-			const zval *const o = zend_hash_str_find(state->cfg.mime_overrides, ext, ext_len);
+			const zval *o = zend_hash_str_find(state->cfg.mime_overrides, ext, ext_len);
 			if (o != NULL && Z_TYPE_P(o) == IS_STRING) {
 				*out = Z_STRVAL_P(o);
 				*out_len = Z_STRLEN_P(o);
@@ -213,7 +214,7 @@ static void engine_finalize(engine_state_t *state, int status)
 	}
 
 	const send_file_cbs_t cbs_copy = state->cbs;
-	void *const user = state->user;
+	void *user = state->user;
 	const bool armed = state->armed;
 	engine_state_free(state);
 
@@ -225,9 +226,9 @@ static void engine_finalize(engine_state_t *state, int status)
 static bool engine_delegate_to_protocol(engine_state_t *state, zend_async_io_t *file_io,
 										uint64_t body_offset, uint64_t body_length, bool head_only)
 {
-	zend_object *const response_obj = state->response_obj;
-	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
-	void *const op_ctx = http_response_get_stream_ctx(response_obj);
+	zend_object *response_obj = state->response_obj;
+	const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
+	void *op_ctx = http_response_get_stream_ctx(response_obj);
 
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
 		return false;
@@ -262,7 +263,7 @@ static bool engine_delegate_to_protocol(engine_state_t *state, zend_async_io_t *
 static bool engine_emit_error_via_op(engine_state_t *state, int status, const char *body,
 									 size_t body_len)
 {
-	zend_object *const response_obj = state->response_obj;
+	zend_object *response_obj = state->response_obj;
 	http_response_static_set_status(response_obj, status);
 	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
 									25);
@@ -294,7 +295,7 @@ static void engine_rollback_to_php(engine_state_t *state)
 	state->phase = ENGINE_PHASE_DONE;
 
 	const send_file_cbs_t cbs_copy = state->cbs;
-	void *const user = state->user;
+	void *user = state->user;
 	engine_state_free(state);
 
 	if (cbs_copy.on_passthrough != NULL) {
@@ -310,8 +311,8 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 							void *result, zend_object *exception)
 {
 	(void)event;
-	engine_state_t *const state = ((engine_cb_t *)callback)->state;
-	zend_async_io_req_t *const req = (zend_async_io_req_t *)result;
+	engine_state_t *state = ((engine_cb_t *)callback)->state;
+	zend_async_io_req_t *req = (zend_async_io_req_t *)result;
 
 	switch (state->phase) {
 	case ENGINE_PHASE_OPEN:
@@ -382,12 +383,12 @@ static void engine_handle_open(engine_state_t *state, zend_object *exception)
 
 static void engine_handle_stat(engine_state_t *state)
 {
-	zend_object *const response_obj = state->response_obj;
-	const send_file_config_t *const cfg = &state->cfg;
+	zend_object *response_obj = state->response_obj;
+	const send_file_config_t *cfg = &state->cfg;
 
 	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
 		const int status = (cfg->on_error == SEND_FILE_ERR_INLINE_500) ? 500 : 404;
-		const char *const body = (status == 500) ? "Internal Server Error" : "Not Found";
+		const char *body = (status == 500) ? "Internal Server Error" : "Not Found";
 		const size_t body_len = (status == 500) ? 21 : 9;
 		if (!engine_emit_error_via_op(state, status, body, body_len)) {
 			engine_finalize(state, -1);
@@ -402,7 +403,7 @@ static void engine_handle_stat(engine_state_t *state)
 	bool etag_enabled = cfg->etag;
 	const char *content_type = NULL;
 	size_t content_type_len = 0;
-	const http_static_cache_view_t *const view =
+	const http_static_cache_view_t *view =
 		state->has_cache_view ? &state->cache_view_copy : NULL;
 
 	if (view != NULL) {
@@ -576,7 +577,7 @@ static void engine_handle_stat(engine_state_t *state)
 
 	/* === Hand off to the protocol op ================================= */
 
-	zend_async_io_t *const file_io = state->file_io;
+	zend_async_io_t *file_io = state->file_io;
 
 	if (not_modified) {
 		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
@@ -603,7 +604,7 @@ static void engine_handle_stat(engine_state_t *state)
 
 static void engine_on_protocol_done(void *user, int status)
 {
-	engine_state_t *const state = (engine_state_t *)user;
+	engine_state_t *state = (engine_state_t *)user;
 	if (state == NULL) {
 		return;
 	}
@@ -623,7 +624,7 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 		return SEND_FILE_HANDLED;
 	}
 
-	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+	const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
 		/* Caller's responsibility — engine refuses to drive without a
 		 * protocol op. Either the adapter falls back to a synchronous

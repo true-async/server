@@ -79,7 +79,7 @@ static inline bool handler_check_locked(const http_static_handler_t *mount)
 static bool validate_url_prefix(const zend_string *prefix)
 {
 	const size_t len = ZSTR_LEN(prefix);
-	const char *const val = ZSTR_VAL(prefix);
+	const char *val = ZSTR_VAL(prefix);
 
 	if (len < 2 || val[0] != '/' || val[len - 1] != '/') {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,

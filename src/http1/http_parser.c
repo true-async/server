@@ -337,7 +337,7 @@ static void save_current_header(http1_parser_t *parser)
      * recognised header — typical REST traffic hits the table on
      * 70-90 %% of headers. The release-at-end below stays correct
      * because zend_string_release is a no-op on interned strings. */
-    zend_string *const interned =
+    zend_string *interned =
         http_known_header_lookup(ZSTR_VAL(name), ZSTR_LEN(name));
     if (interned != NULL) {
         zend_string_release(name);
@@ -866,6 +866,7 @@ void http_request_destroy(http_request_t *req)
         zend_hash_destroy(req->post_data);
         FREE_HASHTABLE(req->post_data);
     }
+
     if (req->files) {
         zend_hash_destroy(req->files);
         FREE_HASHTABLE(req->files);
@@ -874,6 +875,7 @@ void http_request_destroy(http_request_t *req)
     if (req->path) {
         zend_string_release(req->path);
     }
+
     if (req->query_params) {
         zend_hash_destroy(req->query_params);
         FREE_HASHTABLE(req->query_params);
@@ -882,6 +884,7 @@ void http_request_destroy(http_request_t *req)
     if (req->traceparent_raw) {
         zend_string_release(req->traceparent_raw);
     }
+
     if (req->tracestate_raw) {
         zend_string_release(req->tracestate_raw);
     }
@@ -890,7 +893,7 @@ void http_request_destroy(http_request_t *req)
      * any embedder-specific teardown. NULL = legacy ecalloc owner, free
      * via efree. Capture the callback before clearing — defensive in
      * case the cb does anything that might re-enter via field reads. */
-    void (*const release_cb)(http_request_t *) = req->release;
+    void (*release_cb)(http_request_t *) = req->release;
     if (release_cb != NULL) {
         req->release = NULL;
         release_cb(req);

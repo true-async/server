@@ -563,7 +563,7 @@ const zend_string *http_request_find_header(const http_request_t *req,
         return NULL;
     }
 
-    const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
+    const zval *zv = zend_hash_str_find(req->headers, name, name_len);
     if (zv == NULL) {
         return NULL;
     }
@@ -573,7 +573,7 @@ const zend_string *http_request_find_header(const http_request_t *req,
     }
 
     if (Z_TYPE_P(zv) == IS_ARRAY) {
-        const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
+        const zval *first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
         if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
             return Z_STR_P(first);
         }

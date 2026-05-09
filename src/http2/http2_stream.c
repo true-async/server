@@ -26,10 +26,10 @@
 
 static void http2_stream_release_via_request(http_request_t *req);
 
-http2_stream_t *http2_stream_new(http2_session_t *const session,
+http2_stream_t *http2_stream_new(http2_session_t *session,
                                  const uint32_t stream_id)
 {
-    http2_stream_t *const stream = ecalloc(1, sizeof(*stream));
+    http2_stream_t *stream = ecalloc(1, sizeof(*stream));
     stream->session   = session;
     stream->stream_id = stream_id;
     stream->state     = H2_STREAM_OPEN;
@@ -59,11 +59,11 @@ static void http2_stream_release_via_request(http_request_t *req)
 {
     /* Offset-0 invariant: _request_storage is the first field of
      * http2_stream_t, so they share the same address. */
-    http2_stream_t *const stream = (http2_stream_t *)req;
+    http2_stream_t *stream = (http2_stream_t *)req;
     efree(stream);
 }
 
-void http2_stream_release(http2_stream_t *const stream)
+void http2_stream_release(http2_stream_t *stream)
 {
     if (stream == NULL) {
         return;
@@ -93,7 +93,7 @@ void http2_stream_release(http2_stream_t *const stream)
      * h2_wait_for_drain_event. Dispose explicitly so TrueAsync's
      * event registry releases backing memory. Safe on NULL. */
     if (stream->write_event != NULL) {
-        zend_async_event_t *const ev =
+        zend_async_event_t *ev =
             &((zend_async_trigger_event_t *)stream->write_event)->base;
         if (ev->dispose != NULL) {
             ev->dispose(ev);
@@ -117,7 +117,7 @@ void http2_stream_release(http2_stream_t *const stream)
 
 /* Back-compat name used by the session table destructor. The table
  * holds exactly one reference — removing an entry releases it. */
-void http2_stream_free(http2_stream_t *const stream)
+void http2_stream_free(http2_stream_t *stream)
 {
     http2_stream_release(stream);
 }

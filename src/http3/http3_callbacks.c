@@ -106,7 +106,7 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
  * nghttp3 application callbacks — request side (HEADERS, DATA, end-stream)
  * ------------------------------------------------------------------------ */
 
-static void h3_ensure_headers_table(http_request_t *const req)
+static void h3_ensure_headers_table(http_request_t *req)
 {
     if (req->headers == NULL) {
         ALLOC_HASHTABLE(req->headers);
@@ -114,14 +114,14 @@ static void h3_ensure_headers_table(http_request_t *const req)
     }
 }
 
-static void h3_store_header_value(http_request_t *const req,
+static void h3_store_header_value(http_request_t *req,
                                   const char *name, size_t namelen,
                                   const char *value, size_t valuelen)
 {
     h3_ensure_headers_table(req);
 
-    zend_string *const name_str = zend_string_init(name, namelen, 0);
-    zend_string *const val_str  = zend_string_init(value, valuelen, 0);
+    zend_string *name_str = zend_string_init(name, namelen, 0);
+    zend_string *val_str  = zend_string_init(value, valuelen, 0);
 
     zval tmp;
     ZVAL_STR(&tmp, val_str);
@@ -235,9 +235,9 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
     }
     s->headers_total_bytes += entry_cost;
 
-    http_request_t *const req = s->request;
-    const char *const n = (const char *)name_v.base;
-    const char *const v = (const char *)value_v.base;
+    http_request_t *req = s->request;
+    const char *n = (const char *)name_v.base;
+    const char *v = (const char *)value_v.base;
 
     /* Pseudo-headers — token enum lets us skip the strcmp ladder for
      * the four RFC 9114 pseudo names. nghttp3 already validates
@@ -584,6 +584,7 @@ headers_done:
         if (stats != NULL) stats->h3_response_submitted++;
         return true;
     }
+
     if (stats != NULL) stats->h3_response_submit_error++;
     if (s->response_body != NULL) {
         zend_string_release(s->response_body);

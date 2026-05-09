@@ -81,6 +81,7 @@ static int decode_gzip(http_request_t *req, size_t cap)
             if (cap > 0 && new_cap > cap) {
                 new_cap = cap;
             }
+
             if (new_cap == out_cap) {
                 /* Already at cap and inflate still wants room → bomb. */
                 ZS_INFLATE_END(&s);

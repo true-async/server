@@ -34,9 +34,9 @@ static inline int hex_value(const char c)
 /* Decoded literal '/' bytes are preserved — segment-level traversal
  * validation below relies on the separator being unambiguous. NUL
  * bytes (literal or %00) are rejected. */
-static http_static_path_result_t percent_decode(const char *const src, const size_t src_len,
-												char *const dst, const size_t dst_cap,
-												size_t *const dst_len_out)
+static http_static_path_result_t percent_decode(const char *src, const size_t src_len,
+												char *dst, const size_t dst_cap,
+												size_t *dst_len_out)
 {
 	size_t out = 0;
 	for (size_t i = 0; i < src_len;) {
@@ -93,7 +93,7 @@ static http_static_path_result_t percent_decode(const char *const src, const siz
 /* Reject empty / "." / ".." segments and apply the dotfile policy.
  * `path` always starts with '/' so the leading separator is skipped. */
 static http_static_path_result_t validate_segments(const http_static_handler_t *mount,
-												   const char *const path, const size_t path_len)
+												   const char *path, const size_t path_len)
 {
 	size_t i = (path_len > 0 && path[0] == '/') ? 1 : 0;
 	size_t segment_count = 0;
@@ -107,7 +107,7 @@ static http_static_path_result_t validate_segments(const http_static_handler_t *
 			i++;
 		}
 		const size_t seg_len = i - seg_start;
-		const char *const seg = path + seg_start;
+		const char *seg = path + seg_start;
 
 		if (seg_len == 0) {
 			return HTTP_STATIC_PATH_BAD_REQUEST;
@@ -159,7 +159,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 		return HTTP_STATIC_PATH_NO_MATCH;
 	}
 
-	const char *const tail = request_path + prefix_len;
+	const char *tail = request_path + prefix_len;
 	size_t tail_len = request_path_len - prefix_len;
 
 	/* Defensive: llhttp hands us path-only, H2/H3 paths may differ. */
@@ -192,7 +192,7 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 
 	/* realpath()-canonical root has no trailing '/' except when the
 	 * root is exactly "/". */
-	const char *const root = ZSTR_VAL(mount->root_directory);
+	const char *root = ZSTR_VAL(mount->root_directory);
 	const size_t root_len = ZSTR_LEN(mount->root_directory);
 
 	if (UNEXPECTED(root_len + 1 + decoded_len + 1 > out_buf_cap)) {
@@ -215,8 +215,8 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
 	return HTTP_STATIC_PATH_OK;
 }
 
-bool http_static_path_join(char *const buf, const size_t cap, size_t *const len,
-						   const char *const name, const size_t name_len)
+bool http_static_path_join(char *buf, const size_t cap, size_t *len,
+						   const char *name, const size_t name_len)
 {
 	size_t cur = *len;
 	const bool need_sep = (cur == 0 || buf[cur - 1] != '/');
@@ -246,7 +246,7 @@ bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *
 	 * to fnmatch and skip the per-request memcpy + 4 KiB scratch. */
 	(void)relative_len;
 	for (size_t i = 0; i < mount->hide_count; i++) {
-		const zend_string *const glob = mount->hide_globs[i];
+		const zend_string *glob = mount->hide_globs[i];
 		if (fnmatch(ZSTR_VAL(glob), relative, FNM_PATHNAME) == 0) {
 			return true;
 		}

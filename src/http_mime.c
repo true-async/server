@@ -99,7 +99,7 @@ static inline bool is_path_separator(const char c)
 #endif
 }
 
-static inline size_t find_extension_offset(const char *const path, const size_t path_len)
+static inline size_t find_extension_offset(const char *path, const size_t path_len)
 {
 	size_t i = path_len;
 	while (i > 0) {
@@ -116,7 +116,7 @@ static inline size_t find_extension_offset(const char *const path, const size_t 
 }
 
 /* Returns 0 on empty / overflow. */
-static inline size_t lower_extension(const char *const src, const size_t src_len, char *const buf,
+static inline size_t lower_extension(const char *src, const size_t src_len, char *buf,
 									 const size_t buf_cap)
 {
 	if (src_len == 0 || src_len >= buf_cap) {
@@ -133,7 +133,7 @@ static inline size_t lower_extension(const char *const src, const size_t src_len
 	return src_len;
 }
 
-static const http_mime_entry_t *lookup_builtin(const char *const ext)
+static const http_mime_entry_t *lookup_builtin(const char *ext)
 {
 	size_t lo = 0;
 	size_t hi = BUILTIN_TABLE_LEN;
@@ -189,7 +189,7 @@ bool http_mime_lookup_by_ext(const char *path, size_t path_len, const char **out
 		return false;
 	}
 
-	const char *const ext_src = path + ext_offset;
+	const char *ext_src = path + ext_offset;
 	const size_t ext_src_len = path_len - ext_offset;
 
 	char ext_buf[32];
@@ -198,7 +198,7 @@ bool http_mime_lookup_by_ext(const char *path, size_t path_len, const char **out
 		return false;
 	}
 
-	const http_mime_entry_t *const hit = lookup_builtin(ext_buf);
+	const http_mime_entry_t *hit = lookup_builtin(ext_buf);
 	if (hit != NULL) {
 		*out = hit->content_type;
 		*out_len = hit->content_type_len;

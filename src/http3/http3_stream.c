@@ -49,12 +49,12 @@ static void http3_stream_release_via_request(http_request_t *req)
 {
     /* Offset-0 invariant: _request_storage is the first field of
      * http3_stream_t, so the same byte address is both. */
-    http3_stream_t *const s = (http3_stream_t *)req;
+    http3_stream_t *s = (http3_stream_t *)req;
 
     http3_stream_pool_free(s->pool, s);
 }
 
-void http3_stream_release(http3_stream_t *const s)
+void http3_stream_release(http3_stream_t *s)
 {
     if (s == NULL) {
         return;

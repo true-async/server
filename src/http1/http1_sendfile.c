@@ -146,6 +146,7 @@ static inline void h1_send_state_free(h1_send_state_t *state)
     if (state == NULL) {
         return;
     }
+
     if (state->chunk_buf != NULL) {
         efree(state->chunk_buf);
         state->chunk_buf = NULL;
@@ -211,7 +212,7 @@ static bool h1_send_submit_head(h1_send_state_t *state, zend_string *head)
  * past this point. */
 static void h1_send_finalize(h1_send_state_t *state)
 {
-    http_connection_t *const conn = state->conn;
+    http_connection_t *conn = state->conn;
 
     state->phase = H1_SEND_PHASE_DONE;
 
@@ -246,8 +247,8 @@ static void h1_send_finalize(h1_send_state_t *state)
         state->file_io = NULL;
     }
 
-    void (*const on_done)(void *, int) = state->on_done;
-    void *const user = state->user;
+    void (*on_done)(void *, int) = state->on_done;
+    void *user = state->user;
     const int status = state->status;
 
     h1_send_state_free(state);
@@ -266,8 +267,8 @@ static void h1_send_dispatch(zend_async_event_t *event,
                              void *result, zend_object *exception)
 {
     (void)event;
-    h1_send_state_t *const state = ((h1_send_cb_t *)callback)->state;
-    zend_async_io_req_t *const req = (zend_async_io_req_t *)result;
+    h1_send_state_t *state = ((h1_send_cb_t *)callback)->state;
+    zend_async_io_req_t *req = (zend_async_io_req_t *)result;
 
     switch (state->phase) {
     case H1_SEND_PHASE_SENDFILE:
@@ -482,13 +483,13 @@ int h1_stream_send_static_response(void *ctx_void,
                                    void (*on_done)(void *user, int status),
                                    void *user)
 {
-    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)ctx_void;
+    http1_request_ctx_t *ctx = (http1_request_ctx_t *)ctx_void;
     if (UNEXPECTED(ctx == NULL || ctx->conn == NULL)) {
         /* Pre-init failure: the caller still owns file_io. */
         return -1;
     }
 
-    http_connection_t *const conn = ctx->conn;
+    http_connection_t *conn = ctx->conn;
 
     h1_send_state_t *state = ecalloc(1, sizeof(*state));
     state->conn = conn;
@@ -521,7 +522,7 @@ int h1_stream_send_static_response(void *ctx_void,
      * body source the inline body is skipped (caller must NOT set
      * both). */
     const bool include_inline_body = (file_io == NULL);
-    zend_string *const head = http_response_format_static_head(response_obj,
+    zend_string *head = http_response_format_static_head(response_obj,
                                                                include_inline_body);
 
     if (UNEXPECTED(!h1_send_submit_head(state, head))) {

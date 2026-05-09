@@ -58,9 +58,9 @@ static void sf_adapter_free(sf_adapter_t *a)
 
 static void sf_adapter_on_done(void *user, int status)
 {
-	sf_adapter_t *const a = (sf_adapter_t *)user;
-	void (*const on_done)(void *, int) = a->on_done;
-	void *const outer_user = a->user;
+	sf_adapter_t *a = (sf_adapter_t *)user;
+	void (*on_done)(void *, int) = a->on_done;
+	void *outer_user = a->user;
 	sf_adapter_free(a);
 	if (on_done != NULL) {
 		on_done(outer_user, status);
@@ -92,7 +92,7 @@ static zend_string *sf_build_content_disposition(const http_send_file_options_t 
 	smart_str_appends(&s, is_attachment ? "attachment" : "inline");
 
 	if (opts->download_name != NULL) {
-		const char *const dn = ZSTR_VAL(opts->download_name);
+		const char *dn = ZSTR_VAL(opts->download_name);
 		const size_t dn_len = ZSTR_LEN(opts->download_name);
 
 		bool ascii_clean = true;
@@ -115,7 +115,7 @@ static zend_string *sf_build_content_disposition(const http_send_file_options_t 
 	}
 
 	smart_str_0(&s);
-	zend_string *const out = zend_string_init(ZSTR_VAL(s.s), ZSTR_LEN(s.s), 0);
+	zend_string *out = zend_string_init(ZSTR_VAL(s.s), ZSTR_LEN(s.s), 0);
 	smart_str_free(&s);
 	return out;
 }
@@ -134,7 +134,7 @@ static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t
 		return false;
 	}
 
-	const zval *const ae_zv = zend_hash_str_find(request->headers, "accept-encoding", 15);
+	const zval *ae_zv = zend_hash_str_find(request->headers, "accept-encoding", 15);
 	if (ae_zv == NULL) {
 		return false;
 	}
@@ -142,7 +142,7 @@ static bool sf_try_precompressed(http_request_t *request, char *path_buf, size_t
 	if (Z_TYPE_P(ae_zv) == IS_STRING) {
 		ae = Z_STR_P(ae_zv);
 	} else if (Z_TYPE_P(ae_zv) == IS_ARRAY) {
-		const zval *const first = zend_hash_index_find(Z_ARRVAL_P(ae_zv), 0);
+		const zval *first = zend_hash_index_find(Z_ARRVAL_P(ae_zv), 0);
 		if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
 			ae = Z_STR_P(first);
 		}
@@ -220,7 +220,7 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	}
 
 	/* Engine refuses to drive without a protocol op — synthesize 500. */
-	const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+	const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
 		http_send_file_request_free(req);
 		http_response_synth_error(response_obj, 500,
@@ -245,7 +245,7 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 								   &picked_encoding, &picked_encoding_len);
 	}
 
-	zend_string *const cd = sf_build_content_disposition(&req->opts);
+	zend_string *cd = sf_build_content_disposition(&req->opts);
 
 	sf_adapter_t *adapter = emalloc(sizeof(*adapter));
 	adapter->req = req;

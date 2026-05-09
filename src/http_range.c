@@ -39,7 +39,7 @@ http_range_result_t http_range_parse(const char *header, size_t header_len, uint
 		return HTTP_RANGE_UNSUPPORTED;
 	}
 	const char *p = header + 6;
-	const char *const end = header + header_len;
+	const char *end = header + header_len;
 	while (p < end && (*p == ' ' || *p == '\t')) {
 		p++;
 	}

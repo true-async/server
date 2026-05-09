@@ -62,7 +62,7 @@ static bool mount_resolve_content_type(const http_static_handler_t *mount, const
 		char ext[32];
 		const size_t ext_len = http_mime_extract_lowered_ext(path, path_len, ext, sizeof(ext));
 		if (ext_len > 0) {
-			const zval *const override = zend_hash_str_find(mount->mime_overrides, ext, ext_len);
+			const zval *override = zend_hash_str_find(mount->mime_overrides, ext, ext_len);
 			if (override != NULL && Z_TYPE_P(override) == IS_STRING) {
 				*out = Z_STRVAL_P(override);
 				*out_len = Z_STRLEN_P(override);
@@ -216,7 +216,7 @@ static bool resolved_under_root(const http_static_handler_t *mount, const char *
 		return false;
 	}
 
-	const char *const root = ZSTR_VAL(mount->root_directory);
+	const char *root = ZSTR_VAL(mount->root_directory);
 	const size_t root_len = ZSTR_LEN(mount->root_directory);
 
 	if (strncmp(canonical, root, root_len) != 0) {
@@ -435,14 +435,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 	/* request->path is built lazily by the PHP-side getter; req->uri is
 	 * always populated by the parser. http_static_path_resolve strips
 	 * '?' and '#' so the whole URI is safe to feed in. */
-	const char *const req_path = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
+	const char *req_path = (request->uri != NULL) ? ZSTR_VAL(request->uri) : NULL;
 	const size_t req_path_len = (request->uri != NULL) ? ZSTR_LEN(request->uri) : 0;
 	if (UNEXPECTED(req_path == NULL || req_path_len == 0)) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
 
 	for (size_t mi = 0; mi < mount_count; mi++) {
-		const http_static_handler_t *const mount = http_static_handler_get(server, mi);
+		const http_static_handler_t *mount = http_static_handler_get(server, mi);
 		if (UNEXPECTED(mount == NULL)) {
 			continue;
 		}
@@ -502,7 +502,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		if (was_directory) {
 			bool index_resolved = false;
 			for (size_t ii = 0; ii < mount->index_count; ii++) {
-				const zend_string *const idx = mount->index_files[ii];
+				const zend_string *idx = mount->index_files[ii];
 				size_t cand_len = fs_path_len;
 				if (UNEXPECTED(!http_static_path_join(fs_path, sizeof(fs_path), &cand_len,
 													  ZSTR_VAL(idx), ZSTR_LEN(idx)))) {
@@ -597,7 +597,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		 * is wired (H1, H2). H3 stub leaves it NULL — fall through to
 		 * the synchronous slurp path below. http_static_dispatch_cbs_t
 		 * is now an alias of send_file_cbs_t — pass it straight through. */
-		const http_response_stream_ops_t *const ops = http_response_get_stream_ops(response_obj);
+		const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
 		if (gate_ok && ops != NULL && ops->send_static_response != NULL) {
 			send_file_config_t cfg = {0};
 			cfg.abs_path = fs_path;
@@ -695,8 +695,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		char last_modified_buf[HTTP_DATE_BUF_LEN];
 		http_date_format_imf(st.st_mtime, last_modified_buf);
 
-		const zend_string *const if_none_match = http_request_find_header(request, "if-none-match", 13);
-		const zend_string *const if_modified_since =
+		const zend_string *if_none_match = http_request_find_header(request, "if-none-match", 13);
+		const zend_string *if_modified_since =
 			http_request_find_header(request, "if-modified-since", 17);
 		const bool not_modified = http_conditional_check(
 			if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,

@@ -93,13 +93,13 @@ static void merge_vary_accept_encoding(HashTable *ht)
     static const char AE[]   = "Accept-Encoding";
     const size_t      AE_LEN = sizeof(AE) - 1;
 
-    zval *const existing = zend_hash_str_find(ht, V, sizeof(V) - 1);
+    zval *existing = zend_hash_str_find(ht, V, sizeof(V) - 1);
     if (existing == NULL) {
         put_header_string(ht, V, sizeof(V) - 1, AE, AE_LEN);
         return;
     }
     if (EXPECTED(Z_TYPE_P(existing) == IS_STRING)) {
-        const char *const cur = Z_STRVAL_P(existing);
+        const char *cur = Z_STRVAL_P(existing);
         const size_t      cl  = Z_STRLEN_P(existing);
         /* Already mentions Accept-Encoding (case-insensitive needle)?
          * Loop bound guarantees no read past the buffer end. */
@@ -109,7 +109,7 @@ static void merge_vary_accept_encoding(HashTable *ht)
             }
         }
         /* Build "<cur>, Accept-Encoding" in one allocation, store it. */
-        zend_string *const merged = zend_string_alloc(cl + 2 + AE_LEN, 0);
+        zend_string *merged = zend_string_alloc(cl + 2 + AE_LEN, 0);
         memcpy(ZSTR_VAL(merged), cur, cl);
         memcpy(ZSTR_VAL(merged) + cl, ", ", 2);
         memcpy(ZSTR_VAL(merged) + cl + 2, AE, AE_LEN);
@@ -251,7 +251,7 @@ static http_codec_id_t decide(http_compression_state_t *st,
 /* Pick the configured level for a codec. Each backend clamps internally,
  * so out-of-range values are still safe — this just keeps the call site
  * codec-agnostic. */
-static inline int level_for_codec(const http_server_config_t *const cfg,
+static inline int level_for_codec(const http_server_config_t *cfg,
                                   const http_codec_id_t codec)
 {
     switch (codec) {
@@ -327,9 +327,9 @@ void http_compression_apply_buffered(zend_object *response_obj)
         return;
     }
 
-    const http_encoder_vtable_t *const vt = http_compression_lookup(codec);
+    const http_encoder_vtable_t *vt = http_compression_lookup(codec);
     if (UNEXPECTED(vt == NULL)) return;
-    http_encoder_t *const enc = vt->create(level_for_codec(st->cfg, codec));
+    http_encoder_t *enc = vt->create(level_for_codec(st->cfg, codec));
     if (UNEXPECTED(enc == NULL)) return;
 
     /* Pre-size for the worst-case output: gzip overhead on text is
@@ -340,7 +340,7 @@ void http_compression_apply_buffered(zend_object *response_obj)
     smart_str out = {0};
     smart_str_alloc(&out, body_len + 64, 0);
 
-    const unsigned char *const in = (const unsigned char *)ZSTR_VAL(body->s);
+    const unsigned char *in = (const unsigned char *)ZSTR_VAL(body->s);
     size_t fed = 0;
 
     /* write() drain. smart_str_alloc on NEED_OUTPUT instead of every
@@ -413,7 +413,7 @@ typedef struct {
  * wire. Compared with emitting per-loop slices, this trades a small
  * temporary buffer for fewer protocol-level frames (H2 DATA / chunked
  * size-line). zs is consumed; the underlying owns the refcount. */
-static int forward_compressed(ws_ctx_t *const w, zend_string *zs)
+static int forward_compressed(ws_ctx_t *w, zend_string *zs)
 {
     if (UNEXPECTED(zs == NULL || ZSTR_LEN(zs) == 0)) {
         if (zs) zend_string_release(zs);
@@ -424,7 +424,7 @@ static int forward_compressed(ws_ctx_t *const w, zend_string *zs)
 
 static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
 {
-    ws_ctx_t *const w = (ws_ctx_t *)ctx_opaque;
+    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
 
     if (UNEXPECTED(!w->first_chunk_done)) {
         /* Header mutation deferred to first chunk: by now the handler
@@ -441,7 +441,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
      * single chunk. Avoids one zend_string_init + one append_chunk
      * round-trip per inner pass — relevant for chunked H1 (per-chunk
      * size line + CRLF on the wire) and H2 (one DATA frame per call). */
-    const unsigned char *const in = (const unsigned char *)ZSTR_VAL(chunk);
+    const unsigned char *in = (const unsigned char *)ZSTR_VAL(chunk);
     const size_t in_len = ZSTR_LEN(chunk);
     smart_str out = {0};
     /* Pre-size: gzipped text is typically <50% of source. The estimate
@@ -482,7 +482,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
 
 static void ws_mark_ended(void *ctx_opaque)
 {
-    ws_ctx_t *const w = (ws_ctx_t *)ctx_opaque;
+    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
     /* Drain finish() into the underlying stream. If the handler never
      * sent a single byte we still need to commit headers, encode the
      * empty stream's footer (10-byte gzip header + CRC trailer), and
@@ -523,7 +523,7 @@ static void ws_mark_ended(void *ctx_opaque)
 
 static zend_async_event_t *ws_get_wait_event(void *ctx_opaque)
 {
-    ws_ctx_t *const w = (ws_ctx_t *)ctx_opaque;
+    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
     return w->underlying_ops->get_wait_event(w->underlying_ctx);
 }
 
@@ -544,9 +544,9 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     const http_codec_id_t codec = decide(st, response_obj, 0);
     if (codec == HTTP_CODEC_IDENTITY) return;
 
-    const http_encoder_vtable_t *const vt = http_compression_lookup(codec);
+    const http_encoder_vtable_t *vt = http_compression_lookup(codec);
     if (UNEXPECTED(vt == NULL)) return;
-    http_encoder_t *const enc = vt->create(level_for_codec(st->cfg, codec));
+    http_encoder_t *enc = vt->create(level_for_codec(st->cfg, codec));
     if (UNEXPECTED(enc == NULL)) return;
 
     const http_response_stream_ops_t *under_ops =

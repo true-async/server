@@ -60,7 +60,7 @@ bool detect_and_assign_protocol(http_connection_t *conn)
     const uint32_t server_mask = http_server_get_protocol_mask(conn->server);
     const uint32_t listener_mask = conn->protocol_mask ? conn->protocol_mask : server_mask;
     const http_protocol_mask_t mask = (http_protocol_mask_t)(listener_mask & server_mask);
-    const char *const data = conn->read_buffer;
+    const char *data = conn->read_buffer;
     const size_t len       = conn->read_buffer_len;
 
     if (UNEXPECTED(data == NULL || len < MIN_DETECTION_BYTES)) {

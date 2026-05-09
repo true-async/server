@@ -570,7 +570,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailers)
         if (name == NULL || Z_TYPE_P(value_zv) != IS_STRING) {
             continue;
         }
-        zend_string *const lname = zend_string_tolower(name);
+        zend_string *lname = zend_string_tolower(name);
         zval v;
         ZVAL_STR_COPY(&v, Z_STR_P(value_zv));
         zend_hash_update(response->trailers, lname, &v);
@@ -737,7 +737,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream)
 void http_response_set_default_json_flags(zend_object *obj, uint32_t flags)
 {
     if (UNEXPECTED(obj == NULL)) return;
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     response->default_json_flags = flags;
 }
 
@@ -774,7 +774,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
         Z_PARAM_LONG(flags)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response_check_closed(response)) {
         return;
@@ -796,7 +796,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
     if (!zend_hash_str_exists(response->headers, "content-type", sizeof("content-type") - 1)) {
         zval ct;
         ZVAL_STRING(&ct, "application/json");
-        zend_string *const ct_name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
+        zend_string *ct_name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
         add_header_value(response->headers, ct_name, &ct, true);
         zend_string_release(ct_name);
         zval_ptr_dtor(&ct);
@@ -928,7 +928,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
         Z_PARAM_STR(chunk)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -1007,7 +1007,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
         Z_PARAM_OBJECT_OF_CLASS_OR_NULL(options_zv, http_send_file_options_ce)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -1043,7 +1043,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
 
     /* Per-call validation. RFC says no CR/LF in header values; status
      * range matches the rest of the API. */
-    const http_send_file_options_t *const opts = &req->opts;
+    const http_send_file_options_t *opts = &req->opts;
     if (opts->status != 0 && (opts->status < 100 || opts->status > 599)) {
         http_send_file_request_free(req);
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -1296,7 +1296,7 @@ HashTable *http_response_get_headers_table(zend_object *obj)
 
 zend_string *http_response_get_body_string(zend_object *obj)
 {
-    smart_str *const b = &http_response_from_obj(obj)->body;
+    smart_str *b = &http_response_from_obj(obj)->body;
     if (b->s == NULL || ZSTR_LEN(b->s) == 0) {
         return NULL;
     }
@@ -1307,8 +1307,8 @@ zend_string *http_response_get_body_string(zend_object *obj)
 /* sendFile descriptor accessors used by the dispose path (issue #13). */
 http_send_file_request_t *http_response_take_send_file(zend_object *obj)
 {
-    http_response_object *const r = http_response_from_obj(obj);
-    http_send_file_request_t *const req = r->send_file_req;
+    http_response_object *r = http_response_from_obj(obj);
+    http_send_file_request_t *req = r->send_file_req;
     r->send_file_req = NULL;
     return req;
 }
@@ -1394,7 +1394,7 @@ const char *http_response_status_line_http11(const int code, size_t *out_len)
     if (code <= 0 || (size_t) code >= HTTP11_STATUS_LINES_CNT) {
         return NULL;
     }
-    const http_status_line_t *const e = &http11_status_lines[code];
+    const http_status_line_t *e = &http11_status_lines[code];
     if (e->line == NULL) {
         return NULL;
     }
@@ -1465,14 +1465,14 @@ static void emit_headers_only(smart_str *out, HashTable *headers)
     ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
         if (UNEXPECTED(name == NULL)) continue;
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            const zend_string *const v = Z_STR_P(values);
+            const zend_string *v = Z_STR_P(values);
             append_header_line(out, ZSTR_VAL(name), ZSTR_LEN(name),
                                ZSTR_VAL(v), ZSTR_LEN(v));
         } else if (Z_TYPE_P(values) == IS_ARRAY) {
             zval *val;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
                 if (Z_TYPE_P(val) != IS_STRING) continue;
-                const zend_string *const v = Z_STR_P(val);
+                const zend_string *v = Z_STR_P(val);
                 append_header_line(out, ZSTR_VAL(name), ZSTR_LEN(name),
                                    ZSTR_VAL(v), ZSTR_LEN(v));
             } ZEND_HASH_FOREACH_END();
@@ -1624,14 +1624,14 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
             continue;
         }
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            const zend_string *const v = Z_STR_P(values);
+            const zend_string *v = Z_STR_P(values);
             append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
                                ZSTR_VAL(v), ZSTR_LEN(v));
         } else if (Z_TYPE_P(values) == IS_ARRAY) {
             zval *val;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
                 if (Z_TYPE_P(val) != IS_STRING) continue;
-                const zend_string *const v = Z_STR_P(val);
+                const zend_string *v = Z_STR_P(val);
                 append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
                                    ZSTR_VAL(v), ZSTR_LEN(v));
             } ZEND_HASH_FOREACH_END();
@@ -1739,7 +1739,7 @@ void http_response_install_stream_ops(zend_object *obj,
                                       const http_response_stream_ops_t *ops,
                                       void *ctx)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     response->stream_ops = ops;
     response->stream_ctx = ctx;
 }
@@ -1751,9 +1751,9 @@ void http_response_install_stream_ops(zend_object *obj,
  * header, so this is safe regardless of what the handler wrote. */
 void http_response_force_connection_close(zend_object *obj)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
 
-    zend_string *const key = zend_string_init("connection", sizeof("connection") - 1, 0);
+    zend_string *key = zend_string_init("connection", sizeof("connection") - 1, 0);
 
     zval value_zv, arr;
     ZVAL_STRINGL(&value_zv, "close", 5);
@@ -1773,11 +1773,11 @@ void http_response_force_connection_close(zend_object *obj)
 void http_response_set_alt_svc_if_unset(zend_object *obj,
                                         const char *value, size_t valuelen)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     if (response->headers == NULL || value == NULL || valuelen == 0) {
         return;
     }
-    zend_string *const key =
+    zend_string *key =
         zend_string_init("alt-svc", sizeof("alt-svc") - 1, 0);
     if (zend_hash_exists(response->headers, key)) {
         zend_string_release(key);
@@ -1800,7 +1800,7 @@ HashTable *http_response_get_trailers(zend_object *obj)
 
 const char *http_response_get_body(zend_object *obj, size_t *len_out)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     smart_str_0(&response->body);
     if (response->body.s == NULL) {
         if (len_out != NULL) { *len_out = 0; }
@@ -1812,7 +1812,7 @@ const char *http_response_get_body(zend_object *obj, size_t *len_out)
 
 zend_string *http_response_get_body_str(zend_object *obj)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     smart_str_0(&response->body);
     return response->body.s;  /* may be NULL */
 }
@@ -1827,7 +1827,7 @@ zend_string *http_response_get_body_str(zend_object *obj)
  * and there is no PHP code path that could have flipped those bits. */
 void http_response_static_set_status(zend_object *obj, int status_code)
 {
-    http_response_object *const r = http_response_from_obj(obj);
+    http_response_object *r = http_response_from_obj(obj);
     r->status_code = status_code;
 }
 
@@ -1835,7 +1835,7 @@ void http_response_static_set_header(zend_object *obj,
                                      const char *name, size_t name_len,
                                      const char *value, size_t value_len)
 {
-    http_response_object *const r = http_response_from_obj(obj);
+    http_response_object *r = http_response_from_obj(obj);
     /* Header names are stored lowercased — reader paths assume it. */
     zend_string *lower_name = zend_string_alloc(name_len, 0);
     for (size_t i = 0; i < name_len; i++) {
@@ -1853,7 +1853,7 @@ void http_response_static_set_header(zend_object *obj,
 
 void http_response_static_set_body_str(zend_object *obj, zend_string *body)
 {
-    http_response_object *const r = http_response_from_obj(obj);
+    http_response_object *r = http_response_from_obj(obj);
     smart_str_free(&r->body);
     if (body != NULL && ZSTR_LEN(body) > 0) {
         smart_str_appendl(&r->body, ZSTR_VAL(body), ZSTR_LEN(body));
@@ -1868,7 +1868,7 @@ void http_response_static_set_body_str(zend_object *obj, zend_string *body)
 void http_response_static_set_body_cstr(zend_object *obj,
                                         const char *body, size_t body_len)
 {
-    http_response_object *const r = http_response_from_obj(obj);
+    http_response_object *r = http_response_from_obj(obj);
     smart_str_free(&r->body);
     if (body != NULL && body_len > 0) {
         smart_str_appendl(&r->body, body, body_len);

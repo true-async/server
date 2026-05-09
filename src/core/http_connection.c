@@ -1261,6 +1261,7 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
         if (buf != NULL) { efree(buf); }
         return true;
     }
+
     if (UNEXPECTED(conn->write_timed_out)) {
         efree(buf);
         return false;
@@ -1307,6 +1308,7 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
         zend_string_release(body);
         return true;
     }
+
     if (UNEXPECTED(conn->write_timed_out)) {
         zend_string_release(body);
         return false;
@@ -1412,7 +1414,7 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
     if (conn->current_request == NULL || conn->current_request->coroutine == NULL) {
         return;
     }
-    zend_coroutine_t *const h = conn->current_request->coroutine;
+    zend_coroutine_t *h = conn->current_request->coroutine;
     conn->current_request->coroutine = NULL;
 
     const http_parse_error_t err = conn->parser ? conn->parser->parse_error
@@ -1432,7 +1434,7 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
      * via zend_read_property to construct the response. */
     zval exception_zv, message_zv, code_zv;
     object_init_ex(&exception_zv, http_exception_ce);
-    zend_object *const exc = Z_OBJ(exception_zv);
+    zend_object *exc = Z_OBJ(exception_zv);
 
     ZVAL_STRING(&message_zv, reason);
     zend_update_property_ex(http_exception_ce, exc,
@@ -1486,7 +1488,7 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
      * for the given request, so retry would be pointless. */
     char response[256];
     const size_t reason_len = strlen(reason);
-    const char *const extra_hdr = (status == 503) ? "Retry-After: 1\r\n" : "";
+    const char *extra_hdr = (status == 503) ? "Retry-After: 1\r\n" : "";
     const int n = snprintf(response, sizeof(response),
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: text/plain; charset=utf-8\r\n"
@@ -1566,8 +1568,8 @@ bool http_connection_send_error(http_connection_t *conn, const int status_code, 
  * http1_request_ctx_t for the request; conn is ctx->conn. */
 static void h1_static_on_hard_zero_armed(void *user)
 {
-    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
-    http_connection_t *const conn = ctx->conn;
+    http1_request_ctx_t *ctx = (http1_request_ctx_t *)user;
+    http_connection_t *conn = ctx->conn;
     /* Pin the conn for the duration of the static FSM — paired with
      * the drop in h1_static_on_static_done. Mirrors the bracket the
      * coroutine path puts around its handler invocation. */
@@ -1579,8 +1581,8 @@ static void h1_static_on_hard_zero_armed(void *user)
 static void h1_static_on_static_done(void *user, int status)
 {
     (void)status;
-    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
-    http_connection_t *const conn = ctx->conn;
+    http1_request_ctx_t *ctx = (http1_request_ctx_t *)user;
+    http_connection_t *conn = ctx->conn;
 
     /* Pair the on_request_dispatch fired in on_hard_zero_armed. */
     http_server_on_request_dispose(conn->counters);
@@ -1598,8 +1600,8 @@ static void h1_static_on_static_done(void *user, int status)
 
 static void h1_static_on_passthrough_to_php(void *user)
 {
-    http1_request_ctx_t *const ctx = (http1_request_ctx_t *)user;
-    http_connection_t *const conn = ctx->conn;
+    http1_request_ctx_t *ctx = (http1_request_ctx_t *)user;
+    http_connection_t *conn = ctx->conn;
 
     /* Spawn the regular PHP-handler coroutine — same shape as the
      * dispatch tail below, but as a continuation from the FSM. Counters
@@ -1638,7 +1640,7 @@ static void h1_static_on_passthrough_to_php(void *user)
 
 static bool h1_static_keep_alive(void *user)
 {
-    const http1_request_ctx_t *const ctx = (const http1_request_ctx_t *)user;
+    const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)user;
     return ctx->conn->keep_alive;
 }
 
@@ -1665,9 +1667,9 @@ typedef struct {
 static void h1_sendfile_on_done(void *user, int status)
 {
     (void)status;
-    h1_sendfile_user_t *const u = (h1_sendfile_user_t *)user;
-    http_connection_t *const conn = u->conn;
-    http1_request_ctx_t *const ctx = u->ctx;
+    h1_sendfile_user_t *u = (h1_sendfile_user_t *)user;
+    http_connection_t *conn = u->conn;
+    http1_request_ctx_t *ctx = u->ctx;
     const bool should_continue = u->should_continue;
     efree(u);
 
@@ -1679,7 +1681,7 @@ bool h1_sendfile_arm(http_connection_t *conn,
                      http_send_file_request_t *req,
                      bool should_continue)
 {
-    h1_sendfile_user_t *const u = ecalloc(1, sizeof(*u));
+    h1_sendfile_user_t *u = ecalloc(1, sizeof(*u));
     u->conn = conn;
     u->ctx  = ctx;
     u->should_continue = should_continue;
@@ -2087,7 +2089,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     if (coroutine->exception != NULL
         && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {
         zval rv;
-        zend_object *const exc = coroutine->exception;
+        zend_object *exc = coroutine->exception;
 
         zval *code_zv = zend_read_property_ex(exc->ce, exc, ZSTR_KNOWN(ZEND_STR_CODE), 1, &rv);
         const zend_long code = (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG)
@@ -2158,7 +2160,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * stat's it, writes the head + body via send_static_response, and
      * runs http_request_finalize on completion. */
     {
-        http_send_file_request_t *const sf_req =
+        http_send_file_request_t *sf_req =
             http_response_take_send_file(Z_OBJ(ctx->response_zv));
         if (sf_req != NULL) {
             if (h1_sendfile_arm(conn, ctx, sf_req, conn->keep_alive)) {

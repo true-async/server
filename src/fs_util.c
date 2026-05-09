@@ -21,7 +21,7 @@ zend_string *fs_slurp_fd(const int fd, const size_t expected_size)
 	if (expected_size == 0) {
 		return ZSTR_EMPTY_ALLOC();
 	}
-	zend_string *const out = zend_string_alloc(expected_size, 0);
+	zend_string *out = zend_string_alloc(expected_size, 0);
 	size_t total = 0;
 
 	while (total < expected_size) {

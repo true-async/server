@@ -203,7 +203,7 @@ static void http_compression_mime_table_init(HashTable **dst)
  * adding a key already present is a no-op for set semantics. */
 static void http_compression_mime_table_load_defaults(HashTable *dst)
 {
-    for (const char *const *p = http_compression_default_mime_types; *p != NULL; p++) {
+    for (const char **p = http_compression_default_mime_types; *p != NULL; p++) {
         zval one;
         ZVAL_TRUE(&one);
         zend_hash_str_update(dst, *p, strlen(*p), &one);
@@ -2210,6 +2210,7 @@ static void http_server_config_free(zend_object *obj)
     if (config->tls_cert_path) {
         zend_string_release(config->tls_cert_path);
     }
+
     if (config->tls_key_path) {
         zend_string_release(config->tls_key_path);
     }

@@ -46,7 +46,7 @@ static http_encoder_t *br_create(int level)
     if (level < HTTP_COMPRESSION_BROTLI_LEVEL_MIN) level = HTTP_COMPRESSION_BROTLI_LEVEL_MIN;
     if (level > HTTP_COMPRESSION_BROTLI_LEVEL_MAX) level = HTTP_COMPRESSION_BROTLI_LEVEL_MAX;
 
-    BrotliEncoderState *const st = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+    BrotliEncoderState *st = BrotliEncoderCreateInstance(NULL, NULL, NULL);
     if (UNEXPECTED(st == NULL)) return NULL;
     /* BROTLI_PARAM_MODE left at default (BROTLI_MODE_GENERIC) — text-only
      * (BROTLI_MODE_TEXT) gives a ~1-2% better ratio on JSON/HTML but the
@@ -57,7 +57,7 @@ static http_encoder_t *br_create(int level)
         return NULL;
     }
 
-    brotli_encoder_t *const enc = ecalloc(1, sizeof(*enc));
+    brotli_encoder_t *enc = ecalloc(1, sizeof(*enc));
     enc->base.vt = &http_compression_brotli_vt;
     enc->state   = st;
     return &enc->base;
@@ -67,13 +67,13 @@ static http_encoder_t *br_create(int level)
  * output. Returns produced bytes; advances state internally. Used as a
  * tail step after CompressStream when the caller-supplied buffer was
  * smaller than the encoded payload. */
-static size_t br_drain_output(BrotliEncoderState *const st,
-                              unsigned char *const out, const size_t out_cap)
+static size_t br_drain_output(BrotliEncoderState *st,
+                              unsigned char *out, const size_t out_cap)
 {
     size_t produced = 0;
     while (BrotliEncoderHasMoreOutput(st) && produced < out_cap) {
         size_t avail = out_cap - produced;
-        const uint8_t *const p = BrotliEncoderTakeOutput(st, &avail);
+        const uint8_t *p = BrotliEncoderTakeOutput(st, &avail);
         if (UNEXPECTED(p == NULL || avail == 0)) break;
         memcpy(out + produced, p, avail);
         produced += avail;
@@ -85,7 +85,7 @@ static http_encoder_status_t br_write(http_encoder_t *base,
                                       const void *in,  size_t in_len,  size_t *in_consumed,
                                       void       *out, size_t out_cap, size_t *out_produced)
 {
-    brotli_encoder_t *const enc = (brotli_encoder_t *)base;
+    brotli_encoder_t *enc = (brotli_encoder_t *)base;
 
     /* Pass the caller buffer directly: brotli writes into it when there
      * is room, only spilling into the internal buffer if more output is
@@ -124,7 +124,7 @@ static http_encoder_status_t br_write(http_encoder_t *base,
 static http_encoder_status_t br_finish(http_encoder_t *base,
                                        void *out, size_t out_cap, size_t *out_produced)
 {
-    brotli_encoder_t *const enc = (brotli_encoder_t *)base;
+    brotli_encoder_t *enc = (brotli_encoder_t *)base;
 
     /* Issue FINISH only once; subsequent calls just drain. Brotli
      * tolerates re-issued FINISH after IsFinished, but skipping the
@@ -191,7 +191,7 @@ int http_compression_decode_request_brotli(http_request_t *req, size_t cap)
         return HTTP_DECODE_OK;
     }
 
-    BrotliDecoderState *const st = BrotliDecoderCreateInstance(NULL, NULL, NULL);
+    BrotliDecoderState *st = BrotliDecoderCreateInstance(NULL, NULL, NULL);
     if (UNEXPECTED(st == NULL)) {
         return HTTP_DECODE_MALFORMED;
     }

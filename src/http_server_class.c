@@ -738,7 +738,7 @@ bool http_server_should_shed_request(const http_server_object *server)
 /* Alt-Svc value pre-rendered at start(). NULL when no H3
  * listener is up or PHP_HTTP3_DISABLE_ALT_SVC is set. Returned
  * pointer is owned by the server object; do not release. */
-zend_string *http_server_get_alt_svc_value(const http_server_object *const server)
+zend_string *http_server_get_alt_svc_value(const http_server_object *server)
 {
 #ifdef HAVE_HTTP_SERVER_HTTP3
     return server != NULL ? server->alt_svc_header_value : NULL;
@@ -748,7 +748,7 @@ zend_string *http_server_get_alt_svc_value(const http_server_object *const serve
 #endif
 }
 
-uint64_t http_server_get_max_connection_age_ns(const http_server_object *const server)
+uint64_t http_server_get_max_connection_age_ns(const http_server_object *server)
 {
     return server != NULL ? server->max_connection_age_ns : 0;
 }
@@ -773,12 +773,12 @@ const http_server_view_t http_server_view_default = {
 
 /* Counters / view accessors. Always return a non-NULL pointer; callers
  * cache once at create time. */
-http_server_counters_t *http_server_counters(http_server_object *const server)
+http_server_counters_t *http_server_counters(http_server_object *server)
 {
     return server != NULL ? &server->counters : &http_server_counters_dummy;
 }
 
-const http_server_view_t *http_server_view(const http_server_object *const server)
+const http_server_view_t *http_server_view(const http_server_object *server)
 {
     return server != NULL ? &server->view : &http_server_view_default;
 }
@@ -866,7 +866,7 @@ http_log_state_t *http_server_get_log_state(http_server_object *server)
     return server != NULL ? &server->log_state : &http_log_state_default;
 }
 
-void http_server_trigger_drain(http_server_object *const server)
+void http_server_trigger_drain(http_server_object *server)
 {
     if (server == NULL) {
         return;
@@ -896,7 +896,7 @@ void http_server_trigger_drain(http_server_object *const server)
  * (cannot have addresses taken) can write the updated values back
  * field-by-field. The proactive + reactive logic is identical to the
  * original should_drain_now — just unwound from struct access. */
-http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const server,
+http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
                                                     bool drain_pending,
                                                     uint64_t drain_not_before_ns,
                                                     uint64_t drain_epoch_seen,
@@ -938,8 +938,8 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *const se
     return r;
 }
 
-bool http_server_should_drain_now(http_server_object *const server,
-                                  http_connection_t *const conn,
+bool http_server_should_drain_now(http_server_object *server,
+                                  http_connection_t *conn,
                                   uint64_t now_ns)
 {
     if (conn == NULL) {
@@ -1413,10 +1413,10 @@ typedef struct {
     zend_async_event_callback_t  cb;          /* embedded — recovered via XtOffsetOf */
 } pool_await_state_t;
 
-static void pool_worker_handler(zend_async_event_t *event, void *const vctx)
+static void pool_worker_handler(zend_async_event_t *event, void *vctx)
 {
     (void)event;
-    pool_worker_ctx_t *const wctx = (pool_worker_ctx_t *)vctx;
+    pool_worker_ctx_t *wctx = (pool_worker_ctx_t *)vctx;
 
     zval server_zv;
     ZVAL_UNDEF(&server_zv);
@@ -1443,15 +1443,15 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     (void)event; (void)result; (void)exception;
     /* Callbacks fire on the parent thread (cross-thread wakeup is
      * already serialized by the reactor) — no atomicity needed. */
-    pool_await_state_t *const st = (pool_await_state_t *)
+    pool_await_state_t *st = (pool_await_state_t *)
         ((char *)cb - XtOffsetOf(pool_await_state_t, cb));
     if (--st->pending == 0 && st->all_done != NULL) {
         ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
     }
 }
 
-static int http_server_start_pool(http_server_object *const server,
-                                  zval *const this_zv,
+static int http_server_start_pool(http_server_object *server,
+                                  zval *this_zv,
                                   const int workers)
 {
     if (UNEXPECTED(zend_async_new_thread_pool_fn == NULL)) {
@@ -1463,7 +1463,7 @@ static int http_server_start_pool(http_server_object *const server,
     /* queue_size = workers so submit doesn't block before workers reach
      * the receive loop — fresh-pool boot-up is otherwise faster on the
      * parent than on worker threads. */
-    zend_async_thread_pool_t *const pool =
+    zend_async_thread_pool_t *pool =
         ZEND_ASYNC_NEW_THREAD_POOL((int32_t)workers, (int32_t)workers);
     if (UNEXPECTED(pool == NULL || pool->submit_internal == NULL)) {
         if (pool != NULL) {
@@ -1476,7 +1476,7 @@ static int http_server_start_pool(http_server_object *const server,
 
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
-    pool_worker_ctx_t *const ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
+    pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
     for (int i = 0; i < workers; i++) {
         ZVAL_UNDEF(&ctxs[i].server_transit);
         ZEND_ASYNC_THREAD_TRANSFER_ZVAL_TOPLEVEL(&ctxs[i].server_transit, this_zv);
@@ -1493,14 +1493,14 @@ static int http_server_start_pool(http_server_object *const server,
     server->pool_worker_ctx       = ctxs;
     server->pool_worker_ctx_count = workers;
 
-    pool_await_state_t *const st = ecalloc(1, sizeof(*st));
+    pool_await_state_t *st = ecalloc(1, sizeof(*st));
     st->pending = workers;
     st->all_done = create_server_wait_event();
     st->cb.callback = pool_worker_done_cb;
 
     int rc = FAILURE;
     for (int i = 0; i < workers; i++) {
-        zend_async_event_t *const worker_evt =
+        zend_async_event_t *worker_evt =
             pool->submit_internal(pool, pool_worker_handler, &ctxs[i]);
         if (UNEXPECTED(worker_evt == NULL)) {
             /* submit_internal failed mid-loop. Already-submitted workers
@@ -1521,7 +1521,7 @@ static int http_server_start_pool(http_server_object *const server,
      * entirely when nothing got submitted — there is no callback to
      * notify all_done, so awaiting on it would deadlock. */
     if (st->pending > 0) {
-        zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+        zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
         if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
             zend_throw_exception(http_server_runtime_exception_ce,
                 "Failed to create waker for pool parent", 0);
@@ -1808,7 +1808,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (Z_TYPE_P(tls_probe) != IS_ARRAY) {
                 continue;
             }
-            zval *const tls_flag =
+            zval *tls_flag =
                 zend_hash_str_find(Z_ARRVAL_P(tls_probe), "tls", 3);
             if (tls_flag != NULL && zend_is_true(tls_flag)) {
                 any_tls_listener = true;
@@ -1823,9 +1823,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL,
                                            "getPrivateKey", &key_zv);
 
-            const char *const cert_path =
+            const char *cert_path =
                 (Z_TYPE(cert_zv) == IS_STRING) ? Z_STRVAL(cert_zv) : NULL;
-            const char *const key_path =
+            const char *key_path =
                 (Z_TYPE(key_zv)  == IS_STRING) ? Z_STRVAL(key_zv)  : NULL;
 
             char tls_err[TLS_ERR_BUF_SIZE];
@@ -1857,7 +1857,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (Z_TYPE_P(tls_probe) != IS_ARRAY) {
                 continue;
             }
-            zval *const tls_flag =
+            zval *tls_flag =
                 zend_hash_str_find(Z_ARRVAL_P(tls_probe), "tls", 3);
             if (tls_flag != NULL && zend_is_true(tls_flag)) {
                 zval_ptr_dtor(&listeners_zval);
@@ -2649,7 +2649,7 @@ static void http_server_free(zend_object *obj)
      * non-NULL only for parent servers that ran with workers > 1.
      * Each entry's persistent zval shell is released here. */
     if (server->pool_worker_ctx != NULL) {
-        pool_worker_ctx_t *const ctxs = server->pool_worker_ctx;
+        pool_worker_ctx_t *ctxs = server->pool_worker_ctx;
         for (int i = 0; i < server->pool_worker_ctx_count; i++) {
             ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[i].server_transit);
         }
@@ -2679,6 +2679,7 @@ static void http_server_free(zend_object *obj)
         efree(server->static_handler_mounts);
         server->static_handler_mounts = NULL;
     }
+
     if (server->static_handler_objects != NULL) {
         efree(server->static_handler_objects);
         server->static_handler_objects = NULL;
@@ -2919,6 +2920,7 @@ static zend_object *http_server_transfer_obj(
                 efree(fcall);
                 continue;
             }
+
             if (error_str) {
                 efree(error_str);
             }

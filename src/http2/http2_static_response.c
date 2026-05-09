@@ -70,7 +70,7 @@ extern void http2_static_drain_to_socket(http_connection_t *conn,
 
 /* Forbidden / HTTP/1-only response headers per RFC 9113 §8.2.2.
  * Mirrors the strategy's response_header_allowed but kept local. */
-static bool h2_static_header_allowed(const char *const name, const size_t len)
+static bool h2_static_header_allowed(const char *name, const size_t len)
 {
     if (len == 10 && strncasecmp(name, "connection",        10) == 0) return false;
     if (len == 10 && strncasecmp(name, "keep-alive",        10) == 0) return false;
@@ -105,8 +105,8 @@ static void h2_static_finalize(h2_static_state_t *state, int status)
         state->file_io = NULL;
     }
 
-    void (*const on_done)(void *, int) = state->on_done;
-    void *const user = state->user;
+    void (*on_done)(void *, int) = state->on_done;
+    void *user = state->user;
     const bool fire = !state->done_fired && on_done != NULL;
     state->done_fired = true;
 
@@ -130,23 +130,23 @@ static void h2_static_finalize(h2_static_state_t *state, int status)
  * peer reset the stream (non-zero). Dispose file_io + fire on_done. */
 static void h2_static_on_stream_close(void *user, uint32_t error_code)
 {
-    h2_static_state_t *const state = (h2_static_state_t *)user;
+    h2_static_state_t *state = (h2_static_state_t *)user;
     h2_static_finalize(state, error_code == NGHTTP2_NO_ERROR ? 0 : -1);
 }
 
-static ssize_t h2_static_data_read(nghttp2_session *const ng,
+static ssize_t h2_static_data_read(nghttp2_session *ng,
                                    const int32_t stream_id,
-                                   uint8_t *const buf,
+                                   uint8_t *buf,
                                    const size_t length,
-                                   uint32_t *const data_flags,
-                                   nghttp2_data_source *const source,
-                                   void *const user_data)
+                                   uint32_t *data_flags,
+                                   nghttp2_data_source *source,
+                                   void *user_data)
 {
     (void)ng;
     (void)stream_id;
     (void)user_data;
 
-    h2_static_state_t *const state = (h2_static_state_t *)source->ptr;
+    h2_static_state_t *state = (h2_static_state_t *)source->ptr;
     if (state == NULL || state->file_fd < 0) {
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
@@ -188,15 +188,15 @@ static ssize_t h2_static_data_read(nghttp2_session *const ng,
 /* Build nghttp2_nv[] (with leading :status) from response_obj. Returns
  * the heap allocation pointer (NULL if scratch was sufficient); the
  * filled view is written through *out_nv / *out_count. */
-static nghttp2_nv *h2_static_build_nv(zend_object *const response_obj,
+static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
                                       const int status,
-                                      char *const status_buf3,
-                                      nghttp2_nv *const scratch,
+                                      char *status_buf3,
+                                      nghttp2_nv *scratch,
                                       const size_t scratch_cap,
-                                      size_t *const out_count,
-                                      nghttp2_nv **const out_nv)
+                                      size_t *out_count,
+                                      nghttp2_nv **out_nv)
 {
-    HashTable *const headers = http_response_get_headers_table(response_obj);
+    HashTable *headers = http_response_get_headers_table(response_obj);
 
     size_t total_values = 1;
     if (headers != NULL) {
@@ -272,24 +272,24 @@ static nghttp2_nv *h2_static_build_nv(zend_object *const response_obj,
     return nv_heap;
 }
 
-int h2_stream_send_static_response(void *const ctx,
-                                   zend_object *const response_obj,
-                                   zend_async_io_t *const file_io,
+int h2_stream_send_static_response(void *ctx,
+                                   zend_object *response_obj,
+                                   zend_async_io_t *file_io,
                                    const uint64_t body_offset,
                                    const uint64_t body_length,
                                    const bool head_only_in,
-                                   void (*const on_done)(void *user, int status),
-                                   void *const user)
+                                   void (*on_done)(void *user, int status),
+                                   void *user)
 {
-    http2_stream_t *const stream = (http2_stream_t *)ctx;
+    http2_stream_t *stream = (http2_stream_t *)ctx;
     if (UNEXPECTED(stream == NULL || stream->session == NULL)) {
         return -1;
     }
-    http_connection_t *const conn = http2_session_get_conn(stream->session);
+    http_connection_t *conn = http2_session_get_conn(stream->session);
     if (UNEXPECTED(conn == NULL)) {
         return -1;
     }
-    nghttp2_session *const ng = http2_session_get_ng(stream->session);
+    nghttp2_session *ng = http2_session_get_ng(stream->session);
     if (UNEXPECTED(ng == NULL)) {
         return -1;
     }
@@ -302,7 +302,7 @@ int h2_stream_send_static_response(void *const ctx,
     nghttp2_nv *nv = NULL;
     size_t nv_count = 0;
     char status_buf[4];
-    nghttp2_nv *const nv_heap = h2_static_build_nv(response_obj, status_code,
+    nghttp2_nv *nv_heap = h2_static_build_nv(response_obj, status_code,
                                                    status_buf, scratch, 64,
                                                    &nv_count, &nv);
 
@@ -316,7 +316,7 @@ int h2_stream_send_static_response(void *const ctx,
             file_io->event.dispose(&file_io->event);
         }
 
-        zend_string *const inline_body = http_response_get_body_string(response_obj);
+        zend_string *inline_body = http_response_get_body_string(response_obj);
         const bool has_inline =
             inline_body != NULL && ZSTR_LEN(inline_body) > 0
             && status_code != 304 && status_code != 204;

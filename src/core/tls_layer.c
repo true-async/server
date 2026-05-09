@@ -186,7 +186,7 @@ static int tls_alpn_select_cb(SSL *ssl,
  * Apply the hardened default options to @p ssl_ctx. Split out so the
  * policy is readable at a glance.
  */
-static bool tls_apply_security_defaults(SSL_CTX *const ssl_ctx,
+static bool tls_apply_security_defaults(SSL_CTX *ssl_ctx,
                                         char *err_buf, size_t err_cap)
 {
     if (SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION) != 1 ||
@@ -328,7 +328,7 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
 
     if (enc == 1) {
         tls_maybe_rotate_ticket_keys(ctx);
-        tls_ticket_key_t *const k = &ctx->ticket_keys[0];
+        tls_ticket_key_t *k = &ctx->ticket_keys[0];
         if (!k->valid) return -1;
 
         memcpy(key_name, k->name, sizeof(k->name));
@@ -363,7 +363,7 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
     if (hit < 0) {
         return 0; /* unknown key — full handshake */
     }
-    tls_ticket_key_t *const k = &ctx->ticket_keys[hit];
+    tls_ticket_key_t *k = &ctx->ticket_keys[hit];
     if (EVP_DecryptInit_ex(cipher_ctx, EVP_aes_256_cbc(), NULL,
                            k->aes_key, iv) != 1) {
         return -1;
@@ -442,7 +442,7 @@ tls_context_t *tls_context_new(const char *cert_path,
     (void)ngtcp2_crypto_ossl_init();
 #endif
 
-    SSL_CTX *const ssl_ctx = SSL_CTX_new(TLS_server_method());
+    SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
     if (ssl_ctx == NULL) {
         tls_format_error(err_buf, err_cap, "SSL_CTX_new failed", NULL);
         return NULL;
@@ -474,7 +474,7 @@ tls_context_t *tls_context_new(const char *cert_path,
         return NULL;
     }
 
-    tls_context_t *const ctx = pemalloc(sizeof(*ctx), 0);
+    tls_context_t *ctx = pemalloc(sizeof(*ctx), 0);
     memset(ctx, 0, sizeof(*ctx));
     ctx->ctx       = ssl_ctx;
     ctx->cert_path = zend_string_init(cert_path, strlen(cert_path), 0);
@@ -505,6 +505,7 @@ void tls_context_free(tls_context_t *ctx)
         zend_string_release(ctx->cert_path);
         ctx->cert_path = NULL;
     }
+
     if (ctx->key_path != NULL) {
         zend_string_release(ctx->key_path);
         ctx->key_path = NULL;
@@ -519,7 +520,7 @@ void tls_context_free(tls_context_t *ctx)
  * Per-connection session (BIO pair + I/O state machine).
  * ------------------------------------------------------------------------- */
 
-static const char *const tls_op_names_table[] = {
+static const char *tls_op_names_table[] = {
     [TLS_OP_NONE]      = "none",
     [TLS_OP_HANDSHAKE] = "handshake",
     [TLS_OP_READ]      = "read",
@@ -534,7 +535,7 @@ const char *tls_op_name(const tls_op_t op)
     if ((size_t)op >= (sizeof(tls_op_names_table) / sizeof(tls_op_names_table[0]))) {
         return "unknown";
     }
-    const char *const name = tls_op_names_table[op];
+    const char *name = tls_op_names_table[op];
     return name != NULL ? name : "unknown";
 }
 
@@ -551,16 +552,16 @@ const char *tls_op_name(const tls_op_t op)
  * @p fallback_reason is used when ERR_peek_last_error() returns 0 (BIO
  * primitives often fail without pushing an error). May be NULL.
  */
-static void tls_session_record_error(tls_session_t *const session,
+static void tls_session_record_error(tls_session_t *session,
                                      const tls_op_t op,
                                      const int ssl_err,
                                      const size_t bytes_done,
-                                     const char *const fallback_reason)
+                                     const char *fallback_reason)
 {
     if (session == NULL) {
         return;
     }
-    tls_error_info_t *const err = &session->last_error;
+    tls_error_info_t *err = &session->last_error;
     err->op            = op;
     err->ssl_err       = ssl_err;
     err->openssl_err   = ERR_peek_last_error();
@@ -587,7 +588,7 @@ static void tls_session_record_error(tls_session_t *const session,
  * OpenSSL error stack is drained (inside tls_session_record_error) to
  * prevent stale entries from leaking into the next operation.
  */
-static tls_io_result_t tls_classify_ssl_error(tls_session_t *const session,
+static tls_io_result_t tls_classify_ssl_error(tls_session_t *session,
                                               const int rc,
                                               const tls_op_t op,
                                               const size_t bytes_done)
@@ -617,7 +618,7 @@ static tls_io_result_t tls_classify_ssl_error(tls_session_t *const session,
  * transitions to TLS_ESTABLISHED; after that the protocol strategy
  * dispatches based on session->alpn_selected.
  */
-static tls_alpn_t tls_lookup_alpn(SSL *const ssl)
+static tls_alpn_t tls_lookup_alpn(SSL *ssl)
 {
     const unsigned char *proto = NULL;
     unsigned int proto_len = 0;
@@ -643,7 +644,7 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
         return NULL;
     }
 
-    SSL *const ssl = SSL_new(ctx->ctx);
+    SSL *ssl = SSL_new(ctx->ctx);
     if (ssl == NULL) {
         ERR_clear_error();
         return NULL;
@@ -665,7 +666,7 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
     SSL_set_bio(ssl, internal_bio, internal_bio);
     SSL_set_accept_state(ssl);
 
-    tls_session_t *const session = pemalloc(sizeof(*session), 0);
+    tls_session_t *session = pemalloc(sizeof(*session), 0);
     *session = (tls_session_t){
         .ssl           = ssl,
         .internal_bio  = internal_bio,
@@ -869,7 +870,7 @@ tls_io_result_t tls_write_plaintext(tls_session_t *session,
  * outlives us and stays attached to SSL*).
  * ------------------------------------------------------------------------- */
 
-size_t tls_reserve_cipher_in(tls_session_t *const session, char **const out_ptr)
+size_t tls_reserve_cipher_in(tls_session_t *session, char **out_ptr)
 {
     if (session == NULL || session->network_bio == NULL || out_ptr == NULL) {
         return 0;
@@ -884,7 +885,7 @@ size_t tls_reserve_cipher_in(tls_session_t *const session, char **const out_ptr)
     return (size_t)space;
 }
 
-bool tls_commit_cipher_in(tls_session_t *const session, const size_t n)
+bool tls_commit_cipher_in(tls_session_t *session, const size_t n)
 {
     if (session == NULL || session->network_bio == NULL) {
         return false;
@@ -918,7 +919,7 @@ bool tls_commit_cipher_in(tls_session_t *const session, const size_t n)
     return true;
 }
 
-size_t tls_peek_cipher_out(tls_session_t *const session, char **const out_ptr)
+size_t tls_peek_cipher_out(tls_session_t *session, char **out_ptr)
 {
     if (session == NULL || session->network_bio == NULL || out_ptr == NULL) {
         return 0;
@@ -933,7 +934,7 @@ size_t tls_peek_cipher_out(tls_session_t *const session, char **const out_ptr)
     return (size_t)avail;
 }
 
-bool tls_session_was_resumed(const tls_session_t *const session)
+bool tls_session_was_resumed(const tls_session_t *session)
 {
     if (session == NULL || session->ssl == NULL) {
         return false;
@@ -947,7 +948,7 @@ bool tls_session_was_resumed(const tls_session_t *const session)
  * BIO pair layout that precludes direct offload), they also return 0.
  * Both cases manifest identically to the caller: "no offload, keep
  * using userspace SSL_write/SSL_read" — exactly what we want. */
-bool tls_session_ktls_tx_active(const tls_session_t *const session)
+bool tls_session_ktls_tx_active(const tls_session_t *session)
 {
     if (session == NULL || session->internal_bio == NULL) {
         return false;
@@ -955,7 +956,7 @@ bool tls_session_ktls_tx_active(const tls_session_t *const session)
     return BIO_get_ktls_send(session->internal_bio) != 0;
 }
 
-bool tls_session_ktls_rx_active(const tls_session_t *const session)
+bool tls_session_ktls_rx_active(const tls_session_t *session)
 {
     if (session == NULL || session->internal_bio == NULL) {
         return false;
@@ -963,7 +964,7 @@ bool tls_session_ktls_rx_active(const tls_session_t *const session)
     return BIO_get_ktls_recv(session->internal_bio) != 0;
 }
 
-bool tls_consume_cipher_out(tls_session_t *const session, const size_t n)
+bool tls_consume_cipher_out(tls_session_t *session, const size_t n)
 {
     if (session == NULL || session->network_bio == NULL) {
         return false;
@@ -1017,7 +1018,7 @@ tls_io_result_t tls_shutdown_step(tls_session_t *session)
     return tls_classify_ssl_error(session, rc, TLS_OP_SHUTDOWN, 0);
 }
 
-const tls_error_info_t *tls_session_last_error(const tls_session_t *const session)
+const tls_error_info_t *tls_session_last_error(const tls_session_t *session)
 {
     if (session == NULL) {
         return NULL;

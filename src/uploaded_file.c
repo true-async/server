@@ -90,12 +90,15 @@ static void uploaded_file_free_object(zend_object *object)
     if (intern->client_filename) {
         zend_string_release(intern->client_filename);
     }
+
     if (intern->client_media_type) {
         zend_string_release(intern->client_media_type);
     }
+
     if (intern->client_charset) {
         zend_string_release(intern->client_charset);
     }
+
     if (intern->tmp_path) {
         /* Delete temp file if not moved */
         if (!intern->moved && intern->is_ready) {
