@@ -208,7 +208,15 @@ static void h2_static_dispatch(zend_async_event_t *event,
     h2_static_state_t *state = ((h2_static_cb_t *)callback)->state;
     zend_async_io_req_t *req = (zend_async_io_req_t *)result;
 
-    if (req == NULL || req != state->pending_req) {
+    /* Spurious-fire guard. The notify iteration on file_io->event can
+     * re-enter our newly-registered cb during the very iteration that
+     * completed an earlier req on the same event (e.g. the engine's
+     * stat-completion path adds the H2 cb mid-iteration). The loop's
+     * vector-resize logic then revisits index 0, calling us with the
+     * stale `result` pointer to the just-disposed earlier req. The
+     * efree'd address may even be reused by submit_read's pecalloc, so
+     * `req == pending_req` is not enough — gate on completed too. */
+    if (req == NULL || req != state->pending_req || !req->completed) {
         return;
     }
 

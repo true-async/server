@@ -303,7 +303,7 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 		return;
 
 	case ENGINE_PHASE_STAT:
-		if (req == NULL || req != state->pending_req) {
+		if (req == NULL || req != state->pending_req || !req->completed) {
 			return;
 		}
 
