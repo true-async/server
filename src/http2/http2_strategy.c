@@ -23,6 +23,7 @@
 #include "http1/http_parser.h"   /* http_request_t */
 #include "static/static_handler.h"
 #include "http_send_file.h"
+#include "http_response_header_filter.h"
 #include "http_response_internal.h"
 
 #include <string.h>
@@ -839,24 +840,6 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     return rc;
 }
 
-/* Forbidden / HTTP-1-only response headers per RFC 9113 §8.2.2.
- * nghttp2 would reject them at submit time anyway; filter here so a
- * handler that sets e.g. Connection: close for HTTP/1 habit doesn't
- * kill the whole stream. */
-static bool response_header_allowed(const char *name, const size_t len)
-{
-    if (len == 10 && strncasecmp(name, "connection", 10) == 0) return false;
-
-    if (len == 10 && strncasecmp(name, "keep-alive", 10) == 0) return false;
-
-    if (len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0) return false;
-
-    if (len == 7  && strncasecmp(name, "upgrade", 7) == 0)  return false;
-
-    if (len == 14 && strncasecmp(name, "content-length", 14) == 0) return false; /* implicit via DATA */
-    return true;
-}
-
 /* Commit a response on a specific stream. Per-stream dispatch means
  * we already KNOW which stream, no scan needed.
  * Extracts status / headers / body / trailers from the PHP
@@ -919,7 +902,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
 
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
@@ -949,7 +932,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
 
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv_view[nv_count].name      = ZSTR_VAL(name);
@@ -1132,7 +1115,7 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
 
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
@@ -1162,7 +1145,7 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
 
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv_view[nv_count].name      = ZSTR_VAL(name);

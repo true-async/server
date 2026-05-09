@@ -43,6 +43,7 @@
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
+#include "http_response_header_filter.h"
 #include "http_response_internal.h"
 
 #include <nghttp2/nghttp2.h>
@@ -67,22 +68,6 @@
 extern nghttp2_session *http2_session_get_ng(http2_session_t *session);
 extern void http2_static_drain_to_socket(http_connection_t *conn,
                                          http2_session_t *session);
-
-/* Forbidden / HTTP/1-only response headers per RFC 9113 §8.2.2.
- * Mirrors the strategy's response_header_allowed but kept local. */
-static bool h2_static_header_allowed(const char *name, const size_t len)
-{
-    if (len == 10 && strncasecmp(name, "connection",        10) == 0) return false;
-
-    if (len == 10 && strncasecmp(name, "keep-alive",        10) == 0) return false;
-
-    if (len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0) return false;
-
-    if (len == 7  && strncasecmp(name, "upgrade",            7) == 0) return false;
-
-    if (len == 14 && strncasecmp(name, "content-length",    14) == 0) return false;
-    return true;
-}
 
 typedef struct {
     http2_stream_t      *stream;
@@ -218,7 +203,7 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
 
-            if (!h2_static_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
@@ -262,7 +247,7 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
 
-            if (!h2_static_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv[i].name     = (uint8_t *)ZSTR_VAL(name);

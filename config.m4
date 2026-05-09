@@ -478,6 +478,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/http_rfc5987.c
     src/http_precompressed.c
     src/http_param_parse.c
+    src/http_response_header_filter.c
     src/send_file.c
     src/http_send_file.c
     src/http_send_file_options.c

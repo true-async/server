@@ -38,6 +38,7 @@
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
 #include "http3/http3_stream.h"            /* http3_stream_t */
+#include "http_response_header_filter.h"
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
 
@@ -439,24 +440,6 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
     return 1;
 }
 
-/* RFC 9114 §4.2 forbids these on HTTP/3. Same blocklist as the H2 path
- * — content-length is implicit from the DATA frames, the rest are
- * connection-specific HTTP/1.1 hop-by-hop fields with no analogue at
- * the framed-protocol layer. */
-static bool h3_response_header_allowed(const char *name, size_t len)
-{
-    if (len == 10 && strncasecmp(name, "connection", 10) == 0)         return false;
-
-    if (len == 10 && strncasecmp(name, "keep-alive", 10) == 0)         return false;
-
-    if (len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0)  return false;
-
-    if (len == 7  && strncasecmp(name, "upgrade", 7)  == 0)            return false;
-
-    if (len == 14 && strncasecmp(name, "content-length", 14) == 0)     return false;
-    return true;
-}
-
 /* Hard cap on outbound response headers — backstop against a
  * server-side accident that fills HttpResponse with an unbounded
  * header set. 256 covers any sane response and bounds RAM. */
@@ -584,7 +567,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL) continue;
 
-            if (!h3_response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 if (!h3_nv_push(&buf, name, values)) goto headers_done;
