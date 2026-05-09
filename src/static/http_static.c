@@ -47,55 +47,6 @@
 #include <errno.h>
 #include <string.h>
 
-static void emit_status(zend_object *response_obj, const int status, const char *body_msg,
-						const size_t body_msg_len)
-{
-	http_response_static_set_status(response_obj, status);
-	http_response_static_set_header(response_obj, "content-type", 12, "text/plain; charset=utf-8",
-									25);
-	if (body_msg != NULL && body_msg_len > 0) {
-		http_response_static_set_body_cstr(response_obj, body_msg, body_msg_len);
-	}
-}
-
-static inline bool method_is_get(const http_request_t *req)
-{
-	return req != NULL && req->method != NULL && ZSTR_LEN(req->method) == 3 &&
-		   memcmp(ZSTR_VAL(req->method), "GET", 3) == 0;
-}
-
-static inline bool method_is_head(const http_request_t *req)
-{
-	return req != NULL && req->method != NULL && ZSTR_LEN(req->method) == 4 &&
-		   memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
-}
-
-static const zend_string *find_first_request_header(const http_request_t *const req,
-													 const char *const name, const size_t name_len)
-{
-	if (req == NULL || req->headers == NULL) {
-		return NULL;
-	}
-
-	const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
-	if (zv == NULL) {
-		return NULL;
-	}
-
-	if (Z_TYPE_P(zv) == IS_STRING) {
-		return Z_STR_P(zv);
-	}
-
-	if (Z_TYPE_P(zv) == IS_ARRAY) {
-		const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
-		if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
-			return Z_STR_P(first);
-		}
-	}
-
-	return NULL;
-}
-
 static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
 	int flags = O_RDONLY | O_CLOEXEC;
@@ -528,52 +479,16 @@ static void static_fsm_finalize(static_fsm_state_t *state, int status)
 	}
 }
 
-/* Format a uint64 into `out` (buffer must be ≥ 21 bytes). Manual
- * digit-by-digit beats snprintf("%" PRIu64) by ~15× on hot paths
- * (no parse-format-string overhead, no locale lookup). Returns the
- * byte count written (excluding the NUL). */
-static inline size_t static_fsm_fmt_u64(char *out, uint64_t v)
-{
-	/* Worst case for uint64 is 20 digits ("18446744073709551615"). */
-	char tmp[20];
-	size_t n = 0;
-	do {
-		tmp[n++] = (char)('0' + (v % 10));
-		v /= 10;
-	} while (v != 0);
-	for (size_t i = 0; i < n; i++) {
-		out[i] = tmp[n - 1 - i];
-	}
-	out[n] = '\0';
-	return n;
-}
-
-/* The protocol op serializes headers verbatim — no auto-Content-Length
- * — so we own writing the number on every response that needs one. */
-static void static_fsm_set_content_length(zend_object *response_obj, uint64_t len)
-{
-	char buf[24];
-	const size_t n = static_fsm_fmt_u64(buf, len);
-	http_response_static_set_header(response_obj, "content-length", 14, buf, n);
-}
-
 /* H1 reads conn->keep_alive; H2/H3 return true (multiplex transports
- * filter out Connection headers at submit time anyway). */
+ * filter out Connection headers at submit time anyway). FSM-level
+ * resolver — protocol-aware via cbs.keep_alive callback, not the
+ * request-level http_response_should_keep_alive(). */
 static bool static_fsm_keep_alive(const static_fsm_state_t *state)
 {
 	if (state->cbs.keep_alive != NULL) {
 		return state->cbs.keep_alive(state->user);
 	}
 	return true;
-}
-
-static void static_fsm_set_connection_header(zend_object *response_obj, bool keep_alive)
-{
-	if (keep_alive) {
-		http_response_static_set_header(response_obj, "connection", 10, "keep-alive", 10);
-	} else {
-		http_response_static_set_header(response_obj, "connection", 10, "close", 5);
-	}
 }
 
 /* Push the mount's Cache-Control + extra headers onto response_obj.
@@ -742,8 +657,8 @@ static bool static_fsm_emit_error_via_op(static_fsm_state_t *state, int status, 
 	if (body != NULL && body_len > 0) {
 		http_response_static_set_body_cstr(response_obj, body, body_len);
 	}
-	static_fsm_set_content_length(response_obj, (uint64_t)body_len);
-	static_fsm_set_connection_header(response_obj, static_fsm_keep_alive(state));
+	http_response_set_content_length(response_obj, (uint64_t)body_len);
+	http_response_set_connection(response_obj, static_fsm_keep_alive(state));
 
 	http_server_count_request(state->counters);
 	return static_fsm_delegate_to_protocol(state, NULL, 0, 0, true);
@@ -864,9 +779,9 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 	}
 
 	const zend_string *if_none_match =
-		find_first_request_header(state->request, "if-none-match", 13);
+		http_request_find_header(state->request, "if-none-match", 13);
 	const zend_string *if_modified_since =
-		find_first_request_header(state->request, "if-modified-since", 17);
+		http_request_find_header(state->request, "if-modified-since", 17);
 	const bool not_modified = http_static_conditional_match(
 		if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
 		if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
@@ -889,8 +804,8 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 	state->range_total = (uint64_t)state->st.st_size;
 	state->is_range = false;
 	if (!not_modified) {
-		const zend_string *range_hdr = find_first_request_header(state->request, "range", 5);
-		const zend_string *if_range = find_first_request_header(state->request, "if-range", 8);
+		const zend_string *range_hdr = http_request_find_header(state->request, "range", 5);
+		const zend_string *if_range = http_request_find_header(state->request, "if-range", 8);
 		bool range_allowed = true;
 		if (if_range != NULL && etag_enabled) {
 			range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN &&
@@ -918,7 +833,7 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 													(size_t)crn);
 				}
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
-				static_fsm_set_connection_header(response_obj, static_fsm_keep_alive(state));
+				http_response_set_connection(response_obj, static_fsm_keep_alive(state));
 				http_server_count_request(state->counters);
 				if (!static_fsm_delegate_to_protocol(state, NULL, 0, 0, true)) {
 					static_fsm_finalize(state, -1);
@@ -954,7 +869,7 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 										 : (uint64_t)state->st.st_size);
 
 	if (include_content_headers) {
-		static_fsm_set_content_length(response_obj, body_len);
+		http_response_set_content_length(response_obj, body_len);
 	}
 
 	if (etag_enabled) {
@@ -990,7 +905,7 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 	}
 
 	apply_mount_headers(response_obj, state->mount, include_content_headers);
-	static_fsm_set_connection_header(response_obj, keep_alive);
+	http_response_set_connection(response_obj, keep_alive);
 
 	/* === Hand off to the protocol's send_static_response ============== */
 
@@ -1289,7 +1204,7 @@ static bool try_select_precompressed(const http_static_handler_t *mount, http_re
 		return false;
 	}
 
-	const zend_string *ae = find_first_request_header(request, "accept-encoding", 15);
+	const zend_string *ae = http_request_find_header(request, "accept-encoding", 15);
 	if (ae == NULL) {
 		return false;
 	}
@@ -1370,8 +1285,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 	/* GET/HEAD only — operators can overlay POST/PUT endpoints on the
 	 * same prefix without the static layer turning them into 405s. */
-	const bool is_head = method_is_head(request);
-	const bool is_get = method_is_get(request);
+	const bool is_head = http_request_method_is_head(request);
+	const bool is_get = http_request_method_is_get(request);
 	if (!is_get && !is_head) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
@@ -1404,20 +1319,20 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			continue;
 		}
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_BAD_REQUEST)) {
-			emit_status(response_obj, 400, "Bad Request", 11);
+			http_response_emit_status_body(response_obj, 400, "Bad Request", 11);
 			return HTTP_STATIC_HANDLED;
 		}
 		/* Dotfile-deny / traversal escape: 404 (not 403) so existence
 		 * of the restricted resource isn't disclosed. */
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_FORBIDDEN)) {
-			emit_status(response_obj, 404, "Not Found", 9);
+			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
 		if (UNEXPECTED(rc == HTTP_STATIC_PATH_HIDE)) {
 			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 				return HTTP_STATIC_PASSTHROUGH;
 			}
-			emit_status(response_obj, 404, "Not Found", 9);
+			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1428,7 +1343,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 				return HTTP_STATIC_PASSTHROUGH;
 			}
-			emit_status(response_obj, 404, "Not Found", 9);
+			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1466,7 +1381,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 					return HTTP_STATIC_PASSTHROUGH;
 				}
-				emit_status(response_obj, 404, "Not Found", 9);
+				http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 				return HTTP_STATIC_HANDLED;
 			}
 		}
@@ -1557,7 +1472,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			if (mount->flags & HTTP_STATIC_FLAG_ON_MISSING_NEXT) {
 				return HTTP_STATIC_PASSTHROUGH;
 			}
-			emit_status(response_obj, 404, "Not Found", 9);
+			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1568,7 +1483,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		if (UNEXPECTED(!resolved_under_root(mount, fs_path) ||
 					   !symlink_policy_admits(mount, fs_path))) {
 			close(fd);
-			emit_status(response_obj, 404, "Not Found", 9);
+			http_response_emit_status_body(response_obj, 404, "Not Found", 9);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1576,7 +1491,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		 * file. The async sendfile path will remove this limit. */
 		if (UNEXPECTED((uint64_t)st.st_size > (uint64_t)HTTP_STATIC_MAX_FILE_SIZE)) {
 			close(fd);
-			emit_status(response_obj, 413, "Payload Too Large", 17);
+			http_response_emit_status_body(response_obj, 413, "Payload Too Large", 17);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -1589,9 +1504,9 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
 		http_static_format_http_date(st.st_mtime, last_modified_buf);
 
-		const zend_string *const if_none_match = find_first_request_header(request, "if-none-match", 13);
+		const zend_string *const if_none_match = http_request_find_header(request, "if-none-match", 13);
 		const zend_string *const if_modified_since =
-			find_first_request_header(request, "if-modified-since", 17);
+			http_request_find_header(request, "if-modified-since", 17);
 		const bool not_modified = http_static_conditional_match(
 			if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
 			if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
@@ -1617,7 +1532,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			body = slurp_fd(fd, (size_t)st.st_size);
 			if (UNEXPECTED(body == NULL)) {
 				close(fd);
-				emit_status(response_obj, 500, "Internal Server Error", 21);
+				http_response_emit_status_body(response_obj, 500, "Internal Server Error", 21);
 				return HTTP_STATIC_HANDLED;
 			}
 		}
@@ -1647,7 +1562,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			/* The format-time path computes Content-Length from the
 			 * body smart_str; with an empty body we have to advertise
 			 * the would-be size explicitly. */
-			static_fsm_set_content_length(response_obj, (uint64_t)st.st_size);
+			http_response_set_content_length(response_obj, (uint64_t)st.st_size);
 		} else {
 			http_response_static_set_body_str(response_obj, body);
 			zend_string_release(body);

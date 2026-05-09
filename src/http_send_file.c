@@ -108,31 +108,6 @@ static inline void sf_state_free(sf_state_t *state)
 	efree(state);
 }
 
-/* ===== Header helpers — write directly via the static-handler setters
- * because the response is sealed at the PHP boundary; nothing else can
- * be racing us here. ============================================= */
-
-static void sf_set_status(zend_object *r, int code)
-{
-	http_response_static_set_status(r, code);
-}
-
-static void sf_set_header(zend_object *r,
-                          const char *name, size_t name_len,
-                          const char *value, size_t value_len)
-{
-	http_response_static_set_header(r, name, name_len, value, value_len);
-}
-
-static void sf_set_content_length(zend_object *r, uint64_t v)
-{
-	char buf[24];
-	int n = snprintf(buf, sizeof(buf), "%" PRIu64, v);
-	if (n > 0 && (size_t)n < sizeof(buf)) {
-		sf_set_header(r, "content-length", 14, buf, (size_t)n);
-	}
-}
-
 /* Best-effort RFC 5987 "filename*=UTF-8''..." encode. ASCII-clean
  * names also get a plain filename="" form so legacy clients work. */
 static void sf_set_content_disposition(zend_object *r,
@@ -187,8 +162,8 @@ static void sf_set_content_disposition(zend_object *r,
 	}
 
 	smart_str_0(&s);
-	sf_set_header(r, "content-disposition", 19,
-	              ZSTR_VAL(s.s), ZSTR_LEN(s.s));
+	http_response_static_set_header(r, "content-disposition", 19,
+	                                ZSTR_VAL(s.s), ZSTR_LEN(s.s));
 	smart_str_free(&s);
 }
 
@@ -259,20 +234,6 @@ static bool sf_try_precompressed(sf_state_t *state)
 		return true;
 	}
 	return false;
-}
-
-static const zend_string *sf_first_request_header(http_request_t *req,
-                                                  const char *name, size_t name_len)
-{
-	if (req == NULL || req->headers == NULL) return NULL;
-	const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
-	if (zv == NULL) return NULL;
-	if (Z_TYPE_P(zv) == IS_STRING) return Z_STR_P(zv);
-	if (Z_TYPE_P(zv) == IS_ARRAY) {
-		const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
-		if (first != NULL && Z_TYPE_P(first) == IS_STRING) return Z_STR_P(first);
-	}
-	return NULL;
 }
 
 /* Tear down the FSM. Disposes file_io if still owned, fires on_done. */
@@ -365,13 +326,9 @@ static bool sf_emit_inline_error(sf_state_t *state, int status,
                                  const char *body, size_t body_len)
 {
 	zend_object *const r = state->response_obj;
-	sf_set_status(r, status);
-	sf_set_header(r, "content-type", 12, "text/plain; charset=utf-8", 25);
-	if (body != NULL && body_len > 0) {
-		http_response_static_set_body_cstr(r, body, body_len);
-	}
-	sf_set_content_length(r, (uint64_t)body_len);
-	sf_set_header(r, "connection", 10, "keep-alive", 10);
+	http_response_emit_status_body(r, status, body, body_len);
+	http_response_set_content_length(r, (uint64_t)body_len);
+	http_response_set_connection(r, true);
 	return sf_delegate(state, NULL, 0, 0, true);
 }
 
@@ -424,9 +381,9 @@ static void sf_handle_stat(sf_state_t *state)
 	bool not_modified = false;
 	if (opts->conditional && (opts->etag || opts->last_modified)) {
 		const zend_string *inm =
-			sf_first_request_header(state->request, "if-none-match", 13);
+			http_request_find_header(state->request, "if-none-match", 13);
 		const zend_string *ims =
-			sf_first_request_header(state->request, "if-modified-since", 17);
+			http_request_find_header(state->request, "if-modified-since", 17);
 		not_modified = http_static_conditional_match(
 			inm != NULL ? ZSTR_VAL(inm) : NULL,
 			inm != NULL ? ZSTR_LEN(inm) : 0,
@@ -443,8 +400,8 @@ static void sf_handle_stat(sf_state_t *state)
 	bool is_range = false;
 	uint64_t range_first = 0, range_last = 0;
 	if (!not_modified && opts->accept_ranges) {
-		const zend_string *rh = sf_first_request_header(state->request, "range", 5);
-		const zend_string *ifr = sf_first_request_header(state->request, "if-range", 8);
+		const zend_string *rh = http_request_find_header(state->request, "range", 5);
+		const zend_string *ifr = http_request_find_header(state->request, "if-range", 8);
 		bool range_allowed = true;
 		if (ifr != NULL && opts->etag) {
 			range_allowed = (ZSTR_LEN(ifr) == HTTP_STATIC_ETAG_LEN
@@ -504,10 +461,10 @@ static void sf_handle_stat(sf_state_t *state)
 	const int default_status = not_modified ? 304 : (is_range ? 206 : 200);
 	const int status_code = (opts->status > 0) ? opts->status : default_status;
 
-	sf_set_status(r, status_code);
+	http_response_static_set_status(r, status_code);
 
 	if (include_content_headers) {
-		sf_set_header(r, "content-type", 12, content_type, content_type_len);
+		http_response_static_set_header(r, "content-type", 12, content_type, content_type_len);
 	}
 
 	const uint64_t body_len = not_modified
@@ -515,26 +472,26 @@ static void sf_handle_stat(sf_state_t *state)
 		: (is_range ? (range_last - range_first + 1) : total);
 
 	if (include_content_headers) {
-		sf_set_content_length(r, body_len);
+		http_response_set_content_length(r, body_len);
 	}
 
 	if (opts->etag) {
-		sf_set_header(r, "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
+		http_response_static_set_header(r, "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
 	}
 	if (opts->last_modified) {
-		sf_set_header(r, "last-modified", 13, lm_buf, HTTP_STATIC_DATE_LEN);
+		http_response_static_set_header(r, "last-modified", 13, lm_buf, HTTP_STATIC_DATE_LEN);
 	}
 
 	if (state->content_encoding != NULL && include_content_headers) {
-		sf_set_header(r, "content-encoding", 16,
+		http_response_static_set_header(r, "content-encoding", 16,
 			state->content_encoding, state->content_encoding_len);
 	}
 	if (state->content_encoding != NULL) {
-		sf_set_header(r, "vary", 4, "Accept-Encoding", 15);
+		http_response_static_set_header(r, "vary", 4, "Accept-Encoding", 15);
 	}
 
 	if (opts->accept_ranges && include_content_headers) {
-		sf_set_header(r, "accept-ranges", 13, "bytes", 5);
+		http_response_static_set_header(r, "accept-ranges", 13, "bytes", 5);
 	}
 	if (is_range && include_content_headers) {
 		char cr[64];
@@ -542,18 +499,18 @@ static void sf_handle_stat(sf_state_t *state)
 			"bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64,
 			range_first, range_last, total);
 		if (n > 0 && (size_t)n < sizeof(cr)) {
-			sf_set_header(r, "content-range", 13, cr, (size_t)n);
+			http_response_static_set_header(r, "content-range", 13, cr, (size_t)n);
 		}
 	}
 
 	if (opts->cache_control != NULL) {
-		sf_set_header(r, "cache-control", 13,
+		http_response_static_set_header(r, "cache-control", 13,
 			ZSTR_VAL(opts->cache_control), ZSTR_LEN(opts->cache_control));
 	}
 
 	sf_set_content_disposition(r, opts);
 
-	sf_set_header(r, "connection", 10, "keep-alive", 10);
+	http_response_set_connection(r, true);
 
 	zend_async_io_t *const file_io = state->file_io;
 
@@ -627,18 +584,6 @@ static void sf_dispatch(zend_async_event_t *event,
 	}
 }
 
-/* Synthesize a 500 response onto response_obj — used when arm fails
- * before the FSM took ownership of the path. The dispose path's regular
- * flush emits it. */
-static void sf_synth_500(zend_object *response_obj, const char *msg)
-{
-	const size_t msg_len = strlen(msg);
-	http_response_static_set_status(response_obj, 500);
-	http_response_static_set_header(response_obj, "content-type", 12,
-		"text/plain; charset=utf-8", 25);
-	http_response_static_set_body_cstr(response_obj, msg, msg_len);
-}
-
 bool http_send_file_dispatch(http_request_t *request,
                              zend_object *response_obj,
                              http_send_file_request_t *req,
@@ -647,7 +592,7 @@ bool http_send_file_dispatch(http_request_t *request,
 {
 	if (UNEXPECTED(req == NULL || response_obj == NULL || req->path == NULL)) {
 		if (req != NULL) http_send_file_request_free(req);
-		sf_synth_500(response_obj, "sendFile: invalid arguments");
+		http_response_synth_error(response_obj, 500, "sendFile: invalid arguments");
 		return false;
 	}
 
@@ -655,7 +600,7 @@ bool http_send_file_dispatch(http_request_t *request,
 	if (UNEXPECTED(path_len == 0 || path_len + 4 + 1 >= MAXPATHLEN
 	               || ZSTR_VAL(req->path)[0] != '/')) {
 		http_send_file_request_free(req);
-		sf_synth_500(response_obj, "sendFile: path must be absolute");
+		http_response_synth_error(response_obj, 500, "sendFile: path must be absolute");
 		return false;
 	}
 
@@ -664,7 +609,7 @@ bool http_send_file_dispatch(http_request_t *request,
 		http_response_get_stream_ops(response_obj);
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
 		http_send_file_request_free(req);
-		sf_synth_500(response_obj, "sendFile: protocol does not support sendfile");
+		http_response_synth_error(response_obj, 500, "sendFile: protocol does not support sendfile");
 		return false;
 	}
 
@@ -702,7 +647,7 @@ bool http_send_file_dispatch(http_request_t *request,
 	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
 	if (UNEXPECTED(state->file_io == NULL)) {
 		sf_state_free(state);
-		sf_synth_500(response_obj, "sendFile: cannot open file");
+		http_response_synth_error(response_obj, 500, "sendFile: cannot open file");
 		return false;
 	}
 
@@ -713,7 +658,7 @@ bool http_send_file_dispatch(http_request_t *request,
 		}
 		state->file_io = NULL;
 		sf_state_free(state);
-		sf_synth_500(response_obj, "sendFile: callback alloc failed");
+		http_response_synth_error(response_obj, 500, "sendFile: callback alloc failed");
 		return false;
 	}
 	cb->base.dispose = sf_cb_dispose;
@@ -726,7 +671,7 @@ bool http_send_file_dispatch(http_request_t *request,
 		}
 		state->file_io = NULL;
 		sf_state_free(state);
-		sf_synth_500(response_obj, "sendFile: cannot register callback");
+		http_response_synth_error(response_obj, 500, "sendFile: cannot register callback");
 		return false;
 	}
 	state->cb = &cb->base;

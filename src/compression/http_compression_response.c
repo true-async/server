@@ -164,13 +164,6 @@ static inline bool request_has_header(const http_request_t *req,
     return zend_hash_str_exists(req->headers, lower_name, lower_len);
 }
 
-static inline bool method_is_head(const http_request_t *req)
-{
-    return req && req->method &&
-           ZSTR_LEN(req->method) == 4 &&
-           zend_binary_strcasecmp(ZSTR_VAL(req->method), 4, "HEAD", 4) == 0;
-}
-
 /* Read the chosen content-type from the response's headers HT. The
  * dispatch flow lowercases stored keys, so a case-sensitive lookup
  * suffices. Returns 0 when the handler did not set one. */
@@ -196,7 +189,7 @@ static http_codec_id_t decide(http_compression_state_t *st,
     }
 
     /* --- request side --- */
-    if (method_is_head(st->request)) {
+    if (http_request_method_is_head(st->request)) {
         return HTTP_CODEC_IDENTITY;
     }
     /* Range responses are sliced; compressing them would corrupt the

@@ -536,3 +536,48 @@ zval* http_request_create_from_parsed(http_request_t *req)
 
     return obj;
 }
+
+/* Method tokens are case-sensitive per RFC 7230 §3.1.1. */
+bool http_request_method_is_get(const http_request_t *req)
+{
+    return req != NULL && req->method != NULL &&
+           ZSTR_LEN(req->method) == 3 &&
+           memcmp(ZSTR_VAL(req->method), "GET", 3) == 0;
+}
+
+bool http_request_method_is_head(const http_request_t *req)
+{
+    return req != NULL && req->method != NULL &&
+           ZSTR_LEN(req->method) == 4 &&
+           memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
+}
+
+/* Header lookup. Headers are stored with lowercase keys; caller must
+ * pass an already-lowercased name. Multi-value headers can be stored
+ * either as a single comma-joined string (HTTP/1) or as an array of
+ * strings (HTTP/2 stream events) — return the first occurrence. */
+const zend_string *http_request_find_header(const http_request_t *req,
+                                            const char *name, size_t name_len)
+{
+    if (req == NULL || req->headers == NULL) {
+        return NULL;
+    }
+
+    const zval *const zv = zend_hash_str_find(req->headers, name, name_len);
+    if (zv == NULL) {
+        return NULL;
+    }
+
+    if (Z_TYPE_P(zv) == IS_STRING) {
+        return Z_STR_P(zv);
+    }
+
+    if (Z_TYPE_P(zv) == IS_ARRAY) {
+        const zval *const first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
+        if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
+            return Z_STR_P(first);
+        }
+    }
+
+    return NULL;
+}

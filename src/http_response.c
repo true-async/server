@@ -17,6 +17,7 @@
 #include "ext/json/php_json.h"
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
 #include "php_http_server.h"
+#include "http1/http_parser.h"   /* http_request_t full definition for keep_alive read */
 #include "http_response_internal.h"
 #include "http_send_file.h"
 #include "smart_str_scalable.h"
@@ -1899,5 +1900,66 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
     response->reason_phrase = zend_string_init(message, strlen(message), 0);
 
     response->committed = true;
+}
+
+/* Manual digit-by-digit decimal format. ~15× faster than snprintf("%PRIu64")
+ * on hot paths (no parse-format-string, no locale lookup). Buffer must be
+ * at least 21 bytes (20 digits + NUL). Returns bytes written (excluding NUL). */
+static inline size_t format_u64(char *out, uint64_t v)
+{
+    char tmp[20];
+    size_t n = 0;
+    do {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v != 0);
+    for (size_t i = 0; i < n; i++) {
+        out[i] = tmp[n - 1 - i];
+    }
+    out[n] = '\0';
+    return n;
+}
+
+void http_response_set_content_length(zend_object *obj, uint64_t length)
+{
+    char buf[24];
+    const size_t n = format_u64(buf, length);
+    http_response_static_set_header(obj, "content-length", 14, buf, n);
+}
+
+void http_response_set_connection(zend_object *obj, bool keep_alive)
+{
+    if (keep_alive) {
+        http_response_static_set_header(obj, "connection", 10, "keep-alive", 10);
+    } else {
+        http_response_static_set_header(obj, "connection", 10, "close", 5);
+    }
+}
+
+bool http_response_should_keep_alive(const http_request_t *req)
+{
+    /* Parser populates req->keep_alive during on_headers_complete:
+     * HTTP/1.1 defaults keep-alive unless "Connection: close",
+     * HTTP/1.0 defaults close unless "Connection: keep-alive".
+     * HTTP/2 / HTTP/3 streams: parser leaves it true; multiplex
+     * transports filter Connection at submit time anyway. */
+    return req != NULL && req->keep_alive;
+}
+
+void http_response_emit_status_body(zend_object *obj, int status_code,
+                                    const char *body, size_t body_len)
+{
+    http_response_static_set_status(obj, status_code);
+    http_response_static_set_header(obj, "content-type", 12,
+                                    "text/plain; charset=utf-8", 25);
+    if (body != NULL && body_len > 0) {
+        http_response_static_set_body_cstr(obj, body, body_len);
+    }
+}
+
+void http_response_synth_error(zend_object *obj, int status_code, const char *message)
+{
+    const size_t msg_len = (message != NULL) ? strlen(message) : 0;
+    http_response_emit_status_body(obj, status_code, message, msg_len);
 }
 

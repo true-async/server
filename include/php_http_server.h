@@ -44,6 +44,7 @@ extern zend_module_entry http_server_module_entry;
  */
 
 typedef struct http1_parser_t http1_parser_t;
+typedef struct http_request_t http_request_t;
 typedef struct _http_server_t http_server_t;
 typedef struct _http_server_config_t http_server_config_t;
 typedef struct _http_connection_t http_connection_t;
@@ -400,6 +401,24 @@ void http_server_exceptions_register(void);
 void http_server_config_class_register(void);
 void http_response_class_register(void);
 void http_server_class_register(void);
+
+/*
+ * ==========================================================================
+ * HttpRequest helpers — operate on the parsed http_request_t directly,
+ * no PHP-object dance. Used by static handler, send_file, compression,
+ * and anywhere else that needs cheap method/header inspection.
+ * ==========================================================================
+ */
+
+bool http_request_method_is_get (const http_request_t *req);
+bool http_request_method_is_head(const http_request_t *req);
+
+/* Lookup first value of a request header by lowercase name. Returns
+ * NULL when absent. Multi-value headers may be stored as a single
+ * comma-joined string or as an array of strings — both forms supported,
+ * the array form returns the first element. */
+const zend_string *http_request_find_header(const http_request_t *req,
+                                            const char *name, size_t name_len);
 
 /*
  * ==========================================================================
@@ -1021,6 +1040,33 @@ void http_response_static_set_header   (zend_object *obj,
 void http_response_static_set_body_str (zend_object *obj, zend_string *body);
 void http_response_static_set_body_cstr(zend_object *obj,
                                         const char *body, size_t body_len);
+
+/* High-level response builders. Wrappers over the static_set_* primitives
+ * for patterns that recurred in static handler / send_file / compression
+ * with subtle drift between copies. */
+
+/* Set Content-Length from a uint64. Hand-rolled decimal format to avoid
+ * snprintf overhead — Content-Length is on the hot path of every response. */
+void http_response_set_content_length(zend_object *obj, uint64_t length);
+
+/* Set Connection: keep-alive | close. Multiplex protocols (H2/H3) filter
+ * Connection at submit time, so it is harmless to call on any response. */
+void http_response_set_connection(zend_object *obj, bool keep_alive);
+
+/* Resolve effective keep-alive for a request. Reads req->keep_alive,
+ * which the parser populated according to HTTP/1.x semantics. */
+bool http_response_should_keep_alive(const http_request_t *req);
+
+/* Emit a synthetic plain-text response: set status, Content-Type:
+ * text/plain; charset=utf-8, body. Does NOT set Content-Length or
+ * Connection — caller layers those if needed. */
+void http_response_emit_status_body(zend_object *obj, int status_code,
+                                    const char *body, size_t body_len);
+
+/* Convenience wrapper around emit_status_body for short C-string messages
+ * (e.g. 5xx error pages). */
+void http_response_synth_error(zend_object *obj, int status_code,
+                               const char *message);
 
 /* Borrow a pre-rendered "HTTP/1.1 <code> <reason>\r\n" status line.
  * Returns NULL when the code is outside the known table — the caller
