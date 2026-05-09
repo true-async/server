@@ -31,6 +31,7 @@
 #include "http_conditional.h"
 #include "http_range.h"
 #include "fs_util.h"
+#include "static/static_handler.h" /* http_static_cache_acquire decl */
 #include "static/http_static_cache.h"
 
 #include <fcntl.h>
@@ -69,6 +70,13 @@ typedef struct
 	bool is_head;
 	engine_phase_t phase;
 
+	/* Deep copy of cfg.cache_view when supplied — caller's stack
+	 * frame is gone by the time the async chain fires. The view's
+	 * inner const char* fields point into the open-file cache and are
+	 * stable until eviction, so copying the struct by value is safe. */
+	bool has_cache_view;
+	http_static_cache_view_t cache_view_copy;
+
 	zend_async_io_req_t *pending_req;
 	zend_async_event_callback_t *cb;
 
@@ -102,6 +110,15 @@ static inline void engine_state_free(engine_state_t *state)
 	if (state->fs_path != NULL) {
 		efree(state->fs_path);
 		state->fs_path = NULL;
+	}
+	if (state->cfg.content_type != NULL) {
+		zend_string_release((zend_string *)state->cfg.content_type);
+	}
+	if (state->cfg.content_disposition != NULL) {
+		zend_string_release((zend_string *)state->cfg.content_disposition);
+	}
+	if (state->cfg.cache_control != NULL) {
+		zend_string_release((zend_string *)state->cfg.cache_control);
 	}
 	efree(state);
 }
@@ -321,12 +338,10 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 			req->dispose(req);
 		}
 		if (UNEXPECTED(exception != NULL)) {
-			if (state->cfg.on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
-				if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-					engine_finalize(state, -1);
-				}
-			} else {
+			if (state->cfg.on_error == SEND_FILE_ERR_INLINE_500) {
 				engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+				engine_finalize(state, -1);
+			} else if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
 				engine_finalize(state, -1);
 			}
 			return;
@@ -343,21 +358,25 @@ static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback
 static void engine_handle_open(engine_state_t *state, zend_object *exception)
 {
 	if (UNEXPECTED(exception != NULL || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
-		if (state->cfg.on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
+		switch (state->cfg.on_error) {
+		case SEND_FILE_ERR_PASSTHROUGH_PHP:
 			engine_rollback_to_php(state);
 			return;
+		case SEND_FILE_ERR_EMIT_VIA_OP:
+			if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
+				engine_finalize(state, -1);
+			}
+			return;
+		case SEND_FILE_ERR_INLINE_500:
+		default:
+			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+			engine_finalize(state, -1);
+			return;
 		}
-		/* INLINE_500: caller wants a synthetic 500. Open failure on
-		 * a path the user supplied is "not found from their view" —
-		 * but the existing http_send_file behavior synthesizes 500,
-		 * not 404. Preserve. */
-		engine_inline_error_synth(state, 500, "Internal Server Error", 21);
-		engine_finalize(state, -1);
-		return;
 	}
 
-	if (state->cfg.cache_view != NULL) {
-		state->st = state->cfg.cache_view->st;
+	if (state->has_cache_view) {
+		state->st = state->cache_view_copy.st;
 		engine_handle_stat(state);
 		return;
 	}
@@ -382,12 +401,10 @@ static void engine_handle_stat(engine_state_t *state)
 	const send_file_config_t *const cfg = &state->cfg;
 
 	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
-		if (cfg->on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
-			if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
-				engine_finalize(state, -1);
-			}
-		} else {
+		if (cfg->on_error == SEND_FILE_ERR_INLINE_500) {
 			engine_inline_error_synth(state, 500, "Internal Server Error", 21);
+			engine_finalize(state, -1);
+		} else if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
 			engine_finalize(state, -1);
 		}
 		return;
@@ -400,22 +417,23 @@ static void engine_handle_stat(engine_state_t *state)
 	bool etag_enabled = cfg->etag;
 	const char *content_type = NULL;
 	size_t content_type_len = 0;
+	const http_static_cache_view_t *const view =
+		state->has_cache_view ? &state->cache_view_copy : NULL;
 
-	if (cfg->cache_view != NULL) {
-		etag_enabled = cfg->cache_view->etag != NULL && cfg->cache_view->etag_len == HTTP_ETAG_LEN;
+	if (view != NULL) {
+		etag_enabled = view->etag != NULL && view->etag_len == HTTP_ETAG_LEN;
 		if (etag_enabled) {
-			memcpy(etag_buf, cfg->cache_view->etag, HTTP_ETAG_LEN);
+			memcpy(etag_buf, view->etag, HTTP_ETAG_LEN);
 			etag_buf[HTTP_ETAG_LEN] = '\0';
 		}
-		if (cfg->cache_view->last_modified != NULL &&
-			cfg->cache_view->last_modified_len == HTTP_DATE_LEN) {
-			memcpy(last_modified_buf, cfg->cache_view->last_modified, HTTP_DATE_LEN);
+		if (view->last_modified != NULL && view->last_modified_len == HTTP_DATE_LEN) {
+			memcpy(last_modified_buf, view->last_modified, HTTP_DATE_LEN);
 			last_modified_buf[HTTP_DATE_LEN] = '\0';
 		} else if (cfg->last_modified) {
 			http_date_format_imf(state->st.st_mtime, last_modified_buf);
 		}
-		content_type = cfg->cache_view->content_type;
-		content_type_len = cfg->cache_view->content_type_len;
+		content_type = view->content_type;
+		content_type_len = view->content_type_len;
 	} else {
 		if (etag_enabled) {
 			http_etag_format_strong(&state->st, etag_buf);
@@ -447,7 +465,7 @@ static void engine_handle_stat(engine_state_t *state)
 
 	/* === Cache insert (only on miss path) =========================== */
 
-	if (cfg->cache_view == NULL && cfg->server != NULL) {
+	if (view == NULL && cfg->server != NULL) {
 		http_static_cache_t *cache = http_static_cache_acquire(cfg->server);
 		if (cache != NULL) {
 			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
@@ -642,6 +660,24 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	state->fs_path[config->abs_path_len] = '\0';
 	state->is_head = http_request_method_is_head(request);
 	state->phase = ENGINE_PHASE_OPEN;
+
+	if (config->cache_view != NULL) {
+		state->cache_view_copy = *config->cache_view;
+		state->has_cache_view = true;
+	}
+
+	/* The cfg snapshot is shallow — caller's stack frame may be gone
+	 * by the time the async chain fires. Pin every zend_string we
+	 * intend to read past kick-off; finalize releases. */
+	if (state->cfg.content_type != NULL) {
+		zend_string_addref((zend_string *)state->cfg.content_type);
+	}
+	if (state->cfg.content_disposition != NULL) {
+		zend_string_addref((zend_string *)state->cfg.content_disposition);
+	}
+	if (state->cfg.cache_control != NULL) {
+		zend_string_addref((zend_string *)state->cfg.cache_control);
+	}
 
 	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
 	if (UNEXPECTED(state->file_io == NULL)) {

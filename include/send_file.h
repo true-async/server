@@ -34,12 +34,17 @@ struct http_request_t;
 
 typedef enum
 {
-	/* Synthesize a small text/plain 500 onto response_obj when the
-	 * engine fails after open/stat — used by Response::sendFile. */
+	/* Open failure: synth 500 inline via http_response_emit_status_body.
+	 * Internal errors (stat fail, etc): same. — sendFile: caller already
+	 * passed a path it expects to exist; failure is server-side. */
 	SEND_FILE_ERR_INLINE_500 = 0,
-	/* Tear down without populating response_obj and call
-	 * cbs->on_passthrough — used by StaticHandler with on_missing:Next. */
+	/* Open failure: rollback to PHP via cbs->on_passthrough; engine
+	 * tears down without writing response_obj. Internal errors: emit
+	 * 500 via the protocol op. — StaticHandler with on_missing:Next. */
 	SEND_FILE_ERR_PASSTHROUGH_PHP = 1,
+	/* Open failure: emit 404 via the protocol op. Internal errors: 500
+	 * via the op. — StaticHandler default (no on_missing:Next). */
+	SEND_FILE_ERR_EMIT_VIA_OP = 2,
 } send_file_on_error_t;
 
 /* Per-call configuration. Owned by the caller; the engine takes a

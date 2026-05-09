@@ -379,7 +379,18 @@ server-suite по-прежнему зелёные.
 
 **Контрольная точка**: сборка зелёная, движок никем не вызывается.
 
-### Шаг 4. Перевод StaticHandler на новый движок
+### Шаг 4. Перевод StaticHandler на новый движок ✅
+
+Сделан. `http_static.c` 1576 → 827 строк. Удалён `static_fsm_*` FSM
+(~750 строк), весь FSM теперь в `src/send_file.c`. Адаптер заполняет
+`send_file_config_t` из mount-полей, `on_error` выбирается по
+`HTTP_STATIC_FLAG_ON_MISSING_NEXT` (PASSTHROUGH_PHP / EMIT_VIA_OP).
+Маленький `static_adapter_t` мостит `http_static_dispatch_cbs_t` ↔
+`send_file_cbs_t` (одинаковая форма, разные имена). Sync fallback
+оставлен для H3 (где `ops->send_static_response == NULL`); engine
+проверяет ops каждый раз и не зовётся, если не подключён. 12 static
++ 4 sendfile + 11 multipart + полный server-suite (133 PASS / 1 SKIP)
+зелёные.
 
 1. В `http_static.c` оставить только URL match + path resolve + cache + mount-policy.
 2. Заполнять `send_file_config_t`, вызывать `send_file()` с `PASSTHROUGH_PHP`.
