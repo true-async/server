@@ -11,7 +11,7 @@
 #endif
 
 #include "php.h"
-#include "static/http_static_mime.h"
+#include "http_mime.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -25,14 +25,14 @@ typedef struct
 	const char *extension;
 	const char *content_type;
 	size_t content_type_len; /* precomputed; saves a strlen per hit */
-} http_static_mime_entry_t;
+} http_mime_entry_t;
 
 #define MIME(ext, ct)           \
 	{                           \
 		ext, ct, sizeof(ct) - 1 \
 	}
 
-static const http_static_mime_entry_t builtin_table[] = {
+static const http_mime_entry_t builtin_table[] = {
 	MIME("atom", "application/atom+xml"),
 	MIME("avif", "image/avif"),
 	MIME("bin", "application/octet-stream"),
@@ -133,7 +133,7 @@ static inline size_t lower_extension(const char *const src, const size_t src_len
 	return src_len;
 }
 
-static const http_static_mime_entry_t *lookup_builtin(const char *const ext)
+static const http_mime_entry_t *lookup_builtin(const char *const ext)
 {
 	size_t lo = 0;
 	size_t hi = BUILTIN_TABLE_LEN;
@@ -169,8 +169,16 @@ static void assert_builtin_table_sorted(void)
 }
 #endif
 
-bool http_static_mime_lookup(const http_static_handler_t *mount, const char *path, size_t path_len,
-							 const char **out, size_t *out_len)
+size_t http_mime_extract_lowered_ext(const char *path, size_t path_len, char *buf, size_t buf_cap)
+{
+	const size_t ext_offset = find_extension_offset(path, path_len);
+	if (ext_offset >= path_len) {
+		return 0;
+	}
+	return lower_extension(path + ext_offset, path_len - ext_offset, buf, buf_cap);
+}
+
+bool http_mime_lookup_by_ext(const char *path, size_t path_len, const char **out, size_t *out_len)
 {
 #ifndef NDEBUG
 	assert_builtin_table_sorted();
@@ -190,18 +198,7 @@ bool http_static_mime_lookup(const http_static_handler_t *mount, const char *pat
 		return false;
 	}
 
-	/* Per-mount overrides win — setMimeType() is documented as
-	 * "override the Content-Type for files with this extension". */
-	if (mount != NULL && mount->mime_overrides != NULL) {
-		const zval *const override = zend_hash_str_find(mount->mime_overrides, ext_buf, ext_len);
-		if (override != NULL && Z_TYPE_P(override) == IS_STRING) {
-			*out = Z_STRVAL_P(override);
-			*out_len = Z_STRLEN_P(override);
-			return true;
-		}
-	}
-
-	const http_static_mime_entry_t *const hit = lookup_builtin(ext_buf);
+	const http_mime_entry_t *const hit = lookup_builtin(ext_buf);
 	if (hit != NULL) {
 		*out = hit->content_type;
 		*out_len = hit->content_type_len;

@@ -324,7 +324,12 @@ slurp_fd, emit_status, set_content_length, method_is_get/head, find_header.
 **Контрольная точка**: 12 static + 4 sendfile + 167 server тестов зелёные.
 Дубликатов методов request/response в проекте больше нет.
 
-### Шаг 2. Извлечение общих HTTP-утилит
+### Шаг 2. Извлечение общих HTTP-утилит ✅
+
+Сделан в этой ветке. Diff: `+~750 / -~900` (rename + relocate, без новой
+логики, кроме decoder'а в `http_rfc5987` — он закрыл TODO в multipart).
+Все 27 целевых тестов (12 static + 4 sendfile + 11 multipart) и полная
+server-suite (133 PASS / 1 SKIP) зелёные.
 
 1. Создать `src/http_mime.c` + `include/http_mime.h`. Перенести содержимое
    `src/static/http_static_mime.c` с переименованием API

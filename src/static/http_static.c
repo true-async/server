@@ -32,9 +32,13 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h" /* http_request_t */
 #include "static/static_handler.h"
-#include "static/http_static_mime.h"
+#include "http_mime.h"
 #include "static/http_static_path.h"
-#include "static/http_static_etag.h"
+#include "http_etag.h"
+#include "http_date.h"
+#include "http_conditional.h"
+#include "http_range.h"
+#include "fs_util.h"
 #include "static/http_static_cache.h"
 #include "compression/http_compression_negotiate.h"
 #include "compression/http_encoder.h"
@@ -46,6 +50,28 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
+
+/* Per-mount overrides win — setMimeType() is documented as
+ * "override the Content-Type for files with this extension". On miss
+ * fall through to the project-wide builtin table. */
+static bool mount_resolve_content_type(const http_static_handler_t *mount, const char *path,
+									   size_t path_len, const char **out, size_t *out_len)
+{
+	if (mount != NULL && mount->mime_overrides != NULL) {
+		char ext[32];
+		const size_t ext_len = http_mime_extract_lowered_ext(path, path_len, ext, sizeof(ext));
+		if (ext_len > 0) {
+			const zval *const override = zend_hash_str_find(mount->mime_overrides, ext, ext_len);
+			if (override != NULL && Z_TYPE_P(override) == IS_STRING) {
+				*out = Z_STRVAL_P(override);
+				*out_len = Z_STRLEN_P(override);
+				return true;
+			}
+		}
+	}
+
+	return http_mime_lookup_by_ext(path, path_len, out, out_len);
+}
 
 static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
@@ -69,8 +95,6 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 }
 
 static bool verify_path_owner_chain(const http_static_handler_t *mount, const char *fs_path);
-static int parse_byte_range(const char *hdr, size_t hdr_len, uint64_t size, uint64_t *out_first,
-							uint64_t *out_last);
 
 /* REJECT pre-flight check. The sync fallback open() uses O_NOFOLLOW
  * (kernel rejects symlinks on the final component); the async hard-zero
@@ -203,42 +227,6 @@ static bool resolved_under_root(const http_static_handler_t *mount, const char *
 	 * (e.g. root="/srv/foo", canonical="/srv/foobar/x"). */
 	const char tail = canonical[root_len];
 	return tail == '\0' || tail == '/';
-}
-
-static zend_string *slurp_fd(const int fd, const size_t size)
-{
-	if (size == 0) {
-		return ZSTR_EMPTY_ALLOC();
-	}
-	zend_string *const out = zend_string_alloc(size, 0);
-	size_t total = 0;
-
-	while (total < size) {
-		const ssize_t n = read(fd, ZSTR_VAL(out) + total, size - total);
-		if (EXPECTED(n > 0)) {
-			total += (size_t)n;
-			continue;
-		}
-
-		if (n == 0) {
-			break; /* premature EOF */
-		}
-
-		if (errno == EINTR) {
-			continue;
-		}
-
-		zend_string_release(out);
-		return NULL;
-	}
-
-	if (UNEXPECTED(total != size)) {
-		zend_string_release(out);
-		return NULL;
-	}
-
-	ZSTR_VAL(out)[size] = '\0';
-	return out;
 }
 
 /* Try open + fstat. On a non-regular file, surface ENOENT so the
@@ -388,8 +376,8 @@ typedef struct
 	 * lifetime invariant as the cache entry. */
 	bool has_cached_meta;
 	bool cached_etag_enabled;
-	char cached_etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
-	char cached_lm_buf[HTTP_STATIC_DATE_BUF_LEN];
+	char cached_etag_buf[HTTP_ETAG_BUF_LEN];
+	char cached_lm_buf[HTTP_DATE_BUF_LEN];
 	const char *cached_content_type;
 	size_t cached_content_type_len;
 
@@ -748,8 +736,8 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 	/* On a cache hit static_fsm_kick_off pre-rendered etag/lm into the state
 	 * scratch buffers. On a miss we synthesise everything from the
 	 * freshly-stat'd inode and (at the bottom) hand it to the cache. */
-	char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
-	char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
+	char etag_buf[HTTP_ETAG_BUF_LEN];
+	char last_modified_buf[HTTP_DATE_BUF_LEN];
 	bool etag_enabled;
 	const char *content_type = NULL;
 	size_t content_type_len = 0;
@@ -757,22 +745,22 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 	if (state->has_cached_meta) {
 		etag_enabled = state->cached_etag_enabled;
 		if (etag_enabled) {
-			memcpy(etag_buf, state->cached_etag_buf, HTTP_STATIC_ETAG_BUF_LEN);
+			memcpy(etag_buf, state->cached_etag_buf, HTTP_ETAG_BUF_LEN);
 		}
-		memcpy(last_modified_buf, state->cached_lm_buf, HTTP_STATIC_DATE_BUF_LEN);
+		memcpy(last_modified_buf, state->cached_lm_buf, HTTP_DATE_BUF_LEN);
 		content_type = state->cached_content_type;
 		content_type_len = state->cached_content_type_len;
 	} else {
 		etag_enabled = (state->mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
 		if (etag_enabled) {
-			http_static_etag_format(&state->st, etag_buf);
+			http_etag_format_strong(&state->st, etag_buf);
 		}
-		http_static_format_http_date(state->st.st_mtime, last_modified_buf);
+		http_date_format_imf(state->st.st_mtime, last_modified_buf);
 		if (state->override_content_type != NULL) {
 			content_type = state->override_content_type;
 			content_type_len = state->override_content_type_len;
-		} else if (!http_static_mime_lookup(state->mount, state->fs_path, state->fs_path_len,
-											&content_type, &content_type_len)) {
+		} else if (!mount_resolve_content_type(state->mount, state->fs_path, state->fs_path_len,
+											   &content_type, &content_type_len)) {
 			content_type = "application/octet-stream";
 			content_type_len = sizeof("application/octet-stream") - 1;
 		}
@@ -782,12 +770,12 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 		http_request_find_header(state->request, "if-none-match", 13);
 	const zend_string *if_modified_since =
 		http_request_find_header(state->request, "if-modified-since", 17);
-	const bool not_modified = http_static_conditional_match(
+	const bool not_modified = http_conditional_check(
 		if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
 		if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
 		if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
 		if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0, etag_enabled ? etag_buf : NULL,
-		etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, state->st.st_mtime);
+		etag_enabled ? HTTP_ETAG_LEN : 0, state->st.st_mtime);
 
 	/* Cache insert (only on miss path). */
 	if (!state->has_cached_meta && state->server != NULL) {
@@ -795,8 +783,8 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 		if (cache != NULL) {
 			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
 									 content_type, content_type_len, etag_enabled ? etag_buf : NULL,
-									 etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, last_modified_buf,
-									 HTTP_STATIC_DATE_LEN);
+									 etag_enabled ? HTTP_ETAG_LEN : 0, last_modified_buf,
+									 HTTP_DATE_LEN);
 		}
 	}
 
@@ -808,20 +796,20 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 		const zend_string *if_range = http_request_find_header(state->request, "if-range", 8);
 		bool range_allowed = true;
 		if (if_range != NULL && etag_enabled) {
-			range_allowed = (ZSTR_LEN(if_range) == HTTP_STATIC_ETAG_LEN &&
-							 memcmp(ZSTR_VAL(if_range), etag_buf, HTTP_STATIC_ETAG_LEN) == 0);
+			range_allowed = (ZSTR_LEN(if_range) == HTTP_ETAG_LEN &&
+							 memcmp(ZSTR_VAL(if_range), etag_buf, HTTP_ETAG_LEN) == 0);
 		} else if (if_range != NULL) {
 			range_allowed = false;
 		}
 		if (range_hdr != NULL && range_allowed) {
 			uint64_t first = 0, last = 0;
-			const int rc = parse_byte_range(ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr),
-											state->range_total, &first, &last);
-			if (rc == 1) {
+			const http_range_result_t rc = http_range_parse(
+				ZSTR_VAL(range_hdr), ZSTR_LEN(range_hdr), state->range_total, &first, &last);
+			if (rc == HTTP_RANGE_OK) {
 				state->is_range = true;
 				state->range_first = first;
 				state->range_last = last;
-			} else if (rc == -1) {
+			} else if (rc == HTTP_RANGE_NOT_SATISFIABLE) {
 				/* 416. Carry "Content-Range: bytes [star]/size" per RFC 9110 sec 14.1.2. */
 				http_response_static_set_status(response_obj, 416);
 				http_response_static_set_header(response_obj, "content-type", 12,
@@ -873,10 +861,10 @@ static void static_fsm_handle_stat(static_fsm_state_t *state)
 	}
 
 	if (etag_enabled) {
-		http_response_static_set_header(response_obj, "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
+		http_response_static_set_header(response_obj, "etag", 4, etag_buf, HTTP_ETAG_LEN);
 	}
 	http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
-									HTTP_STATIC_DATE_LEN);
+									HTTP_DATE_LEN);
 
 	/* Precompressed sidecar served: tell intermediaries the
 	 * representation depends on Accept-Encoding. Vary is added
@@ -1005,14 +993,14 @@ static bool static_fsm_kick_off(http_server_object *server, http_request_t *requ
 		state->st = cv->st;
 		state->cached_content_type = cv->content_type;
 		state->cached_content_type_len = cv->content_type_len;
-		if (cv->etag != NULL && cv->etag_len == HTTP_STATIC_ETAG_LEN) {
-			memcpy(state->cached_etag_buf, cv->etag, HTTP_STATIC_ETAG_LEN);
-			state->cached_etag_buf[HTTP_STATIC_ETAG_LEN] = '\0';
+		if (cv->etag != NULL && cv->etag_len == HTTP_ETAG_LEN) {
+			memcpy(state->cached_etag_buf, cv->etag, HTTP_ETAG_LEN);
+			state->cached_etag_buf[HTTP_ETAG_LEN] = '\0';
 			state->cached_etag_enabled = true;
 		}
-		if (cv->last_modified != NULL && cv->last_modified_len == HTTP_STATIC_DATE_LEN) {
-			memcpy(state->cached_lm_buf, cv->last_modified, HTTP_STATIC_DATE_LEN);
-			state->cached_lm_buf[HTTP_STATIC_DATE_LEN] = '\0';
+		if (cv->last_modified != NULL && cv->last_modified_len == HTTP_DATE_LEN) {
+			memcpy(state->cached_lm_buf, cv->last_modified, HTTP_DATE_LEN);
+			state->cached_lm_buf[HTTP_DATE_LEN] = '\0';
 		}
 	}
 
@@ -1059,124 +1047,6 @@ static bool static_fsm_kick_off(http_server_object *server, http_request_t *requ
 	http_server_on_static_zero_coroutine(counters);
 
 	return true;
-}
-
-/* Single Byte-Range parser. RFC 9110 §14.1.2.
- *
- * Accepts:
- *   bytes=A-B      first..last (inclusive)
- *   bytes=A-       first..size-1
- *   bytes=-N       size-N..size-1 (suffix-length form)
- *
- * Multi-range syntax (comma-separated) is recognised but rejected
- * here — the caller falls back to 200 with the full body, which
- * is RFC-permitted ("a server MAY ignore the Range header field").
- * Multipart/byteranges responses are a separate follow-up.
- *
- * Returns:
- *   1  parsed successfully into *out_first / *out_last (inclusive,
- *      already validated against `size`).
- *   0  header malformed or multi-range — caller serves 200 full body.
- *  -1  syntactically valid but unsatisfiable (start past EOF, etc) —
- *      caller MUST emit 416 Range Not Satisfiable per §14.1.2. */
-static int parse_byte_range(const char *hdr, size_t hdr_len, uint64_t size, uint64_t *out_first,
-							uint64_t *out_last)
-{
-	if (hdr == NULL || hdr_len < 7) {
-		return 0;
-	}
-	if (memcmp(hdr, "bytes=", 6) != 0) {
-		return 0;
-	}
-	const char *p = hdr + 6;
-	const char *end = hdr + hdr_len;
-	while (p < end && (*p == ' ' || *p == '\t')) {
-		p++;
-	}
-	/* Reject multi-range: scan for ',' before the dash. */
-	for (const char *q = p; q < end; q++) {
-		if (*q == ',') {
-			return 0;
-		}
-	}
-	if (p >= end) {
-		return 0;
-	}
-
-	bool suffix_form = false;
-	uint64_t first = 0;
-	bool first_set = false;
-	if (*p == '-') {
-		suffix_form = true;
-		p++;
-	} else {
-		while (p < end && *p >= '0' && *p <= '9') {
-			if (first > UINT64_MAX / 10) {
-				return 0;
-			}
-			first = first * 10 + (uint64_t)(*p - '0');
-			first_set = true;
-			p++;
-		}
-		if (!first_set || p >= end || *p != '-') {
-			return 0;
-		}
-		p++;
-	}
-
-	uint64_t last = 0;
-	bool last_set = false;
-	while (p < end && *p >= '0' && *p <= '9') {
-		if (last > UINT64_MAX / 10) {
-			return 0;
-		}
-		last = last * 10 + (uint64_t)(*p - '0');
-		last_set = true;
-		p++;
-	}
-	while (p < end && (*p == ' ' || *p == '\t')) {
-		p++;
-	}
-	if (p != end) {
-		return 0; /* trailing garbage */
-	}
-
-	if (size == 0) {
-		return -1; /* nothing to slice from */
-	}
-
-	if (suffix_form) {
-		if (!last_set || last == 0) {
-			return 0;
-		}
-		if (last >= size) {
-			/* "last N where N >= size" → whole file (RFC 9110: a
-			 * suffix-length larger than the resource length is
-			 * treated as the whole resource, status still 206). */
-			*out_first = 0;
-		} else {
-			*out_first = size - last;
-		}
-		*out_last = size - 1;
-		return 1;
-	}
-	if (first >= size) {
-		return -1;
-	}
-	if (!last_set) {
-		*out_first = first;
-		*out_last = size - 1;
-		return 1;
-	}
-	if (last < first) {
-		return 0;
-	}
-	if (last >= size) {
-		last = size - 1;
-	}
-	*out_first = first;
-	*out_last = last;
-	return 1;
 }
 
 /* Precompressed sidecar selection. Picks a `.zst` /
@@ -1418,7 +1288,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 							 HTTP_STATIC_FLAG_PRECOMP_ZSTD)) != 0) {
 			const char *pre_ct = NULL;
 			size_t pre_ct_len = 0;
-			if (!http_static_mime_lookup(mount, fs_path, fs_path_len, &pre_ct, &pre_ct_len)) {
+			if (!mount_resolve_content_type(mount, fs_path, fs_path_len, &pre_ct, &pre_ct_len)) {
 				pre_ct = "application/octet-stream";
 				pre_ct_len = sizeof("application/octet-stream") - 1;
 			}
@@ -1495,41 +1365,41 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			return HTTP_STATIC_HANDLED;
 		}
 
-		char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
+		char etag_buf[HTTP_ETAG_BUF_LEN];
 		const bool etag_enabled = (mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
 		if (etag_enabled) {
-			http_static_etag_format(&st, etag_buf);
+			http_etag_format_strong(&st, etag_buf);
 		}
 
-		char last_modified_buf[HTTP_STATIC_DATE_BUF_LEN];
-		http_static_format_http_date(st.st_mtime, last_modified_buf);
+		char last_modified_buf[HTTP_DATE_BUF_LEN];
+		http_date_format_imf(st.st_mtime, last_modified_buf);
 
 		const zend_string *const if_none_match = http_request_find_header(request, "if-none-match", 13);
 		const zend_string *const if_modified_since =
 			http_request_find_header(request, "if-modified-since", 17);
-		const bool not_modified = http_static_conditional_match(
+		const bool not_modified = http_conditional_check(
 			if_none_match != NULL ? ZSTR_VAL(if_none_match) : NULL,
 			if_none_match != NULL ? ZSTR_LEN(if_none_match) : 0,
 			if_modified_since != NULL ? ZSTR_VAL(if_modified_since) : NULL,
 			if_modified_since != NULL ? ZSTR_LEN(if_modified_since) : 0,
-			etag_enabled ? etag_buf : NULL, etag_enabled ? HTTP_STATIC_ETAG_LEN : 0, st.st_mtime);
+			etag_enabled ? etag_buf : NULL, etag_enabled ? HTTP_ETAG_LEN : 0, st.st_mtime);
 
 		if (not_modified) {
 			close(fd);
 			http_response_static_set_status(response_obj, 304);
 			if (etag_enabled) {
 				http_response_static_set_header(response_obj, "etag", 4, etag_buf,
-												HTTP_STATIC_ETAG_LEN);
+												HTTP_ETAG_LEN);
 			}
 			http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
-											HTTP_STATIC_DATE_LEN);
+											HTTP_DATE_LEN);
 			apply_mount_headers(response_obj, mount, false);
 			return HTTP_STATIC_HANDLED;
 		}
 
 		zend_string *body = NULL;
 		if (is_get) {
-			body = slurp_fd(fd, (size_t)st.st_size);
+			body = fs_slurp_fd(fd, (size_t)st.st_size);
 			if (UNEXPECTED(body == NULL)) {
 				close(fd);
 				http_response_emit_status_body(response_obj, 500, "Internal Server Error", 21);
@@ -1542,8 +1412,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		const char *content_type = NULL;
 		size_t content_type_len = 0;
-		if (!http_static_mime_lookup(mount, fs_path, fs_path_len, &content_type,
-									 &content_type_len)) {
+		if (!mount_resolve_content_type(mount, fs_path, fs_path_len, &content_type,
+										&content_type_len)) {
 			content_type = "application/octet-stream";
 			content_type_len = sizeof("application/octet-stream") - 1;
 		}
@@ -1552,10 +1422,10 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		if (etag_enabled) {
 			http_response_static_set_header(response_obj, "etag", 4, etag_buf,
-											HTTP_STATIC_ETAG_LEN);
+											HTTP_ETAG_LEN);
 		}
 		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
-										HTTP_STATIC_DATE_LEN);
+										HTTP_DATE_LEN);
 		apply_mount_headers(response_obj, mount, true);
 
 		if (is_head) {

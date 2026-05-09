@@ -28,8 +28,12 @@
 #include "http_response_internal.h"
 #include "http_send_file.h"
 #include "static/static_handler.h"
-#include "static/http_static_mime.h"
-#include "static/http_static_etag.h"
+#include "http_mime.h"
+#include "http_etag.h"
+#include "http_date.h"
+#include "http_conditional.h"
+#include "http_range.h"
+#include "http_rfc5987.h"
 #include "compression/http_compression_negotiate.h"
 
 #include <fcntl.h>
@@ -143,21 +147,7 @@ static void sf_set_content_disposition(zend_object *r,
 			smart_str_appendc(&s, '"');
 		} else {
 			smart_str_appendl(&s, "; filename*=UTF-8''", 19);
-			static const char hex[] = "0123456789ABCDEF";
-			for (size_t i = 0; i < dn_len; i++) {
-				const unsigned char c = (unsigned char)dn[i];
-				const bool unreserved =
-					(c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-					(c >= '0' && c <= '9') ||
-					c == '-' || c == '.' || c == '_' || c == '~';
-				if (unreserved) {
-					smart_str_appendc(&s, (char)c);
-				} else {
-					smart_str_appendc(&s, '%');
-					smart_str_appendc(&s, hex[c >> 4]);
-					smart_str_appendc(&s, hex[c & 0xf]);
-				}
-			}
+			http_rfc5987_encode(&s, dn, dn_len);
 		}
 	}
 
@@ -368,13 +358,13 @@ static void sf_handle_stat(sf_state_t *state)
 	}
 
 	/* ETag + Last-Modified scratch. */
-	char etag_buf[HTTP_STATIC_ETAG_BUF_LEN];
+	char etag_buf[HTTP_ETAG_BUF_LEN];
 	if (opts->etag) {
-		http_static_etag_format(&state->st, etag_buf);
+		http_etag_format_strong(&state->st, etag_buf);
 	}
-	char lm_buf[HTTP_STATIC_DATE_BUF_LEN];
+	char lm_buf[HTTP_DATE_BUF_LEN];
 	if (opts->last_modified) {
-		http_static_format_http_date(state->st.st_mtime, lm_buf);
+		http_date_format_imf(state->st.st_mtime, lm_buf);
 	}
 
 	/* Conditional GET. */
@@ -384,18 +374,16 @@ static void sf_handle_stat(sf_state_t *state)
 			http_request_find_header(state->request, "if-none-match", 13);
 		const zend_string *ims =
 			http_request_find_header(state->request, "if-modified-since", 17);
-		not_modified = http_static_conditional_match(
+		not_modified = http_conditional_check(
 			inm != NULL ? ZSTR_VAL(inm) : NULL,
 			inm != NULL ? ZSTR_LEN(inm) : 0,
 			ims != NULL ? ZSTR_VAL(ims) : NULL,
 			ims != NULL ? ZSTR_LEN(ims) : 0,
 			opts->etag ? etag_buf : NULL,
-			opts->etag ? HTTP_STATIC_ETAG_LEN : 0,
+			opts->etag ? HTTP_ETAG_LEN : 0,
 			state->st.st_mtime);
 	}
 
-	/* Range support. We piggyback on the existing static parser by
-	 * copy-pasting the minimal logic — keeps this TU self-contained. */
 	const uint64_t total = (uint64_t)state->st.st_size;
 	bool is_range = false;
 	uint64_t range_first = 0, range_last = 0;
@@ -404,55 +392,19 @@ static void sf_handle_stat(sf_state_t *state)
 		const zend_string *ifr = http_request_find_header(state->request, "if-range", 8);
 		bool range_allowed = true;
 		if (ifr != NULL && opts->etag) {
-			range_allowed = (ZSTR_LEN(ifr) == HTTP_STATIC_ETAG_LEN
-				&& memcmp(ZSTR_VAL(ifr), etag_buf, HTTP_STATIC_ETAG_LEN) == 0);
+			range_allowed = (ZSTR_LEN(ifr) == HTTP_ETAG_LEN
+				&& memcmp(ZSTR_VAL(ifr), etag_buf, HTTP_ETAG_LEN) == 0);
 		} else if (ifr != NULL) {
 			range_allowed = false;
 		}
-		if (rh != NULL && range_allowed && total > 0
-		    && ZSTR_LEN(rh) > 6 && memcmp(ZSTR_VAL(rh), "bytes=", 6) == 0) {
-			/* Parse simple bytes=A-B form (no multi-range). */
-			const char *p = ZSTR_VAL(rh) + 6;
-			const char *end = ZSTR_VAL(rh) + ZSTR_LEN(rh);
-			while (p < end && (*p == ' ' || *p == '\t')) p++;
-
-			bool multi = false;
-			for (const char *q = p; q < end; q++) {
-				if (*q == ',') { multi = true; break; }
-			}
-			if (!multi) {
-				bool suffix = false;
-				uint64_t a = 0, b = 0;
-				bool a_set = false, b_set = false;
-				if (p < end && *p == '-') {
-					suffix = true;
-					p++;
-				} else {
-					while (p < end && *p >= '0' && *p <= '9') {
-						a = a * 10 + (uint64_t)(*p - '0');
-						a_set = true;
-						p++;
-					}
-					if (a_set && p < end && *p == '-') p++;
-				}
-				while (p < end && *p >= '0' && *p <= '9') {
-					b = b * 10 + (uint64_t)(*p - '0');
-					b_set = true;
-					p++;
-				}
-				if (suffix && b_set && b > 0) {
-					range_first = (b >= total) ? 0 : (total - b);
-					range_last = total - 1;
-					is_range = true;
-				} else if (a_set) {
-					if (a < total) {
-						range_first = a;
-						range_last = b_set ? (b < total ? b : total - 1) : (total - 1);
-						if (range_last >= range_first) {
-							is_range = true;
-						}
-					}
-				}
+		if (rh != NULL && range_allowed) {
+			const http_range_result_t rr = http_range_parse(
+				ZSTR_VAL(rh), ZSTR_LEN(rh), total, &range_first, &range_last);
+			/* sendFile() does not synthesize 416 — fall back to 200
+			 * with the full body on any non-OK outcome (matches the
+			 * pre-extraction behavior). */
+			if (rr == HTTP_RANGE_OK) {
+				is_range = true;
 			}
 		}
 	}
@@ -476,10 +428,10 @@ static void sf_handle_stat(sf_state_t *state)
 	}
 
 	if (opts->etag) {
-		http_response_static_set_header(r, "etag", 4, etag_buf, HTTP_STATIC_ETAG_LEN);
+		http_response_static_set_header(r, "etag", 4, etag_buf, HTTP_ETAG_LEN);
 	}
 	if (opts->last_modified) {
-		http_response_static_set_header(r, "last-modified", 13, lm_buf, HTTP_STATIC_DATE_LEN);
+		http_response_static_set_header(r, "last-modified", 13, lm_buf, HTTP_DATE_LEN);
 	}
 
 	if (state->content_encoding != NULL && include_content_headers) {
@@ -633,11 +585,7 @@ bool http_send_file_dispatch(http_request_t *request,
 	 * change the Content-Type the client sees. */
 	{
 		const char *ct = NULL; size_t ct_len = 0;
-		/* http_static_mime_lookup tolerates a NULL mount: the per-mount
-		 * override pass simply yields NULL and falls through to the
-		 * built-in table. */
-		(void)http_static_mime_lookup(NULL, state->fs_path, state->fs_path_len,
-		                              &ct, &ct_len);
+		(void)http_mime_lookup_by_ext(state->fs_path, state->fs_path_len, &ct, &ct_len);
 		state->content_type     = ct;
 		state->content_type_len = ct_len;
 	}

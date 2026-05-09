@@ -469,6 +469,13 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/formats/multipart_processor.c
     src/http_request.c
     src/http_response.c
+    src/http_mime.c
+    src/http_date.c
+    src/http_etag.c
+    src/http_conditional.c
+    src/http_range.c
+    src/fs_util.c
+    src/http_rfc5987.c
     src/http_send_file.c
     src/http_send_file_options.c
     src/uploaded_file.c
@@ -478,9 +485,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/log/http_log.c
     src/log/trace_context.c
     src/static/static_handler_class.c
-    src/static/http_static_mime.c
     src/static/http_static_path.c
-    src/static/http_static_etag.c
     src/static/http_static_cache.c
     src/static/http_static.c
   "

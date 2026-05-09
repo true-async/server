@@ -21,6 +21,7 @@
 #include "main/php_open_temporary_file.h"  /* cross-platform temp fd */
 #include "Zend/zend_virtual_cwd.h"         /* VCWD_UNLINK */
 #include "log/http_log.h"
+#include "http_rfc5987.h"
 
 /* Memory allocation macros */
 #ifdef PHP_WIN32
@@ -205,13 +206,15 @@ static void parse_content_disposition(mp_processor_t* proc, const char* value)
             while (*p && *p != '\'') p++;
             if (*p == '\'') p++;
 
-            /* URL-decode the filename */
             const char* start = p;
             while (*p && *p != ';' && *p != ' ') p++;
 
-            /* Simple copy for now - TODO: proper URL decoding */
+            const size_t enc_len = (size_t)(p - start);
+            char *decoded = MP_MALLOC(enc_len + 1);
+            const size_t dec_len = http_rfc5987_decode(decoded, start, enc_len);
+            decoded[dec_len] = '\0';
             if (proc->filename) MP_FREE(proc->filename);
-            proc->filename = MP_STRNDUP(start, p - start);
+            proc->filename = decoded;
         }
 
         /* Skip to next parameter */
