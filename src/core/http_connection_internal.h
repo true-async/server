@@ -109,12 +109,8 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 bool tls_push_and_maybe_flush(http_connection_t *conn,
                               const char *data, size_t len);
 
-/* Fire-and-forget plaintext send for the handler dispose hot path:
- * encrypts inline, hands the resulting ciphertext span to libuv via
- * the zero-copy WRITE_EX + free_cb pipeline, returns without awaiting.
- * h1 sequential request/response semantics — no per-conn pending queue
- * needed. Falls back to tls_push_and_maybe_flush when the flusher role
- * is already held (FSM-side encrypt in flight). */
+/* Fire-and-forget variant of tls_push_and_maybe_flush for the h1 dispose
+ * hot path. Falls back when flusher role is already held. */
 bool tls_push_and_fire(http_connection_t *conn,
                        const char *data, size_t len);
 
