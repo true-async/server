@@ -490,6 +490,43 @@ static void engine_handle_stat(engine_state_t *state)
 		return;
 	}
 
+	/* === Small-file fast path (slurp + inline body) ================== */
+	/* libuv's uv_fs_sendfile is doubly broken for file→TCP-socket: it
+	 * tries copy_file_range first (returns EINVAL on socket), then
+	 * falls into a userspace pread+write loop *inside* a worker
+	 * thread — no kernel zero-copy AND a thread-pool round-trip per
+	 * request. For small files the round-trip dominates. Bypass it:
+	 * read the whole file synchronously into an emalloc'd
+	 * zend_string, hand the body to the response object, and
+	 * delegate with file_io=NULL — the protocol op then emits a
+	 * single writev(headers + inline body) via the same per-socket
+	 * write queue that headers normally use. Ordering with prior
+	 * writes on the same socket is guaranteed by libuv's stream
+	 * write queue. */
+#define SEND_FILE_SLURP_THRESHOLD ((size_t)64 * 1024)
+
+	if (!state->is_range && (size_t)state->st.st_size <= SEND_FILE_SLURP_THRESHOLD &&
+		file_io != NULL) {
+		zend_string *body = fs_slurp_fd((int)file_io->descriptor.fd, (size_t)state->st.st_size);
+
+		if (body != NULL) {
+			http_response_static_set_body_str(response_obj, body);
+			zend_string_release(body);
+
+			if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+
+			/* file_io=NULL → engine_delegate_to_protocol disposes
+			 * state->file_io and the protocol op writes the inline
+			 * body riding along with headers. */
+			if (UNEXPECTED(!engine_delegate_to_protocol(state, NULL, 0, 0, true))) {
+				engine_finalize(state, -1);
+			}
+
+			return;
+		}
+		/* Slurp failed — fall through to sendfile path. */
+	}
+
 	const uint64_t body_offset = state->is_range ? state->range_first : 0;
 
 	if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
