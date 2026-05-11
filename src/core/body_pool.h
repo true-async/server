@@ -23,4 +23,17 @@ void         body_pool_release(zend_string *zstr);
  * debug allocator's leak detector doesn't flag pool-retained slots. */
 void         body_pool_shutdown(void);
 
+/* Convenience: release whatever this string is — pool slot via the pool,
+ * regular zend_string via zend_string_release. Use this anywhere you'd
+ * otherwise call zend_string_release on a request body. */
+static inline void body_release(zend_string *zstr)
+{
+    if (zstr == NULL) return;
+    if (body_pool_owns(zstr)) {
+        body_pool_release(zstr);
+    } else {
+        zend_string_release(zstr);
+    }
+}
+
 #endif

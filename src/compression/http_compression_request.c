@@ -21,6 +21,7 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "compression/http_compression_request.h"
+#include "core/body_pool.h"
 
 #ifdef HAVE_ZLIB_NG
 #  include <zlib-ng.h>
@@ -109,7 +110,7 @@ static int decode_gzip(http_request_t *req, size_t cap)
 
     ZSTR_VAL(out)[produced] = '\0';
 
-    zend_string_release(req->body);
+    body_release(req->body);
     req->body = out;
     req->content_length = produced;
     return HTTP_DECODE_OK;

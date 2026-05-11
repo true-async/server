@@ -25,6 +25,7 @@
 #include "php.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "core/body_pool.h"
 
 #include <brotli/encode.h>
 #include <brotli/decode.h>
@@ -265,7 +266,7 @@ int http_compression_decode_request_brotli(http_request_t *req, size_t cap)
 
     ZSTR_VAL(out)[produced] = '\0';
 
-    zend_string_release(req->body);
+    body_release(req->body);
     req->body = out;
     req->content_length = produced;
     return HTTP_DECODE_OK;

@@ -884,13 +884,8 @@ void http_request_destroy(http_request_t *req)
         FREE_HASHTABLE(req->headers);
     }
 
-    if (req->body) {
-        if (body_pool_owns(req->body)) {
-            body_pool_release(req->body);
-        } else {
-            zend_string_release(req->body);
-        }
-    }
+    body_release(req->body);
+    req->body = NULL;
 
     /* Dispose body-progress event if awaitBody() created one */
     if (req->body_event) {

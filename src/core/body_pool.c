@@ -79,7 +79,8 @@ zend_string *body_pool_acquire(const size_t len)
     }
 
     /* IS_STR_INTERNED makes PHP refcount ops no-ops; lifecycle is owned
-     * by us, not the engine. POOL_MAGIC in GC_INFO marks ownership. */
+     * by us, not the engine. POOL_MAGIC in GC_INFO marks ownership so
+     * body_pool_owns() can recognise the slot from any release site. */
     GC_SET_REFCOUNT(zstr, 1);
     GC_TYPE_INFO(zstr) = GC_STRING
         | (IS_STR_INTERNED << GC_FLAGS_SHIFT)
