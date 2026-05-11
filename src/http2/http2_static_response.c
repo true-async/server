@@ -82,6 +82,7 @@
 #include <nghttp2/nghttp2.h>
 #include <errno.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 
 /* Per-chunk read size. 16 KiB matches HTTP2_SETTINGS_MAX_FRAME so a
@@ -276,6 +277,18 @@ static bool h2_static_submit_read(h2_static_state_t *state)
 
     if (state->read_buf == NULL) {
         state->read_buf = emalloc(H2_STATIC_READ_CHUNK_BYTES);
+
+        /* On a Range request the engine asks us to deliver bytes
+         * starting at body_offset, but ZEND_ASYNC_IO_READ uses the
+         * fd's tracked position (libuv passes offset=-1 → read(2)),
+         * which is 0 right after open. Seek the io once before the
+         * first read so the position lines up with body_offset.
+         * Reads thereafter advance naturally. */
+        if (state->body_offset != 0) {
+            (void)ZEND_ASYNC_IO_SEEK(state->file_io,
+                                     (zend_off_t)state->body_offset,
+                                     SEEK_SET);
+        }
     }
 
     const uint64_t remaining = state->body_length > state->bytes_sent
