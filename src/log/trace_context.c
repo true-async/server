@@ -18,6 +18,7 @@
 static int hex_nibble(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
+
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     /* W3C TC §3.2.2.1 mandates lower-case; we reject upper-case. */
     return -1;
@@ -28,14 +29,18 @@ static bool decode_hex(const char *src, size_t src_chars, uint8_t *dst)
     if ((src_chars & 1u) != 0) {
         return false;
     }
+
     for (size_t i = 0; i < src_chars; i += 2) {
         int hi = hex_nibble(src[i]);
         int lo = hex_nibble(src[i + 1]);
+
         if (hi < 0 || lo < 0) {
             return false;
         }
+
         dst[i / 2] = (uint8_t)((hi << 4) | lo);
     }
+
     return true;
 }
 
@@ -44,6 +49,7 @@ static bool is_all_zero(const uint8_t *p, size_t n)
     for (size_t i = 0; i < n; i++) {
         if (p[i] != 0) return false;
     }
+
     return true;
 }
 
@@ -56,6 +62,7 @@ bool trace_parse_traceparent(const char *header, size_t len,
     if (header == NULL || len != 55) {
         return false;
     }
+
     if (header[2] != '-' || header[35] != '-' || header[52] != '-') {
         return false;
     }
@@ -63,6 +70,7 @@ bool trace_parse_traceparent(const char *header, size_t len,
     /* Version. Future versions are explicitly rejected here — a v01+
      * peer's header layout is not guaranteed compatible. */
     uint8_t version;
+
     if (!decode_hex(header, 2, &version) || version != 0x00) {
         return false;
     }
@@ -70,6 +78,7 @@ bool trace_parse_traceparent(const char *header, size_t len,
     uint8_t trace_id[16];
     uint8_t span_id[8];
     uint8_t flags;
+
     if (!decode_hex(header + 3,  32, trace_id)
         || !decode_hex(header + 36, 16, span_id)
         || !decode_hex(header + 53, 2,  &flags)) {
@@ -94,6 +103,7 @@ void trace_hex_encode(const uint8_t *src, size_t src_len, char *dst)
         dst[2 * i]     = digits[(src[i] >> 4) & 0xf];
         dst[2 * i + 1] = digits[src[i]        & 0xf];
     }
+
     dst[2 * src_len] = '\0';
 }
 
@@ -106,6 +116,7 @@ void http_request_parse_trace_context(http_request_t *req)
     /* Header keys in req->headers are lowercase by convention. */
     zval *tp = zend_hash_str_find(req->headers,
                                   "traceparent", sizeof("traceparent") - 1);
+
     if (tp == NULL || Z_TYPE_P(tp) != IS_STRING) {
         return;
     }
@@ -113,6 +124,7 @@ void http_request_parse_trace_context(http_request_t *req)
     uint8_t trace_id[16];
     uint8_t span_id[8];
     uint8_t flags;
+
     if (!trace_parse_traceparent(Z_STRVAL_P(tp), Z_STRLEN_P(tp),
                                  trace_id, span_id, &flags)) {
         return;
@@ -128,6 +140,7 @@ void http_request_parse_trace_context(http_request_t *req)
      * don't enforce here — the spec leaves enforcement to the consumer. */
     zval *ts = zend_hash_str_find(req->headers,
                                   "tracestate", sizeof("tracestate") - 1);
+
     if (ts != NULL && Z_TYPE_P(ts) == IS_STRING) {
         req->tracestate_raw = zend_string_copy(Z_STR_P(ts));
     }

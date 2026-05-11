@@ -17,7 +17,12 @@
 #include "ext/json/php_json.h"
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
 #include "php_http_server.h"
+#include "http1/http_parser.h"   /* http_request_t full definition for keep_alive read */
+#include "http_response_internal.h"
+#include "http_send_file.h"
 #include "smart_str_scalable.h"
+
+#include <strings.h>             /* strncasecmp */
 
 /* Include generated arginfo */
 #include "../stubs/HttpResponse.php_arginfo.h"
@@ -107,6 +112,11 @@ typedef struct {
      * which makes ::json() fall back to ext/json's own zero-flag default. */
     uint32_t         default_json_flags;
 
+    /* sendFile() handoff: when non-NULL, every mutating PHP method
+     * throws and the dispose path consumes it through the per-protocol
+     * sendfile FSM. Owned by the response until take_send_file pulls it. */
+    http_send_file_request_t *send_file_req;
+
     zend_object      std;
 } http_response_object;
 
@@ -134,11 +144,19 @@ static inline bool response_check_closed(const http_response_object *response)
             "Cannot modify response after end() has been called", 0);
         return true;
     }
+
     if (response->streaming) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot modify response — headers already committed by send()", 0);
         return true;
     }
+
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return true;
+    }
+
     return false;
 }
 
@@ -167,6 +185,7 @@ static void add_header_value(HashTable *headers, zend_string *name, zval *value,
     if (replace || !existing) {
         if (Z_TYPE_P(value) == IS_ARRAY) {
             uint32_t count = zend_hash_num_elements(Z_ARRVAL_P(value));
+
             if (count == 1) {
                 /* Single-element array — store the inner string directly. */
                 zval *first = NULL;
@@ -210,6 +229,7 @@ static void add_header_value(HashTable *headers, zend_string *name, zval *value,
             zend_hash_update(headers, lower_name, &arr);
             existing = zend_hash_find(headers, lower_name);
         }
+
         if (Z_TYPE_P(value) == IS_ARRAY) {
             zval *val;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(value), val) {
@@ -232,6 +252,7 @@ static void add_header_value(HashTable *headers, zend_string *name, zval *value,
 /* {{{ proto private HttpResponse::__construct() */
 ZEND_METHOD(TrueAsync_HttpResponse, __construct)
 {
+    (void)return_value;
     /* This constructor is private - instances are created internally by server */
     ZEND_PARSE_PARAMETERS_NONE();
 }
@@ -291,6 +312,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setReasonPhrase)
     if (response->reason_phrase) {
         zend_string_release(response->reason_phrase);
     }
+
     response->reason_phrase = zend_string_copy(phrase);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -394,16 +416,20 @@ ZEND_METHOD(TrueAsync_HttpResponse, getHeader)
     if (!values) {
         RETURN_NULL();
     }
+
     if (Z_TYPE_P(values) == IS_STRING) {
         RETURN_STR_COPY(Z_STR_P(values));
     }
+
     if (Z_TYPE_P(values) == IS_ARRAY) {
         /* Return first value */
         zval *first = zend_hash_index_find(Z_ARRVAL_P(values), 0);
+
         if (first) {
             RETURN_ZVAL(first, 1, 0);
         }
     }
+
     RETURN_NULL();
 }
 /* }}} */
@@ -426,9 +452,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, getHeaderLine)
     if (!values) {
         RETURN_EMPTY_STRING();
     }
+
     if (Z_TYPE_P(values) == IS_STRING) {
         RETURN_STR_COPY(Z_STR_P(values));
     }
+
     if (Z_TYPE_P(values) != IS_ARRAY) {
         RETURN_EMPTY_STRING();
     }
@@ -442,6 +470,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getHeaderLine)
         if (!first) {
             smart_str_appends(&result, ", ");
         }
+
         smart_str_append(&result, Z_STR_P(val));
         first = false;
     } ZEND_HASH_FOREACH_END();
@@ -451,6 +480,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getHeaderLine)
     if (result.s) {
         RETURN_STR(result.s);
     }
+
     RETURN_EMPTY_STRING();
 }
 /* }}} */
@@ -515,6 +545,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailer)
     ZEND_PARSE_PARAMETERS_END();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
     if (response_check_closed(response)) {
         return;
     }
@@ -544,6 +575,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailers)
     ZEND_PARSE_PARAMETERS_END();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
     if (response_check_closed(response)) {
         return;
     }
@@ -556,7 +588,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailers)
         if (name == NULL || Z_TYPE_P(value_zv) != IS_STRING) {
             continue;
         }
-        zend_string *const lname = zend_string_tolower(name);
+
+        zend_string *lname = zend_string_tolower(name);
         zval v;
         ZVAL_STR_COPY(&v, Z_STR_P(value_zv));
         zend_hash_update(response->trailers, lname, &v);
@@ -573,9 +606,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, resetTrailers)
     ZEND_PARSE_PARAMETERS_NONE();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
     if (response_check_closed(response)) {
         return;
     }
+
     if (response->trailers != NULL) {
         zend_hash_clean(response->trailers);
     }
@@ -590,10 +625,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, getTrailers)
     ZEND_PARSE_PARAMETERS_NONE();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
     if (response->trailers == NULL) {
         array_init(return_value);
         return;
     }
+
     ZVAL_ARR(return_value, zend_array_dup(response->trailers));
 }
 /* }}} */
@@ -615,6 +652,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getProtocolVersion)
     if (response->protocol_version) {
         RETURN_STR_COPY(response->protocol_version);
     }
+
     RETURN_STRING("1.1");
 }
 /* }}} */
@@ -663,6 +701,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getBody)
          * the slot). */
         RETURN_STR(zend_string_dup(response->body.s, 0));
     }
+
     RETURN_EMPTY_STRING();
 }
 /* }}} */
@@ -703,6 +742,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getBodyStream)
 /* {{{ proto HttpResponse::setBodyStream(mixed $stream): static */
 ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream)
 {
+    (void)return_value;
     zval *stream;
 
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -722,7 +762,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream)
 void http_response_set_default_json_flags(zend_object *obj, uint32_t flags)
 {
     if (UNEXPECTED(obj == NULL)) return;
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     response->default_json_flags = flags;
 }
 
@@ -759,11 +799,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
         Z_PARAM_LONG(flags)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response_check_closed(response)) {
         return;
     }
+
     if (UNEXPECTED(status < 100 || status > 599)) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "HTTP status code must be between 100 and 599", 0);
@@ -781,7 +822,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
     if (!zend_hash_str_exists(response->headers, "content-type", sizeof("content-type") - 1)) {
         zval ct;
         ZVAL_STRING(&ct, "application/json");
-        zend_string *const ct_name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
+        zend_string *ct_name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
         add_header_value(response->headers, ct_name, &ct, true);
         zend_string_release(ct_name);
         zval_ptr_dtor(&ct);
@@ -913,13 +954,20 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
         Z_PARAM_STR(chunk)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Response already closed — cannot send() after end()", 0);
         return;
     }
+
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return;
+    }
+
     if (response->stream_ops == NULL) {
         /* No stream ops installed — response is detached from a
          * connection (e.g. constructed standalone in user code). */
@@ -970,9 +1018,100 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
+/* {{{ proto HttpResponse::sendFile(string $path, ?SendFileOptions $options = null): void
+ *
+ * Records a path + options pair on the response and seals it. Returns
+ * immediately; the dispose path calls into the per-protocol sendfile
+ * FSM. Path must be absolute; the handler is treated as the trust
+ * boundary (no symlink/dotfile policy is applied here). */
+ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
+{
+    zend_string *path;
+    zval        *options_zv = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_OBJECT_OF_CLASS_OR_NULL(options_zv, http_send_file_options_ce)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response has already been closed", 0);
+        return;
+    }
+
+    if (response->streaming || response->headers_sent) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): headers already committed", 0);
+        return;
+    }
+
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — sendFile already called", 0);
+        return;
+    }
+
+    if (UNEXPECTED(ZSTR_LEN(path) == 0)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): path must not be empty", 0);
+        return;
+    }
+
+    if (UNEXPECTED(ZSTR_VAL(path)[0] != '/')) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): path must be absolute", 0);
+        return;
+    }
+
+    http_send_file_request_t *req = ecalloc(1, sizeof(*req));
+    req->path = zend_string_copy(path);
+    http_send_file_options_snapshot(
+        options_zv != NULL ? Z_OBJ_P(options_zv) : NULL,
+        &req->opts);
+
+    /* Per-call validation. RFC says no CR/LF in header values; status
+     * range matches the rest of the API. */
+    const http_send_file_options_t *opts = &req->opts;
+
+    if (opts->status != 0 && (opts->status < 100 || opts->status > 599)) {
+        http_send_file_request_free(req);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): status must be between 100 and 599", 0);
+        return;
+    }
+#define HAS_CRLF(zs) ((zs) != NULL && \
+        (memchr(ZSTR_VAL(zs), '\r', ZSTR_LEN(zs)) != NULL \
+         || memchr(ZSTR_VAL(zs), '\n', ZSTR_LEN(zs)) != NULL))
+
+    if (HAS_CRLF(opts->content_type) || HAS_CRLF(opts->download_name)
+        || HAS_CRLF(opts->cache_control)) {
+        http_send_file_request_free(req);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "sendFile(): option strings must not contain CR or LF", 0);
+        return;
+    }
+#undef HAS_CRLF
+
+    response->send_file_req = req;
+
+    /* Sendfile body bypasses the compression module — never wrap. */
+#ifdef HAVE_HTTP_COMPRESSION
+    {
+        extern void http_compression_mark_no_compression(zend_object *);
+        http_compression_mark_no_compression(Z_OBJ_P(ZEND_THIS));
+    }
+#endif
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::end(?string $data = null): void */
 ZEND_METHOD(TrueAsync_HttpResponse, end)
 {
+    (void)return_value;
     zend_string *data = NULL;
 
     ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -988,6 +1127,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
         return;
     }
 
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return;
+    }
+
     /* Streaming path — optional final data goes as one last chunk,
      * then mark_ended drives the data provider to emit EOF. */
     if (response->streaming) {
@@ -996,6 +1141,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
             (void)response->stream_ops->append_chunk(
                 response->stream_ctx, data);
         }
+
         response->stream_ops->mark_ended(response->stream_ctx);
         response->closed = true;
         return;
@@ -1067,6 +1213,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->stream_ctx = NULL;
     response->compression_state = NULL;
     response->default_json_flags = 0;
+    response->send_file_req = NULL;
     response->socket_fd = SOCK_ERR;
     memset(&response->body, 0, sizeof(smart_str));
 
@@ -1108,6 +1255,12 @@ static void http_response_free(zend_object *obj)
     }
 
     smart_str_free(&response->body);
+
+    /* Aborted-request safety: dispose never picked up the descriptor. */
+    if (response->send_file_req != NULL) {
+        http_send_file_request_free(response->send_file_req);
+        response->send_file_req = NULL;
+    }
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* Compression state is owned by the compression TU; reach in only
@@ -1159,6 +1312,48 @@ void http_response_replace_stream_ops(zend_object *obj,
 smart_str *http_response_get_body_smart_str(zend_object *obj)
 {
     return &http_response_from_obj(obj)->body;
+}
+
+/* Read-only accessors used by the H1 static-file delivery op
+ * (src/http1/http1_sendfile.c) to serialize the head verbatim
+ * without going through http_response_format (which auto-adds
+ * Content-Length and runs the compression hook — neither is
+ * appropriate when the static handler has already decided every
+ * header on the wire). */
+int http_response_get_status_code(zend_object *obj)
+{
+    return http_response_from_obj(obj)->status_code;
+}
+
+HashTable *http_response_get_headers_table(zend_object *obj)
+{
+    return http_response_from_obj(obj)->headers;
+}
+
+zend_string *http_response_get_body_string(zend_object *obj)
+{
+    smart_str *b = &http_response_from_obj(obj)->body;
+
+    if (b->s == NULL || ZSTR_LEN(b->s) == 0) {
+        return NULL;
+    }
+
+    smart_str_0(b);
+    return b->s;
+}
+
+/* sendFile descriptor accessors used by the dispose path (issue #13). */
+http_send_file_request_t *http_response_take_send_file(zend_object *obj)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    http_send_file_request_t *req = r->send_file_req;
+    r->send_file_req = NULL;
+    return req;
+}
+
+bool http_response_has_send_file(zend_object *obj)
+{
+    return http_response_from_obj(obj)->send_file_req != NULL;
 }
 
 /* Internal "set canned error" — used when the dispatch layer rejects
@@ -1221,6 +1416,7 @@ static const http_status_line_t http11_status_lines[] = {
     [409] = MK_LINE("HTTP/1.1 409 Conflict\r\n"),
     [413] = MK_LINE("HTTP/1.1 413 Payload Too Large\r\n"),
     [414] = MK_LINE("HTTP/1.1 414 URI Too Long\r\n"),
+    [416] = MK_LINE("HTTP/1.1 416 Range Not Satisfiable\r\n"),
     [429] = MK_LINE("HTTP/1.1 429 Too Many Requests\r\n"),
     [500] = MK_LINE("HTTP/1.1 500 Internal Server Error\r\n"),
     [502] = MK_LINE("HTTP/1.1 502 Bad Gateway\r\n"),
@@ -1230,6 +1426,25 @@ static const http_status_line_t http11_status_lines[] = {
 #undef MK_LINE
 #define HTTP11_STATUS_LINES_CNT \
     (sizeof(http11_status_lines) / sizeof(http11_status_lines[0]))
+
+const char *http_response_status_line_http11(const int code, size_t *out_len)
+{
+    if (code <= 0 || (size_t) code >= HTTP11_STATUS_LINES_CNT) {
+        return NULL;
+    }
+
+    const http_status_line_t *e = &http11_status_lines[code];
+
+    if (e->line == NULL) {
+        return NULL;
+    }
+
+    if (out_len != NULL) {
+        *out_len = e->len;
+    }
+
+    return e->line;
+}
 
 /* Emit status line into result. Fast path: HTTP/1.1 + no custom reason
  * phrase + code in the pre-baked table → single memcpy. Everything
@@ -1264,6 +1479,50 @@ static inline void emit_status_line(smart_str *result,
     smart_str_appends(result, "\r\n");
 }
 
+/* Single-grow header line writer. "name: value\r\n" written with one
+ * smart_str_extend (one grow-check + tail pointer) instead of 4×
+ * smart_str_append* which pays the size-check+memcpy bookkeeping per
+ * call. The two memcpy's (name, value) are inherent — name and value
+ * live in separate zend_strings. */
+static inline void append_header_line(smart_str *out,
+                                      const char *name, size_t name_len,
+                                      const char *value, size_t value_len)
+{
+    const size_t need = name_len + 2 /* ": " */ + value_len + 2 /* "\r\n" */;
+    char *p = smart_str_extend(out, need);
+    memcpy(p, name, name_len);            p += name_len;
+    *p++ = ':'; *p++ = ' ';
+    memcpy(p, value, value_len);          p += value_len;
+    *p++ = '\r'; *p   = '\n';
+}
+
+/* Iterate the headers table emitting "name: value\r\n" for each entry.
+ * Flat IS_STRING fast path (single-value, common case) + IS_ARRAY
+ * multi-value fallback. Does NOT emit the trailing CRLF that ends the
+ * header block — caller appends that. */
+static void emit_headers_only(smart_str *out, HashTable *headers)
+{
+    zend_string *name;
+    zval *values;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
+        if (UNEXPECTED(name == NULL)) continue;
+
+        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
+            const zend_string *v = Z_STR_P(values);
+            append_header_line(out, ZSTR_VAL(name), ZSTR_LEN(name),
+                               ZSTR_VAL(v), ZSTR_LEN(v));
+        } else if (Z_TYPE_P(values) == IS_ARRAY) {
+            zval *val;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
+                if (Z_TYPE_P(val) != IS_STRING) continue;
+                const zend_string *v = Z_STR_P(val);
+                append_header_line(out, ZSTR_VAL(name), ZSTR_LEN(name),
+                                   ZSTR_VAL(v), ZSTR_LEN(v));
+            } ZEND_HASH_FOREACH_END();
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
 /* Internal: append status line + Content-Length + headers + CRLF terminator
  * into @p result. Body is NOT appended — callers either append it themselves
  * (legacy http_response_format) or send it as a separate iov entry
@@ -1284,30 +1543,10 @@ static void emit_headers_block(smart_str *result, http_response_object *response
         smart_str_appendl(result, "\r\n", 2);
     }
 
-    /* Headers — flat IS_STRING avoids nested foreach for the
-     * single-value common case (§4.4 perf). */
-    zend_string *name;
-    zval *values;
-    ZEND_HASH_FOREACH_STR_KEY_VAL(response->headers, name, values) {
-        if (UNEXPECTED(name == NULL)) continue;
-        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            smart_str_append(result, name);
-            smart_str_appends(result, ": ");
-            smart_str_append(result, Z_STR_P(values));
-            smart_str_appends(result, "\r\n");
-        } else if (Z_TYPE_P(values) == IS_ARRAY) {
-            zval *val;
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                smart_str_append(result, name);
-                smart_str_appends(result, ": ");
-                smart_str_append(result, Z_STR_P(val));
-                smart_str_appends(result, "\r\n");
-            } ZEND_HASH_FOREACH_END();
-        }
-    } ZEND_HASH_FOREACH_END();
+    emit_headers_only(result, response->headers);
 
     /* End of headers */
-    smart_str_appends(result, "\r\n");
+    smart_str_appendl(result, "\r\n", 2);
 }
 
 /* Body length for the threshold branch in the dispose hot path. Reads
@@ -1332,6 +1571,10 @@ void http_response_format_parts(zend_object *obj,
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+    /* Pre-size for a typical 10-15 header block (~500 bytes) plus
+     * comfortable headroom — saves the realloc rounds on the
+     * smart_str grow path. */
+    smart_str_alloc(&result, 1024, 0);
 
 #ifdef HAVE_HTTP_COMPRESSION
     {
@@ -1364,6 +1607,7 @@ zend_string *http_response_format(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+    smart_str_alloc(&result, 1024, 0);
 
 #ifdef HAVE_HTTP_COMPRESSION
     {
@@ -1399,9 +1643,11 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
     smart_str result = {0};
+    smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
-    smart_str_appends(&result, "Transfer-Encoding: chunked\r\n");
+    smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
+                      sizeof("Transfer-Encoding: chunked\r\n") - 1);
 
     zend_string *name;
     zval        *values;
@@ -1420,24 +1666,55 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
             zend_binary_strcasecmp(ZSTR_VAL(name), 17, "transfer-encoding", 17) == 0) {
             continue;
         }
+
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            smart_str_append(&result, name);
-            smart_str_appends(&result, ": ");
-            smart_str_append(&result, Z_STR_P(values));
-            smart_str_appends(&result, "\r\n");
+            const zend_string *v = Z_STR_P(values);
+            append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
+                               ZSTR_VAL(v), ZSTR_LEN(v));
         } else if (Z_TYPE_P(values) == IS_ARRAY) {
             zval *val;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                if (Z_TYPE_P(val) != IS_STRING) { continue; }
-                smart_str_append(&result, name);
-                smart_str_appends(&result, ": ");
-                smart_str_append(&result, Z_STR_P(val));
-                smart_str_appends(&result, "\r\n");
+                if (Z_TYPE_P(val) != IS_STRING) continue;
+                const zend_string *v = Z_STR_P(val);
+                append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
+                                   ZSTR_VAL(v), ZSTR_LEN(v));
             } ZEND_HASH_FOREACH_END();
         }
     } ZEND_HASH_FOREACH_END();
 
-    smart_str_appends(&result, "\r\n");
+    smart_str_appendl(&result, "\r\n", 2);
+    smart_str_0(&result);
+    return result.s ? result.s : zend_empty_string;
+}
+
+/* Static-handler head builder (issue #13 sendfile path). Status line +
+ * verbatim headers (NO auto-Content-Length — caller is responsible:
+ * the static handler sets it from file size, omits it on 304) +
+ * terminator + optional inline body (small 4xx/416 text). Does NOT
+ * run the compression hook (file body rides separately via sendfile;
+ * the inline body buffer is tiny error text where compression would
+ * be wasteful).
+ *
+ * Returned zend_string is owned by the caller. */
+zend_string *http_response_format_static_head(zend_object *obj,
+                                              bool include_inline_body)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    smart_str result = {0};
+    smart_str_alloc(&result, 1024, 0);
+
+    emit_status_line(&result, response);
+    emit_headers_only(&result, response->headers);
+    smart_str_appendl(&result, "\r\n", 2);
+
+    if (include_inline_body) {
+        smart_str_0(&response->body);
+
+        if (response->body.s != NULL && ZSTR_LEN(response->body.s) > 0) {
+            smart_str_append(&result, response->body.s);
+        }
+    }
+
     smart_str_0(&result);
     return result.s ? result.s : zend_empty_string;
 }
@@ -1453,9 +1730,11 @@ void http_response_set_socket(zend_object *obj, php_socket_t fd)
 void http_response_set_protocol_version(zend_object *obj, const char *version)
 {
     http_response_object *response = http_response_from_obj(obj);
+
     if (response->protocol_version) {
         zend_string_release(response->protocol_version);
     }
+
     response->protocol_version = zend_string_init(version, strlen(version), 0);
 }
 
@@ -1507,7 +1786,7 @@ void http_response_install_stream_ops(zend_object *obj,
                                       const http_response_stream_ops_t *ops,
                                       void *ctx)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     response->stream_ops = ops;
     response->stream_ctx = ctx;
 }
@@ -1519,9 +1798,9 @@ void http_response_install_stream_ops(zend_object *obj,
  * header, so this is safe regardless of what the handler wrote. */
 void http_response_force_connection_close(zend_object *obj)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
 
-    zend_string *const key = zend_string_init("connection", sizeof("connection") - 1, 0);
+    zend_string *key = zend_string_init("connection", sizeof("connection") - 1, 0);
 
     zval value_zv, arr;
     ZVAL_STRINGL(&value_zv, "close", 5);
@@ -1541,16 +1820,20 @@ void http_response_force_connection_close(zend_object *obj)
 void http_response_set_alt_svc_if_unset(zend_object *obj,
                                         const char *value, size_t valuelen)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
+
     if (response->headers == NULL || value == NULL || valuelen == 0) {
         return;
     }
-    zend_string *const key =
+
+    zend_string *key =
         zend_string_init("alt-svc", sizeof("alt-svc") - 1, 0);
+
     if (zend_hash_exists(response->headers, key)) {
         zend_string_release(key);
         return;
     }
+
     zval value_zv, arr;
     ZVAL_STRINGL(&value_zv, value, valuelen);
     array_init(&arr);
@@ -1568,21 +1851,88 @@ HashTable *http_response_get_trailers(zend_object *obj)
 
 const char *http_response_get_body(zend_object *obj, size_t *len_out)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     smart_str_0(&response->body);
+
     if (response->body.s == NULL) {
         if (len_out != NULL) { *len_out = 0; }
         return NULL;
     }
+
     if (len_out != NULL) { *len_out = ZSTR_LEN(response->body.s); }
     return ZSTR_VAL(response->body.s);
 }
 
 zend_string *http_response_get_body_str(zend_object *obj)
 {
-    http_response_object *const response = http_response_from_obj(obj);
+    http_response_object *response = http_response_from_obj(obj);
     smart_str_0(&response->body);
     return response->body.s;  /* may be NULL */
+}
+
+/* Static-handler internal API (issue #13). The dispatch path resolves
+ * the file in C without entering the PHP VM, then populates status,
+ * headers, and body via these direct field setters before the
+ * coroutine entry's skip_php_handler short-circuit fires.
+ *
+ * No `closed`/`streaming` guard like the PHP-facing setters: we are
+ * the single writer, the response object is freshly object_init_ex'd,
+ * and there is no PHP code path that could have flipped those bits. */
+void http_response_static_set_status(zend_object *obj, int status_code)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    r->status_code = status_code;
+}
+
+void http_response_static_set_header(zend_object *obj,
+                                     const char *name, size_t name_len,
+                                     const char *value, size_t value_len)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    /* Header names are stored lowercased — reader paths assume it. */
+    zend_string *lower_name = zend_string_alloc(name_len, 0);
+    for (size_t i = 0; i < name_len; i++) {
+        char c = name[i];
+
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        ZSTR_VAL(lower_name)[i] = c;
+    }
+
+    ZSTR_VAL(lower_name)[name_len] = '\0';
+
+    zval header_value;
+    ZVAL_STR(&header_value, zend_string_init(value, value_len, 0));
+    zend_hash_update(r->headers, lower_name, &header_value);
+    zend_string_release(lower_name);
+}
+
+void http_response_static_set_body_str(zend_object *obj, zend_string *body)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    smart_str_free(&r->body);
+
+    if (body != NULL && ZSTR_LEN(body) > 0) {
+        smart_str_appendl(&r->body, ZSTR_VAL(body), ZSTR_LEN(body));
+    }
+
+    smart_str_0(&r->body);
+}
+
+/* C-string variant — skips the zend_string init/release dance the
+ * static handler used to do for short literal bodies (404 "Not
+ * Found", 500 "Internal Server Error", etc.). Behaviourally
+ * identical to set_body_str: replaces any prior body. */
+void http_response_static_set_body_cstr(zend_object *obj,
+                                        const char *body, size_t body_len)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    smart_str_free(&r->body);
+
+    if (body != NULL && body_len > 0) {
+        smart_str_appendl(&r->body, body, body_len);
+    }
+
+    smart_str_0(&r->body);
 }
 
 void http_response_reset_to_error(zend_object *obj, int status_code, const char *message)
@@ -1606,8 +1956,114 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
     if (response->reason_phrase) {
         zend_string_release(response->reason_phrase);
     }
+
     response->reason_phrase = zend_string_init(message, strlen(message), 0);
 
     response->committed = true;
+}
+
+/* Manual digit-by-digit decimal format. ~15× faster than snprintf("%PRIu64")
+ * on hot paths (no parse-format-string, no locale lookup). Buffer must be
+ * at least 21 bytes (20 digits + NUL). Returns bytes written (excluding NUL). */
+static inline size_t format_u64(char *out, uint64_t v)
+{
+    char tmp[20];
+    size_t n = 0;
+    do {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v != 0);
+    for (size_t i = 0; i < n; i++) {
+        out[i] = tmp[n - 1 - i];
+    }
+
+    out[n] = '\0';
+    return n;
+}
+
+void http_response_set_content_length(zend_object *obj, uint64_t length)
+{
+    char buf[24];
+    const size_t n = format_u64(buf, length);
+    http_response_static_set_header(obj, "content-length", 14, buf, n);
+}
+
+void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
+                                       const bool include_content_headers)
+{
+    if (extra == NULL) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *value;
+    ZEND_HASH_FOREACH_STR_KEY_VAL((HashTable *)extra, name, value) {
+        if (name == NULL || Z_TYPE_P(value) != IS_STRING) {
+            continue;
+        }
+
+        if (!include_content_headers && ZSTR_LEN(name) >= 8 &&
+            strncasecmp(ZSTR_VAL(name), "content-", 8) == 0) {
+            continue;
+        }
+
+        http_response_static_set_header(obj, ZSTR_VAL(name), ZSTR_LEN(name),
+                                        Z_STRVAL_P(value), Z_STRLEN_P(value));
+    } ZEND_HASH_FOREACH_END();
+}
+
+void http_response_set_connection(zend_object *obj, bool keep_alive)
+{
+    if (keep_alive) {
+        http_response_static_set_header(obj, "connection", 10, "keep-alive", 10);
+    } else {
+        http_response_static_set_header(obj, "connection", 10, "close", 5);
+    }
+}
+
+bool http_response_header_allowed_h2h3(const char *name, const size_t len)
+{
+    switch (len) {
+    case 7:
+        return zend_binary_strcasecmp(name, 7, "upgrade", 7) != 0;
+    case 10:
+        return zend_binary_strcasecmp(name, 10, "connection", 10) != 0 &&
+               zend_binary_strcasecmp(name, 10, "keep-alive", 10) != 0;
+    case 14:
+        /* implicit from DATA frames */
+        return zend_binary_strcasecmp(name, 14, "content-length", 14) != 0;
+    case 17:
+        return zend_binary_strcasecmp(name, 17, "transfer-encoding", 17) != 0;
+    default:
+        return true;
+    }
+}
+
+bool http_response_should_keep_alive(const http_request_t *req)
+{
+    /* Parser populates req->keep_alive during on_headers_complete:
+     * HTTP/1.1 defaults keep-alive unless "Connection: close",
+     * HTTP/1.0 defaults close unless "Connection: keep-alive".
+     * HTTP/2 / HTTP/3 streams: parser leaves it true; multiplex
+     * transports filter Connection at submit time anyway. */
+    return req != NULL && req->keep_alive;
+}
+
+void http_response_emit_status_body(zend_object *obj, int status_code,
+                                    const char *body, size_t body_len)
+{
+    http_response_static_set_status(obj, status_code);
+    http_response_static_set_header(obj, "content-type", 12,
+                                    "text/plain; charset=utf-8", 25);
+
+    if (body != NULL && body_len > 0) {
+        http_response_static_set_body_cstr(obj, body, body_len);
+    }
+}
+
+void http_response_synth_error(zend_object *obj, int status_code, const char *message)
+{
+    const size_t msg_len = (message != NULL) ? strlen(message) : 0;
+    http_response_emit_status_body(obj, status_code, message, msg_len);
 }
 

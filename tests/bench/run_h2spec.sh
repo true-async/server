@@ -15,7 +15,7 @@ set -uo pipefail
 PORT="${1:-18081}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$DIR/../.." && pwd)"
-EXT="$PROJECT/modules/http_server.so"
+EXT="$PROJECT/modules/true_async_server.so"
 RESULTS="$DIR/h2spec-results.txt"
 
 if [[ ! -f "$EXT" ]]; then

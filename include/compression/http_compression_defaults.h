@@ -37,6 +37,6 @@
  * and h2o defaults — text + structured-data only, never binary. The
  * setCompressionMimeTypes() setter REPLACES this list wholesale
  * (nginx semantics), so users who want a delta need to re-list. */
-extern const char *const http_compression_default_mime_types[];
+extern const char *http_compression_default_mime_types[];
 
 #endif /* HTTP_COMPRESSION_DEFAULTS_H */

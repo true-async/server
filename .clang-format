@@ -46,6 +46,7 @@ AllowShortCaseLabelsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
+InsertBraces: true
 AlwaysBreakAfterReturnType: None
 BreakBeforeBinaryOperators: None
 BreakBeforeTernaryOperators: true

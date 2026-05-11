@@ -25,6 +25,7 @@ const char* http_protocol_type_to_string(http_protocol_type_t type)
         case HTTP_PROTOCOL_GRPC:      return "grpc";
         case HTTP_PROTOCOL_UNKNOWN:   return "unknown";
     }
+
     return "unknown";
 }
 /* }}} */
@@ -33,10 +34,15 @@ const char* http_protocol_type_to_string(http_protocol_type_t type)
 http_protocol_type_t http_protocol_string_to_type(const char *str)
 {
     if (strcmp(str, "http") == 0)      return HTTP_PROTOCOL_HTTP1;
+
     if (strcmp(str, "http2") == 0)     return HTTP_PROTOCOL_HTTP2;
+
     if (strcmp(str, "http3") == 0)     return HTTP_PROTOCOL_HTTP3;
+
     if (strcmp(str, "websocket") == 0) return HTTP_PROTOCOL_WEBSOCKET;
+
     if (strcmp(str, "sse") == 0)       return HTTP_PROTOCOL_SSE;
+
     if (strcmp(str, "grpc") == 0)      return HTTP_PROTOCOL_GRPC;
     return HTTP_PROTOCOL_UNKNOWN;
 }
@@ -46,6 +52,7 @@ http_protocol_type_t http_protocol_string_to_type(const char *str)
 static void handler_entry_dtor(zval *zv)
 {
     zend_fcall_t *fcall = (zend_fcall_t *)Z_PTR_P(zv);
+
     if (fcall) {
         /* Release function name reference */
         zval_ptr_dtor(&fcall->fci.function_name);

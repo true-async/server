@@ -15,7 +15,7 @@ set -euo pipefail
 PORT="${1:-18080}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$DIR/../.." && pwd)"
-EXT="$PROJECT/modules/http_server.so"
+EXT="$PROJECT/modules/true_async_server.so"
 
 if [[ ! -f "$EXT" ]]; then
     echo "extension not built at $EXT" >&2

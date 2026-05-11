@@ -18,7 +18,7 @@ PORT="${1:-18080}"
 SIZE_MIB="${2:-1024}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$DIR/../.." && pwd)"
-EXT="$PROJECT/modules/http_server.so"
+EXT="$PROJECT/modules/true_async_server.so"
 PAYLOAD="/tmp/bench_upload_${SIZE_MIB}MiB.bin"
 
 if [[ ! -f "$EXT" ]]; then

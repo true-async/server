@@ -97,6 +97,7 @@ void http_known_strings_minit(void)
             /* permanent */ 1
         );
     }
+
     for (size_t i = 0; i < HTTP_KNOWN_HEADER_COUNT; i++) {
         known_headers[i] = zend_string_init_interned(
             known_header_table[i].name,
@@ -117,6 +118,7 @@ zend_string *http_known_method_lookup(const char *name, size_t len)
             return known_methods[i];
         }
     }
+
     return NULL;
 }
 
@@ -131,5 +133,6 @@ zend_string *http_known_header_lookup(const char *name, size_t len)
             return known_headers[i];
         }
     }
+
     return NULL;
 }

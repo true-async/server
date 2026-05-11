@@ -424,5 +424,39 @@ if(_compr_test_ok)
     endif()
 endif()
 
+# Static-handler decoder tests (issue #13 §13c.4). Exercises the three
+# parsing surfaces — MIME extension lookup, If-None-Match / If-Modified-
+# Since matching, and percent-decode + segment validation. Each decoder
+# TU is compiled directly into the test binary; no llhttp / zlib needed.
+add_executable(test_static_decoders
+    static/test_static_decoders.c
+    ${CMAKE_SOURCE_DIR}/../src/static/http_static_mime.c
+    ${CMAKE_SOURCE_DIR}/../src/static/http_static_etag.c
+    ${CMAKE_SOURCE_DIR}/../src/static/http_static_path.c
+)
+
+target_include_directories(test_static_decoders PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+)
+
+target_link_libraries(test_static_decoders
+    test_common
+    ${CMOCKA_LIBRARIES}
+    ${CMAKE_DL_LIBS}
+)
+
+if(UNIX)
+    target_link_libraries(test_static_decoders m pthread rt)
+endif()
+
+add_test(NAME StaticDecoders COMMAND test_static_decoders)
+
+if(UNIX AND NOT APPLE)
+    set_tests_properties(StaticDecoders PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
 # Install test binaries (optional)
 # install(TARGETS test_http1_parser test_http1_parser_edge_cases test_multipart_parser DESTINATION bin/tests)

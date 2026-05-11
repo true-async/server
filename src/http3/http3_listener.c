@@ -178,6 +178,7 @@ static bool sockaddr_same_peer(const struct sockaddr *a, socklen_t a_len,
                                const struct sockaddr *b, socklen_t b_len)
 {
     if (a == NULL || b == NULL || a->sa_family != b->sa_family) return false;
+
     if (a->sa_family == AF_INET
         && a_len >= (socklen_t)sizeof(struct sockaddr_in)
         && b_len >= (socklen_t)sizeof(struct sockaddr_in)) {
@@ -186,6 +187,7 @@ static bool sockaddr_same_peer(const struct sockaddr *a, socklen_t a_len,
         return sa->sin_port == sb->sin_port
             && sa->sin_addr.s_addr == sb->sin_addr.s_addr;
     }
+
     if (a->sa_family == AF_INET6
         && a_len >= (socklen_t)sizeof(struct sockaddr_in6)
         && b_len >= (socklen_t)sizeof(struct sockaddr_in6)) {
@@ -194,6 +196,7 @@ static bool sockaddr_same_peer(const struct sockaddr *a, socklen_t a_len,
         return sa->sin6_port == sb->sin6_port
             && memcmp(&sa->sin6_addr, &sb->sin6_addr, sizeof(sa->sin6_addr)) == 0;
     }
+
     return false;
 }
 
@@ -209,6 +212,7 @@ static void update_peer_cache(http3_listener_t *listener,
                                listener->last_peer_addr_len)) {
         format_peer(cur_addr, cur_addr_len,
                     listener->stats.last_peer, sizeof(listener->stats.last_peer));
+
         if ((size_t)cur_addr_len <= sizeof(listener->last_peer_addr)) {
             memcpy(&listener->last_peer_addr, cur_addr, (size_t)cur_addr_len);
             listener->last_peer_addr_len = cur_addr_len;
@@ -232,13 +236,16 @@ static void http3_listener_recv_cb(zend_async_event_t *event,
     if (listener == NULL || listener->closed) {
         return;
     }
+
     if (req == NULL || req != listener->recv_req) {
         return;
     }
+
     if (exception != NULL || req->exception != NULL) {
         listener->stats.datagrams_errored++;
         return;
     }
+
     if (req->transferred <= 0) {
         return;
     }
@@ -285,6 +292,7 @@ static void drain_err_queue(http3_listener_t *listener)
         do {
             rv = recvmsg(listener->fd, &msg, MSG_ERRQUEUE | MSG_DONTWAIT);
         } while (rv < 0 && errno == EINTR);
+
         if (rv < 0) return;     /* nothing pending */
 
         for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm != NULL;
@@ -330,10 +338,12 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
     if (listener == NULL || listener->closed) {
         return;
     }
+
     if (exception != NULL) {
         listener->stats.datagrams_errored++;
         return;
     }
+
     if (listener->fd < 0) {
         return;
     }
@@ -393,6 +403,7 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
             ) {
                 listener->stats.datagrams_errored++;
             }
+
             return;
         }
 
@@ -530,9 +541,11 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
             .msg_control = ecn ? ctrl : NULL,
             .msg_controllen = ecn ? sizeof(ctrl) : 0,
         };
+
         if (ecn) {
             struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
             int tos = ecn;
+
             if (peer->sa_family == AF_INET6) {
 #ifdef IPV6_TCLASS
                 cm->cmsg_level = IPPROTO_IPV6;
@@ -547,13 +560,16 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
                 memcpy(CMSG_DATA(cm), &tos, sizeof(tos));
             }
         }
+
         ssize_t rv;
         do {
             rv = sendmsg(l->fd, &msg, MSG_DONTWAIT);
         } while (rv < 0 && errno == EINTR);
+
         if (rv >= 0) {
             return rv;
         }
+
         account_send_error(&l->stats.packet, errno);
         l->errq_pending = true;
         return -errno;
@@ -570,14 +586,18 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
     if (l->udp_io == NULL) {
         return -EBADF;
     }
+
     zend_async_udp_req_t *req = ZEND_ASYNC_UDP_SENDTO(
         l->udp_io, (const char *)buf, len, peer, peer_len);
+
     if (req == NULL) {
         return -EIO;
     }
+
     if (req->dispose != NULL) {
         req->dispose(req);
     }
+
     return (ssize_t)len;
 }
 
@@ -590,6 +610,7 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
     if (l == NULL || buf == NULL || peer == NULL || total_len == 0) {
         return -EINVAL;
     }
+
     if (segsize == 0 || total_len <= segsize) {
         /* Single segment — GSO has no benefit, plain sendmsg. */
         return http3_listener_send_packet(l, buf, total_len, ecn, peer, peer_len);
@@ -621,9 +642,11 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
         memcpy(CMSG_DATA(cm), &segsize_u16, sizeof(segsize_u16));
 
         size_t actual_ctrl = CMSG_SPACE(sizeof(uint16_t));
+
         if (ecn) {
             struct cmsghdr *cm2 = CMSG_NXTHDR(&msg, cm);
             int tos = ecn;
+
             if (peer->sa_family == AF_INET6) {
 #ifdef IPV6_TCLASS
                 cm2->cmsg_level = IPPROTO_IPV6;
@@ -640,6 +663,7 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
                 actual_ctrl += CMSG_SPACE(sizeof(tos));
             }
         }
+
         msg.msg_controllen = actual_ctrl;
 
         ssize_t rv;
@@ -650,6 +674,7 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
         if (rv >= 0) {
             return rv;
         }
+
         if (errno == EAGAIN
 #if EAGAIN != EWOULDBLOCK
             || errno == EWOULDBLOCK
@@ -667,8 +692,10 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
                 http3_packet_stats_t *st = &l->stats.packet;
                 st->quic_gso_disabled = 1;
             }
+
             l->stats.packet.quic_send_gso_refused++;
         }
+
         l->errq_pending = true;
     }
 #endif
@@ -680,12 +707,15 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
     while (remaining > 0) {
         size_t this_len = remaining > segsize ? segsize : remaining;
         ssize_t s = http3_listener_send_packet(l, p, this_len, ecn, peer, peer_len);
+
         if (s < 0 && s != -EAGAIN) {
             return s;
         }
+
         p += this_len;
         remaining -= this_len;
     }
+
     return (ssize_t)total_len;
 }
 
@@ -719,6 +749,7 @@ void http3_listener_track_connection(http3_listener_t *l,
     if (l == NULL || conn == NULL) {
         return;
     }
+
     conn->next = l->conn_list;
     l->conn_list = conn;
 }
@@ -732,16 +763,19 @@ static bool peer_key_from_sockaddr(const struct sockaddr *peer,
                                    uint8_t out[16], size_t *out_len)
 {
     if (peer == NULL) return false;
+
     if (peer->sa_family == AF_INET) {
         memcpy(out, &((const struct sockaddr_in *)peer)->sin_addr, 4);
         *out_len = 4;
         return true;
     }
+
     if (peer->sa_family == AF_INET6) {
         memcpy(out, &((const struct sockaddr_in6 *)peer)->sin6_addr, 16);
         *out_len = 16;
         return true;
     }
+
     return false;
 }
 
@@ -750,19 +784,24 @@ bool http3_listener_peer_inc(http3_listener_t *l,
 {
     if (l == NULL || peer == NULL) return true;       /* fail-open */
     uint8_t key[16]; size_t klen = 0;
+
     if (!peer_key_from_sockaddr(peer, key, &klen)) {
         return true;                                   /* unknown family */
     }
+
     if (l->peer_count_map == NULL) {
         ALLOC_HASHTABLE(l->peer_count_map);
         zend_hash_init(l->peer_count_map, 16, NULL, NULL, 0);
     }
+
     void *p = zend_hash_str_find_ptr(l->peer_count_map,
                                      (const char *)key, klen);
     uintptr_t cnt = (uintptr_t)p;
+
     if (cnt >= l->peer_budget) {
         return false;
     }
+
     cnt++;
     zend_hash_str_update_ptr(l->peer_count_map,
                              (const char *)key, klen, (void *)cnt);
@@ -774,11 +813,14 @@ void http3_listener_peer_dec(http3_listener_t *l,
 {
     if (l == NULL || peer == NULL || l->peer_count_map == NULL) return;
     uint8_t key[16]; size_t klen = 0;
+
     if (!peer_key_from_sockaddr(peer, key, &klen)) return;
     void *p = zend_hash_str_find_ptr(l->peer_count_map,
                                      (const char *)key, klen);
+
     if (p == NULL) return;
     uintptr_t cnt = (uintptr_t)p;
+
     if (cnt <= 1) {
         zend_hash_str_del(l->peer_count_map, (const char *)key, klen);
     } else {
@@ -813,6 +855,7 @@ void http3_listener_remove_connection(http3_listener_t *l,
             }
         }
     }
+
     conn->next = NULL;
 
     if (l->conn_map != NULL) {
@@ -820,6 +863,7 @@ void http3_listener_remove_connection(http3_listener_t *l,
             zend_hash_str_del(l->conn_map,
                 (const char *)conn->scid, conn->scidlen);
         }
+
         if (conn->original_dcidlen > 0
             && (conn->original_dcidlen != conn->scidlen
                 || memcmp(conn->original_dcid, conn->scid, conn->scidlen) != 0)) {
@@ -842,6 +886,7 @@ HashTable *http3_listener_conn_map(http3_listener_t *l)
         ALLOC_HASHTABLE(l->conn_map);
         zend_hash_init(l->conn_map, 16, NULL, NULL, /* persistent: */ 0);
     }
+
     return l->conn_map;
 }
 
@@ -878,17 +923,20 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     int family = AF_UNSPEC;
     struct sockaddr_storage bind_addr;
     socklen_t bind_addr_len = 0;
+
     if (strchr(host, ':') != NULL) {
         family = AF_INET6;
         struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&bind_addr;
         memset(sin6, 0, sizeof(*sin6));
         sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons((uint16_t)port);
+
         if (inet_pton(AF_INET6, host, &sin6->sin6_addr) != 1) {
             zend_throw_error(NULL, "HTTP/3 listener: invalid IPv6 address %s", host);
             http3_listener_destroy(listener);
             return NULL;
         }
+
         bind_addr_len = (socklen_t)sizeof(*sin6);
     } else {
         family = AF_INET;
@@ -896,21 +944,25 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
         memset(sin, 0, sizeof(*sin));
         sin->sin_family = AF_INET;
         sin->sin_port = htons((uint16_t)port);
+
         if (inet_pton(AF_INET, host, &sin->sin_addr) != 1) {
             zend_throw_error(NULL, "HTTP/3 listener: invalid IPv4 address %s", host);
             http3_listener_destroy(listener);
             return NULL;
         }
+
         bind_addr_len = (socklen_t)sizeof(*sin);
     }
 
     int fd = socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+
     if (fd < 0) {
         zend_throw_error(NULL,
             "HTTP/3 listener: socket() failed: %s", strerror(errno));
         http3_listener_destroy(listener);
         return NULL;
     }
+
     listener->fd = fd;
     listener->family = family;
 
@@ -980,12 +1032,14 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     bind_flags |= ZEND_ASYNC_UDP_F_REUSEPORT;
 #endif
     zend_async_io_t *udp_io = ZEND_ASYNC_UDP_BIND_EX(host, port, bind_flags, 0);
+
     if (udp_io == NULL) {
         /* ZEND_ASYNC_UDP_BIND_EX has already thrown a descriptive async
          * exception (uv_strerror) — propagate it. */
         http3_listener_destroy(listener);
         return NULL;
     }
+
     listener->udp_io = udp_io;
 #endif
 
@@ -1021,14 +1075,18 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     listener->peer_budget = 16;
     uint32_t cfg_budget = http_server_get_http3_peer_connection_budget(
         (const http_server_object *)server_obj);
+
     if (cfg_budget != 0) {
         listener->peer_budget = cfg_budget;
     }
+
     {
         const char *env = getenv("PHP_HTTP3_PEER_BUDGET");
+
         if (env != NULL && *env != '\0') {
             char *end = NULL;
             unsigned long n = strtoul(env, &end, 10);
+
             if (end != env && *end == '\0' && n > 0 && n <= 4096) {
                 listener->peer_budget = (uint32_t)n;
                 /* A silent env-var override of a security knob is
@@ -1054,6 +1112,7 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
      * us drain via recvmmsg in the callback. */
     listener->poll_event = ZEND_ASYNC_NEW_POLL_EVENT(
         ZEND_FD_NULL, (zend_socket_t)listener->fd, ASYNC_READABLE);
+
     if (listener->poll_event == NULL) {
         http3_listener_destroy(listener);
         return NULL;
@@ -1065,10 +1124,12 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
 
     http3_recv_cb_t *rcb = (http3_recv_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
         http3_listener_poll_cb, sizeof(http3_recv_cb_t));
+
     if (rcb == NULL) {
         http3_listener_destroy(listener);
         return NULL;
     }
+
     rcb->listener = listener;
     listener->poll_cb = &rcb->base;
 
@@ -1089,10 +1150,12 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
 
     http3_recv_cb_t *rcb = (http3_recv_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
         http3_listener_recv_cb, sizeof(http3_recv_cb_t));
+
     if (rcb == NULL) {
         http3_listener_destroy(listener);
         return NULL;
     }
+
     rcb->listener = listener;
     listener->recv_cb = &rcb->base;
 
@@ -1104,10 +1167,12 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     }
 
     zend_async_udp_req_t *req = ZEND_ASYNC_UDP_RECVFROM(udp_io, 2048);
+
     if (req == NULL) {
         http3_listener_destroy(listener);
         return NULL;
     }
+
     listener->recv_req = req;
 #endif
 
@@ -1138,6 +1203,7 @@ void http3_listener_destroy(http3_listener_t *listener)
     if (listener == NULL || listener->closed) {
         return;
     }
+
     listener->closed = true;
 
     /* 1. Sever the callback's back-pointer to our listener data BEFORE
@@ -1164,11 +1230,13 @@ void http3_listener_destroy(http3_listener_t *listener)
         conn->next = NULL;
         http3_connection_free(conn);
     }
+
     if (listener->conn_map != NULL) {
         zend_hash_destroy(listener->conn_map);
         FREE_HASHTABLE(listener->conn_map);
         listener->conn_map = NULL;
     }
+
     if (listener->peer_count_map != NULL) {
         zend_hash_destroy(listener->peer_count_map);
         FREE_HASHTABLE(listener->peer_count_map);

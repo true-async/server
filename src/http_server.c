@@ -18,6 +18,8 @@
 #include "http1/http_parser.h"
 #include "http_known_strings.h"
 #include "log/http_log.h"
+#include "static/static_handler.h"
+#include "http_send_file.h"
 
 #ifdef HAVE_HTTP2
 # include <nghttp2/nghttp2.h>
@@ -44,6 +46,7 @@ extern zval* http_request_create_from_parsed(http_request_t *req);
 /* {{{ proto void TrueAsync\server_dispose() */
 ZEND_FUNCTION(TrueAsync_server_dispose)
 {
+	(void)return_value;
 	ZEND_PARSE_PARAMETERS_NONE();
 
 	/* Clear parser pool */
@@ -65,6 +68,7 @@ ZEND_FUNCTION(TrueAsync_http_parse_request)
 
 	/* Acquire parser from pool */
 	http1_parser_t *parser_ctx = parser_pool_acquire();
+
 	if (!parser_ctx) {
 		RETURN_FALSE;
 	}
@@ -84,6 +88,7 @@ ZEND_FUNCTION(TrueAsync_http_parse_request)
 
 	/* Get parsed request */
 	http_request_t *req = http_parser_get_request(parser_ctx);
+
 	if (!req) {
 		parser_pool_return(parser_ctx);
 		RETURN_FALSE;
@@ -146,6 +151,7 @@ ZEND_GET_MODULE(http_server)
 /* {{{ PHP_MINIT_FUNCTION */
 PHP_MINIT_FUNCTION(http_server)
 {
+	(void)type; (void)module_number;
 	/* Initialize module globals */
 	ZEND_INIT_MODULE_GLOBALS(http_server, php_http_server_init_globals, NULL);
 
@@ -167,6 +173,8 @@ PHP_MINIT_FUNCTION(http_server)
 	http_server_exceptions_register();
 	http_server_config_class_register();
 	http_response_class_register();
+	http_send_file_options_class_register();
+	http_static_handler_class_register();
 	http_server_class_register();
 
 	return SUCCESS;
@@ -176,6 +184,7 @@ PHP_MINIT_FUNCTION(http_server)
 /* {{{ PHP_MSHUTDOWN_FUNCTION */
 PHP_MSHUTDOWN_FUNCTION(http_server)
 {
+	(void)type; (void)module_number;
 	http_log_mshutdown();
 	return SUCCESS;
 }
@@ -184,6 +193,7 @@ PHP_MSHUTDOWN_FUNCTION(http_server)
 /* {{{ PHP_RINIT_FUNCTION */
 PHP_RINIT_FUNCTION(http_server)
 {
+	(void)type; (void)module_number;
 #if defined(ZTS) && defined(COMPILE_DL_TRUE_ASYNC_SERVER)
 	ZEND_TSRMLS_CACHE_UPDATE();
 #endif
@@ -200,6 +210,7 @@ PHP_RINIT_FUNCTION(http_server)
 /* {{{ PHP_RSHUTDOWN_FUNCTION */
 PHP_RSHUTDOWN_FUNCTION(http_server)
 {
+	(void)type; (void)module_number;
 	/* Cleanup per-request parser pool */
 	for (size_t i = 0; i < HTTP_SERVER_G(parser_pool).count; i++) {
 		http_parser_destroy(HTTP_SERVER_G(parser_pool).parsers[i]);
@@ -217,6 +228,7 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 /* {{{ PHP_MINFO_FUNCTION */
 PHP_MINFO_FUNCTION(http_server)
 {
+	(void)zend_module;
 	php_info_print_table_start();
 	php_info_print_table_header(2, "TrueAsync HTTP Server", "enabled");
 	php_info_print_table_row(2, "Extension", "true_async_server");
@@ -308,6 +320,7 @@ void parser_pool_clear(void)
 	for (size_t i = 0; i < HTTP_SERVER_G(parser_pool).count; i++) {
 		http_parser_destroy(HTTP_SERVER_G(parser_pool).parsers[i]);
 	}
+
 	HTTP_SERVER_G(parser_pool).count = 0;
 }
 /* }}} */

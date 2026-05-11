@@ -44,6 +44,7 @@ extern zend_module_entry http_server_module_entry;
  */
 
 typedef struct http1_parser_t http1_parser_t;
+typedef struct http_request_t http_request_t;
 typedef struct _http_server_t http_server_t;
 typedef struct _http_server_config_t http_server_config_t;
 typedef struct _http_connection_t http_connection_t;
@@ -403,6 +404,24 @@ void http_server_class_register(void);
 
 /*
  * ==========================================================================
+ * HttpRequest helpers — operate on the parsed http_request_t directly,
+ * no PHP-object dance. Used by static handler, send_file, compression,
+ * and anywhere else that needs cheap method/header inspection.
+ * ==========================================================================
+ */
+
+bool http_request_method_is_get (const http_request_t *req);
+bool http_request_method_is_head(const http_request_t *req);
+
+/* Lookup first value of a request header by lowercase name. Returns
+ * NULL when absent. Multi-value headers may be stored as a single
+ * comma-joined string or as an array of strings — both forms supported,
+ * the array form returns the first element. */
+const zend_string *http_request_find_header(const http_request_t *req,
+                                            const char *name, size_t name_len);
+
+/*
+ * ==========================================================================
  * Internal API
  * ==========================================================================
  */
@@ -588,6 +607,49 @@ struct http_response_stream_ops_t {
      * below threshold. Returns NULL only on alloc failure — callers
      * must NULL-check. */
     zend_async_event_t *(*get_wait_event)(void *ctx);
+
+    /* Protocol-owned static-file body delivery.
+     *
+     * Preconditions:
+     *  - response_obj already has status code and headers set
+     *    (Content-Type, Content-Length, ETag, Last-Modified,
+     *    Content-Range, Content-Encoding, Vary, Cache-Control,
+     *    extra headers, Connection — caller's responsibility). The
+     *    op MUST NOT auto-add Content-Length; whatever the caller
+     *    placed on response_obj is what goes on the wire.
+     *  - file_io, when non-NULL, is an ALREADY-OPEN async file io
+     *    handle (post-OPEN, post-STAT). Ownership transfers to the
+     *    op: it disposes file_io on completion (success or failure).
+     *  - body_offset / body_length define the slice to send. For
+     *    HEAD, 304 and small error responses the caller passes
+     *    head_only=true; the op writes only the head. file_io is
+     *    still owned and disposed in that case.
+     *  - file_io == NULL is allowed and means "no separate body
+     *    source". Any inline body the caller put on response_obj
+     *    (small 4xx/5xx text, etc.) is emitted as part of the head
+     *    write. body_offset / body_length / head_only are then
+     *    ignored. This is how short error pages travel through the
+     *    same path without re-introducing H1 specifics in the
+     *    static handler.
+     *
+     * The op fires on_done(user, status) exactly once after the head
+     * (and body, if any) has been pushed onto the wire and any
+     * underlying drain has settled. status==0 means success; non-zero
+     * means abort (peer reset / write error). Returns 0 on synchronous
+     * accept of the request. Non-zero return means the op could not
+     * be initiated and on_done WILL NOT fire — in that case the
+     * caller still owns file_io and must dispose it.
+     *
+     * Implemented by HTTP/1 today. H2 / H3 strategies leave this NULL
+     * pending follow-up plumbing through their stream machinery. */
+    int     (*send_static_response)(void *ctx,
+                                    zend_object *response_obj,
+                                    zend_async_io_t *file_io,
+                                    uint64_t body_offset,
+                                    uint64_t body_length,
+                                    bool head_only,
+                                    void (*on_done)(void *user, int status),
+                                    void *user);
 };
 
 /* Install the streaming vtable + ctx on a response object. The
@@ -647,6 +709,20 @@ typedef struct {
      * http_server_count_request() helper hits one cache line shared with
      * the rest of the hot counters. Read by getStats / __debugInfo. */
     uint64_t total_requests;
+
+    /* StaticHandler hard-zero hits — bumped on every successful
+     * dispatch into the no-coroutine FSM (open → stat → headers →
+     * sendfile → close, bypassing the PHP coroutine entirely). The
+     * counter shows the cache-friendly fast path's hit rate. */
+    uint64_t static_zero_coroutine_total;
+
+    /* Open-file cache hit/miss (issue #13 §5a follow-up). Bumped from
+     * http_static_cache_lookup — hits skip the realpath() walk in the
+     * static pre-flight; misses go on to validate via realpath and
+     * (on success) insert the resolved entry. Both freshly-loaded
+     * paths and TTL-evicted re-lookups count as misses. */
+    uint64_t static_cache_hits_total;
+    uint64_t static_cache_misses_total;
 } http_server_counters_t;
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
@@ -691,27 +767,35 @@ const http_server_view_t *http_server_view(const http_server_object *server);
 static inline uint32_t http_server_get_protocol_mask(const http_server_object *server) {
     return http_server_view(server)->protocol_mask;
 }
+
 static inline uint32_t http_server_get_write_timeout_s(const http_server_object *server) {
     return http_server_view(server)->write_timeout_s;
 }
+
 static inline uint32_t http_server_get_stream_write_buffer_bytes(const http_server_object *server) {
     return http_server_view(server)->stream_write_buffer_bytes;
 }
+
 static inline uint64_t http_server_get_drain_epoch_current(const http_server_object *server) {
     return http_server_view(server)->drain_epoch_current;
 }
+
 static inline uint32_t http_server_get_http3_idle_timeout_ms(const http_server_object *server) {
     return http_server_view(server)->http3_idle_timeout_ms;
 }
+
 static inline uint32_t http_server_get_http3_stream_window_bytes(const http_server_object *server) {
     return http_server_view(server)->http3_stream_window_bytes;
 }
+
 static inline uint32_t http_server_get_http3_max_concurrent_streams(const http_server_object *server) {
     return http_server_view(server)->http3_max_concurrent_streams;
 }
+
 static inline uint32_t http_server_get_http3_peer_connection_budget(const http_server_object *server) {
     return http_server_view(server)->http3_peer_connection_budget;
 }
+
 static inline bool http_server_get_http3_alt_svc_enabled(const http_server_object *server) {
     return http_server_view(server)->http3_alt_svc_enabled;
 }
@@ -723,14 +807,31 @@ static zend_always_inline void http_server_on_streaming_response_started(http_se
 {
     c->streaming_responses_total++;
 }
+
 static zend_always_inline void http_server_on_stream_send(http_server_counters_t *c, size_t bytes)
 {
     c->stream_send_calls_total++;
     c->stream_bytes_sent_total += bytes;
 }
+
 static zend_always_inline void http_server_on_stream_backpressure(http_server_counters_t *c)
 {
     c->stream_send_backpressure_events_total++;
+}
+
+static zend_always_inline void http_server_on_static_zero_coroutine(http_server_counters_t *c)
+{
+    c->static_zero_coroutine_total++;
+}
+
+static zend_always_inline void http_server_on_static_cache_hit(http_server_counters_t *c)
+{
+    c->static_cache_hits_total++;
+}
+
+static zend_always_inline void http_server_on_static_cache_miss(http_server_counters_t *c)
+{
+    c->static_cache_misses_total++;
 }
 
 static zend_always_inline void http_server_on_h2_stream_opened(http_server_counters_t *c)
@@ -738,30 +839,37 @@ static zend_always_inline void http_server_on_h2_stream_opened(http_server_count
     c->h2_streams_active++;
     c->h2_streams_opened_total++;
 }
+
 static zend_always_inline void http_server_on_h2_stream_closed(http_server_counters_t *c)
 {
     if (c->h2_streams_active > 0) c->h2_streams_active--;
 }
+
 static zend_always_inline void http_server_on_h2_ping_rtt(http_server_counters_t *c, uint64_t rtt_ns)
 {
     c->h2_ping_rtt_ns = rtt_ns;
 }
+
 static zend_always_inline void http_server_on_h2_stream_reset_by_peer(http_server_counters_t *c)
 {
     c->h2_streams_reset_by_peer_total++;
 }
+
 static zend_always_inline void http_server_on_h2_goaway_recv(http_server_counters_t *c)
 {
     c->h2_goaway_recv_total++;
 }
+
 static zend_always_inline void http_server_on_h2_goaway_sent(http_server_counters_t *c)
 {
     c->h2_goaway_sent_total++;
 }
+
 static zend_always_inline void http_server_on_h2_data_recv(http_server_counters_t *c, size_t bytes)
 {
     c->h2_data_recv_bytes_total += bytes;
 }
+
 static zend_always_inline void http_server_on_h2_data_sent(http_server_counters_t *c, size_t bytes)
 {
     c->h2_data_sent_bytes_total += bytes;
@@ -771,6 +879,7 @@ static zend_always_inline void http_server_on_h1_connection_close_sent(http_serv
 {
     c->h1_connection_close_sent_total++;
 }
+
 static zend_always_inline void http_server_on_h3_goaway_sent(http_server_counters_t *c)
 {
     c->h3_goaway_sent_total++;
@@ -780,13 +889,16 @@ static zend_always_inline void http_server_on_request_dispatch(http_server_count
 {
     c->active_requests++;
 }
+
 static zend_always_inline void http_server_on_request_dispose(http_server_counters_t *c)
 {
     if (c->active_requests > 0) c->active_requests--;
 }
+
 static zend_always_inline void http_server_on_request_shed(http_server_counters_t *c, bool is_h2)
 {
     c->requests_shed_total++;
+
     if (is_h2) c->h2_streams_refused_total++;
 }
 
@@ -908,6 +1020,19 @@ size_t http_response_get_body_len(zend_object *obj);
  * still cashing in the win on real payload-sized responses. */
 #define HTTP_WRITEV_THRESHOLD 1024
 zend_string *http_response_format_streaming_headers(zend_object *obj);
+
+/* Static-handler (issue #13) head builder. Status line + verbatim
+ * headers + CRLF terminator + (optional) inline body, into a single
+ * zend_string the caller owns. Differs from http_response_format:
+ *   - NO auto-Content-Length insertion (static handler sets it from
+ *     file size, omits it on 304);
+ *   - NO compression hook (the file body rides separately via
+ *     sendfile / TLS chunked-encrypt);
+ * include_inline_body=true bundles the response object's small inline
+ * body (4xx text, 416 sentinel) onto the wire with the head; the file-
+ * body path passes false and ships the body via sendfile/IO_READ. */
+zend_string *http_response_format_static_head(zend_object *obj,
+                                              bool include_inline_body);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
 void http_response_set_protocol_version(zend_object *obj, const char *version);
 bool http_response_is_closed(zend_object *obj);
@@ -927,6 +1052,65 @@ const char    *http_response_get_body    (zend_object *obj, size_t *len_out);
  * H3 submit path where the response object lives only for the duration
  * of the submit call but the data_reader walks the bytes asynchronously. */
 zend_string   *http_response_get_body_str(zend_object *obj);
+
+/* Static-handler (issue #13) direct field setters. Used by
+ * http_static_try_serve to populate a freshly-init'd response without
+ * paying the PHP-facing setter validation cost. Call site is
+ * single-writer (no PHP handler ever ran on the response). */
+void http_response_static_set_status   (zend_object *obj, int status_code);
+void http_response_static_set_header   (zend_object *obj,
+                                        const char *name, size_t name_len,
+                                        const char *value, size_t value_len);
+void http_response_static_set_body_str (zend_object *obj, zend_string *body);
+void http_response_static_set_body_cstr(zend_object *obj,
+                                        const char *body, size_t body_len);
+
+/* High-level response builders. Wrappers over the static_set_* primitives
+ * for patterns that recurred in static handler / send_file / compression
+ * with subtle drift between copies. */
+
+/* Set Content-Length from a uint64. Hand-rolled decimal format to avoid
+ * snprintf overhead — Content-Length is on the hot path of every response. */
+void http_response_set_content_length(zend_object *obj, uint64_t length);
+
+/* Push a HashTable of operator-supplied headers (name → string) onto the
+ * response via http_response_static_set_header. With include_content_headers
+ * == false skips name starting with `content-` case-insensitively, matching
+ * RFC 9110 §15.4.5 for 304 Not Modified responses. NULL keys, non-string
+ * values, and an entirely NULL `extra` are tolerated and simply skipped. */
+void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
+                                       bool include_content_headers);
+
+/* Set Connection: keep-alive | close. Multiplex protocols (H2/H3) filter
+ * Connection at submit time, so it is harmless to call on any response. */
+void http_response_set_connection(zend_object *obj, bool keep_alive);
+
+/* H2/H3 forbidden response-header filter (RFC 9113 §8.2.2 / RFC 9114
+ * §4.2). Returns false for hop-by-hop names (connection, keep-alive,
+ * transfer-encoding, upgrade) and content-length (implicit from DATA
+ * frames). H1 has its own framing rules and uses none of this. */
+bool http_response_header_allowed_h2h3(const char *name, size_t len);
+
+/* Resolve effective keep-alive for a request. Reads req->keep_alive,
+ * which the parser populated according to HTTP/1.x semantics. */
+bool http_response_should_keep_alive(const http_request_t *req);
+
+/* Emit a synthetic plain-text response: set status, Content-Type:
+ * text/plain; charset=utf-8, body. Does NOT set Content-Length or
+ * Connection — caller layers those if needed. */
+void http_response_emit_status_body(zend_object *obj, int status_code,
+                                    const char *body, size_t body_len);
+
+/* Convenience wrapper around emit_status_body for short C-string messages
+ * (e.g. 5xx error pages). */
+void http_response_synth_error(zend_object *obj, int status_code,
+                               const char *message);
+
+/* Borrow a pre-rendered "HTTP/1.1 <code> <reason>\r\n" status line.
+ * Returns NULL when the code is outside the known table — the caller
+ * is expected to fall back to the piecewise builder. The returned
+ * pointer + length live in static const memory; do not free. */
+const char *http_response_status_line_http11(int code, size_t *out_len);
 
 /* Response-state helpers used by handler-dispose paths (HTTP/1 in
  * http_connection.c, HTTP/2 in src/http2/http2_strategy.c). */

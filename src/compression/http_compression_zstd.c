@@ -12,8 +12,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_ZSTD
-
 #include "compression/http_encoder.h"
 #include "compression/http_compression_defaults.h"
 #include "compression/http_compression_request.h"
@@ -39,23 +37,27 @@ extern const http_encoder_vtable_t http_compression_zstd_vt;
 static http_encoder_t *zs_create(int level)
 {
     if (level < HTTP_COMPRESSION_ZSTD_LEVEL_MIN) level = HTTP_COMPRESSION_ZSTD_LEVEL_MIN;
+
     if (level > HTTP_COMPRESSION_ZSTD_LEVEL_MAX) level = HTTP_COMPRESSION_ZSTD_LEVEL_MAX;
     /* Belt-and-braces against future level-cap changes in libzstd. */
     const int max_cl = ZSTD_maxCLevel();
+
     if (level > max_cl) level = max_cl;
 
-    ZSTD_CStream *const cs = ZSTD_createCStream();
+    ZSTD_CStream *cs = ZSTD_createCStream();
+
     if (UNEXPECTED(cs == NULL)) return NULL;
 
     /* ZSTD_CCtx_setParameter is the modern way; ZSTD_initCStream is
      * deprecated (it bakes pledgedSrcSize=0 and a fixed level). */
     const size_t rc = ZSTD_CCtx_setParameter(cs, ZSTD_c_compressionLevel, level);
+
     if (UNEXPECTED(ZSTD_isError(rc))) {
         ZSTD_freeCStream(cs);
         return NULL;
     }
 
-    zstd_encoder_t *const enc = ecalloc(1, sizeof(*enc));
+    zstd_encoder_t *enc = ecalloc(1, sizeof(*enc));
     enc->base.vt = &http_compression_zstd_vt;
     enc->cstream = cs;
     return &enc->base;
@@ -65,7 +67,7 @@ static http_encoder_status_t zs_write(http_encoder_t *base,
                                       const void *in,  size_t in_len,  size_t *in_consumed,
                                       void       *out, size_t out_cap, size_t *out_produced)
 {
-    zstd_encoder_t *const enc = (zstd_encoder_t *)base;
+    zstd_encoder_t *enc = (zstd_encoder_t *)base;
 
     ZSTD_inBuffer  ibuf = { .src = in,  .size = in_len,  .pos = 0 };
     ZSTD_outBuffer obuf = { .dst = out, .size = out_cap, .pos = 0 };
@@ -77,6 +79,7 @@ static http_encoder_status_t zs_write(http_encoder_t *base,
     const size_t rc = ZSTD_compressStream2(enc->cstream, &obuf, &ibuf, ZSTD_e_continue);
 
     if (in_consumed)  *in_consumed  = ibuf.pos;
+
     if (out_produced) *out_produced = obuf.pos;
 
     if (UNEXPECTED(ZSTD_isError(rc))) return HTTP_ENC_ERROR;
@@ -85,13 +88,14 @@ static http_encoder_status_t zs_write(http_encoder_t *base,
     if (obuf.pos == obuf.size && ibuf.pos < ibuf.size) {
         return HTTP_ENC_NEED_OUTPUT;
     }
+
     return HTTP_ENC_OK;
 }
 
 static http_encoder_status_t zs_finish(http_encoder_t *base,
                                        void *out, size_t out_cap, size_t *out_produced)
 {
-    zstd_encoder_t *const enc = (zstd_encoder_t *)base;
+    zstd_encoder_t *enc = (zstd_encoder_t *)base;
 
     ZSTD_inBuffer  ibuf = { .src = NULL, .size = 0, .pos = 0 };
     ZSTD_outBuffer obuf = { .dst = out,  .size = out_cap, .pos = 0 };
@@ -100,9 +104,11 @@ static http_encoder_status_t zs_finish(http_encoder_t *base,
      * epilogue. Return value is the residual bytes still buffered;
      * 0 means the frame is fully written. */
     const size_t remaining = ZSTD_compressStream2(enc->cstream, &obuf, &ibuf, ZSTD_e_end);
+
     if (out_produced) *out_produced = obuf.pos;
 
     if (UNEXPECTED(ZSTD_isError(remaining))) return HTTP_ENC_ERROR;
+
     if (EXPECTED(remaining == 0))            return HTTP_ENC_DONE;
     return HTTP_ENC_NEED_OUTPUT;
 }
@@ -111,10 +117,12 @@ static void zs_destroy(http_encoder_t *base)
 {
     if (base == NULL) return;
     zstd_encoder_t *enc = (zstd_encoder_t *)base;
+
     if (enc->cstream) {
         ZSTD_freeCStream(enc->cstream);
         enc->cstream = NULL;
     }
+
     efree(enc);
 }
 
@@ -135,11 +143,13 @@ int http_compression_decode_request_zstd(http_request_t *req, size_t cap)
         return HTTP_DECODE_OK;
     }
 
-    ZSTD_DStream *const ds = ZSTD_createDStream();
+    ZSTD_DStream *ds = ZSTD_createDStream();
+
     if (UNEXPECTED(ds == NULL)) return HTTP_DECODE_MALFORMED;
 
     /* Same growth schedule as the gzip/brotli decoders for parity. */
     size_t out_cap = 4096;
+
     if (cap > 0 && cap < out_cap) out_cap = cap;
     zend_string *out = zend_string_alloc(out_cap, 0);
     size_t produced = 0;
@@ -164,6 +174,7 @@ int http_compression_decode_request_zstd(http_request_t *req, size_t cap)
             zend_string_release(out);
             return HTTP_DECODE_MALFORMED;
         }
+
         if (EXPECTED(rc == 0)) break;   /* frame fully decoded */
 
         /* rc > 0 → decoder needs more input or output. If the input
@@ -176,21 +187,26 @@ int http_compression_decode_request_zstd(http_request_t *req, size_t cap)
         /* Need more output room — grow within cap. */
         if (produced == out_cap) {
             size_t new_cap = out_cap * 2;
+
             if (cap > 0 && new_cap > cap) new_cap = cap;
+
             if (UNEXPECTED(new_cap == out_cap)) {
                 ZSTD_freeDStream(ds);
                 zend_string_release(out);
                 return HTTP_DECODE_TOO_LARGE;
             }
+
             out     = zend_string_realloc(out, new_cap, 0);
             out_cap = new_cap;
         }
     }
+
     ZSTD_freeDStream(ds);
 
     if (produced != out_cap) {
         out = zend_string_truncate(out, produced, 0);
     }
+
     ZSTR_VAL(out)[produced] = '\0';
 
     zend_string_release(req->body);
@@ -198,5 +214,3 @@ int http_compression_decode_request_zstd(http_request_t *req, size_t cap)
     req->content_length = produced;
     return HTTP_DECODE_OK;
 }
-
-#endif /* HAVE_HTTP_ZSTD */

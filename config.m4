@@ -464,16 +464,34 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/conn_arena.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
+    src/http1/http1_sendfile.c
     src/formats/multipart_parser.c
     src/formats/multipart_processor.c
     src/http_request.c
     src/http_response.c
+    src/http_mime.c
+    src/http_date.c
+    src/http_etag.c
+    src/http_conditional.c
+    src/http_range.c
+    src/fs_util.c
+    src/http_rfc5987.c
+    src/http_precompressed.c
+    src/http_param_parse.c
+    src/send_file.c
+    src/http_send_file.c
+    src/http_send_file_options.c
     src/uploaded_file.c
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c
     src/core/http_known_strings.c
     src/log/http_log.c
     src/log/trace_context.c
+    src/static/static_handler_class.c
+    src/static/http_static_path.c
+    src/static/http_static_cache.c
+    src/static/http_static.c
+    src/static/http_static_safety.c
   "
 
   dnl TLS-only TU split out of http_connection.c (BIO ring writer +
@@ -491,6 +509,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/http2/http2_strategy.c
       src/http2/http2_session.c
       src/http2/http2_stream.c
+      src/http2/http2_static_response.c
     "
   fi
 
@@ -532,6 +551,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/http3/http3_io.c
       src/http3/http3_callbacks.c
       src/http3/http3_dispatch.c
+      src/http3/http3_static_response.c
       src/http3/http3_stream.c
       src/http3/http3_stream_pool.c
     "
@@ -572,6 +592,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   PHP_ADD_BUILD_DIR([$ext_builddir/src/http1])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/formats])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/log])
+  PHP_ADD_BUILD_DIR([$ext_builddir/src/static])
   PHP_ADD_BUILD_DIR([$ext_builddir/deps/llhttp])
 
   if test "$PHP_HTTP2" = "yes"; then

@@ -33,8 +33,8 @@
  * smart_str_alloc(buf, size, 0) up front is still the right call.
  */
 static zend_always_inline void
-http_smart_str_append_scalable(smart_str *const buf,
-                               const char *const data,
+http_smart_str_append_scalable(smart_str *buf,
+                               const char *data,
                                const size_t len)
 {
     const size_t cur   = buf->s != NULL ? ZSTR_LEN(buf->s) : 0;
@@ -60,6 +60,7 @@ http_smart_str_append_scalable(smart_str *const buf,
             (void)smart_str_alloc(buf, reserve - cur, 0);
         }
     }
+
     smart_str_appendl(buf, data, len);
 }
 

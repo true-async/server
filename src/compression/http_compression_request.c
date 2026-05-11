@@ -17,8 +17,6 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_HTTP_COMPRESSION
-
 #include "php.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
@@ -57,6 +55,7 @@ static int decode_gzip(http_request_t *req, size_t cap)
 
     /* Output buffer. Initial 4 KiB, doubles on demand up to `cap`. */
     size_t out_cap = 4096;
+
     if (cap > 0 && cap < out_cap) out_cap = cap;
     zend_string *out = zend_string_alloc(out_cap, 0);
     size_t produced = 0;
@@ -72,6 +71,7 @@ static int decode_gzip(http_request_t *req, size_t cap)
         produced = out_cap - s.avail_out;
 
         if (rc == Z_STREAM_END) break;
+
         if (rc != Z_OK) {
             ZS_INFLATE_END(&s);
             zend_string_release(out);
@@ -80,15 +80,18 @@ static int decode_gzip(http_request_t *req, size_t cap)
         /* Need more output. Cap-aware grow: never above `cap`. */
         if (s.avail_out == 0) {
             size_t new_cap = out_cap * 2;
+
             if (cap > 0 && new_cap > cap) {
                 new_cap = cap;
             }
+
             if (new_cap == out_cap) {
                 /* Already at cap and inflate still wants room → bomb. */
                 ZS_INFLATE_END(&s);
                 zend_string_release(out);
                 return HTTP_DECODE_TOO_LARGE;
             }
+
             zend_string *grown = zend_string_realloc(out, new_cap, 0);
             out = grown;
             s.next_out  = (unsigned char *)ZSTR_VAL(out) + produced;
@@ -96,12 +99,14 @@ static int decode_gzip(http_request_t *req, size_t cap)
             out_cap = new_cap;
         }
     }
+
     ZS_INFLATE_END(&s);
 
     /* Right-size + NUL-terminate. */
     if (produced != out_cap) {
         out = zend_string_truncate(out, produced, 0);
     }
+
     ZSTR_VAL(out)[produced] = '\0';
 
     zend_string_release(req->body);
@@ -116,6 +121,7 @@ int http_compression_decode_request_body(http_request_t *req,
     if (req == NULL || req->headers == NULL) return HTTP_DECODE_OK;
 
     zval *ce = zend_hash_str_find(req->headers, "content-encoding", 16);
+
     if (ce == NULL || Z_TYPE_P(ce) != IS_STRING) return HTTP_DECODE_OK;
 
     const char *val = Z_STRVAL_P(ce);
@@ -127,6 +133,7 @@ int http_compression_decode_request_body(http_request_t *req,
         (len == 8 && zend_binary_strcasecmp(val, 8, "identity", 8) == 0)) {
         return HTTP_DECODE_OK;
     }
+
     size_t cap = (cfg != NULL) ? cfg->request_max_decompressed_size : 0;
 
     if (len == 4 && zend_binary_strcasecmp(val, 4, "gzip", 4) == 0) {
@@ -150,5 +157,3 @@ int http_compression_decode_request_body(http_request_t *req,
 
     return HTTP_DECODE_UNKNOWN_CODING;
 }
-
-#endif /* HAVE_HTTP_COMPRESSION */

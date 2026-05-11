@@ -14,11 +14,10 @@
 #include <stddef.h>
 
 /* Backend vtables. Each is provided in its own TU and only linked when
- * the corresponding feature was detected. The registry below references
- * them under the same #ifdef so the linker stays happy on partial builds. */
-#ifdef HAVE_HTTP_COMPRESSION
+ * the corresponding feature was detected. This TU itself is excluded
+ * from the build when HAVE_HTTP_COMPRESSION is undefined, so the gzip
+ * vtable is always present here; brotli/zstd remain optional. */
 extern const http_encoder_vtable_t http_compression_gzip_vt;
-#endif
 #ifdef HAVE_HTTP_BROTLI
 extern const http_encoder_vtable_t http_compression_brotli_vt;
 #endif
@@ -29,10 +28,8 @@ extern const http_encoder_vtable_t http_compression_zstd_vt;
 const http_encoder_vtable_t *http_compression_lookup(http_codec_id_t id)
 {
     switch (id) {
-#ifdef HAVE_HTTP_COMPRESSION
         case HTTP_CODEC_GZIP:
             return &http_compression_gzip_vt;
-#endif
 #ifdef HAVE_HTTP_BROTLI
         case HTTP_CODEC_BROTLI:
             return &http_compression_brotli_vt;
@@ -60,11 +57,11 @@ const char *http_compression_codec_token(http_codec_id_t id)
 
 const char *http_compression_engine_name(void)
 {
-#if defined(HAVE_ZLIB_NG)
+    /* This TU only compiles when HAVE_HTTP_COMPRESSION is on; the
+     * choice is between zlib-ng (preferred) and stock zlib. */
+#ifdef HAVE_ZLIB_NG
     return "zlib-ng";
-#elif defined(HAVE_HTTP_COMPRESSION)
-    return "zlib";
 #else
-    return "disabled";
+    return "zlib";
 #endif
 }

@@ -62,6 +62,7 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
 {
     uint8_t mac[32];
     unsigned int maclen = sizeof(mac);
+
     if (HMAC(EVP_sha256(), key, 32, dcid, dcidlen, mac, &maclen) == NULL
         || maclen < 16) {
         /* Should not happen with EVP_sha256 + 32-byte key; zero-fill
@@ -70,6 +71,7 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
         memset(out, 0, 16);
         return;
     }
+
     memcpy(out, mac, 16);
 }
 
@@ -98,7 +100,9 @@ bool http3_packet_send_stateless_reset(
     }
 
     size_t reply_len = inbound_datagram_len - 1;
+
     if (reply_len > 1200) reply_len = 1200;
+
     if (reply_len < 22)   reply_len = 22;
 
     uint8_t buf[1200];
@@ -138,6 +142,7 @@ bool http3_packet_send_retry(
      * length as our HTTP3_SCID_LEN. */
     ngtcp2_cid retry_scid;
     retry_scid.datalen = 18;
+
     if (RAND_bytes(retry_scid.data, (int)retry_scid.datalen) != 1) {
         return false;
     }
@@ -152,6 +157,7 @@ bool http3_packet_send_retry(
         token, retry_token_key, 32, version,
         (const ngtcp2_sockaddr *)peer, (ngtcp2_socklen)peer_len,
         &retry_scid, &odcid, ts);
+
     if (tokenlen < 0) {
         return false;
     }
@@ -159,6 +165,7 @@ bool http3_packet_send_retry(
     /* Retry packet's DCID is the client's SCID (echoed back). */
     ngtcp2_cid pkt_dcid;
     pkt_dcid.datalen = client_scid_len;
+
     if (client_scid_len > 0) {
         memcpy(pkt_dcid.data, client_scid, client_scid_len);
     }
@@ -167,6 +174,7 @@ bool http3_packet_send_retry(
     ngtcp2_ssize n = ngtcp2_crypto_write_retry(
         buf, sizeof(buf), version,
         &pkt_dcid, &retry_scid, &odcid, token, (size_t)tokenlen);
+
     if (n < 0) {
         return false;
     }
@@ -191,6 +199,7 @@ int http3_packet_verify_retry_token(
 
     ngtcp2_cid dcid;
     dcid.datalen = current_dcid_len;
+
     if (current_dcid_len > 0) {
         memcpy(dcid.data, current_dcid, current_dcid_len);
     }
@@ -202,6 +211,7 @@ int http3_packet_verify_retry_token(
         retry_token_key, 32, version,
         (const ngtcp2_sockaddr *)peer, (ngtcp2_socklen)peer_len,
         &dcid, HTTP3_RETRY_TOKEN_TIMEOUT_NS, ts);
+
     if (rv != 0) {
         return -1;
     }
@@ -209,6 +219,7 @@ int http3_packet_verify_retry_token(
     if (odcid.datalen > NGTCP2_MAX_CIDLEN) {
         return -1;
     }
+
     memcpy(odcid_out, odcid.data, odcid.datalen);
     *odcid_len_out = odcid.datalen;
     return 0;

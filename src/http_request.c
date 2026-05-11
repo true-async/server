@@ -85,6 +85,7 @@ static void http_request_free_object(zend_object *object)
 /* Private constructor - prevents direct instantiation */
 ZEND_METHOD(TrueAsync_HttpRequest, __construct)
 {
+    (void)return_value;
     /* This constructor is private - instances are created internally */
     ZEND_PARSE_PARAMETERS_NONE();
 }
@@ -259,6 +260,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFile)
     }
 
     zval *file = zend_hash_find(intern->request->files, name);
+
     if (!file) {
         RETURN_NULL();
     }
@@ -266,9 +268,11 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFile)
     /* If it's an array (multiple files), return first one */
     if (Z_TYPE_P(file) == IS_ARRAY) {
         zval *first = zend_hash_index_find(Z_ARRVAL_P(file), 0);
+
         if (first && Z_TYPE_P(first) == IS_OBJECT) {
             RETURN_OBJ_COPY(Z_OBJ_P(first));
         }
+
         RETURN_NULL();
     }
 
@@ -308,12 +312,14 @@ static void http_request_ensure_uri_parsed(http_request_t *req)
     zval arr;
     array_init(&arr);
     size_t qslen = ulen - (size_t)(q + 1 - uri);
+
     if (qslen > 0) {
         /* php_default_treat_data takes ownership of the string (calls efree),
          * handles percent-decoding, '+'-as-space, PHP array notation, and
          * max_input_vars — identical to how PHP populates $_GET. */
         php_default_treat_data(PARSE_STRING, estrndup(q + 1, qslen), &arr);
     }
+
     req->query_params = Z_ARR(arr);
 }
 
@@ -350,6 +356,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam)
     http_request_ensure_uri_parsed(intern->request);
 
     zval *val = zend_hash_find(intern->request->query_params, name);
+
     if (val) {
         RETURN_COPY(val);
     }
@@ -390,6 +397,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getContentLength)
         char *end = NULL;
         errno = 0;
         long long len = strtoll(Z_STRVAL_P(value), &end, 10);
+
         if (errno == 0 && end != Z_STRVAL_P(value) && len >= 0) {
             RETURN_LONG((zend_long)len);
         }
@@ -406,6 +414,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceParent)
     if (intern->request->traceparent_raw == NULL) {
         RETURN_NULL();
     }
+
     RETURN_STR_COPY(intern->request->traceparent_raw);
 }
 
@@ -417,6 +426,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceState)
     if (intern->request->tracestate_raw == NULL) {
         RETURN_NULL();
     }
+
     RETURN_STR_COPY(intern->request->tracestate_raw);
 }
 
@@ -428,6 +438,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceId)
     if (!intern->request->has_trace) {
         RETURN_NULL();
     }
+
     char hex[33];
     trace_hex_encode(intern->request->trace_id, 16, hex);
     RETURN_STRINGL(hex, 32);
@@ -441,6 +452,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getSpanId)
     if (!intern->request->has_trace) {
         RETURN_NULL();
     }
+
     char hex[17];
     trace_hex_encode(intern->request->span_id, 8, hex);
     RETURN_STRINGL(hex, 16);
@@ -454,6 +466,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceFlags)
     if (!intern->request->has_trace) {
         RETURN_NULL();
     }
+
     RETURN_LONG((zend_long)intern->request->trace_flags);
 }
 
@@ -477,17 +490,20 @@ ZEND_METHOD(TrueAsync_HttpRequest, awaitBody)
      * wakers. */
     if (req->body_event == NULL) {
         zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
         if (trig == NULL) {
             /* Out of memory / reactor shutdown — fall back to returning
              * $this as if the wait had completed. */
             RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
         }
+
         req->body_event = &trig->base;
     }
 
     /* Attach a waker to body_event and suspend. Mirrors the pattern
      * used by http_connection's async_io_req_await. */
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
     if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
         return;
     }
@@ -534,4 +550,51 @@ zval* http_request_create_from_parsed(http_request_t *req)
     intern->request = req;
 
     return obj;
+}
+
+/* Method tokens are case-sensitive per RFC 7230 §3.1.1. */
+bool http_request_method_is_get(const http_request_t *req)
+{
+    return req != NULL && req->method != NULL &&
+           ZSTR_LEN(req->method) == 3 &&
+           memcmp(ZSTR_VAL(req->method), "GET", 3) == 0;
+}
+
+bool http_request_method_is_head(const http_request_t *req)
+{
+    return req != NULL && req->method != NULL &&
+           ZSTR_LEN(req->method) == 4 &&
+           memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
+}
+
+/* Header lookup. Headers are stored with lowercase keys; caller must
+ * pass an already-lowercased name. Multi-value headers can be stored
+ * either as a single comma-joined string (HTTP/1) or as an array of
+ * strings (HTTP/2 stream events) — return the first occurrence. */
+const zend_string *http_request_find_header(const http_request_t *req,
+                                            const char *name, size_t name_len)
+{
+    if (req == NULL || req->headers == NULL) {
+        return NULL;
+    }
+
+    const zval *zv = zend_hash_str_find(req->headers, name, name_len);
+
+    if (zv == NULL) {
+        return NULL;
+    }
+
+    if (Z_TYPE_P(zv) == IS_STRING) {
+        return Z_STR_P(zv);
+    }
+
+    if (Z_TYPE_P(zv) == IS_ARRAY) {
+        const zval *first = zend_hash_index_find(Z_ARRVAL_P(zv), 0);
+
+        if (first != NULL && Z_TYPE_P(first) == IS_STRING) {
+            return Z_STR_P(first);
+        }
+    }
+
+    return NULL;
 }

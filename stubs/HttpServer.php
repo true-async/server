@@ -31,6 +31,20 @@ final class HttpServer
     public function addHttpHandler(callable $handler): static {}
 
     /**
+     * Register a built-in static file handler (issue #13).
+     *
+     * Matches URLs whose path begins with the handler's configured
+     * prefix and serves files from its root directory entirely in C —
+     * no PHP coroutine, no callback. Multiple calls are allowed; mounts
+     * are matched in registration order. The supplied {@see StaticHandler}
+     * is locked at attach time, so any subsequent setter call on it
+     * throws HttpServerRuntimeException.
+     *
+     * @return static
+     */
+    public function addStaticHandler(StaticHandler $handler): static {}
+
+    /**
      * Add WebSocket handler (TODO)
      *
      * @param callable $handler WebSocket handler callback

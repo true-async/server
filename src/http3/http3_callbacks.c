@@ -89,8 +89,10 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
     if (!http3_fill_random(cid->data, cidlen)) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
+
     cid->datalen = cidlen;
     const uint8_t *sr_key = c != NULL ? http3_listener_sr_key(c->listener) : NULL;
+
     if (sr_key == NULL) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
@@ -106,7 +108,7 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
  * nghttp3 application callbacks — request side (HEADERS, DATA, end-stream)
  * ------------------------------------------------------------------------ */
 
-static void h3_ensure_headers_table(http_request_t *const req)
+static void h3_ensure_headers_table(http_request_t *req)
 {
     if (req->headers == NULL) {
         ALLOC_HASHTABLE(req->headers);
@@ -114,14 +116,14 @@ static void h3_ensure_headers_table(http_request_t *const req)
     }
 }
 
-static void h3_store_header_value(http_request_t *const req,
+static void h3_store_header_value(http_request_t *req,
                                   const char *name, size_t namelen,
                                   const char *value, size_t valuelen)
 {
     h3_ensure_headers_table(req);
 
-    zend_string *const name_str = zend_string_init(name, namelen, 0);
-    zend_string *const val_str  = zend_string_init(value, valuelen, 0);
+    zend_string *name_str = zend_string_init(name, namelen, 0);
+    zend_string *val_str  = zend_string_init(value, valuelen, 0);
 
     zval tmp;
     ZVAL_STR(&tmp, val_str);
@@ -144,11 +146,14 @@ static void h3_reject_request_stream(http3_connection_t *c,
 {
     if (s == NULL || s->rejected) return;
     s->rejected = true;
+
     if (c == NULL) return;
+
     if (c->nghttp3_conn != NULL) {
         (void)nghttp3_conn_shutdown_stream_read(
             (nghttp3_conn *)c->nghttp3_conn, stream_id);
     }
+
     if (c->ngtcp2_conn != NULL) {
         /* STOP_SENDING — tell peer we won't read more on this stream. */
         (void)ngtcp2_conn_shutdown_stream_read(
@@ -180,9 +185,11 @@ static int h3_begin_headers_cb(nghttp3_conn *conn, int64_t stream_id,
         ? http3_listener_packet_stats(c->listener) : NULL;
 
     http3_stream_t *s = http3_stream_new(c, stream_id);
+
     if (s == NULL) {
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
+
     if (nghttp3_conn_set_stream_user_data(conn, stream_id, s) != 0) {
         http3_stream_release(s);
         return NGHTTP3_ERR_CALLBACK_FAILURE;
@@ -203,6 +210,7 @@ static int h3_begin_headers_cb(nghttp3_conn *conn, int64_t stream_id,
         s->list_next = c->streams_head;
         c->streams_head = s;
     }
+
     if (stats != NULL) stats->h3_streams_opened++;
     return 0;
 }
@@ -215,6 +223,7 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
     (void)conn; (void)stream_id; (void)flags;
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
     http3_stream_t *s = (http3_stream_t *)stream_user_data;
+
     if (s == NULL || s->rejected) {
         return 0;
     }
@@ -224,20 +233,23 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
 
     /* Same RFC 7541 §4.1 32-byte overhead accounting H2 uses. */
     const size_t entry_cost = name_v.len + value_v.len + 32;
+
     if (SIZE_MAX - s->headers_total_bytes < entry_cost
      || s->headers_total_bytes + entry_cost > HTTP3_MAX_HEADERS_BYTES) {
         http3_packet_stats_t *stats = c != NULL
             ? http3_listener_packet_stats(c->listener) : NULL;
+
         if (stats != NULL) stats->h3_request_oversized++;
         /* RFC 9114: reject this stream, don't kill the connection. */
         h3_reject_request_stream(c, s, stream_id);
         return 0;
     }
+
     s->headers_total_bytes += entry_cost;
 
-    http_request_t *const req = s->request;
-    const char *const n = (const char *)name_v.base;
-    const char *const v = (const char *)value_v.base;
+    http_request_t *req = s->request;
+    const char *n = (const char *)name_v.base;
+    const char *v = (const char *)value_v.base;
 
     /* Pseudo-headers — token enum lets us skip the strcmp ladder for
      * the four RFC 9114 pseudo names. nghttp3 already validates
@@ -246,18 +258,23 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
         if (req->method == NULL) {
             req->method = zend_string_init(v, value_v.len, 0);
         }
+
         return 0;
     }
+
     if (token == NGHTTP3_QPACK_TOKEN__PATH) {
         if (req->uri == NULL) {
             req->uri = zend_string_init(v, value_v.len, 0);
         }
+
         return 0;
     }
+
     if (token == NGHTTP3_QPACK_TOKEN__AUTHORITY) {
         h3_store_header_value(req, "host", 4, v, value_v.len);
         return 0;
     }
+
     if (token == NGHTTP3_QPACK_TOKEN__SCHEME) {
         h3_store_header_value(req, "scheme", 6, v, value_v.len);
         return 0;
@@ -274,10 +291,12 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
         buf[value_v.len] = '\0';
         char *end = NULL;
         unsigned long long cl = strtoull(buf, &end, 10);
+
         if (end != buf && *end == '\0' && cl <= SIZE_MAX) {
             req->content_length = (size_t)cl;
         }
     }
+
     return 0;
 }
 
@@ -288,6 +307,7 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
     (void)conn; (void)stream_id; (void)fin;
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
     http3_stream_t *s     = (http3_stream_t *)stream_user_data;
+
     if (s == NULL || s->dispatched || s->rejected) {
         return 0;
     }
@@ -307,16 +327,19 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     (void)conn; (void)stream_id;
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
     http3_stream_t *s = (http3_stream_t *)stream_user_data;
+
     if (s == NULL || s->rejected) {
         return 0;
     }
 
     const size_t current = s->body_buf.s != NULL
         ? ZSTR_LEN(s->body_buf.s) : 0;
+
     if (SIZE_MAX - current < datalen
      || current + datalen > HTTP3_MAX_BODY_BYTES) {
         http3_packet_stats_t *stats = c != NULL
             ? http3_listener_packet_stats(c->listener) : NULL;
+
         if (stats != NULL) stats->h3_request_oversized++;
         /* RFC 9114: reject this stream, don't kill the connection. */
         h3_reject_request_stream(c, s, stream_id);
@@ -328,6 +351,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
         && s->request->content_length <= HTTP3_MAX_BODY_BYTES) {
         smart_str_alloc(&s->body_buf, s->request->content_length, 0);
     }
+
     smart_str_appendl(&s->body_buf, (const char *)data, datalen);
     return 0;
 }
@@ -353,6 +377,7 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
 {
     (void)conn; (void)stream_id; (void)conn_user_data;
     http3_stream_t *s = (http3_stream_t *)stream_user_data;
+
     if (s == NULL || veccnt == 0) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
         return 0;
@@ -364,11 +389,13 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
          * in queue[head..read_idx) holding their refcount until ACK. */
         while (s->chunk_read_idx < s->chunk_queue_tail) {
             zend_string *cur = s->chunk_queue[s->chunk_read_idx];
+
             if (cur == NULL || s->chunk_read_offset >= ZSTR_LEN(cur)) {
                 s->chunk_read_idx++;
                 s->chunk_read_offset = 0;
                 continue;
             }
+
             break;
         }
 
@@ -377,6 +404,7 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
                 *pflags |= NGHTTP3_DATA_FLAG_EOF;
                 return 0;
             }
+
             return NGHTTP3_ERR_WOULDBLOCK;
         }
 
@@ -394,32 +422,21 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
         return 0;
     }
+
     const size_t total     = ZSTR_LEN(s->response_body);
     const size_t remaining = (s->response_body_offset < total)
                              ? total - s->response_body_offset : 0;
+
     if (remaining == 0) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
         return 0;
     }
+
     vec[0].base = (uint8_t *)ZSTR_VAL(s->response_body) + s->response_body_offset;
     vec[0].len  = remaining;
     s->response_body_offset += remaining;
     *pflags |= NGHTTP3_DATA_FLAG_EOF;
     return 1;
-}
-
-/* RFC 9114 §4.2 forbids these on HTTP/3. Same blocklist as the H2 path
- * — content-length is implicit from the DATA frames, the rest are
- * connection-specific HTTP/1.1 hop-by-hop fields with no analogue at
- * the framed-protocol layer. */
-static bool h3_response_header_allowed(const char *name, size_t len)
-{
-    if (len == 10 && strncasecmp(name, "connection", 10) == 0)         return false;
-    if (len == 10 && strncasecmp(name, "keep-alive", 10) == 0)         return false;
-    if (len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0)  return false;
-    if (len == 7  && strncasecmp(name, "upgrade", 7)  == 0)            return false;
-    if (len == 14 && strncasecmp(name, "content-length", 14) == 0)     return false;
-    return true;
 }
 
 /* Hard cap on outbound response headers — backstop against a
@@ -446,18 +463,22 @@ static inline bool h3_nv_push(h3_nv_buf_t *b,
     if (UNEXPECTED(b->nvi >= H3_RESPONSE_HEADER_MAX)) {
         return false;
     }
+
     if (UNEXPECTED(b->nvi == b->nvcap)) {
         const size_t new_cap = (b->heap == NULL) ? 64 : b->nvcap * 2;
         nghttp3_nv *new_buf  = (b->heap == NULL)
             ? emalloc(new_cap * sizeof(*new_buf))
             : erealloc(b->heap, new_cap * sizeof(*new_buf));
+
         if (b->heap == NULL) {
             memcpy(new_buf, b->scratch, b->nvcap * sizeof(*new_buf));
         }
+
         b->heap  = new_buf;
         b->nv    = new_buf;
         b->nvcap = new_cap;
     }
+
     nghttp3_nv *slot = &b->nv[b->nvi++];
     slot->name     = (uint8_t *)ZSTR_VAL(name);
     slot->namelen  = ZSTR_LEN(name);
@@ -507,8 +528,10 @@ bool http3_stream_submit_response(http3_connection_t *c,
      * fixed scratch buffer so its lifetime matches the submit call. */
     char status_buf[8];
     int  status = http_response_get_status(resp_obj);
+
     if (status <= 0) status = 200;
     int status_len = snprintf(status_buf, sizeof(status_buf), "%d", status);
+
     if (status_len < 0 || status_len >= (int)sizeof(status_buf)) {
         status_len = 3;
         memcpy(status_buf, "500", 3);
@@ -542,18 +565,22 @@ bool http3_stream_submit_response(http3_connection_t *c,
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL) continue;
-            if (!h3_response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 if (!h3_nv_push(&buf, name, values)) goto headers_done;
             } else if (Z_TYPE_P(values) == IS_ARRAY) {
                 zval *v;
                 ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
                     if (Z_TYPE_P(v) != IS_STRING) continue;
+
                     if (!h3_nv_push(&buf, name, v)) goto headers_done;
                 } ZEND_HASH_FOREACH_END();
             }
         } ZEND_HASH_FOREACH_END();
     }
+
 headers_done:
 
     /* Body source. Buffered: copy onto the stream so the data_reader
@@ -562,6 +589,7 @@ headers_done:
      * data_reader walks it directly. */
     if (!streaming) {
         zend_string *body_str = http_response_get_body_str(resp_obj);
+
         if (body_str != NULL && ZSTR_LEN(body_str) > 0) {
             /* Zero-copy: addref the response's underlying zend_string
              * instead of memcpy'ing it. The reader walks it asynchronously,
@@ -580,15 +608,19 @@ headers_done:
     if (buf.heap != NULL) efree(buf.heap);
 
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
     if (rv == 0) {
         if (stats != NULL) stats->h3_response_submitted++;
         return true;
     }
+
     if (stats != NULL) stats->h3_response_submit_error++;
+
     if (s->response_body != NULL) {
         zend_string_release(s->response_body);
         s->response_body = NULL;
     }
+
     return false;
 }
 
@@ -603,14 +635,17 @@ headers_done:
  * the caller suspends on write_event, which extend_max_stream_data_cb
  * fires when the peer extends the window via MAX_STREAM_DATA.
  * ------------------------------------------------------------------- */
-static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
+int h3_stream_append_chunk(void *ctx, zend_string *chunk)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
+
     if (s == NULL || s->conn == NULL || s->peer_closed) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
+
     http3_connection_t *c = s->conn;
+
     if (c->closed || c->nghttp3_conn == NULL) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
@@ -620,6 +655,7 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
      * the streaming data_reader). The data_reader reads the chunk we
      * are about to enqueue. */
     const bool first_call = s->chunk_queue == NULL;
+
     if (first_call) {
         s->chunk_queue_cap     = 8;
         s->chunk_queue         = ecalloc(s->chunk_queue_cap, sizeof(zend_string *));
@@ -645,6 +681,7 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
             s->chunk_read_idx   -= shift;
             s->chunk_queue_tail -= shift;
         }
+
         if (s->chunk_queue_tail == s->chunk_queue_cap) {
             const size_t new_cap = s->chunk_queue_cap * 2;
             s->chunk_queue = erealloc(s->chunk_queue,
@@ -659,9 +696,11 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
     /* Telemetry — match the H1/H2 vantage so operators see one
      * unified streaming-load picture across protocols. */
     http_server_counters_t *counters = c->counters;
+
     if (first_call) {
         http_server_on_streaming_response_started(counters);
     }
+
     http_server_on_stream_send(counters, ZSTR_LEN(chunk));
 
     if (first_call) {
@@ -676,6 +715,7 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
                     s->chunk_queue[i] = NULL;
                 }
             }
+
             s->chunk_pending_bytes = 0;
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
@@ -703,21 +743,27 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
         (uint32_t)c->view->write_timeout_s * 1000u;
     while (s->chunk_pending_bytes > 0 && !s->peer_closed) {
         zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+
         if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
             /* Not in a coroutine — can't suspend; flush is best-effort. */
             break;
         }
+
         if (s->write_event == NULL) {
             s->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
             if (s->write_event == NULL) {
                 return HTTP_STREAM_APPEND_STREAM_DEAD;
             }
         }
+
         zend_async_event_t *wake_ev =
             &s->write_event->base;
+
         if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
+
         zend_async_resume_when(co, wake_ev, false,
                                zend_async_waker_callback_resolve, NULL);
         /* Defensive write_timeout_s — caps the wait so a peer that stops
@@ -731,8 +777,10 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
             zend_async_resume_when(co, timer, true,
                                    zend_async_waker_callback_timeout, NULL);
         }
+
         ZEND_ASYNC_SUSPEND();
         zend_async_waker_clean(co);
+
         if (EG(exception) != NULL) {
             /* Timeout exception expected for genuinely stalled peers;
              * cancel-from-RST also lands here. send() surfaces this as
@@ -743,17 +791,21 @@ static int h3_stream_append_chunk(void *ctx, zend_string *chunk)
         http3_connection_drain_out(c);
         http3_connection_arm_timer(c);
     }
+
     return s->peer_closed ? HTTP_STREAM_APPEND_STREAM_DEAD
                           : HTTP_STREAM_APPEND_OK;
 }
 
-static void h3_stream_mark_ended(void *ctx)
+void h3_stream_mark_ended(void *ctx)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
+
     if (s == NULL || s->conn == NULL || s->streaming_ended) {
         return;
     }
+
     s->streaming_ended = true;
+
     if (s->peer_closed || s->conn->closed
         || s->conn->nghttp3_conn == NULL) {
         return;
@@ -769,19 +821,23 @@ static void h3_stream_mark_ended(void *ctx)
 static zend_async_event_t *h3_stream_get_wait_event(void *ctx)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
+
     if (s == NULL) return NULL;
+
     if (s->write_event == NULL) {
         s->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
     }
+
     return s->write_event != NULL
                ? &s->write_event->base
                : NULL;
 }
 
 const http_response_stream_ops_t h3_stream_ops = {
-    .append_chunk   = h3_stream_append_chunk,
-    .mark_ended     = h3_stream_mark_ended,
-    .get_wait_event = h3_stream_get_wait_event,
+    .append_chunk        = h3_stream_append_chunk,
+    .mark_ended          = h3_stream_mark_ended,
+    .get_wait_event      = h3_stream_get_wait_event,
+    .send_static_response = h3_stream_send_static_response,
 };
 
 /* ------------------------------------------------------------------------
@@ -802,6 +858,7 @@ const http_response_stream_ops_t h3_stream_ops = {
 static void http3_finalize_request_body(http3_stream_t *s)
 {
     http_request_t *req = s->request;
+
     if (req == NULL) {
         return;
     }
@@ -814,6 +871,7 @@ static void http3_finalize_request_body(http3_stream_t *s)
         req->body = s->body_buf.s;
         s->body_buf.s = NULL;        /* request now owns the storage */
     }
+
     req->complete = true;
     s->fin_received = true;
 
@@ -823,6 +881,7 @@ static void http3_finalize_request_body(http3_stream_t *s)
     if (req->body_event != NULL) {
         zend_async_trigger_event_t *trig =
             (zend_async_trigger_event_t *)req->body_event;
+
         if (trig->trigger != NULL) {
             trig->trigger(trig);
         }
@@ -835,6 +894,7 @@ static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,
     (void)conn; (void)stream_id;
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
     http3_stream_t *s = (http3_stream_t *)stream_user_data;
+
     if (s == NULL || s->rejected) {
         return 0;
     }
@@ -843,6 +903,7 @@ static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,
 
     http3_packet_stats_t *stats = c != NULL
         ? http3_listener_packet_stats(c->listener) : NULL;
+
     if (stats != NULL) stats->h3_request_received++;
 
     /* Defensive: if h3_end_headers_cb never fired (malformed peer that
@@ -852,6 +913,7 @@ static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,
     if (!s->dispatched) {
         http3_stream_dispatch(c, s);
     }
+
     return 0;
 }
 
@@ -868,10 +930,13 @@ static void h3_stream_mark_peer_closed(http3_stream_t *s)
     if (s == NULL || s->peer_closed) {
         return;
     }
+
     s->peer_closed = true;
+
     if (s->write_event != NULL) {
         zend_async_trigger_event_t *trig =
             s->write_event;
+
         if (trig->trigger != NULL) {
             trig->trigger(trig);
         }
@@ -891,10 +956,12 @@ static int h3_stream_close_cb(nghttp3_conn *conn, int64_t stream_id,
      * own per-stream state machines; nothing forces them to fire close in
      * lockstep. */
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
+
     if (c != NULL && c->ngtcp2_conn != NULL) {
         ngtcp2_conn_set_stream_user_data(
             (ngtcp2_conn *)c->ngtcp2_conn, stream_id, NULL);
     }
+
     h3_stream_mark_peer_closed(s);
     http3_stream_release(s);
     return 0;
@@ -909,10 +976,12 @@ static int h3_stop_sending_cb(nghttp3_conn *conn, int64_t stream_id,
      * gave up on its data. ngtcp2 has the function exposed on the
      * connection-level handle. */
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
+
     if (c != NULL && c->ngtcp2_conn != NULL) {
         ngtcp2_conn_shutdown_stream_read(
             (ngtcp2_conn *)c->ngtcp2_conn, 0, stream_id, app_error_code);
     }
+
     return 0;
 }
 
@@ -922,10 +991,12 @@ static int h3_reset_stream_cb(nghttp3_conn *conn, int64_t stream_id,
 {
     (void)conn; (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)conn_user_data;
+
     if (c != NULL && c->ngtcp2_conn != NULL) {
         ngtcp2_conn_shutdown_stream_write(
             (ngtcp2_conn *)c->ngtcp2_conn, 0, stream_id, app_error_code);
     }
+
     return 0;
 }
 
@@ -942,25 +1013,32 @@ static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
 {
     (void)conn; (void)stream_id; (void)cu;
     http3_stream_t *s = (http3_stream_t *)su;
+
     if (s == NULL || s->chunk_queue == NULL) {
         return 0;
     }
+
     s->chunk_ack_credit += datalen;
     while (s->chunk_queue_head < s->chunk_read_idx) {
         zend_string *head = s->chunk_queue[s->chunk_queue_head];
+
         if (head == NULL) {
             s->chunk_queue_head++;
             continue;
         }
+
         const size_t hlen = ZSTR_LEN(head);
+
         if (s->chunk_ack_credit < hlen) {
             break;
         }
+
         s->chunk_ack_credit -= hlen;
         zend_string_release(head);
         s->chunk_queue[s->chunk_queue_head] = NULL;
         s->chunk_queue_head++;
     }
+
     return 0;
 }
 
@@ -991,6 +1069,7 @@ bool http3_connection_init_h3(http3_connection_t *c)
     nghttp3_conn *h3 = NULL;
     int rv = nghttp3_conn_server_new(
         &h3, &HTTP3_NGHTTP3_CALLBACKS, &settings, nghttp3_mem_default(), c);
+
     if (rv != 0) {
         return false;
     }
@@ -1005,16 +1084,20 @@ bool http3_connection_init_h3(http3_connection_t *c)
         const http_server_object *srv_obj =
             (const http_server_object *)http3_listener_server_obj(c->listener);
         const uint32_t cfg_streams = http_server_get_http3_max_concurrent_streams(srv_obj);
+
         if (cfg_streams != 0) {
             bidi_cap = (uint64_t)cfg_streams;
         }
+
         if (getenv("PHP_HTTP3_BENCH_FC") != NULL) {
             bidi_cap = 1000000ull;
         }
     }
+
     nghttp3_conn_set_max_client_streams_bidi(h3, bidi_cap);
 
     int64_t ctrl_id = -1, qenc_id = -1, qdec_id = -1;
+
     if (ngtcp2_conn_open_uni_stream((ngtcp2_conn *)c->ngtcp2_conn, &ctrl_id, NULL) != 0
      || ngtcp2_conn_open_uni_stream((ngtcp2_conn *)c->ngtcp2_conn, &qenc_id, NULL) != 0
      || ngtcp2_conn_open_uni_stream((ngtcp2_conn *)c->ngtcp2_conn, &qdec_id, NULL) != 0) {
@@ -1046,6 +1129,7 @@ static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
 {
     (void)conn;
     http3_connection_t *c = (http3_connection_t *)user_data;
+
     if (c == NULL) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
@@ -1072,6 +1156,7 @@ static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
         if (stats != NULL) stats->h3_init_failed++;
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
+
     if (stats != NULL) stats->h3_init_ok++;
     return 0;
 }
@@ -1083,14 +1168,18 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
 {
     (void)conn; (void)offset; (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)user_data;
+
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;  /* Pre-handshake stream data is not expected; drop. */
     }
+
     int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ? 1 : 0;
     nghttp3_ssize n = nghttp3_conn_read_stream(
         (nghttp3_conn *)c->nghttp3_conn, stream_id, data, datalen, fin);
+
     if (n < 0) {
         http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
         if (stats != NULL) stats->h3_stream_read_error++;
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
@@ -1125,13 +1214,16 @@ static int extend_max_stream_data_cb(ngtcp2_conn *conn, int64_t stream_id,
         (void)nghttp3_conn_unblock_stream(
             (nghttp3_conn *)c->nghttp3_conn, stream_id);
     }
+
     if (s != NULL && s->write_event != NULL) {
         zend_async_trigger_event_t *trig =
             s->write_event;
+
         if (trig->trigger != NULL) {
             trig->trigger(trig);
         }
     }
+
     return 0;
 }
 
@@ -1142,9 +1234,11 @@ static int acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
     (void)conn; (void)offset;
     http3_connection_t *c = (http3_connection_t *)user_data;
     http3_stream_t     *s = (http3_stream_t *)stream_user_data;
+
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
     }
+
     if (nghttp3_conn_add_ack_offset(
             (nghttp3_conn *)c->nghttp3_conn, stream_id, datalen) != 0) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1161,14 +1255,17 @@ static int acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
     if (s != NULL) {
         (void)nghttp3_conn_unblock_stream(
             (nghttp3_conn *)c->nghttp3_conn, stream_id);
+
         if (s->write_event != NULL) {
             zend_async_trigger_event_t *trig =
                 s->write_event;
+
             if (trig->trigger != NULL) {
                 trig->trigger(trig);
             }
         }
     }
+
     return 0;
 }
 
@@ -1178,6 +1275,7 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
 {
     (void)conn; (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)user_data;
+
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
     }
@@ -1186,13 +1284,17 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
     if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET)) {
         app_error_code = NGHTTP3_H3_NO_ERROR;
     }
+
     int rv = nghttp3_conn_close_stream(
         (nghttp3_conn *)c->nghttp3_conn, stream_id, app_error_code);
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
     if (stats != NULL) stats->h3_stream_close++;
+
     if (rv != 0 && rv != NGHTTP3_ERR_STREAM_NOT_FOUND) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
+
     return 0;
 }
 
@@ -1202,13 +1304,16 @@ static int stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
 {
     (void)conn; (void)final_size; (void)app_error_code; (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)user_data;
+
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
     }
+
     if (nghttp3_conn_shutdown_stream_read(
             (nghttp3_conn *)c->nghttp3_conn, stream_id) != 0) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
+
     return 0;
 }
 
@@ -1218,13 +1323,16 @@ static int stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
 {
     (void)conn; (void)app_error_code; (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)user_data;
+
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
     }
+
     if (nghttp3_conn_shutdown_stream_read(
             (nghttp3_conn *)c->nghttp3_conn, stream_id) != 0) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
+
     return 0;
 }
 
@@ -1234,9 +1342,11 @@ static int extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn,
 {
     (void)conn;
     http3_connection_t *c = (http3_connection_t *)user_data;
+
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
     }
+
     nghttp3_conn_set_max_client_streams_bidi(
         (nghttp3_conn *)c->nghttp3_conn, max_streams);
     return 0;

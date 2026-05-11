@@ -19,7 +19,11 @@
 #include "http_connection.h"
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
+#include "http2/http2_static_response.h"
 #include "http1/http_parser.h"   /* http_request_t */
+#include "static/static_handler.h"
+#include "http_send_file.h"
+#include "http_response_internal.h"
 
 #include <string.h>
 
@@ -92,6 +96,85 @@ static void h2_stream_mark_ended(void *ctx);
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn);
 
+/* === Static-handler dispatch callbacks ============================
+ *
+ * The protocol-agnostic static FSM in src/static/http_static.c calls
+ * back through these to manage protocol-side bookkeeping (refcounts,
+ * counters, eventual cleanup). Mirrors h1_static_dispatch_cbs in
+ * src/core/http_connection.c, but the user pointer is the
+ * http2_stream_t and the lifecycle hooks differ:
+ *   - HARD_ZERO arms by pinning conn->handler_refcount + bumping the
+ *     stream refcount so the close hook can run after dispose.
+ *   - on_static_done releases the conn pin and lets the stream clean
+ *     up via http2_stream_release; no PHP-side coroutine to dispose.
+ *   - on_passthrough_to_php is unused (H2 currently doesn't expose
+ *     on_missing:Next on this code path — falling back to PHP from
+ *     a stream that armed-then-rolled is a follow-up). */
+static void h2_static_on_hard_zero_armed(void *user)
+{
+    http2_stream_t *stream = (http2_stream_t *)user;
+
+    if (stream == NULL || stream->session == NULL) {
+        return;
+    }
+
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+
+    if (conn != NULL) {
+        conn->handler_refcount++;
+        http_server_on_request_dispatch(conn->counters);
+    }
+    /* Pin the stream itself so cb_on_stream_close + the static FSM
+     * close hook can fire after the dispatch frame returns. Released
+     * in h2_static_on_static_done. */
+    stream->refcount++;
+}
+
+static void h2_static_on_static_done(void *user, int status)
+{
+    (void)status;
+    http2_stream_t *stream = (http2_stream_t *)user;
+
+    if (stream == NULL || stream->session == NULL) {
+        return;
+    }
+
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+
+    if (conn != NULL) {
+        http_server_on_request_dispose(conn->counters);
+
+        if (conn->handler_refcount > 0) {
+            conn->handler_refcount--;
+        }
+
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+            /* conn freed; stream lives until release. */
+        }
+    }
+
+    /* Release the dispatch-side refcount we took in on_hard_zero_armed.
+     * The session table still holds its own (released by stream_close). */
+    http2_stream_release(stream);
+}
+
+/* H2 multiplexes on one TCP connection; Connection / Keep-Alive are
+ * filtered out of every response anyway. Always keep-alive. */
+static bool h2_static_keep_alive(void *user)
+{
+    (void)user;
+    return true;
+}
+
+static const http_static_dispatch_cbs_t h2_static_dispatch_cbs = {
+    .on_armed    = h2_static_on_hard_zero_armed,
+    .on_done        = h2_static_on_static_done,
+    .on_passthrough = NULL,
+    .keep_alive            = h2_static_keep_alive,
+};
+
 /* Session calls this on HEADERS + END_HEADERS for each new stream.
  * Per plan §3.6 this fires regardless of END_STREAM so gRPC bidi
  * handlers start running before the body arrives.
@@ -101,23 +184,34 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
  * the stream, so concurrent streams can't trample each other —
  * unlike HTTP/1's one-request-per-connection generic on_request_ready
  * path. */
-static void http2_strategy_dispatch(struct http_request_t *const request,
+static void http2_strategy_dispatch(struct http_request_t *request,
                                     const uint32_t stream_id,
-                                    void *const user_data)
+                                    void *user_data)
 {
     (void)request;      /* Reachable via stream->request; we use that path. */
-    http2_strategy_t *const self = (http2_strategy_t *)user_data;
+    http2_strategy_t *self = (http2_strategy_t *)user_data;
 
-    http2_stream_t *const stream = http2_session_find_stream(self->session,
+    http2_stream_t *stream = http2_session_find_stream(self->session,
                                                              stream_id);
-    if (stream == NULL || self->conn == NULL || self->conn->handler == NULL) {
+
+    if (stream == NULL || self->conn == NULL) {
+        return;
+    }
+    /* Static-only deployments register a static mount but no PHP
+     * handler — the static dispatch path below claims the request
+     * before we ever check conn->handler. The PHP-handler-required
+     * branches are guarded individually further down. */
+    const bool has_static_mount =
+        http_static_handler_count(self->conn->server) > 0;
+
+    if (self->conn->handler == NULL && !has_static_mount) {
         return;
     }
 
     /* Build the PHP HttpRequest object from the parsed request. The
      * object takes ownership of the http_request_t — stream_free's
      * `request_dispatched` guard already knows not to free it again. */
-    zval *const req_obj = http_request_create_from_parsed(stream->request);
+    zval *req_obj = http_request_create_from_parsed(stream->request);
     ZVAL_COPY_VALUE(&stream->request_zv, req_obj);
     efree(req_obj);
 
@@ -149,11 +243,55 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
     }
 
+    /* Static-handler dispatch (issue #13). Identical policy to the
+     * H1 site in http_connection_dispatch_request:
+     *   HARD_ZERO   — FSM owns the request; on_hard_zero_armed has
+     *                 pinned conn + stream. Return without spawning a
+     *                 coroutine; on_static_done eventually unpins.
+     *   HANDLED     — response_obj populated synchronously (small
+     *                 4xx body / soft skip). Mark stream->skip_handler
+     *                 so http2_handler_coroutine_entry skips the user
+     *                 handler; dispose still runs the regular
+     *                 buffered-commit path so the wire frames go out.
+     *   PASSTHROUGH — no mount matched; spawn the user handler. */
+    if (UNEXPECTED(has_static_mount)) {
+        const http_static_result_t static_rc =
+            http_static_try_serve(self->conn->server, stream->request,
+                                  Z_OBJ(stream->response_zv),
+                                  self->conn->counters,
+                                  &h2_static_dispatch_cbs, stream);
+
+        if (static_rc == HTTP_STATIC_HARD_ZERO) {
+            return;
+        }
+
+        if (static_rc == HTTP_STATIC_HANDLED) {
+            stream->skip_handler = true;
+        }
+    }
+
+    /* No PHP handler and the static path didn't claim the request:
+     * synthesise a 404 on the response so the dispose-side commit
+     * sends one. Otherwise the coroutine entry's handler==NULL
+     * guard would silently return and the stream would hang until
+     * the client times out. Mirrors the H1 path in
+     * http_connection_dispatch_request. */
+    if (self->conn->handler == NULL && !stream->skip_handler) {
+        http_response_static_set_status(Z_OBJ(stream->response_zv), 404);
+        http_response_static_set_header(Z_OBJ(stream->response_zv),
+            "content-type", 12, "text/plain; charset=utf-8", 25);
+        zend_string *msg = zend_string_init("Not Found", 9, 0);
+        http_response_static_set_body_str(Z_OBJ(stream->response_zv), msg);
+        zend_string_release(msg);
+        stream->skip_handler = true;
+    }
+
     /* Spawn the handler coroutine. extended_data is the STREAM, not
      * the connection — that's what makes multiplex safe: N
      * coroutines hold N distinct stream pointers, each pointing at
      * its own zvals. */
-    zend_coroutine_t *const co = ZEND_ASYNC_NEW_COROUTINE(self->conn->scope);
+    zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(self->conn->scope);
+
     if (co == NULL) {
         zval_ptr_dtor(&stream->request_zv);
         ZVAL_UNDEF(&stream->request_zv);
@@ -161,6 +299,7 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
         ZVAL_UNDEF(&stream->response_zv);
         return;
     }
+
     co->internal_entry    = http2_handler_coroutine_entry;
     co->extended_data     = stream;
     co->extended_dispose  = http2_handler_coroutine_dispose;
@@ -168,6 +307,7 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
     /* Save for cancellation (peer RST_STREAM, server shutdown). */
     stream->coroutine          = co;
     stream->request->coroutine = co;
+
     if (http_server_sample_stamps_enabled(self->conn->view)) {
         stream->request->enqueue_ns = zend_hrtime();
     }
@@ -209,14 +349,28 @@ static void http2_strategy_dispatch(struct http_request_t *const request,
  * never touch a shared conn-level zval. */
 static void http2_handler_coroutine_entry(void)
 {
-    const zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
-    http2_stream_t *const stream = (http2_stream_t *)co->extended_data;
+    const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    http2_stream_t *stream = (http2_stream_t *)co->extended_data;
+
     if (stream == NULL || stream->session == NULL) { return; }
 
-    http_connection_t *const conn = http2_session_get_conn(stream->session);
-    if (conn == NULL || conn->handler == NULL) { return; }
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+
+    if (conn == NULL) { return; }
+
+    /* Static-handler HANDLED path: response_obj already carries the
+     * synchronous 4xx error body. Skip the user handler entirely;
+     * dispose runs the normal buffered commit and the wire frames go
+     * out the same way they would for any handler-set response. */
+    if (stream->skip_handler) {
+        http_server_count_request(conn->counters);
+        return;
+    }
+
+    if (conn->handler == NULL) { return; }
 
     const bool stamps = http_server_sample_stamps_enabled(conn->view);
+
     if (stream->request != NULL && stamps) {
         stream->request->start_ns = zend_hrtime();
     }
@@ -231,12 +385,14 @@ static void http2_handler_coroutine_entry(void)
         extern void http_response_set_error(zend_object *, int, const char *);
         int dec = http_compression_decode_request_body(
             stream->request, conn->config);
+
         if (dec != 0) {
             http_response_set_error(Z_OBJ(stream->response_zv), dec,
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
             http_server_count_request(conn->counters);
+
             if (stamps) stream->request->end_ns = zend_hrtime();
             return;
         }
@@ -267,10 +423,12 @@ static void http2_handler_coroutine_entry(void)
     {
         zend_call_function(&fci, &conn->handler->fci_cache);
     }
+
     zend_catch
     {
         bailout = true;
     }
+
     zend_end_try();
 
     if (UNEXPECTED(bailout)) {
@@ -291,6 +449,7 @@ static void http2_handler_coroutine_entry(void)
      * the sample call are skipped when no consumer (CoDel/telemetry) is
      * active; total_requests is still bumped. */
     http_server_count_request(conn->counters);
+
     if (stream->request != NULL && stamps) {
         stream->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
@@ -310,13 +469,19 @@ static void http2_handler_coroutine_entry(void)
 static bool http2_commit_stream_response(http_connection_t *conn,
                                          http2_stream_t *stream);
 
+/* HttpResponse::sendFile() — H2 dispose hand-off (issue #13). Hijacks
+ * dispose: pin stream + conn, kick the sendfile FSM, defer the
+ * response-zval dtor + refcount drop tail to h2_sendfile_on_done. */
+static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream);
+
 /* Guaranteed cleanup — runs on normal return, exception, or
  * cancellation (peer RST_STREAM / server stop). The stream remains
  * in nghttp2's table until on_stream_close_cb tears it down; we
  * only release the PHP-side state here. */
 static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
-    http2_stream_t *const stream = (http2_stream_t *)coroutine->extended_data;
+    http2_stream_t *stream = (http2_stream_t *)coroutine->extended_data;
+
     if (stream == NULL || stream->session == NULL) { return; }
 
     /* Break the back-pointer BEFORE anything else so a late
@@ -324,11 +489,12 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * coroutine that's already tearing down. Same discipline as the
      * HTTP/1 coroutine dispose path. */
     stream->coroutine = NULL;
+
     if (stream->request != NULL) {
         stream->request->coroutine = NULL;
     }
 
-    http_connection_t *const conn = http2_session_get_conn(stream->session);
+    http_connection_t *conn = http2_session_get_conn(stream->session);
 
     /* Paired with http_server_on_request_dispatch in
      * http2_strategy_dispatch. conn->counters is always non-NULL (dummy
@@ -347,7 +513,7 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         !Z_ISUNDEF(stream->response_zv) &&
         !http_response_is_committed(Z_OBJ(stream->response_zv))) {
         zval rv, *code_zv, *msg_zv;
-        zend_object *const exc = coroutine->exception;
+        zend_object *exc = coroutine->exception;
 
         code_zv = zend_read_property_ex(exc->ce, exc,
                                         ZSTR_KNOWN(ZEND_STR_CODE), 1, &rv);
@@ -358,17 +524,30 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         const char *reason = "Internal Server Error";
         msg_zv = zend_read_property_ex(exc->ce, exc,
                                        ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
+
         if (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING && Z_STRLEN_P(msg_zv) > 0) {
             reason = Z_STRVAL_P(msg_zv);
         } else if (status != 500) {
             reason = "";
         }
+
         http_response_reset_to_error(Z_OBJ(stream->response_zv), status, reason);
     }
 
     if (!Z_ISUNDEF(stream->response_zv) &&
         !http_response_is_committed(Z_OBJ(stream->response_zv))) {
         http_response_set_committed(Z_OBJ(stream->response_zv));
+    }
+
+    /* sendFile() handoff (issue #13). Take the descriptor before
+     * the streaming/buffered branch so the FSM owns delivery; the
+     * regular zval-dtor + refcount tail runs from h2_sendfile_on_done
+     * after the FSM finalizes. Return early — dispose will resume
+     * via on_done. */
+    if (!Z_ISUNDEF(stream->response_zv) && conn != NULL
+        && http_response_has_send_file(Z_OBJ(stream->response_zv))) {
+        h2_sendfile_arm(conn, stream);
+        return;
     }
 
     /* Streaming path (send() was called): HEADERS + DATA already
@@ -407,6 +586,102 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         if (conn->handler_refcount > 0) {
             conn->handler_refcount--;
         }
+
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+        }
+    }
+}
+
+typedef struct {
+    http_connection_t *conn;
+    http2_stream_t    *stream;
+} h2_sendfile_user_t;
+
+static void h2_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h2_sendfile_user_t *u = (h2_sendfile_user_t *)user;
+    http_connection_t *conn = u->conn;
+    http2_stream_t *stream = u->stream;
+    efree(u);
+
+    /* Mirror the original dispose tail: dtor zvals, release stream,
+     * release conn handler ref. Counters were retired in dispose. */
+    if (!Z_ISUNDEF(stream->request_zv)) {
+        zval_ptr_dtor(&stream->request_zv);
+        ZVAL_UNDEF(&stream->request_zv);
+    }
+
+    if (!Z_ISUNDEF(stream->response_zv)) {
+        zval_ptr_dtor(&stream->response_zv);
+        ZVAL_UNDEF(&stream->response_zv);
+    }
+
+    http2_stream_release(stream);
+
+    if (conn != NULL) {
+        if (conn->handler_refcount > 0) {
+            conn->handler_refcount--;
+        }
+
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+        }
+    }
+}
+
+static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
+{
+    /* Counters paired with the original dispatch's on_request_dispatch.
+     * h2_handler_coroutine_dispose's tail would have done this; do it
+     * now so dispose's early-return doesn't leak the in-flight count. */
+    if (conn->counters != NULL) {
+        http_server_on_request_dispose(conn->counters);
+    }
+
+    http_send_file_request_t *sf_req =
+        http_response_take_send_file(Z_OBJ(stream->response_zv));
+
+    if (sf_req == NULL) {
+        /* Race / accounting bug — fall through to commit. */
+        (void)http2_commit_stream_response(conn, stream);
+        zval_ptr_dtor(&stream->request_zv);
+        ZVAL_UNDEF(&stream->request_zv);
+        zval_ptr_dtor(&stream->response_zv);
+        ZVAL_UNDEF(&stream->response_zv);
+        http2_stream_release(stream);
+
+        if (conn->handler_refcount > 0) conn->handler_refcount--;
+
+        if (conn->handler_refcount == 0 && conn->destroy_pending) {
+            conn->destroy_pending = false;
+            http_connection_destroy(conn);
+        }
+
+        return;
+    }
+
+    h2_sendfile_user_t *u = ecalloc(1, sizeof(*u));
+    u->conn   = conn;
+    u->stream = stream;
+
+    if (!http_send_file_dispatch(stream->request, Z_OBJ(stream->response_zv),
+                                  sf_req, h2_sendfile_on_done, u)) {
+        /* Dispatch failed — response now carries a 500. Commit the
+         * synthesized error response, then run the standard tail. */
+        efree(u);
+        (void)http2_commit_stream_response(conn, stream);
+        zval_ptr_dtor(&stream->request_zv);
+        ZVAL_UNDEF(&stream->request_zv);
+        zval_ptr_dtor(&stream->response_zv);
+        ZVAL_UNDEF(&stream->response_zv);
+        http2_stream_release(stream);
+
+        if (conn->handler_refcount > 0) conn->handler_refcount--;
+
         if (conn->handler_refcount == 0 && conn->destroy_pending) {
             conn->destroy_pending = false;
             http_connection_destroy(conn);
@@ -430,6 +705,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
         self->conn = conn;
         self->session = http2_session_new(conn,
                                           http2_strategy_dispatch, self);
+
         if (self->session == NULL) {
             if (consumed_out != NULL) { *consumed_out = 0; }
             return -1;
@@ -437,6 +713,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     }
 
     const int rc = http2_session_feed(self->session, data, len, consumed_out);
+
     if (rc < 0) {
         /* Error-path drain. When feed() flagged a bad connection preface
          * or a hard protocol violation, the session may have queued a
@@ -459,6 +736,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
 #endif
         if (should_drain) {
             const php_socket_t fd = (php_socket_t)conn->io->descriptor.socket;
+
             if (fd != (php_socket_t)-1) {
                 /* Bad-preface path: nghttp2 can't queue a GOAWAY itself
                  * once BAD_CLIENT_MAGIC has fired. Write the static
@@ -473,12 +751,14 @@ static int http2_feed(http_protocol_strategy_t *strategy,
                     const ssize_t n = http2_session_drain(self->session,
                                                            drain_buf,
                                                            sizeof(drain_buf));
+
                     if (n > 0) {
                         (void)send(fd, drain_buf, (size_t)n, MSG_NOSIGNAL);
                     }
                 }
             }
         }
+
         return rc;
     }
 
@@ -533,11 +813,15 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     while (http2_session_want_write(self->session)) {
         const ssize_t n = http2_session_drain(self->session,
                                               drain_buf, sizeof(drain_buf));
+
         if (n <= 0) { break; }
+
         if (conn->io == NULL) { break; }
         const php_socket_t fd = (php_socket_t)conn->io->descriptor.socket;
+
         if (fd == (php_socket_t)-1) { break; }
         const ssize_t sent = send(fd, drain_buf, (size_t)n, MSG_NOSIGNAL);
+
         if (sent != (ssize_t)n) { break; }
     }
 
@@ -555,20 +839,6 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     return rc;
 }
 
-/* Forbidden / HTTP-1-only response headers per RFC 9113 §8.2.2.
- * nghttp2 would reject them at submit time anyway; filter here so a
- * handler that sets e.g. Connection: close for HTTP/1 habit doesn't
- * kill the whole stream. */
-static bool response_header_allowed(const char *const name, const size_t len)
-{
-    if (len == 10 && strncasecmp(name, "connection", 10) == 0) return false;
-    if (len == 10 && strncasecmp(name, "keep-alive", 10) == 0) return false;
-    if (len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0) return false;
-    if (len == 7  && strncasecmp(name, "upgrade", 7) == 0)  return false;
-    if (len == 14 && strncasecmp(name, "content-length", 14) == 0) return false; /* implicit via DATA */
-    return true;
-}
-
 /* Commit a response on a specific stream. Per-stream dispatch means
  * we already KNOW which stream, no scan needed.
  * Extracts status / headers / body / trailers from the PHP
@@ -576,15 +846,17 @@ static bool response_header_allowed(const char *const name, const size_t len)
  * http2_session_submit_trailer, then drains HEADERS + DATA +
  * optional HEADERS(trailers) into the socket through
  * http_connection_send. */
-static bool http2_commit_stream_response(http_connection_t *const conn,
-                                         http2_stream_t *const stream)
+static bool http2_commit_stream_response(http_connection_t *conn,
+                                         http2_stream_t *stream)
 {
     if (conn == NULL || conn->strategy == NULL || stream == NULL ||
         Z_ISUNDEF(stream->response_zv)) {
         return false;
     }
-    zend_object *const response_obj = Z_OBJ(stream->response_zv);
-    http2_strategy_t *const self = (http2_strategy_t *)conn->strategy;
+
+    zend_object *response_obj = Z_OBJ(stream->response_zv);
+    http2_strategy_t *self = (http2_strategy_t *)conn->strategy;
+
     if (self->session == NULL) {
         return false;
     }
@@ -606,6 +878,7 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
      * the value rides the HEADERS frame. */
     {
         zend_string *alt = http_server_get_alt_svc_value(conn->server);
+
         if (alt != NULL) {
             http_response_set_alt_svc_if_unset(
                 response_obj, ZSTR_VAL(alt), ZSTR_LEN(alt));
@@ -618,15 +891,18 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
      * headers with many values (e.g. multiple Set-Cookie). nghttp2
      * copies name/value into its HPACK dynamic table so the backing
      * zend_string memory only needs to live through this call. */
-    HashTable *const headers = http_response_get_headers(response_obj);
+    HashTable *headers = http_response_get_headers(response_obj);
 
     size_t total_values = 0;
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
             } else if (Z_TYPE_P(values) == IS_ARRAY) {
@@ -641,18 +917,22 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
     http2_header_view_t scratch[HTTP2_NV_SCRATCH];
     http2_header_view_t *nv_view = scratch;
     http2_header_view_t *nv_heap = NULL;
+
     if (total_values > HTTP2_NV_SCRATCH) {
         nv_heap = emalloc(total_values * sizeof(*nv_heap));
         nv_view = nv_heap;
     }
 
     size_t nv_count = 0;
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv_view[nv_count].name      = ZSTR_VAL(name);
                 nv_view[nv_count].name_len  = ZSTR_LEN(name);
@@ -675,7 +955,7 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
 
     const int status = http_response_get_status(response_obj);
     size_t body_len = 0;
-    const char *const body = http_response_get_body(response_obj, &body_len);
+    const char *body = http_response_get_body(response_obj, &body_len);
 
     const int submit_rc = http2_session_submit_response(
         self->session, stream->stream_id,
@@ -684,12 +964,14 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
         body, body_len);
 
     if (nv_heap != NULL) { efree(nv_heap); }
+
     if (submit_rc != 0)  { return false; }
 
     /* Trailers. Must be queued BEFORE the drain loop so
      * the data_provider sees has_trailers=true on the final DATA
      * slice and emits NO_END_STREAM instead of END_STREAM. */
-    HashTable *const trailers = http_response_get_trailers(response_obj);
+    HashTable *trailers = http_response_get_trailers(response_obj);
+
     if (trailers != NULL && zend_hash_num_elements(trailers) > 0) {
         http2_header_view_t tr_scratch[HTTP2_NV_SCRATCH];
         http2_header_view_t *tr_view = tr_scratch;
@@ -715,6 +997,7 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
 
         (void)http2_session_submit_trailer(self->session, stream->stream_id,
                                            tr_view, ti);
+
         if (tr_heap != NULL) { efree(tr_heap); }
     }
 
@@ -750,12 +1033,16 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
         while (http2_session_want_write(self->session)) {
             const ssize_t n = http2_session_drain(self->session,
                                                   drain_buf, sizeof(drain_buf));
+
             if (n < 0) { return false; }
+
             if (n == 0) { break; }
+
             if (!http_connection_send(conn, drain_buf, (size_t)n)) {
                 return false;
             }
         }
+
         return true;
     }
 #endif
@@ -768,19 +1055,25 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
             cap *= 2;
             buf = erealloc(buf, cap);
         }
+
         const ssize_t n = http2_session_drain(self->session,
                                               buf + total, cap - total);
+
         if (n < 0) { efree(buf); return false; }
+
         if (n == 0) { break; }
         total += (size_t)n;
     }
+
     if (total == 0) {
         efree(buf);
         return true;
     }
+
     if (!http_connection_send_batched(conn, buf, total)) {
         return false;
     }
+
     return true;
 }
 
@@ -796,28 +1089,33 @@ static bool http2_commit_stream_response(http_connection_t *const conn,
  * lazily on the first h2_stream_append_chunk — buffered handlers
  * never touch this. Returns false on submit error (bad header set,
  * session gone). */
-static bool h2_commit_streaming_headers(http_connection_t *const conn,
-                                        http2_stream_t *const stream)
+static bool h2_commit_streaming_headers(http_connection_t *conn,
+                                        http2_stream_t *stream)
 {
     if (conn == NULL || conn->strategy == NULL || stream == NULL
         || Z_ISUNDEF(stream->response_zv)) {
         return false;
     }
-    zend_object *const response_obj = Z_OBJ(stream->response_zv);
-    http2_strategy_t *const self = (http2_strategy_t *)conn->strategy;
+
+    zend_object *response_obj = Z_OBJ(stream->response_zv);
+    http2_strategy_t *self = (http2_strategy_t *)conn->strategy;
+
     if (self->session == NULL) { return false; }
 
     /* Flatten headers — identical two-pass to commit_stream_response,
      * just bundled with submit_response_streaming at the end. */
-    HashTable *const headers = http_response_get_headers(response_obj);
+    HashTable *headers = http_response_get_headers(response_obj);
 
     size_t total_values = 0;
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
             } else if (Z_TYPE_P(values) == IS_ARRAY) {
@@ -832,18 +1130,22 @@ static bool h2_commit_streaming_headers(http_connection_t *const conn,
     http2_header_view_t scratch[HTTP2_NV_SCRATCH];
     http2_header_view_t *nv_view = scratch;
     http2_header_view_t *nv_heap = NULL;
+
     if (total_values > HTTP2_NV_SCRATCH) {
         nv_heap = emalloc(total_values * sizeof(*nv_heap));
         nv_view = nv_heap;
     }
 
     size_t nv_count = 0;
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                            continue;
-            if (!response_header_allowed(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv_view[nv_count].name      = ZSTR_VAL(name);
                 nv_view[nv_count].name_len  = ZSTR_LEN(name);
@@ -878,19 +1180,22 @@ static bool h2_commit_streaming_headers(http_connection_t *const conn,
  * Runs from the handler coroutine context. Plaintext: drain-all-then-
  * single-WRITE_EX, same shape as commit_stream_response above. TLS
  * stays on await-based send_raw via http_connection_send. */
-static void h2_drain_to_socket(http_connection_t *const conn,
-                               http2_session_t *const session)
+static void h2_drain_to_socket(http_connection_t *conn,
+                               http2_session_t *session)
 {
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
         char buf[16384];
         while (http2_session_want_write(session)) {
             const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
+
             if (n <= 0) { break; }
+
             if (!http_connection_send(conn, buf, (size_t)n)) {
                 break;
             }
         }
+
         return;
     }
 #endif
@@ -903,15 +1208,20 @@ static void h2_drain_to_socket(http_connection_t *const conn,
             cap *= 2;
             buf = erealloc(buf, cap);
         }
+
         const ssize_t n = http2_session_drain(session, buf + total, cap - total);
+
         if (n < 0) { efree(buf); return; }
+
         if (n == 0) { break; }
         total += (size_t)n;
     }
+
     if (total == 0) {
         efree(buf);
         return;
     }
+
     (void)http_connection_send_batched(conn, buf, total);
 }
 
@@ -933,10 +1243,11 @@ static void h2_drain_to_socket(http_connection_t *const conn,
  *
  * Lifecycle: stream->write_event is lazy — created on first wait, kept
  * across subsequent waits, disposed in http2_stream_release. */
-static bool h2_wait_for_drain_event(http2_stream_t *const stream,
-                                    http_connection_t *const conn)
+static bool h2_wait_for_drain_event(http2_stream_t *stream,
+                                    http_connection_t *conn)
 {
-    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+
     if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
         return false;
     }
@@ -944,9 +1255,11 @@ static bool h2_wait_for_drain_event(http2_stream_t *const stream,
     /* Lazy-create the wake event once per stream. */
     if (stream->write_event == NULL) {
         stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
         if (stream->write_event == NULL) { return false; }
     }
-    zend_async_event_t *const wake_ev =
+
+    zend_async_event_t *wake_ev =
         &((zend_async_trigger_event_t *)stream->write_event)->base;
 
     if (ZEND_ASYNC_WAKER_NEW(co) == NULL) { return false; }
@@ -958,7 +1271,7 @@ static bool h2_wait_for_drain_event(http2_stream_t *const stream,
      * this, a peer that stops acknowledging WINDOW_UPDATE can pin
      * the handler forever. */
     if (conn != NULL && conn->write_timeout_ms > 0) {
-        zend_async_event_t *const timer =
+        zend_async_event_t *timer =
             &ZEND_ASYNC_NEW_TIMER_EVENT(
                 (zend_ulong)conn->write_timeout_ms, false)->base;
         zend_async_resume_when(co, timer, true,
@@ -974,17 +1287,21 @@ static bool h2_wait_for_drain_event(http2_stream_t *const stream,
          * exceptions (peer RST propagated as cancel) likewise exit. */
         return false;
     }
+
     return true;
 }
 
-static int h2_stream_append_chunk(void *const ctx, zend_string *const chunk)
+static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 {
-    http2_stream_t *const stream = (http2_stream_t *)ctx;
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
     if (stream == NULL || stream->session == NULL) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
-    http_connection_t *const conn = http2_session_get_conn(stream->session);
+
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+
     if (conn == NULL) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
@@ -1007,7 +1324,8 @@ static int h2_stream_append_chunk(void *const ctx, zend_string *const chunk)
         /* One new streaming response activated. */
         http_server_on_streaming_response_started(conn->counters);
     }
-    http_server_counters_t *const counters = conn->counters;
+
+    http_server_counters_t *counters = conn->counters;
 
     /* Grow ring if full. Compact first (shift head → 0) to avoid
      * unbounded growth on long-lived streams. */
@@ -1020,6 +1338,7 @@ static int h2_stream_append_chunk(void *const ctx, zend_string *const chunk)
             stream->chunk_queue_head = 0;
             stream->chunk_queue_tail = live;
         }
+
         if (stream->chunk_queue_tail == stream->chunk_queue_cap) {
             const size_t new_cap = stream->chunk_queue_cap * 2;
             stream->chunk_queue = erealloc(stream->chunk_queue,
@@ -1060,18 +1379,21 @@ static int h2_stream_append_chunk(void *const ctx, zend_string *const chunk)
             /* Timeout / cancel / peer gone. PHP exception set. */
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
+
         h2_drain_to_socket(conn, stream->session);
     }
 
     return HTTP_STREAM_APPEND_OK;
 }
 
-static void h2_stream_mark_ended(void *const ctx)
+static void h2_stream_mark_ended(void *ctx)
 {
-    http2_stream_t *const stream = (http2_stream_t *)ctx;
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
     if (stream == NULL || stream->session == NULL || stream->streaming_ended) {
         return;
     }
+
     stream->streaming_ended = true;
 
     /* If the peer already RST'd this stream, nghttp2's internal state
@@ -1088,29 +1410,50 @@ static void h2_stream_mark_ended(void *const ctx)
      * + streaming_ended and flag EOF (or NO_END_STREAM + trailers). */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
 
-    http_connection_t *const conn = http2_session_get_conn(stream->session);
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+
     if (conn != NULL) {
         h2_drain_to_socket(conn, stream->session);
     }
 }
 
-static zend_async_event_t *h2_stream_get_wait_event(void *const ctx)
+static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
 {
-    http2_stream_t *const stream = (http2_stream_t *)ctx;
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
     if (stream == NULL) { return NULL; }
+
     if (stream->write_event == NULL) {
         stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
     }
+
     return stream->write_event != NULL
                ? &((zend_async_trigger_event_t *)stream->write_event)->base
                : NULL;
 }
 
 const http_response_stream_ops_t h2_stream_ops = {
-    .append_chunk   = h2_stream_append_chunk,
-    .mark_ended     = h2_stream_mark_ended,
-    .get_wait_event = h2_stream_get_wait_event,
+    .append_chunk        = h2_stream_append_chunk,
+    .mark_ended          = h2_stream_mark_ended,
+    .get_wait_event      = h2_stream_get_wait_event,
+    .send_static_response = h2_stream_send_static_response,
 };
+
+/* Public-by-extern entrypoint into h2_drain_to_socket, used by the
+ * static-response module after it submits a response. Kept as a
+ * thin trampoline rather than renaming h2_drain_to_socket to keep
+ * the existing handler-coroutine code-paths unchanged. */
+void http2_static_drain_to_socket(http_connection_t *conn,
+                                  http2_session_t *session);
+void http2_static_drain_to_socket(http_connection_t *conn,
+                                  http2_session_t *session)
+{
+    if (conn == NULL || session == NULL) {
+        return;
+    }
+
+    h2_drain_to_socket(conn, session);
+}
 
 static void http2_strategy_send_response(http_connection_t *conn, void *response)
 {
@@ -1134,7 +1477,9 @@ static void http2_strategy_cleanup(http_connection_t *conn)
     if (conn == NULL || conn->strategy == NULL) {
         return;
     }
+
     http2_strategy_t *self = (http2_strategy_t *)conn->strategy;
+
     if (self->session != NULL) {
         http2_session_free(self->session);
         self->session = NULL;
