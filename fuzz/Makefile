@@ -30,6 +30,7 @@ MULTIPART_SRC = ../src/formats/multipart_parser.c
 
 HTTP1_SRC = \
     ../src/http1/http_parser.c \
+    ../src/core/body_pool.c \
     ../src/formats/multipart_parser.c \
     ../src/formats/multipart_processor.c \
     ../src/http_param_parse.c \
@@ -60,6 +61,7 @@ H2_SRC = \
     ../src/http2/http2_session.c \
     ../src/http2/http2_stream.c \
     ../src/http1/http_parser.c \
+    ../src/core/body_pool.c \
     ../src/formats/multipart_parser.c \
     ../src/formats/multipart_processor.c \
     ../src/http_param_parse.c \

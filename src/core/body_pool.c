@@ -3,6 +3,7 @@
  * caps multi-worker scaling on upload-heavy workloads. */
 
 #include "body_pool.h"
+#include "php.h"
 #include "zend_string.h"
 #include <sys/mman.h>
 #include <unistd.h>
@@ -55,6 +56,13 @@ zend_string *body_pool_acquire(const size_t len)
 
     const int cls = size_to_class(len);
     if (cls < 0) return NULL;
+
+    /* Honour PHP memory_limit. Pool slots are mmap'd outside zend_mm,
+     * so they don't count against the per-request budget — falling back
+     * to zend_string_alloc here lets the engine raise OOM as the caller
+     * expects. */
+    const size_t limit = (size_t)PG(memory_limit);
+    if (limit > 0 && (size_t)len > limit) return NULL;
 
     body_pool_class_t *bucket = &pool_classes[cls];
     zend_string *zstr;
