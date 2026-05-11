@@ -7,9 +7,14 @@
 */
 
 /* Single file-delivery engine — protocol-agnostic, mount-agnostic.
- * Drives the async chain
  *
- *     fs_open → fstat → headers → protocol send_static_response → finalize
+ *     open()/fstat() inline → headers → protocol send_static_response → finalize
+ *
+ * open(2) and fstat(2) execute synchronously on the event-loop thread:
+ * for local filesystems both calls are dentry-cache hits in the common
+ * case, and the thread-pool round-trip (submit → worker wakes →
+ * uv_async back) cost more than the syscalls themselves. Async I/O
+ * remains for the protocol op (sendfile / writev).
  *
  * Behaviour decisions (etag / range / conditional / mount-side overrides /
  * inline error vs PHP passthrough) all flow from `send_file_config_t`.
@@ -42,12 +47,13 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-typedef enum
-{
-	ENGINE_PHASE_OPEN = 0,
-	ENGINE_PHASE_STAT = 1,
-	ENGINE_PHASE_DONE = 2,
-} engine_phase_t;
+/* zend_async_API.h ≥ 2026-05-11 exposes ZEND_ASYNC_IO_OWNS_FD, telling
+ * the reactor to close crt_fd on dispose for io_t handles created via
+ * io_create. Older installed headers omit it but the loaded runtime
+ * still honours the bit; define defensively. */
+#ifndef ZEND_ASYNC_IO_OWNS_FD
+#define ZEND_ASYNC_IO_OWNS_FD (1u << 6)
+#endif
 
 typedef struct
 {
@@ -60,7 +66,7 @@ typedef struct
 	struct http_request_t *request;
 	zend_object *response_obj;
 
-	/* On-disk path. emalloc'd in kick_off, freed by state_free. */
+	/* On-disk path. emalloc'd in send_file, freed by state_free. */
 	char *fs_path;
 	size_t fs_path_len;
 
@@ -68,17 +74,24 @@ typedef struct
 	struct stat st;
 
 	bool is_head;
-	engine_phase_t phase;
 
 	/* Deep copy of cfg.cache_view when supplied — caller's stack
-	 * frame is gone by the time the async chain fires. The view's
-	 * inner const char* fields point into the open-file cache and are
-	 * stable until eviction, so copying the struct by value is safe. */
+	 * frame is gone by the time the async tail (protocol op) fires.
+	 * The view's inner const char* fields point into the open-file
+	 * cache and are stable until eviction, so copying the struct by
+	 * value is safe. */
 	bool has_cache_view;
 	http_static_cache_view_t cache_view_copy;
 
-	zend_async_io_req_t *pending_req;
-	zend_async_event_callback_t *cb;
+	/* 0-ms tick that defers engine_handle_stat (or the open-failure
+	 * error path) out of the synchronous send_file() tail so on_done
+	 * cannot re-enter the request dispatcher on its own call stack. */
+	zend_async_timer_event_t *defer_timer;
+	zend_async_event_callback_t *defer_cb;
+	int defer_status;
+	const char *defer_body;
+	size_t defer_body_len;
+	bool defer_emit_error;
 
 	/* Range support. */
 	bool is_range;
@@ -91,16 +104,7 @@ typedef struct
 {
 	zend_async_event_callback_t base;
 	engine_state_t *state;
-} engine_cb_t;
-
-static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
-							void *result, zend_object *exception);
-
-static void engine_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *event)
-{
-	(void)event;
-	efree(cb);
-}
+} engine_defer_cb_t;
 
 static inline void engine_state_free(engine_state_t *state)
 {
@@ -165,17 +169,14 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 
 static void engine_on_protocol_done(void *user, int status);
 
-/* Tear down + fire on_done. Used on early-error paths (open failed
- * before we delegated, stat error) AND as the tail of
- * engine_on_protocol_done. status==0 ok, non-zero abort. */
+/* Tear down + fire on_done. Used as the tail of engine_on_protocol_done
+ * and on synchronous early-error paths that need cleanup before the
+ * caller sees us return. status==0 ok, non-zero abort. */
+static void engine_defer_cleanup(engine_state_t *state);
+
 static void engine_finalize(engine_state_t *state, int status)
 {
-	state->phase = ENGINE_PHASE_DONE;
-
-	if (state->cb != NULL && state->file_io != NULL) {
-		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
-		state->cb = NULL;
-	}
+	engine_defer_cleanup(state);
 
 	if (state->file_io != NULL) {
 		if (state->file_io->event.dispose != NULL) {
@@ -210,18 +211,12 @@ static bool engine_delegate_to_protocol(engine_state_t *state, zend_async_io_t *
 		return false;
 	}
 
-	if (state->cb != NULL && state->file_io != NULL) {
-		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
-		state->cb = NULL;
-	}
-
 	if (file_io == NULL && state->file_io != NULL) {
 		if (state->file_io->event.dispose != NULL) {
 			state->file_io->event.dispose(&state->file_io->event);
 		}
 	}
 
-	state->phase = ENGINE_PHASE_DONE;
 	state->file_io = NULL;
 
 	const int rc = ops->send_static_response(op_ctx, response_obj, file_io, body_offset, body_length,
@@ -229,7 +224,6 @@ static bool engine_delegate_to_protocol(engine_state_t *state, zend_async_io_t *
 
 	if (UNEXPECTED(rc != 0)) {
 		state->file_io = file_io;
-		state->phase = ENGINE_PHASE_DONE;
 		return false;
 	}
 
@@ -253,120 +247,6 @@ static bool engine_emit_error_via_op(engine_state_t *state, int status, const ch
 
 	if (state->cfg.counters != NULL) { http_server_count_request(state->cfg.counters); }
 	return engine_delegate_to_protocol(state, NULL, 0, 0, true);
-}
-
-/* PASSTHROUGH_PHP rollback. */
-static void engine_rollback_to_php(engine_state_t *state)
-{
-	if (state->cb != NULL && state->file_io != NULL) {
-		(void)state->file_io->event.del_callback(&state->file_io->event, state->cb);
-		state->cb = NULL;
-	}
-
-	if (state->file_io != NULL) {
-		if (state->file_io->event.dispose != NULL) {
-			state->file_io->event.dispose(&state->file_io->event);
-		}
-
-		state->file_io = NULL;
-	}
-
-	state->phase = ENGINE_PHASE_DONE;
-
-	const send_file_cbs_t cbs_copy = state->cbs;
-	void *user = state->user;
-	engine_state_free(state);
-
-	if (cbs_copy.on_passthrough != NULL) {
-		cbs_copy.on_passthrough(user);
-	}
-}
-
-
-static void engine_handle_open(engine_state_t *state, zend_object *exception);
-static void engine_handle_stat(engine_state_t *state);
-
-static void engine_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
-							void *result, zend_object *exception)
-{
-	(void)event;
-	engine_state_t *state = ((engine_cb_t *)callback)->state;
-	zend_async_io_req_t *req = (zend_async_io_req_t *)result;
-
-	switch (state->phase) {
-	case ENGINE_PHASE_OPEN:
-		if (req != NULL) {
-			return;
-		}
-
-		engine_handle_open(state, exception);
-		return;
-
-	case ENGINE_PHASE_STAT:
-		if (req == NULL || req != state->pending_req || !req->completed) {
-			return;
-		}
-
-		state->pending_req = NULL;
-
-		if (req->dispose != NULL) {
-			req->dispose(req);
-		}
-
-		if (UNEXPECTED(exception != NULL)) {
-			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-				engine_finalize(state, -1);
-			}
-
-			return;
-		}
-
-		engine_handle_stat(state);
-		return;
-
-	case ENGINE_PHASE_DONE:
-	default:
-		return;
-	}
-}
-
-static void engine_handle_open(engine_state_t *state, zend_object *exception)
-{
-	if (UNEXPECTED(exception != NULL || (state->file_io->state & ZEND_ASYNC_IO_CLOSED) != 0)) {
-		switch (state->cfg.on_error) {
-		case SEND_FILE_ERR_PASSTHROUGH_PHP:
-			engine_rollback_to_php(state);
-			return;
-		case SEND_FILE_ERR_EMIT_VIA_OP:
-			if (!engine_emit_error_via_op(state, 404, "Not Found", 9)) {
-				engine_finalize(state, -1);
-			}
-
-			return;
-		case SEND_FILE_ERR_INLINE_500:
-		default:
-			if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-				engine_finalize(state, -1);
-			}
-
-			return;
-		}
-	}
-
-	if (state->has_cache_view) {
-		state->st = state->cache_view_copy.st;
-		engine_handle_stat(state);
-		return;
-	}
-
-	state->phase = ENGINE_PHASE_STAT;
-	state->pending_req = ZEND_ASYNC_IO_STAT(state->file_io, &state->st);
-
-	if (UNEXPECTED(state->pending_req == NULL)) {
-		if (!engine_emit_error_via_op(state, 500, "Internal Server Error", 21)) {
-			engine_finalize(state, -1);
-		}
-	}
 }
 
 static void engine_handle_stat(engine_state_t *state)
@@ -630,6 +510,146 @@ static void engine_on_protocol_done(void *user, int status)
 	engine_finalize(state, status);
 }
 
+static void engine_defer_cb_dispose(zend_async_event_callback_t *cb, zend_async_event_t *event)
+{
+	(void)event;
+	efree(cb);
+}
+
+/* Tear down the deferral timer + its callback. Used both on normal fire
+ * (one-shot timer disposes itself after the callback returns) and on
+ * cleanup paths where we never made it to the fire. */
+static void engine_defer_cleanup(engine_state_t *state)
+{
+	if (state->defer_cb != NULL && state->defer_timer != NULL) {
+		(void)state->defer_timer->base.del_callback(&state->defer_timer->base, state->defer_cb);
+		state->defer_cb = NULL;
+	}
+
+	if (state->defer_timer != NULL) {
+		if (state->defer_timer->base.dispose != NULL) {
+			state->defer_timer->base.dispose(&state->defer_timer->base);
+		}
+
+		state->defer_timer = NULL;
+	}
+}
+
+/* Timer fire: run the deferred work, drop the timer. */
+static void engine_defer_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
+								  void *result, zend_object *exception)
+{
+	(void)event;
+	(void)result;
+	(void)exception;
+	engine_state_t *state = ((engine_defer_cb_t *)callback)->state;
+	engine_defer_cleanup(state);
+
+	if (state->defer_emit_error) {
+		if (!engine_emit_error_via_op(state, state->defer_status, state->defer_body,
+									   state->defer_body_len)) {
+			engine_finalize(state, -1);
+		}
+
+		return;
+	}
+
+	engine_handle_stat(state);
+}
+
+/* Park `state` on a 0-ms timer. The reactor wakes us on the next loop
+ * iteration, ensuring on_armed / engine_handle_stat / on_done can never
+ * unwind through the synchronous send_file() call stack. Returns false
+ * on allocation failure; caller surfaces SEND_FILE_HANDLED. */
+static bool engine_defer_schedule(engine_state_t *state)
+{
+	zend_async_timer_event_t *timer = ZEND_ASYNC_NEW_TIMER_EVENT(0, false);
+
+	if (UNEXPECTED(timer == NULL)) {
+		return false;
+	}
+
+	engine_defer_cb_t *cb = (engine_defer_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(engine_defer_dispatch,
+																			   sizeof(engine_defer_cb_t));
+
+	if (UNEXPECTED(cb == NULL)) {
+		timer->base.dispose(&timer->base);
+		return false;
+	}
+
+	cb->base.dispose = engine_defer_cb_dispose;
+	cb->state = state;
+
+	if (UNEXPECTED(!timer->base.add_callback(&timer->base, &cb->base))) {
+		efree(cb);
+		timer->base.dispose(&timer->base);
+		return false;
+	}
+
+	if (UNEXPECTED(!timer->base.start(&timer->base))) {
+		(void)timer->base.del_callback(&timer->base, &cb->base);
+		timer->base.dispose(&timer->base);
+		return false;
+	}
+
+	state->defer_timer = timer;
+	state->defer_cb = &cb->base;
+	return true;
+}
+
+/* Schedule a deferred error emission via the protocol op. on_armed
+ * fires synchronously here (caller pins resources), the actual head
+ * is written on the next loop tick. */
+static send_file_result_t engine_arm_and_defer_error(engine_state_t *state, int status,
+													  const char *body, size_t body_len)
+{
+	if (state->cbs.on_armed != NULL) {
+		state->cbs.on_armed(state->user);
+	}
+
+	state->armed = true;
+	state->defer_emit_error = true;
+	state->defer_status = status;
+	state->defer_body = body;
+	state->defer_body_len = body_len;
+
+	if (UNEXPECTED(!engine_defer_schedule(state))) {
+		engine_finalize(state, -1);
+		return SEND_FILE_ASYNC;
+	}
+
+	return SEND_FILE_ASYNC;
+}
+
+/* Handle an open() failure on the synchronous prologue. Either rolls
+ * back to PHP (PASSTHROUGH_PHP) or emits 404/500 head via the protocol
+ * op (deferred). PASSTHROUGH_PHP is fired synchronously since the
+ * caller (request dispatcher) handles it via the explicit
+ * SEND_FILE_PASSTHROUGH return code, not via on_done re-entry. */
+static send_file_result_t engine_handle_open_failure(engine_state_t *state)
+{
+	const send_file_config_t *cfg = &state->cfg;
+
+	if (cfg->on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
+		const send_file_cbs_t cbs_copy = state->cbs;
+		void *user = state->user;
+		engine_state_free(state);
+
+		if (cbs_copy.on_passthrough != NULL) {
+			cbs_copy.on_passthrough(user);
+		}
+
+		return SEND_FILE_PASSTHROUGH;
+	}
+
+	const bool is_404 = (cfg->on_error == SEND_FILE_ERR_EMIT_VIA_OP);
+	const int status = is_404 ? 404 : 500;
+	const char *body = is_404 ? "Not Found" : "Internal Server Error";
+	const size_t body_len = is_404 ? 9 : 21;
+
+	return engine_arm_and_defer_error(state, status, body, body_len);
+}
+
 send_file_result_t send_file(struct http_request_t *request, zend_object *response_obj,
 							 const send_file_config_t *config, const send_file_cbs_t *cbs,
 							 void *user)
@@ -667,7 +687,6 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	memcpy(state->fs_path, config->abs_path, config->abs_path_len);
 	state->fs_path[config->abs_path_len] = '\0';
 	state->is_head = http_request_method_is_head(request);
-	state->phase = ENGINE_PHASE_OPEN;
 
 	if (config->cache_view != NULL) {
 		state->cache_view_copy = *config->cache_view;
@@ -675,8 +694,8 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	}
 
 	/* The cfg snapshot is shallow — caller's stack frame may be gone
-	 * by the time the async chain fires. Pin every zend_string we
-	 * intend to read past kick-off; finalize releases. */
+	 * by the time the async tail (protocol op) fires. Pin every
+	 * zend_string we intend to read past kick-off; finalize releases. */
 	if (state->cfg.content_type != NULL) {
 		zend_string_addref((zend_string *)state->cfg.content_type);
 	}
@@ -689,46 +708,45 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 		zend_string_addref((zend_string *)state->cfg.cache_control);
 	}
 
-	state->file_io = ZEND_ASYNC_FS_OPEN(state->fs_path, O_RDONLY | O_CLOEXEC, 0);
+	/* === Synchronous open(2) ========================================= */
+
+	const int fd = open(state->fs_path, O_RDONLY | O_CLOEXEC);
+
+	if (UNEXPECTED(fd < 0)) {
+		return engine_handle_open_failure(state);
+	}
+
+	/* === Synchronous fstat(2) (skipped on cache hit) ================= */
+
+	if (state->has_cache_view) {
+		state->st = state->cache_view_copy.st;
+	} else if (UNEXPECTED(fstat(fd, &state->st) < 0)) {
+		(void)close(fd);
+		return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
+	}
+
+	/* Wrap the fd into an async io_t handle. Initial state mirrors what
+	 * fs_open emits after its open callback fires: READABLE for
+	 * sendfile/stat/seek, OWNS_FD so dispose closes the fd through the
+	 * reactor's uv_fs_close path. */
+	state->file_io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd, ZEND_ASYNC_IO_TYPE_FILE,
+										   ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_OWNS_FD);
 
 	if (UNEXPECTED(state->file_io == NULL)) {
-		engine_state_free(state);
-		return SEND_FILE_HANDLED;
+		(void)close(fd);
+		return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
 	}
-
-	engine_cb_t *cb =
-		(engine_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(engine_dispatch, sizeof(engine_cb_t));
-
-	if (UNEXPECTED(cb == NULL)) {
-		if (state->file_io->event.dispose != NULL) {
-			state->file_io->event.dispose(&state->file_io->event);
-		}
-
-		engine_state_free(state);
-		return SEND_FILE_HANDLED;
-	}
-
-	cb->base.dispose = engine_cb_dispose;
-	cb->state = state;
-
-	if (UNEXPECTED(!state->file_io->event.add_callback(&state->file_io->event, &cb->base))) {
-		efree(cb);
-
-		if (state->file_io->event.dispose != NULL) {
-			state->file_io->event.dispose(&state->file_io->event);
-		}
-
-		engine_state_free(state);
-		return SEND_FILE_HANDLED;
-	}
-
-	state->cb = &cb->base;
 
 	if (state->cbs.on_armed != NULL) {
 		state->cbs.on_armed(user);
 	}
 
 	state->armed = true;
+
+	if (UNEXPECTED(!engine_defer_schedule(state))) {
+		engine_finalize(state, -1);
+		return SEND_FILE_ASYNC;
+	}
 
 	return SEND_FILE_ASYNC;
 }
