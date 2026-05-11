@@ -17,6 +17,7 @@
 #include "smart_str_scalable.h"
 #include "http_known_strings.h"
 #include "core/http_connection.h"   /* for http_connection_t::server layout */
+#include "core/body_pool.h"
 #include "log/trace_context.h"
 
 #include <string.h>
@@ -559,7 +560,10 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
          * scheduler down with it. Same pattern below for chunked. */
         volatile bool oom = false;
         zend_try {
-            req->body = zend_string_alloc(req->content_length, 0);
+            req->body = body_pool_acquire(req->content_length);
+            if (req->body == NULL) {
+                req->body = zend_string_alloc(req->content_length, 0);
+            }
             parser->body_offset = 0;
         } zend_catch {
             oom = true;
@@ -881,7 +885,11 @@ void http_request_destroy(http_request_t *req)
     }
 
     if (req->body) {
-        zend_string_release(req->body);
+        if (body_pool_owns(req->body)) {
+            body_pool_release(req->body);
+        } else {
+            zend_string_release(req->body);
+        }
     }
 
     /* Dispose body-progress event if awaitBody() created one */
