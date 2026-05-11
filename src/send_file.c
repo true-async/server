@@ -8,17 +8,11 @@
 
 /* Single file-delivery engine — protocol-agnostic, mount-agnostic.
  *
- *     open()/fstat() inline → headers → protocol send_static_response → finalize
+ *     open()/fstat() inline → headers → protocol send_static_response
  *
- * open(2) and fstat(2) execute synchronously on the event-loop thread:
- * for local filesystems both calls are dentry-cache hits in the common
- * case, and the thread-pool round-trip (submit → worker wakes →
- * uv_async back) cost more than the syscalls themselves. Async I/O
- * remains for the protocol op (sendfile / writev).
- *
- * Behaviour decisions (etag / range / conditional / mount-side overrides /
- * inline error vs PHP passthrough) all flow from `send_file_config_t`.
- * Protocol-side coupling lives behind `send_file_cbs_t`. */
+ * open(2)/fstat(2) run synchronously on the event-loop thread; thread-pool
+ * dispatch (futex round-trip per request) costs more than the syscalls.
+ * Async I/O remains for the protocol op (sendfile / writev). */
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -47,10 +41,8 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-/* zend_async_API.h ≥ 2026-05-11 exposes ZEND_ASYNC_IO_OWNS_FD, telling
- * the reactor to close crt_fd on dispose for io_t handles created via
- * io_create. Older installed headers omit it but the loaded runtime
- * still honours the bit; define defensively. */
+/* Added in zend_async_API v0.12 (2026-05-11). Older installed headers
+ * omit it but the runtime still honours the bit. */
 #ifndef ZEND_ASYNC_IO_OWNS_FD
 #define ZEND_ASYNC_IO_OWNS_FD (1u << 6)
 #endif
@@ -66,7 +58,6 @@ typedef struct
 	struct http_request_t *request;
 	zend_object *response_obj;
 
-	/* On-disk path. emalloc'd in send_file, freed by state_free. */
 	char *fs_path;
 	size_t fs_path_len;
 
@@ -75,17 +66,14 @@ typedef struct
 
 	bool is_head;
 
-	/* Deep copy of cfg.cache_view when supplied — caller's stack
-	 * frame is gone by the time the async tail (protocol op) fires.
-	 * The view's inner const char* fields point into the open-file
-	 * cache and are stable until eviction, so copying the struct by
-	 * value is safe. */
+	/* cfg.cache_view points into the caller's stack; deep-copy because
+	 * the protocol op fires after the caller has unwound. */
 	bool has_cache_view;
 	http_static_cache_view_t cache_view_copy;
 
-	/* 0-ms tick that defers engine_handle_stat (or the open-failure
-	 * error path) out of the synchronous send_file() tail so on_done
-	 * cannot re-enter the request dispatcher on its own call stack. */
+	/* 0-ms tick that defers engine_handle_stat off the synchronous
+	 * send_file() tail so on_done cannot re-enter the request
+	 * dispatcher on its own call stack. */
 	zend_async_timer_event_t *defer_timer;
 	zend_async_event_callback_t *defer_cb;
 	int defer_status;
@@ -93,7 +81,6 @@ typedef struct
 	size_t defer_body_len;
 	bool defer_emit_error;
 
-	/* Range support. */
 	bool is_range;
 	uint64_t range_first;
 	uint64_t range_last;
@@ -137,8 +124,6 @@ static bool engine_keep_alive(const engine_state_t *state)
 	return true;
 }
 
-/* Apply per-extension MIME override from cfg->mime_overrides if set;
- * otherwise fall back to the builtin. */
 static bool engine_resolve_content_type(const engine_state_t *state, const char **out,
 										size_t *out_len)
 {
@@ -169,9 +154,6 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 
 static void engine_on_protocol_done(void *user, int status);
 
-/* Tear down + fire on_done. Used as the tail of engine_on_protocol_done
- * and on synchronous early-error paths that need cleanup before the
- * caller sees us return. status==0 ok, non-zero abort. */
 static void engine_defer_cleanup(engine_state_t *state);
 
 static void engine_finalize(engine_state_t *state, int status)
@@ -491,18 +473,12 @@ static void engine_handle_stat(engine_state_t *state)
 	}
 
 	/* === Small-file fast path (slurp + inline body) ================== */
-	/* libuv's uv_fs_sendfile is doubly broken for file→TCP-socket: it
-	 * tries copy_file_range first (returns EINVAL on socket), then
-	 * falls into a userspace pread+write loop *inside* a worker
-	 * thread — no kernel zero-copy AND a thread-pool round-trip per
-	 * request. For small files the round-trip dominates. Bypass it:
-	 * read the whole file synchronously into an emalloc'd
-	 * zend_string, hand the body to the response object, and
-	 * delegate with file_io=NULL — the protocol op then emits a
-	 * single writev(headers + inline body) via the same per-socket
-	 * write queue that headers normally use. Ordering with prior
-	 * writes on the same socket is guaranteed by libuv's stream
-	 * write queue. */
+	/* uv_fs_sendfile on Linux falls through copy_file_range (EINVAL on
+	 * socket) into a userspace pread+write loop inside a worker thread
+	 * — no kernel zero-copy + a futex round-trip per request. For small
+	 * files the round-trip dominates. Slurp inline and let the protocol
+	 * op writev(headers+body) through the same per-socket queue that
+	 * headers normally use; ordering is then libuv's problem. */
 #define SEND_FILE_SLURP_THRESHOLD ((size_t)64 * 1024)
 
 	if (!state->is_range && (size_t)state->st.st_size <= SEND_FILE_SLURP_THRESHOLD &&
@@ -515,9 +491,6 @@ static void engine_handle_stat(engine_state_t *state)
 
 			if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
 
-			/* file_io=NULL → engine_delegate_to_protocol disposes
-			 * state->file_io and the protocol op writes the inline
-			 * body riding along with headers. */
 			if (UNEXPECTED(!engine_delegate_to_protocol(state, NULL, 0, 0, true))) {
 				engine_finalize(state, -1);
 			}
@@ -553,9 +526,6 @@ static void engine_defer_cb_dispose(zend_async_event_callback_t *cb, zend_async_
 	efree(cb);
 }
 
-/* Tear down the deferral timer + its callback. Used both on normal fire
- * (one-shot timer disposes itself after the callback returns) and on
- * cleanup paths where we never made it to the fire. */
 static void engine_defer_cleanup(engine_state_t *state)
 {
 	if (state->defer_cb != NULL && state->defer_timer != NULL) {
@@ -572,7 +542,6 @@ static void engine_defer_cleanup(engine_state_t *state)
 	}
 }
 
-/* Timer fire: run the deferred work, drop the timer. */
 static void engine_defer_dispatch(zend_async_event_t *event, zend_async_event_callback_t *callback,
 								  void *result, zend_object *exception)
 {
@@ -594,10 +563,8 @@ static void engine_defer_dispatch(zend_async_event_t *event, zend_async_event_ca
 	engine_handle_stat(state);
 }
 
-/* Park `state` on a 0-ms timer. The reactor wakes us on the next loop
- * iteration, ensuring on_armed / engine_handle_stat / on_done can never
- * unwind through the synchronous send_file() call stack. Returns false
- * on allocation failure; caller surfaces SEND_FILE_HANDLED. */
+/* Defer onto the next loop tick so on_done never re-enters the
+ * request dispatcher on send_file()'s synchronous call stack. */
 static bool engine_defer_schedule(engine_state_t *state)
 {
 	zend_async_timer_event_t *timer = ZEND_ASYNC_NEW_TIMER_EVENT(0, false);
@@ -658,11 +625,9 @@ static send_file_result_t engine_arm_and_defer_error(engine_state_t *state, int 
 	return SEND_FILE_ASYNC;
 }
 
-/* Handle an open() failure on the synchronous prologue. Either rolls
- * back to PHP (PASSTHROUGH_PHP) or emits 404/500 head via the protocol
- * op (deferred). PASSTHROUGH_PHP is fired synchronously since the
- * caller (request dispatcher) handles it via the explicit
- * SEND_FILE_PASSTHROUGH return code, not via on_done re-entry. */
+/* PASSTHROUGH_PHP fires sync — caller switches paths on the return
+ * code, no on_done re-entry. EMIT_VIA_OP / INLINE_500 defer the error
+ * head through the protocol op. */
 static send_file_result_t engine_handle_open_failure(engine_state_t *state)
 {
 	const send_file_config_t *cfg = &state->cfg;
@@ -703,9 +668,7 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
 
 	if (UNEXPECTED(ops == NULL || ops->send_static_response == NULL)) {
-		/* Caller's responsibility — engine refuses to drive without a
-		 * protocol op. Either the adapter falls back to a synchronous
-		 * path or it surfaces 500. */
+		/* No protocol op (H3 stub) — adapter handles via sync fallback. */
 		return SEND_FILE_HANDLED;
 	}
 
@@ -730,9 +693,8 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 		state->has_cache_view = true;
 	}
 
-	/* The cfg snapshot is shallow — caller's stack frame may be gone
-	 * by the time the async tail (protocol op) fires. Pin every
-	 * zend_string we intend to read past kick-off; finalize releases. */
+	/* cfg snapshot is shallow; pin zend_strings so they outlive the
+	 * caller's frame. engine_state_free releases. */
 	if (state->cfg.content_type != NULL) {
 		zend_string_addref((zend_string *)state->cfg.content_type);
 	}
@@ -762,10 +724,6 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 		return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
 	}
 
-	/* Wrap the fd into an async io_t handle. Initial state mirrors what
-	 * fs_open emits after its open callback fires: READABLE for
-	 * sendfile/stat/seek, OWNS_FD so dispose closes the fd through the
-	 * reactor's uv_fs_close path. */
 	state->file_io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd, ZEND_ASYNC_IO_TYPE_FILE,
 										   ZEND_ASYNC_IO_READABLE | ZEND_ASYNC_IO_OWNS_FD);
 
