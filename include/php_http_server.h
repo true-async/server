@@ -35,7 +35,7 @@
 extern zend_module_entry http_server_module_entry;
 #define phpext_http_server_ptr &http_server_module_entry
 
-#define PHP_HTTP_SERVER_VERSION "0.1.0-dev"
+#define PHP_HTTP_SERVER_VERSION "0.4.0"
 
 /*
  * ==========================================================================

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-11
+
+### Performance
+
+- Per-thread body-buffer pool for large request bodies (≥ 1 MB). Bodies
+  in this size range are allocated through zend_mm but freed back to a
+  thread-local LIFO instead of being released — subsequent requests of
+  the same size class reuse the slot, eliminating per-request mmap /
+  munmap traffic and the kernel `mmap_lock` contention that capped
+  multi-worker scaling on upload-heavy workloads. Local benchmark
+  (W=8, c=128, 2 MiB POST body) goes from ~1500 RPS / 370% CPU to
+  ~3300 RPS / 720% CPU (×2.2 throughput; CPU now actually scales with
+  workers). Drained on `HttpServer::stop()` and on PHP RSHUTDOWN; the
+  debug zend_mm leak detector sees a clean slate at module unload.
+  Compression decoders (gzip / brotli / zstd request body) and the
+  request destructor route releases through a single `body_release()`
+  helper that recognises pool-owned slots.
+
 ### Added
 
 - `HttpResponse::sendFile(string $path, ?SendFileOptions $options = null): void`
