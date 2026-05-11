@@ -2281,14 +2281,18 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         bool sent;
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
-            /* TLS path keeps the legacy single-buffer formatter — the
-             * encryption ring needs a contiguous payload, so vectored
-             * write would only force an extra copy. */
+            /* TLS dispose hot path. Encrypt inline via SSL_write, then
+             * hand the resulting ciphertext span to libuv zero-copy
+             * fire-and-forget — same pipeline the FSM uses for handshake
+             * msgs. No coroutine suspend on socket I/O, no per-response
+             * write deadline. The encryption ring needs a contiguous
+             * payload (so vectored write would force an extra copy);
+             * we keep the single-buffer formatter for that reason. */
             zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
 
             if (response_str) {
-                sent = http_connection_send(conn, ZSTR_VAL(response_str),
-                                            ZSTR_LEN(response_str));
+                sent = tls_push_and_fire(conn, ZSTR_VAL(response_str),
+                                         ZSTR_LEN(response_str));
                 zend_string_release(response_str);
             } else {
                 sent = false;

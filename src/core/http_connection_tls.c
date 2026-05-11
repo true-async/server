@@ -258,6 +258,89 @@ static bool tls_drain(http_connection_t *conn)
     return ok;
 }
 
+/* Fire-and-forget plaintext send for the handler-coroutine dispose path.
+ *
+ * Mirrors tls_push_and_maybe_flush but emits ciphertext via the zero-copy
+ * tls_fsm_send_kick path instead of the suspending tls_drain_ring_to_socket.
+ * After the SSL_write loop fills network_bio with ciphertext, kick submits
+ * one BIO span to libuv with WRITE_EX + tls_zc_write_free_cb — no memcpy,
+ * no coroutine suspend, no per-response write deadline.
+ *
+ * Falls back to tls_push_and_maybe_flush when another coroutine already
+ * owns the flusher role (rare — FSM-side encrypts during handshake or
+ * post-handshake; the producer would race on SSL state otherwise).
+ *
+ * h1 connections are sequential request/response, so per-conn there is
+ * never a queued second response while the first is in flight — no
+ * app-level pending buffer is needed. Across conns libuv coalesces
+ * naturally because write_queue_size returns to 0 between sequential
+ * fire-and-forget submits on the same fd.
+ */
+bool tls_push_and_fire(http_connection_t *conn,
+                       const char *data, const size_t len)
+{
+    if (conn->tls_write_error) {
+        return false;
+    }
+
+    if (conn->tls_flushing) {
+        /* FSM holds the flusher role (handshake or post-handshake msg).
+         * Fall back to the legacy await-based path — correct, just slower. */
+        return tls_push_and_maybe_flush(conn, data, len);
+    }
+
+    conn->tls_flushing = true;
+
+    bool ok = true;
+    size_t offset = 0;
+
+    while (offset < len) {
+        size_t written = 0;
+        const tls_io_result_t rc = tls_write_plaintext(
+            conn->tls, data + offset, len - offset, &written);
+
+        if (rc == TLS_IO_OK) {
+            offset += written;
+            http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+            continue;
+        }
+
+        if (rc == TLS_IO_WANT_WRITE) {
+            /* network_bio full mid-encrypt — fall back to suspending
+             * drain for one round to free space, then resume. Releases
+             * the flusher flag around the drain so the FSM can re-kick. */
+            conn->tls_flushing = false;
+
+            if (!tls_drain_ring_to_socket(conn)) {
+                conn->tls_write_error = true;
+                return false;
+            }
+
+            conn->tls_flushing = true;
+            continue;
+        }
+        /* WANT_READ on writes is exotic (renegotiation requested); treat
+         * the same as a hard error to keep the fast path branchless. */
+        ok = false;
+        break;
+    }
+
+    conn->tls_flushing = false;
+
+    if (!ok) {
+        conn->tls_write_error = true;
+        return false;
+    }
+
+    /* All plaintext consumed → ciphertext now sits in network_bio.
+     * Hand the BIO ring slot to libuv zero-copy; the free_cb consumes
+     * the slot once the kernel accepts the bytes and re-kicks for any
+     * ring-wrap remainder. */
+    tls_fsm_send_kick(conn);
+
+    return true;
+}
+
 /* Producer entry point. Pushes @p len plaintext bytes into the ring
  * (waiting on tls_drain_event if full) and then either takes the
  * flusher role or returns immediately if one is already held. */
