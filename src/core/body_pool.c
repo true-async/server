@@ -94,6 +94,15 @@ void body_pool_release(zend_string *zstr)
 {
     if (!body_pool_owns(zstr)) return;
 
+    /* Pool was already drained (RSHUTDOWN/stop) — late-arriving releases
+     * (e.g. HttpRequest object dtors during PHP fast-shutdown) must go
+     * straight to zend_mm, otherwise they'd repopulate the freelist and
+     * leak past the debug allocator's checkpoint. */
+    if (!pool_initialised) {
+        efree(zstr);
+        return;
+    }
+
     const int cls = size_to_class(ZSTR_LEN(zstr));
     if (cls < 0) {
         efree(zstr);
