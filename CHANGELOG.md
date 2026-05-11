@@ -37,8 +37,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StaticSymlinks::{Reject→REJECT, Follow→FOLLOW, OwnerMatch→OWNER_MATCH}`.
   Breaking for any existing user code that referenced the old casings.
 
+### Performance
+
+- Static file delivery — inline `open(2)` / `fstat(2)` in `send_file`
+  engine (issue #13). The previous `ZEND_ASYNC_FS_OPEN` /
+  `ZEND_ASYNC_IO_STAT` chain routed both syscalls through the libuv
+  thread pool: one futex round-trip per request just to learn whether
+  a file existed. On a warm dentry cache both syscalls are sub-µs;
+  the dispatch was pure overhead. A 0-ms timer defers `engine_handle_stat`
+  off the synchronous tail so on_done cannot re-enter the request
+  dispatcher on its own call stack. Wins: H1 tiny 256B 19k → 35k req/s,
+  H1 304 If-None-Match 24k → 123k req/s.
+- Static file delivery — small-file fast path (≤ 64 KiB). libuv's
+  `uv_fs_sendfile` on Linux is doubly broken for file→TCP-socket: it
+  tries `copy_file_range` first (returns EINVAL on socket), then falls
+  into a userspace `pread` + `write` loop inside a worker thread — no
+  kernel zero-copy plus a futex round-trip per request. Files at or
+  under 64 KiB are now slurped synchronously into a `zend_string` and
+  emitted as one `writev(headers + body)` through libuv's per-socket
+  write queue; ordering with prior writes is then libuv's problem.
+  Files above 64 KiB stay on the (broken-but-functional) sendfile
+  path. Wins on top of the inline-syscall change: H1 tiny → 103k req/s
+  (×2.9), H1 small 16K → 73k (×1.9), H2 tiny → 154k (×4.4), H2 small
+  → 73k (×2.7).
+
 ### Fixed
 
+- HTTP/2 single byte-range delivery served bytes from offset 0 of the
+  file regardless of the requested range start. The H2 body FSM stored
+  `body_offset` in its state but never applied it to the file: the
+  buffered read path (`ZEND_ASYNC_IO_READ`) uses the fd's tracked
+  position, which is 0 right after open. Seek the io once before the
+  first read when `body_offset > 0`. H1 was unaffected (sendfile path
+  passes the offset explicitly to the syscall).
+  Closes pre-existing failure of `tests/phpt/server/static/012-static-h2`.
 - Proactive drain mis-fired on the first response when CoDel/telemetry
   were disabled. The fallback timestamp used `CLOCK_MONOTONIC_COARSE`
   while `created_at_ns` and `drain_not_before_ns` are `zend_hrtime`
