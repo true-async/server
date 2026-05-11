@@ -20,6 +20,7 @@
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
+#include "core/body_pool.h"
 #include "core/conn_arena.h"
 #include "core/http_protocol_handlers.h"
 #include "core/http_protocol_strategy.h"
@@ -2271,6 +2272,11 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
     server->running = false;
     server->stopping = false;
     current_server = NULL;
+
+    /* Release pooled body buffers held by this thread back to zend_mm.
+     * Workers that don't accept further requests don't need their pool
+     * any more; keeping it would just inflate RSS until module shutdown. */
+    body_pool_shutdown();
 
     RETURN_TRUE;
 }
