@@ -1,13 +1,13 @@
-/* Thread-local body buffer pool — keeps freed large bodies in user space
- * to avoid per-request mmap/munmap and the mmap_lock contention that
- * caps multi-worker scaling on upload-heavy workloads. */
+/* Thread-local pool of large body buffers. Allocations go through
+ * zend_mm (emalloc → zend_mm_alloc_huge → single mmap), so memory_limit
+ * and peak-usage tracking work the same way they do for any other
+ * zend_string. The win is reuse: freed buffers stay in the per-thread
+ * LIFO instead of being munmap'd, so subsequent requests don't take the
+ * mmap_lock. */
 
 #include "body_pool.h"
 #include "php.h"
 #include "zend_string.h"
-#include <sys/mman.h>
-#include <unistd.h>
-#include <string.h>
 
 /* Magic stamped into GC_INFO (22 bits) so body_pool_owns() can recognise
  * pool-allocated strings without a side table. */
@@ -57,33 +57,32 @@ zend_string *body_pool_acquire(const size_t len)
     const int cls = size_to_class(len);
     if (cls < 0) return NULL;
 
-    /* Honour PHP memory_limit. Pool slots are mmap'd outside zend_mm,
-     * so they don't count against the per-request budget — falling back
-     * to zend_string_alloc here lets the engine raise OOM as the caller
-     * expects. */
-    const size_t limit = (size_t)PG(memory_limit);
-    if (limit > 0 && (size_t)len > limit) return NULL;
-
     body_pool_class_t *bucket = &pool_classes[cls];
     zend_string *zstr;
 
     if (bucket->count > 0) {
         zstr = bucket->slots[--bucket->count];
     } else {
+        /* Allocate a fresh slot via zend_mm. emalloc honours memory_limit
+         * and goes through zend_mm_alloc_huge for sizes >= ZEND_MM_CHUNK_SIZE,
+         * which is exactly one mmap. The zend_try guard catches the longjmp
+         * raised on OOM so we can fall back to the caller's normal path. */
         const size_t alloc_size = _ZSTR_STRUCT_SIZE(bucket->capacity);
-        void *mem = mmap(NULL, alloc_size,
-                         PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS,
-                         -1, 0);
-        if (mem == MAP_FAILED) return NULL;
-        zstr = (zend_string *)mem;
+        zend_string *new_zstr = NULL;
+        zend_try {
+            new_zstr = (zend_string *)emalloc(alloc_size);
+        } zend_catch {
+            new_zstr = NULL;
+        } zend_end_try();
+        if (new_zstr == NULL) return NULL;
+        zstr = new_zstr;
     }
 
     /* IS_STR_INTERNED makes PHP refcount ops no-ops; lifecycle is owned
      * by us, not the engine. POOL_MAGIC in GC_INFO marks ownership. */
     GC_SET_REFCOUNT(zstr, 1);
     GC_TYPE_INFO(zstr) = GC_STRING
-        | ((IS_STR_INTERNED | IS_STR_PERSISTENT) << GC_FLAGS_SHIFT)
+        | (IS_STR_INTERNED << GC_FLAGS_SHIFT)
         | (POOL_MAGIC << GC_INFO_SHIFT);
     ZSTR_H(zstr)   = 0;
     ZSTR_LEN(zstr) = len;
@@ -97,8 +96,7 @@ void body_pool_release(zend_string *zstr)
 
     const int cls = size_to_class(ZSTR_LEN(zstr));
     if (cls < 0) {
-        const size_t alloc_size = _ZSTR_STRUCT_SIZE(ZSTR_LEN(zstr));
-        munmap(zstr, alloc_size);
+        efree(zstr);
         return;
     }
 
@@ -108,6 +106,6 @@ void body_pool_release(zend_string *zstr)
         return;
     }
 
-    const size_t alloc_size = _ZSTR_STRUCT_SIZE(bucket->capacity);
-    munmap(zstr, alloc_size);
+    /* Pool full — return the slot to zend_mm. */
+    efree(zstr);
 }
