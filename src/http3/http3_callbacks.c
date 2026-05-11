@@ -38,7 +38,6 @@
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
 #include "http3/http3_stream.h"            /* http3_stream_t */
-#include "http_response_header_filter.h"
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
 

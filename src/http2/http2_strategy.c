@@ -23,7 +23,6 @@
 #include "http1/http_parser.h"   /* http_request_t */
 #include "static/static_handler.h"
 #include "http_send_file.h"
-#include "http_response_header_filter.h"
 #include "http_response_internal.h"
 
 #include <string.h>

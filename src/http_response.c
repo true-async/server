@@ -2021,6 +2021,24 @@ void http_response_set_connection(zend_object *obj, bool keep_alive)
     }
 }
 
+bool http_response_header_allowed_h2h3(const char *name, const size_t len)
+{
+    switch (len) {
+    case 7:
+        return zend_binary_strcasecmp(name, 7, "upgrade", 7) != 0;
+    case 10:
+        return zend_binary_strcasecmp(name, 10, "connection", 10) != 0 &&
+               zend_binary_strcasecmp(name, 10, "keep-alive", 10) != 0;
+    case 14:
+        /* implicit from DATA frames */
+        return zend_binary_strcasecmp(name, 14, "content-length", 14) != 0;
+    case 17:
+        return zend_binary_strcasecmp(name, 17, "transfer-encoding", 17) != 0;
+    default:
+        return true;
+    }
+}
+
 bool http_response_should_keep_alive(const http_request_t *req)
 {
     /* Parser populates req->keep_alive during on_headers_complete:

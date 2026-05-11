@@ -76,7 +76,6 @@
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
-#include "http_response_header_filter.h"
 #include "http_response_internal.h"
 
 #include <nghttp2/nghttp2.h>

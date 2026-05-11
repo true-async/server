@@ -1085,6 +1085,12 @@ void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
  * Connection at submit time, so it is harmless to call on any response. */
 void http_response_set_connection(zend_object *obj, bool keep_alive);
 
+/* H2/H3 forbidden response-header filter (RFC 9113 §8.2.2 / RFC 9114
+ * §4.2). Returns false for hop-by-hop names (connection, keep-alive,
+ * transfer-encoding, upgrade) and content-length (implicit from DATA
+ * frames). H1 has its own framing rules and uses none of this. */
+bool http_response_header_allowed_h2h3(const char *name, size_t len);
+
 /* Resolve effective keep-alive for a request. Reads req->keep_alive,
  * which the parser populated according to HTTP/1.x semantics. */
 bool http_response_should_keep_alive(const http_request_t *req);
