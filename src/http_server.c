@@ -16,6 +16,7 @@
 #include "zend_smart_str.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "core/body_pool.h"
 #include "http_known_strings.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
@@ -220,6 +221,8 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 		efree(HTTP_SERVER_G(parser_pool).parsers);
 		HTTP_SERVER_G(parser_pool).parsers = NULL;
 	}
+
+	body_pool_shutdown();
 
 	return SUCCESS;
 }

@@ -19,4 +19,8 @@ bool         body_pool_owns(const zend_string *zstr);
 zend_string *body_pool_acquire(size_t len);
 void         body_pool_release(zend_string *zstr);
 
+/* Drain all cached slots back to zend_mm. Call from RSHUTDOWN so the
+ * debug allocator's leak detector doesn't flag pool-retained slots. */
+void         body_pool_shutdown(void);
+
 #endif

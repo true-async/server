@@ -109,3 +109,21 @@ void body_pool_release(zend_string *zstr)
     /* Pool full — return the slot to zend_mm. */
     efree(zstr);
 }
+
+void body_pool_shutdown(void)
+{
+    if (!pool_initialised) return;
+
+    for (int i = 0; i < BODY_POOL_NUM_CLASSES; i++) {
+        body_pool_class_t *bucket = &pool_classes[i];
+
+        for (int j = 0; j < bucket->count; j++) {
+            efree(bucket->slots[j]);
+            bucket->slots[j] = NULL;
+        }
+
+        bucket->count = 0;
+    }
+
+    pool_initialised = false;
+}
