@@ -458,5 +458,43 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
+# Windows/MSVC portability tests (issue #15).
+# Exercises win32_compat.h macro values, path-separator handling in
+# http_static_resolved_under_root / verify_path_owner_chain, and
+# the open/read/close/unlink compat aliases.  Runs on all platforms;
+# Windows-specific assertions are guarded with #ifdef PHP_WIN32.
+add_executable(test_win32_compat
+    static/test_win32_compat.c
+    ${CMAKE_SOURCE_DIR}/../src/static/http_static_safety.c
+)
+
+target_include_directories(test_win32_compat PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../include/static
+    ${CMAKE_SOURCE_DIR}/../src
+)
+
+target_link_libraries(test_win32_compat
+    test_common
+    ${CMOCKA_LIBRARIES}
+    ${CMAKE_DL_LIBS}
+)
+
+if(UNIX)
+    target_link_libraries(test_win32_compat m pthread rt)
+endif()
+
+if(MSVC)
+    target_compile_options(test_win32_compat PRIVATE /wd4701 /wd4703)
+endif()
+
+add_test(NAME Win32Compat COMMAND test_win32_compat)
+
+if(UNIX AND NOT APPLE)
+    set_tests_properties(Win32Compat PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
 # Install test binaries (optional)
 # install(TARGETS test_http1_parser test_http1_parser_edge_cases test_multipart_parser DESTINATION bin/tests)
