@@ -115,6 +115,10 @@ static void tls_format_error(char *err_buf, size_t err_cap,
 }
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
+/* Forward declaration at file scope (not inside a function) — MSVC rejects
+ * local extern declarations (C4210 nonstandard extension). */
+int ngtcp2_crypto_ossl_init(void);
+
 /* Per-SSL marker set by http3_connection_attach_tls right after SSL_new,
  * so the ALPN callback can pick the QUIC list. We can't rely on
  * SSL_is_quic() — that returns true only for SSL objects driving the
@@ -468,7 +472,6 @@ tls_context_t *tls_context_new(const char *cert_path,
      * datagram) leaves the SSL_CTX without the QUIC hook, so
      * SSL_provide_quic_data never advances the TLS state machine and
      * ServerHello is never emitted. Idempotent. */
-    extern int ngtcp2_crypto_ossl_init(void);
     (void)ngtcp2_crypto_ossl_init();
 #endif
 

@@ -120,14 +120,59 @@ if(ENABLE_HTTP3)
             message(WARNING "HTTP/3 disabled: libnghttp3 >= 1.4 not found.")
             set(_http3_ok FALSE)
         endif()
-    else()
-        message(WARNING "HTTP/3 disabled: pkg-config not available.")
-        set(_http3_ok FALSE)
+        set(_ngtcp2_ver  "${NGTCP2_VERSION}")
+        set(_nghttp3_ver "${NGHTTP3_VERSION}")
+    elseif(_http3_ok)
+        # No pkg-config (typical on Windows): probe via find_library + find_path.
+        find_path(NGTCP2_INCLUDE_DIR  ngtcp2/ngtcp2.h)
+        find_path(NGHTTP3_INCLUDE_DIR nghttp3/nghttp3.h)
+        find_library(NGTCP2_LIB      NAMES ngtcp2)
+        find_library(NGTCP2_OSSL_LIB NAMES ngtcp2_crypto_ossl)
+        find_library(NGHTTP3_LIB     NAMES nghttp3)
+        if(NOT NGTCP2_INCLUDE_DIR OR NOT NGTCP2_LIB)
+            message(WARNING "HTTP/3 disabled: ngtcp2 not found (set CMAKE_PREFIX_PATH).")
+            set(_http3_ok FALSE)
+        endif()
+        if(NOT NGTCP2_OSSL_LIB)
+            message(WARNING "HTTP/3 disabled: ngtcp2_crypto_ossl not found.")
+            set(_http3_ok FALSE)
+        endif()
+        if(NOT NGHTTP3_INCLUDE_DIR OR NOT NGHTTP3_LIB)
+            message(WARNING "HTTP/3 disabled: nghttp3 not found (set CMAKE_PREFIX_PATH).")
+            set(_http3_ok FALSE)
+        endif()
+        if(_http3_ok)
+            file(STRINGS "${NGTCP2_INCLUDE_DIR}/ngtcp2/version.h"  _l REGEX "NGTCP2_VERSION \"")
+            string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _ngtcp2_ver "${_l}")
+            file(STRINGS "${NGHTTP3_INCLUDE_DIR}/nghttp3/version.h" _l REGEX "NGHTTP3_VERSION \"")
+            string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _nghttp3_ver "${_l}")
+            if(_ngtcp2_ver VERSION_LESS "1.6")
+                message(WARNING "HTTP/3 disabled: ngtcp2 ${_ngtcp2_ver} < 1.6.")
+                set(_http3_ok FALSE)
+            endif()
+            if(_nghttp3_ver VERSION_LESS "1.4")
+                message(WARNING "HTTP/3 disabled: nghttp3 ${_nghttp3_ver} < 1.4.")
+                set(_http3_ok FALSE)
+            endif()
+        endif()
     endif()
     if(_http3_ok)
-        add_compile_definitions(HAVE_HTTP_SERVER_HTTP3=1 HAVE_NGTCP2=1 HAVE_NGHTTP3=1)
-        message(STATUS "  HTTP/3: ngtcp2 ${NGTCP2_VERSION}, nghttp3 ${NGHTTP3_VERSION}")
+        add_compile_definitions(HAVE_HTTP_SERVER_HTTP3=1 HAVE_NGTCP2=1 HAVE_NGHTTP3=1
+            NGTCP2_STATICLIB NGHTTP3_STATICLIB)
+        set(HTTP3_SOURCES
+            src/http3/http3_listener.c
+            src/http3/http3_connection.c
+            src/http3/http3_dispatch.c
+            src/http3/http3_callbacks.c
+            src/http3/http3_io.c
+            src/http3/http3_packet.c
+            src/http3/http3_stream.c
+            src/http3/http3_stream_pool.c
+            src/http3/http3_static_response.c
+        )
+        message(STATUS "  HTTP/3: ngtcp2 ${_ngtcp2_ver}, nghttp3 ${_nghttp3_ver}")
     else()
+        set(HTTP3_SOURCES "")
         message(STATUS "  HTTP/3: disabled (prerequisites missing)")
     endif()
 endif()
@@ -238,6 +283,7 @@ set(ALL_SOURCES
     ${LLHTTP_SOURCES}
     ${STATIC_SOURCES}
     ${COMPRESSION_SOURCES}
+    ${HTTP3_SOURCES}
 )
 
 # Extension DLL / shared library
@@ -291,6 +337,20 @@ endif()
 if(OpenSSL_FOUND)
     target_compile_definitions(php_true_async_server PRIVATE HAVE_OPENSSL=1)
     target_link_libraries(php_true_async_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+if(_http3_ok)
+    if(PkgConfig_FOUND)
+        target_include_directories(php_true_async_server SYSTEM PRIVATE
+            ${NGTCP2_INCLUDE_DIRS} ${NGTCP2_OSSL_INCLUDE_DIRS} ${NGHTTP3_INCLUDE_DIRS})
+        target_link_libraries(php_true_async_server PRIVATE
+            ${NGTCP2_LIBRARIES} ${NGTCP2_OSSL_LIBRARIES} ${NGHTTP3_LIBRARIES})
+    else()
+        target_include_directories(php_true_async_server SYSTEM PRIVATE
+            ${NGTCP2_INCLUDE_DIR} ${NGHTTP3_INCLUDE_DIR})
+        target_link_libraries(php_true_async_server PRIVATE
+            ${NGTCP2_LIB} ${NGTCP2_OSSL_LIB} ${NGHTTP3_LIB})
+    endif()
 endif()
 
 # Diagnostic flags — our code only (SYSTEM headers are already silenced above).
