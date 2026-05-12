@@ -179,6 +179,7 @@ http_codec_id_t http_accept_encoding_select(const http_accept_encoding_t *ae)
      * filters out codecs absent from the build, so picking a codec the
      * client accepts but we cannot encode degrades to identity rather
      * than failing. */
+#ifdef HAVE_HTTP_COMPRESSION
     if (ae->zstd_acceptable && http_compression_lookup(HTTP_CODEC_ZSTD)) {
         return HTTP_CODEC_ZSTD;
     }
@@ -190,6 +191,7 @@ http_codec_id_t http_accept_encoding_select(const http_accept_encoding_t *ae)
     if (ae->gzip_acceptable && http_compression_lookup(HTTP_CODEC_GZIP)) {
         return HTTP_CODEC_GZIP;
     }
+#endif
 
     if (ae->identity_acceptable) {
         return HTTP_CODEC_IDENTITY;

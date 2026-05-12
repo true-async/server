@@ -22,7 +22,10 @@
 #include "http_send_file.h"
 #include "smart_str_scalable.h"
 
-#include <strings.h>             /* strncasecmp */
+#ifndef PHP_WIN32
+# include <strings.h>            /* strncasecmp */
+#endif
+/* On Windows, php.h → zend_config.w32.h already defines strncasecmp. */
 
 /* Include generated arginfo */
 #include "../stubs/HttpResponse.php_arginfo.h"

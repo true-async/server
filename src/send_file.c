@@ -33,9 +33,11 @@
 #include "static/static_handler.h" /* http_static_cache_acquire decl */
 #include "static/http_static_cache.h"
 
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/stat.h>
+#ifndef PHP_WIN32
+# include <fcntl.h>
+# include <unistd.h>
+#endif
 #include <errno.h>
 #include <string.h>
 #include <inttypes.h>
@@ -62,7 +64,7 @@ typedef struct
 	size_t fs_path_len;
 
 	zend_async_io_t *file_io;
-	struct stat st;
+	zend_stat_t st;
 
 	bool is_head;
 
@@ -169,7 +171,11 @@ static void engine_finalize(engine_state_t *state, int status)
 	}
 
 	if (state->cfg.delete_after_send && status == 0 && state->fs_path != NULL) {
+#ifdef PHP_WIN32
+		(void)_unlink(state->fs_path);
+#else
 		(void)unlink(state->fs_path);
+#endif
 	}
 
 	const send_file_cbs_t cbs_copy = state->cbs;
@@ -719,9 +725,16 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 
 	if (state->has_cache_view) {
 		state->st = state->cache_view_copy.st;
-	} else if (UNEXPECTED(fstat(fd, &state->st) < 0)) {
-		(void)close(fd);
-		return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
+	} else {
+#ifdef PHP_WIN32
+		const int fstat_ret = php_win32_ioutil_fstat(fd, &state->st);
+#else
+		const int fstat_ret = fstat(fd, &state->st);
+#endif
+		if (UNEXPECTED(fstat_ret < 0)) {
+			(void)close(fd);
+			return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
+		}
 	}
 
 	state->file_io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd, ZEND_ASYNC_IO_TYPE_FILE,

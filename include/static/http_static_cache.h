@@ -31,7 +31,7 @@
  */
 
 #include "php.h"
-#include <sys/stat.h>
+#include "Zend/zend_stream.h"  /* zend_stat_t */
 #include <time.h>
 
 typedef struct http_static_cache_s http_static_cache_t;
@@ -47,7 +47,7 @@ void http_static_cache_destroy(http_static_cache_t *cache);
  * NOT free or retain past the current request. */
 typedef struct
 {
-	struct stat st;
+	zend_stat_t st;
 	const char *content_type; /* persistent — points into MIME table */
 	size_t content_type_len;
 	const char *etag;		   /* NULL if etag disabled at insert time */
@@ -69,7 +69,7 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
  * "application/octet-stream" — both safe to alias). Eviction picks
  * the LRU tail when at capacity. */
 void http_static_cache_insert(http_static_cache_t *cache, const char *path, size_t path_len,
-							  const struct stat *st, const char *content_type,
+							  const zend_stat_t *st, const char *content_type,
 							  size_t content_type_len, const char *etag, size_t etag_len,
 							  const char *last_modified, size_t last_modified_len);
 

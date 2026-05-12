@@ -30,6 +30,10 @@ static bool h1_sendfile_arm(http_connection_t *conn,
                             http_send_file_request_t *req,
                             bool should_continue);
 
+/* Declared here rather than in php_http_server.h to avoid pulling the full
+ * http_response internal header into every TU. */
+extern void http_response_set_default_json_flags(zend_object *, uint32_t);
+
 /* php_network.h (pulled in via http_connection.h) supplies socket
  * types and closesocket on both POSIX and Windows. No direct POSIX
  * headers are needed — the async reactor owns the socket lifecycle. */
@@ -1665,7 +1669,7 @@ static void h1_static_on_static_done(void *user, int status)
         conn->current_request = NULL;
     }
 
-    const bool should_continue = conn->keep_alive;
+    const bool should_continue = conn->keep_alive != 0;
     http_request_finalize(conn, ctx, should_continue);
 }
 
@@ -1713,7 +1717,7 @@ static void h1_static_on_passthrough_to_php(void *user)
 static bool h1_static_keep_alive(void *user)
 {
     const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)user;
-    return ctx->conn->keep_alive;
+    return ctx->conn->keep_alive != 0;
 }
 
 const http_static_dispatch_cbs_t h1_static_dispatch_cbs = {
@@ -1822,7 +1826,6 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     /* Wire the per-request JSON encode default — used by
      * HttpResponse::json() when the per-call $flags arg is 0. */
     if (conn->config != NULL) {
-        extern void http_response_set_default_json_flags(zend_object *, uint32_t);
         http_response_set_default_json_flags(
             Z_OBJ(ctx->response_zv), conn->config->json_encode_flags);
     }
@@ -2252,7 +2255,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             http_response_take_send_file(Z_OBJ(ctx->response_zv));
 
         if (sf_req != NULL) {
-            if (h1_sendfile_arm(conn, ctx, sf_req, conn->keep_alive)) {
+            if (h1_sendfile_arm(conn, ctx, sf_req, conn->keep_alive != 0)) {
                 return;
             }
             /* arm() failed and synthesized a 500 on response — fall through. */
@@ -2276,7 +2279,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             (void)http_connection_send(conn, "0\r\n\r\n", 5);
         }
 
-        should_continue = conn->keep_alive;
+        should_continue = conn->keep_alive != 0;
     } else {
         bool sent;
 #ifdef HAVE_OPENSSL
@@ -2339,7 +2342,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
              * http_response_is_closed means "$res->end() was called",
              * which is the *expected* finalization path, not a signal
              * that the transport should close. */
-            should_continue = conn->keep_alive;
+            should_continue = conn->keep_alive != 0;
         }
     }
 

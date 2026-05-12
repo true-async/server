@@ -19,8 +19,10 @@ typedef struct {
     size_t       capacity;
 } body_pool_class_t;
 
-static __thread body_pool_class_t pool_classes[BODY_POOL_NUM_CLASSES];
-static __thread bool              pool_initialised = false;
+/* ZEND_TLS expands to "static TSRM_TLS" (i.e., static + __declspec(thread)
+ * on MSVC, or static + __thread on GCC). Do not add another "static". */
+ZEND_TLS body_pool_class_t pool_classes[BODY_POOL_NUM_CLASSES];
+ZEND_TLS bool              pool_initialised = false;
 
 static inline int size_to_class(const size_t len)
 {

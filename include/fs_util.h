@@ -13,6 +13,7 @@
 
 #include "Zend/zend_string.h"
 #include <stddef.h>
+#include "win32_compat.h"
 
 /* Read exactly `expected_size` bytes from `fd` into a freshly-allocated
  * zend_string. Retries EINTR. Returns NULL on any IO error or on

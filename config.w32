@@ -20,10 +20,24 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "src\\http_server_class.c " +
         "src\\http_request.c " +
         "src\\http_response.c " +
-        "src\\uploaded_file.c ";
+        "src\\uploaded_file.c " +
+        // HTTP utilities (mirrors config.m4 base source list)
+        "src\\http_mime.c " +
+        "src\\http_date.c " +
+        "src\\http_etag.c " +
+        "src\\http_conditional.c " +
+        "src\\http_range.c " +
+        "src\\fs_util.c " +
+        "src\\http_rfc5987.c " +
+        "src\\http_precompressed.c " +
+        "src\\http_param_parse.c " +
+        "src\\send_file.c " +
+        "src\\http_send_file.c " +
+        "src\\http_send_file_options.c ";
 
     var http_server_core =
         "conn_arena.c " +
+        "body_pool.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +
@@ -33,7 +47,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
     var http_server_http1 =
         "http_parser.c " +
-        "http1_stream.c ";
+        "http1_stream.c " +
+        "http1_sendfile.c ";
 
     var http_server_http3 =
         "http3_listener.c " +
@@ -42,7 +57,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "http3_io.c " +
         "http3_callbacks.c " +
         "http3_dispatch.c " +
-        "http3_stream.c ";
+        "http3_stream.c " +
+        "http3_stream_pool.c ";
 
     var http_server_formats =
         "multipart_parser.c " +
@@ -51,6 +67,13 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     var http_server_log =
         "http_log.c " +
         "trace_context.c ";
+
+    var http_server_static =
+        "static_handler_class.c " +
+        "http_static_path.c " +
+        "http_static_cache.c " +
+        "http_static.c " +
+        "http_static_safety.c ";
 
     // llhttp bundled
     var http_server_llhttp =
@@ -63,6 +86,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     ADD_SOURCES(configure_module_dirname + "/src/http1",   http_server_http1,   "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/src/formats", http_server_formats, "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/src/log",     http_server_log,     "true_async_server");
+    ADD_SOURCES(configure_module_dirname + "/src/static",  http_server_static,  "true_async_server");
     ADD_SOURCES(configure_module_dirname + "/deps/llhttp", http_server_llhttp,  "true_async_server");
 
     // Include paths
@@ -70,6 +94,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/src");
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/src/core");
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/deps/llhttp/include");
+    // static/ files include each other by short name (e.g. "static/http_static_safety.h")
+    ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/include/static");
 
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HTTP_SERVER_EXPORTS /D HAVE_LLHTTP=1");
 
@@ -105,7 +131,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
             && CHECK_LIB("nghttp2.lib", "true_async_server")) {
             AC_DEFINE("HAVE_HTTP2", 1, "Whether HTTP/2 support is enabled");
             ADD_SOURCES(configure_module_dirname + "/src/http2",
-                "http2_strategy.c http2_session.c http2_stream.c",
+                "http2_strategy.c http2_session.c http2_stream.c http2_static_response.c",
                 "true_async_server");
         } else {
             ERROR("nghttp2 not found. Install headers to '" + PHP_PHP_BUILD + "\\include\\nghttp2' and nghttp2.lib to '\\lib'.");

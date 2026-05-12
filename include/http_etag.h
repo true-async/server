@@ -14,13 +14,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/stat.h>
+#include "Zend/zend_stream.h"  /* zend_stat_t — struct stat on POSIX, _stat64 on Windows */
 
 /* W/"<16 hex>" — 20 chars. */
 #define HTTP_ETAG_LEN 20
 #define HTTP_ETAG_BUF_LEN (HTTP_ETAG_LEN + 1)
 
-void http_etag_format_strong(const struct stat *st, char buf[HTTP_ETAG_BUF_LEN]);
+void http_etag_format_strong(const zend_stat_t *st, char buf[HTTP_ETAG_BUF_LEN]);
 
 /* RFC 9110 §13.1.2 weak-equal comparison. `header` is the raw
  * If-None-Match value; `etag` is the canonical W/"..." form written

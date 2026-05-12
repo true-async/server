@@ -15,7 +15,7 @@
 
 #include <string.h>
 
-static inline uint64_t mtime_ns_from_stat(const struct stat *st)
+static inline uint64_t mtime_ns_from_stat(const zend_stat_t *st)
 {
 #if defined(__APPLE__)
 	return (uint64_t)st->st_mtimespec.tv_sec * 1000000000ULL + (uint64_t)st->st_mtimespec.tv_nsec;
@@ -37,7 +37,7 @@ static inline void put_u64_16hex(char *out, uint64_t v)
 	}
 }
 
-void http_etag_format_strong(const struct stat *st, char buf[HTTP_ETAG_BUF_LEN])
+void http_etag_format_strong(const zend_stat_t *st, char buf[HTTP_ETAG_BUF_LEN])
 {
 	/* Single 64-bit mix — SHA/MD5 cost more per request than the
 	 * conditional GET saves. See docs/PLAN_STATIC_HANDLER.md §4. */
