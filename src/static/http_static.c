@@ -45,10 +45,13 @@
 #include "static/http_static_cache.h"
 #include "http_response_internal.h"
 
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifndef PHP_WIN32
+# include <fcntl.h>
+# include <unistd.h>
+#endif
+/* close() → _close() on Windows via win32_compat.h (php_http_server.h). */
 #include <errno.h>
 #include <string.h>
 

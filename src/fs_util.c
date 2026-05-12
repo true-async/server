@@ -14,7 +14,11 @@
 #include "fs_util.h"
 
 #include <errno.h>
-#include <unistd.h>
+#ifdef PHP_WIN32
+# include <io.h>       /* _read() */
+#else
+# include <unistd.h>
+#endif
 
 zend_string *fs_slurp_fd(const int fd, const size_t expected_size)
 {
@@ -26,7 +30,12 @@ zend_string *fs_slurp_fd(const int fd, const size_t expected_size)
 	size_t total = 0;
 
 	while (total < expected_size) {
+#ifdef PHP_WIN32
+		const ssize_t n = _read(fd, ZSTR_VAL(out) + total,
+		                        (unsigned int)(expected_size - total));
+#else
 		const ssize_t n = read(fd, ZSTR_VAL(out) + total, expected_size - total);
+#endif
 
 		if (EXPECTED(n > 0)) {
 			total += (size_t)n;

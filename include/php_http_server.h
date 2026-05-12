@@ -32,6 +32,11 @@
 # include <time.h>
 #endif
 
+/* Windows portability shims (ssize_t, O_CLOEXEC/O_NOFOLLOW, S_IS*,
+ * lstat, MAXPATHLEN, realpath).  Must come after <php.h> so PHP_WIN32
+ * and BaseTsd.h / MAX_PATH are already visible. */
+#include "win32_compat.h"
+
 extern zend_module_entry http_server_module_entry;
 #define phpext_http_server_ptr &http_server_module_entry
 

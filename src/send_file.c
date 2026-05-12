@@ -33,9 +33,11 @@
 #include "static/static_handler.h" /* http_static_cache_acquire decl */
 #include "static/http_static_cache.h"
 
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/stat.h>
+#ifndef PHP_WIN32
+# include <fcntl.h>
+# include <unistd.h>
+#endif
 #include <errno.h>
 #include <string.h>
 #include <inttypes.h>
@@ -169,7 +171,11 @@ static void engine_finalize(engine_state_t *state, int status)
 	}
 
 	if (state->cfg.delete_after_send && status == 0 && state->fs_path != NULL) {
+#ifdef PHP_WIN32
+		(void)_unlink(state->fs_path);
+#else
 		(void)unlink(state->fs_path);
+#endif
 	}
 
 	const send_file_cbs_t cbs_copy = state->cbs;

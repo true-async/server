@@ -18,7 +18,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>     /* ssize_t */
+#ifdef PHP_WIN32
+# include "win32_compat.h"  /* ssize_t via SSIZE_T */
+#else
+# include <sys/types.h>     /* ssize_t */
+#endif
 
 /* Forward declarations. Kept out of the connection layer. */
 typedef struct _http_connection_t http_connection_t;

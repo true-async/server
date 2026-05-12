@@ -14,8 +14,10 @@
 #include "static/http_static_safety.h"
 
 #include <fcntl.h>
-#include <unistd.h>
-#include <sys/param.h>
+#ifndef PHP_WIN32
+# include <unistd.h>
+# include <sys/param.h>
+#endif
 #include <sys/stat.h>
 #include <errno.h>
 #include <string.h>
@@ -25,6 +27,9 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 static int open_for_policy(const http_static_handler_t *mount, const char *path)
 {
 	int flags = O_RDONLY | O_CLOEXEC;
+#ifdef O_BINARY
+	flags |= O_BINARY;
+#endif
 
 #ifdef O_NOFOLLOW
 	/* REJECT: kernel-level — any symlink on the final component fails
@@ -107,12 +112,23 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 	buf[len] = '\0';
 
 	const char *seg = fs_path + root_len;
-	while (*seg == '/') {
+	while (*seg == '/'
+#ifdef PHP_WIN32
+		|| *seg == '\\'
+#endif
+	) {
 		seg++;
 	}
 
 	while (*seg != '\0') {
+#ifdef PHP_WIN32
+		const char *next_fwd = strchr(seg, '/');
+		const char *next_bwd = strchr(seg, '\\');
+		const char *next = (next_fwd && next_bwd) ? (next_fwd < next_bwd ? next_fwd : next_bwd)
+		                  : (next_fwd ? next_fwd : next_bwd);
+#else
 		const char *next = strchr(seg, '/');
+#endif
 		const size_t seg_len = (next != NULL) ? (size_t)(next - seg) : strlen(seg);
 
 		/* "+2" — '/' separator + NUL. */
@@ -120,7 +136,11 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 			return false;
 		}
 
+#ifdef PHP_WIN32
+		buf[len++] = '\\';
+#else
 		buf[len++] = '/';
+#endif
 		memcpy(buf + len, seg, seg_len);
 		len += seg_len;
 		buf[len] = '\0';
@@ -132,6 +152,9 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 		}
 
 		if (S_ISLNK(ls.st_mode)) {
+#ifndef PHP_WIN32
+			/* On Windows: lstat() maps to stat() and S_ISLNK is always 0,
+			 * so this branch is a dead no-op; st_uid is always 0 anyway. */
 			struct stat ts;
 
 			if (UNEXPECTED(stat(buf, &ts) != 0)) {
@@ -141,6 +164,7 @@ static bool verify_path_owner_chain(const http_static_handler_t *mount, const ch
 			if (ls.st_uid != ts.st_uid) {
 				return false;
 			}
+#endif
 		}
 
 		if (next == NULL) {
@@ -179,7 +203,11 @@ bool http_static_resolved_under_root(const http_static_handler_t *mount, const c
 	 * (subpath). Otherwise canonical only happens to share a prefix
 	 * (e.g. root="/srv/foo", canonical="/srv/foobar/x"). */
 	const char tail = canonical[root_len];
+#ifdef PHP_WIN32
+	return tail == '\0' || tail == '/' || tail == '\\';
+#else
 	return tail == '\0' || tail == '/';
+#endif
 }
 
 /* Try open + fstat. On a non-regular file, surface ENOENT so the
@@ -214,6 +242,10 @@ bool http_static_try_open_candidate(const http_static_handler_t *mount, const ch
 		return false;
 	}
 
+#ifndef PHP_WIN32
+	/* TOCTOU §13d: re-stat after open, compare dev/ino to detect swap attacks.
+	 * Skipped on Windows: MSVC stat() always returns st_dev=0, st_ino=0
+	 * so the comparison would be meaningless and could false-positive. */
 	struct stat path_st;
 
 	if (UNEXPECTED(lstat(path, &path_st) != 0)) {
@@ -228,6 +260,7 @@ bool http_static_try_open_candidate(const http_static_handler_t *mount, const ch
 		errno = EPERM;
 		return false;
 	}
+#endif
 
 	*out_fd = fd;
 	return true;

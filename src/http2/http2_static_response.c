@@ -81,7 +81,9 @@
 #include <nghttp2/nghttp2.h>
 #include <errno.h>
 #include <stdio.h>
-#include <unistd.h>
+#ifndef PHP_WIN32
+# include <unistd.h>
+#endif
 #include <string.h>
 
 /* Per-chunk read size. 16 KiB matches HTTP2_SETTINGS_MAX_FRAME so a

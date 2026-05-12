@@ -4,6 +4,7 @@
 #include <zend.h>
 #include <zend_async_API.h>
 #include <stdint.h>
+#include "win32_compat.h"  /* ssize_t on Windows */
 
 #include "http3_packet.h"
 #include "http3/http3_stream_pool.h"
