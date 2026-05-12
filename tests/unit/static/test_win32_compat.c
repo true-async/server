@@ -35,10 +35,13 @@
 # include <sys/param.h>
 #endif
 
+#ifndef PHP_WIN32
+/* On Windows zend_print_backtrace_ex is already exported by php8ts.dll. */
 ZEND_API void zend_print_backtrace_ex(const char *msg, const char *file, int line)
 {
 	(void)msg; (void)file; (void)line;
 }
+#endif
 
 /* =========================================================================
  * Helpers
@@ -213,7 +216,7 @@ static void test_try_open_candidate_reads_file(void **state)
 	http_static_handler_t *h = make_handler(root, HTTP_STATIC_FLAG_SYMLINKS_FOLLOW);
 
 	int fd = -1;
-	struct stat st;
+	zend_stat_t st;
 	assert_true(http_static_try_open_candidate(h, resolved, &fd, &st));
 	assert_true(fd >= 0);
 	assert_true(S_ISREG(st.st_mode));
@@ -255,7 +258,7 @@ static void test_try_open_candidate_missing_file(void **state)
 	);
 
 	int fd = -1;
-	struct stat st;
+	zend_stat_t st;
 	assert_false(http_static_try_open_candidate(h, missing, &fd, &st));
 	assert_int_equal(fd, -1);
 

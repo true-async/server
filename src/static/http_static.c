@@ -235,9 +235,9 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 					continue;
 				}
 
-				struct stat sb;
+				zend_stat_t sb;
 
-				if (stat(fs_path, &sb) == 0 && S_ISREG(sb.st_mode)) {
+				if (VCWD_STAT(fs_path, &sb) == 0 && S_ISREG(sb.st_mode)) {
 					fs_path_len = cand_len;
 					index_resolved = true;
 					break;
@@ -391,7 +391,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		}
 
 		int fd = -1;
-		struct stat st;
+		zend_stat_t st;
 		bool opened = http_static_try_open_candidate(mount, fs_path, &fd, &st);
 
 		if (UNEXPECTED(!opened)) {

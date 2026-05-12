@@ -15,9 +15,21 @@
 #include "http_precompressed.h"
 #include "compression/http_compression_negotiate.h"
 
-#include <sys/param.h>
-#include <sys/stat.h>
+#include "Zend/zend_stream.h"    /* zend_stat_t */
+#include "Zend/zend_virtual_cwd.h" /* VCWD_STAT */
 #include <string.h>
+
+/* sys/param.h (POSIX) is the usual source of MAXPATHLEN; php.h defines
+ * it on all platforms via main/php.h. Provide a fallback just in case. */
+#ifndef MAXPATHLEN
+# define MAXPATHLEN 4096
+#endif
+
+/* POSIX S_ISREG is absent from some Windows CRT headers; define it if
+ * the platform does not supply it (php.h win32/param.h usually does). */
+#ifndef S_ISREG
+# define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#endif
 
 bool http_precompressed_select(const http_request_t *request, const uint32_t enabled_mask,
 							   char *path_buf, const size_t buf_cap, size_t *path_len,
@@ -75,9 +87,9 @@ bool http_precompressed_select(const http_request_t *request, const uint32_t ena
 		memcpy(candidate + *path_len, codecs[i].suffix, codecs[i].suffix_len);
 		candidate[*path_len + codecs[i].suffix_len] = '\0';
 
-		struct stat st;
+		zend_stat_t st;
 
-		if (stat(candidate, &st) != 0 || !S_ISREG(st.st_mode)) {
+		if (VCWD_STAT(candidate, &st) != 0 || !S_ISREG(st.st_mode)) {
 			continue;
 		}
 

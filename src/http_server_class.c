@@ -996,7 +996,7 @@ bool http_server_should_drain_now(http_server_object *server,
     }
 
     const http_server_drain_eval_t r = http_server_drain_evaluate(server,
-        conn->drain_pending,
+        conn->drain_pending != 0,
         conn->drain_not_before_ns,
         conn->drain_epoch_seen,
         now_ns);
@@ -1388,7 +1388,7 @@ static void http_server_accept_callback(
                                "Content-Length: 19\r\n"
                                "Connection: close\r\n\r\n"
                                "Service Unavailable";
-        send(client_fd, response, strlen(response), MSG_NOSIGNAL);
+        send(client_fd, response, (int)strlen(response), MSG_NOSIGNAL);
         closesocket(client_fd);
         /* Make sure listeners are paused so we stop accepting new ones. */
         if (!server->listeners_paused) {
@@ -1996,7 +1996,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (!host_zv || !port_zv) continue;
 
             const char *host = Z_STRVAL_P(host_zv);
-            int port = Z_LVAL_P(port_zv);
+            int port = (int)Z_LVAL_P(port_zv);
             bool tls = tls_zv && zend_is_true(tls_zv);
             uint32_t protocol_mask = (mask_zv && Z_TYPE_P(mask_zv) == IS_LONG)
                 ? (uint32_t)Z_LVAL_P(mask_zv)

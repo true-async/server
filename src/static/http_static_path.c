@@ -13,8 +13,42 @@
 #include "php.h"
 #include "static/http_static_path.h"
 
-#include <fnmatch.h>
 #include <string.h>
+#include <ctype.h>
+
+#ifdef PHP_WIN32
+/* Minimal glob matching used only for hide-path patterns. Handles '?'
+ * (any single non-separator char) and '*' (any sequence of
+ * non-separator chars). Case-insensitive on Windows. */
+# define FNM_PATHNAME 0x01
+static int win32_fnmatch_impl(const char *p, const char *s)
+{
+	while (*p) {
+		if (*p == '?') {
+			if (!*s || *s == '/') return 1;
+			p++; s++;
+		} else if (*p == '*') {
+			p++;
+			do {
+				if (win32_fnmatch_impl(p, s) == 0) return 0;
+				if (*s == '/' || !*s) break;
+			} while (*s++);
+			return 1;
+		} else {
+			if (tolower((unsigned char)*p) != tolower((unsigned char)*s)) return 1;
+			p++; s++;
+		}
+	}
+	return (*s != '\0') ? 1 : 0;
+}
+static int fnmatch(const char *pattern, const char *string, int flags)
+{
+	(void)flags;
+	return win32_fnmatch_impl(pattern, string);
+}
+#else
+# include <fnmatch.h>
+#endif
 
 /* Returns -1 on non-hex input. */
 static inline int hex_value(const char c)

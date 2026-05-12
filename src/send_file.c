@@ -64,7 +64,7 @@ typedef struct
 	size_t fs_path_len;
 
 	zend_async_io_t *file_io;
-	struct stat st;
+	zend_stat_t st;
 
 	bool is_head;
 
@@ -725,9 +725,16 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 
 	if (state->has_cache_view) {
 		state->st = state->cache_view_copy.st;
-	} else if (UNEXPECTED(fstat(fd, &state->st) < 0)) {
-		(void)close(fd);
-		return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
+	} else {
+#ifdef PHP_WIN32
+		const int fstat_ret = php_win32_ioutil_fstat(fd, &state->st);
+#else
+		const int fstat_ret = fstat(fd, &state->st);
+#endif
+		if (UNEXPECTED(fstat_ret < 0)) {
+			(void)close(fd);
+			return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
+		}
 	}
 
 	state->file_io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd, ZEND_ASYNC_IO_TYPE_FILE,

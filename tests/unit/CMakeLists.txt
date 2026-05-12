@@ -428,6 +428,9 @@ endif()
 # parsing surfaces — MIME extension lookup, If-None-Match / If-Modified-
 # Since matching, and percent-decode + segment validation. Each decoder
 # TU is compiled directly into the test binary; no llhttp / zlib needed.
+# Guard with existence check: mime/etag sources are added in a later PR.
+if(EXISTS "${CMAKE_SOURCE_DIR}/../src/static/http_static_mime.c" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/../src/static/http_static_etag.c")
 add_executable(test_static_decoders
     static/test_static_decoders.c
     ${CMAKE_SOURCE_DIR}/../src/static/http_static_mime.c
@@ -452,10 +455,17 @@ endif()
 
 add_test(NAME StaticDecoders COMMAND test_static_decoders)
 
-if(UNIX AND NOT APPLE)
+if(WIN32)
+    set_tests_properties(StaticDecoders PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
     set_tests_properties(StaticDecoders PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )
+endif()
+else()
+    message(STATUS "Skipping test_static_decoders: http_static_mime.c / http_static_etag.c not yet present")
 endif()
 
 # Windows/MSVC portability tests (issue #15).
@@ -472,6 +482,7 @@ target_include_directories(test_win32_compat PRIVATE
     ${CMAKE_SOURCE_DIR}/../include
     ${CMAKE_SOURCE_DIR}/../include/static
     ${CMAKE_SOURCE_DIR}/../src
+    ${CMAKE_SOURCE_DIR}           # tests/ → resolves "common/php_sapi_test.h"
 )
 
 target_link_libraries(test_win32_compat
@@ -490,7 +501,11 @@ endif()
 
 add_test(NAME Win32Compat COMMAND test_win32_compat)
 
-if(UNIX AND NOT APPLE)
+if(WIN32)
+    set_tests_properties(Win32Compat PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
     set_tests_properties(Win32Compat PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )

@@ -23,7 +23,8 @@
 
 #ifdef PHP_WIN32
 # include <io.h>
-# define mode_t int
+/* mode_t is typedef unsigned short in Zend/zend_virtual_cwd.h — do not
+ * redefine it here. */
 #else
 # include <unistd.h>
 #endif
@@ -271,7 +272,7 @@ ZEND_METHOD(TrueAsync_UploadedFile, moveTo)
     zend_stat_t st;
 
     if (VCWD_STAT(dir_copy, &st) != 0) {
-        if (mkdir_recursive(dir_copy, 0755) != 0) {
+        if (mkdir_recursive(dir_copy, (mode_t)0755) != 0) {
             efree(dir_copy);
             zend_throw_exception_ex(spl_ce_RuntimeException, 0,
                 "Cannot create directory: %s", strerror(errno));

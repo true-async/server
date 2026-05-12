@@ -1,37 +1,33 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.22)
 project(php_http_server C)
 
 set(CMAKE_C_STANDARD 11)
 
-# PHP paths - adjust if needed
-set(PHP_INCLUDE_DIR "e:/php/php-src" CACHE PATH "PHP source directory")
-set(PHP_MAIN_INCLUDE "${PHP_INCLUDE_DIR}/main")
-set(PHP_ZEND_INCLUDE "${PHP_INCLUDE_DIR}/Zend")
-set(PHP_TSRM_INCLUDE "${PHP_INCLUDE_DIR}/TSRM")
+# PHP source root (used for include dirs and, on Windows, the import lib).
+set(PHP_INCLUDE_DIR "E:/php/php-src" CACHE PATH "PHP source directory")
 
-# Project include directories
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/formats
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/http1
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/llhttp/include
-    ${PHP_INCLUDE_DIR}
-    ${PHP_MAIN_INCLUDE}
-    ${PHP_ZEND_INCLUDE}
-    ${PHP_TSRM_INCLUDE}
-)
-
-# Windows-specific defines for PHP
+# Windows: locate the PHP import library automatically.
 if(WIN32)
-    add_compile_definitions(
-        ZEND_WIN32
-        PHP_WIN32
-        ZTS=1
-        ZEND_DEBUG=0
-        _CRT_SECURE_NO_WARNINGS
-    )
+    set(_php_inc_extra "")
+    if(EXISTS "${PHP_INCLUDE_DIR}/x64/Debug_TS/php8ts_debug.lib")
+        set(PHP_LIBRARY "${PHP_INCLUDE_DIR}/x64/Debug_TS/php8ts_debug.lib")
+        set(_php_build_dir "${PHP_INCLUDE_DIR}/x64/Debug_TS")
+        set(_zend_debug 1)
+    elseif(EXISTS "${PHP_INCLUDE_DIR}/x64/Release_TS/php8ts.lib")
+        set(PHP_LIBRARY "${PHP_INCLUDE_DIR}/x64/Release_TS/php8ts.lib")
+        set(_php_build_dir "${PHP_INCLUDE_DIR}/x64/Release_TS")
+        set(_zend_debug 0)
+    else()
+        message(FATAL_ERROR
+            "PHP import lib not found under ${PHP_INCLUDE_DIR}/x64/. "
+            "Set -DPHP_INCLUDE_DIR=<php-src-root>.")
+    endif()
+    # The build dir contains the generated config.w32.h (copied from main/).
+    # Do NOT add win32/ as a search dir: it contains time.h / param.h that
+    # shadow the CRT system headers when searched via angle-bracket includes.
+    # PHP's own headers reference win32/* via "win32/foo.h" relative to root.
+    set(_php_inc_extra "${_php_build_dir}")
+    message(STATUS "PHP lib: ${PHP_LIBRARY} (ZEND_DEBUG=${_zend_debug})")
 endif()
 
 # Source files - Core
@@ -43,15 +39,40 @@ set(CORE_SOURCES
     src/http_request.c
     src/http_response.c
     src/uploaded_file.c
+    src/http_mime.c
+    src/http_date.c
+    src/http_etag.c
+    src/http_conditional.c
+    src/http_range.c
+    src/fs_util.c
+    src/http_rfc5987.c
+    src/http_precompressed.c
+    src/http_param_parse.c
+    src/send_file.c
+    src/http_send_file.c
+    src/http_send_file_options.c
+    src/compression/http_compression_negotiate.c
 )
 
 # Source files - Core subsystem
 set(CORE_SUBSYSTEM_SOURCES
     src/core/http_connection.c
+    src/core/http_connection_tls.c
     src/core/conn_arena.c
+    src/core/body_pool.c
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c
     src/core/tls_layer.c
+    src/core/http_known_strings.c
+)
+
+# Source files - Static handler
+set(STATIC_SOURCES
+    src/static/static_handler_class.c
+    src/static/http_static_path.c
+    src/static/http_static_cache.c
+    src/static/http_static.c
+    src/static/http_static_safety.c
 )
 
 # OpenSSL detection (auto) — mirrors config.m4. Uses the system OpenSSL;
@@ -184,6 +205,8 @@ endif()
 # Source files - HTTP/1.1 parser
 set(HTTP1_SOURCES
     src/http1/http_parser.c
+    src/http1/http1_stream.c
+    src/http1/http1_sendfile.c
 )
 
 # Source files - Multipart format handling
@@ -213,49 +236,94 @@ set(ALL_SOURCES
     ${FORMAT_SOURCES}
     ${LOG_SOURCES}
     ${LLHTTP_SOURCES}
+    ${STATIC_SOURCES}
     ${COMPRESSION_SOURCES}
 )
 
-# Create library target (not for actual building, just for CodeQL analysis)
-add_library(http_server SHARED ${ALL_SOURCES})
-if(OpenSSL_FOUND)
-    target_link_libraries(http_server OpenSSL::SSL OpenSSL::Crypto)
+# Extension DLL / shared library
+add_library(php_true_async_server SHARED ${ALL_SOURCES})
+
+set_target_properties(php_true_async_server PROPERTIES
+    OUTPUT_NAME "php_true_async_server"
+    PREFIX ""
+)
+
+# Project include dirs (our own code)
+target_include_directories(php_true_async_server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/formats
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/http1
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/static
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/llhttp/include
+)
+
+# PHP headers — added as SYSTEM so the compiler suppresses their warnings.
+target_include_directories(php_true_async_server SYSTEM PRIVATE
+    ${PHP_INCLUDE_DIR}
+    ${PHP_INCLUDE_DIR}/main
+    ${PHP_INCLUDE_DIR}/Zend
+    ${PHP_INCLUDE_DIR}/TSRM
+    ${_php_inc_extra}
+)
+
+target_compile_definitions(php_true_async_server PRIVATE
+    HTTP_SERVER_EXPORTS
+    HAVE_LLHTTP=1
+)
+
+if(WIN32)
+    target_compile_definitions(php_true_async_server PRIVATE
+        ZEND_WIN32 PHP_WIN32 _WINDOWS WINDOWS=1 WIN32
+        ZTS=1 ZEND_DEBUG=${_zend_debug}
+        _CRT_SECURE_NO_WARNINGS FD_SETSIZE=256
+    )
+    target_link_libraries(php_true_async_server PRIVATE
+        ${PHP_LIBRARY} ws2_32 Mswsock
+    )
+    # /external:W0 suppresses warnings from SYSTEM includes on MSVC.
+    target_compile_options(php_true_async_server PRIVATE
+        /external:W0
+    )
 endif()
 
-# Hardening + diagnostic flags. Mirrored from config.m4. Probed
-# per-flag so MSVC and older compilers stay green; CodeQL and
-# any contributor IDE pick up the same warning surface.
+if(OpenSSL_FOUND)
+    target_compile_definitions(php_true_async_server PRIVATE HAVE_OPENSSL=1)
+    target_link_libraries(php_true_async_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+# Diagnostic flags — our code only (SYSTEM headers are already silenced above).
 include(CheckCCompilerFlag)
-if(NOT MSVC)
-    # -Wshadow excluded — Zend macros legitimately shadow names; see config.m4.
-    foreach(_flag -Wall -Wextra -fstack-protector-strong -Wformat=2 -Wstrict-prototypes -Wsign-compare)
+if(MSVC)
+    target_compile_options(php_true_async_server PRIVATE
+        /W4 /WX /GS /sdl /guard:cf
+        /wd4100  # unreferenced formal parameter — return_value in void ZEND_METHOD + llhttp callbacks
+        /wd4127  # constant conditional — PHP do{}while(0) macros
+        /wd4456  # declaration hides local — nested ZEND_HASH_FOREACH _count/_size/_z vars
+        /wd4701 /wd4703  # uninitialized false-positives in Z_PARAM_* macros
+    )
+else()
+    foreach(_flag -Wall -Wextra -Werror -fstack-protector-strong
+                  -Wformat=2 -Wstrict-prototypes -Wsign-compare)
         string(MAKE_C_IDENTIFIER "HAVE_CFLAG${_flag}" _flag_var)
         check_c_compiler_flag(${_flag} ${_flag_var})
         if(${_flag_var})
-            target_compile_options(http_server PRIVATE ${_flag})
+            target_compile_options(php_true_async_server PRIVATE ${_flag})
         endif()
     endforeach()
-else()
-    target_compile_options(http_server PRIVATE /W4 /GS /sdl /guard:cf)
 endif()
 
-# Test sources (optional, for comprehensive analysis)
-set(TEST_SOURCES
-    tests/common/php_sapi_test.c
-    tests/unit/http1/test_parser.c
-    tests/unit/http1/test_parser_edge_cases.c
-    tests/unit/http1/test_parser_security.c
-    tests/unit/http1/test_multipart_parser.c
-    tests/unit/http1/test_multipart_processor.c
-    tests/unit/common/multipart_stubs.c
-)
+# llhttp is a generated third-party parser — it has intentional
+# int→uint8_t narrowing and function/data pointer casts. Relax warnings
+# only for those source files so our own code stays under /WX.
+if(MSVC)
+    foreach(_f ${LLHTTP_SOURCES})
+        set_source_files_properties(${_f} PROPERTIES
+            COMPILE_FLAGS "/wd4244 /wd4152")
+    endforeach()
+endif()
 
-# Optionally add tests as a separate target
-add_library(http_server_tests STATIC ${TEST_SOURCES})
-target_link_libraries(http_server_tests http_server)
-
-# Print configuration info
-message(STATUS "PHP HTTP Server - CodeQL Analysis Configuration")
-message(STATUS "  Source files: ${ALL_SOURCES}")
+message(STATUS "PHP HTTP Server")
 message(STATUS "  PHP include: ${PHP_INCLUDE_DIR}")
-message(STATUS "  Project root: ${CMAKE_CURRENT_SOURCE_DIR}")
+message(STATUS "  Sources: ${ALL_SOURCES}")

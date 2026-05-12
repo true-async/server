@@ -22,24 +22,13 @@
 
 #include "php_http_server.h"   /* zend_http_server_globals layout */
 
-/* Weak stubs for extension-level class entries referenced by production
- * source files that are linked into unit tests. The real definitions
- * live in src/http_server_exceptions.c and are populated at MINIT in
- * the loaded extension; unit tests run against libphp only, so we
- * supply NULL defaults here. Individual tests may override by defining
- * the same symbol non-weakly. */
+/* Weak stubs for extension-level symbols not present in libphp.
+ * GCC/Clang support __attribute__((weak)); MSVC does not — on Windows
+ * these symbols either come from the DLL import lib or are not needed
+ * by the TUs compiled into each test binary. */
+#ifndef _MSC_VER
 zend_class_entry *http_exception_ce __attribute__((weak)) = NULL;
 
-/* Weak stubs for extension-level helpers that would normally come from
- * src/http_response.c / src/http_server_class.c. Unit tests link only
- * the protocol-strategy + session TUs, so these cross-TU references
- * would otherwise fail to resolve. Any individual test that exercises
- * these paths can supply a strong override.
- *
- * Signatures track the real declarations from php_http_server.h —
- * keep them in sync if the header changes. http_server_on_h2_goaway_sent
- * and http_server_on_h1_connection_close_sent migrated to inline
- * helpers (counters slice) and no longer need extern stubs. */
 __attribute__((weak)) void http_response_install_stream_ops(zend_object *obj,
                                                             const http_response_stream_ops_t *ops,
                                                             void *ctx) {
@@ -57,6 +46,7 @@ __attribute__((weak)) bool http_server_should_drain_now(http_server_object *serv
     (void)server; (void)conn; (void)now_ns;
     return false;
 }
+#endif /* !_MSC_VER */
 
 /* Real definition of the extension's module globals — TUs that reference
  * HTTP_SERVER_G (e.g. http2_session.c reading parser_pool.max_body_size)

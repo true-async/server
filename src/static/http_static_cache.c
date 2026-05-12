@@ -33,7 +33,7 @@ typedef struct entry_s
 	 * HashTable (it released on entry removal). */
 	zend_string *path_key;
 
-	struct stat st;
+	zend_stat_t st;
 	time_t cached_at;
 
 	/* MIME content_type is a borrowed pointer into the persistent
@@ -165,7 +165,7 @@ http_static_cache_t *http_static_cache_create(size_t max_entries, time_t ttl_sec
 	cache->max_entries = max_entries;
 	cache->ttl_seconds = ttl_seconds;
 	/* Persistent HashTable (lives across requests / workers). */
-	zend_hash_init(&cache->index, max_entries > 0 ? max_entries : 16, NULL, index_dtor, 1);
+	zend_hash_init(&cache->index, (uint32_t)(max_entries > 0 ? max_entries : 16), NULL, index_dtor, 1);
 	return cache;
 }
 
@@ -237,7 +237,7 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 }
 
 void http_static_cache_insert(http_static_cache_t *cache, const char *path, size_t path_len,
-							  const struct stat *st, const char *content_type,
+							  const zend_stat_t *st, const char *content_type,
 							  size_t content_type_len, const char *etag, size_t etag_len,
 							  const char *last_modified, size_t last_modified_len)
 {

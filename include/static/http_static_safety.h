@@ -26,6 +26,7 @@
 
 #include <stdbool.h>
 #include <sys/stat.h>
+#include "Zend/zend_stream.h"  /* zend_stat_t */
 
 #include "static/static_handler.h"
 
@@ -34,6 +35,6 @@ bool http_static_symlink_policy_admits(const http_static_handler_t *mount, const
 bool http_static_resolved_under_root(const http_static_handler_t *mount, const char *path);
 
 bool http_static_try_open_candidate(const http_static_handler_t *mount, const char *path,
-									int *out_fd, struct stat *st);
+									int *out_fd, zend_stat_t *st);
 
 #endif
