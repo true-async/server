@@ -54,7 +54,6 @@
 /* ------------------------------------------------------------------------
  * Forward declarations — both subsystems reference each other's helpers.
  * ------------------------------------------------------------------------ */
-static bool tls_drain_ring_to_socket(http_connection_t *conn);
 static bool tls_ssl_write_and_drain(http_connection_t *conn,
                                     const char *data, const size_t len);
 static inline void trigger_tls_drain_event(http_connection_t *conn);
@@ -69,7 +68,7 @@ static void tls_log_error(const http_connection_t *conn, const char *context);
 static void tls_absorb_io_submission_exception(const http_connection_t *conn,
                                                const char *op);
 
-static void tls_fsm_send_kick(http_connection_t *conn);
+static bool tls_send_cipher_ring(http_connection_t *conn);
 static bool tls_fsm_io_cb_attach(http_connection_t *conn);
 static void tls_fsm_io_callback_fn(zend_async_event_t *event,
                                    zend_async_event_callback_t *callback,
@@ -91,33 +90,6 @@ static bool tls_finalize_if_closing(http_connection_t *conn);
  * async send path further down.
  * ======================================================================== */
 
-/* Zero-copy drain helper: pulls every queued ciphertext byte out of
- * the BIO pair via tls_peek_cipher_out (direct pointer into the ring,
- * no memcpy) and hands it straight to the socket via
- * http_connection_send_raw. The ring never wraps a peeked region, so
- * a full ring takes two iterations in the worst case. */
-static bool tls_drain_ring_to_socket(http_connection_t *conn)
-{
-    for (;;) {
-        char *slot = NULL;
-        const size_t avail = tls_peek_cipher_out(conn->tls, &slot);
-
-        if (avail == 0 || slot == NULL) {
-            return true;
-        }
-
-        if (!http_connection_send_raw(conn, slot, avail)) {
-            return false;
-        }
-
-        if (!tls_consume_cipher_out(conn->tls, avail)) {
-            return false;
-        }
-
-        http_server_on_tls_io(conn->counters, 0, 0, 0, avail);
-    }
-}
-
 /* Encrypt @p len bytes of plaintext through the session and ship the
  * resulting ciphertext out the socket. Must run with conn->tls_flushing
  * == true — callers without that invariant race with each other on
@@ -138,7 +110,7 @@ static bool tls_ssl_write_and_drain(http_connection_t *conn,
             return false;
         }
 
-        if (!tls_drain_ring_to_socket(conn)) {
+        if (!tls_send_cipher_ring(conn)) {
             return false;
         }
     }
@@ -155,7 +127,15 @@ static inline void trigger_tls_drain_event(http_connection_t *conn)
 }
 
 /* Suspend the calling coroutine until the flusher frees space in the
- * plaintext ring. Returns false on cancellation / scope stop. */
+ * plaintext ring. Returns true on resume, false on cancellation /
+ * scope stop / non-coroutine context.
+ *
+ * Non-coroutine context (libuv I/O completion, scheduler thread) cannot
+ * SUSPEND — we'd be parking the reactor against itself. Detect that and
+ * return false so the caller can bail out without crashing the reactor.
+ * In practice this only matters for unexpected callers — the producer
+ * (tls_push_and_maybe_flush) is reached from coroutine code paths;
+ * the consumer side (tls_send_cipher_ring) no longer routes here. */
 static bool await_tls_drain_event(http_connection_t *conn)
 {
     if (conn->tls_drain_event == NULL) {
@@ -166,7 +146,11 @@ static bool await_tls_drain_event(http_connection_t *conn)
         }
     }
 
-    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    if (UNEXPECTED(ZEND_ASYNC_IS_SCHEDULER_CONTEXT)) {
+        return false;
+    }
+
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
 
     if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
         return false;
@@ -180,6 +164,7 @@ static bool await_tls_drain_event(http_connection_t *conn)
 
     return EG(exception) == NULL;
 }
+
 
 /* Drain the plaintext ring under the single-writer invariant.
  *
@@ -246,7 +231,7 @@ static bool tls_drain(http_connection_t *conn)
      * SSL_read (TLS 1.3 NewSessionTicket, KeyUpdate), shutdown alerts
      * from the session state machine, anything the BIO still holds. */
     if (ok) {
-        ok = tls_drain_ring_to_socket(conn);
+        ok = tls_send_cipher_ring(conn);
     }
 
     conn->tls_flushing = false;
@@ -259,7 +244,7 @@ static bool tls_drain(http_connection_t *conn)
 }
 
 /* Fire-and-forget plaintext send: SSL_write inline, ship ciphertext via
- * tls_fsm_send_kick (zero-copy WRITE_EX). No coroutine suspend. */
+ * tls_send_cipher_ring (zero-copy WRITE_EX). No coroutine suspend. */
 bool tls_push_and_fire(http_connection_t *conn,
                        const char *data, const size_t len)
 {
@@ -291,7 +276,7 @@ bool tls_push_and_fire(http_connection_t *conn,
             /* network_bio full — drain to free space. */
             conn->tls_flushing = false;
 
-            if (!tls_drain_ring_to_socket(conn)) {
+            if (!tls_send_cipher_ring(conn)) {
                 conn->tls_write_error = true;
                 return false;
             }
@@ -311,7 +296,7 @@ bool tls_push_and_fire(http_connection_t *conn,
         return false;
     }
 
-    tls_fsm_send_kick(conn);
+    tls_send_cipher_ring(conn);
 
     return true;
 }
@@ -331,6 +316,7 @@ bool tls_push_and_maybe_flush(http_connection_t *conn,
         const size_t chunk = len - off;
         const int to_write = chunk > (size_t)INT_MAX ? INT_MAX : (int)chunk;
         const int n = BIO_write(conn->tls_plaintext_bio, data + off, to_write);
+
 
         if (n > 0) {
             off += (size_t)n;
@@ -373,7 +359,7 @@ bool tls_push_and_maybe_flush(http_connection_t *conn,
  * Coordination with the producer flusher: while tls_flushing is held
  * the FSM defers submission and lets the flusher's BIO_nread0 loop
  * pick up the bytes. The flusher already drains residual ciphertext
- * via tls_drain_ring_to_socket on every loop iteration.
+ * via tls_send_cipher_ring on every loop iteration.
  * ======================================================================== */
 
 /* Read-side dispatch callback. The FSM-send path is fire-and-forget
@@ -559,6 +545,13 @@ static void tls_zc_write_free_cb(void *data, zend_async_io_t *io)
         return;
     }
 
+    /* Re-kick: tls_send_cipher_ring only submits one span per call
+     * (single in-flight is the WRITE_EX contract). The remainder of
+     * the BIO output ring rides on subsequent kicks chained through
+     * this very free_cb. tls_send_cipher_ring is a no-op when the BIO
+     * has nothing left, so this terminates naturally. */
+    tls_send_cipher_ring(conn);
+
     /* Static FSM observer hook: the static TLS path needs to know when
      * wbio has drained so it can encrypt the next file chunk without
      * SSL_ERROR_WANT_WRITE. Fire after tls_advance_state so any post-
@@ -572,44 +565,39 @@ static void tls_zc_write_free_cb(void *data, zend_async_io_t *io)
 }
 
 /* Submit one ciphertext span from the BIO output ring zero-copy via
- * ZEND_ASYNC_IO_WRITE_EX: the BIO ring slot pointer is handed straight
- * to libuv; the free_cb consumes the ring on completion. If the BIO
- * has more bytes than fit in one contiguous span (ring wrap), the
- * remainder ships on the next kick — fired automatically by the
- * free_cb's tls_advance_state call.
+ * ZEND_ASYNC_IO_WRITE_EX: the ring slot is handed straight to libuv,
+ * tls_zc_write_free_cb consumes after the kernel acks. If the ring
+ * wraps or has more bytes than fit in one contiguous span, the
+ * remainder ships on the next call — chained from the free_cb itself.
  *
- * No-op when:
- *   - no bytes pending;
- *   - tls_flushing is held (producer flusher will ship our bytes);
- *   - a previous FSM write is still in flight (tls_zc_write_n != 0);
- *   - tls_write_error is sticky. */
-static void tls_fsm_send_kick(http_connection_t *conn)
+ * Single-writer invariant by `tls_zc_write_n`: non-zero = in flight,
+ * the previous call's free_cb will re-enter us. No mutex, no flag —
+ * we run on the single reactor thread.
+ *
+ * Returns false if tls_write_error is set (sticky after a submission
+ * failure); the caller propagates the error up. true otherwise — in
+ * particular when there is nothing to ship (callers treat "did nothing"
+ * the same as "submitted"). */
+static bool tls_send_cipher_ring(http_connection_t *conn)
 {
     if (conn->tls == NULL || conn->tls_write_error) {
-        return;
-    }
-
-    if (conn->tls_flushing) {
-        return;
+        return !conn->tls_write_error;
     }
 
     if (conn->tls_zc_write_n != 0) {
-        return;   /* a zero-copy write is already in flight; the free_cb re-kicks */
+        return true;   /* in flight; free_cb will re-enter */
     }
 
     if (UNEXPECTED(!tls_fsm_io_cb_attach(conn))) {
         conn->tls_write_error = true;
-        return;
+        return false;
     }
 
-    /* Peek one contiguous span out of the BIO output ring. The libuv
-     * write borrows the slot until completion — we MUST NOT consume
-     * (and therefore free) the span until the free_cb fires. */
-    char  *slot  = NULL;
+    char        *slot  = NULL;
     const size_t avail = tls_peek_cipher_out(conn->tls, &slot);
 
     if (avail == 0 || slot == NULL) {
-        return;   /* nothing pending */
+        return true;   /* nothing to ship */
     }
 
     conn->tls_zc_write_n = avail;
@@ -617,26 +605,20 @@ static void tls_fsm_send_kick(http_connection_t *conn)
         conn->io, slot, avail, tls_zc_write_free_cb);
 
     if (UNEXPECTED(req == NULL)) {
-        /* Submission failed before libuv took ownership — the buffer
-         * is still in the BIO and free_cb will NOT fire. Roll back the
-         * tracking field and treat as a hard write error. */
+        /* Submission failed before libuv took ownership — the slot is
+         * still in the BIO and free_cb will NOT fire. Roll back the
+         * in-flight counter; the failure sticks via tls_write_error. */
         conn->tls_zc_write_n = 0;
         tls_absorb_io_submission_exception(conn, "write");
         conn->tls_write_error = true;
-        return;
+        return false;
     }
 
-    /* Sync-complete fast path: WRITE_EX path in libuv invokes free_cb
-     * inline when the kernel accepts the bytes synchronously. The
-     * free_cb already did consume + counters + re-kick, so there's
-     * nothing left for us to do here. */
-    if (req->completed) {
-        return;
-    }
-
-    /* Async path: nothing to track on the cb struct — fire-and-forget
-     * via WRITE_EX, the free_cb owns completion. The conn-level
-     * tls_zc_write_n field is the "in flight" gate. */
+    /* Sync-complete: WRITE_EX may invoke free_cb inline when the kernel
+     * absorbs the bytes immediately. Async case: free_cb fires later.
+     * Either way we are done here — the conn->tls_zc_write_n field is
+     * the single in-flight gate. */
+    return true;
 }
 
 /* Atomic-encrypt-and-queue helper for callers that want to send a small
@@ -660,7 +642,7 @@ bool http_connection_tls_fsm_send_plaintext_atomic(http_connection_t *conn,
     }
 
     http_server_on_tls_io(conn->counters, 0, written, 0, 0);
-    tls_fsm_send_kick(conn);
+    tls_send_cipher_ring(conn);
     return true;
 }
 
@@ -885,7 +867,7 @@ static void tls_graceful_close(http_connection_t *conn)
     }
 
     (void)tls_shutdown_step(conn->tls);
-    tls_fsm_send_kick(conn);
+    tls_send_cipher_ring(conn);
 }
 
 /* Ship any pending alert bytes the SSL state machine queued during a
@@ -897,7 +879,7 @@ static void tls_flush_pending_alert(http_connection_t *conn)
         return;
     }
 
-    tls_fsm_send_kick(conn);
+    tls_send_cipher_ring(conn);
 }
 
 /* When a libuv submission (read/write) fails in callback context, the
@@ -1037,7 +1019,7 @@ static void tls_advance_state(http_connection_t *conn)
 
         if (conn->state == CONN_STATE_TLS_HANDSHAKE) {
             const tls_io_result_t step = tls_handshake_step(conn->tls);
-            tls_fsm_send_kick(conn);
+            tls_send_cipher_ring(conn);
 
             if (UNEXPECTED(conn->tls_write_error)) {
                 continue;   /* falls through to error branch above */
@@ -1051,7 +1033,7 @@ static void tls_advance_state(http_connection_t *conn)
 
             if (step == TLS_IO_WANT_READ || step == TLS_IO_WANT_WRITE) {
                 /* WANT_WRITE means OpenSSL has bytes in the wbio for
-                 * us to send; tls_fsm_send_kick already submitted
+                 * us to send; tls_send_cipher_ring already submitted
                  * them. Progress now depends on an external event
                  * (peer reply or send completion). */
                 return;
@@ -1084,7 +1066,7 @@ static void tls_advance_state(http_connection_t *conn)
             continue;
         }
         /* SSL_read may have produced post-handshake messages. */
-        tls_fsm_send_kick(conn);
+        tls_send_cipher_ring(conn);
 
         if (conn->state == CONN_STATE_CLOSING) {
             continue;   /* peer close_notify */

@@ -124,6 +124,12 @@ typedef struct {
     zend_async_io_req_t         *pending_req;
     zend_async_event_callback_t *cb;
 
+    /* Subscribed to stream->write_event. Fires when an inbound
+     * WINDOW_UPDATE opens our flow-control window — h2 dispatch lives
+     * in scheduler context with no coroutine to suspend, so we drive
+     * progress by event callback instead of waker. */
+    zend_async_event_callback_t *window_cb;
+
     void                       (*on_done)(void *user, int status);
     void                        *user;
     int                          status;       /* 0 ok, -1 error */
@@ -145,12 +151,48 @@ static void h2_static_cb_dispose(zend_async_event_callback_t *cb,
     efree(cb);
 }
 
+/* Trigger-event subscriber on stream->write_event. cb_on_frame_recv
+ * fires this when an inbound WINDOW_UPDATE opens our flow-control
+ * window. Re-drive drain so nghttp2 emits the DATA frames it had
+ * deferred while window=0. Stops once nghttp2 reports no more bytes
+ * pending; safe to fire on stray triggers — drain is idempotent. */
+static void h2_static_on_window_open(zend_async_event_t *event,
+                                     zend_async_event_callback_t *callback,
+                                     void *result,
+                                     zend_object *exception)
+{
+    (void)event;
+    (void)result;
+    (void)exception;
+
+    h2_static_state_t *state = ((h2_static_cb_t *)callback)->state;
+
+    if (state->conn == NULL || state->session == NULL) {
+        return;
+    }
+
+    if (state->stream != NULL && state->stream->peer_closed) {
+        return;
+    }
+
+    http2_static_drain_to_socket(state->conn, state->session);
+}
+
 static void h2_static_finalize(h2_static_state_t *state, const int status)
 {
     if (state->cb != NULL && state->file_io != NULL) {
         (void)state->file_io->event.del_callback(&state->file_io->event,
                                                  state->cb);
         state->cb = NULL;
+    }
+
+    if (state->window_cb != NULL
+        && state->stream != NULL
+        && state->stream->write_event != NULL) {
+        zend_async_event_t *we = &((zend_async_trigger_event_t *)
+                                   state->stream->write_event)->base;
+        (void)we->del_callback(we, state->window_cb);
+        state->window_cb = NULL;
     }
 
     if (state->file_io != NULL) {
@@ -210,6 +252,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
     h2_static_state_t *state = ((h2_static_cb_t *)callback)->state;
     zend_async_io_req_t *req = (zend_async_io_req_t *)result;
 
+
     /* Spurious-fire guard. The notify iteration on file_io->event can
      * re-enter our newly-registered cb during the very iteration that
      * completed an earlier req on the same event (e.g. the engine's
@@ -257,6 +300,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
         return;
     }
 
+
     if (state->stream != NULL && !state->stream->peer_closed) {
         (void)nghttp2_session_resume_data(ng,
             (int32_t)state->stream->stream_id);
@@ -265,6 +309,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
             http2_static_drain_to_socket(state->conn, state->session);
         }
     }
+
 }
 
 /* Submit the next ZEND_ASYNC_IO_READ. Lazy-allocates read_buf on
@@ -608,6 +653,34 @@ int h2_stream_send_static_response(void *ctx,
         }
 
         state->cb = &cb->base;
+
+        /* Subscribe to stream->write_event so an inbound WINDOW_UPDATE
+         * re-drives our drain. The wait event is lazy on the stream —
+         * coroutine handlers create it via h2_stream_get_wait_event,
+         * we do the same inline here. Failure leaves state->window_cb
+         * NULL; we lose window-open backpressure but the request can
+         * still finish if window stays open. */
+        if (stream->write_event == NULL) {
+            stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+        }
+
+        if (stream->write_event != NULL) {
+            h2_static_cb_t *wcb = (h2_static_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
+                h2_static_on_window_open, sizeof(h2_static_cb_t));
+
+            if (wcb != NULL) {
+                wcb->base.dispose = h2_static_cb_dispose;
+                wcb->state        = state;
+                zend_async_event_t *we = &((zend_async_trigger_event_t *)
+                                           stream->write_event)->base;
+
+                if (we->add_callback(we, &wcb->base)) {
+                    state->window_cb = &wcb->base;
+                } else {
+                    efree(wcb);
+                }
+            }
+        }
 
         stream->on_close      = h2_static_on_stream_close;
         stream->on_close_user = state;
