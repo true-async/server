@@ -17,6 +17,7 @@
 #include "php_http_server.h"     /* http_response_get_* + http_connection_send */
 #include "http_protocol_strategy.h"
 #include "http_connection.h"
+#include "core/http_connection_internal.h"   /* tls_push_and_fire */
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
@@ -1185,13 +1186,18 @@ static void h2_drain_to_socket(http_connection_t *conn,
 {
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
+        /* tls_push_and_fire submits ciphertext via fire-and-forget
+         * WRITE_EX — safe from scheduler context (h2 static dispatch
+         * fired from a libuv read completion), unlike http_connection_send
+         * which would route into tls_push_and_maybe_flush → sync
+         * http_connection_send_raw → await-without-coroutine. */
         char buf[16384];
         while (http2_session_want_write(session)) {
             const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
 
             if (n <= 0) { break; }
 
-            if (!http_connection_send(conn, buf, (size_t)n)) {
+            if (!tls_push_and_fire(conn, buf, (size_t)n)) {
                 break;
             }
         }
