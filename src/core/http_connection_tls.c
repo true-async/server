@@ -93,7 +93,15 @@ static bool tls_finalize_if_closing(http_connection_t *conn);
 /* Encrypt @p len bytes of plaintext through the session and ship the
  * resulting ciphertext out the socket. Must run with conn->tls_flushing
  * == true — callers without that invariant race with each other on
- * SSL_write. */
+ * SSL_write.
+ *
+ * The cipher BIO is bounded; for large payloads SSL_write returns
+ * WANT_WRITE before it has eaten all the plaintext we're feeding.
+ * The submission path is fire-and-forget (tls_send_cipher_ring), so
+ * the cipher buffer doesn't free synchronously — if a write is in
+ * flight we must wait on its free_cb (which fires drain_event) before
+ * the next SSL_write iteration, otherwise this loop spins on WANT_WRITE
+ * with no progress. */
 static bool tls_ssl_write_and_drain(http_connection_t *conn,
                                     const char *data, const size_t len)
 {
@@ -111,6 +119,16 @@ static bool tls_ssl_write_and_drain(http_connection_t *conn,
         }
 
         if (!tls_send_cipher_ring(conn)) {
+            return false;
+        }
+
+        /* Backpressure: a write is in flight, the cipher BIO isn't
+         * going to free up until libuv's completion runs free_cb. From
+         * a coroutine we suspend on drain_event; from scheduler context
+         * await returns false safely and the caller stops mid-encrypt,
+         * leaving the unsent plaintext in the BIO for the next pass. */
+        if (rc != TLS_IO_OK && conn->tls_zc_write_n != 0
+            && !await_tls_drain_event(conn)) {
             return false;
         }
     }
@@ -544,6 +562,11 @@ static void tls_zc_write_free_cb(void *data, zend_async_io_t *io)
     if (tls_finalize_if_closing(conn)) {
         return;
     }
+
+    /* Cipher BIO just freed @p n bytes. Wake any producer suspended in
+     * tls_ssl_write_and_drain on a previous WANT_WRITE — it can now
+     * encrypt the next chunk. */
+    trigger_tls_drain_event(conn);
 
     /* Re-kick: tls_send_cipher_ring only submits one span per call
      * (single in-flight is the WRITE_EX contract). The remainder of
