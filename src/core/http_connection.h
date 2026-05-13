@@ -129,8 +129,9 @@ struct _http_connection_t {
     tls_fsm_send_cb_t             *tls_fsm_send_cb;
 
     /* Bytes of cipher BIO that libuv currently owns via a fire-and-
-     * forget WRITE_EX. Non-zero blocks a fresh submit until the
-     * completion runs. */
+     * forget WRITE_EX. Non-zero gates both fresh SSL_write into the
+     * cipher BIO and a fresh submit — keeps the slot pointer we handed
+     * to libuv stable until consume runs in the completion callback. */
     size_t                         tls_cipher_inflight;
 
     /* Optional zero-copy write completion observer (issue #13 §5a).

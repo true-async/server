@@ -154,39 +154,51 @@ bool tls_drain(http_connection_t *conn)
     for (;;) {
         bool progress = false;
 
-        /* 1) Push plaintext through SSL_write. */
-        char     *plain = NULL;
-        const int avail = BIO_nread0(conn->tls_plaintext_bio_app, &plain);
+        /* Single-in-flight gate: while libuv holds a slot pointer into
+         * network_bio, do not run a fresh SSL_write. SSL_write would
+         * BIO_write more ciphertext into the same ring, and the BIO
+         * pair reclaims space lazily — peek/consume cycles can hand the
+         * same offset back to a fresh write, racing libuv's still-
+         * pending read of the in-flight span (peer "bad record mac"
+         * under load). Serialise encrypt-and-ship on cipher_inflight;
+         * plaintext_bio absorbs producer backpressure (32 KiB ring) and
+         * h2 frames queue inside nghttp2's own outbound queue until the
+         * completion callback frees the slot. */
+        if (conn->tls_cipher_inflight == 0) {
+            /* 1) Push plaintext through SSL_write. */
+            char     *plain = NULL;
+            const int avail = BIO_nread0(conn->tls_plaintext_bio_app, &plain);
 
-        if (avail > 0) {
-            size_t                written = 0;
-            const tls_io_result_t rc = tls_write_plaintext(
-                conn->tls, plain, (size_t)avail, &written);
+            if (avail > 0) {
+                size_t                written = 0;
+                const tls_io_result_t rc = tls_write_plaintext(
+                    conn->tls, plain, (size_t)avail, &written);
 
-            if (written > 0) {
-                char     *dummy    = NULL;
-                const int consumed = BIO_nread(conn->tls_plaintext_bio_app,
-                                               &dummy, (int)written);
+                if (written > 0) {
+                    char     *dummy    = NULL;
+                    const int consumed = BIO_nread(conn->tls_plaintext_bio_app,
+                                                   &dummy, (int)written);
 
-                if (UNEXPECTED(consumed != (int)written)) {
+                    if (UNEXPECTED(consumed != (int)written)) {
+                        ok = false;
+                        break;
+                    }
+
+                    http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+                    tls_signal_space(conn);
+                    progress = true;
+                }
+
+                if (rc != TLS_IO_OK && rc != TLS_IO_WANT_WRITE && rc != TLS_IO_WANT_READ) {
                     ok = false;
                     break;
                 }
-
-                http_server_on_tls_io(conn->counters, 0, written, 0, 0);
-                tls_signal_space(conn);
-                progress = true;
-            }
-
-            if (rc != TLS_IO_OK && rc != TLS_IO_WANT_WRITE && rc != TLS_IO_WANT_READ) {
-                ok = false;
-                break;
             }
         }
 
         /* 2) Submit one cipher span when no write is in flight. The
-         *    completion callback (tls_cipher_completion) frees the
-         *    cipher BIO, signals plaintext-ring space, and re-enters
+         *    completion callback (tls_cipher_completion) consumes the
+         *    BIO ring, signals plaintext-ring space, and re-enters
          *    this drain so the chain self-sustains. */
         if (conn->tls_cipher_inflight == 0) {
             if (UNEXPECTED(!tls_fsm_io_cb_attach(conn))) {
@@ -198,6 +210,12 @@ bool tls_drain(http_connection_t *conn)
             const size_t cipher_avail = tls_peek_cipher_out(conn->tls, &slot);
 
             if (cipher_avail > 0) {
+                /* Zero-copy: slot points into network_bio. Safe because
+                 * (a) step 1 above is gated on cipher_inflight, so no
+                 * concurrent SSL_write will mutate the BIO ring, and
+                 * (b) tls_cipher_completion calls BIO_nread to consume
+                 * only after libuv has released the buffer. The slot
+                 * bytes are stable for the entire WRITE_EX lifetime. */
                 conn->tls_cipher_inflight = cipher_avail;
                 zend_async_io_req_t *const req = ZEND_ASYNC_IO_WRITE_EX(
                     conn->io, slot, cipher_avail, tls_cipher_completion);
@@ -210,8 +228,8 @@ bool tls_drain(http_connection_t *conn)
                 }
 
                 if (req->completed) {
-                    /* Sync-complete: free_cb already consumed the
-                     * cipher slot. Loop back to push more plaintext. */
+                    /* Sync-complete: free_cb already ran consume + cleared
+                     * cipher_inflight. Loop back to push more plaintext. */
                     progress = true;
                     continue;
                 }
@@ -426,6 +444,9 @@ static bool tls_fsm_io_cb_attach(http_connection_t *conn)
  * tears down through the existing peer-FIN path. */
 static void tls_cipher_completion(void *data, zend_async_io_t *io)
 {
+    /* data is the network_bio slot pointer we handed to libuv —
+     * libuv-side accounting only; the actual ring consume happens via
+     * BIO_nread below, now that libuv is done reading from the slot. */
     (void)data;
 
     if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
@@ -728,15 +749,38 @@ static int tls_feed_parser_step(http_connection_t *conn)
  * kick the async send. We deliberately do NOT wait for the peer's
  * close_notify (RFC 8446 §6.1 permits skipping the reply, and every
  * major HTTP client closes TCP immediately after their last response
- * read). */
+ * read).
+ *
+ * Drain ordering: with the single-in-flight gate on SSL_write in
+ * tls_drain (see the long comment there), application plaintext can
+ * accumulate in plaintext_bio while a previous WRITE_EX is still in
+ * flight — common on h1 pipelining over TLS, where N responses commit
+ * before the first record ships. Calling SSL_shutdown before that
+ * plaintext is encrypted would queue close_notify ahead of the unsent
+ * application bytes; some peers (and our own bookkeeping) interpret
+ * close_notify as "stream done" and drop everything after it. Defer
+ * the shutdown until plaintext_bio is empty AND no cipher write is in
+ * flight; tls_drain re-enters this function via the cipher_completion
+ * → tls_advance_state chain after each record drains, so the close
+ * eventually fires. */
 static void tls_graceful_close(http_connection_t *conn)
 {
     if (conn->tls == NULL) {
         return;
     }
 
+    (void)tls_drain(conn);
+
+    if (conn->tls_cipher_inflight != 0) {
+        return;
+    }
+
+    if (BIO_ctrl_pending(conn->tls_plaintext_bio_app) > 0) {
+        return;
+    }
+
     (void)tls_shutdown_step(conn->tls);
-    tls_drain(conn);
+    (void)tls_drain(conn);
 }
 
 /* Ship any pending alert bytes the SSL state machine queued during a
