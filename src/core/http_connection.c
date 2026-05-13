@@ -349,12 +349,12 @@ void http_connection_destroy(http_connection_t *conn)
         tls_session_free(conn->tls);
         conn->tls = NULL;
     }
-    /* Plaintext queue + flusher state. By the time destroy runs the
-     * handler_refcount gate has guaranteed no producer is mid-push, so
-     * the BIOs are unowned. drain_event might still carry a waker if a
-     * producer was backpressured when destroy_pending fired; disposing
-     * the event resolves the waker with conn->tls == NULL, which makes
-     * await_tls_drain_event return false. */
+    /* Plaintext queue + ring-space waiters. handler_refcount has
+     * guaranteed no producer is mid-push, but a backpressured coroutine
+     * may still be parked on the FIFO queue; resume them so their
+     * waker_clean fires before the BIOs go away. */
+    tls_release_waiters(conn);
+
     if (conn->tls_plaintext_bio) {
         BIO_free(conn->tls_plaintext_bio);
         conn->tls_plaintext_bio = NULL;
@@ -363,11 +363,6 @@ void http_connection_destroy(http_connection_t *conn)
     if (conn->tls_plaintext_bio_app) {
         BIO_free(conn->tls_plaintext_bio_app);
         conn->tls_plaintext_bio_app = NULL;
-    }
-
-    if (conn->tls_drain_event) {
-        conn->tls_drain_event->base.dispose(&conn->tls_drain_event->base);
-        conn->tls_drain_event = NULL;
     }
 #endif
 
@@ -1268,7 +1263,7 @@ static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
  * uv_write — that submit takes the fast path because the counter is
  * now zero. Chain continues until pending is empty.
  *
- * Plaintext only: TLS uses tls_zc_write_n via the BIO ring path.
+ * Plaintext only: TLS uses tls_cipher_inflight via the BIO ring path.
  * Caller transfers ownership of `buf` (emalloc'd); the reactor — or
  * the append-into-pending path here — owns it after this call. */
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
@@ -1447,7 +1442,7 @@ bool http_connection_send(http_connection_t *conn, const char *data, const size_
 
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
-        return tls_push_and_maybe_flush(conn, data, len);
+        return tls_push(conn, data, len);
     }
 #endif
 
@@ -2288,8 +2283,8 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
 
             if (response_str) {
-                sent = tls_push_and_fire(conn, ZSTR_VAL(response_str),
-                                         ZSTR_LEN(response_str));
+                sent = tls_push(conn, ZSTR_VAL(response_str),
+                                ZSTR_LEN(response_str));
                 zend_string_release(response_str);
             } else {
                 sent = false;

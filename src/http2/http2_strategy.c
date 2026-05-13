@@ -17,10 +17,14 @@
 #include "php_http_server.h"     /* http_response_get_* + http_connection_send */
 #include "http_protocol_strategy.h"
 #include "http_connection.h"
-#include "core/http_connection_internal.h"   /* tls_push_and_fire */
+#include "core/http_connection_internal.h"
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
+
+#ifdef HAVE_OPENSSL
+#include <openssl/bio.h>
+#endif
 #include "http1/http_parser.h"   /* http_request_t */
 #include "static/static_handler.h"
 #include "http_send_file.h"
@@ -191,6 +195,7 @@ static void http2_strategy_dispatch(struct http_request_t *request,
 {
     (void)request;      /* Reachable via stream->request; we use that path. */
     http2_strategy_t *self = (http2_strategy_t *)user_data;
+
 
     http2_stream_t *stream = http2_session_find_stream(self->session,
                                                              stream_id);
@@ -568,16 +573,14 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         (void)http2_commit_stream_response(conn, stream);
     }
 
-    /* Drop the PHP objects, then release our refcount. If the
-     * session table already released its reference (nghttp2 closed
-     * the stream while we were still draining), this final release
-     * triggers efree; otherwise the table-held ref keeps the stream
-     * alive until on_stream_close_cb fires. */
-    zval_ptr_dtor(&stream->request_zv);
-    ZVAL_UNDEF(&stream->request_zv);
-    zval_ptr_dtor(&stream->response_zv);
-    ZVAL_UNDEF(&stream->response_zv);
-
+    /* Release our refcount — the per-stream zvals are dtor'd by the
+     * stream destructor only when refcount finally hits zero. Keeping
+     * them alive past dispose matters for the buffered-response path:
+     * commit_stream_response submitted a nghttp2 data_provider that
+     * borrows the body via stream->response_body (a raw pointer into
+     * response_zv's body buffer). The emit pump runs the provider
+     * later from scheduler context, so the body must outlive
+     * dispose. */
     http2_stream_release(stream);
 
     /* Release the conn-level handler ref and finalise a deferred
@@ -1030,51 +1033,19 @@ static bool http2_commit_stream_response(http_connection_t *conn,
      * has its own zero-copy submit). */
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
-        char drain_buf[16384];
-        while (http2_session_want_write(self->session)) {
-            const ssize_t n = http2_session_drain(self->session,
-                                                  drain_buf, sizeof(drain_buf));
-
-            if (n < 0) { return false; }
-
-            if (n == 0) { break; }
-
-            if (!http_connection_send(conn, drain_buf, (size_t)n)) {
-                return false;
-            }
-        }
-
+        /* Handler-side commit: response is already queued in nghttp2 via
+         * submit_response above. Notify the emit pump to drain the
+         * outbound queue in scheduler context and return immediately.
+         * The pump runs once all co-pending handlers have submitted, so
+         * frames for concurrent streams come out interleaved. */
+        http2_session_notify(self->session);
         return true;
     }
 #endif
 
-    size_t cap   = 16384;
-    size_t total = 0;
-    char  *buf   = emalloc(cap);
-    while (http2_session_want_write(self->session)) {
-        if (cap - total < 16384) {
-            cap *= 2;
-            buf = erealloc(buf, cap);
-        }
-
-        const ssize_t n = http2_session_drain(self->session,
-                                              buf + total, cap - total);
-
-        if (n < 0) { efree(buf); return false; }
-
-        if (n == 0) { break; }
-        total += (size_t)n;
-    }
-
-    if (total == 0) {
-        efree(buf);
-        return true;
-    }
-
-    if (!http_connection_send_batched(conn, buf, total)) {
-        return false;
-    }
-
+    /* h2c: same notify model — emit pump drains nghttp2 and ships via
+     * send_batched (one uv_write fire-and-forget per pump pass). */
+    http2_session_notify(self->session);
     return true;
 }
 
@@ -1177,31 +1148,59 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     return rc == 0;
 }
 
-/* Drive nghttp2 to push whatever it can onto the socket right now.
- * Runs from the handler coroutine context. Plaintext: drain-all-then-
- * single-WRITE_EX, same shape as commit_stream_response above. TLS
- * stays on await-based send_raw via http_connection_send. */
-static void h2_drain_to_socket(http_connection_t *conn,
-                               http2_session_t *session)
+/* Emit pump — drain nghttp2's outbound frame queue into the transport.
+ * Runs in scheduler context (registered uv_async callback). Never
+ * suspends. On TLS: BIO_write directly into the plaintext BIO under a
+ * write-guarantee check (no wait_space), then tls_drain to encrypt and
+ * ship. On h2c: drain everything into one heap buffer and send_batched.
+ * Backpressure (TLS plain BIO short on room) stops the pump; the next
+ * tls_cipher_completion calls http2_session_notify to resume. */
+void http2_session_emit(http2_session_t *session)
 {
+    if (session == NULL) {
+        return;
+    }
+
+    http_connection_t *conn = http2_session_get_conn(session);
+
+    if (conn == NULL) {
+        return;
+    }
+
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
-        /* tls_push_and_fire submits ciphertext via fire-and-forget
-         * WRITE_EX — safe from scheduler context (h2 static dispatch
-         * fired from a libuv read completion), unlike http_connection_send
-         * which would route into tls_push_and_maybe_flush → sync
-         * http_connection_send_raw → await-without-coroutine. */
-        char buf[16384];
+        char buf[16384 + 9 + 256];
+        const int   need   = (int)sizeof(buf);
+
         while (http2_session_want_write(session)) {
+            const int guarantee =
+                BIO_ctrl_get_write_guarantee(conn->tls_plaintext_bio);
+
+            if (guarantee < need) {
+                break;  /* backpressure — cipher_completion will renotify */
+            }
+
             const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
 
-            if (n <= 0) { break; }
+            if (n < 0) {
+                conn->tls_write_error = true;
+                break;
+            }
 
-            if (!tls_push_and_fire(conn, buf, (size_t)n)) {
+            if (n == 0) {
+                break;
+            }
+
+            const int w =
+                BIO_write(conn->tls_plaintext_bio, buf, (int)n);
+
+            if (UNEXPECTED(w != (int)n)) {
+                conn->tls_write_error = true;
                 break;
             }
         }
 
+        (void)tls_drain(conn);
         return;
     }
 #endif
@@ -1209,6 +1208,7 @@ static void h2_drain_to_socket(http_connection_t *conn,
     size_t cap   = 16384;
     size_t total = 0;
     char  *buf   = emalloc(cap);
+
     while (http2_session_want_write(session)) {
         if (cap - total < 16384) {
             cap *= 2;
@@ -1218,8 +1218,8 @@ static void h2_drain_to_socket(http_connection_t *conn,
         const ssize_t n = http2_session_drain(session, buf + total, cap - total);
 
         if (n < 0) { efree(buf); return; }
-
         if (n == 0) { break; }
+
         total += (size_t)n;
     }
 
@@ -1229,6 +1229,18 @@ static void h2_drain_to_socket(http_connection_t *conn,
     }
 
     (void)http_connection_send_batched(conn, buf, total);
+}
+
+/* Synchronous emit for streaming + static-dispatch callers. The pump
+ * body doesn't yield, so callers that need chunk_queue_bytes settled
+ * before checking backpressure (h2_stream_append_chunk) can rely on
+ * frames being out before this returns. Equivalent to a notify whose
+ * callback ran immediately. */
+static void h2_drain_to_socket(http_connection_t *conn,
+                               http2_session_t *session)
+{
+    (void)conn;
+    http2_session_emit(session);
 }
 
 /* Suspend-until-drain-event helper. Called from append_chunk's tail
@@ -1459,6 +1471,23 @@ void http2_static_drain_to_socket(http_connection_t *conn,
     }
 
     h2_drain_to_socket(conn, session);
+}
+
+/* External entry for non-h2 TUs (tls_cipher_completion) — wake the
+ * emit pump if this conn carries an h2 session. Cheap on plain HTTP/1
+ * connections (NULL strategy / non-h2 strategy). */
+void http2_conn_notify_emit(http_connection_t *conn)
+{
+    if (conn == NULL || conn->strategy == NULL ||
+        conn->protocol_type != HTTP_PROTOCOL_HTTP2) {
+        return;
+    }
+
+    const http2_strategy_t *self = (const http2_strategy_t *)conn->strategy;
+
+    if (self->session != NULL) {
+        http2_session_notify(self->session);
+    }
 }
 
 static void http2_strategy_send_response(http_connection_t *conn, void *response)

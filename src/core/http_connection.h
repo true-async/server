@@ -21,11 +21,8 @@
 
 #include <stdint.h>
 
-/* Per-connection plaintext ring buffer feeding the TLS flusher.
- * Producers (handler coroutines) push plaintext via BIO_write; the
- * flusher drains it through SSL_write. Sized for one MAX_FRAME_SIZE
- * H2 frame (16 KiB) plus one in-flight TLS record (16 KiB); a full
- * ring triggers backpressure via tls_drain_event. */
+/* Plaintext ring fed by tls_push. Sized for one MAX_FRAME_SIZE H2
+ * frame (16 KiB) plus one in-flight TLS record (16 KiB). */
 #define HTTP_TLS_PLAINTEXT_RING_BYTES (32 * 1024)
 
 typedef struct http1_parser_t http1_parser_t;
@@ -115,36 +112,26 @@ struct _http_connection_t {
 #ifdef HAVE_OPENSSL
     tls_session_t                 *tls;
 
-    /* Plaintext queue feeding the cooperative flusher. Active only while
-     * conn->tls != NULL. Producers (handler coroutines) push plaintext
-     * into tls_plaintext_bio via BIO_write — a pure memory op, no SSL
-     * state. The first producer that finds tls_flushing == false becomes
-     * the flusher: it drains tls_plaintext_bio_app via SSL_write and
-     * ships the ciphertext through the suspending send_raw path. Later
-     * producers enqueue and return — they do not wait for their bytes
-     * to hit the wire; the flusher picks them up on its next loop. */
-    BIO                           *tls_plaintext_bio;       /* producer side (BIO_write here) */
-    BIO                           *tls_plaintext_bio_app;   /* flusher side (BIO_nread here) */
-    zend_async_trigger_event_t    *tls_drain_event;         /* fires when ring gains space */
+    /* BIO pair. Coroutine producers BIO_write into tls_plaintext_bio
+     * after waiting on tls_space_event for room. Drain (scheduler)
+     * pulls from tls_plaintext_bio_app via SSL_write into the cipher
+     * BIO and ships ciphertext through tls_cipher_completion. */
+    BIO                           *tls_plaintext_bio;
+    BIO                           *tls_plaintext_bio_app;
 
-    /* Read FSM async-write slot. The TLS read FSM lives in event-loop
-     * callback context (no coroutine, no suspension). Bytes it produces
-     * via SSL_do_handshake / SSL_read (handshake, NewSessionTicket,
-     * KeyUpdate, alerts, close_notify) are shipped zero-copy: the FSM
-     * peeks BIO_nread0 and submits the slot pointer directly via
-     * ZEND_ASYNC_IO_WRITE_EX (fire-and-forget); the free_cb consumes
-     * the ring on completion. Coordination with the producer flusher is
-     * via tls_flushing: while the handler-side flusher owns the cipher
-     * BIO, the FSM defers and lets that loop pick up its bytes. */
+    /* Broadcast wake fired by the drain after every BIO_nread consume.
+     * Coroutines parked in tls_wait_space recheck the guarantee and
+     * proceed or re-park. */
+    zend_async_trigger_event_t    *tls_space_event;
+
+    /* Persistent io-event callback shared by the read FSM (read
+     * completion) and the cipher write (WRITE_EX free_cb). */
     tls_fsm_send_cb_t             *tls_fsm_send_cb;
 
-    /* Zero-copy FSM write: bytes peeked from BIO and submitted to
-     * libuv. Non-zero while a write is in flight; the free_cb consumes
-     * exactly this many bytes from the BIO output ring on completion
-     * (or zero on error — connection torn down). Gate against double
-     * submission while a write is outstanding (BIO would re-peek the
-     * same bytes the in-flight write still owns). */
-    size_t                         tls_zc_write_n;
+    /* Bytes of cipher BIO that libuv currently owns via a fire-and-
+     * forget WRITE_EX. Non-zero blocks a fresh submit until the
+     * completion runs. */
+    size_t                         tls_cipher_inflight;
 
     /* Optional zero-copy write completion observer (issue #13 §5a).
      * The static-handler TLS FSM uses this to pace its read→encrypt→
@@ -165,9 +152,9 @@ struct _http_connection_t {
      * the struct to save padding. unsigned : 1 chosen over bool : 1 for
      * the broadest compiler portability; reads/writes use plain
      * bool/true/false via implicit conversion. */
-    unsigned                       tls_flushing : 1;         /* producer-side flusher role held */
-    unsigned                       tls_write_error : 1;      /* sticky SSL_write / socket failure */
-    unsigned                       tls_awaiting_handler : 1; /* FSM paused until handler dispose */
+    unsigned                       tls_draining : 1;
+    unsigned                       tls_write_error : 1;
+    unsigned                       tls_awaiting_handler : 1;
 #endif
 
     /* size_t fields (8 bytes on 64-bit) */
@@ -186,7 +173,7 @@ struct _http_connection_t {
      * then drains the pending buffer in one more uv_write — at that
      * point write_queue_size has been decremented, so the next submit
      * also takes the fast path. Plaintext only: TLS path has its own
-     * BIO-pair zero-copy submit (tls_zc_write_n above). */
+     * BIO-pair zero-copy submit (tls_cipher_inflight above). */
     char    *out_pending_buf;
     size_t   out_pending_len;
     size_t   out_pending_cap;

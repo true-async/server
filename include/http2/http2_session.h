@@ -114,6 +114,29 @@ http2_stream_t *http2_session_find_stream(http2_session_t *session,
 http_connection_t *http2_session_get_conn(http2_session_t *session);
 
 /* -------------------------------------------------------------------------
+ * Emit pump (issue #23).
+ *
+ * Decouples response submission from frame emission. Handlers and other
+ * frame producers (cb_on_frame_recv reactions, WINDOW_UPDATE responders,
+ * the bind-time SETTINGS path) call http2_session_notify() after they
+ * have queued frames via nghttp2_submit_*. notify() triggers a uv_async
+ * which fires the registered callback in scheduler context; the
+ * callback calls http2_session_emit() which drains nghttp2's frame
+ * queue into the transport (plaintext socket for h2c, plaintext BIO for
+ * TLS) and stops on transport backpressure.
+ *
+ * Backpressure resumes through tls_cipher_completion / batched-write
+ * completion calling notify() again — the emit pump itself never
+ * suspends and never holds a coroutine. This separation is what
+ * lets several concurrent handlers each submit_response and exit
+ * cleanly; emit then ships all of their frames interleaved in one
+ * scheduler tick.
+ * ------------------------------------------------------------------------- */
+
+void http2_session_notify(http2_session_t *session);
+void http2_session_emit  (http2_session_t *session);
+
+/* -------------------------------------------------------------------------
  * Response submission.
  * ------------------------------------------------------------------------- */
 

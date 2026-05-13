@@ -102,17 +102,17 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 #ifdef HAVE_OPENSSL
 /* ===== TLS path entry points (defined in http_connection_tls.c) ===== */
 
-/* Producer-side send: push @p len plaintext bytes through the BIO ring,
- * own the flusher role if free, suspend on tls_drain_event when full.
- * The plaintext http_connection_send routes here when conn->tls != NULL.
- * Must be called from coroutine context (handler coroutine). */
-bool tls_push_and_maybe_flush(http_connection_t *conn,
-                              const char *data, size_t len);
+/* Push @p len plaintext bytes through the encrypted channel. MUST be
+ * called from a coroutine — waits on tls_space_event for ring room,
+ * BIO_writes atomically, kicks the drain. Returns false only on a
+ * sticky TLS write error. */
+bool tls_push(http_connection_t *conn, const char *data, size_t len);
 
-/* Fire-and-forget variant of tls_push_and_maybe_flush for the h1 dispose
- * hot path. Falls back when flusher role is already held. */
-bool tls_push_and_fire(http_connection_t *conn,
-                       const char *data, size_t len);
+/* Scheduler-side TLS drain: SSL_writes plaintext from the BIO ring
+ * into the cipher BIO and submits one ciphertext span via WRITE_EX.
+ * Never yields, safe to call from any non-coroutine context. Exposed
+ * so the h2 emit pump can flush after BIO_write'ing fresh h2 frames. */
+bool tls_drain(http_connection_t *conn);
 
 /* Arm the TLS read FSM on a freshly created connection. Submits the
  * first one-shot read into the cipher BIO, attaches the persistent
@@ -146,6 +146,10 @@ bool http_connection_tls_fsm_send_in_flight(const http_connection_t *conn);
 bool http_connection_tls_fsm_send_plaintext_atomic(http_connection_t *conn,
                                                    const char *data,
                                                    size_t len);
+
+/* Dispose tls_space_event and wake every coroutine still parked on
+ * it. Called from http_connection_destroy before BIOs go away. */
+void tls_release_waiters(http_connection_t *conn);
 #endif /* HAVE_OPENSSL */
 
 #endif /* HTTP_CONNECTION_INTERNAL_H */

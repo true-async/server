@@ -350,11 +350,11 @@ static void h1_send_handle_sendfile_done(h1_send_state_t *state)
  *     ZEND_ASYNC_IO_READ(file_io, chunk_buf, H1_SEND_TLS_CHUNK_BYTES)
  *       → on completion (TLS_READ → handle_tls_read_done)
  *           SSL_write(chunk_buf, n) via tls_fsm_send_plaintext_atomic
- *               → tls_fsm_send_kick submits ciphertext fire-and-forget
- *                 to libuv (zero-copy peek out of the BIO ring)
- *           if (zc_write_n == 0)            sync-complete: loop again
+ *               → tls_drain submits ciphertext fire-and-forget to
+ *                 libuv (zero-copy peek out of the BIO ring)
+ *           if (cipher_inflight == 0)       sync-complete: loop again
  *           else                            park in TLS_DRAIN
- *               → on cipher write completion (tls_zc_write_done_cb
+ *               → on cipher completion (tls_zc_write_done_cb
  *                 ↦ tls_drain_done_cb)      loop again
  *     EOF (transferred == 0)               finalize
  *
@@ -370,7 +370,7 @@ static bool h1_send_tls_submit_next_read(h1_send_state_t *state)
          * write to finish before finalizing — but if it's already
          * settled, finalize now. The DRAIN cb path handles the not-
          * yet-settled case. */
-        if (state->conn->tls_zc_write_n != 0) {
+        if (state->conn->tls_cipher_inflight != 0) {
             state->phase = H1_SEND_PHASE_TLS_DRAIN;
             return true;
         }
@@ -436,7 +436,7 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
     /* Sync-complete cipher write (rare on Linux, common on Windows
      * try-write fast path): zc_write_n already back to 0, no DRAIN
      * wait needed. Loop directly. */
-    if (state->conn->tls_zc_write_n == 0) {
+    if (state->conn->tls_cipher_inflight == 0) {
         if (UNEXPECTED(!h1_send_tls_submit_next_read(state))) {
             state->status = -1;
             h1_send_finalize(state);
@@ -568,7 +568,7 @@ int h1_stream_send_static_response(void *ctx_void,
              * still in flight, park on the drain cb so on_done
              * fires after the bytes are actually queued to libuv.
              * Sync-complete: finalize directly. */
-            if (conn->tls_zc_write_n != 0) {
+            if (conn->tls_cipher_inflight != 0) {
                 conn->tls_zc_write_done_cb = h1_send_tls_drain_done_cb;
                 conn->tls_zc_write_done_cb_data = state;
                 state->phase = H1_SEND_PHASE_TLS_DRAIN;
@@ -624,7 +624,7 @@ int h1_stream_send_static_response(void *ctx_void,
         /* Headers atomic-send may have left a write in flight. If so,
          * park in DRAIN and let the cb call submit_next_read once the
          * BIO ring has drained. Sync-complete: jump in directly. */
-        if (conn->tls_zc_write_n != 0) {
+        if (conn->tls_cipher_inflight != 0) {
             state->phase = H1_SEND_PHASE_TLS_DRAIN;
             return 0;
         }
