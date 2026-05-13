@@ -14,6 +14,7 @@
 #endif
 
 #include "php.h"
+#include "Zend/zend_async_API.h"
 #include <nghttp2/nghttp2.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -100,18 +101,41 @@ http2_session_t *http2_session_new(http_connection_t *conn,
                                    void *user_data);
 void             http2_session_free(http2_session_t *session);
 
-/* Test / introspection: fetch the stream bound to @p stream_id from
- * the session's stream table. Returns NULL if no such stream exists.
- * Lets unit tests inspect stream state without reaching into the
- * private struct. */
-http2_stream_t *http2_session_find_stream(http2_session_t *session,
-                                          uint32_t stream_id);
+/* Session struct exposed for inline hot-path accessors below. Internal
+ * to the h2 TUs (header is only included by src/http2/*.c). */
+struct http2_session_t {
+    nghttp2_session   *ng;
+    http_connection_t *conn;
 
-/* Owning connection accessor. Per-stream handler coroutines
- * need to reach conn->handler / conn->scope / conn->server from
- * inside the session-private callback path. Returns the conn pointer
- * passed to http2_session_new (NULL in unit tests). */
-http_connection_t *http2_session_get_conn(http2_session_t *session);
+    http2_request_ready_cb_t  on_request_ready;
+    void                     *on_request_ready_user_data;
+
+    const uint8_t *send_pending;
+    size_t         send_pending_len;
+    size_t         send_pending_offset;
+
+    HashTable      streams;
+
+    uint64_t       last_ping_rtt_ns;
+    uint32_t       last_peer_stream_id;
+    bool           bad_preface_emit_goaway;
+
+    zend_async_trigger_event_t   *emit_event;
+    zend_async_event_callback_t  *emit_cb;
+};
+
+static inline http2_stream_t *http2_session_find_stream(
+                                http2_session_t *session,
+                                const uint32_t stream_id)
+{
+    zval *zv = zend_hash_index_find(&session->streams, stream_id);
+    return zv != NULL ? (http2_stream_t *)Z_PTR_P(zv) : NULL;
+}
+
+static inline http_connection_t *http2_session_get_conn(http2_session_t *session)
+{
+    return session->conn;
+}
 
 /* -------------------------------------------------------------------------
  * Emit pump (issue #23).
@@ -133,8 +157,14 @@ http_connection_t *http2_session_get_conn(http2_session_t *session);
  * scheduler tick.
  * ------------------------------------------------------------------------- */
 
-void http2_session_notify(http2_session_t *session);
-void http2_session_emit  (http2_session_t *session);
+static inline void http2_session_notify(http2_session_t *session)
+{
+    if (session->emit_event != NULL) {
+        session->emit_event->trigger(session->emit_event);
+    }
+}
+
+void http2_session_emit(http2_session_t *session);
 
 /* -------------------------------------------------------------------------
  * Response submission.

@@ -47,71 +47,8 @@
  *                         guard).
  */
 
-struct http2_session_t {
-    nghttp2_session   *ng;
-
-    /* Owning connection — used by session-level callbacks that need
-     * to reach the connection layer directly (without hopping through
-     * the strategy trampoline): per-stream handler dispatch under
-     * conn->scope, admission control against conn->server (CoDel /
-     * REFUSED_STREAM), and telemetry flush on stream close.
-     * NULL in unit tests that drive the session without a real
-     * connection fixture. */
-    http_connection_t *conn;
-
-    /* Dispatch hook — called on HEADERS + END_HEADERS per stream. */
-    http2_request_ready_cb_t  on_request_ready;
-    void                     *on_request_ready_user_data;
-
-    /* Pending outbound slice — see http2_session_drain. Lives inside
-     * nghttp2's internal buffers; we must not free it. Valid until the
-     * next nghttp2_session_mem_send call. */
-    const uint8_t *send_pending;
-    size_t         send_pending_len;
-    size_t         send_pending_offset;
-
-    /* Stream table: stream_id → http2_stream_t*. Keeps ownership
-     * explicit for teardown; nghttp2 separately holds the same pointer
-     * via stream_user_data so callbacks can do O(1) lookups without
-     * touching this table. */
-    HashTable      streams;
-
-    /* PING RTT state. Our own outbound PINGs embed a
-     * zend_hrtime() stamp as the 8-byte opaque payload; when the peer
-     * bounces it back with NGHTTP2_FLAG_ACK, on_frame_recv decodes and
-     * stores the delta here. nghttp2 auto-ACKs peer-initiated pings
-     * without help from us — nothing to measure on that path. */
-    uint64_t       last_ping_rtt_ns;
-
-    /* Highest peer-initiated stream-id we have accepted. Peer streams
-     * MUST be monotonically increasing per RFC 9113 §5.1.1 — the first
-     * use of a new stream-id implicitly closes all lower idle ones, so
-     * receiving a smaller id later is a connection error PROTOCOL_ERROR.
-     * Set in cb_on_begin_headers; zero means "no peer stream seen yet".
-     *
-     * Client-initiated streams are also required to be odd; even peer
-     * ids on the server side are likewise PROTOCOL_ERROR (reserved for
-     * server-initiated push). */
-    uint32_t       last_peer_stream_id;
-
-    /* Set when nghttp2_session_mem_recv fails with
-     * NGHTTP2_ERR_BAD_CLIENT_MAGIC. At that point the session is
-     * unrecoverable and the library will not accept or emit any more
-     * frames, so we can't use submit_goaway. The caller checks this
-     * flag on the error path and writes a hand-crafted GOAWAY frame
-     * directly to the socket before closing. */
-    bool           bad_preface_emit_goaway;
-
-    /* Outbound emit pump (h2o-style). After a handler queues frames
-     * via nghttp2_submit_* it calls http2_session_notify(), which
-     * triggers emit_event. The registered emit_cb fires from
-     * scheduler context and runs http2_session_emit(), which drains
-     * nghttp2's frame queue into the transport (plaintext socket or
-     * TLS plaintext BIO). Backpressure pauses the pump; the next
-     * cipher_completion / write_complete re-notifies. */
-    zend_async_trigger_event_t   *emit_event;
-    zend_async_event_callback_t  *emit_cb;
-};
+/* struct http2_session_t now defined in http2_session.h for inline
+ * hot-path accessors (find_stream / get_conn / notify). */
 
 /* -------------------------------------------------------------------------
  * Stream table helpers
@@ -135,18 +72,6 @@ static void stream_table_remove(http2_session_t *session,
                                 const uint32_t stream_id)
 {
     zend_hash_index_del(&session->streams, stream_id);
-}
-
-http2_stream_t *http2_session_find_stream(http2_session_t *session,
-                                          const uint32_t stream_id)
-{
-    zval *zv = zend_hash_index_find(&session->streams, stream_id);
-    return zv != NULL ? (http2_stream_t *)Z_PTR_P(zv) : NULL;
-}
-
-http_connection_t *http2_session_get_conn(http2_session_t *session)
-{
-    return session->conn;
 }
 
 /* Internal accessor — exported (extern decl in callers) so the
@@ -828,13 +753,6 @@ static void http2_emit_cb_fn(zend_async_event_t *event,
 
     if (cb->session != NULL) {
         http2_session_emit(cb->session);
-    }
-}
-
-void http2_session_notify(http2_session_t *session)
-{
-    if (session->emit_event != NULL) {
-        session->emit_event->trigger(session->emit_event);
     }
 }
 
