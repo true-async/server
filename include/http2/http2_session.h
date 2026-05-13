@@ -156,6 +156,15 @@ struct http2_emit_state {
     zend_object **body_refs;
     unsigned      body_refs_count;
     unsigned      body_refs_cap;
+
+    /* Optional output-byte budget per nghttp2_session_send call. When
+     * set (TLS path), the send / send_data callbacks return WOULDBLOCK
+     * once `bytes_appended` reaches `byte_cap`, pausing nghttp2 so the
+     * gather + SSL_write cycle never produces more plaintext than the
+     * cipher BIO ring can encrypt in one record. h2c sets byte_cap = 0
+     * (no limit; writev_ex handles arbitrary sizes). */
+    size_t   byte_cap;
+    size_t   bytes_appended;
 };
 
 static inline http2_stream_t *http2_session_find_stream(

@@ -833,7 +833,15 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_WOULDBLOCK;
     }
 
+    /* Per-pass byte budget (TLS path). First chunk always goes through
+     * so we make progress even if a single block exceeds the cap. */
+    if (session->emit_state->byte_cap > 0
+        && session->emit_state->bytes_appended >= session->emit_state->byte_cap) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+
     (void)h2_emit_state_append_buf(session->emit_state, data, length);
+    session->emit_state->bytes_appended += length;
     return (ssize_t)length;
 }
 
@@ -858,6 +866,13 @@ static int h2_send_data_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
 
+    /* Per-pass byte budget (TLS path) — defer to next session_send if
+     * we'd exceed cipher_bio capacity. */
+    if (session->emit_state->byte_cap > 0
+        && session->emit_state->bytes_appended >= session->emit_state->byte_cap) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+
     (void)h2_emit_state_append_buf(session->emit_state, framehd, 9);
 
     const char *payload = stream->response_body + stream->response_body_offset;
@@ -865,6 +880,7 @@ static int h2_send_data_callback(nghttp2_session *ng,
                         ? Z_OBJ(stream->response_zv) : NULL;
 
     (void)h2_emit_state_append_body(session->emit_state, payload, length, ref);
+    session->emit_state->bytes_appended += 9 + length;
 
     stream->response_body_offset += length;
 
