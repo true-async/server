@@ -119,9 +119,6 @@ struct http2_session_t {
     uint64_t       last_ping_rtt_ns;
     uint32_t       last_peer_stream_id;
     bool           bad_preface_emit_goaway;
-
-    zend_async_trigger_event_t   *emit_event;
-    zend_async_event_callback_t  *emit_cb;
 };
 
 static inline http2_stream_t *http2_session_find_stream(
@@ -138,31 +135,20 @@ static inline http_connection_t *http2_session_get_conn(http2_session_t *session
 }
 
 /* -------------------------------------------------------------------------
- * Emit pump (issue #23).
+ * h2 + TLS write pipeline (issue #23). Single-threaded, no cross-TU events.
  *
- * Decouples response submission from frame emission. Handlers and other
- * frame producers (cb_on_frame_recv reactions, WINDOW_UPDATE responders,
- * the bind-time SETTINGS path) call http2_session_notify() after they
- * have queued frames via nghttp2_submit_*. notify() triggers a uv_async
- * which fires the registered callback in scheduler context; the
- * callback calls http2_session_emit() which drains nghttp2's frame
- * queue into the transport (plaintext socket for h2c, plaintext BIO for
- * TLS) and stops on transport backpressure.
+ *   producer → nghttp2_submit_* → http2_session_emit(session)
+ *     emit: mem_send into plaintext_bio; tls_drain(conn)
+ *     tls_drain (gated on cipher_inflight): SSL_write → BIO_nread0 →
+ *       ZEND_ASYNC_IO_WRITE_EX; sets cipher_inflight; returns.
+ *   completion (libuv cb, scheduler ctx): BIO_nread, cipher_inflight=0,
+ *     direct http2_session_emit(session) — no event, no timer.
  *
- * Backpressure resumes through tls_cipher_completion / batched-write
- * completion calling notify() again — the emit pump itself never
- * suspends and never holds a coroutine. This separation is what
- * lets several concurrent handlers each submit_response and exit
- * cleanly; emit then ships all of their frames interleaved in one
- * scheduler tick.
+ * Coroutine producer suspends on tls_space_event when plaintext_bio is
+ * full; tls_signal_space wakes it from inside tls_drain after SSL_write
+ * actually freed plaintext room. The h2 machine itself knows nothing
+ * about coroutines.
  * ------------------------------------------------------------------------- */
-
-static inline void http2_session_notify(http2_session_t *session)
-{
-    if (session->emit_event != NULL) {
-        session->emit_event->trigger(session->emit_event);
-    }
-}
 
 void http2_session_emit(http2_session_t *session);
 

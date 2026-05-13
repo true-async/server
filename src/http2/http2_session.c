@@ -729,34 +729,6 @@ static void install_callbacks(nghttp2_session_callbacks *cbs)
 }
 
 /* -------------------------------------------------------------------------
- * Emit pump — h2o-style writereq machinery (issue #23).
- * ------------------------------------------------------------------------- */
-
-typedef struct {
-    zend_async_event_callback_t  base;
-    http2_session_t             *session;
-} http2_emit_cb_t;
-
-static void http2_emit_cb_dispose(zend_async_event_callback_t *callback,
-                                  zend_async_event_t *event)
-{
-    (void)event;
-    efree(callback);
-}
-
-static void http2_emit_cb_fn(zend_async_event_t *event,
-                             zend_async_event_callback_t *callback,
-                             void *result, zend_object *exception)
-{
-    (void)event; (void)result; (void)exception;
-    http2_emit_cb_t *cb = (http2_emit_cb_t *)callback;
-
-    if (cb->session != NULL) {
-        http2_session_emit(cb->session);
-    }
-}
-
-/* -------------------------------------------------------------------------
  * Internal helpers
  * ------------------------------------------------------------------------- */
 
@@ -845,26 +817,6 @@ http2_session_t *http2_session_new(http_connection_t *conn,
         return NULL;
     }
 
-    /* Emit pump — see http2_session_notify / http2_session_emit. */
-    session->emit_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
-
-    if (session->emit_event != NULL) {
-        http2_emit_cb_t *cb = (http2_emit_cb_t *)
-            ZEND_ASYNC_EVENT_CALLBACK_EX(http2_emit_cb_fn, sizeof(*cb));
-
-        if (cb != NULL) {
-            cb->base.dispose = http2_emit_cb_dispose;
-            cb->session      = session;
-
-            if (session->emit_event->base.add_callback(
-                    &session->emit_event->base, &cb->base)) {
-                session->emit_cb = &cb->base;
-            } else {
-                efree(cb);
-            }
-        }
-    }
-
     return session;
 }
 
@@ -872,19 +824,6 @@ void http2_session_free(http2_session_t *session)
 {
     if (session == NULL) {
         return;
-    }
-
-    /* Tear down the emit pump before the session — the registered
-     * callback dereferences session->emit_cb->session, which is about
-     * to disappear. dispose() also unhooks any pending uv_async. */
-    if (session->emit_event != NULL) {
-        if (session->emit_cb != NULL) {
-            http2_emit_cb_t *cb = (http2_emit_cb_t *)session->emit_cb;
-            cb->session = NULL;
-        }
-        session->emit_event->base.dispose(&session->emit_event->base);
-        session->emit_event = NULL;
-        session->emit_cb    = NULL;
     }
 
     /* nghttp2_session_del invokes on_stream_close for every live stream;

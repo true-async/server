@@ -491,9 +491,11 @@ static void tls_cipher_completion(void *data, zend_async_io_t *io)
         return;
     }
 
-    /* Plaintext BIO just gained room; the h2 emit pump may have more
-     * frames waiting in the nghttp2 outbound queue. No-op on plain
-     * HTTP/1 connections. */
+    /* Plaintext BIO just gained room — drive the h2 emit pump
+     * synchronously to drain any frames nghttp2 has queued. Same
+     * scheduler context as http2_session_emit runs in; tls_drain's
+     * tls_draining guard handles re-entrancy. No-op on plain HTTP/1
+     * connections (NULL strategy / non-h2). */
     {
         extern void http2_conn_notify_emit(http_connection_t *);
         http2_conn_notify_emit(conn);

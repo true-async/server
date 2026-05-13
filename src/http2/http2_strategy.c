@@ -1014,7 +1014,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         http_server_on_h2_goaway_sent(conn->counters);
     }
 
-    http2_session_notify(self->session);
+    http2_session_emit(self->session);
     return true;
 }
 
@@ -1423,9 +1423,10 @@ const http_response_stream_ops_t h2_stream_ops = {
     .send_static_response = h2_stream_send_static_response,
 };
 
-/* External entry for non-h2 TUs (tls_cipher_completion) — wake the
- * emit pump if this conn carries an h2 session. Cheap on plain HTTP/1
- * connections (NULL strategy / non-h2 strategy). */
+/* External entry for non-h2 TUs (tls_cipher_completion): drive the
+ * emit pump after a cipher write freed BIO ring space. Direct C call,
+ * same scheduler context. tls_draining guards re-entrancy inside
+ * tls_drain. Cheap on plain HTTP/1 (NULL/non-h2 strategy). */
 void http2_conn_notify_emit(http_connection_t *conn)
 {
     if (conn == NULL || conn->strategy == NULL ||
@@ -1436,7 +1437,7 @@ void http2_conn_notify_emit(http_connection_t *conn)
     const http2_strategy_t *self = (const http2_strategy_t *)conn->strategy;
 
     if (self->session != NULL) {
-        http2_session_notify(self->session);
+        http2_session_emit(self->session);
     }
 }
 
