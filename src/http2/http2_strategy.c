@@ -1153,10 +1153,15 @@ void http2_session_emit(http2_session_t *session)
 
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
-        /* Cap each pass at one TLS record (16 KiB plaintext). Larger
-         * batches blow past cipher_bio (17 KiB ring); cipher_completion
-         * re-enters this fn and drains the next chunk in a chain. */
-        st.byte_cap = 16384;
+        /* byte_cap bounds plaintext per emit pass so SSL_write_ex never
+         * WANT_WRITEs on cipher_bio. The callback that returns WOULDBLOCK
+         * may overshoot the cap by one chunk (≤ 16 KiB + 9 B framehd),
+         * so the true upper bound on plaintext is byte_cap + 16 KiB.
+         * That must fit ⌊ring / 16406⌋ records (16406 = 16384 plaintext
+         * + ~22 B AEAD overhead per record). For ring = 64 KiB → fits 3
+         * records (49218 B) → byte_cap = 32 KiB gives a worst-case
+         * 48 KiB plaintext = 3 records (49218 ciphertext) ≤ 64 KiB. */
+        st.byte_cap = 32 * 1024;
     }
 #endif
 

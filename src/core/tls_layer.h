@@ -133,13 +133,16 @@ typedef enum {
 /**
  * BIO pair ring-buffer size per direction, in bytes.
  *
- * One TLS record is at most 16 KiB of plaintext + ~325 bytes of
- * framing/overhead (TLS 1.3: 5-byte header + auth tag + content-type).
- * A 17 KiB ring fits exactly one record in steady state; that is the
- * sweet spot — enough to avoid unnecessary fragmentation, small enough
- * to keep per-connection memory predictable.
+ * One TLS record is at most 16 KiB plaintext + ~325 bytes overhead
+ * (TLS 1.3: 5-byte header + auth tag + content-type). At 64 KiB the
+ * cipher ring fits four full records, so a single SSL_write_ex per
+ * h2 emit pass can encrypt up to ~64 KiB plaintext in one shot —
+ * shipped as one WRITE_EX submission to libuv, ~4× the per-tick
+ * throughput we'd see with a single-record ring on bodies > 16 KiB.
+ *
+ * Memory cost: +47 KiB per TLS connection vs the old 17 KiB.
  */
-#define TLS_BIO_RING_SIZE (17 * 1024)
+#define TLS_BIO_RING_SIZE (64 * 1024)
 
 /**
  * Maximum length of an error string written by tls_context_new().
