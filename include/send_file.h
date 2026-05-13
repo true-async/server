@@ -137,4 +137,9 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 							 const send_file_config_t *config, const send_file_cbs_t *cbs,
 							 void *user);
 
+/* File-size threshold below which the static-handler's slurp fast-path
+ * is strictly cheaper than the async engine. See http_static_try_serve
+ * routing and the matching slurp branch inside the send_file engine. */
+#define SEND_FILE_SLURP_THRESHOLD ((size_t)64 * 1024)
+
 #endif

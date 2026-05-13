@@ -485,8 +485,6 @@ static void engine_handle_stat(engine_state_t *state)
 	 * files the round-trip dominates. Slurp inline and let the protocol
 	 * op writev(headers+body) through the same per-socket queue that
 	 * headers normally use; ordering is then libuv's problem. */
-#define SEND_FILE_SLURP_THRESHOLD ((size_t)64 * 1024)
-
 	if (!state->is_range && (size_t)state->st.st_size <= SEND_FILE_SLURP_THRESHOLD &&
 		file_io != NULL) {
 		zend_string *body = fs_slurp_fd((int)file_io->descriptor.fd, (size_t)state->st.st_size);
