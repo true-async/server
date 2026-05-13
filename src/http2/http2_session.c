@@ -718,6 +718,164 @@ static int cb_on_stream_close(nghttp2_session *ng,
     return 0;
 }
 
+/* -------------------------------------------------------------------------
+ * h2c iov emit helpers — append into session->emit_state from inside
+ * nghttp2 send / send_data callbacks. emit_state is set by the caller
+ * (http2_session_emit on plaintext connections) and NULL otherwise.
+ * ------------------------------------------------------------------------- */
+
+static bool h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t need)
+{
+    if (need <= st->emit_buf_cap) { return true; }
+
+    size_t new_cap = st->emit_buf_cap ? st->emit_buf_cap * 2 : 32768;
+
+    while (new_cap < need) { new_cap *= 2; }
+
+    char *new_buf = st->emit_buf_on_heap
+                  ? erealloc(st->emit_buf, new_cap)
+                  : emalloc(new_cap);
+
+    if (!st->emit_buf_on_heap) {
+        if (st->emit_buf_len > 0 && st->stack_origin != NULL) {
+            memcpy(new_buf, st->stack_origin, st->emit_buf_len);
+        }
+        st->emit_buf_on_heap = true;
+    }
+
+    st->emit_buf = new_buf;
+    st->emit_buf_cap = new_cap;
+    return true;
+}
+
+static bool h2_emit_state_grow_records(struct http2_emit_state *st)
+{
+    if (st->records_count < st->records_cap) { return true; }
+
+    const unsigned new_cap = st->records_cap ? st->records_cap * 2 : 64;
+    st->records = st->records == NULL
+                ? emalloc(new_cap * sizeof(*st->records))
+                : erealloc(st->records, new_cap * sizeof(*st->records));
+    st->records_cap = new_cap;
+    return true;
+}
+
+static bool h2_emit_state_grow_refs(struct http2_emit_state *st)
+{
+    if (st->body_refs_count < st->body_refs_cap) { return true; }
+
+    const unsigned new_cap = st->body_refs_cap ? st->body_refs_cap * 2 : 32;
+    st->body_refs = st->body_refs == NULL
+                  ? emalloc(new_cap * sizeof(*st->body_refs))
+                  : erealloc(st->body_refs, new_cap * sizeof(*st->body_refs));
+    st->body_refs_cap = new_cap;
+    return true;
+}
+
+/* Append nghttp2 bytes into emit_buf. Coalesce with the previous record
+ * if it was a contiguous emit_buf chunk. */
+static int h2_emit_state_append_buf(struct http2_emit_state *st,
+                                    const uint8_t *data, const size_t len)
+{
+    h2_emit_state_grow_buf(st, st->emit_buf_len + len);
+    memcpy(st->emit_buf + st->emit_buf_len, data, len);
+    const uint32_t offset = (uint32_t)st->emit_buf_len;
+    st->emit_buf_len += len;
+
+    if (st->records_count > 0) {
+        http2_emit_record_t *last = &st->records[st->records_count - 1];
+        if (!last->is_body
+            && last->buf.offset + last->buf.len == offset) {
+            last->buf.len += (uint32_t)len;
+            return 0;
+        }
+    }
+
+    h2_emit_state_grow_records(st);
+    http2_emit_record_t *rec = &st->records[st->records_count++];
+    rec->is_body    = false;
+    rec->buf.offset = offset;
+    rec->buf.len    = (uint32_t)len;
+    return 0;
+}
+
+static int h2_emit_state_append_body(struct http2_emit_state *st,
+                                     const char *ptr, const size_t len,
+                                     zend_object *obj_ref)
+{
+    h2_emit_state_grow_records(st);
+    http2_emit_record_t *rec = &st->records[st->records_count++];
+    rec->is_body   = true;
+    rec->body.ptr  = ptr;
+    rec->body.len  = (uint32_t)len;
+
+    if (obj_ref != NULL) {
+        h2_emit_state_grow_refs(st);
+        GC_ADDREF(obj_ref);
+        st->body_refs[st->body_refs_count++] = obj_ref;
+    }
+
+    return 0;
+}
+
+/* nghttp2 send_callback — used when http2_session_emit drives via
+ * nghttp2_session_send (h2c iov path). For other callers (TLS via
+ * mem_send, control-frame flush via drain) emit_state is NULL and this
+ * callback never fires. */
+static ssize_t h2_send_callback(nghttp2_session *ng,
+                                const uint8_t *data, size_t length,
+                                int flags, void *user_data)
+{
+    (void)ng; (void)flags;
+    http2_session_t *session = (http2_session_t *)user_data;
+
+    if (UNEXPECTED(session->emit_state == NULL)) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+
+    (void)h2_emit_state_append_buf(session->emit_state, data, length);
+    return (ssize_t)length;
+}
+
+/* nghttp2 send_data_callback — fires for NO_COPY DATA frames during
+ * session_send (h2c iov path). Writes framehd[9] into emit_buf and
+ * records a body iov entry pointing into stream->response_body (no
+ * copy). The response object is addref'd so the body memory survives
+ * until the writev completion. Streaming chunk_queue path never sets
+ * NO_COPY in read_callback, so this only fires for buffered responses. */
+static int h2_send_data_callback(nghttp2_session *ng,
+                                 nghttp2_frame *frame,
+                                 const uint8_t *framehd,
+                                 size_t length,
+                                 nghttp2_data_source *source,
+                                 void *user_data)
+{
+    (void)ng;
+    http2_session_t *session = (http2_session_t *)user_data;
+    http2_stream_t  *stream  = (http2_stream_t *)source->ptr;
+
+    if (UNEXPECTED(session->emit_state == NULL)) {
+        return NGHTTP2_ERR_CALLBACK_FAILURE;
+    }
+
+    (void)h2_emit_state_append_buf(session->emit_state, framehd, 9);
+
+    const char *payload = stream->response_body + stream->response_body_offset;
+    zend_object *ref    = Z_TYPE(stream->response_zv) == IS_OBJECT
+                        ? Z_OBJ(stream->response_zv) : NULL;
+
+    (void)h2_emit_state_append_body(session->emit_state, payload, length, ref);
+
+    stream->response_body_offset += length;
+
+    if (session->conn != NULL && length > 0) {
+        http_server_on_h2_data_sent(session->conn->counters, length);
+    }
+
+    (void)frame;
+    return 0;
+}
+
 static void install_callbacks(nghttp2_session_callbacks *cbs)
 {
     nghttp2_session_callbacks_set_on_begin_frame_callback(cbs, cb_on_begin_frame);
@@ -726,6 +884,8 @@ static void install_callbacks(nghttp2_session_callbacks *cbs)
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, cb_on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_frame_recv_callback   (cbs, cb_on_frame_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback (cbs, cb_on_stream_close);
+    nghttp2_session_callbacks_set_send_callback            (cbs, h2_send_callback);
+    nghttp2_session_callbacks_set_send_data_callback       (cbs, h2_send_data_callback);
 }
 
 /* -------------------------------------------------------------------------
@@ -1051,10 +1211,29 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
         return (ssize_t)written;
     }
 
-    /* Buffered path (legacy) — single-pointer zero-copy read. */
+    /* Buffered path. Two modes:
+     *   - iov mode (h2c plaintext emit set emit_state): announce the
+     *     bytes via NGHTTP2_DATA_FLAG_NO_COPY; h2_send_data_callback
+     *     writes payload pointer into the iov record and advances
+     *     response_body_offset.
+     *   - legacy memcpy mode (TLS, control-flush): copy into nghttp2's
+     *     buf as before. */
     const size_t left =
         stream->response_body_len - stream->response_body_offset;
     const size_t to_copy = left < length ? left : length;
+
+    if (ds_session != NULL && ds_session->emit_state != NULL) {
+        *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
+
+        if (left <= length) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            if (stream->has_trailers) {
+                *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+            }
+        }
+
+        return (ssize_t)to_copy;
+    }
 
     if (to_copy > 0) {
         memcpy(buf, stream->response_body + stream->response_body_offset,

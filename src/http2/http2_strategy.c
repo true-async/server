@@ -101,6 +101,18 @@ static void h2_stream_mark_ended(void *ctx);
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn);
 
+/* Submit ownership context handed to send_batched_writev. free_cb
+ * releases body addrefs (so the response objects survive the in-flight
+ * writev), the iov array, the heap emit_buf, and the ctx itself. */
+typedef struct {
+    char         *emit_buf;
+    zend_async_buf_t *iov;
+    zend_object **body_refs;
+    unsigned      body_refs_cnt;
+} h2_writev_ctx_t;
+
+static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io);
+
 /* === Static-handler dispatch callbacks ============================
  *
  * The protocol-agnostic static FSM in src/static/http_static.c calls
@@ -1162,55 +1174,94 @@ void http2_session_emit(http2_session_t *session)
     }
 #endif
 
-    /* Stack-first to avoid heap churn on the small-response hot path.
-     * One nghttp2 frame ≤ 16 KiB + 9-byte header; the buffer fits two
-     * frames so most responses ship without touching the heap. */
-    char    stack_buf[32768];
-    char   *buf   = stack_buf;
-    size_t  cap   = sizeof(stack_buf);
-    size_t  total = 0;
+    /* h2c iov emit. Set up emit_state so nghttp2's send_callback and
+     * send_data_callback append into it. emit_buf starts on the stack;
+     * h2_emit_state_grow_buf promotes to heap on overflow. After
+     * session_send returns, records[] is walked into iov[] (offsets
+     * stay valid through realloc) and handed off to send_batched_writev. */
+    char stack_buf[32768];
+    struct http2_emit_state st = {
+        .emit_buf         = stack_buf,
+        .emit_buf_len     = 0,
+        .emit_buf_cap     = sizeof(stack_buf),
+        .emit_buf_on_heap = false,
+        .stack_origin     = stack_buf,
+    };
+    session->emit_state = &st;
 
-    while (http2_session_want_write(session)) {
-        if (cap - total < 16384) {
-            const size_t new_cap = cap * 2;
-            char *new_buf = (buf == stack_buf)
-                            ? emalloc(new_cap)
-                            : erealloc(buf, new_cap);
+    const int rc = nghttp2_session_send(session->ng);
 
-            if (buf == stack_buf) {
-                memcpy(new_buf, stack_buf, total);
-            }
+    session->emit_state = NULL;
 
-            buf = new_buf;
-            cap = new_cap;
+    if (UNEXPECTED(rc != 0)) {
+        if (st.emit_buf_on_heap) { efree(st.emit_buf); }
+        if (st.records != NULL)  { efree(st.records); }
+        for (unsigned i = 0; i < st.body_refs_count; i++) {
+            OBJ_RELEASE(st.body_refs[i]);
         }
-
-        const ssize_t n = http2_session_drain(session, buf + total, cap - total);
-
-        if (n < 0) {
-            if (buf != stack_buf) { efree(buf); }
-            return;
-        }
-
-        if (n == 0) { break; }
-
-        total += (size_t)n;
-    }
-
-    if (total == 0) {
-        if (buf != stack_buf) { efree(buf); }
+        if (st.body_refs != NULL) { efree(st.body_refs); }
         return;
     }
 
-    if (buf == stack_buf) {
-        /* send_batched takes ownership of the heap buffer and efrees on
-         * write completion; copy stack contents into a fresh heap buf. */
-        char *heap = emalloc(total);
-        memcpy(heap, stack_buf, total);
-        (void)http_connection_send_batched(conn, heap, total);
-    } else {
-        (void)http_connection_send_batched(conn, buf, total);
+    if (st.records_count == 0) {
+        if (st.emit_buf_on_heap) { efree(st.emit_buf); }
+        if (st.records != NULL)  { efree(st.records); }
+        if (st.body_refs != NULL) { efree(st.body_refs); }
+        return;
     }
+
+    /* Ensure emit_buf lives on the heap so the iov pointers we hand to
+     * the reactor outlive this stack frame. */
+    if (!st.emit_buf_on_heap) {
+        char *heap = emalloc(st.emit_buf_len);
+        memcpy(heap, st.emit_buf, st.emit_buf_len);
+        st.emit_buf = heap;
+        st.emit_buf_on_heap = true;
+    }
+
+    /* Build iov from records. emit_buf base is now final. */
+    zend_async_buf_t *iov = emalloc(st.records_count * sizeof(*iov));
+
+    for (unsigned i = 0; i < st.records_count; i++) {
+        const http2_emit_record_t *rec = &st.records[i];
+        if (rec->is_body) {
+            iov[i].base = (char *)rec->body.ptr;
+            iov[i].len  = rec->body.len;
+        } else {
+            iov[i].base = st.emit_buf + rec->buf.offset;
+            iov[i].len  = rec->buf.len;
+        }
+    }
+
+    /* Hand-off context: free_cb releases emit_buf + body refs + arrays. */
+    h2_writev_ctx_t *ctx = emalloc(sizeof(*ctx));
+    ctx->emit_buf      = st.emit_buf;
+    ctx->iov           = iov;
+    ctx->body_refs     = st.body_refs;
+    ctx->body_refs_cnt = st.body_refs_count;
+
+    const unsigned niov = st.records_count;
+
+    /* records[] is freed here; the iov + body_refs arrays live in ctx. */
+    if (st.records != NULL) { efree(st.records); }
+
+    (void)http_connection_send_batched_writev(conn, iov, niov,
+                                              h2c_writev_free_cb, ctx);
+}
+
+static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
+{
+    (void)io;
+    h2_writev_ctx_t *ctx = (h2_writev_ctx_t *)user_data;
+
+    for (unsigned i = 0; i < ctx->body_refs_cnt; i++) {
+        OBJ_RELEASE(ctx->body_refs[i]);
+    }
+
+    if (ctx->body_refs != NULL) { efree(ctx->body_refs); }
+    if (ctx->iov != NULL)       { efree(ctx->iov); }
+    if (ctx->emit_buf != NULL)  { efree(ctx->emit_buf); }
+    efree(ctx);
 }
 
 /* Suspend-until-drain-event helper. Called from append_chunk's tail

@@ -179,6 +179,14 @@ struct _http_connection_t {
     size_t   out_pending_len;
     size_t   out_pending_cap;
 
+    /* send_batched_writev passthrough: stash user free_cb + user_data
+     * here while one writev is in flight (out_in_flight guarantees
+     * single-writer serialisation, so it's safe to keep these on the
+     * connection rather than emalloc'ing a context per submit). The
+     * writev completion forwards them and then drains pending. */
+    zend_async_io_write_free_cb_t out_writev_user_cb;
+    void                         *out_writev_user_data;
+
     /* 4-byte fields */
     http_connection_state_t  state;
     http_protocol_type_t     protocol_type;
@@ -350,6 +358,18 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
  * only — TLS uses the BIO-pair zero-copy path. */
 bool http_connection_send_batched(http_connection_t *conn,
                                   void *buf, size_t len);
+
+/* Vectored variant of send_batched. iov[] is an array of (base, len)
+ * descriptors pointing into caller-owned memory; free_cb is invoked once
+ * with user_data + io on completion (or after the bytes are accepted into
+ * pending coalescing when a write is already in flight). When in flight
+ * the iov data is COPIED into out_pending_buf (same coalescing semantics
+ * as send_batched) and free_cb fires immediately. Plaintext only. */
+bool http_connection_send_batched_writev(http_connection_t *conn,
+                                         const zend_async_buf_t *iov,
+                                         unsigned niov,
+                                         zend_async_io_write_free_cb_t free_cb,
+                                         void *user_data);
 
 /* Vectored fire-and-forget variant: each slot of @p bufs is an OWNED
  * zend_string reference, consumed by the reactor's writev completion.

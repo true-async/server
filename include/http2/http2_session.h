@@ -119,6 +119,43 @@ struct http2_session_t {
     uint64_t       last_ping_rtt_ns;
     uint32_t       last_peer_stream_id;
     bool           bad_preface_emit_goaway;
+
+    /* h2c iov emit state. Pointer set by http2_session_emit (plaintext
+     * connections only) to a stack-allocated context for the duration
+     * of nghttp2_session_send; the send_callback / send_data_callback
+     * append output bytes into it. NULL outside emit and for TLS. */
+    struct http2_emit_state *emit_state;
+};
+
+/* Per-emit accumulator. emit_buf holds copied nghttp2 control/HEADERS
+ * bytes (and framehd[9] for NO_COPY DATA frames). records[] tracks the
+ * order in which output chunks were produced — converted into the final
+ * iov[] after nghttp2_session_send returns (offsets remain valid through
+ * emit_buf realloc). body_refs[] holds zend_object addrefs to keep
+ * response objects alive across the in-flight writev (released by the
+ * submit free_cb). */
+typedef struct http2_emit_record {
+    bool is_body;
+    union {
+        struct { uint32_t offset; uint32_t len; } buf;
+        struct { const char *ptr;  uint32_t len; } body;
+    };
+} http2_emit_record_t;
+
+struct http2_emit_state {
+    char     *emit_buf;
+    size_t    emit_buf_len;
+    size_t    emit_buf_cap;
+    bool      emit_buf_on_heap;
+    char     *stack_origin;            /* points at caller's stack array */
+
+    http2_emit_record_t *records;
+    unsigned             records_count;
+    unsigned             records_cap;
+
+    zend_object **body_refs;
+    unsigned      body_refs_count;
+    unsigned      body_refs_cap;
 };
 
 static inline http2_stream_t *http2_session_find_stream(

@@ -1357,6 +1357,125 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
     return true;
 }
 
+/* Vectored variant of send_batched. Same coalescing model: only one
+ * writev in flight at a time; additional submits while in-flight memcpy
+ * the iov data into out_pending_buf and fire the user free_cb
+ * immediately. The shared completion below forwards to the user cb,
+ * then drains pending via the single-buf path. */
+static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *io)
+{
+    http_connection_t *conn = (http_connection_t *)data;
+
+    /* Invoke user's release first (body refs, scratch contexts...).
+     * Pulled to a local so a re-entrant emit triggered downstream
+     * (defensive) sees the slot cleared. */
+    zend_async_io_write_free_cb_t user_cb = conn->out_writev_user_cb;
+    void *user_data = conn->out_writev_user_data;
+    conn->out_writev_user_cb   = NULL;
+    conn->out_writev_user_data = NULL;
+
+    if (user_cb != NULL) {
+        user_cb(user_data, io);
+    }
+
+    if (UNEXPECTED(io == NULL || conn != (http_connection_t *)io->user_data)) {
+        return;
+    }
+
+    if (conn->out_pending_len > 0) {
+        /* Drain accumulated single-buf batch via WRITE_EX. */
+        char  *next_buf = conn->out_pending_buf;
+        size_t next_len = conn->out_pending_len;
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+        /* out_in_flight stays true — chain continues. */
+        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+            conn->io, next_buf, next_len, http_send_batched_completion_cb);
+
+        if (UNEXPECTED(req == NULL)) {
+            conn->out_in_flight = false;
+        }
+
+        return;
+    }
+
+    conn->out_in_flight = false;
+
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+    }
+}
+
+bool http_connection_send_batched_writev(http_connection_t *conn,
+                                         const zend_async_buf_t *iov,
+                                         const unsigned niov,
+                                         zend_async_io_write_free_cb_t free_cb,
+                                         void *user_data)
+{
+    if (iov == NULL || niov == 0) {
+        if (free_cb != NULL) {
+            free_cb(user_data, conn != NULL ? conn->io : NULL);
+        }
+
+        return true;
+    }
+
+    if (UNEXPECTED(conn->write_timed_out)) {
+        if (free_cb != NULL) { free_cb(user_data, conn->io); }
+        return false;
+    }
+
+    if (conn->out_in_flight) {
+        /* Coalesce: copy iov bytes into out_pending_buf, fire user
+         * free_cb immediately (data is no longer needed). */
+        size_t total = 0;
+
+        for (unsigned i = 0; i < niov; i++) { total += iov[i].len; }
+
+        const size_t need = conn->out_pending_len + total;
+
+        if (need > conn->out_pending_cap) {
+            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
+
+            while (new_cap < need) { new_cap *= 2; }
+
+            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
+            conn->out_pending_cap = new_cap;
+        }
+
+        char *dst = conn->out_pending_buf + conn->out_pending_len;
+
+        for (unsigned i = 0; i < niov; i++) {
+            memcpy(dst, iov[i].base, iov[i].len);
+            dst += iov[i].len;
+        }
+
+        conn->out_pending_len += total;
+
+        if (free_cb != NULL) { free_cb(user_data, conn->io); }
+
+        return true;
+    }
+
+    /* No write in flight — submit WRITEV_EX directly (zero-copy iov). */
+    conn->out_writev_user_cb   = free_cb;
+    conn->out_writev_user_data = user_data;
+    conn->out_in_flight = true;
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV_EX(
+        conn->io, iov, niov, http_send_batched_writev_completion_cb, conn);
+
+    if (UNEXPECTED(req == NULL)) {
+        /* Reactor invoked our completion already (user cb fired, state
+         * cleared). out_in_flight was reset there. */
+        return false;
+    }
+
+    return true;
+}
+
 bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
 {
     if (body == NULL) {
