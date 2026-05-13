@@ -26,8 +26,8 @@
  *       slice is exhausted or the underlying file hits EOF.
  *     - dispatch callback (file_io completion): writes the bytes into
  *       the read buffer, calls nghttp2_session_resume_data, and drives
- *       http2_static_drain_to_socket so the freshly-readable DATA
- *       frame actually leaves the wire.
+ *       http2_session_emit so the freshly-readable DATA frame
+ *       actually leaves the wire.
  *     - On stream close (cb_on_stream_close): the per-stream on_close
  *       hook fires, which detaches the persistent cb, disposes
  *       file_io, and fires on_done exactly once.
@@ -91,12 +91,7 @@
  * emit between flow-control updates. */
 #define H2_STATIC_READ_CHUNK_BYTES (16u * 1024u)
 
-/* Submit + drain helpers exported from http2_session.c / strategy.
- * Local extern decls to keep the public headers free of these
- * internal hooks — only this TU needs them. */
 extern nghttp2_session *http2_session_get_ng(http2_session_t *session);
-extern void http2_static_drain_to_socket(http_connection_t *conn,
-                                         http2_session_t *session);
 
 typedef struct {
     http2_stream_t              *stream;
@@ -175,7 +170,7 @@ static void h2_static_on_window_open(zend_async_event_t *event,
         return;
     }
 
-    http2_static_drain_to_socket(state->conn, state->session);
+    http2_session_emit(state->session);
 }
 
 static void h2_static_finalize(h2_static_state_t *state, const int status)
@@ -306,7 +301,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
             (int32_t)state->stream->stream_id);
 
         if (state->conn != NULL) {
-            http2_static_drain_to_socket(state->conn, state->session);
+            http2_session_emit(state->session);
         }
     }
 
@@ -715,7 +710,7 @@ int h2_stream_send_static_response(void *ctx,
     /* Push HEADERS + the first DATA window onto the wire. Subsequent
      * WINDOW_UPDATE / inbound traffic drives further drains via
      * http2_feed's tail. */
-    http2_static_drain_to_socket(conn, stream->session);
+    http2_session_emit(stream->session);
 
     /* Head-only completes synchronously — there's no asynchronous
      * body callback to wait for, and the caller's static FSM tail

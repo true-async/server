@@ -1164,7 +1164,6 @@ bool http_connection_read(http_connection_t *conn)
  * the TLS branch on the inner loop. Internal — direct callers are the
  * plaintext path and the TLS encrypt path.
  */
-/* Cross-TU: also called from http_connection_tls_drain_ring_to_socket. */
 bool http_connection_send_raw(http_connection_t *conn,
                                      const char *data, const size_t len)
 {

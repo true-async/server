@@ -282,10 +282,9 @@ bool tls_push(http_connection_t *conn, const char *data, size_t len)
  * ZEND_ASYNC_IO_WRITE. The persistent send-completion callback frees
  * the buffer and re-enters tls_advance_state.
  *
- * Coordination with the producer flusher: while tls_flushing is held
- * the FSM defers submission and lets the flusher's BIO_nread0 loop
- * pick up the bytes. The flusher already drains residual ciphertext
- * via tls_drain_ring_to_socket on every loop iteration.
+ * Coordination with the scheduler-side drain (tls_drain): the FSM only
+ * runs during handshake / alert / close_notify, so after handshake the
+ * drain side owns all plaintext-→-ciphertext shipping.
  * ======================================================================== */
 
 /* Read-side dispatch callback. The FSM-send path is fire-and-forget
@@ -903,8 +902,8 @@ static void tls_advance_state(http_connection_t *conn)
 
             if (step == TLS_IO_WANT_READ || step == TLS_IO_WANT_WRITE) {
                 /* WANT_WRITE means OpenSSL has bytes in the wbio for
-                 * us to send; tls_fsm_send_kick already submitted
-                 * them. Progress now depends on an external event
+                 * us to send; the FSM send path already submitted
+                 * them. Progress depends on an external event
                  * (peer reply or send completion). */
                 return;
             }

@@ -140,17 +140,13 @@ static void stream_table_remove(http2_session_t *session,
 http2_stream_t *http2_session_find_stream(http2_session_t *session,
                                           const uint32_t stream_id)
 {
-    if (session == NULL) {
-        return NULL;
-    }
-
     zval *zv = zend_hash_index_find(&session->streams, stream_id);
     return zv != NULL ? (http2_stream_t *)Z_PTR_P(zv) : NULL;
 }
 
 http_connection_t *http2_session_get_conn(http2_session_t *session)
 {
-    return session != NULL ? session->conn : NULL;
+    return session->conn;
 }
 
 /* Internal accessor — exported (extern decl in callers) so the
@@ -837,7 +833,7 @@ static void http2_emit_cb_fn(zend_async_event_t *event,
 
 void http2_session_notify(http2_session_t *session)
 {
-    if (session != NULL && session->emit_event != NULL) {
+    if (session->emit_event != NULL) {
         session->emit_event->trigger(session->emit_event);
     }
 }
@@ -1122,25 +1118,10 @@ bool http2_session_want_write(const http2_session_t *session)
  * Response submission
  * ------------------------------------------------------------------------- */
 
-/* Data provider — nghttp2 invokes this when it needs DATA-frame bytes.
- * Reads from stream->response_body + offset. Sets
- * NGHTTP2_DATA_FLAG_EOF on the final slice so nghttp2 emits
- * END_STREAM. Zero-copy: we never copy body bytes through an
- * intermediate buffer, the caller's pointer survives until want_write
- * drains. */
-/* Stream bodies come from two sources depending on handler mode:
- *  - Buffered (`$res->setBody($str); $res->end();`): a single zero-
- *    copy pointer + length. chunk_queue is NULL.
- *  - Streaming (`$res->send($chunk); ... $res->end();`): a ring-shaped
- *    queue of refcounted zend_strings, drained head-first.
- *    streaming_ended flags the final EOF.
- *
- * This callback handles both uniformly: if chunk_queue is non-NULL
- * we walk the queue; else fall back to the legacy response_body path.
- * When the streaming queue is transiently empty (handler between
- * send() calls), return NGHTTP2_ERR_DEFERRED — nghttp2 parks the
- * data provider until nghttp2_session_resume_data is called from
- * the next send() / end(). */
+/* nghttp2 data provider. Two body sources: buffered (response_body
+ * pointer+length, zero-copy) or streaming (chunk_queue of refcounted
+ * zend_strings). Empty streaming queue returns NGHTTP2_ERR_DEFERRED;
+ * resume fires from the next send()/end() via resume_stream_data. */
 static ssize_t http2_response_data_read(nghttp2_session *ng,
                                         const int32_t stream_id,
                                         uint8_t *buf,
