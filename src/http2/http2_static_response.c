@@ -61,28 +61,39 @@
 #endif
 #include <string.h>
 
-/* Per-read chunk size. 64 KiB matches nginx's output_buffers default
- * (2 32k) and h2o's ~64 KiB MAX_BUF_SIZE; h2_send_data_callback
- * re-slices each chunk into MAX_FRAME-sized DATA frames. A file smaller
- * than this is read in a single shot — the small-file slurp tier. */
-#define H2_STATIC_CHUNK_BYTES (64u * 1024u)
-
-/* Per-stream read-ahead depth: chunks the FSM keeps queued in the ring
- * plus the one read in flight. 2 is enough to double-buffer (read N+1
- * overlaps the writev of N) while bounding worst-case memory to
- * H2_STATIC_READAHEAD * H2_STATIC_CHUNK_BYTES per concurrent stream —
- * critical under high stream fan-out (hundreds of large files in
- * flight would otherwise pin hundreds of MiB). nginx bounds the same
- * way via small fixed output_buffers. */
-#define H2_STATIC_READAHEAD 2
+/* Adaptive read-ahead. Instead of a fixed per-stream depth, the FSM
+ * targets a byte budget that shrinks as more static streams run
+ * concurrently, so a lone large file gets deep read-ahead (the disk
+ * runs far ahead of the wire) while hundreds of concurrent files share
+ * a bounded total — without this, the read-ahead pinned hundreds of
+ * MiB and hit memory_limit.
+ *
+ *   target = clamp(H2_STATIC_BUDGET_BYTES / active_static_streams,
+ *                  H2_STATIC_TARGET_MIN, H2_STATIC_TARGET_MAX)
+ *   chunk  = min(H2_STATIC_CHUNK_MAX, target / 2)   (>= 2 chunks fit)
+ *
+ * The FSM keeps issuing sequential reads (one in flight at a time —
+ * the io handle has a single position) as long as the bytes already
+ * queued plus the one in flight stay under target. Page-cache-hot
+ * reads complete back-to-back, so the ring fills target bytes ahead of
+ * the emit loop and emit never starves. */
+#define H2_STATIC_BUDGET_BYTES (64u * 1024u * 1024u)   /* per-worker ceiling */
+#define H2_STATIC_TARGET_MIN   (128u * 1024u)
+#define H2_STATIC_TARGET_MAX   (2u * 1024u * 1024u)
+#define H2_STATIC_CHUNK_MAX    (256u * 1024u)
 
 /* Drain-ring slot count. Mirrors H2_CHUNK_RING_SLOTS in
- * http2_strategy.c — the FSM only ever fills H2_STATIC_READAHEAD of
- * them, but the ring must be large enough that head/tail never wrap
- * before a compaction. */
+ * http2_strategy.c. target/chunk is at most
+ * H2_STATIC_TARGET_MAX / (H2_STATIC_CHUNK_MAX) = 8, so the ring never
+ * needs to hold more than this many live entries. */
 #define H2_STATIC_RING_SLOTS 8
 
 extern nghttp2_session *http2_session_get_ng(http2_session_t *session);
+
+/* Count of in-progress static-file body streams on this worker. The
+ * read-ahead budget is divided across them. Plain long — one reactor
+ * per worker process, no cross-thread access. */
+static long active_static_streams = 0;
 
 /* Shared data_provider — see http2_session.c. With stream->chunk_queue
  * non-NULL it takes the streaming branch (NO_COPY iov on h2c). */
@@ -141,10 +152,25 @@ static void h2_static_cb_dispose(zend_async_event_callback_t *cb,
     efree(cb);
 }
 
-/* True while the FSM should pull another chunk: live ring entries plus
- * the one possibly in flight are under the read-ahead budget. Only this
- * FSM produces into the stream's ring, so (tail - head) is exactly the
- * count of chunks it has queued and not yet seen drained. */
+/* Per-stream read-ahead target in bytes — the worker budget split
+ * across the live static streams, clamped to [MIN, MAX]. */
+static size_t h2_static_target_bytes(void)
+{
+    const long active = active_static_streams > 0 ? active_static_streams : 1;
+    size_t target = H2_STATIC_BUDGET_BYTES / (size_t)active;
+
+    if (target < H2_STATIC_TARGET_MIN) { target = H2_STATIC_TARGET_MIN; }
+
+    if (target > H2_STATIC_TARGET_MAX) { target = H2_STATIC_TARGET_MAX; }
+
+    return target;
+}
+
+/* True while the FSM should pull another chunk: the bytes already
+ * queued in the ring plus the one read in flight are under the
+ * adaptive target, and the ring has a physical slot free. Only this
+ * FSM produces into the stream's ring, so chunk_queue_bytes is exactly
+ * what it has queued and not yet seen drained. */
 static bool h2_static_want_more_reads(const h2_static_state_t *state)
 {
     const http2_stream_t *stream = state->stream;
@@ -153,8 +179,16 @@ static bool h2_static_want_more_reads(const h2_static_state_t *state)
         return false;
     }
 
-    const size_t live = stream->chunk_queue_tail - stream->chunk_queue_head;
-    return live + (state->read_in_flight ? 1u : 0u) < H2_STATIC_READAHEAD;
+    if (stream->chunk_queue_tail - stream->chunk_queue_head
+            >= stream->chunk_queue_cap) {
+        return false;
+    }
+
+    const size_t outstanding = stream->chunk_queue_bytes
+        + (state->read_in_flight && state->pending_chunk != NULL
+               ? ZSTR_LEN(state->pending_chunk) : 0u);
+
+    return outstanding < h2_static_target_bytes();
 }
 
 /* Push a fully-read chunk onto the stream's drain ring. Compacts first —
@@ -228,6 +262,8 @@ static void h2_static_finalize(h2_static_state_t *state, const int status)
     }
 
     efree(state);
+
+    active_static_streams--;
 
     if (fire) {
         on_done(user, status);
@@ -423,9 +459,14 @@ static bool h2_static_submit_read(h2_static_state_t *state)
         state->seek_done = true;
     }
 
-    const size_t want = remaining < H2_STATIC_CHUNK_BYTES
+    /* Chunk size = half the adaptive target, capped. */
+    size_t chunk_sz = h2_static_target_bytes() / 2u;
+
+    if (chunk_sz > H2_STATIC_CHUNK_MAX) { chunk_sz = H2_STATIC_CHUNK_MAX; }
+
+    const size_t want = remaining < chunk_sz
                             ? (size_t)remaining
-                            : H2_STATIC_CHUNK_BYTES;
+                            : chunk_sz;
 
     zend_string *chunk = zend_string_alloc(want, 0);
 
@@ -615,6 +656,7 @@ int h2_stream_send_static_response(void *ctx,
          * streaming branch because chunk_queue is now non-NULL), and
          * submit the first read. */
         state = ecalloc(1, sizeof(*state));
+        active_static_streams++;
         state->stream      = stream;
         state->session     = stream->session;
         state->conn        = conn;
