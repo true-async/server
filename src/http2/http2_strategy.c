@@ -102,13 +102,14 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn);
 
 /* Submit ownership context handed to send_batched_writev. free_cb
- * releases body addrefs (so the response objects survive the in-flight
- * writev), the iov array, the heap emit_buf, and the ctx itself. */
+ * releases the body addrefs (response zend_object / streaming chunk
+ * zend_string — see h2_emit_ref_release), the iov array, the heap
+ * emit_buf, and the ctx itself. */
 typedef struct {
-    char         *emit_buf;
+    char             *emit_buf;
     zend_async_buf_t *iov;
-    zend_object **body_refs;
-    unsigned      body_refs_cnt;
+    zend_refcounted **body_refs;
+    unsigned          body_refs_cnt;
 } h2_writev_ctx_t;
 
 static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io);
@@ -1128,6 +1129,20 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     return rc == 0;
 }
 
+/* Drop one body-iov hold-alive ref. Polymorphic: buffered/static
+ * responses store the response zend_object, streaming chunks store the
+ * chunk zend_string — both carry zend_refcounted_h, so GC_TYPE tells
+ * them apart. addref is type-agnostic GC_ADDREF (h2_emit_state_append_body). */
+static void h2_emit_ref_release(zend_refcounted *ref)
+{
+    if (GC_TYPE(ref) == IS_STRING) {
+        zend_string_release((zend_string *)ref);
+    } else {
+        zend_object *obj = (zend_object *)ref;
+        OBJ_RELEASE(obj);
+    }
+}
+
 /* Release everything an emit_state owns: body addrefs, the records and
  * body_refs arrays, and the heap-promoted emit_buf. Safe on a zeroed
  * state and on the TLS contiguous path (records / body_refs stay NULL).
@@ -1136,7 +1151,7 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
 static void h2_emit_state_cleanup(struct http2_emit_state *st)
 {
     for (unsigned i = 0; i < st->body_refs_count; i++) {
-        OBJ_RELEASE(st->body_refs[i]);
+        h2_emit_ref_release(st->body_refs[i]);
     }
 
     if (st->body_refs != NULL) { efree(st->body_refs); }
@@ -1353,7 +1368,7 @@ static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
     h2_writev_ctx_t *ctx = (h2_writev_ctx_t *)user_data;
 
     for (unsigned i = 0; i < ctx->body_refs_cnt; i++) {
-        OBJ_RELEASE(ctx->body_refs[i]);
+        h2_emit_ref_release(ctx->body_refs[i]);
     }
 
     if (ctx->body_refs != NULL) { efree(ctx->body_refs); }
@@ -1439,7 +1454,7 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
  * the server's stream_write_buffer_bytes high-water mark (the real
  * memory bound, set via HttpServerConfig::setStreamWriteBufferBytes).
  * It proceeds again as soon as read_callback frees room. */
-#define H2_CHUNK_RING_SLOTS 16
+#define H2_CHUNK_RING_SLOTS 8
 
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 {

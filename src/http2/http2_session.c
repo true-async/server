@@ -801,9 +801,12 @@ static void h2_emit_state_append_buf(struct http2_emit_state *st,
     rec->buf.len    = (uint32_t)len;
 }
 
+/* ref: zend_object (buffered/static) or zend_string (streaming chunk) —
+ * both start with zend_refcounted_h, GC_ADDREF is type-agnostic. The
+ * matching release branches on GC_TYPE (see h2_emit_ref_release). */
 static void h2_emit_state_append_body(struct http2_emit_state *st,
                                       const char *ptr, const size_t len,
-                                      zend_object *obj_ref)
+                                      zend_refcounted *ref)
 {
     h2_emit_state_grow_records(st);
     http2_emit_record_t *rec = &st->records[st->records_count++];
@@ -811,10 +814,10 @@ static void h2_emit_state_append_body(struct http2_emit_state *st,
     rec->body.ptr  = ptr;
     rec->body.len  = (uint32_t)len;
 
-    if (obj_ref != NULL) {
+    if (ref != NULL) {
         h2_emit_state_grow_refs(st);
-        GC_ADDREF(obj_ref);
-        st->body_refs[st->body_refs_count++] = obj_ref;
+        GC_ADDREF(ref);
+        st->body_refs[st->body_refs_count++] = ref;
     }
 }
 
@@ -847,14 +850,15 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
 
 /* nghttp2 send_data_callback — fires for NO_COPY DATA frames during
  * session_send. Writes framehd[9] into emit_buf, then:
- *   - h2c: records a body iov entry pointing into stream->response_body
- *     (zero-copy) and addrefs the response object so the body survives
- *     the in-flight writev.
+ *   - h2c buffered/static: one body iov pointing into
+ *     stream->response_body, addrefs the response object.
+ *   - h2c streaming: walks the chunk ring for `length` bytes, one body
+ *     iov per chunk slice, addrefs each chunk zend_string. Frees the
+ *     drained ring slots and wakes a parked producer.
  *   - TLS (contiguous): copies the body into emit_buf in-place — it is
  *     consumed by SSL_write before nghttp2_session_send returns, so no
- *     addref is needed.
- * Streaming chunk_queue path never sets NO_COPY in read_callback, so
- * this only fires for buffered responses. */
+ *     addref is needed. (Streaming over TLS stays on the read_callback
+ *     copy path — it never sets NO_COPY — so it never reaches here.) */
 static int h2_send_data_callback(nghttp2_session *ng,
                                  nghttp2_frame *frame,
                                  const uint8_t *framehd,
@@ -879,14 +883,65 @@ static int h2_send_data_callback(nghttp2_session *ng,
 
     h2_emit_state_append_buf(session->emit_state, framehd, 9);
 
+    /* Streaming path — record one body iov per chunk slice the frame
+     * spans. append_body addrefs each chunk; the ring's own ref is
+     * dropped as the slot drains, so the chunk stays alive solely via
+     * body_refs until the writev free_cb releases it. */
+    if (stream->chunk_queue != NULL) {
+        const unsigned head_before = stream->chunk_queue_head;
+        size_t remaining = length;
+
+        while (remaining > 0
+               && stream->chunk_queue_head < stream->chunk_queue_tail) {
+            zend_string *chunk =
+                stream->chunk_queue[stream->chunk_queue_head];
+            const size_t chunk_len = ZSTR_LEN(chunk);
+            const size_t avail     = chunk_len - stream->chunk_read_offset;
+            const size_t take      = avail < remaining ? avail : remaining;
+
+            h2_emit_state_append_body(session->emit_state,
+                ZSTR_VAL(chunk) + stream->chunk_read_offset, take,
+                (zend_refcounted *)chunk);
+
+            stream->chunk_read_offset += take;
+            stream->chunk_queue_bytes -= take;
+            remaining                 -= take;
+
+            if (stream->chunk_read_offset == chunk_len) {
+                zend_string_release(chunk);
+                stream->chunk_queue[stream->chunk_queue_head] = NULL;
+                stream->chunk_queue_head++;
+                stream->chunk_read_offset = 0;
+            }
+        }
+
+        if (stream->chunk_queue_head > head_before
+            && stream->write_event != NULL) {
+            zend_async_trigger_event_t *trig =
+                (zend_async_trigger_event_t *)stream->write_event;
+
+            if (trig->trigger != NULL) { trig->trigger(trig); }
+        }
+
+        session->emit_state->bytes_appended += 9 + length;
+
+        if (session->conn != NULL && length > 0) {
+            http_server_on_h2_data_sent(session->conn->counters, length);
+        }
+
+        (void)frame;
+        return 0;
+    }
+
     const char *payload = stream->response_body + stream->response_body_offset;
 
     if (session->emit_state->contiguous) {
         h2_emit_state_append_buf(session->emit_state,
                                  (const uint8_t *)payload, length);
     } else {
-        zend_object *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
-                         ? Z_OBJ(stream->response_zv) : NULL;
+        zend_refcounted *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
+                             ? (zend_refcounted *)Z_OBJ(stream->response_zv)
+                             : NULL;
 
         h2_emit_state_append_body(session->emit_state, payload, length, ref);
     }
@@ -1182,6 +1237,50 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
 
     /* Streaming path — walk the chunk queue. */
     if (stream->chunk_queue != NULL) {
+        /* h2c iov mode: announce the available bytes via NO_COPY and let
+         * h2_send_data_callback walk the ring into body iovs (zero-copy
+         * — the chunk zend_strings are not copied). The TLS contiguous
+         * path and any non-emit caller fall through to the memcpy path. */
+        if (ds_session != NULL && ds_session->emit_state != NULL
+            && !ds_session->emit_state->contiguous) {
+            size_t avail = 0;
+
+            if (stream->chunk_queue_head < stream->chunk_queue_tail) {
+                for (unsigned i = stream->chunk_queue_head;
+                     i < stream->chunk_queue_tail; i++) {
+                    avail += ZSTR_LEN(stream->chunk_queue[i]);
+                }
+                avail -= stream->chunk_read_offset;
+            }
+
+            if (avail == 0) {
+                if (stream->streaming_ended) {
+                    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+                    if (stream->has_trailers) {
+                        *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+                    }
+
+                    return 0;
+                }
+                /* Handler still running — retry after resume_data. */
+                return NGHTTP2_ERR_DEFERRED;
+            }
+
+            const size_t to_emit = avail < length ? avail : length;
+
+            /* EOF rides the last frame: only when this frame drains the
+             * whole ring AND the handler has already called end(). */
+            if (to_emit == avail && stream->streaming_ended) {
+                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+                if (stream->has_trailers) {
+                    *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+                }
+            }
+
+            *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
+            return (ssize_t)to_emit;
+        }
+
         const unsigned head_before = stream->chunk_queue_head;
         size_t written = 0;
 

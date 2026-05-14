@@ -131,9 +131,10 @@ struct http2_session_t {
  * bytes (and framehd[9] for NO_COPY DATA frames). records[] tracks the
  * order in which output chunks were produced — converted into the final
  * iov[] after nghttp2_session_send returns (offsets remain valid through
- * emit_buf realloc). body_refs[] holds zend_object addrefs to keep
- * response objects alive across the in-flight writev (released by the
- * submit free_cb). */
+ * emit_buf realloc). body_refs[] holds addrefs to keep the NO_COPY body
+ * memory alive across the in-flight writev (released by the submit
+ * free_cb) — a response zend_object for buffered/static responses, a
+ * chunk zend_string for streaming. */
 typedef struct http2_emit_record {
     bool is_body;
     union {
@@ -152,9 +153,9 @@ struct http2_emit_state {
     unsigned             records_count;
     unsigned             records_cap;
 
-    zend_object **body_refs;
-    unsigned      body_refs_count;
-    unsigned      body_refs_cap;
+    zend_refcounted **body_refs;
+    unsigned          body_refs_count;
+    unsigned          body_refs_cap;
 
     /* Optional output-byte budget per nghttp2_session_send call. When
      * set (TLS path), the send / send_data callbacks return WOULDBLOCK
