@@ -111,7 +111,7 @@ static bool tls_wait_space(http_connection_t *conn, size_t need)
             }
         }
 
-        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+        zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
 
         if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
             return false;
@@ -217,7 +217,7 @@ bool tls_drain(http_connection_t *conn)
                  * only after libuv has released the buffer. The slot
                  * bytes are stable for the entire WRITE_EX lifetime. */
                 conn->tls_cipher_inflight = cipher_avail;
-                zend_async_io_req_t *const req = ZEND_ASYNC_IO_WRITE_EX(
+                const zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
                     conn->io, slot, cipher_avail, tls_cipher_completion);
 
                 if (UNEXPECTED(req == NULL)) {
@@ -256,7 +256,7 @@ bool tls_drain(http_connection_t *conn)
  * len > ring_size (h1 large body): the call chunks internally;
  * single-coroutine h1 has no concurrent producer so the chunks stay
  * contiguous on the wire. */
-bool tls_push(http_connection_t *conn, const char *data, size_t len)
+bool tls_push(http_connection_t *conn, const char *data, const size_t len)
 {
     if (conn->tls_write_error) {
         return false;
@@ -291,6 +291,7 @@ bool tls_push(http_connection_t *conn, const char *data, size_t len)
 
     return true;
 }
+
 /* ========================================================================
  * Read FSM async-send path (event-loop callback context)
  *

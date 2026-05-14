@@ -208,7 +208,6 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     (void)request;      /* Reachable via stream->request; we use that path. */
     http2_strategy_t *self = (http2_strategy_t *)user_data;
 
-
     http2_stream_t *stream = http2_session_find_stream(self->session,
                                                              stream_id);
 
@@ -1265,8 +1264,11 @@ void http2_session_emit(http2_session_t *session)
         for (unsigned i = 0; i < st.body_refs_count; i++) {
             OBJ_RELEASE(st.body_refs[i]);
         }
+
         if (st.body_refs != NULL)    { efree(st.body_refs); }
+
         if (st.records != NULL)      { efree(st.records); }
+
         if (st.emit_buf_on_heap)     { efree(st.emit_buf); }
 
         if (!ok) {
@@ -1284,18 +1286,25 @@ void http2_session_emit(http2_session_t *session)
 
     if (UNEXPECTED(rc != 0)) {
         if (st.emit_buf_on_heap) { efree(st.emit_buf); }
+
         if (st.records != NULL)  { efree(st.records); }
+
         for (unsigned i = 0; i < st.body_refs_count; i++) {
             OBJ_RELEASE(st.body_refs[i]);
         }
+
         if (st.body_refs != NULL) { efree(st.body_refs); }
+
         return;
     }
 
     if (st.records_count == 0) {
         if (st.emit_buf_on_heap) { efree(st.emit_buf); }
+
         if (st.records != NULL)  { efree(st.records); }
+
         if (st.body_refs != NULL) { efree(st.body_refs); }
+
         return;
     }
 
@@ -1348,8 +1357,11 @@ static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
     }
 
     if (ctx->body_refs != NULL) { efree(ctx->body_refs); }
+
     if (ctx->iov != NULL)       { efree(ctx->iov); }
+
     if (ctx->emit_buf != NULL)  { efree(ctx->emit_buf); }
+
     efree(ctx);
 }
 

@@ -367,7 +367,7 @@ bool http_connection_send_batched(http_connection_t *conn,
  * as send_batched) and free_cb fires immediately. Plaintext only. */
 bool http_connection_send_batched_writev(http_connection_t *conn,
                                          const zend_async_buf_t *iov,
-                                         unsigned niov,
+                                         const unsigned niov,
                                          zend_async_io_write_free_cb_t free_cb,
                                          void *user_data);
 

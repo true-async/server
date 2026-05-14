@@ -106,7 +106,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
  * called from a coroutine — waits on tls_space_event for ring room,
  * BIO_writes atomically, kicks the drain. Returns false only on a
  * sticky TLS write error. */
-bool tls_push(http_connection_t *conn, const char *data, size_t len);
+bool tls_push(http_connection_t *conn, const char *data, const size_t len);
 
 /* Scheduler-side TLS drain: SSL_writes plaintext from the BIO ring
  * into the cipher BIO and submits one ciphertext span via WRITE_EX.
