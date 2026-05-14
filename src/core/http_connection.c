@@ -1265,6 +1265,12 @@ static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
  * Plaintext only: TLS uses tls_cipher_inflight via the BIO ring path.
  * Caller transfers ownership of `buf` (emalloc'd); the reactor — or
  * the append-into-pending path here — owns it after this call. */
+/* h2 emit pump re-drive — defined in src/http2/http2_strategy.c. Called
+ * when a batched-write chain goes idle so any frames nghttp2 queued
+ * while the chain was in flight ship in the next batch. Self-guards on
+ * protocol — a cheap no-op on plain HTTP/1 connections. */
+extern void http2_conn_notify_emit(http_connection_t *conn);
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1305,7 +1311,12 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
         conn->destroy_pending = false;
         http_connection_destroy(conn);
+        return;
     }
+
+    /* Chain idle — re-drive the h2 emit pump for frames that queued
+     * while the batch was in flight. No-op on non-h2 connections. */
+    http2_conn_notify_emit(conn);
 }
 
 bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len)
@@ -1405,7 +1416,13 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
         conn->destroy_pending = false;
         http_connection_destroy(conn);
+        return;
     }
+
+    /* Writev chain idle — re-drive the h2 emit pump so frames that
+     * queued while this writev was in flight ship in the next batch.
+     * No-op on plain HTTP/1 connections. */
+    http2_conn_notify_emit(conn);
 }
 
 bool http_connection_send_batched_writev(http_connection_t *conn,
