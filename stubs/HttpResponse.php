@@ -164,17 +164,34 @@ final class HttpResponse
      *
      * First call commits status + headers (they can no longer be
      * changed). Subsequent calls append DATA frames (HTTP/2) or
-     * chunked-transfer segments (HTTP/1, Phase 2). Blocks the
-     * handler coroutine ONLY when the per-stream queue crosses
-     * HttpServerConfig::setStreamWriteBufferBytes (default 256 KiB);
-     * otherwise returns immediately.
+     * chunked-transfer segments (HTTP/1).
      *
-     * HTTP/1 path lands in Phase 2 — currently throws on HTTP/1.
+     * Blocks the handler coroutine ONLY under backpressure — when the
+     * per-stream staging buffer is full (HTTP/2: all ring slots live
+     * OR queued bytes reach HttpServerConfig::setStreamWriteBufferBytes,
+     * default 256 KiB). Otherwise returns immediately. send() is always
+     * safe to call; use sendable() to check first if you'd rather do
+     * other work than block.
      *
      * @param string $chunk
      * @return static
      */
     public function send(string $chunk): static {}
+
+    /**
+     * Advisory, non-blocking backpressure check for streaming responses.
+     *
+     * Returns true when send() would accept a chunk without suspending
+     * the handler coroutine — the per-stream staging buffer has room.
+     * Returns false when send() would block on backpressure, or when the
+     * response is closed / sealed by sendFile() / not streaming-capable.
+     *
+     * send() is always safe to call regardless; sendable() just lets a
+     * handler do other work instead of blocking on a slow peer.
+     *
+     * @return bool
+     */
+    public function sendable(): bool {}
 
     /**
      * Mark this response as ineligible for compression. Overrides every

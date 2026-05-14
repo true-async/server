@@ -1021,6 +1021,38 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
+/* {{{ proto HttpResponse::sendable(): bool
+ *
+ * Advisory, non-blocking backpressure check. Returns true when send()
+ * would accept a chunk without suspending the handler coroutine — the
+ * per-stream staging buffer has room. Returns false when send() would
+ * block on backpressure, or when the response is closed / sealed by
+ * sendFile() / not streaming-capable.
+ *
+ * send() is always safe to call regardless; sendable() just lets a
+ * handler do other work instead of blocking on a slow peer. */
+ZEND_METHOD(TrueAsync_HttpResponse, sendable)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed
+        || response->send_file_req != NULL
+        || response->stream_ops == NULL) {
+        RETURN_FALSE;
+    }
+
+    /* Protocol without a userspace staging ring (HTTP/1, paced by the
+     * kernel socket buffer) leaves the op NULL — report writable. */
+    if (response->stream_ops->sendable == NULL) {
+        RETURN_TRUE;
+    }
+
+    RETURN_BOOL(response->stream_ops->sendable(response->stream_ctx));
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::sendFile(string $path, ?SendFileOptions $options = null): void
  *
  * Records a path + options pair on the response and seals it. Returns

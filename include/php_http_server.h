@@ -602,6 +602,13 @@ struct http_response_stream_ops_t {
      * to see server config. */
     int     (*append_chunk)(void *ctx, zend_string *chunk);
 
+    /* Advisory, non-blocking: true when append_chunk would accept a
+     * chunk without suspending the handler (the per-stream staging
+     * buffer has room). Backs HttpResponse::sendable(). MAY be NULL —
+     * protocols without a userspace staging ring (HTTP/1, paced by the
+     * kernel socket buffer) leave it NULL and sendable() reports true. */
+    bool    (*sendable)(void *ctx);
+
     /* Mark stream ended. After all queued chunks drain, the data
      * provider emits EOF (plus trailer HEADERS frame if set).
      * Idempotent. */

@@ -1541,8 +1541,37 @@ static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
                : NULL;
 }
 
+/* Advisory backpressure check — true when h2_stream_append_chunk would
+ * accept a chunk without suspending. Mirrors the ring "has room"
+ * condition there (slot cap AND byte high-water mark). */
+static bool h2_stream_sendable(void *ctx)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
+    if (stream == NULL || stream->session == NULL) {
+        return false;
+    }
+
+    if (stream->chunk_queue == NULL) {
+        return true;   /* not started — first send() always proceeds */
+    }
+
+    if (stream->chunk_queue_tail - stream->chunk_queue_head
+            >= stream->chunk_queue_cap) {
+        return false;  /* all slots live */
+    }
+
+    const http_connection_t *conn = http2_session_get_conn(stream->session);
+    const uint32_t max_bytes = (conn != NULL && conn->server != NULL)
+                             ? http_server_get_stream_write_buffer_bytes(conn->server)
+                             : 0;
+
+    return max_bytes == 0 || stream->chunk_queue_bytes < max_bytes;
+}
+
 const http_response_stream_ops_t h2_stream_ops = {
     .append_chunk        = h2_stream_append_chunk,
+    .sendable            = h2_stream_sendable,
     .mark_ended          = h2_stream_mark_ended,
     .get_wait_event      = h2_stream_get_wait_event,
     .send_static_response = h2_stream_send_static_response,
