@@ -799,6 +799,22 @@ static void http_write_timer_dispose(http_connection_t *conn)
 }
 /* }}} */
 
+/* Refresh the I/O deadline on inbound activity — HTTP/2 only. HTTP/1
+ * manages conn->deadline_ms at request boundaries (create → read
+ * timeout, dispose → keepalive / 0). HTTP/2 is one long multiplexed
+ * connection with no such boundary, so without this an h2 connection
+ * is force-closed by the deadline watchdog read_timeout seconds after
+ * it was created — even while actively serving streams. Any inbound
+ * bytes (a new request, a WINDOW_UPDATE mid streaming-response, PING)
+ * push the deadline forward. Called from both read-completion paths. */
+static void http_connection_note_inbound_h2(http_connection_t *conn)
+{
+    if (conn->protocol_type == HTTP_PROTOCOL_HTTP2
+        && conn->read_timeout_ms > 0) {
+        conn->deadline_ms = ZEND_ASYNC_NOW() + conn->read_timeout_ms;
+    }
+}
+
 /* {{{ http_connection_handle_read_completion
  *
  * Process whatever just landed in conn->read_buffer (via either a
@@ -1013,6 +1029,7 @@ static void http_connection_read_callback_fn(
     }
 
     conn->read_buffer_len += bytes_read;
+    http_connection_note_inbound_h2(conn);
 
     /* Re-entrancy guard: a handler coroutine is currently in flight (possibly
      * suspended at an await), so the parser must not run — feeding new bytes
@@ -1098,6 +1115,7 @@ bool http_connection_read(http_connection_t *conn)
         }
 
         conn->read_buffer_len += bytes_read;
+        http_connection_note_inbound_h2(conn);
 
         bool should_destroy = false;
 
