@@ -1128,170 +1128,169 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     return rc == 0;
 }
 
-/* Scheduler-context drain of nghttp2's outbound queue.
- *   - h2c: send callbacks build records[] → iov → writev_ex (zero-copy
- *          body to socket).
- *   - TLS: send callbacks append straight into emit_buf (contiguous
- *          mode — body copied in-callback), then one SSL_write_ex →
- *          cipher_bio → tls_drain. OpenSSL has no iov writes, so the
- *          gather happens inline as nghttp2 produces bytes. */
+/* Release everything an emit_state owns: body addrefs, the records and
+ * body_refs arrays, and the heap-promoted emit_buf. Safe on a zeroed
+ * state and on the TLS contiguous path (records / body_refs stay NULL).
+ * NOT for the h2c success path — there ownership moves into the writev
+ * hand-off ctx. */
+static void h2_emit_state_cleanup(struct http2_emit_state *st)
+{
+    for (unsigned i = 0; i < st->body_refs_count; i++) {
+        OBJ_RELEASE(st->body_refs[i]);
+    }
+
+    if (st->body_refs != NULL) { efree(st->body_refs); }
+
+    if (st->records != NULL) { efree(st->records); }
+
+    if (st->emit_buf_on_heap) { efree(st->emit_buf); }
+}
+
+#ifdef HAVE_OPENSSL
+/* TLS emit branch. The send callbacks append straight into emit_buf
+ * (contiguous mode — control bytes, framehd and body all copied in),
+ * so emit_buf IS the finished plaintext: one SSL_write ships it into
+ * cipher_bio, tls_drain pushes ciphertext to the socket. */
+static void h2_emit_flush_tls(http_connection_t *conn,
+                              http2_session_t *session,
+                              struct http2_emit_state *st)
+{
+    /* Gate on cipher_inflight: while a WRITE_EX is shipping ciphertext,
+     * producing more frames would fight cipher_bio capacity or stall.
+     * Bail — tls_cipher_completion re-enters after the slot lands. The
+     * tls_drain first flushes any plaintext queued by h1 producers /
+     * FSM alerts so it ships BEFORE the new frames. */
+    (void)tls_drain(conn);
+    if (conn->tls_cipher_inflight > 0) {
+        session->emit_state = NULL;
+        return;
+    }
+
+    const int rc = nghttp2_session_send(session->ng);
+    session->emit_state = NULL;
+
+    bool ok = (rc == 0);
+
+    /* SSL_write the gathered plaintext — PARTIAL_WRITE + the byte_cap
+     * budget keep this to one or two iterations. WANT_WRITE would mean
+     * cipher_bio is full despite the entry gate + budgeting; fatal. */
+    if (ok && st->emit_buf_len > 0) {
+        size_t off = 0;
+
+        while (off < st->emit_buf_len) {
+            size_t written = 0;
+            const tls_io_result_t wrc = tls_write_plaintext(
+                conn->tls, st->emit_buf + off, st->emit_buf_len - off,
+                &written);
+
+            off += written;
+
+            if (written > 0) {
+                http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+            }
+
+            if (wrc != TLS_IO_OK) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    h2_emit_state_cleanup(st);
+
+    if (!ok) {
+        conn->tls_write_error = true;
+    }
+
+    (void)tls_drain(conn);
+}
+#endif
+
+/* h2c emit branch. The send callbacks build records[] over emit_buf +
+ * NO_COPY body pointers; flatten that into an iov[] and ship it through
+ * one zero-copy writev_ex. */
+static void h2_emit_flush_h2c(http_connection_t *conn,
+                              http2_session_t *session,
+                              struct http2_emit_state *st)
+{
+    const int rc = nghttp2_session_send(session->ng);
+    session->emit_state = NULL;
+
+    if (UNEXPECTED(rc != 0) || st->records_count == 0) {
+        h2_emit_state_cleanup(st);
+        return;
+    }
+
+    /* Heap-promote emit_buf so the iov pointers we hand to the reactor
+     * outlive this stack frame. */
+    if (!st->emit_buf_on_heap) {
+        char *heap = emalloc(st->emit_buf_len);
+        memcpy(heap, st->emit_buf, st->emit_buf_len);
+        st->emit_buf = heap;
+        st->emit_buf_on_heap = true;
+    }
+
+    /* Build iov from records. emit_buf base is now final. */
+    zend_async_buf_t *iov = emalloc(st->records_count * sizeof(*iov));
+
+    for (unsigned i = 0; i < st->records_count; i++) {
+        const http2_emit_record_t *rec = &st->records[i];
+        if (rec->is_body) {
+            iov[i].base = (char *)rec->body.ptr;
+            iov[i].len  = rec->body.len;
+        } else {
+            iov[i].base = st->emit_buf + rec->buf.offset;
+            iov[i].len  = rec->buf.len;
+        }
+    }
+
+    /* Hand-off ctx: free_cb releases emit_buf + body refs + iov. The
+     * records[] array is consumed here. */
+    h2_writev_ctx_t *ctx = emalloc(sizeof(*ctx));
+    ctx->emit_buf      = st->emit_buf;
+    ctx->iov           = iov;
+    ctx->body_refs     = st->body_refs;
+    ctx->body_refs_cnt = st->body_refs_count;
+
+    const unsigned niov = st->records_count;
+
+    if (st->records != NULL) { efree(st->records); }
+
+    (void)http_connection_send_batched_writev(conn, iov, niov,
+                                              h2c_writev_free_cb, ctx);
+}
+
+/* Scheduler-context drain of nghttp2's outbound queue. Sets up the
+ * per-emit accumulator on the stack and dispatches to the TLS or h2c
+ * branch — see h2_emit_flush_tls / h2_emit_flush_h2c. */
 void http2_session_emit(http2_session_t *session)
 {
     http_connection_t *conn = http2_session_get_conn(session);
 
-    /* Shared emit_state setup for both TLS and h2c. */
     char stack_buf[32768];
     struct http2_emit_state st = {
-        .emit_buf         = stack_buf,
-        .emit_buf_len     = 0,
-        .emit_buf_cap     = sizeof(stack_buf),
-        .emit_buf_on_heap = false,
-        .stack_origin     = stack_buf,
+        .emit_buf     = stack_buf,
+        .emit_buf_cap = sizeof(stack_buf),
     };
 
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
         /* byte_cap bounds plaintext per emit pass so SSL_write never
-         * WANT_WRITEs on cipher_bio. The callback that returns WOULDBLOCK
-         * may overshoot the cap by one chunk (≤ 16 KiB + 9 B framehd),
-         * so the true upper bound on plaintext is byte_cap + 16 KiB.
-         * For ring = 64 KiB → byte_cap = 32 KiB gives a worst-case
-         * ~48 KiB plaintext = 3 records (49218 ciphertext) ≤ 64 KiB.
-         * contiguous: emit_buf is the plaintext fed to SSL_write — no
-         * records[] / body_refs[] indirection on this path. */
+         * WANT_WRITEs on cipher_bio. The callback returning WOULDBLOCK
+         * may overshoot by one chunk (≤ 16 KiB + 9 B framehd), so the
+         * worst-case plaintext is byte_cap + 16 KiB. For ring = 64 KiB,
+         * byte_cap = 32 KiB → ~48 KiB plaintext = 3 records ≤ 64 KiB.
+         * contiguous: emit_buf is the plaintext — no records[]. */
         st.byte_cap   = 32 * 1024;
         st.contiguous = true;
+        session->emit_state = &st;
+        h2_emit_flush_tls(conn, session, &st);
+        return;
     }
 #endif
 
     session->emit_state = &st;
-
-#ifdef HAVE_OPENSSL
-    if (conn->tls != NULL) {
-        /* Gate on cipher_inflight: if a WRITE_EX is already shipping
-         * ciphertext, producing more frames now would either fight
-         * cipher_bio capacity (causing WANT_WRITE + reorder hazards)
-         * or stall. Bail — tls_cipher_completion re-enters this fn
-         * after the in-flight slot lands. Also flush any pending
-         * plaintext queued from h1 producers / FSM alerts so it goes
-         * out BEFORE the new frames. */
-        (void)tls_drain(conn);
-        if (conn->tls_cipher_inflight > 0) {
-            session->emit_state = NULL;
-            return;
-        }
-
-        const int rc = nghttp2_session_send(session->ng);
-
-        session->emit_state = NULL;
-
-        bool ok = (rc == 0);
-
-        /* emit_buf is the fully-gathered plaintext (control bytes,
-         * framehd and body all copied in-callback). SSL_write it —
-         * PARTIAL_WRITE + the byte_cap budget keep this to one or two
-         * iterations. WANT_WRITE would mean cipher_bio is full despite
-         * the entry gate + budgeting; treat as fatal. */
-        if (ok && st.emit_buf_len > 0) {
-            size_t off = 0;
-
-            while (off < st.emit_buf_len) {
-                size_t written = 0;
-                const tls_io_result_t wrc = tls_write_plaintext(
-                    conn->tls, st.emit_buf + off, st.emit_buf_len - off,
-                    &written);
-
-                off += written;
-
-                if (written > 0) {
-                    http_server_on_tls_io(conn->counters, 0, written, 0, 0);
-                }
-
-                if (wrc != TLS_IO_OK) {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-
-        if (st.emit_buf_on_heap) {
-            efree(st.emit_buf);
-        }
-
-        if (!ok) {
-            conn->tls_write_error = true;
-        }
-
-        (void)tls_drain(conn);
-        return;
-    }
-#endif
-
-    const int rc = nghttp2_session_send(session->ng);
-
-    session->emit_state = NULL;
-
-    if (UNEXPECTED(rc != 0)) {
-        if (st.emit_buf_on_heap) { efree(st.emit_buf); }
-
-        if (st.records != NULL)  { efree(st.records); }
-
-        for (unsigned i = 0; i < st.body_refs_count; i++) {
-            OBJ_RELEASE(st.body_refs[i]);
-        }
-
-        if (st.body_refs != NULL) { efree(st.body_refs); }
-
-        return;
-    }
-
-    if (st.records_count == 0) {
-        if (st.emit_buf_on_heap) { efree(st.emit_buf); }
-
-        if (st.records != NULL)  { efree(st.records); }
-
-        if (st.body_refs != NULL) { efree(st.body_refs); }
-
-        return;
-    }
-
-    /* Ensure emit_buf lives on the heap so the iov pointers we hand to
-     * the reactor outlive this stack frame. */
-    if (!st.emit_buf_on_heap) {
-        char *heap = emalloc(st.emit_buf_len);
-        memcpy(heap, st.emit_buf, st.emit_buf_len);
-        st.emit_buf = heap;
-        st.emit_buf_on_heap = true;
-    }
-
-    /* Build iov from records. emit_buf base is now final. */
-    zend_async_buf_t *iov = emalloc(st.records_count * sizeof(*iov));
-
-    for (unsigned i = 0; i < st.records_count; i++) {
-        const http2_emit_record_t *rec = &st.records[i];
-        if (rec->is_body) {
-            iov[i].base = (char *)rec->body.ptr;
-            iov[i].len  = rec->body.len;
-        } else {
-            iov[i].base = st.emit_buf + rec->buf.offset;
-            iov[i].len  = rec->buf.len;
-        }
-    }
-
-    /* Hand-off context: free_cb releases emit_buf + body refs + arrays. */
-    h2_writev_ctx_t *ctx = emalloc(sizeof(*ctx));
-    ctx->emit_buf      = st.emit_buf;
-    ctx->iov           = iov;
-    ctx->body_refs     = st.body_refs;
-    ctx->body_refs_cnt = st.body_refs_count;
-
-    const unsigned niov = st.records_count;
-
-    /* records[] is freed here; the iov + body_refs arrays live in ctx. */
-    if (st.records != NULL) { efree(st.records); }
-
-    (void)http_connection_send_batched_writev(conn, iov, niov,
-                                              h2c_writev_free_cb, ctx);
+    h2_emit_flush_h2c(conn, session, &st);
 }
 
 static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)

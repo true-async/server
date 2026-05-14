@@ -724,9 +724,9 @@ static int cb_on_stream_close(nghttp2_session *ng,
  * (http2_session_emit on plaintext connections) and NULL otherwise.
  * ------------------------------------------------------------------------- */
 
-static bool h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t need)
+static void h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t need)
 {
-    if (need <= st->emit_buf_cap) { return true; }
+    if (need <= st->emit_buf_cap) { return; }
 
     size_t new_cap = st->emit_buf_cap ? st->emit_buf_cap * 2 : 32768;
 
@@ -737,46 +737,44 @@ static bool h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t nee
                   : emalloc(new_cap);
 
     if (!st->emit_buf_on_heap) {
-        if (st->emit_buf_len > 0 && st->stack_origin != NULL) {
-            memcpy(new_buf, st->stack_origin, st->emit_buf_len);
+        if (st->emit_buf_len > 0) {
+            memcpy(new_buf, st->emit_buf, st->emit_buf_len);
         }
+
         st->emit_buf_on_heap = true;
     }
 
     st->emit_buf = new_buf;
     st->emit_buf_cap = new_cap;
-    return true;
 }
 
-static bool h2_emit_state_grow_records(struct http2_emit_state *st)
+static void h2_emit_state_grow_records(struct http2_emit_state *st)
 {
-    if (st->records_count < st->records_cap) { return true; }
+    if (st->records_count < st->records_cap) { return; }
 
     const unsigned new_cap = st->records_cap ? st->records_cap * 2 : 64;
     st->records = st->records == NULL
                 ? emalloc(new_cap * sizeof(*st->records))
                 : erealloc(st->records, new_cap * sizeof(*st->records));
     st->records_cap = new_cap;
-    return true;
 }
 
-static bool h2_emit_state_grow_refs(struct http2_emit_state *st)
+static void h2_emit_state_grow_refs(struct http2_emit_state *st)
 {
-    if (st->body_refs_count < st->body_refs_cap) { return true; }
+    if (st->body_refs_count < st->body_refs_cap) { return; }
 
     const unsigned new_cap = st->body_refs_cap ? st->body_refs_cap * 2 : 32;
     st->body_refs = st->body_refs == NULL
                   ? emalloc(new_cap * sizeof(*st->body_refs))
                   : erealloc(st->body_refs, new_cap * sizeof(*st->body_refs));
     st->body_refs_cap = new_cap;
-    return true;
 }
 
 /* Append nghttp2 bytes into emit_buf. Coalesce with the previous record
  * if it was a contiguous emit_buf chunk. In contiguous mode (TLS)
  * emit_buf IS the plaintext — no iov records are tracked. */
-static int h2_emit_state_append_buf(struct http2_emit_state *st,
-                                    const uint8_t *data, const size_t len)
+static void h2_emit_state_append_buf(struct http2_emit_state *st,
+                                     const uint8_t *data, const size_t len)
 {
     h2_emit_state_grow_buf(st, st->emit_buf_len + len);
     memcpy(st->emit_buf + st->emit_buf_len, data, len);
@@ -784,7 +782,7 @@ static int h2_emit_state_append_buf(struct http2_emit_state *st,
     st->emit_buf_len += len;
 
     if (st->contiguous) {
-        return 0;
+        return;
     }
 
     if (st->records_count > 0) {
@@ -792,7 +790,7 @@ static int h2_emit_state_append_buf(struct http2_emit_state *st,
         if (!last->is_body
             && last->buf.offset + last->buf.len == offset) {
             last->buf.len += (uint32_t)len;
-            return 0;
+            return;
         }
     }
 
@@ -801,12 +799,11 @@ static int h2_emit_state_append_buf(struct http2_emit_state *st,
     rec->is_body    = false;
     rec->buf.offset = offset;
     rec->buf.len    = (uint32_t)len;
-    return 0;
 }
 
-static int h2_emit_state_append_body(struct http2_emit_state *st,
-                                     const char *ptr, const size_t len,
-                                     zend_object *obj_ref)
+static void h2_emit_state_append_body(struct http2_emit_state *st,
+                                      const char *ptr, const size_t len,
+                                      zend_object *obj_ref)
 {
     h2_emit_state_grow_records(st);
     http2_emit_record_t *rec = &st->records[st->records_count++];
@@ -819,8 +816,6 @@ static int h2_emit_state_append_body(struct http2_emit_state *st,
         GC_ADDREF(obj_ref);
         st->body_refs[st->body_refs_count++] = obj_ref;
     }
-
-    return 0;
 }
 
 /* nghttp2 send_callback — used when http2_session_emit drives via
@@ -845,7 +840,7 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_WOULDBLOCK;
     }
 
-    (void)h2_emit_state_append_buf(session->emit_state, data, length);
+    h2_emit_state_append_buf(session->emit_state, data, length);
     session->emit_state->bytes_appended += length;
     return (ssize_t)length;
 }
@@ -882,18 +877,18 @@ static int h2_send_data_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_WOULDBLOCK;
     }
 
-    (void)h2_emit_state_append_buf(session->emit_state, framehd, 9);
+    h2_emit_state_append_buf(session->emit_state, framehd, 9);
 
     const char *payload = stream->response_body + stream->response_body_offset;
 
     if (session->emit_state->contiguous) {
-        (void)h2_emit_state_append_buf(session->emit_state,
-                                       (const uint8_t *)payload, length);
+        h2_emit_state_append_buf(session->emit_state,
+                                 (const uint8_t *)payload, length);
     } else {
         zend_object *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
                          ? Z_OBJ(stream->response_zv) : NULL;
 
-        (void)h2_emit_state_append_body(session->emit_state, payload, length, ref);
+        h2_emit_state_append_body(session->emit_state, payload, length, ref);
     }
 
     session->emit_state->bytes_appended += 9 + length;

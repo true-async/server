@@ -143,11 +143,10 @@ typedef struct http2_emit_record {
 } http2_emit_record_t;
 
 struct http2_emit_state {
-    char     *emit_buf;
+    char     *emit_buf;                /* caller's stack array until heap-promoted */
     size_t    emit_buf_len;
     size_t    emit_buf_cap;
     bool      emit_buf_on_heap;
-    char     *stack_origin;            /* points at caller's stack array */
 
     http2_emit_record_t *records;
     unsigned             records_count;
