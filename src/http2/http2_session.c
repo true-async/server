@@ -773,7 +773,8 @@ static bool h2_emit_state_grow_refs(struct http2_emit_state *st)
 }
 
 /* Append nghttp2 bytes into emit_buf. Coalesce with the previous record
- * if it was a contiguous emit_buf chunk. */
+ * if it was a contiguous emit_buf chunk. In contiguous mode (TLS)
+ * emit_buf IS the plaintext — no iov records are tracked. */
 static int h2_emit_state_append_buf(struct http2_emit_state *st,
                                     const uint8_t *data, const size_t len)
 {
@@ -781,6 +782,10 @@ static int h2_emit_state_append_buf(struct http2_emit_state *st,
     memcpy(st->emit_buf + st->emit_buf_len, data, len);
     const uint32_t offset = (uint32_t)st->emit_buf_len;
     st->emit_buf_len += len;
+
+    if (st->contiguous) {
+        return 0;
+    }
 
     if (st->records_count > 0) {
         http2_emit_record_t *last = &st->records[st->records_count - 1];
@@ -846,11 +851,15 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
 }
 
 /* nghttp2 send_data_callback — fires for NO_COPY DATA frames during
- * session_send (h2c iov path). Writes framehd[9] into emit_buf and
- * records a body iov entry pointing into stream->response_body (no
- * copy). The response object is addref'd so the body memory survives
- * until the writev completion. Streaming chunk_queue path never sets
- * NO_COPY in read_callback, so this only fires for buffered responses. */
+ * session_send. Writes framehd[9] into emit_buf, then:
+ *   - h2c: records a body iov entry pointing into stream->response_body
+ *     (zero-copy) and addrefs the response object so the body survives
+ *     the in-flight writev.
+ *   - TLS (contiguous): copies the body into emit_buf in-place — it is
+ *     consumed by SSL_write before nghttp2_session_send returns, so no
+ *     addref is needed.
+ * Streaming chunk_queue path never sets NO_COPY in read_callback, so
+ * this only fires for buffered responses. */
 static int h2_send_data_callback(nghttp2_session *ng,
                                  nghttp2_frame *frame,
                                  const uint8_t *framehd,
@@ -876,10 +885,17 @@ static int h2_send_data_callback(nghttp2_session *ng,
     (void)h2_emit_state_append_buf(session->emit_state, framehd, 9);
 
     const char *payload = stream->response_body + stream->response_body_offset;
-    zend_object *ref    = Z_TYPE(stream->response_zv) == IS_OBJECT
-                        ? Z_OBJ(stream->response_zv) : NULL;
 
-    (void)h2_emit_state_append_body(session->emit_state, payload, length, ref);
+    if (session->emit_state->contiguous) {
+        (void)h2_emit_state_append_buf(session->emit_state,
+                                       (const uint8_t *)payload, length);
+    } else {
+        zend_object *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
+                         ? Z_OBJ(stream->response_zv) : NULL;
+
+        (void)h2_emit_state_append_body(session->emit_state, payload, length, ref);
+    }
+
     session->emit_state->bytes_appended += 9 + length;
 
     stream->response_body_offset += length;

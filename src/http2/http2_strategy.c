@@ -1129,13 +1129,12 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
 }
 
 /* Scheduler-context drain of nghttp2's outbound queue.
- * Both paths share the emit_state mechanism (records[] of bufs +
- * NO_COPY body pointers):
- *   - h2c: records → iov → writev_ex (zero-copy body to socket).
- *   - TLS: records → gather memcpy into one contiguous plaintext
- *          buffer → single SSL_write_ex → cipher_bio → tls_drain
- *          (nginx/HAProxy coalescing pattern). OpenSSL has no iov
- *          writes, hence the gather; bypasses tls_plaintext_bio. */
+ *   - h2c: send callbacks build records[] → iov → writev_ex (zero-copy
+ *          body to socket).
+ *   - TLS: send callbacks append straight into emit_buf (contiguous
+ *          mode — body copied in-callback), then one SSL_write_ex →
+ *          cipher_bio → tls_drain. OpenSSL has no iov writes, so the
+ *          gather happens inline as nghttp2 produces bytes. */
 void http2_session_emit(http2_session_t *session)
 {
     http_connection_t *conn = http2_session_get_conn(session);
@@ -1152,15 +1151,16 @@ void http2_session_emit(http2_session_t *session)
 
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
-        /* byte_cap bounds plaintext per emit pass so SSL_write_ex never
+        /* byte_cap bounds plaintext per emit pass so SSL_write never
          * WANT_WRITEs on cipher_bio. The callback that returns WOULDBLOCK
          * may overshoot the cap by one chunk (≤ 16 KiB + 9 B framehd),
          * so the true upper bound on plaintext is byte_cap + 16 KiB.
-         * That must fit ⌊ring / 16406⌋ records (16406 = 16384 plaintext
-         * + ~22 B AEAD overhead per record). For ring = 64 KiB → fits 3
-         * records (49218 B) → byte_cap = 32 KiB gives a worst-case
-         * 48 KiB plaintext = 3 records (49218 ciphertext) ≤ 64 KiB. */
-        st.byte_cap = 32 * 1024;
+         * For ring = 64 KiB → byte_cap = 32 KiB gives a worst-case
+         * ~48 KiB plaintext = 3 records (49218 ciphertext) ≤ 64 KiB.
+         * contiguous: emit_buf is the plaintext fed to SSL_write — no
+         * records[] / body_refs[] indirection on this path. */
+        st.byte_cap   = 32 * 1024;
+        st.contiguous = true;
     }
 #endif
 
@@ -1187,53 +1187,19 @@ void http2_session_emit(http2_session_t *session)
 
         bool ok = (rc == 0);
 
-        /* Gather records into one contiguous plaintext buffer and
-         * SSL_write_ex it. Body pointers live in stream->response_body;
-         * we copy them out so we can OBJ_RELEASE the body refs before
-         * leaving the function (SSL_write has already encrypted by then). */
-        if (ok && st.records_count > 0) {
-            size_t total = 0;
-            for (unsigned i = 0; i < st.records_count; i++) {
-                total += st.records[i].is_body
-                       ? st.records[i].body.len
-                       : st.records[i].buf.len;
-            }
-
-            char  pt_stack[16384];
-            char *plaintext  = pt_stack;
-            bool  pt_on_heap = false;
-
-            if (total > sizeof(pt_stack)) {
-                plaintext  = emalloc(total);
-                pt_on_heap = true;
-            }
-
-            size_t gathered = 0;
-            for (unsigned i = 0; i < st.records_count; i++) {
-                const http2_emit_record_t *rec = &st.records[i];
-
-                if (rec->is_body) {
-                    memcpy(plaintext + gathered, rec->body.ptr,
-                           rec->body.len);
-                    gathered += rec->body.len;
-                } else {
-                    memcpy(plaintext + gathered,
-                           st.emit_buf + rec->buf.offset,
-                           rec->buf.len);
-                    gathered += rec->buf.len;
-                }
-            }
-
-            /* SSL_write_ex into the empty cipher_bio. With byte_cap = 16K
-             * the gathered plaintext fits one TLS record (~16K + 22 B
-             * ≤ 17 KiB ring), so PARTIAL_WRITE plus the entry gate keep
-             * this loop down to one or two iterations in practice. */
+        /* emit_buf is the fully-gathered plaintext (control bytes,
+         * framehd and body all copied in-callback). SSL_write it —
+         * PARTIAL_WRITE + the byte_cap budget keep this to one or two
+         * iterations. WANT_WRITE would mean cipher_bio is full despite
+         * the entry gate + budgeting; treat as fatal. */
+        if (ok && st.emit_buf_len > 0) {
             size_t off = 0;
 
-            while (off < total) {
+            while (off < st.emit_buf_len) {
                 size_t written = 0;
                 const tls_io_result_t wrc = tls_write_plaintext(
-                    conn->tls, plaintext + off, total - off, &written);
+                    conn->tls, st.emit_buf + off, st.emit_buf_len - off,
+                    &written);
 
                 off += written;
 
@@ -1241,35 +1207,16 @@ void http2_session_emit(http2_session_t *session)
                     http_server_on_tls_io(conn->counters, 0, written, 0, 0);
                 }
 
-                if (wrc == TLS_IO_OK) {
-                    continue;
+                if (wrc != TLS_IO_OK) {
+                    ok = false;
+                    break;
                 }
-
-                /* WANT_WRITE here would mean cipher_bio is full despite
-                 * starting empty + budgeting one record — protocol error
-                 * or unexpected ring state. Treat as fatal: no spill, no
-                 * reorder hazards. */
-                ok = false;
-                break;
-            }
-
-            if (pt_on_heap) {
-                efree(plaintext);
             }
         }
 
-        /* Cleanup: release body refs and free emit_state arrays. Body
-         * bytes are already copied into the (now consumed) plaintext
-         * buffer / spilled into plaintext_bio. */
-        for (unsigned i = 0; i < st.body_refs_count; i++) {
-            OBJ_RELEASE(st.body_refs[i]);
+        if (st.emit_buf_on_heap) {
+            efree(st.emit_buf);
         }
-
-        if (st.body_refs != NULL)    { efree(st.body_refs); }
-
-        if (st.records != NULL)      { efree(st.records); }
-
-        if (st.emit_buf_on_heap)     { efree(st.emit_buf); }
 
         if (!ok) {
             conn->tls_write_error = true;

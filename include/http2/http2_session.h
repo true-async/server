@@ -165,6 +165,14 @@ struct http2_emit_state {
      * (no limit; writev_ex handles arbitrary sizes). */
     size_t   byte_cap;
     size_t   bytes_appended;
+
+    /* TLS path: emit_buf is the final contiguous plaintext fed straight
+     * to SSL_write. The send_data callback copies body bytes into
+     * emit_buf in-place (the response object is alive for the whole
+     * synchronous nghttp2_session_send) instead of recording an iov
+     * entry — so records[] / body_refs[] stay unused. h2c keeps it
+     * false: it needs the iov indirection for zero-copy writev. */
+    bool     contiguous;
 };
 
 static inline http2_stream_t *http2_session_find_stream(
