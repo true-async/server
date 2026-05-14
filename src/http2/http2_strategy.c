@@ -1260,6 +1260,26 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
                                               h2c_writev_free_cb, ctx);
 }
 
+/* zend_bailout firewall for the emit pump. Frame serialisation runs
+ * emalloc (emit_buf growth, iov, hand-off ctx); under memory_limit
+ * pressure that longjmps. emit is driven from scheduler context too
+ * (writev completion → http2_conn_notify_emit), where an escaping
+ * bailout unwinds straight into the scheduler fiber and leaves the
+ * reactor loop alive at finalize — the assert in scheduler.c. Catch
+ * it here, reclaim the partial buffers, latch the connection's write
+ * side dead and close the socket; the streams unwind via the normal
+ * write-dead path. */
+static void http2_emit_log_bailout(const http_connection_t *conn)
+{
+    const zend_string *last_err = PG(last_error_message);
+    const char *cause = (last_err != NULL) ? ZSTR_VAL(last_err) : "(no PG message)";
+
+    fprintf(stderr,
+            "[true-async-server] zend_bailout in h2 emit: conn=%p — %s\n",
+            (const void *)conn, cause);
+    fflush(stderr);
+}
+
 /* Scheduler-context drain of nghttp2's outbound queue. Sets up the
  * per-emit accumulator on the stack and dispatches to the TLS or h2c
  * branch — see h2_emit_flush_tls / h2_emit_flush_h2c. */
@@ -1267,30 +1287,64 @@ void http2_session_emit(http2_session_t *session)
 {
     http_connection_t *conn = http2_session_get_conn(session);
 
+    /* Connection's write side already dead (timeout / earlier emit
+     * bailout) — nothing more goes on the wire. */
+    if (conn->write_timed_out) {
+        return;
+    }
+
     char stack_buf[32768];
     struct http2_emit_state st = {
         .emit_buf     = stack_buf,
         .emit_buf_cap = sizeof(stack_buf),
     };
 
+    volatile bool bailout = false;
+    zend_try
+    {
 #ifdef HAVE_OPENSSL
-    if (conn->tls != NULL) {
-        /* byte_cap bounds plaintext per emit pass so SSL_write never
-         * WANT_WRITEs on cipher_bio. The callback returning WOULDBLOCK
-         * may overshoot by one chunk (≤ 16 KiB + 9 B framehd), so the
-         * worst-case plaintext is byte_cap + 16 KiB. For ring = 64 KiB,
-         * byte_cap = 32 KiB → ~48 KiB plaintext = 3 records ≤ 64 KiB.
-         * contiguous: emit_buf is the plaintext — no records[]. */
-        st.byte_cap   = 32 * 1024;
-        st.contiguous = true;
-        session->emit_state = &st;
-        h2_emit_flush_tls(conn, session, &st);
-        return;
-    }
+        if (conn->tls != NULL) {
+            /* byte_cap bounds plaintext per emit pass so SSL_write never
+             * WANT_WRITEs on cipher_bio. The callback returning WOULDBLOCK
+             * may overshoot by one chunk (≤ 16 KiB + 9 B framehd), so the
+             * worst-case plaintext is byte_cap + 16 KiB. For ring = 64 KiB,
+             * byte_cap = 32 KiB → ~48 KiB plaintext = 3 records ≤ 64 KiB.
+             * contiguous: emit_buf is the plaintext — no records[]. */
+            st.byte_cap   = 32 * 1024;
+            st.contiguous = true;
+            session->emit_state = &st;
+            h2_emit_flush_tls(conn, session, &st);
+        } else
 #endif
+        /* Completion-driven chain: if a writev is already in flight, skip.
+         * http_send_batched_writev_completion_cb re-drives the pump via
+         * http2_conn_notify_emit once the chain goes idle, picking up
+         * everything that queued in the meantime — one writev per
+         * round-trip instead of one per write(). */
+        if (!conn->out_in_flight) {
+            session->emit_state = &st;
+            h2_emit_flush_h2c(conn, session, &st);
+        }
+    }
 
-    session->emit_state = &st;
-    h2_emit_flush_h2c(conn, session, &st);
+    zend_catch
+    {
+        bailout = true;
+    }
+
+    zend_end_try();
+
+    if (UNEXPECTED(bailout)) {
+        session->emit_state = NULL;
+        h2_emit_state_cleanup(&st);
+        conn->write_timed_out = true;
+
+        if (conn->io != NULL) {
+            ZEND_ASYNC_IO_CLOSE(conn->io);
+        }
+
+        http2_emit_log_bailout(conn);
+    }
 }
 
 static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
@@ -1399,6 +1453,13 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
     if (conn == NULL) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* Write side latched dead (timeout / emit bailout) — stop feeding
+     * the ring; the handler unwinds via the stream-dead path. */
+    if (conn->write_timed_out) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
