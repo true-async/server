@@ -1386,10 +1386,14 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     return true;
 }
 
-/* Fixed staging-ring depth for $response->write(). The ring holds owned
+/* Staging-ring slot count for $response->write(). The ring holds owned
  * zend_string chunk refs waiting for nghttp2's data_provider to pull
- * them. When all slots are live the producer coroutine IS the
- * backpressure — it suspends until read_callback frees a slot. */
+ * them. Dual-bounded backpressure: the producer coroutine suspends when
+ * EITHER all H2_CHUNK_RING_SLOTS slots are live (caps the pointer array
+ * + bounds pathological tiny-chunk handlers) OR the queued bytes reach
+ * the server's stream_write_buffer_bytes high-water mark (the real
+ * memory bound, set via HttpServerConfig::setStreamWriteBufferBytes).
+ * It proceeds again as soon as read_callback frees room. */
 #define H2_CHUNK_RING_SLOTS 16
 
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
@@ -1428,15 +1432,22 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 
     http_server_counters_t *counters = conn->counters;
 
+    /* Per-stream byte high-water mark. 0 (no server / unconfigured)
+     * disables the byte cap — the slot cap still bounds the ring. */
+    const uint32_t max_bytes = conn->server != NULL
+                             ? http_server_get_stream_write_buffer_bytes(conn->server)
+                             : 0;
+
     /* Make room for one chunk. The ring is a fixed-depth linear buffer:
-     * compact (shift live entries to index 0) so tail can advance. If
-     * all H2_CHUNK_RING_SLOTS are still live after compaction, this is
-     * the backpressure point — suspend the producer coroutine until
-     * read_callback drains a slot. cb_on_frame_recv fires write_event
-     * on WINDOW_UPDATE; we re-drive the pump on wake because nghttp2
-     * forbids session_send from inside a recv callback, so the drain
-     * must run here in coroutine context. The producer proceeds as soon
-     * as ONE slot frees — it does not wait for the ring to empty.
+     * compact (shift live entries to index 0) so tail can advance. The
+     * producer has room while a slot is free AND the queued bytes are
+     * under max_bytes; otherwise this is the backpressure point —
+     * suspend until read_callback drains room. Whoever drives the emit
+     * pump (writev completion, inbound feed) drains the ring; the
+     * read_callback then fires write_event to wake us. We also re-drive
+     * the pump on wake — emit self-guards on out_in_flight, so it is a
+     * cheap no-op while a writev is in flight. The producer proceeds as
+     * soon as room appears — it does not wait for the ring to empty.
      *
      * Race-free: h2_wait_for_drain_event registers the waker BEFORE
      * suspending; the trigger fires only from scheduler context, which
@@ -1456,7 +1467,8 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
             stream->chunk_queue_tail = live;
         }
 
-        if (stream->chunk_queue_tail < stream->chunk_queue_cap) {
+        if (stream->chunk_queue_tail < stream->chunk_queue_cap
+            && (max_bytes == 0 || stream->chunk_queue_bytes < max_bytes)) {
             break;
         }
 

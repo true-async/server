@@ -137,7 +137,10 @@ static void http_server_config_populate_from_shared(
 #define DEFAULT_DRAIN_COOLDOWN_MS           10000  /* prevent drain oscillation */
 #define DEFAULT_STREAM_WRITE_BUFFER_BYTES   262144 /* 256 KiB — gRPC middle */
 #define STREAM_WRITE_BUFFER_MIN_BYTES       4096
-#define STREAM_WRITE_BUFFER_MAX_BYTES       (64u * 1024u * 1024u)
+/* 4 MiB ceiling: even at MAX_CONCURRENT_STREAMS (100) the worst-case
+ * per-connection staging memory stays bounded (~400 MiB), not the
+ * 6.4 GiB a 64 MiB cap would have allowed. */
+#define STREAM_WRITE_BUFFER_MAX_BYTES       (4u * 1024u * 1024u)
 
 /* max_body_size applies to both H1 parser and H2 session. Upper bound
  * set at 16 GiB: realistic for uploads, stays well under SIZE_MAX/2 on
@@ -1091,14 +1094,17 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getDrainCooldownMs)
 
 /* proto HttpServerConfig::setStreamWriteBufferBytes(int $bytes): static
  *
- * Per-stream chunk-queue cap for streaming responses.
- * HTTP/2 path only. When HttpResponse::send() appends a chunk and the
- * queue crosses this cap, the handler coroutine suspends until
- * nghttp2 drains enough bytes to drop below.
+ * Per-stream staging-buffer high-water mark for streaming responses
+ * (HTTP/2). HttpResponse::write() accepts chunks into a per-stream ring
+ * until the queued bytes reach this mark, then suspends the handler
+ * coroutine until the data provider drains room.
  *
- * Default: 262144 (256 KiB). Valid range: 4096 .. 67108864. Smaller
- * = lower latency, higher suspend rate; larger = higher throughput,
- * more RAM per concurrent stream. */
+ * This is a MEMORY knob, not a throughput knob: delivery speed is
+ * bounded by the HTTP/2 flow-control window regardless. Larger = fewer
+ * handler suspend/resume cycles, more RAM per concurrent stream;
+ * smaller = tighter memory, more suspends.
+ *
+ * Default: 262144 (256 KiB). Valid range: 4096 .. 4194304 (4 MiB). */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes)
 {
     zend_long bytes;
@@ -1113,7 +1119,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes)
     if (bytes < STREAM_WRITE_BUFFER_MIN_BYTES
         || bytes > STREAM_WRITE_BUFFER_MAX_BYTES) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "StreamWriteBufferBytes must be between 4096 and 67108864", 0);
+            "StreamWriteBufferBytes must be between 4096 and 4194304", 0);
         return;
     }
 
