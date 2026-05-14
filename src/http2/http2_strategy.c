@@ -1289,15 +1289,6 @@ void http2_session_emit(http2_session_t *session)
     }
 #endif
 
-    /* Completion-driven chain: if a writev is already in flight, skip.
-     * http_send_batched_writev_completion_cb re-drives the pump via
-     * http2_conn_notify_emit once the chain goes idle, picking up
-     * everything that queued in the meantime — one writev per
-     * round-trip instead of one per write(). */
-    if (conn->out_in_flight) {
-        return;
-    }
-
     session->emit_state = &st;
     h2_emit_flush_h2c(conn, session, &st);
 }

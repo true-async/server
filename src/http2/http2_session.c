@@ -1182,7 +1182,6 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
 
     /* Streaming path — walk the chunk queue. */
     if (stream->chunk_queue != NULL) {
-        const unsigned head_before = stream->chunk_queue_head;
         size_t written = 0;
 
         while (written < length
@@ -1210,19 +1209,6 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
                 stream->chunk_queue_head++;
                 stream->chunk_read_offset = 0;
             }
-        }
-
-        /* Freed at least one ring slot — wake a producer coroutine
-         * parked in h2_stream_append_chunk on a full ring. Whoever
-         * drives the emit pump (writev completion, inbound feed) thus
-         * wakes the producer; the producer itself never has to poll.
-         * Harmless when no producer is parked (trigger no-op). */
-        if (stream->chunk_queue_head > head_before
-            && stream->write_event != NULL) {
-            zend_async_trigger_event_t *trig =
-                (zend_async_trigger_event_t *)stream->write_event;
-
-            if (trig->trigger != NULL) { trig->trigger(trig); }
         }
 
         /* Queue empty — decide EOF vs DEFERRED. */
