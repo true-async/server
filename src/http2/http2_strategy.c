@@ -1377,6 +1377,12 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     return true;
 }
 
+/* Fixed staging-ring depth for $response->write(). The ring holds owned
+ * zend_string chunk refs waiting for nghttp2's data_provider to pull
+ * them. When all slots are live the producer coroutine IS the
+ * backpressure — it suspends until read_callback frees a slot. */
+#define H2_CHUNK_RING_SLOTS 16
+
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
@@ -1393,13 +1399,13 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* Lazy queue allocation + first-send HEADERS commit. */
+    /* Lazy ring allocation + first-send HEADERS commit. */
     if (stream->chunk_queue == NULL) {
-        stream->chunk_queue_cap  = 8;
-        stream->chunk_queue      = ecalloc(stream->chunk_queue_cap,
-                                           sizeof(zend_string *));
-        stream->chunk_queue_head = 0;
-        stream->chunk_queue_tail = 0;
+        stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
+        stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
+                                            sizeof(zend_string *));
+        stream->chunk_queue_head  = 0;
+        stream->chunk_queue_tail  = 0;
         stream->chunk_queue_bytes = 0;
         stream->chunk_read_offset = 0;
 
@@ -1413,24 +1419,47 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 
     http_server_counters_t *counters = conn->counters;
 
-    /* Grow ring if full. Compact first (shift head → 0) to avoid
-     * unbounded growth on long-lived streams. */
-    if (stream->chunk_queue_tail == stream->chunk_queue_cap) {
+    /* Make room for one chunk. The ring is a fixed-depth linear buffer:
+     * compact (shift live entries to index 0) so tail can advance. If
+     * all H2_CHUNK_RING_SLOTS are still live after compaction, this is
+     * the backpressure point — suspend the producer coroutine until
+     * read_callback drains a slot. cb_on_frame_recv fires write_event
+     * on WINDOW_UPDATE; we re-drive the pump on wake because nghttp2
+     * forbids session_send from inside a recv callback, so the drain
+     * must run here in coroutine context. The producer proceeds as soon
+     * as ONE slot frees — it does not wait for the ring to empty.
+     *
+     * Race-free: h2_wait_for_drain_event registers the waker BEFORE
+     * suspending; the trigger fires only from scheduler context, which
+     * cannot run concurrently with this coroutine. */
+    for (;;) {
         if (stream->chunk_queue_head > 0) {
-            const size_t live = stream->chunk_queue_tail - stream->chunk_queue_head;
-            memmove(stream->chunk_queue,
-                    stream->chunk_queue + stream->chunk_queue_head,
-                    live * sizeof(zend_string *));
+            const size_t live =
+                stream->chunk_queue_tail - stream->chunk_queue_head;
+
+            if (live > 0) {
+                memmove(stream->chunk_queue,
+                        stream->chunk_queue + stream->chunk_queue_head,
+                        live * sizeof(zend_string *));
+            }
+
             stream->chunk_queue_head = 0;
             stream->chunk_queue_tail = live;
         }
 
-        if (stream->chunk_queue_tail == stream->chunk_queue_cap) {
-            const size_t new_cap = stream->chunk_queue_cap * 2;
-            stream->chunk_queue = erealloc(stream->chunk_queue,
-                                           new_cap * sizeof(zend_string *));
-            stream->chunk_queue_cap = new_cap;
+        if (stream->chunk_queue_tail < stream->chunk_queue_cap) {
+            break;
         }
+
+        http_server_on_stream_backpressure(counters);
+
+        if (!h2_wait_for_drain_event(stream, conn)) {
+            /* Timeout / cancel / peer gone. PHP exception set. */
+            zend_string_release(chunk);
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
+
+        http2_session_emit(stream->session);
     }
 
     stream->chunk_queue[stream->chunk_queue_tail++] = chunk;
@@ -1438,36 +1467,13 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 
     http_server_on_stream_send(counters, ZSTR_LEN(chunk));
 
-    /* Kick nghttp2: the data provider was DEFERRED while the queue
-     * was empty; resume_data tells it to retry now. */
+    /* Kick nghttp2: the data provider was DEFERRED while the ring was
+     * empty; resume_data + emit ship whatever the flow-control window
+     * allows right now. Fire-and-forget — no wait here; the chunk lives
+     * in the ring (owned ref) until read_callback drains and releases
+     * it. Backpressure happens at the NEXT write() if the ring fills. */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
-
-    /* Drive the pump — turn queued bytes into socket writes. */
     http2_session_emit(stream->session);
-
-    /* Backpressure: if the drain didn't empty the queue,
-     * flow control (per-stream or connection) is holding bytes back.
-     * Suspend the handler coroutine on the stream's write_event; it
-     * wakes when cb_on_frame_recv processes an inbound WINDOW_UPDATE
-     * (in src/http2/http2_session.c). Write-timeout is the fallback
-     * for dead peers.
-     *
-     * Race-free: we register the waker on our write_event BEFORE
-     * suspending. The trigger fires only from the read-callback
-     * (scheduler context), which cannot execute concurrently with
-     * this coroutine under TrueAsync's single-threaded scope. So
-     * "register → fire" ordering is guaranteed. */
-    if (stream->chunk_queue_bytes > 0) {
-        http_server_on_stream_backpressure(counters);
-    }
-    while (stream->chunk_queue_bytes > 0) {
-        if (!h2_wait_for_drain_event(stream, conn)) {
-            /* Timeout / cancel / peer gone. PHP exception set. */
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-
-        http2_session_emit(stream->session);
-    }
 
     return HTTP_STREAM_APPEND_OK;
 }
