@@ -287,6 +287,16 @@ struct _http_connection_t {
     zend_async_event_t            *write_timer;       /* zend_async_timer_event_t* */
     zend_async_event_callback_t   *write_timer_cb;
     unsigned                       write_timed_out : 1;
+
+    /* Pending deferred-teardown microtask, or NULL. Set by
+     * http_connection_destroy_if_idle_deferred when a teardown is
+     * requested from a context that may be nested inside an nghttp2
+     * callback / emit chain — where a synchronous http_connection_destroy
+     * would free the session nghttp2 is still walking. The microtask
+     * runs the destroy at the top of the next loop iteration, after the
+     * call stack has fully unwound. Cancelled by http_connection_destroy
+     * itself if another path tears the connection down first. */
+    zend_async_microtask_t        *destroy_microtask;
 };
 
 /* Per-request state for the HTTP/1 handler coroutine. Lives on the
@@ -336,6 +346,16 @@ struct http_server_object;
 http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
+
+/* Teardown a connection that just went idle (handler_refcount == 0 and
+ * destroy_pending), but defer the actual http_connection_destroy to a
+ * microtask running at the top of the next loop iteration. Use this
+ * instead of a direct destroy from any context that may be nested
+ * inside an nghttp2 callback or the h2 emit chain — calling
+ * http_connection_destroy there frees the nghttp2 session while
+ * nghttp2_session_send is still on the stack (use-after-free). No-op if
+ * the connection is not idle or a teardown microtask is already queued. */
+void http_connection_destroy_if_idle_deferred(http_connection_t *conn);
 
 /* Connection processing */
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len);

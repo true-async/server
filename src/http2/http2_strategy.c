@@ -166,11 +166,12 @@ static void h2_static_on_static_done(void *user, int status)
             conn->handler_refcount--;
         }
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-            /* conn freed; stream lives until release. */
-        }
+        /* Deferred teardown — h2_static_on_static_done runs from
+         * cb_on_stream_close, which nghttp2 fires from inside
+         * nghttp2_session_send. A synchronous http_connection_destroy
+         * here frees the nghttp2 session mid-send (use-after-free); the
+         * microtask runs it once the call stack has unwound. */
+        http_connection_destroy_if_idle_deferred(conn);
     }
 
     /* Release the dispatch-side refcount we took in on_hard_zero_armed.
@@ -603,10 +604,10 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             conn->handler_refcount--;
         }
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        /* Deferred — this may run inside an nghttp2 callback (e.g. a
+         * stream close fired from within nghttp2_session_send); a direct
+         * destroy would free the session nghttp2 is still using. */
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 
@@ -642,10 +643,10 @@ static void h2_sendfile_on_done(void *user, int status)
             conn->handler_refcount--;
         }
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        /* Deferred — this may run inside an nghttp2 callback (e.g. a
+         * stream close fired from within nghttp2_session_send); a direct
+         * destroy would free the session nghttp2 is still using. */
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 
@@ -672,10 +673,10 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 
         if (conn->handler_refcount > 0) conn->handler_refcount--;
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        /* Deferred — this may run inside an nghttp2 callback (e.g. a
+         * stream close fired from within nghttp2_session_send); a direct
+         * destroy would free the session nghttp2 is still using. */
+        http_connection_destroy_if_idle_deferred(conn);
 
         return;
     }
@@ -698,10 +699,10 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 
         if (conn->handler_refcount > 0) conn->handler_refcount--;
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        /* Deferred — this may run inside an nghttp2 callback (e.g. a
+         * stream close fired from within nghttp2_session_send); a direct
+         * destroy would free the session nghttp2 is still using. */
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 

@@ -217,10 +217,73 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
 }
 /* }}} */
 
+/* {{{ deferred-teardown microtask
+ *
+ * http_connection_destroy frees the strategy + nghttp2 session. When a
+ * teardown is decided from inside an nghttp2 callback (e.g. the last
+ * stream's on_stream_close, fired from within nghttp2_session_send),
+ * destroying synchronously frees the session nghttp2 is still walking —
+ * a use-after-free. http_connection_destroy_if_idle_deferred queues
+ * this microtask instead; the scheduler runs it at the top of the next
+ * loop iteration, when the nghttp2 / emit call stack has fully unwound. */
+typedef struct {
+    zend_async_microtask_t base;
+    http_connection_t     *conn;
+} conn_destroy_microtask_t;
+
+static void conn_destroy_microtask_handler(zend_async_microtask_t *mt)
+{
+    conn_destroy_microtask_t *t = (conn_destroy_microtask_t *)mt;
+    http_connection_t *conn = t->conn;
+
+    conn->destroy_microtask = NULL;
+
+    /* Re-check: a fresh handler may have been dispatched on the conn
+     * between queueing and now. If so, leave destroy_pending set — that
+     * handler's own dispose re-runs this check when it finishes. */
+    if (conn->handler_refcount == 0 && conn->destroy_pending) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+    }
+}
+
+static void conn_destroy_microtask_dtor(zend_async_microtask_t *mt)
+{
+    efree(mt);
+}
+
+void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
+{
+    if (conn == NULL
+        || conn->handler_refcount != 0
+        || !conn->destroy_pending
+        || conn->destroy_microtask != NULL) {
+        return;
+    }
+
+    conn_destroy_microtask_t *t = ecalloc(1, sizeof(*t));
+    t->base.handler = conn_destroy_microtask_handler;
+    t->base.dtor    = conn_destroy_microtask_dtor;
+    t->conn         = conn;
+    conn->destroy_microtask = &t->base;
+
+    ZEND_ASYNC_ADD_MICROTASK(&t->base);
+}
+/* }}} */
+
 /* {{{ http_connection_destroy */
 void http_connection_destroy(http_connection_t *conn)
 {
     if (!conn) return;
+
+    /* A deferred-teardown microtask may be queued for this conn (set by
+     * http_connection_destroy_if_idle_deferred). We are tearing down
+     * now via some other path — cancel it so it does not run against
+     * freed memory. execute_microtasks still pops and dtor-frees it. */
+    if (conn->destroy_microtask != NULL) {
+        conn->destroy_microtask->is_cancelled = true;
+        conn->destroy_microtask = NULL;
+    }
 
     /* Defer the actual free if a handler coroutine is still holding
      * this conn alive. Prevents the async UAF where a read-callback
