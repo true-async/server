@@ -68,7 +68,7 @@
  * a bounded total — without this, the read-ahead pinned hundreds of
  * MiB and hit memory_limit.
  *
- *   target = clamp(H2_STATIC_BUDGET_BYTES / active_static_streams,
+ *   target = clamp(budget_bytes / active_static_streams,
  *                  H2_STATIC_TARGET_MIN, H2_STATIC_TARGET_MAX)
  *   chunk  = min(H2_STATIC_CHUNK_MAX, target / 2)   (>= 2 chunks fit)
  *
@@ -76,11 +76,33 @@
  * the io handle has a single position) as long as the bytes already
  * queued plus the one in flight stay under target. Page-cache-hot
  * reads complete back-to-back, so the ring fills target bytes ahead of
- * the emit loop and emit never starves. */
-#define H2_STATIC_BUDGET_BYTES (64u * 1024u * 1024u)   /* per-worker ceiling */
-#define H2_STATIC_TARGET_MIN   (128u * 1024u)
-#define H2_STATIC_TARGET_MAX   (2u * 1024u * 1024u)
-#define H2_STATIC_CHUNK_MAX    (256u * 1024u)
+ * the emit loop and emit never starves.
+ *
+ * budget_bytes is computed once per worker on first use from
+ * PG(memory_limit), so a tight memory_limit shrinks the pinned
+ * read-ahead and an unlimited one falls back to the hardcoded ceiling.
+ *
+ * TODO: turn budget_bytes into a periodically-recomputed value with:
+ *   - INI override `true_async_server.h2_static_budget_max` (would
+ *     need extension-wide INI plumbing — none exists yet).
+ *   - Reactor timer (~1 min period) re-reading zend_memory_usage(true)
+ *     plus host RAM: /proc/meminfo `MemAvailable` clamped by cgroup v2
+ *     `memory.max` / `memory.current`; divide host share by worker
+ *     count so all workers don't independently claim the same RAM.
+ *   - EWMA smoothing (α≈0.25) so the value doesn't dance around with
+ *     short-lived allocations between two ticks.
+ *   - Low/high watermarks in h2_static_want_more_reads (start a read
+ *     at outstanding < 0.75·target, stop at outstanding >= target) to
+ *     keep the producer from stop-and-go'ing when target wobbles.
+ *   - Soft-OOM guard in h2_static_submit_read: if
+ *     zend_memory_usage(false) + want + SAFETY > PG(memory_limit),
+ *     skip the read and wait for drain — mgmt of the actual OOM
+ *     handler is too late (E_ERROR longjmps out of the request). */
+#define H2_STATIC_BUDGET_CEILING (64u * 1024u * 1024u)  /* fallback / hard cap */
+#define H2_STATIC_BUDGET_FLOOR   (4u * 1024u * 1024u)   /* minimum on tight memory_limit */
+#define H2_STATIC_TARGET_MIN     (128u * 1024u)
+#define H2_STATIC_TARGET_MAX     (2u * 1024u * 1024u)
+#define H2_STATIC_CHUNK_MAX      (256u * 1024u)
 
 /* Drain-ring slot count. Mirrors H2_CHUNK_RING_SLOTS in
  * http2_strategy.c. target/chunk is at most
@@ -91,9 +113,46 @@
 extern nghttp2_session *http2_session_get_ng(http2_session_t *session);
 
 /* Count of in-progress static-file body streams on this worker. The
- * read-ahead budget is divided across them. Plain long — one reactor
- * per worker process, no cross-thread access. */
-static long active_static_streams = 0;
+ * read-ahead budget is divided across them. ZEND_TLS so a ZTS build
+ * with several reactor threads per process keeps a separate count
+ * per thread (no atomics, no cross-thread tearing). */
+ZEND_TLS long active_static_streams = 0;
+
+/* Per-worker read-ahead budget, lazily computed from PG(memory_limit)
+ * on first use. ZEND_TLS for the same reason as the stream counter.
+ * Zero means "not yet initialised" — see h2_static_budget_init_once. */
+ZEND_TLS size_t h2_static_budget_bytes = 0;
+
+/* Compute the per-worker read-ahead budget from PG(memory_limit).
+ *
+ *   memory_limit = -1 (unlimited) → CEILING (64 MiB).
+ *   otherwise                     → clamp(limit/8, FLOOR, CEILING).
+ *
+ * 1/8 of the script's arena leaves the other 7/8 for business logic
+ * and concurrent corutines sharing the same Zend MM. Worth noting:
+ * pending_chunk is allocated via zend_string_alloc → emalloc, so the
+ * read-ahead does count against memory_limit. */
+static void h2_static_budget_init_once(void)
+{
+    if (h2_static_budget_bytes != 0) {
+        return;
+    }
+
+    const zend_long limit = PG(memory_limit);
+    size_t budget;
+
+    if (limit <= 0) {
+        budget = H2_STATIC_BUDGET_CEILING;
+    } else {
+        budget = (size_t)limit / 8u;
+
+        if (budget < H2_STATIC_BUDGET_FLOOR) { budget = H2_STATIC_BUDGET_FLOOR; }
+
+        if (budget > H2_STATIC_BUDGET_CEILING) { budget = H2_STATIC_BUDGET_CEILING; }
+    }
+
+    h2_static_budget_bytes = budget;
+}
 
 /* Shared data_provider — see http2_session.c. With stream->chunk_queue
  * non-NULL it takes the streaming branch (NO_COPY iov on h2c). */
@@ -156,8 +215,10 @@ static void h2_static_cb_dispose(zend_async_event_callback_t *cb,
  * across the live static streams, clamped to [MIN, MAX]. */
 static size_t h2_static_target_bytes(void)
 {
+    h2_static_budget_init_once();
+
     const long active = active_static_streams > 0 ? active_static_streams : 1;
-    size_t target = H2_STATIC_BUDGET_BYTES / (size_t)active;
+    size_t target = h2_static_budget_bytes / (size_t)active;
 
     if (target < H2_STATIC_TARGET_MIN) { target = H2_STATIC_TARGET_MIN; }
 
