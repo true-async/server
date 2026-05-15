@@ -104,6 +104,13 @@
 #define H2_STATIC_TARGET_MAX     (2u * 1024u * 1024u)
 #define H2_STATIC_CHUNK_MAX      (256u * 1024u)
 
+/* Soft-OOM guard: stop scheduling read-ahead once arena usage gets
+ * within 1/OOM_RESERVE_FRAC of memory_limit. Prevents zend_string_alloc
+ * from bailing out under hundreds of concurrent static streams when
+ * the budget split gives a tiny per-stream target but the floor still
+ * pins enough bytes to exhaust the limit. */
+#define H2_STATIC_OOM_RESERVE_FRAC 8u   /* keep 1/8 of memory_limit free */
+
 /* Drain-ring slot count. Mirrors H2_CHUNK_RING_SLOTS in
  * http2_strategy.c. target/chunk is at most
  * H2_STATIC_TARGET_MAX / (H2_STATIC_CHUNK_MAX) = 8, so the ring never
@@ -225,6 +232,46 @@ static size_t h2_static_target_bytes(void)
     if (target > H2_STATIC_TARGET_MAX) { target = H2_STATIC_TARGET_MAX; }
 
     return target;
+}
+
+/* Floor for adaptive chunk shrinking under memory pressure. Below
+ * this the pipeline is so shallow that we'd rather refuse the stream
+ * than serve it byte-by-byte. */
+#define H2_STATIC_CHUNK_MIN (8u * 1024u)
+
+/* Cap `want` so a fresh alloc stays under memory_limit minus a 1/8
+ * safety reserve. Returns the (possibly shrunk) byte count; returns
+ * 0 if even H2_STATIC_CHUNK_MIN would breach the limit — caller
+ * treats that as a genuine refusal. memory_limit=-1 disables the
+ * guard and passes `want` through. */
+static size_t h2_static_fit_to_arena(const size_t want)
+{
+    const zend_long limit = PG(memory_limit);
+
+    if (limit <= 0) {
+        return want;
+    }
+
+    const size_t lim = (size_t)limit;
+    const size_t reserve = lim / H2_STATIC_OOM_RESERVE_FRAC;
+    const size_t headroom = lim > reserve ? lim - reserve : 0;
+    const size_t usage = zend_memory_usage(false);
+
+    if (usage >= headroom) {
+        if (usage + H2_STATIC_CHUNK_MIN > lim) {
+            return 0;
+        }
+
+        return H2_STATIC_CHUNK_MIN;
+    }
+
+    const size_t avail = headroom - usage;
+
+    if (want <= avail) {
+        return want;
+    }
+
+    return avail < H2_STATIC_CHUNK_MIN ? 0 : avail;
 }
 
 /* True while the FSM should pull another chunk: the bytes already
@@ -525,9 +572,18 @@ static bool h2_static_submit_read(h2_static_state_t *state)
 
     if (chunk_sz > H2_STATIC_CHUNK_MAX) { chunk_sz = H2_STATIC_CHUNK_MAX; }
 
-    const size_t want = remaining < chunk_sz
+    const size_t ideal = remaining < chunk_sz
                             ? (size_t)remaining
                             : chunk_sz;
+
+    /* Soft-OOM: shrink the read so the alloc stays under the arena
+     * safety reserve. Zero means even the floor is over the limit —
+     * caller treats that as a real refusal. */
+    const size_t want = h2_static_fit_to_arena(ideal);
+
+    if (want == 0) {
+        return false;
+    }
 
     zend_string *chunk = zend_string_alloc(want, 0);
 
