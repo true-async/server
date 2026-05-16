@@ -12,8 +12,10 @@
 #include <cmocka.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+# include <unistd.h>
+#endif
 
 #include "formats/multipart_processor.h"
 

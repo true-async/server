@@ -4,8 +4,15 @@
 # Source files to test
 set(HTTP1_PARSER_SRC
     ${CMAKE_SOURCE_DIR}/../src/http1/http_parser.c
+    # Streaming body queue (issue #26) — called directly from http_parser.c.
+    ${CMAKE_SOURCE_DIR}/../src/http_body_stream.c
+    # Body slab pool — used by http_parser.c for body allocation.
+    ${CMAKE_SOURCE_DIR}/../src/core/body_pool.c
     ${CMAKE_SOURCE_DIR}/../src/formats/multipart_parser.c
     ${CMAKE_SOURCE_DIR}/../src/formats/multipart_processor.c
+    # RFC 5987 / header-param parse — referenced by multipart_processor.c.
+    ${CMAKE_SOURCE_DIR}/../src/http_rfc5987.c
+    ${CMAKE_SOURCE_DIR}/../src/http_param_parse.c
     ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
 )
 
@@ -58,8 +65,11 @@ endif()
 # Add test to CTest
 add_test(NAME HTTP1Parser COMMAND test_http1_parser)
 
-# Set environment for test
-if(UNIX AND NOT APPLE)
+if(WIN32)
+    set_tests_properties(HTTP1Parser PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
     set_tests_properties(HTTP1Parser PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )
@@ -96,8 +106,11 @@ endif()
 # Add edge cases test to CTest
 add_test(NAME HTTP1ParserEdgeCases COMMAND test_http1_parser_edge_cases)
 
-# Set environment for test
-if(UNIX AND NOT APPLE)
+if(WIN32)
+    set_tests_properties(HTTP1ParserEdgeCases PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
     set_tests_properties(HTTP1ParserEdgeCases PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )
@@ -134,11 +147,20 @@ endif()
 # Add multipart parser test to CTest
 add_test(NAME MultipartParser COMMAND test_multipart_parser)
 
+if(WIN32)
+    set_tests_properties(MultipartParser PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+endif()
+
 # Multipart Processor Tests
 add_executable(test_multipart_processor
     http1/test_multipart_processor.c
     ${MULTIPART_PARSER_SRC}
     ${CMAKE_SOURCE_DIR}/../src/formats/multipart_processor.c
+    # multipart_processor.c references these via http_param_parse.h.
+    ${CMAKE_SOURCE_DIR}/../src/http_rfc5987.c
+    ${CMAKE_SOURCE_DIR}/../src/http_param_parse.c
     ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
 )
 
@@ -163,6 +185,12 @@ endif()
 
 # Add multipart processor test to CTest
 add_test(NAME MultipartProcessor COMMAND test_multipart_processor)
+
+if(WIN32)
+    set_tests_properties(MultipartProcessor PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+endif()
 
 # HTTP/1.1 Parser Security Tests
 add_executable(test_http1_parser_security
@@ -195,8 +223,11 @@ endif()
 # Add security test to CTest
 add_test(NAME HTTP1ParserSecurity COMMAND test_http1_parser_security)
 
-# Set environment for test
-if(UNIX AND NOT APPLE)
+if(WIN32)
+    set_tests_properties(HTTP1ParserSecurity PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
     set_tests_properties(HTTP1ParserSecurity PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )
@@ -342,6 +373,9 @@ endif()
 add_executable(test_compression_negotiate
     compression/test_negotiate.c
     ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_negotiate.c
+    # Stub for http_compression_lookup — avoids pulling in gzip/brotli/zstd
+    # backends (and their zlib/libbrotli/libzstd deps) into the unit test.
+    compression/compression_stubs.c
 )
 
 target_compile_definitions(test_compression_negotiate PRIVATE HAVE_HTTP_COMPRESSION=1)
@@ -361,6 +395,12 @@ if(UNIX)
 endif()
 
 add_test(NAME CompressionNegotiate COMMAND test_compression_negotiate)
+
+if(WIN32)
+    set_tests_properties(CompressionNegotiate PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+endif()
 
 # Compression gzip-encoder round-trip tests. Pulls in real zlib(-ng)
 # at link time and depends on the PHP runtime (the encoder uses

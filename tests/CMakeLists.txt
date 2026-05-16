@@ -45,12 +45,15 @@ if(WIN32)
             "Set -DPHP_SRC_DIR=<path> to the PHP source root.")
     endif()
 
+    # Do NOT add win32/ as a search dir: it contains time.h / unistd.h /
+    # param.h that shadow CRT system headers when searched via angle-bracket
+    # includes. PHP's own headers reference win32/* via "win32/foo.h"
+    # relative to the root — that still resolves correctly through PHP_SRC_DIR.
     set(PHP_INCLUDES_LIST
         "${PHP_SRC_DIR}"
         "${PHP_SRC_DIR}/main"
         "${PHP_SRC_DIR}/Zend"
         "${PHP_SRC_DIR}/TSRM"
-        "${PHP_SRC_DIR}/win32"
         "${PHP_PREFIX}"
     )
 else()
