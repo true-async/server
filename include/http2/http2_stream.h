@@ -178,6 +178,25 @@ struct http2_stream_t {
     unsigned             refcount;
 };
 
+/* Shift live ring entries to index 0 so tail can advance. No-op when head==0. */
+static inline void http2_stream_compact_chunk_queue(http2_stream_t *stream)
+{
+    if (stream->chunk_queue_head == 0) {
+        return;
+    }
+
+    const size_t live = stream->chunk_queue_tail - stream->chunk_queue_head;
+
+    if (live > 0) {
+        memmove(stream->chunk_queue,
+                stream->chunk_queue + stream->chunk_queue_head,
+                live * sizeof(zend_string *));
+    }
+
+    stream->chunk_queue_head = 0;
+    stream->chunk_queue_tail = live;
+}
+
 /* Decrement refcount; free storage when it hits zero. */
 void http2_stream_release(http2_stream_t *stream);
 

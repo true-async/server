@@ -14,6 +14,7 @@
 #endif
 
 #include "php.h"
+#include "Zend/zend_async_API.h"
 #include <nghttp2/nghttp2.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -63,6 +64,18 @@ typedef void (*http2_request_ready_cb_t)(struct http_request_t *request,
 #define HTTP2_SETTINGS_MAX_FRAME           16384u
 #define HTTP2_SETTINGS_MAX_CONCURRENT      100u
 
+/* TLS record payload ceiling (RFC 8446 §5.1). SSL_write splits at this size. */
+#define H2_TLS_RECORD_PAYLOAD_MAX          16384u
+
+/* Per-emit accumulator initial capacities (geometric growth × 2 after). */
+#define H2_EMIT_BUF_INITIAL_CAP            32768u
+#define H2_EMIT_RECORDS_INITIAL_CAP        64u
+#define H2_EMIT_REFS_INITIAL_CAP           32u
+
+/* TLS emit byte budget: half the cipher BIO ring so plaintext stays bounded
+ * after one chunk overshoot (≤ 16 KiB + 9 B framehd). */
+#define H2_EMIT_TLS_BYTE_CAP               (32u * 1024u)
+
 /* Flood-defence constants. These are the ceilings we set on
  * nghttp2's internal queues; exceeding them makes the library answer
  * with GOAWAY(ENHANCE_YOUR_CALM) without any work on our side. */
@@ -100,18 +113,75 @@ http2_session_t *http2_session_new(http_connection_t *conn,
                                    void *user_data);
 void             http2_session_free(http2_session_t *session);
 
-/* Test / introspection: fetch the stream bound to @p stream_id from
- * the session's stream table. Returns NULL if no such stream exists.
- * Lets unit tests inspect stream state without reaching into the
- * private struct. */
-http2_stream_t *http2_session_find_stream(http2_session_t *session,
-                                          uint32_t stream_id);
+/* Session struct exposed for inline hot-path accessors below. Internal
+ * to the h2 TUs (header is only included by src/http2/*.c). */
+struct http2_session_t {
+    nghttp2_session   *ng;
+    http_connection_t *conn;
 
-/* Owning connection accessor. Per-stream handler coroutines
- * need to reach conn->handler / conn->scope / conn->server from
- * inside the session-private callback path. Returns the conn pointer
- * passed to http2_session_new (NULL in unit tests). */
-http_connection_t *http2_session_get_conn(http2_session_t *session);
+    http2_request_ready_cb_t  on_request_ready;
+    void                     *on_request_ready_user_data;
+
+    const uint8_t *send_pending;
+    size_t         send_pending_len;
+    size_t         send_pending_offset;
+
+    HashTable      streams;
+
+    uint64_t       last_ping_rtt_ns;
+    uint32_t       last_peer_stream_id;
+    bool           bad_preface_emit_goaway;
+
+    /* Set by http2_session_emit for the duration of nghttp2_session_send;
+     * NULL otherwise. */
+    struct http2_emit_state *emit_state;
+};
+
+/* Per-emit accumulator: copied control bytes (emit_buf) + ordered body iov
+ * records + addrefs that keep body memory alive across the in-flight writev. */
+typedef struct http2_emit_record {
+    bool is_body;
+    union {
+        struct { uint32_t offset; uint32_t len; } buf;
+        struct { const char *ptr;  uint32_t len; } body;
+    };
+} http2_emit_record_t;
+
+struct http2_emit_state {
+    char     *emit_buf;                /* caller's stack array until heap-promoted */
+    size_t    emit_buf_len;
+    size_t    emit_buf_cap;
+    bool      emit_buf_on_heap;
+
+    http2_emit_record_t *records;
+    unsigned             records_count;
+    unsigned             records_cap;
+
+    zend_refcounted **body_refs;
+    unsigned          body_refs_count;
+    unsigned          body_refs_cap;
+
+    /* TLS: WOULDBLOCK once bytes_appended >= byte_cap (keeps plaintext
+     * under cipher BIO ring). h2c sets 0 = unlimited. */
+    size_t   byte_cap;
+    size_t   bytes_appended;
+};
+
+static inline http2_stream_t *http2_session_find_stream(
+                                http2_session_t *session,
+                                const uint32_t stream_id)
+{
+    zval *zv = zend_hash_index_find(&session->streams, stream_id);
+    return zv != NULL ? (http2_stream_t *)Z_PTR_P(zv) : NULL;
+}
+
+static inline http_connection_t *http2_session_get_conn(http2_session_t *session)
+{
+    return session->conn;
+}
+
+/* h2 emit pump (issue #23): h2c → one writev; TLS → SSL_write + tls_drain. */
+void http2_session_emit(http2_session_t *session);
 
 /* -------------------------------------------------------------------------
  * Response submission.

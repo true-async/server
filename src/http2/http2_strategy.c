@@ -17,10 +17,14 @@
 #include "php_http_server.h"     /* http_response_get_* + http_connection_send */
 #include "http_protocol_strategy.h"
 #include "http_connection.h"
-#include "core/http_connection_internal.h"   /* tls_push_and_fire */
+#include "core/http_connection_internal.h"
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
+
+#ifdef HAVE_OPENSSL
+#include <openssl/bio.h>
+#endif
 #include "http1/http_parser.h"   /* http_request_t */
 #include "static/static_handler.h"
 #include "http_send_file.h"
@@ -97,6 +101,17 @@ static void h2_stream_mark_ended(void *ctx);
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn);
 
+/* Ownership ctx for send_batched_writev — free_cb releases body refs +
+ * iov + emit_buf + ctx. */
+typedef struct {
+    char             *emit_buf;
+    zend_async_buf_t *iov;
+    zend_refcounted **body_refs;
+    unsigned          body_refs_cnt;
+} h2_writev_ctx_t;
+
+static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io);
+
 /* === Static-handler dispatch callbacks ============================
  *
  * The protocol-agnostic static FSM in src/static/http_static.c calls
@@ -114,17 +129,11 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
 static void h2_static_on_hard_zero_armed(void *user)
 {
     http2_stream_t *stream = (http2_stream_t *)user;
-
-    if (stream == NULL || stream->session == NULL) {
-        return;
-    }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
-    if (conn != NULL) {
-        conn->handler_refcount++;
-        http_server_on_request_dispatch(conn->counters);
-    }
+    conn->handler_refcount++;
+    http_server_on_request_dispatch(conn->counters);
+
     /* Pin the stream itself so cb_on_stream_close + the static FSM
      * close hook can fire after the dispatch frame returns. Released
      * in h2_static_on_static_done. */
@@ -135,29 +144,17 @@ static void h2_static_on_static_done(void *user, int status)
 {
     (void)status;
     http2_stream_t *stream = (http2_stream_t *)user;
-
-    if (stream == NULL || stream->session == NULL) {
-        return;
-    }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
-    if (conn != NULL) {
-        http_server_on_request_dispose(conn->counters);
+    http_server_on_request_dispose(conn->counters);
 
-        if (conn->handler_refcount > 0) {
-            conn->handler_refcount--;
-        }
-
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-            /* conn freed; stream lives until release. */
-        }
+    if (conn->handler_refcount > 0) {
+        conn->handler_refcount--;
     }
 
-    /* Release the dispatch-side refcount we took in on_hard_zero_armed.
-     * The session table still holds its own (released by stream_close). */
+    http_connection_destroy_if_idle_deferred(conn);
+
+    /* Released by stream_close — drop the dispatch-side ref taken in on_hard_zero_armed. */
     http2_stream_release(stream);
 }
 
@@ -352,12 +349,7 @@ static void http2_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     http2_stream_t *stream = (http2_stream_t *)co->extended_data;
-
-    if (stream == NULL || stream->session == NULL) { return; }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
-
-    if (conn == NULL) { return; }
 
     /* Static-handler HANDLED path: response_obj already carries the
      * synchronous 4xx error body. Skip the user handler entirely;
@@ -483,8 +475,6 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http2_stream_t *stream = (http2_stream_t *)coroutine->extended_data;
 
-    if (stream == NULL || stream->session == NULL) { return; }
-
     /* Break the back-pointer BEFORE anything else so a late
      * RST_STREAM handler can't re-enter ZEND_ASYNC_CANCEL on a
      * coroutine that's already tearing down. Same discipline as the
@@ -551,11 +541,7 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         return;
     }
 
-    /* Streaming path (send() was called): HEADERS + DATA already
-     * committed via h2_stream_ops. Just make sure the stream is
-     * marked ended — if the handler forgot to call end(), we do it
-     * here so the data provider emits EOF. Skip the buffered-mode
-     * commit entirely (re-submitting response would RST the stream). */
+    /* Streaming: skip buffered commit (would RST); just mark ended for EOF. */
     const bool is_streaming = !Z_ISUNDEF(stream->response_zv)
                               && http_response_is_streaming(Z_OBJ(stream->response_zv));
 
@@ -564,34 +550,19 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             h2_stream_mark_ended(stream);
         }
     } else if (conn != NULL && !Z_ISUNDEF(stream->response_zv)) {
-        /* Buffered-mode commit (normal REST path). */
         (void)http2_commit_stream_response(conn, stream);
     }
 
-    /* Drop the PHP objects, then release our refcount. If the
-     * session table already released its reference (nghttp2 closed
-     * the stream while we were still draining), this final release
-     * triggers efree; otherwise the table-held ref keeps the stream
-     * alive until on_stream_close_cb fires. */
-    zval_ptr_dtor(&stream->request_zv);
-    ZVAL_UNDEF(&stream->request_zv);
-    zval_ptr_dtor(&stream->response_zv);
-    ZVAL_UNDEF(&stream->response_zv);
-
+    /* zvals must outlive dispose: data_provider borrows response_body
+     * past dispose (emit runs later from scheduler context). */
     http2_stream_release(stream);
 
-    /* Release the conn-level handler ref and finalise a deferred
-     * destroy if the read-callback marked one while we ran. Stash
-     * conn locally because the release may free it. */
     if (conn != NULL) {
         if (conn->handler_refcount > 0) {
             conn->handler_refcount--;
         }
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 
@@ -627,10 +598,7 @@ static void h2_sendfile_on_done(void *user, int status)
             conn->handler_refcount--;
         }
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 
@@ -657,10 +625,7 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 
         if (conn->handler_refcount > 0) conn->handler_refcount--;
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        http_connection_destroy_if_idle_deferred(conn);
 
         return;
     }
@@ -683,10 +648,7 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 
         if (conn->handler_refcount > 0) conn->handler_refcount--;
 
-        if (conn->handler_refcount == 0 && conn->destroy_pending) {
-            conn->destroy_pending = false;
-            http_connection_destroy(conn);
-        }
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 
@@ -1002,17 +964,8 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         if (tr_heap != NULL) { efree(tr_heap); }
     }
 
-    /* Graceful connection drain. Submitted AFTER response + trailers
-     * are queued so the GOAWAY
-     * frame bundles into the same writev batch as the final DATA —
-     * client receives its full response plus the "no new streams"
-     * signal in one round-trip. drain_submitted guards against
-     * double-GOAWAY when multiple concurrent streams commit on the
-     * same session; existing streams continue to drain naturally
-     * after GOAWAY per RFC 9113 §6.8. */
-    /* zend_hrtime() — same clock domain as conn->drain_not_before_ns
-     * (CLOCK_MONOTONIC_RAW on Linux). The coarse clock would drift
-     * after NTP slewing / suspend and mis-fire drain. */
+    /* GOAWAY after response+trailers so it bundles with the final DATA
+     * in one writev. drain_submitted guards multi-stream double-GOAWAY. */
     if (!conn->drain_submitted
         && http_server_should_drain_now(conn->server, conn, zend_hrtime())) {
         (void)http2_session_terminate(self->session, 0 /* NGHTTP2_NO_ERROR */);
@@ -1020,61 +973,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         http_server_on_h2_goaway_sent(conn->counters);
     }
 
-    /* Plaintext: drain ALL pending bytes from nghttp2 into a single
-     * heap buffer in one pass, then ship it via ZEND_ASYNC_IO_WRITE_EX
-     * fire-and-forget — one uv_write, one syscall, no per-frame
-     * coroutine suspend, no zend_string middleware. Buffer grows
-     * geometrically if nghttp2 has more than the initial cap.
-     * efree fires from the completion callback. TLS keeps the
-     * await-based send (encrypt ring needs contiguous payload, FSM
-     * has its own zero-copy submit). */
-#ifdef HAVE_OPENSSL
-    if (conn->tls != NULL) {
-        char drain_buf[16384];
-        while (http2_session_want_write(self->session)) {
-            const ssize_t n = http2_session_drain(self->session,
-                                                  drain_buf, sizeof(drain_buf));
-
-            if (n < 0) { return false; }
-
-            if (n == 0) { break; }
-
-            if (!http_connection_send(conn, drain_buf, (size_t)n)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-#endif
-
-    size_t cap   = 16384;
-    size_t total = 0;
-    char  *buf   = emalloc(cap);
-    while (http2_session_want_write(self->session)) {
-        if (cap - total < 16384) {
-            cap *= 2;
-            buf = erealloc(buf, cap);
-        }
-
-        const ssize_t n = http2_session_drain(self->session,
-                                              buf + total, cap - total);
-
-        if (n < 0) { efree(buf); return false; }
-
-        if (n == 0) { break; }
-        total += (size_t)n;
-    }
-
-    if (total == 0) {
-        efree(buf);
-        return true;
-    }
-
-    if (!http_connection_send_batched(conn, buf, total)) {
-        return false;
-    }
-
+    http2_session_emit(self->session);
     return true;
 }
 
@@ -1177,78 +1076,279 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     return rc == 0;
 }
 
-/* Drive nghttp2 to push whatever it can onto the socket right now.
- * Runs from the handler coroutine context. Plaintext: drain-all-then-
- * single-WRITE_EX, same shape as commit_stream_response above. TLS
- * stays on await-based send_raw via http_connection_send. */
-static void h2_drain_to_socket(http_connection_t *conn,
-                               http2_session_t *session)
+/* Release body ref: zend_object (buffered) or zend_string (chunk), via GC_TYPE. */
+static void h2_emit_ref_release(zend_refcounted *ref)
 {
-#ifdef HAVE_OPENSSL
-    if (conn->tls != NULL) {
-        /* tls_push_and_fire submits ciphertext via fire-and-forget
-         * WRITE_EX — safe from scheduler context (h2 static dispatch
-         * fired from a libuv read completion), unlike http_connection_send
-         * which would route into tls_push_and_maybe_flush → sync
-         * http_connection_send_raw → await-without-coroutine. */
-        char buf[16384];
-        while (http2_session_want_write(session)) {
-            const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
-
-            if (n <= 0) { break; }
-
-            if (!tls_push_and_fire(conn, buf, (size_t)n)) {
-                break;
-            }
-        }
-
-        return;
+    if (GC_TYPE(ref) == IS_STRING) {
+        zend_string_release((zend_string *)ref);
+    } else {
+        zend_object *obj = (zend_object *)ref;
+        OBJ_RELEASE(obj);
     }
-#endif
-
-    size_t cap   = 16384;
-    size_t total = 0;
-    char  *buf   = emalloc(cap);
-    while (http2_session_want_write(session)) {
-        if (cap - total < 16384) {
-            cap *= 2;
-            buf = erealloc(buf, cap);
-        }
-
-        const ssize_t n = http2_session_drain(session, buf + total, cap - total);
-
-        if (n < 0) { efree(buf); return; }
-
-        if (n == 0) { break; }
-        total += (size_t)n;
-    }
-
-    if (total == 0) {
-        efree(buf);
-        return;
-    }
-
-    (void)http_connection_send_batched(conn, buf, total);
 }
 
-/* Suspend-until-drain-event helper. Called from append_chunk's tail
- * loop when flow control keeps bytes in the queue after a drain pass.
- * See the "Race-free" comment block at the call site for why this
- * doesn't deadlock.
- *
- * Two wake sources, whichever fires first wins:
- *   1. stream->write_event (trigger event) — fired from
- *      cb_on_frame_recv on WINDOW_UPDATE.
- *   2. write_timeout timer — defensive, caps wait. Maps write_timeout
- *      from the connection; 0 disables the timer (wait forever, used
- *      only in tests / bring-up).
- *
- * Returns true on event wake, false on timeout (EG(exception) set) or
- * cancellation (peer RST — also sets exception). Caller must not
- * suspend outside a coroutine — we check up front.
- *
- * Lifecycle: stream->write_event is lazy — created on first wait, kept
- * across subsequent waits, disposed in http2_stream_release. */
+/* NOT for the h2c success path — there ownership moves into the writev ctx. */
+static void h2_emit_state_cleanup(struct http2_emit_state *st)
+{
+    for (unsigned i = 0; i < st->body_refs_count; i++) {
+        h2_emit_ref_release(st->body_refs[i]);
+    }
+
+    if (st->body_refs != NULL) { efree(st->body_refs); }
+
+    if (st->records != NULL) { efree(st->records); }
+
+    if (st->emit_buf_on_heap) { efree(st->emit_buf); }
+}
+
+#ifdef HAVE_OPENSSL
+static bool h2_tls_write_chunk(http_connection_t *conn,
+                               const char *ptr, const size_t len)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        size_t written = 0;
+        const tls_io_result_t wrc = tls_write_plaintext(
+            conn->tls, ptr + off, len - off, &written);
+
+        off += written;
+
+        if (written > 0) {
+            http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+        }
+
+        if (wrc != TLS_IO_OK) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* HEADERS-only fast path: everything sits contiguous in emit_buf, one SSL_write. */
+static bool h2_emit_flush_tls_contiguous(http_connection_t *conn,
+                                         const struct http2_emit_state *st)
+{
+    return st->emit_buf_len == 0
+         || h2_tls_write_chunk(conn, st->emit_buf, st->emit_buf_len);
+}
+
+/* Walk records[] honouring TLS record boundary: large body slices ship
+ * direct, small records pack into one staged TLS record. */
+static bool h2_emit_flush_tls_records(http_connection_t *conn,
+                                      const struct http2_emit_state *st)
+{
+    char   stage[H2_TLS_RECORD_PAYLOAD_MAX];
+    size_t stage_len = 0;
+    bool   ok = true;
+
+    for (unsigned i = 0; ok && i < st->records_count; i++) {
+        const http2_emit_record_t *rec = &st->records[i];
+        const char *ptr = rec->is_body
+                            ? rec->body.ptr
+                            : st->emit_buf + rec->buf.offset;
+        const size_t len = rec->is_body ? rec->body.len : rec->buf.len;
+
+        if (len >= H2_TLS_RECORD_PAYLOAD_MAX) {
+            if (stage_len > 0) {
+                ok = h2_tls_write_chunk(conn, stage, stage_len);
+                stage_len = 0;
+                if (!ok) { break; }
+            }
+
+            ok = h2_tls_write_chunk(conn, ptr, len);
+            continue;
+        }
+
+        if (stage_len + len > H2_TLS_RECORD_PAYLOAD_MAX) {
+            ok = h2_tls_write_chunk(conn, stage, stage_len);
+            stage_len = 0;
+            if (!ok) { break; }
+        }
+
+        memcpy(stage + stage_len, ptr, len);
+        stage_len += len;
+    }
+
+    if (ok && stage_len > 0) {
+        ok = h2_tls_write_chunk(conn, stage, stage_len);
+    }
+
+    return ok;
+}
+
+/* TLS emit: body records >= H2_TLS_RECORD_PAYLOAD_MAX go zero-copy;
+ * smaller records pack into one TLS record via stage[]. */
+static void h2_emit_flush_tls(http_connection_t *conn,
+                              http2_session_t *session,
+                              struct http2_emit_state *st)
+{
+    /* Gate on cipher_inflight; tls_cipher_completion re-enters us. */
+    (void)tls_drain(conn);
+    if (conn->tls_cipher_inflight > 0) {
+        session->emit_state = NULL;
+        return;
+    }
+
+    const int rc = nghttp2_session_send(session->ng);
+    session->emit_state = NULL;
+
+    const bool ok = (rc == 0) && (st->records == NULL
+                                  ? h2_emit_flush_tls_contiguous(conn, st)
+                                  : h2_emit_flush_tls_records(conn, st));
+
+    h2_emit_state_cleanup(st);
+
+    if (!ok) {
+        conn->tls_write_error = true;
+    }
+
+    (void)tls_drain(conn);
+}
+#endif
+
+/* h2c emit: flatten records[] (emit_buf slices + NO_COPY body) into an
+ * iov[] shipped through one zero-copy writev_ex. */
+static void h2_emit_flush_h2c(http_connection_t *conn,
+                              http2_session_t *session,
+                              struct http2_emit_state *st)
+{
+    const int rc = nghttp2_session_send(session->ng);
+    session->emit_state = NULL;
+
+    if (UNEXPECTED(rc != 0) || st->emit_buf_len == 0) {
+        h2_emit_state_cleanup(st);
+        return;
+    }
+
+    /* iov pointers outlive this frame — heap-promote. */
+    if (!st->emit_buf_on_heap) {
+        char *heap = emalloc(st->emit_buf_len);
+        memcpy(heap, st->emit_buf, st->emit_buf_len);
+        st->emit_buf = heap;
+        st->emit_buf_on_heap = true;
+    }
+
+    /* HEADERS-only pass: synthesize one iov over emit_buf. */
+    const unsigned niov = st->records != NULL ? st->records_count : 1u;
+    zend_async_buf_t *iov = emalloc(niov * sizeof(*iov));
+
+    if (st->records == NULL) {
+        iov[0].base = st->emit_buf;
+        iov[0].len  = st->emit_buf_len;
+    } else {
+        for (unsigned i = 0; i < st->records_count; i++) {
+            const http2_emit_record_t *rec = &st->records[i];
+            if (rec->is_body) {
+                iov[i].base = (char *)rec->body.ptr;
+                iov[i].len  = rec->body.len;
+            } else {
+                iov[i].base = st->emit_buf + rec->buf.offset;
+                iov[i].len  = rec->buf.len;
+            }
+        }
+    }
+
+    h2_writev_ctx_t *ctx = emalloc(sizeof(*ctx));
+    ctx->emit_buf      = st->emit_buf;
+    ctx->iov           = iov;
+    ctx->body_refs     = st->body_refs;
+    ctx->body_refs_cnt = st->body_refs_count;
+
+    if (st->records != NULL) { efree(st->records); }
+
+    (void)http_connection_send_batched_writev(conn, iov, niov,
+                                              h2c_writev_free_cb, ctx);
+}
+
+/* zend_bailout firewall: emalloc inside emit can longjmp out of scheduler
+ * context (writev completion → notify_emit) and crash finalize. */
+static void http2_emit_log_bailout(const http_connection_t *conn)
+{
+    const zend_string *last_err = PG(last_error_message);
+    const char *cause = (last_err != NULL) ? ZSTR_VAL(last_err) : "(no PG message)";
+
+    fprintf(stderr,
+            "[true-async-server] zend_bailout in h2 emit: conn=%p — %s\n",
+            (const void *)conn, cause);
+    fflush(stderr);
+}
+
+void http2_session_emit(http2_session_t *session)
+{
+    http_connection_t *conn = http2_session_get_conn(session);
+
+    if (conn->write_timed_out) {
+        return;
+    }
+
+    char stack_buf[H2_EMIT_BUF_INITIAL_CAP];
+    struct http2_emit_state st = {
+        .emit_buf     = stack_buf,
+        .emit_buf_cap = sizeof(stack_buf),
+    };
+
+    volatile bool bailout = false;
+    zend_try
+    {
+#ifdef HAVE_OPENSSL
+        if (conn->tls != NULL) {
+            st.byte_cap   = H2_EMIT_TLS_BYTE_CAP;
+            session->emit_state = &st;
+            h2_emit_flush_tls(conn, session, &st);
+        } else
+#endif
+        /* Skip if writev in flight; completion re-drives via notify_emit. */
+        if (!conn->out_in_flight) {
+            session->emit_state = &st;
+            h2_emit_flush_h2c(conn, session, &st);
+        }
+    }
+
+    zend_catch
+    {
+        bailout = true;
+    }
+
+    zend_end_try();
+
+    if (UNEXPECTED(bailout)) {
+        session->emit_state = NULL;
+        h2_emit_state_cleanup(&st);
+        conn->write_timed_out = true;
+        /* Defensive: bailout between set-flag and WRITEV_EX submit would
+         * leave the chain wedged forever (no completion to clear it). */
+        conn->out_in_flight = false;
+
+        if (conn->io != NULL) {
+            ZEND_ASYNC_IO_CLOSE(conn->io);
+        }
+
+        http2_emit_log_bailout(conn);
+    }
+}
+
+static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
+{
+    (void)io;
+    h2_writev_ctx_t *ctx = (h2_writev_ctx_t *)user_data;
+
+    for (unsigned i = 0; i < ctx->body_refs_cnt; i++) {
+        h2_emit_ref_release(ctx->body_refs[i]);
+    }
+
+    if (ctx->body_refs != NULL) { efree(ctx->body_refs); }
+
+    if (ctx->iov != NULL)       { efree(ctx->iov); }
+
+    if (ctx->emit_buf != NULL)  { efree(ctx->emit_buf); }
+
+    efree(ctx);
+}
+
+/* Park on stream->write_event (woken by WINDOW_UPDATE / ring-slot drain)
+ * with write_timeout fallback. false on timeout/cancel (exception set). */
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn)
 {
@@ -1258,7 +1358,6 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
         return false;
     }
 
-    /* Lazy-create the wake event once per stream. */
     if (stream->write_event == NULL) {
         stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
 
@@ -1273,9 +1372,6 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     zend_async_resume_when(co, wake_ev, false,
                            zend_async_waker_callback_resolve, NULL);
 
-    /* Write-timeout fallback for dead / misbehaving peers. Without
-     * this, a peer that stops acknowledging WINDOW_UPDATE can pin
-     * the handler forever. */
     if (conn != NULL && conn->write_timeout_ms > 0) {
         zend_async_event_t *timer =
             &ZEND_ASYNC_NEW_TIMER_EVENT(
@@ -1288,106 +1384,92 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     zend_async_waker_clean(co);
 
     if (EG(exception) != NULL) {
-        /* Timeout exception is expected for genuinely stalled clients;
-         * map to "stream dead" so send() unwinds cleanly. Other
-         * exceptions (peer RST propagated as cancel) likewise exit. */
         return false;
     }
 
     return true;
 }
 
+/* Per-stream ring slot count. Dual-bounded backpressure: slot cap OR
+ * stream_write_buffer_bytes high-water mark. */
+#define H2_CHUNK_RING_SLOTS 8
+
+/* First-send lazy: allocate ring + commit HEADERS. */
+static bool h2_stream_init_ring(http_connection_t *conn, http2_stream_t *stream)
+{
+    stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
+    stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
+                                        sizeof(zend_string *));
+    stream->chunk_queue_head  = 0;
+    stream->chunk_queue_tail  = 0;
+    stream->chunk_queue_bytes = 0;
+    stream->chunk_read_offset = 0;
+
+    if (!h2_commit_streaming_headers(conn, stream)) {
+        return false;
+    }
+
+    http_server_on_streaming_response_started(conn->counters);
+    return true;
+}
+
+/* Park producer until ring has room (slot free AND bytes < max_bytes).
+ * Returns false on timeout/cancel (caller releases chunk + bails). */
+static bool h2_stream_wait_for_room(http2_stream_t *stream,
+                                    http_connection_t *conn,
+                                    const uint32_t max_bytes)
+{
+    for (;;) {
+        http2_stream_compact_chunk_queue(stream);
+
+        if (stream->chunk_queue_tail < stream->chunk_queue_cap
+            && (max_bytes == 0 || stream->chunk_queue_bytes < max_bytes)) {
+            return true;
+        }
+
+        http_server_on_stream_backpressure(conn->counters);
+
+        if (!h2_wait_for_drain_event(stream, conn)) {
+            return false;
+        }
+
+        http2_session_emit(stream->session);
+    }
+}
+
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
-
-    if (stream == NULL || stream->session == NULL) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
-    if (conn == NULL) {
+    if (conn->write_timed_out) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* Lazy queue allocation + first-send HEADERS commit. */
-    if (stream->chunk_queue == NULL) {
-        stream->chunk_queue_cap  = 8;
-        stream->chunk_queue      = ecalloc(stream->chunk_queue_cap,
-                                           sizeof(zend_string *));
-        stream->chunk_queue_head = 0;
-        stream->chunk_queue_tail = 0;
-        stream->chunk_queue_bytes = 0;
-        stream->chunk_read_offset = 0;
-
-        if (!h2_commit_streaming_headers(conn, stream)) {
-            zend_string_release(chunk);
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-        /* One new streaming response activated. */
-        http_server_on_streaming_response_started(conn->counters);
+    if (stream->chunk_queue == NULL && !h2_stream_init_ring(conn, stream)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    http_server_counters_t *counters = conn->counters;
+    /* 0 disables byte cap; slot cap still bounds the ring. */
+    const uint32_t max_bytes = conn->server != NULL
+                             ? http_server_get_stream_write_buffer_bytes(conn->server)
+                             : 0;
 
-    /* Grow ring if full. Compact first (shift head → 0) to avoid
-     * unbounded growth on long-lived streams. */
-    if (stream->chunk_queue_tail == stream->chunk_queue_cap) {
-        if (stream->chunk_queue_head > 0) {
-            const size_t live = stream->chunk_queue_tail - stream->chunk_queue_head;
-            memmove(stream->chunk_queue,
-                    stream->chunk_queue + stream->chunk_queue_head,
-                    live * sizeof(zend_string *));
-            stream->chunk_queue_head = 0;
-            stream->chunk_queue_tail = live;
-        }
-
-        if (stream->chunk_queue_tail == stream->chunk_queue_cap) {
-            const size_t new_cap = stream->chunk_queue_cap * 2;
-            stream->chunk_queue = erealloc(stream->chunk_queue,
-                                           new_cap * sizeof(zend_string *));
-            stream->chunk_queue_cap = new_cap;
-        }
+    if (!h2_stream_wait_for_room(stream, conn, max_bytes)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
     stream->chunk_queue[stream->chunk_queue_tail++] = chunk;
     stream->chunk_queue_bytes += ZSTR_LEN(chunk);
 
-    http_server_on_stream_send(counters, ZSTR_LEN(chunk));
+    http_server_on_stream_send(conn->counters, ZSTR_LEN(chunk));
 
-    /* Kick nghttp2: the data provider was DEFERRED while the queue
-     * was empty; resume_data tells it to retry now. */
+    /* Resume DEFERRED data provider + emit. */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
-
-    /* Drive the pump — turn queued bytes into socket writes. */
-    h2_drain_to_socket(conn, stream->session);
-
-    /* Backpressure: if the drain didn't empty the queue,
-     * flow control (per-stream or connection) is holding bytes back.
-     * Suspend the handler coroutine on the stream's write_event; it
-     * wakes when cb_on_frame_recv processes an inbound WINDOW_UPDATE
-     * (in src/http2/http2_session.c). Write-timeout is the fallback
-     * for dead peers.
-     *
-     * Race-free: we register the waker on our write_event BEFORE
-     * suspending. The trigger fires only from the read-callback
-     * (scheduler context), which cannot execute concurrently with
-     * this coroutine under TrueAsync's single-threaded scope. So
-     * "register → fire" ordering is guaranteed. */
-    if (stream->chunk_queue_bytes > 0) {
-        http_server_on_stream_backpressure(counters);
-    }
-    while (stream->chunk_queue_bytes > 0) {
-        if (!h2_wait_for_drain_event(stream, conn)) {
-            /* Timeout / cancel / peer gone. PHP exception set. */
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-
-        h2_drain_to_socket(conn, stream->session);
-    }
+    http2_session_emit(stream->session);
 
     return HTTP_STREAM_APPEND_OK;
 }
@@ -1396,38 +1478,26 @@ static void h2_stream_mark_ended(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    if (stream == NULL || stream->session == NULL || stream->streaming_ended) {
+    if (stream->streaming_ended) {
         return;
     }
 
     stream->streaming_ended = true;
 
-    /* If the peer already RST'd this stream, nghttp2's internal state
-     * for stream_id is gone. resume_stream_data is a no-op in that
-     * case per the nghttp2 API, but the subsequent mem_send call can
-     * still walk a stale data-provider pointer and dereference a NULL
-     * function slot — crashes under concurrent peer-reset-mid-stream
-     * loads (phpt 092). Nothing more to push; dispose unwinds. */
+    /* Peer-RST removed nghttp2's stream state; resume + mem_send would
+     * walk a stale data_provider and crash (phpt 092). */
     if (stream->peer_closed) {
         return;
     }
 
-    /* Wake the data provider one last time — it'll see empty queue
-     * + streaming_ended and flag EOF (or NO_END_STREAM + trailers). */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
 
-    http_connection_t *conn = http2_session_get_conn(stream->session);
-
-    if (conn != NULL) {
-        h2_drain_to_socket(conn, stream->session);
-    }
+    http2_session_emit(stream->session);
 }
 
 static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
-
-    if (stream == NULL) { return NULL; }
 
     if (stream->write_event == NULL) {
         stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
@@ -1438,27 +1508,49 @@ static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
                : NULL;
 }
 
+/* sendable() backing: true if append_chunk would proceed without suspend. */
+static bool h2_stream_sendable(void *ctx)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
+    if (stream->chunk_queue == NULL) {
+        return true;   /* not started — first send() always proceeds */
+    }
+
+    if (stream->chunk_queue_tail - stream->chunk_queue_head
+            >= stream->chunk_queue_cap) {
+        return false;  /* all slots live */
+    }
+
+    const http_connection_t *conn = http2_session_get_conn(stream->session);
+    const uint32_t max_bytes = conn->server != NULL
+                             ? http_server_get_stream_write_buffer_bytes(conn->server)
+                             : 0;
+
+    return max_bytes == 0 || stream->chunk_queue_bytes < max_bytes;
+}
+
 const http_response_stream_ops_t h2_stream_ops = {
     .append_chunk        = h2_stream_append_chunk,
+    .sendable            = h2_stream_sendable,
     .mark_ended          = h2_stream_mark_ended,
     .get_wait_event      = h2_stream_get_wait_event,
     .send_static_response = h2_stream_send_static_response,
 };
 
-/* Public-by-extern entrypoint into h2_drain_to_socket, used by the
- * static-response module after it submits a response. Kept as a
- * thin trampoline rather than renaming h2_drain_to_socket to keep
- * the existing handler-coroutine code-paths unchanged. */
-void http2_static_drain_to_socket(http_connection_t *conn,
-                                  http2_session_t *session);
-void http2_static_drain_to_socket(http_connection_t *conn,
-                                  http2_session_t *session)
+/* External entry for tls_cipher_completion. No-op on non-h2. */
+void http2_conn_notify_emit(http_connection_t *conn)
 {
-    if (conn == NULL || session == NULL) {
+    if (conn == NULL || conn->strategy == NULL ||
+        conn->protocol_type != HTTP_PROTOCOL_HTTP2) {
         return;
     }
 
-    h2_drain_to_socket(conn, session);
+    const http2_strategy_t *self = (const http2_strategy_t *)conn->strategy;
+
+    if (self->session != NULL) {
+        http2_session_emit(self->session);
+    }
 }
 
 static void http2_strategy_send_response(http_connection_t *conn, void *response)

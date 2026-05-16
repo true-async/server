@@ -21,11 +21,8 @@
 
 #include <stdint.h>
 
-/* Per-connection plaintext ring buffer feeding the TLS flusher.
- * Producers (handler coroutines) push plaintext via BIO_write; the
- * flusher drains it through SSL_write. Sized for one MAX_FRAME_SIZE
- * H2 frame (16 KiB) plus one in-flight TLS record (16 KiB); a full
- * ring triggers backpressure via tls_drain_event. */
+/* Plaintext ring fed by tls_push. Sized for one MAX_FRAME_SIZE H2
+ * frame (16 KiB) plus one in-flight TLS record (16 KiB). */
 #define HTTP_TLS_PLAINTEXT_RING_BYTES (32 * 1024)
 
 typedef struct http1_parser_t http1_parser_t;
@@ -115,36 +112,27 @@ struct _http_connection_t {
 #ifdef HAVE_OPENSSL
     tls_session_t                 *tls;
 
-    /* Plaintext queue feeding the cooperative flusher. Active only while
-     * conn->tls != NULL. Producers (handler coroutines) push plaintext
-     * into tls_plaintext_bio via BIO_write — a pure memory op, no SSL
-     * state. The first producer that finds tls_flushing == false becomes
-     * the flusher: it drains tls_plaintext_bio_app via SSL_write and
-     * ships the ciphertext through the suspending send_raw path. Later
-     * producers enqueue and return — they do not wait for their bytes
-     * to hit the wire; the flusher picks them up on its next loop. */
-    BIO                           *tls_plaintext_bio;       /* producer side (BIO_write here) */
-    BIO                           *tls_plaintext_bio_app;   /* flusher side (BIO_nread here) */
-    zend_async_trigger_event_t    *tls_drain_event;         /* fires when ring gains space */
+    /* BIO pair. Coroutine producers BIO_write into tls_plaintext_bio
+     * after waiting on tls_space_event for room. Drain (scheduler)
+     * pulls from tls_plaintext_bio_app via SSL_write into the cipher
+     * BIO and ships ciphertext through tls_cipher_completion. */
+    BIO                           *tls_plaintext_bio;
+    BIO                           *tls_plaintext_bio_app;
 
-    /* Read FSM async-write slot. The TLS read FSM lives in event-loop
-     * callback context (no coroutine, no suspension). Bytes it produces
-     * via SSL_do_handshake / SSL_read (handshake, NewSessionTicket,
-     * KeyUpdate, alerts, close_notify) are shipped zero-copy: the FSM
-     * peeks BIO_nread0 and submits the slot pointer directly via
-     * ZEND_ASYNC_IO_WRITE_EX (fire-and-forget); the free_cb consumes
-     * the ring on completion. Coordination with the producer flusher is
-     * via tls_flushing: while the handler-side flusher owns the cipher
-     * BIO, the FSM defers and lets that loop pick up its bytes. */
+    /* Broadcast wake fired by the drain after every BIO_nread consume.
+     * Coroutines parked in tls_wait_space recheck the guarantee and
+     * proceed or re-park. */
+    zend_async_trigger_event_t    *tls_space_event;
+
+    /* Persistent io-event callback shared by the read FSM (read
+     * completion) and the cipher write (WRITE_EX free_cb). */
     tls_fsm_send_cb_t             *tls_fsm_send_cb;
 
-    /* Zero-copy FSM write: bytes peeked from BIO and submitted to
-     * libuv. Non-zero while a write is in flight; the free_cb consumes
-     * exactly this many bytes from the BIO output ring on completion
-     * (or zero on error — connection torn down). Gate against double
-     * submission while a write is outstanding (BIO would re-peek the
-     * same bytes the in-flight write still owns). */
-    size_t                         tls_zc_write_n;
+    /* Bytes of cipher BIO that libuv currently owns via a fire-and-
+     * forget WRITE_EX. Non-zero gates both fresh SSL_write into the
+     * cipher BIO and a fresh submit — keeps the slot pointer we handed
+     * to libuv stable until consume runs in the completion callback. */
+    size_t                         tls_cipher_inflight;
 
     /* Optional zero-copy write completion observer (issue #13 §5a).
      * The static-handler TLS FSM uses this to pace its read→encrypt→
@@ -165,9 +153,9 @@ struct _http_connection_t {
      * the struct to save padding. unsigned : 1 chosen over bool : 1 for
      * the broadest compiler portability; reads/writes use plain
      * bool/true/false via implicit conversion. */
-    unsigned                       tls_flushing : 1;         /* producer-side flusher role held */
-    unsigned                       tls_write_error : 1;      /* sticky SSL_write / socket failure */
-    unsigned                       tls_awaiting_handler : 1; /* FSM paused until handler dispose */
+    unsigned                       tls_draining : 1;
+    unsigned                       tls_write_error : 1;
+    unsigned                       tls_awaiting_handler : 1;
 #endif
 
     /* size_t fields (8 bytes on 64-bit) */
@@ -186,10 +174,18 @@ struct _http_connection_t {
      * then drains the pending buffer in one more uv_write — at that
      * point write_queue_size has been decremented, so the next submit
      * also takes the fast path. Plaintext only: TLS path has its own
-     * BIO-pair zero-copy submit (tls_zc_write_n above). */
+     * BIO-pair zero-copy submit (tls_cipher_inflight above). */
     char    *out_pending_buf;
     size_t   out_pending_len;
     size_t   out_pending_cap;
+
+    /* send_batched_writev passthrough: stash user free_cb + user_data
+     * here while one writev is in flight (out_in_flight guarantees
+     * single-writer serialisation, so it's safe to keep these on the
+     * connection rather than emalloc'ing a context per submit). The
+     * writev completion forwards them and then drains pending. */
+    zend_async_io_write_free_cb_t out_writev_user_cb;
+    void                         *out_writev_user_data;
 
     /* 4-byte fields */
     http_connection_state_t  state;
@@ -291,6 +287,16 @@ struct _http_connection_t {
     zend_async_event_t            *write_timer;       /* zend_async_timer_event_t* */
     zend_async_event_callback_t   *write_timer_cb;
     unsigned                       write_timed_out : 1;
+
+    /* Pending deferred-teardown microtask, or NULL. Set by
+     * http_connection_destroy_if_idle_deferred when a teardown is
+     * requested from a context that may be nested inside an nghttp2
+     * callback / emit chain — where a synchronous http_connection_destroy
+     * would free the session nghttp2 is still walking. The microtask
+     * runs the destroy at the top of the next loop iteration, after the
+     * call stack has fully unwound. Cancelled by http_connection_destroy
+     * itself if another path tears the connection down first. */
+    zend_async_microtask_t        *destroy_microtask;
 };
 
 /* Per-request state for the HTTP/1 handler coroutine. Lives on the
@@ -341,6 +347,16 @@ http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 
+/* Teardown a connection that just went idle (handler_refcount == 0 and
+ * destroy_pending), but defer the actual http_connection_destroy to a
+ * microtask running at the top of the next loop iteration. Use this
+ * instead of a direct destroy from any context that may be nested
+ * inside an nghttp2 callback or the h2 emit chain — calling
+ * http_connection_destroy there frees the nghttp2 session while
+ * nghttp2_session_send is still on the stack (use-after-free). No-op if
+ * the connection is not idle or a teardown microtask is already queued. */
+void http_connection_destroy_if_idle_deferred(http_connection_t *conn);
+
 /* Connection processing */
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len);
 bool http_connection_send_error(http_connection_t *conn, int status_code, const char *message);
@@ -362,6 +378,18 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
  * only — TLS uses the BIO-pair zero-copy path. */
 bool http_connection_send_batched(http_connection_t *conn,
                                   void *buf, size_t len);
+
+/* Vectored variant of send_batched. iov[] is an array of (base, len)
+ * descriptors pointing into caller-owned memory; free_cb is invoked once
+ * with user_data + io on completion (or after the bytes are accepted into
+ * pending coalescing when a write is already in flight). When in flight
+ * the iov data is COPIED into out_pending_buf (same coalescing semantics
+ * as send_batched) and free_cb fires immediately. Plaintext only. */
+bool http_connection_send_batched_writev(http_connection_t *conn,
+                                         const zend_async_buf_t *iov,
+                                         const unsigned niov,
+                                         zend_async_io_write_free_cb_t free_cb,
+                                         void *user_data);
 
 /* Vectored fire-and-forget variant: each slot of @p bufs is an OWNED
  * zend_string reference, consumed by the reactor's writev completion.

@@ -217,36 +217,75 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
 }
 /* }}} */
 
+/* {{{ deferred-teardown microtask — destroy from inside nghttp2 callbacks
+ * would free the session mid-send (UAF); microtask runs after stack unwinds. */
+typedef struct {
+    zend_async_microtask_t base;
+    http_connection_t     *conn;
+} conn_destroy_microtask_t;
+
+static void conn_destroy_microtask_handler(zend_async_microtask_t *mt)
+{
+    conn_destroy_microtask_t *t = (conn_destroy_microtask_t *)mt;
+    http_connection_t *conn = t->conn;
+
+    conn->destroy_microtask = NULL;
+
+    /* Re-check: a fresh handler may have been dispatched in the interim. */
+    if (conn->handler_refcount == 0 && conn->destroy_pending) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+    }
+}
+
+static void conn_destroy_microtask_dtor(zend_async_microtask_t *mt)
+{
+    efree(mt);
+}
+
+void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
+{
+    if (conn == NULL
+        || conn->handler_refcount != 0
+        || !conn->destroy_pending
+        || conn->destroy_microtask != NULL) {
+        return;
+    }
+
+    conn_destroy_microtask_t *t = ecalloc(1, sizeof(*t));
+    t->base.handler = conn_destroy_microtask_handler;
+    t->base.dtor    = conn_destroy_microtask_dtor;
+    t->conn         = conn;
+    conn->destroy_microtask = &t->base;
+
+    ZEND_ASYNC_ADD_MICROTASK(&t->base);
+}
+/* }}} */
+
 /* {{{ http_connection_destroy */
 void http_connection_destroy(http_connection_t *conn)
 {
     if (!conn) return;
 
-    /* Defer the actual free if a handler coroutine is still holding
-     * this conn alive. Prevents the async UAF where a read-callback
-     * CLOSING path frees strategy/session while a dispose coroutine is
-     * suspended inside commit/send drain. The last handler's dispose
-     * re-enters destroy via destroy_pending once handler_refcount hits
-     * zero. */
+    /* Cancel any pending teardown microtask — direct destroy taking over. */
+    if (conn->destroy_microtask != NULL) {
+        conn->destroy_microtask->is_cancelled = true;
+        conn->destroy_microtask = NULL;
+    }
+
+    /* Defer if a handler coroutine still holds the conn (last dispose re-enters). */
     if (conn->handler_refcount > 0) {
         conn->destroy_pending = true;
         return;
     }
 #ifdef HAVE_OPENSSL
-    /* Defer destroy while an FSM async send is in flight. libuv still
-     * holds a pointer into our heap buffer for the pending uv_write;
-     * detaching the completion callback now would orphan the only path
-     * that frees that buffer. The send callback re-runs destroy after
-     * the write completes (or is cancelled by the close path). */
+    /* Defer while a TLS FSM send is in flight (libuv owns our heap buf). */
     if (http_connection_tls_fsm_send_in_flight(conn)) {
         conn->destroy_pending = true;
         return;
     }
 #endif
-    /* Same deferral for the batched plaintext send: libuv owns a
-     * pointer into the heap buf we passed to ZEND_ASYNC_IO_WRITE_EX.
-     * The completion cb sees destroy_pending == true and re-runs
-     * teardown after draining/freeing. */
+    /* Same deferral for the batched plaintext send (libuv owns our buf). */
     if (conn->out_in_flight) {
         conn->destroy_pending = true;
         return;
@@ -349,12 +388,12 @@ void http_connection_destroy(http_connection_t *conn)
         tls_session_free(conn->tls);
         conn->tls = NULL;
     }
-    /* Plaintext queue + flusher state. By the time destroy runs the
-     * handler_refcount gate has guaranteed no producer is mid-push, so
-     * the BIOs are unowned. drain_event might still carry a waker if a
-     * producer was backpressured when destroy_pending fired; disposing
-     * the event resolves the waker with conn->tls == NULL, which makes
-     * await_tls_drain_event return false. */
+    /* Plaintext queue + ring-space waiters. handler_refcount has
+     * guaranteed no producer is mid-push, but a backpressured coroutine
+     * may still be parked on the FIFO queue; resume them so their
+     * waker_clean fires before the BIOs go away. */
+    tls_release_waiters(conn);
+
     if (conn->tls_plaintext_bio) {
         BIO_free(conn->tls_plaintext_bio);
         conn->tls_plaintext_bio = NULL;
@@ -363,11 +402,6 @@ void http_connection_destroy(http_connection_t *conn)
     if (conn->tls_plaintext_bio_app) {
         BIO_free(conn->tls_plaintext_bio_app);
         conn->tls_plaintext_bio_app = NULL;
-    }
-
-    if (conn->tls_drain_event) {
-        conn->tls_drain_event->base.dispose(&conn->tls_drain_event->base);
-        conn->tls_drain_event = NULL;
     }
 #endif
 
@@ -804,6 +838,15 @@ static void http_write_timer_dispose(http_connection_t *conn)
 }
 /* }}} */
 
+/* h2 has no request boundary — push the read deadline on any inbound activity. */
+static void http_connection_note_inbound_h2(http_connection_t *conn)
+{
+    if (conn->protocol_type == HTTP_PROTOCOL_HTTP2
+        && conn->read_timeout_ms > 0) {
+        conn->deadline_ms = ZEND_ASYNC_NOW() + conn->read_timeout_ms;
+    }
+}
+
 /* {{{ http_connection_handle_read_completion
  *
  * Process whatever just landed in conn->read_buffer (via either a
@@ -1018,6 +1061,7 @@ static void http_connection_read_callback_fn(
     }
 
     conn->read_buffer_len += bytes_read;
+    http_connection_note_inbound_h2(conn);
 
     /* Re-entrancy guard: a handler coroutine is currently in flight (possibly
      * suspended at an await), so the parser must not run — feeding new bytes
@@ -1103,6 +1147,7 @@ bool http_connection_read(http_connection_t *conn)
         }
 
         conn->read_buffer_len += bytes_read;
+        http_connection_note_inbound_h2(conn);
 
         bool should_destroy = false;
 
@@ -1169,7 +1214,6 @@ bool http_connection_read(http_connection_t *conn)
  * the TLS branch on the inner loop. Internal — direct callers are the
  * plaintext path and the TLS encrypt path.
  */
-/* Cross-TU: also called from http_connection_tls_drain_ring_to_socket. */
 bool http_connection_send_raw(http_connection_t *conn,
                                      const char *data, const size_t len)
 {
@@ -1268,9 +1312,12 @@ static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
  * uv_write — that submit takes the fast path because the counter is
  * now zero. Chain continues until pending is empty.
  *
- * Plaintext only: TLS uses tls_zc_write_n via the BIO ring path.
+ * Plaintext only: TLS uses tls_cipher_inflight via the BIO ring path.
  * Caller transfers ownership of `buf` (emalloc'd); the reactor — or
  * the append-into-pending path here — owns it after this call. */
+/* h2 emit re-drive — defined in src/http2/http2_strategy.c, no-op on non-h2. */
+extern void http2_conn_notify_emit(http_connection_t *conn);
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1282,21 +1329,16 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
     http_connection_t *conn = (http_connection_t *)io->user_data;
 
     if (conn->out_pending_len > 0) {
-        /* Drain the accumulated batch as one writev. write_queue_size
-         * was just decremented for the completed req before we were
-         * called, so this submit takes the inline-writev fast path. */
         char  *next_buf = conn->out_pending_buf;
         size_t next_len = conn->out_pending_len;
         conn->out_pending_buf = NULL;
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
-        /* out_in_flight stays true — chain continues through the next
-         * completion. */
+        /* out_in_flight stays true — chain continues. */
         zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
-            /* Reactor already efree'd next_buf via the cb on submit failure. */
             conn->out_in_flight = false;
         }
 
@@ -1305,13 +1347,13 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 
     conn->out_in_flight = false;
 
-    /* Conn destroy was deferred while a batched write was in flight
-     * (see http_connection_destroy below). Now that the buffer is
-     * released and the chain has drained, run the pending teardown. */
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
         conn->destroy_pending = false;
         http_connection_destroy(conn);
+        return;
     }
+
+    http2_conn_notify_emit(conn);
 }
 
 bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len)
@@ -1327,8 +1369,6 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
     }
 
     if (conn->out_in_flight) {
-        /* A uv_write is outstanding — append + return without dipping
-         * back into libuv. The completion cb will pick this up. */
         const size_t need = conn->out_pending_len + len;
 
         if (need > conn->out_pending_cap) {
@@ -1347,16 +1387,126 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
         return true;
     }
 
-    /* No write in flight — submit directly. Mark in-flight BEFORE
-     * the call so a sync-complete (rare on Linux for stream writes)
-     * still sees a consistent state when the cb fires inline. */
+    /* Mark in-flight BEFORE submit so sync-complete sees consistent state. */
     conn->out_in_flight = true;
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, buf, len, http_send_batched_completion_cb);
 
     if (UNEXPECTED(req == NULL)) {
-        /* Submit failed — reactor invoked the cb (efree'd buf), and
-         * the cb sets out_in_flight = false / drains pending. */
+        return false;
+    }
+
+    return true;
+}
+
+/* Vectored variant of send_batched. Drains pending via the single-buf path. */
+static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *io)
+{
+    http_connection_t *conn = (http_connection_t *)data;
+
+    /* User release first; pulled to a local so a re-entrant emit sees cleared slot. */
+    zend_async_io_write_free_cb_t user_cb = conn->out_writev_user_cb;
+    void *user_data = conn->out_writev_user_data;
+    conn->out_writev_user_cb   = NULL;
+    conn->out_writev_user_data = NULL;
+
+    if (user_cb != NULL) {
+        user_cb(user_data, io);
+    }
+
+    if (UNEXPECTED(io == NULL || conn != (http_connection_t *)io->user_data)) {
+        return;
+    }
+
+    if (conn->out_pending_len > 0) {
+        char  *next_buf = conn->out_pending_buf;
+        size_t next_len = conn->out_pending_len;
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+            conn->io, next_buf, next_len, http_send_batched_completion_cb);
+
+        if (UNEXPECTED(req == NULL)) {
+            conn->out_in_flight = false;
+        }
+
+        return;
+    }
+
+    conn->out_in_flight = false;
+
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+        return;
+    }
+
+    http2_conn_notify_emit(conn);
+}
+
+bool http_connection_send_batched_writev(http_connection_t *conn,
+                                         const zend_async_buf_t *iov,
+                                         const unsigned niov,
+                                         zend_async_io_write_free_cb_t free_cb,
+                                         void *user_data)
+{
+    if (iov == NULL || niov == 0) {
+        if (free_cb != NULL) {
+            free_cb(user_data, conn != NULL ? conn->io : NULL);
+        }
+
+        return true;
+    }
+
+    if (UNEXPECTED(conn->write_timed_out)) {
+        if (free_cb != NULL) { free_cb(user_data, conn->io); }
+        return false;
+    }
+
+    if (conn->out_in_flight) {
+        /* Coalesce: copy iov bytes into out_pending_buf, fire user
+         * free_cb immediately (data is no longer needed). */
+        size_t total = 0;
+
+        for (unsigned i = 0; i < niov; i++) { total += iov[i].len; }
+
+        const size_t need = conn->out_pending_len + total;
+
+        if (need > conn->out_pending_cap) {
+            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
+
+            while (new_cap < need) { new_cap *= 2; }
+
+            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
+            conn->out_pending_cap = new_cap;
+        }
+
+        char *dst = conn->out_pending_buf + conn->out_pending_len;
+
+        for (unsigned i = 0; i < niov; i++) {
+            memcpy(dst, iov[i].base, iov[i].len);
+            dst += iov[i].len;
+        }
+
+        conn->out_pending_len += total;
+
+        if (free_cb != NULL) { free_cb(user_data, conn->io); }
+
+        return true;
+    }
+
+    /* No write in flight — submit WRITEV_EX directly (zero-copy iov). */
+    conn->out_writev_user_cb   = free_cb;
+    conn->out_writev_user_data = user_data;
+    conn->out_in_flight = true;
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV_EX(
+        conn->io, iov, niov, http_send_batched_writev_completion_cb, conn);
+
+    if (UNEXPECTED(req == NULL)) {
+        /* Reactor invoked our completion already (user cb fired, state
+         * cleared). out_in_flight was reset there. */
         return false;
     }
 
@@ -1447,7 +1597,7 @@ bool http_connection_send(http_connection_t *conn, const char *data, const size_
 
 #ifdef HAVE_OPENSSL
     if (conn->tls != NULL) {
-        return tls_push_and_maybe_flush(conn, data, len);
+        return tls_push(conn, data, len);
     }
 #endif
 
@@ -2288,8 +2438,8 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             zend_string *response_str = http_response_format(Z_OBJ(ctx->response_zv));
 
             if (response_str) {
-                sent = tls_push_and_fire(conn, ZSTR_VAL(response_str),
-                                         ZSTR_LEN(response_str));
+                sent = tls_push(conn, ZSTR_VAL(response_str),
+                                ZSTR_LEN(response_str));
                 zend_string_release(response_str);
             } else {
                 sent = false;

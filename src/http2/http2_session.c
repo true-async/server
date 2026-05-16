@@ -47,61 +47,8 @@
  *                         guard).
  */
 
-struct http2_session_t {
-    nghttp2_session   *ng;
-
-    /* Owning connection — used by session-level callbacks that need
-     * to reach the connection layer directly (without hopping through
-     * the strategy trampoline): per-stream handler dispatch under
-     * conn->scope, admission control against conn->server (CoDel /
-     * REFUSED_STREAM), and telemetry flush on stream close.
-     * NULL in unit tests that drive the session without a real
-     * connection fixture. */
-    http_connection_t *conn;
-
-    /* Dispatch hook — called on HEADERS + END_HEADERS per stream. */
-    http2_request_ready_cb_t  on_request_ready;
-    void                     *on_request_ready_user_data;
-
-    /* Pending outbound slice — see http2_session_drain. Lives inside
-     * nghttp2's internal buffers; we must not free it. Valid until the
-     * next nghttp2_session_mem_send call. */
-    const uint8_t *send_pending;
-    size_t         send_pending_len;
-    size_t         send_pending_offset;
-
-    /* Stream table: stream_id → http2_stream_t*. Keeps ownership
-     * explicit for teardown; nghttp2 separately holds the same pointer
-     * via stream_user_data so callbacks can do O(1) lookups without
-     * touching this table. */
-    HashTable      streams;
-
-    /* PING RTT state. Our own outbound PINGs embed a
-     * zend_hrtime() stamp as the 8-byte opaque payload; when the peer
-     * bounces it back with NGHTTP2_FLAG_ACK, on_frame_recv decodes and
-     * stores the delta here. nghttp2 auto-ACKs peer-initiated pings
-     * without help from us — nothing to measure on that path. */
-    uint64_t       last_ping_rtt_ns;
-
-    /* Highest peer-initiated stream-id we have accepted. Peer streams
-     * MUST be monotonically increasing per RFC 9113 §5.1.1 — the first
-     * use of a new stream-id implicitly closes all lower idle ones, so
-     * receiving a smaller id later is a connection error PROTOCOL_ERROR.
-     * Set in cb_on_begin_headers; zero means "no peer stream seen yet".
-     *
-     * Client-initiated streams are also required to be odd; even peer
-     * ids on the server side are likewise PROTOCOL_ERROR (reserved for
-     * server-initiated push). */
-    uint32_t       last_peer_stream_id;
-
-    /* Set when nghttp2_session_mem_recv fails with
-     * NGHTTP2_ERR_BAD_CLIENT_MAGIC. At that point the session is
-     * unrecoverable and the library will not accept or emit any more
-     * frames, so we can't use submit_goaway. The caller checks this
-     * flag on the error path and writes a hand-crafted GOAWAY frame
-     * directly to the socket before closing. */
-    bool           bad_preface_emit_goaway;
-};
+/* struct http2_session_t now defined in http2_session.h for inline
+ * hot-path accessors (find_stream / get_conn / notify). */
 
 /* -------------------------------------------------------------------------
  * Stream table helpers
@@ -125,22 +72,6 @@ static void stream_table_remove(http2_session_t *session,
                                 const uint32_t stream_id)
 {
     zend_hash_index_del(&session->streams, stream_id);
-}
-
-http2_stream_t *http2_session_find_stream(http2_session_t *session,
-                                          const uint32_t stream_id)
-{
-    if (session == NULL) {
-        return NULL;
-    }
-
-    zval *zv = zend_hash_index_find(&session->streams, stream_id);
-    return zv != NULL ? (http2_stream_t *)Z_PTR_P(zv) : NULL;
-}
-
-http_connection_t *http2_session_get_conn(http2_session_t *session)
-{
-    return session != NULL ? session->conn : NULL;
 }
 
 /* Internal accessor — exported (extern decl in callers) so the
@@ -787,6 +718,246 @@ static int cb_on_stream_close(nghttp2_session *ng,
     return 0;
 }
 
+static void h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t need)
+{
+    if (need <= st->emit_buf_cap) { return; }
+
+    size_t new_cap = st->emit_buf_cap ? st->emit_buf_cap * 2 : H2_EMIT_BUF_INITIAL_CAP;
+
+    while (new_cap < need) { new_cap *= 2; }
+
+    char *new_buf = st->emit_buf_on_heap
+                  ? erealloc(st->emit_buf, new_cap)
+                  : emalloc(new_cap);
+
+    if (!st->emit_buf_on_heap) {
+        if (st->emit_buf_len > 0) {
+            memcpy(new_buf, st->emit_buf, st->emit_buf_len);
+        }
+
+        st->emit_buf_on_heap = true;
+    }
+
+    st->emit_buf = new_buf;
+    st->emit_buf_cap = new_cap;
+}
+
+static void h2_emit_state_grow_records(struct http2_emit_state *st)
+{
+    if (st->records_count < st->records_cap) { return; }
+
+    const unsigned new_cap = st->records_cap ? st->records_cap * 2 : H2_EMIT_RECORDS_INITIAL_CAP;
+    st->records = st->records == NULL
+                ? emalloc(new_cap * sizeof(*st->records))
+                : erealloc(st->records, new_cap * sizeof(*st->records));
+    st->records_cap = new_cap;
+}
+
+static void h2_emit_state_grow_refs(struct http2_emit_state *st)
+{
+    if (st->body_refs_count < st->body_refs_cap) { return; }
+
+    const unsigned new_cap = st->body_refs_cap ? st->body_refs_cap * 2 : H2_EMIT_REFS_INITIAL_CAP;
+    st->body_refs = st->body_refs == NULL
+                  ? emalloc(new_cap * sizeof(*st->body_refs))
+                  : erealloc(st->body_refs, new_cap * sizeof(*st->body_refs));
+    st->body_refs_cap = new_cap;
+}
+
+/* records[] stays NULL until the first body record (HEADERS-only fast path). */
+static void h2_emit_state_append_buf(struct http2_emit_state *st,
+                                     const uint8_t *data, const size_t len)
+{
+    h2_emit_state_grow_buf(st, st->emit_buf_len + len);
+    memcpy(st->emit_buf + st->emit_buf_len, data, len);
+    const uint32_t offset = (uint32_t)st->emit_buf_len;
+    st->emit_buf_len += len;
+
+    if (st->records == NULL) {
+        return;
+    }
+
+    /* Coalesce with previous adjacent buf record. */
+    if (st->records_count > 0) {
+        http2_emit_record_t *last = &st->records[st->records_count - 1];
+        if (!last->is_body
+            && last->buf.offset + last->buf.len == offset) {
+            last->buf.len += (uint32_t)len;
+            return;
+        }
+    }
+
+    h2_emit_state_grow_records(st);
+    http2_emit_record_t *rec = &st->records[st->records_count++];
+    rec->is_body    = false;
+    rec->buf.offset = offset;
+    rec->buf.len    = (uint32_t)len;
+}
+
+/* Activates records[] on first body iov; back-fills emit_buf as one buf
+ * record. ref = zend_object (buffered) or zend_string (chunk). */
+static void h2_emit_state_append_body(struct http2_emit_state *st,
+                                      const char *ptr, const size_t len,
+                                      zend_refcounted *ref)
+{
+    if (st->records == NULL && st->emit_buf_len > 0) {
+        h2_emit_state_grow_records(st);
+        http2_emit_record_t *back = &st->records[st->records_count++];
+        back->is_body    = false;
+        back->buf.offset = 0;
+        back->buf.len    = (uint32_t)st->emit_buf_len;
+    }
+
+    h2_emit_state_grow_records(st);
+    http2_emit_record_t *rec = &st->records[st->records_count++];
+    rec->is_body   = true;
+    rec->body.ptr  = ptr;
+    rec->body.len  = (uint32_t)len;
+
+    /* Interned strings live in opcache SHM (read-only under ZTS) — addref
+     * SEGVs and the matching release is a no-op anyway. */
+    if (ref != NULL
+        && !(GC_TYPE(ref) == IS_STRING
+             && ZSTR_IS_INTERNED((zend_string *)ref))) {
+        h2_emit_state_grow_refs(st);
+        GC_ADDREF(ref);
+        st->body_refs[st->body_refs_count++] = ref;
+    }
+}
+
+/* nghttp2 send_callback: appends control bytes into emit_state
+ * (NGHTTP2_ERR_WOULDBLOCK outside emit context). */
+static ssize_t h2_send_callback(nghttp2_session *ng,
+                                const uint8_t *data, size_t length,
+                                int flags, void *user_data)
+{
+    (void)ng; (void)flags;
+    http2_session_t *session = (http2_session_t *)user_data;
+
+    if (UNEXPECTED(session->emit_state == NULL)) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+
+    if (session->emit_state->byte_cap > 0
+        && session->emit_state->bytes_appended >= session->emit_state->byte_cap) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+
+    h2_emit_state_append_buf(session->emit_state, data, length);
+    session->emit_state->bytes_appended += length;
+    return (ssize_t)length;
+}
+
+/* Streaming branch: walk chunk_queue slicing into iov records (or
+ * coalescing on TLS). Returns bytes appended to emit body (== length). */
+static void h2_emit_streaming_body(struct http2_emit_state *st,
+                                   http2_stream_t *stream,
+                                   const size_t length,
+                                   const bool tls_small_coalesce)
+{
+    const unsigned head_before = stream->chunk_queue_head;
+    size_t remaining = length;
+
+    while (remaining > 0
+           && stream->chunk_queue_head < stream->chunk_queue_tail) {
+        zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
+        const size_t chunk_len = ZSTR_LEN(chunk);
+        const size_t avail     = chunk_len - stream->chunk_read_offset;
+        const size_t take      = avail < remaining ? avail : remaining;
+        const char *slice_ptr  = ZSTR_VAL(chunk) + stream->chunk_read_offset;
+
+        if (tls_small_coalesce && take < H2_TLS_RECORD_PAYLOAD_MAX) {
+            h2_emit_state_append_buf(st, (const uint8_t *)slice_ptr, take);
+        } else {
+            h2_emit_state_append_body(st, slice_ptr, take,
+                                      (zend_refcounted *)chunk);
+        }
+
+        stream->chunk_read_offset += take;
+        stream->chunk_queue_bytes -= take;
+        remaining                 -= take;
+
+        if (stream->chunk_read_offset == chunk_len) {
+            zend_string_release(chunk);
+            stream->chunk_queue[stream->chunk_queue_head] = NULL;
+            stream->chunk_queue_head++;
+            stream->chunk_read_offset = 0;
+        }
+    }
+
+    if (stream->chunk_queue_head > head_before
+        && stream->write_event != NULL) {
+        zend_async_trigger_event_t *trig =
+            (zend_async_trigger_event_t *)stream->write_event;
+
+        if (trig->trigger != NULL) { trig->trigger(trig); }
+    }
+}
+
+/* Buffered branch: one body iov over stream->response_body slice. */
+static void h2_emit_buffered_body(struct http2_emit_state *st,
+                                  http2_stream_t *stream,
+                                  const size_t length,
+                                  const bool tls_small_coalesce)
+{
+    const char *payload = stream->response_body + stream->response_body_offset;
+
+    if (tls_small_coalesce && length < H2_TLS_RECORD_PAYLOAD_MAX) {
+        h2_emit_state_append_buf(st, (const uint8_t *)payload, length);
+    } else {
+        zend_refcounted *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
+                             ? (zend_refcounted *)Z_OBJ(stream->response_zv)
+                             : NULL;
+
+        h2_emit_state_append_body(st, payload, length, ref);
+    }
+
+    stream->response_body_offset += length;
+}
+
+/* nghttp2 send_data_callback for NO_COPY DATA: framehd → emit_buf, body
+ * → iov record (or coalesced into emit_buf for small slices on TLS). */
+static int h2_send_data_callback(nghttp2_session *ng,
+                                 nghttp2_frame *frame,
+                                 const uint8_t *framehd,
+                                 size_t length,
+                                 nghttp2_data_source *source,
+                                 void *user_data)
+{
+    (void)ng; (void)frame;
+    http2_session_t *session = (http2_session_t *)user_data;
+    http2_stream_t  *stream  = (http2_stream_t *)source->ptr;
+
+    if (UNEXPECTED(session->emit_state == NULL)) {
+        return NGHTTP2_ERR_CALLBACK_FAILURE;
+    }
+
+    struct http2_emit_state *st = session->emit_state;
+
+    if (st->byte_cap > 0 && st->bytes_appended >= st->byte_cap) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+
+    h2_emit_state_append_buf(st, framehd, 9);
+
+    /* TLS: coalesce small body slices into emit_buf — one SSL_write = one record. */
+    const bool tls_small_coalesce = st->byte_cap > 0;
+
+    if (stream->chunk_queue != NULL) {
+        h2_emit_streaming_body(st, stream, length, tls_small_coalesce);
+    } else {
+        h2_emit_buffered_body(st, stream, length, tls_small_coalesce);
+    }
+
+    st->bytes_appended += 9 + length;
+
+    if (session->conn != NULL && length > 0) {
+        http_server_on_h2_data_sent(session->conn->counters, length);
+    }
+
+    return 0;
+}
+
 static void install_callbacks(nghttp2_session_callbacks *cbs)
 {
     nghttp2_session_callbacks_set_on_begin_frame_callback(cbs, cb_on_begin_frame);
@@ -795,6 +966,8 @@ static void install_callbacks(nghttp2_session_callbacks *cbs)
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, cb_on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_frame_recv_callback   (cbs, cb_on_frame_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback (cbs, cb_on_stream_close);
+    nghttp2_session_callbacks_set_send_callback            (cbs, h2_send_callback);
+    nghttp2_session_callbacks_set_send_data_callback       (cbs, h2_send_data_callback);
 }
 
 /* -------------------------------------------------------------------------
@@ -894,6 +1067,7 @@ void http2_session_free(http2_session_t *session)
     if (session == NULL) {
         return;
     }
+
     /* nghttp2_session_del invokes on_stream_close for every live stream;
      * our stream_table_dtor then frees each http2_stream_t. Tear down
      * in that order — the other way round would make the callbacks
@@ -1043,25 +1217,119 @@ bool http2_session_want_write(const http2_session_t *session)
  * Response submission
  * ------------------------------------------------------------------------- */
 
-/* Data provider — nghttp2 invokes this when it needs DATA-frame bytes.
- * Reads from stream->response_body + offset. Sets
- * NGHTTP2_DATA_FLAG_EOF on the final slice so nghttp2 emits
- * END_STREAM. Zero-copy: we never copy body bytes through an
- * intermediate buffer, the caller's pointer survives until want_write
- * drains. */
-/* Stream bodies come from two sources depending on handler mode:
- *  - Buffered (`$res->setBody($str); $res->end();`): a single zero-
- *    copy pointer + length. chunk_queue is NULL.
- *  - Streaming (`$res->send($chunk); ... $res->end();`): a ring-shaped
- *    queue of refcounted zend_strings, drained head-first.
- *    streaming_ended flags the final EOF.
- *
- * This callback handles both uniformly: if chunk_queue is non-NULL
- * we walk the queue; else fall back to the legacy response_body path.
- * When the streaming queue is transiently empty (handler between
- * send() calls), return NGHTTP2_ERR_DEFERRED — nghttp2 parks the
- * data provider until nghttp2_session_resume_data is called from
- * the next send() / end(). */
+/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending) on the
+ * provider's data_flags. */
+static inline void h2_dp_mark_eof(const http2_stream_t *stream,
+                                  uint32_t *data_flags)
+{
+    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    if (stream->has_trailers) {
+        *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+    }
+}
+
+/* Bytes ready in the streaming ring (queue len minus the current chunk's
+ * already-consumed offset). */
+static size_t h2_stream_pending_bytes(const http2_stream_t *stream)
+{
+    if (stream->chunk_queue_head >= stream->chunk_queue_tail) {
+        return 0;
+    }
+
+    size_t avail = 0;
+
+    for (unsigned i = stream->chunk_queue_head;
+         i < stream->chunk_queue_tail; i++) {
+        avail += ZSTR_LEN(stream->chunk_queue[i]);
+    }
+
+    return avail - stream->chunk_read_offset;
+}
+
+/* Streaming + emit context: announce bytes via NO_COPY (send_data_callback
+ * will walk the ring). */
+static ssize_t h2_dp_streaming_emit(http2_stream_t *stream,
+                                    const size_t length,
+                                    uint32_t *data_flags)
+{
+    const size_t avail = h2_stream_pending_bytes(stream);
+
+    if (avail == 0) {
+        if (stream->streaming_ended) {
+            h2_dp_mark_eof(stream, data_flags);
+            return 0;
+        }
+
+        return NGHTTP2_ERR_DEFERRED;
+    }
+
+    const size_t to_emit = avail < length ? avail : length;
+
+    if (to_emit == avail && stream->streaming_ended) {
+        h2_dp_mark_eof(stream, data_flags);
+    }
+
+    *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
+    return (ssize_t)to_emit;
+}
+
+/* Streaming + memcpy fallback (non-emit drain, e.g. control-flush). */
+static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
+                                    uint8_t *buf, const size_t length,
+                                    uint32_t *data_flags)
+{
+    const unsigned head_before = stream->chunk_queue_head;
+    size_t written = 0;
+
+    while (written < length
+           && stream->chunk_queue_head < stream->chunk_queue_tail) {
+        zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
+        const size_t chunk_len = ZSTR_LEN(chunk);
+        const size_t avail     = chunk_len - stream->chunk_read_offset;
+        const size_t space     = length - written;
+        const size_t to_copy   = avail < space ? avail : space;
+
+        if (to_copy > 0) {
+            memcpy(buf + written,
+                   ZSTR_VAL(chunk) + stream->chunk_read_offset,
+                   to_copy);
+            stream->chunk_read_offset += to_copy;
+            stream->chunk_queue_bytes -= to_copy;
+            written += to_copy;
+        }
+
+        if (stream->chunk_read_offset == chunk_len) {
+            zend_string_release(chunk);
+            stream->chunk_queue[stream->chunk_queue_head] = NULL;
+            stream->chunk_queue_head++;
+            stream->chunk_read_offset = 0;
+        }
+    }
+
+    /* Wake producer parked on full ring (no-op if none parked). */
+    if (stream->chunk_queue_head > head_before
+        && stream->write_event != NULL) {
+        zend_async_trigger_event_t *trig =
+            (zend_async_trigger_event_t *)stream->write_event;
+
+        if (trig->trigger != NULL) { trig->trigger(trig); }
+    }
+
+    if (stream->chunk_queue_head == stream->chunk_queue_tail) {
+        if (stream->streaming_ended) {
+            h2_dp_mark_eof(stream, data_flags);
+        } else if (written == 0) {
+            return NGHTTP2_ERR_DEFERRED;
+        }
+    }
+
+    return (ssize_t)written;
+}
+
+/* nghttp2 data provider. Two body sources: buffered (response_body
+ * pointer+length, zero-copy) or streaming (chunk_queue of refcounted
+ * zend_strings). Empty streaming queue returns NGHTTP2_ERR_DEFERRED;
+ * resume fires from the next send()/end() via resume_stream_data. */
 static ssize_t http2_response_data_read(nghttp2_session *ng,
                                         const int32_t stream_id,
                                         uint8_t *buf,
@@ -1073,71 +1341,34 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
     (void)ng;
     (void)stream_id;
     http2_session_t *ds_session = (http2_session_t *)user_data;
+    http2_stream_t  *stream     = (http2_stream_t *)source->ptr;
+    const bool emit_ctx = ds_session != NULL && ds_session->emit_state != NULL;
 
-    http2_stream_t *stream = (http2_stream_t *)source->ptr;
-
-    /* Streaming path — walk the chunk queue. */
     if (stream->chunk_queue != NULL) {
-        size_t written = 0;
+        const ssize_t rc = emit_ctx
+            ? h2_dp_streaming_emit(stream, length, data_flags)
+            : h2_dp_streaming_copy(stream, buf, length, data_flags);
 
-        while (written < length
-               && stream->chunk_queue_head < stream->chunk_queue_tail) {
-            zend_string *chunk =
-                stream->chunk_queue[stream->chunk_queue_head];
-            const size_t chunk_len  = ZSTR_LEN(chunk);
-            const size_t avail      = chunk_len - stream->chunk_read_offset;
-            const size_t space      = length - written;
-            const size_t to_copy    = avail < space ? avail : space;
-
-            if (to_copy > 0) {
-                memcpy(buf + written,
-                       ZSTR_VAL(chunk) + stream->chunk_read_offset,
-                       to_copy);
-                stream->chunk_read_offset += to_copy;
-                stream->chunk_queue_bytes -= to_copy;
-                written += to_copy;
-            }
-
-            /* Chunk fully drained — release refcount, advance head. */
-            if (stream->chunk_read_offset == chunk_len) {
-                zend_string_release(chunk);
-                stream->chunk_queue[stream->chunk_queue_head] = NULL;
-                stream->chunk_queue_head++;
-                stream->chunk_read_offset = 0;
-            }
+        if (rc > 0 && !emit_ctx && ds_session->conn != NULL) {
+            http_server_on_h2_data_sent(ds_session->conn->counters, (size_t)rc);
         }
 
-        /* Queue empty — decide EOF vs DEFERRED. */
-        if (stream->chunk_queue_head == stream->chunk_queue_tail) {
-            if (stream->streaming_ended) {
-                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-                if (stream->has_trailers) {
-                    *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-                }
-            } else if (written == 0) {
-                /* Park. The handler is still running and has more to
-                 * send — nghttp2 will retry once we call
-                 * nghttp2_session_resume_data(stream_id). */
-                return NGHTTP2_ERR_DEFERRED;
-            }
-            /* If written > 0 and !streaming_ended: we return the
-             * partial fill; nghttp2 will ask again for more, at
-             * which point the queue being still empty falls into
-             * the DEFERRED branch above. */
-        }
-
-        if (written > 0 && ds_session != NULL && ds_session->conn != NULL) {
-            http_server_on_h2_data_sent(ds_session->conn->counters,
-                                        (size_t)written);
-        }
-
-        return (ssize_t)written;
+        return rc;
     }
 
-    /* Buffered path (legacy) — single-pointer zero-copy read. */
-    const size_t left =
-        stream->response_body_len - stream->response_body_offset;
+    /* Buffered branch — single contiguous response_body slice. */
+    const size_t left    = stream->response_body_len - stream->response_body_offset;
     const size_t to_copy = left < length ? left : length;
+
+    if (emit_ctx) {
+        *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
+
+        if (left <= length) {
+            h2_dp_mark_eof(stream, data_flags);
+        }
+
+        return (ssize_t)to_copy;
+    }
 
     if (to_copy > 0) {
         memcpy(buf, stream->response_body + stream->response_body_offset,
@@ -1150,24 +1381,13 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
     }
 
     if (stream->response_body_offset >= stream->response_body_len) {
-        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-        if (stream->has_trailers) {
-            /* Defer END_STREAM — nghttp2 will emit a terminal
-             * HEADERS(trailers) frame carrying END_STREAM instead
-             * (queued via nghttp2_submit_trailer). */
-            *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-        }
+        h2_dp_mark_eof(stream, data_flags);
     }
 
     return (ssize_t)to_copy;
 }
 
-/* Public-ish trampoline so the static-response module can reuse the
- * stream's buffered data_provider for inline-body responses without
- * having to re-implement the chunk-queue / response_body machinery.
- * Same identity as http2_response_data_read — kept as a separate
- * symbol so the static_response TU doesn't need to know the static
- * function's name. */
+/* Exported alias of http2_response_data_read for the static-response TU. */
 ssize_t http2_static_buffered_data_read(nghttp2_session *ng,
                                         int32_t stream_id,
                                         uint8_t *buf,

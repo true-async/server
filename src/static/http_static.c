@@ -328,13 +328,27 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			gate_ok = http_static_symlink_policy_admits(mount, fs_path) && http_static_resolved_under_root(mount, fs_path);
 		}
 
-		/* Hand off to the single send_file engine when the protocol op
-		 * is wired (H1, H2). H3 stub leaves it NULL — fall through to
-		 * the synchronous slurp path below. http_static_dispatch_cbs_t
-		 * is now an alias of send_file_cbs_t — pass it straight through. */
+		/* Small-file fast-path bypass. When the cache already has a
+		 * validated view and the file is below the slurp threshold, the
+		 * async engine's whole machinery — 0-ms timer defer, file_io
+		 * handle, on_armed/on_done callbacks, FSM state, dedicated
+		 * h2 head-only-with-inline branch — buys nothing. The file
+		 * fits in a single synchronous read(2); the dispose+commit
+		 * pipeline (skip_handler=true) is the same path a PHP handler
+		 * with $response->setBody() would take, and the rest of the
+		 * stack already amortises it. Fall through to the inline slurp
+		 * path below, which builds the response synchronously and
+		 * returns HTTP_STATIC_HANDLED. Big files (> threshold), range
+		 * requests, and HEAD stay on the engine — they actually benefit
+		 * from async sendfile / chunked-read overlap. */
+		const bool prefer_inline = have_view
+		                           && is_get
+		                           && (uint64_t)cv.st.st_size <= (uint64_t)SEND_FILE_SLURP_THRESHOLD
+		                           && http_request_find_header(request, "range", 5) == NULL;
+
 		const http_response_stream_ops_t *ops = http_response_get_stream_ops(response_obj);
 
-		if (gate_ok && ops != NULL && ops->send_static_response != NULL) {
+		if (!prefer_inline && gate_ok && ops != NULL && ops->send_static_response != NULL) {
 			send_file_config_t cfg = {0};
 			cfg.abs_path = fs_path;
 			cfg.abs_path_len = fs_path_len;
