@@ -99,6 +99,7 @@ struct _http_server_shared_config_t {
     bool                    protocol_detection_enabled;
     bool                    tls_enabled;
     bool                    auto_await_body;
+    bool                    body_streaming_enabled;   /* Issue #26 */
     /* Alt-Svc: h3=":<port>"; ma=86400 emission on H1/H2 responses when an
      * H3 listener is up. Default true. setHttp3AltSvcEnabled(false) lets
      * operators roll out H3 without clients migrating yet — replaces the
@@ -2191,6 +2192,42 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, isTelemetryEnabled)
 }
 /* }}} */
 
+/* {{{ proto HttpServerConfig::setBodyStreamingEnabled(bool $enabled): static
+ *
+ * Issue #26 — when enabled, request bodies are NOT accumulated into
+ * req->body; instead DATA chunks are pushed into a per-request queue
+ * which the handler drains via HttpRequest::readBody(). Saves up to
+ * Content-Length bytes of RSS per concurrent request. Handlers that
+ * still call getBody() while streaming is enabled get an empty string. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setBodyStreamingEnabled)
+{
+    bool enabled;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    config->body_streaming_enabled = enabled;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::isBodyStreamingEnabled(): bool */
+ZEND_METHOD(TrueAsync_HttpServerConfig, isBodyStreamingEnabled)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    const http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_BOOL(config->body_streaming_enabled);
+}
+/* }}} */
+
 /* Object handlers */
 
 static zend_object *http_server_config_create(zend_class_entry *ce)
@@ -2231,6 +2268,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->log_severity = 0;          /* HTTP_LOG_OFF */
     ZVAL_UNDEF(&config->log_stream);
     config->telemetry_enabled = false;
+    config->body_streaming_enabled = false;
     config->frozen = NULL;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -2352,6 +2390,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->protocol_detection_enabled = src->protocol_detection_enabled;
     shared->tls_enabled                = src->tls_enabled;
     shared->auto_await_body            = src->auto_await_body;
+    shared->body_streaming_enabled     = src->body_streaming_enabled;
 
     shared->compression_enabled           = src->compression_enabled;
     shared->compression_level             = src->compression_level;
@@ -2499,6 +2538,7 @@ static void http_server_config_populate_from_shared(
     dst->protocol_detection_enabled = src->protocol_detection_enabled;
     dst->tls_enabled                = src->tls_enabled;
     dst->auto_await_body            = src->auto_await_body;
+    dst->body_streaming_enabled     = src->body_streaming_enabled;
 
     dst->compression_enabled           = src->compression_enabled;
     dst->compression_level             = src->compression_level;

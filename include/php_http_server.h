@@ -288,6 +288,10 @@ struct _http_server_config_t {
     bool protocol_detection_enabled; /* Auto-detect protocol */
     bool tls_enabled;                /* Enable TLS */
     bool auto_await_body;            /* Automatically await request body */
+    bool body_streaming_enabled;     /* Issue #26 — push parser DATA chunks
+                                      * into per-request queue instead of
+                                      * accumulating into req->body. Handlers
+                                      * must consume via HttpRequest::readBody(). */
     bool is_locked;                  /* Locked after server start */
 
     /* Zend object (must be last for PHP object layout) */
@@ -752,6 +756,7 @@ typedef struct {
     uint32_t http3_peer_connection_budget;
     bool     http3_alt_svc_enabled;
     bool     telemetry_enabled;          /* W3C trace context ingestion */
+    bool     body_streaming_enabled;     /* Issue #26 */
     /* Hot-path gate: true iff per-request hrtime stamps (enqueue_ns /
      * start_ns / end_ns) are needed by an active consumer (CoDel or
      * telemetry). Set once at start(); the H1/H2/H3 hot paths read it

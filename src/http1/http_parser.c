@@ -19,6 +19,7 @@
 #include "core/http_connection.h"   /* for http_connection_t::server layout */
 #include "core/body_pool.h"
 #include "log/trace_context.h"
+#include "http_body_stream.h"
 
 #include <string.h>
 #ifndef PHP_WIN32
@@ -544,8 +545,19 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         }
     }
 
-    /* Prepare body buffer based on Content-Length (only if not multipart) */
-    if (!req->use_multipart && req->content_length > 0) {
+    /* Streaming body mode (issue #26). When the server-wide flag is on,
+     * parser does NOT accumulate body into req->body — instead on_body
+     * pushes chunks into a per-request queue drained by readBody().
+     * Multipart still goes through the multipart processor (no current
+     * use case for streaming raw multipart; see plan §5 edge-case). */
+    if (!req->use_multipart && parser->conn != NULL && parser->conn->view != NULL
+        && parser->conn->view->body_streaming_enabled) {
+        req->body_streaming = true;
+    }
+
+    /* Prepare body buffer based on Content-Length (only if not multipart
+     * AND not streaming) */
+    if (!req->use_multipart && !req->body_streaming && req->content_length > 0) {
         /* Check body size limit */
         if (req->content_length > parser->max_body_size) {
             parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
@@ -613,6 +625,33 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
         return 0;
     }
 
+    /* Streaming mode (issue #26) — push to per-request queue. Apply
+     * cumulative body-size cap and backpressure-pause when queued
+     * bytes cross the watermark. */
+    if (req->body_streaming) {
+        const size_t total = req->body_bytes_consumed + req->body_bytes_queued + length;
+
+        if (total > parser->max_body_size) {
+            parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+            return -1;
+        }
+
+        zend_string *chunk = zend_string_init(at, length, 0);
+        const bool ok = http_body_stream_push(req, chunk);
+        zend_string_release(chunk);
+
+        if (UNEXPECTED(!ok)) {
+            parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
+            return -1;
+        }
+
+        /* TODO(issue #26 PR-followup): llhttp_pause when queue crosses
+         * HTTP_BODY_QUEUE_WATERMARK and llhttp_resume from readBody at
+         * the 50% low-water mark. MVP relies on max_body_size + handler
+         * being faster than network (true for the /upload counter loop). */
+        return 0;
+    }
+
     if (req->body) {
         /* Pre-allocated body (Content-Length known) */
         /* Check if we have space using content_length */
@@ -675,8 +714,12 @@ static int on_message_complete(llhttp_t* llhttp_parser)
         finalize_multipart(parser);
     }
 
-    /* Finalize body if using smart_str (chunked/unknown length) */
-    if (!req->body && parser->body_builder.s) {
+    /* Streaming: signal EOF to readBody() consumer; no req->body
+     * accumulator to finalize. */
+    if (req->body_streaming) {
+        http_body_stream_close(req);
+    } else if (!req->body && parser->body_builder.s) {
+        /* Finalize body if using smart_str (chunked/unknown length) */
         smart_str_0(&parser->body_builder);
         req->body = parser->body_builder.s;
         parser->body_builder.s = NULL;  /* Transfer ownership */
@@ -892,6 +935,9 @@ void http_request_destroy(http_request_t *req)
         req->body_event->dispose(req->body_event);
         req->body_event = NULL;
     }
+
+    /* Streaming body queue + data event (issue #26). Safe on never-used. */
+    http_body_stream_dispose(req);
 
     /* Cleanup multipart state (owned by the request) */
     if (req->multipart_proc) {

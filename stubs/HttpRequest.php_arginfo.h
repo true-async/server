@@ -56,6 +56,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_awaitBody, 0, 0, IS_STATIC, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_readBody, 0, 0, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, maxLen, IS_LONG, 0, "65536")
+ZEND_END_ARG_INFO()
+
 #define arginfo_class_TrueAsync_HttpRequest_getTraceParent  arginfo_class_TrueAsync_HttpRequest_getContentType
 #define arginfo_class_TrueAsync_HttpRequest_getTraceState   arginfo_class_TrueAsync_HttpRequest_getContentType
 #define arginfo_class_TrueAsync_HttpRequest_getTraceId      arginfo_class_TrueAsync_HttpRequest_getContentType
@@ -87,6 +91,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceId);
 ZEND_METHOD(TrueAsync_HttpRequest, getSpanId);
 ZEND_METHOD(TrueAsync_HttpRequest, getTraceFlags);
 ZEND_METHOD(TrueAsync_HttpRequest, awaitBody);
+ZEND_METHOD(TrueAsync_HttpRequest, readBody);
 
 static const zend_function_entry class_TrueAsync_HttpRequest_methods[] = {
 	ZEND_ME(TrueAsync_HttpRequest, __construct,   arginfo_class_TrueAsync_HttpRequest___construct,  ZEND_ACC_PRIVATE)
@@ -114,6 +119,7 @@ static const zend_function_entry class_TrueAsync_HttpRequest_methods[] = {
 	ZEND_ME(TrueAsync_HttpRequest, getSpanId,        arginfo_class_TrueAsync_HttpRequest_getSpanId,        ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getTraceFlags,    arginfo_class_TrueAsync_HttpRequest_getTraceFlags,    ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, awaitBody,        arginfo_class_TrueAsync_HttpRequest_awaitBody,        ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpRequest, readBody,         arginfo_class_TrueAsync_HttpRequest_readBody,         ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
