@@ -1311,6 +1311,9 @@ void http2_session_emit(http2_session_t *session)
         session->emit_state = NULL;
         h2_emit_state_cleanup(&st);
         conn->write_timed_out = true;
+        /* Defensive: bailout between set-flag and WRITEV_EX submit would
+         * leave the chain wedged forever (no completion to clear it). */
+        conn->out_in_flight = false;
 
         if (conn->io != NULL) {
             ZEND_ASYNC_IO_CLOSE(conn->io);
