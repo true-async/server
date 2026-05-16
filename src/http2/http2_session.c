@@ -1457,6 +1457,38 @@ ssize_t http2_static_buffered_data_read(nghttp2_session *ng,
                                     source, user_data);
 }
 
+/* Buffered (setBody) data_provider needs a wake on WINDOW_UPDATE
+ * once initial flow-control window is exhausted: nghttp2 deferred the
+ * stream, mem_send won't pull more body until something calls it again.
+ * Subscribe stream->write_event so cb_on_frame_recv's trigger restarts
+ * the emit. Static/streaming paths run their own subscribers. */
+typedef struct {
+    zend_async_event_callback_t base;
+    http2_session_t            *session;
+} h2_buffered_wcb_t;
+
+static void h2_buffered_wcb_dispose(zend_async_event_callback_t *cb,
+                                    zend_async_event_t *event)
+{
+    (void)event;
+    efree(cb);
+}
+
+static void h2_buffered_on_window_open(zend_async_event_t *event,
+                                       zend_async_event_callback_t *callback,
+                                       void *result,
+                                       zend_object *exception)
+{
+    (void)event;
+    (void)result;
+    (void)exception;
+    http2_session_t *session = ((h2_buffered_wcb_t *)callback)->session;
+
+    if (session != NULL) {
+        http2_session_emit(session);
+    }
+}
+
 int http2_session_submit_response(http2_session_t *session,
                                   const uint32_t stream_id,
                                   const int status,
@@ -1529,6 +1561,32 @@ int http2_session_submit_response(http2_session_t *session,
         prv.read_callback = http2_response_data_read;
         rc = nghttp2_submit_response(session->ng, (int32_t)stream_id,
                                      nv, total_nv, &prv);
+
+        /* Subscribe write_event so WINDOW_UPDATE / ring drain restarts
+         * mem_send once initial window is exhausted. Stream-owned event,
+         * cb freed via dispose when event is torn down. */
+        if (rc == 0) {
+            if (stream->write_event == NULL) {
+                stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+            }
+
+            if (stream->write_event != NULL) {
+                h2_buffered_wcb_t *wcb = (h2_buffered_wcb_t *)
+                    ZEND_ASYNC_EVENT_CALLBACK_EX(h2_buffered_on_window_open,
+                                                 sizeof(h2_buffered_wcb_t));
+
+                if (wcb != NULL) {
+                    wcb->base.dispose = h2_buffered_wcb_dispose;
+                    wcb->session      = session;
+                    zend_async_event_t *we = &((zend_async_trigger_event_t *)
+                                               stream->write_event)->base;
+
+                    if (!we->add_callback(we, &wcb->base)) {
+                        efree(wcb);
+                    }
+                }
+            }
+        }
     }
 
     if (nv_heap != NULL) {
