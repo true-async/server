@@ -13,7 +13,10 @@
 #include "php.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "http_body_stream.h"
 #include "log/trace_context.h"
+#include "Zend/zend_async_API.h"
+#include "Zend/zend_exceptions.h"
 #include "main/php_variables.h"
 
 #include <errno.h>
@@ -519,6 +522,104 @@ ZEND_METHOD(TrueAsync_HttpRequest, awaitBody)
     }
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* HttpRequest::readBody(int $maxLen = 65536): ?string
+ *
+ * Streaming body read (issue #26). Pulls the next chunk from the
+ * per-request queue produced by H1/H2 parsers when
+ * HttpServerConfig::setBodyStreamingEnabled(true) was set at server
+ * start. Returns a non-empty string per chunk, or null at EOF.
+ *
+ * Each call returns exactly one parser-supplied chunk: an H2 DATA
+ * frame payload (peer-side SETTINGS_MAX_FRAME_SIZE, default 16 KiB)
+ * or one llhttp on_body slice (bounded by the H1 socket read,
+ * DEFAULT_READ_BUFFER_SIZE = 8 KiB). TODO(issue #26): honour $maxLen
+ * by coalescing consecutive queued chunks up to that cap so userland
+ * can amortise the readBody() call overhead. Ignored today — kept in
+ * the signature so the future change is binary-compatible.
+ *
+ * Throws \Exception if the body stream errored (peer reset, size cap
+ * exceeded). Returns null idempotently at EOF.
+ */
+ZEND_METHOD(TrueAsync_HttpRequest, readBody)
+{
+    zend_long max_len = 65536;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(max_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    (void)max_len;  /* TODO(issue #26): wire into a pop-side coalesce. */
+
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    http_request_t *req = intern->request;
+
+    if (req == NULL) {
+        RETURN_NULL();
+    }
+
+    if (UNEXPECTED(!req->body_streaming)) {
+        /* Buffered mode: drain req->body once, then EOF. */
+        if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
+            zend_string *body = req->body;
+            req->body = NULL;
+            RETURN_STR(body);
+        }
+
+        RETURN_NULL();
+    }
+
+    for (;;) {
+        zend_string *chunk = http_body_stream_pop(req);
+
+        if (chunk != NULL) {
+            RETURN_STR(chunk);
+        }
+
+        if (req->body_eof) {
+            if (UNEXPECTED(req->body_error)) {
+                zend_throw_exception(zend_ce_exception,
+                                     "Request body stream error", 0);
+                RETURN_THROWS();
+            }
+
+            RETURN_NULL();
+        }
+
+        /* Park on body_data_event. Lazy-create if no chunk has been
+         * pushed yet (early-call before parser delivered anything). */
+        if (req->body_data_event == NULL) {
+            zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+            if (trig == NULL) {
+                RETURN_NULL();
+            }
+
+            req->body_data_event = &trig->base;
+        }
+
+        zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+            RETURN_NULL();
+        }
+
+        if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+            return;
+        }
+
+        zend_async_resume_when(co, req->body_data_event, false,
+                               zend_async_waker_callback_resolve, NULL);
+
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
+
+        if (EG(exception) != NULL) {
+            return;
+        }
+    }
 }
 
 /* Register HttpRequest class. Class entry + method table + FINAL flag

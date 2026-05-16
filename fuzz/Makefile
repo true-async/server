@@ -35,6 +35,7 @@ HTTP1_SRC = \
     ../src/formats/multipart_processor.c \
     ../src/http_param_parse.c \
     ../src/http_rfc5987.c \
+    ../src/http_body_stream.c \
     ../deps/llhttp/api.c \
     ../deps/llhttp/http.c \
     ../deps/llhttp/llhttp.c
@@ -66,6 +67,7 @@ H2_SRC = \
     ../src/formats/multipart_processor.c \
     ../src/http_param_parse.c \
     ../src/http_rfc5987.c \
+    ../src/http_body_stream.c \
     ../deps/llhttp/api.c \
     ../deps/llhttp/http.c \
     ../deps/llhttp/llhttp.c

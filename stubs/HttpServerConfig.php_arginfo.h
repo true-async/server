@@ -216,6 +216,9 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
 #define arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled  arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
 
+#define arginfo_class_TrueAsync_HttpServerConfig_setBodyStreamingEnabled arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
+#define arginfo_class_TrueAsync_HttpServerConfig_isBodyStreamingEnabled  arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
+
 /* Method declarations */
 ZEND_METHOD(TrueAsync_HttpServerConfig, __construct);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addListener);
@@ -304,6 +307,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setLogStream);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getLogStream);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTelemetryEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isTelemetryEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setBodyStreamingEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, isBodyStreamingEnabled);
 
 /* Method table */
 static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
@@ -394,6 +399,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getLogStream,        arginfo_class_TrueAsync_HttpServerConfig_getLogStream,        ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setTelemetryEnabled, arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isTelemetryEnabled,  arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled,  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setBodyStreamingEnabled, arginfo_class_TrueAsync_HttpServerConfig_setBodyStreamingEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isBodyStreamingEnabled,  arginfo_class_TrueAsync_HttpServerConfig_isBodyStreamingEnabled,  ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 

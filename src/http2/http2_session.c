@@ -20,6 +20,7 @@
 #include "http2/http2_stream.h"
 #include "http_known_strings.h"
 #include "log/trace_context.h"
+#include "http_body_stream.h"
 
 #include <stdio.h>            /* snprintf for :status value */
 #include <string.h>
@@ -377,6 +378,41 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
         http_server_on_h2_data_recv(session->conn->counters, len);
     }
 
+    /* Streaming mode (issue #26) — push the chunk into the per-request
+     * queue instead of accumulating into stream->request_body_buf. The
+     * cumulative max_body_size cap still applies as a hard ceiling.
+     *
+     * TODO(issue #26 backpressure): nghttp2's auto window update is on
+     * by default, so the queue can grow up to max_body_size if the
+     * handler is slower than the network. The follow-up PR will set
+     * NGHTTP2_OPT_NO_AUTO_WINDOW_UPDATE and call
+     * nghttp2_session_consume from readBody after each pop to bound
+     * the queue at HTTP_BODY_QUEUE_WATERMARK. The /upload bench
+     * handler is faster than the network, so the queue stays tiny
+     * in practice — no correctness issue today. */
+    if (stream->request != NULL && stream->request->body_streaming) {
+        http_request_t *req = stream->request;
+        size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+
+        if (body_cap == 0) {
+            body_cap = HTTP2_MAX_BODY_SIZE;
+        }
+
+        if (req->body_bytes_consumed + req->body_bytes_queued + len > body_cap) {
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        }
+
+        zend_string *chunk = zend_string_init((const char *)data, len, 0);
+        const bool ok = http_body_stream_push(req, chunk);
+        zend_string_release(chunk);
+
+        if (UNEXPECTED(!ok)) {
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        }
+
+        return 0;
+    }
+
     const size_t current = stream->request_body_buf.s != NULL
         ? ZSTR_LEN(stream->request_body_buf.s) : 0;
     /* Shared cap with H1 parser pool; configured via
@@ -441,6 +477,14 @@ static void finalize_request_body(http2_stream_t *stream)
         return;
     }
 
+    /* Streaming mode (issue #26): no smart_str to finalize, just close
+     * the queue so a parked readBody() consumer sees EOF. */
+    if (req->body_streaming) {
+        http_body_stream_close(req);
+        req->complete = true;
+        return;
+    }
+
     smart_str_0(&stream->request_body_buf);
 
     if (stream->request_body_buf.s != NULL) {
@@ -496,6 +540,12 @@ static int cb_on_frame_recv(nghttp2_session *ng,
             if (session->conn != NULL && session->conn->view != NULL
                 && session->conn->view->telemetry_enabled) {
                 http_request_parse_trace_context(stream->request);
+            }
+
+            /* Streaming body mode (issue #26) — see H1 parser equivalent. */
+            if (session->conn != NULL && session->conn->view != NULL
+                && session->conn->view->body_streaming_enabled) {
+                stream->request->body_streaming = true;
             }
             /* Bump request refcount BEFORE handing it to PHP.
              * The stream keeps writing body bytes / firing body_event

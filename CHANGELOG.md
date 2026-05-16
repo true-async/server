@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-16
+
+### Added
+
+- `HttpRequest::readBody(int $maxLen = 65536): ?string` — pull-based
+  streaming read of the request body. Returns one parser-supplied
+  chunk (H2 DATA frame, default 16 KiB; H1 llhttp on_body slice,
+  bounded by the H1 read buffer = 8 KiB) per call, or `null` at EOF.
+  Parks the coroutine on a per-request trigger event when the queue
+  is empty. Throws `\Exception` if the stream errored (peer reset,
+  size cap exceeded). `$maxLen` is reserved for a future pop-side
+  coalesce — kept in the signature so the eventual wiring is binary
+  compatible (issue #26).
+- `HttpServerConfig::setBodyStreamingEnabled(bool): static` /
+  `isBodyStreamingEnabled(): bool` — server-wide flag, default
+  `false`. When enabled, H1 and H2 parsers push DATA chunks into a
+  per-request FIFO instead of accumulating into `req->body`, so the
+  handler can consume the body via `readBody()` without ever
+  materialising the full payload in memory.
+
+### Performance
+
+- Streaming request body (issue #26). For handlers that opt in via
+  `setBodyStreamingEnabled(true)` and consume through `readBody()`,
+  the per-request RSS footprint of an in-flight upload drops from
+  `~Content-Length` to roughly one parser chunk. Measured on h2load
+  with 50 concurrent 20 MiB POSTs (release PHP, WSL2):
+  - peak RSS: 1170 MiB → **197 MiB** (~6× reduction)
+  - throughput: 36 req/s → **100 req/s** (~2.7× improvement, mostly
+    because handler dispatch no longer waits for the full body)
+  Buffered handlers (no opt-in) keep the previous behaviour byte for
+  byte; A/B benchmarks on the H1 + H2 baseline endpoints and on the
+  buffered upload path show no regression beyond WSL2 measurement
+  noise. Backpressure (`llhttp_pause` + deferred
+  `nghttp2_session_consume`), `readBodyChunks()` for zero-copy
+  scatter reads, HTTP/3 wiring, and the mode trichotomy with
+  `LogicException` are tracked as follow-ups in
+  `docs/PLAN_STREAMING_INGRESS.md`.
+
 ## [0.4.0] - 2026-05-11
 
 ### Performance

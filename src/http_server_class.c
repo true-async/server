@@ -1820,6 +1820,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isTelemetryEnabled", &retval);
     server->view.telemetry_enabled = (Z_TYPE(retval) == IS_TRUE);
 
+    zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isBodyStreamingEnabled", &retval);
+    server->view.body_streaming_enabled = (Z_TYPE(retval) == IS_TRUE);
+
     /* Stamps drive CoDel sojourn samples and the telemetry aggregate
      * (sojourn_sum / service_sum / sojourn_max). Drain falls back to a
      * fresh hrtime when end_ns is 0, so it does not require stamps. */
