@@ -51,20 +51,24 @@ set(CORE_SOURCES
     src/send_file.c
     src/http_send_file.c
     src/http_send_file_options.c
+    src/http_body_stream.c
     src/compression/http_compression_negotiate.c
 )
 
 # Source files - Core subsystem
 set(CORE_SUBSYSTEM_SOURCES
     src/core/http_connection.c
-    src/core/http_connection_tls.c
     src/core/conn_arena.c
     src/core/body_pool.c
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c
-    src/core/tls_layer.c
     src/core/http_known_strings.c
 )
+
+# TLS sources — only compiled when OpenSSL is present. Both files
+# unconditionally include OpenSSL headers and must not appear in the
+# source list for no-TLS builds.
+set(TLS_SOURCES "")
 
 # Source files - Static handler
 set(STATIC_SOURCES
@@ -88,9 +92,61 @@ if(OpenSSL_FOUND)
     if(HAVE_KTLS)
         add_compile_definitions(HAVE_KTLS=1)
     endif()
+    set(TLS_SOURCES
+        src/core/http_connection_tls.c
+        src/core/tls_layer.c
+    )
     message(STATUS "  OpenSSL: ${OPENSSL_VERSION} (${OPENSSL_LIBRARIES})")
 else()
     message(STATUS "  OpenSSL: not found — TLS support disabled")
+endif()
+
+# HTTP/2 detection (mirrors config.m4). Requires nghttp2 >= 1.57 (rapid-reset
+# CVE-2023-44487 mitigation). Fail-soft: without nghttp2, HAVE_HTTP2 is not
+# defined and the HTTP/2 sources are excluded; http_connection.c provides a
+# static no-op stub for http2_conn_notify_emit so the build links cleanly.
+set(HTTP2_SOURCES "")
+find_package(PkgConfig QUIET)
+set(_http2_ok FALSE)
+if(PkgConfig_FOUND)
+    pkg_check_modules(NGHTTP2 QUIET libnghttp2>=1.57)
+    if(NGHTTP2_FOUND)
+        set(_http2_ok TRUE)
+        set(_nghttp2_ver "${NGHTTP2_VERSION}")
+    else()
+        message(STATUS "  HTTP/2: disabled (libnghttp2 >= 1.57 not found via pkg-config)")
+    endif()
+endif()
+if(NOT _http2_ok)
+    find_path(NGHTTP2_INCLUDE_DIR nghttp2/nghttp2.h)
+    find_library(NGHTTP2_LIB NAMES nghttp2)
+    if(NGHTTP2_INCLUDE_DIR AND NGHTTP2_LIB)
+        # Version check via header
+        if(EXISTS "${NGHTTP2_INCLUDE_DIR}/nghttp2/nghttp2ver.h")
+            file(STRINGS "${NGHTTP2_INCLUDE_DIR}/nghttp2/nghttp2ver.h" _l
+                REGEX "NGHTTP2_VERSION \"")
+            string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _nghttp2_ver "${_l}")
+        else()
+            set(_nghttp2_ver "0.0.0")
+        endif()
+        if(_nghttp2_ver VERSION_GREATER_EQUAL "1.57")
+            set(_http2_ok TRUE)
+        else()
+            message(STATUS "  HTTP/2: disabled (nghttp2 ${_nghttp2_ver} < 1.57)")
+        endif()
+    else()
+        message(STATUS "  HTTP/2: disabled (nghttp2 not found; set CMAKE_PREFIX_PATH)")
+    endif()
+endif()
+if(_http2_ok)
+    add_compile_definitions(HAVE_HTTP2=1)
+    set(HTTP2_SOURCES
+        src/http2/http2_strategy.c
+        src/http2/http2_session.c
+        src/http2/http2_stream.c
+        src/http2/http2_static_response.c
+    )
+    message(STATUS "  HTTP/2: nghttp2 ${_nghttp2_ver}")
 endif()
 
 # HTTP/3 detection (optional; mirrors config.m4). Fail-soft: if any
@@ -277,6 +333,8 @@ set(LLHTTP_SOURCES
 set(ALL_SOURCES
     ${CORE_SOURCES}
     ${CORE_SUBSYSTEM_SOURCES}
+    ${TLS_SOURCES}
+    ${HTTP2_SOURCES}
     ${HTTP1_SOURCES}
     ${FORMAT_SOURCES}
     ${LOG_SOURCES}
@@ -337,6 +395,16 @@ endif()
 if(OpenSSL_FOUND)
     target_compile_definitions(php_true_async_server PRIVATE HAVE_OPENSSL=1)
     target_link_libraries(php_true_async_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+if(_http2_ok)
+    if(PkgConfig_FOUND AND NGHTTP2_FOUND)
+        target_include_directories(php_true_async_server SYSTEM PRIVATE ${NGHTTP2_INCLUDE_DIRS})
+        target_link_libraries(php_true_async_server PRIVATE ${NGHTTP2_LIBRARIES})
+    else()
+        target_include_directories(php_true_async_server SYSTEM PRIVATE ${NGHTTP2_INCLUDE_DIR})
+        target_link_libraries(php_true_async_server PRIVATE ${NGHTTP2_LIB})
+    endif()
 endif()
 
 if(_http3_ok)

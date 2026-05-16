@@ -1315,8 +1315,13 @@ static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
  * Plaintext only: TLS uses tls_cipher_inflight via the BIO ring path.
  * Caller transfers ownership of `buf` (emalloc'd); the reactor — or
  * the append-into-pending path here — owns it after this call. */
-/* h2 emit re-drive — defined in src/http2/http2_strategy.c, no-op on non-h2. */
+/* h2 emit re-drive — defined in src/http2/http2_strategy.c when HAVE_HTTP2
+ * is set; falls back to a static no-op so no-HTTP/2 builds still link. */
+#ifdef HAVE_HTTP2
 extern void http2_conn_notify_emit(http_connection_t *conn);
+#else
+static inline void http2_conn_notify_emit(http_connection_t *conn) { (void)conn; }
+#endif
 
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
