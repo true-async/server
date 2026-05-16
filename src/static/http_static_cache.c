@@ -36,9 +36,15 @@ typedef struct entry_s
 	zend_stat_t st;
 	time_t cached_at;
 
-	/* MIME content_type is a borrowed pointer into the persistent
-	 * MIME table or a static literal — never freed by the cache. */
-	const char *content_type;
+	/* content_type — deep-copied into pemalloc'd buffer. Earlier
+	 * versions borrowed the pointer assuming it always lived in the
+	 * persistent MIME table, but the precompressed-sidecar path
+	 * synthesizes a transient zend_string for the override Content-Type
+	 * (so the .br/.gz response advertises the ORIGINAL file's MIME).
+	 * That pointer is released the moment send_file unwinds, leaving
+	 * the cache holding dangling memory and triggering UAF on the
+	 * next cache hit (h2 static-h2 precompressed >64K death-spiral). */
+	char *content_type;
 	size_t content_type_len;
 
 	/* ETag and Last-Modified are pre-formatted ASCII; deep-copied
@@ -75,6 +81,11 @@ static void entry_free(entry_t *e)
 	if (e->path_key != NULL) {
 		zend_string_release(e->path_key);
 		e->path_key = NULL;
+	}
+
+	if (e->content_type != NULL) {
+		pefree(e->content_type, 1);
+		e->content_type = NULL;
 	}
 
 	if (e->etag != NULL) {
@@ -268,8 +279,12 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 	e->path_key = key; /* HashTable will release on dtor */
 	e->st = *st;
 	e->cached_at = time(NULL);
-	e->content_type = content_type;
-	e->content_type_len = content_type_len;
+
+	if (content_type != NULL && content_type_len > 0) {
+		e->content_type = pemalloc(content_type_len, 1);
+		memcpy(e->content_type, content_type, content_type_len);
+		e->content_type_len = content_type_len;
+	}
 
 	if (etag != NULL && etag_len > 0) {
 		e->etag = pemalloc(etag_len, 1);
