@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-05-16
+
+### Fixed
+
+- **HTTP/2 over TLS**: `Response->setBody()` with body > 64 KiB hung
+  after the initial flow-control window — buffered data_provider had
+  no `write_event` subscriber, WINDOW_UPDATE never reached emit. Test:
+  `h2/024-h2-tls-large-body.phpt`.
+
+- **StaticHandler open-file cache UAF**: cache stored `content_type`
+  as a borrowed pointer, but the precompressed-sidecar path passed a
+  transient `zend_string` (override MIME). Next cache hit dereferenced
+  freed memory → heap corruption under load (HttpArena static-h2
+  lite collapsed to ~190 RPS). Cache now copies. Test:
+  `static/011-static-precompressed-cache-uaf.phpt`.
+
+- **StaticHandler sync-slurp on cache hit**: the small-file shortcut
+  (≤64 KiB + cache hit) bypassed the engine and dropped
+  `Content-Encoding`, `Vary`, and the override `Content-Type` for
+  precompressed sidecars — browsers rendered brotli as garbage. Test:
+  `static/012-static-precompressed-small-cache-headers.phpt`.
+
+### Performance
+
+- HttpArena `static-h2` lite: 10 RPS / death-spiral → **~163k RPS**,
+  0 errored (cache UAF fix).
+
 ## [0.5.2] - 2026-05-16
 
 ### Fixed
