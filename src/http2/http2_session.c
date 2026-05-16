@@ -1217,6 +1217,115 @@ bool http2_session_want_write(const http2_session_t *session)
  * Response submission
  * ------------------------------------------------------------------------- */
 
+/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending) on the
+ * provider's data_flags. */
+static inline void h2_dp_mark_eof(const http2_stream_t *stream,
+                                  uint32_t *data_flags)
+{
+    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    if (stream->has_trailers) {
+        *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+    }
+}
+
+/* Bytes ready in the streaming ring (queue len minus the current chunk's
+ * already-consumed offset). */
+static size_t h2_stream_pending_bytes(const http2_stream_t *stream)
+{
+    if (stream->chunk_queue_head >= stream->chunk_queue_tail) {
+        return 0;
+    }
+
+    size_t avail = 0;
+
+    for (unsigned i = stream->chunk_queue_head;
+         i < stream->chunk_queue_tail; i++) {
+        avail += ZSTR_LEN(stream->chunk_queue[i]);
+    }
+
+    return avail - stream->chunk_read_offset;
+}
+
+/* Streaming + emit context: announce bytes via NO_COPY (send_data_callback
+ * will walk the ring). */
+static ssize_t h2_dp_streaming_emit(http2_stream_t *stream,
+                                    const size_t length,
+                                    uint32_t *data_flags)
+{
+    const size_t avail = h2_stream_pending_bytes(stream);
+
+    if (avail == 0) {
+        if (stream->streaming_ended) {
+            h2_dp_mark_eof(stream, data_flags);
+            return 0;
+        }
+
+        return NGHTTP2_ERR_DEFERRED;
+    }
+
+    const size_t to_emit = avail < length ? avail : length;
+
+    if (to_emit == avail && stream->streaming_ended) {
+        h2_dp_mark_eof(stream, data_flags);
+    }
+
+    *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
+    return (ssize_t)to_emit;
+}
+
+/* Streaming + memcpy fallback (non-emit drain, e.g. control-flush). */
+static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
+                                    uint8_t *buf, const size_t length,
+                                    uint32_t *data_flags)
+{
+    const unsigned head_before = stream->chunk_queue_head;
+    size_t written = 0;
+
+    while (written < length
+           && stream->chunk_queue_head < stream->chunk_queue_tail) {
+        zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
+        const size_t chunk_len = ZSTR_LEN(chunk);
+        const size_t avail     = chunk_len - stream->chunk_read_offset;
+        const size_t space     = length - written;
+        const size_t to_copy   = avail < space ? avail : space;
+
+        if (to_copy > 0) {
+            memcpy(buf + written,
+                   ZSTR_VAL(chunk) + stream->chunk_read_offset,
+                   to_copy);
+            stream->chunk_read_offset += to_copy;
+            stream->chunk_queue_bytes -= to_copy;
+            written += to_copy;
+        }
+
+        if (stream->chunk_read_offset == chunk_len) {
+            zend_string_release(chunk);
+            stream->chunk_queue[stream->chunk_queue_head] = NULL;
+            stream->chunk_queue_head++;
+            stream->chunk_read_offset = 0;
+        }
+    }
+
+    /* Wake producer parked on full ring (no-op if none parked). */
+    if (stream->chunk_queue_head > head_before
+        && stream->write_event != NULL) {
+        zend_async_trigger_event_t *trig =
+            (zend_async_trigger_event_t *)stream->write_event;
+
+        if (trig->trigger != NULL) { trig->trigger(trig); }
+    }
+
+    if (stream->chunk_queue_head == stream->chunk_queue_tail) {
+        if (stream->streaming_ended) {
+            h2_dp_mark_eof(stream, data_flags);
+        } else if (written == 0) {
+            return NGHTTP2_ERR_DEFERRED;
+        }
+    }
+
+    return (ssize_t)written;
+}
+
 /* nghttp2 data provider. Two body sources: buffered (response_body
  * pointer+length, zero-copy) or streaming (chunk_queue of refcounted
  * zend_strings). Empty streaming queue returns NGHTTP2_ERR_DEFERRED;
@@ -1232,119 +1341,30 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
     (void)ng;
     (void)stream_id;
     http2_session_t *ds_session = (http2_session_t *)user_data;
-
-    http2_stream_t *stream = (http2_stream_t *)source->ptr;
+    http2_stream_t  *stream     = (http2_stream_t *)source->ptr;
+    const bool emit_ctx = ds_session != NULL && ds_session->emit_state != NULL;
 
     if (stream->chunk_queue != NULL) {
-        /* Emit context: announce bytes via NO_COPY → send_data_callback walks
-         * the ring. Memcpy fallback below is for non-emit drain. */
-        if (ds_session != NULL && ds_session->emit_state != NULL) {
-            size_t avail = 0;
+        const ssize_t rc = emit_ctx
+            ? h2_dp_streaming_emit(stream, length, data_flags)
+            : h2_dp_streaming_copy(stream, buf, length, data_flags);
 
-            if (stream->chunk_queue_head < stream->chunk_queue_tail) {
-                for (unsigned i = stream->chunk_queue_head;
-                     i < stream->chunk_queue_tail; i++) {
-                    avail += ZSTR_LEN(stream->chunk_queue[i]);
-                }
-                avail -= stream->chunk_read_offset;
-            }
-
-            if (avail == 0) {
-                if (stream->streaming_ended) {
-                    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-                    if (stream->has_trailers) {
-                        *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-                    }
-
-                    return 0;
-                }
-
-                return NGHTTP2_ERR_DEFERRED;
-            }
-
-            const size_t to_emit = avail < length ? avail : length;
-
-            if (to_emit == avail && stream->streaming_ended) {
-                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-                if (stream->has_trailers) {
-                    *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-                }
-            }
-
-            *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
-            return (ssize_t)to_emit;
+        if (rc > 0 && !emit_ctx && ds_session->conn != NULL) {
+            http_server_on_h2_data_sent(ds_session->conn->counters, (size_t)rc);
         }
 
-        const unsigned head_before = stream->chunk_queue_head;
-        size_t written = 0;
-
-        while (written < length
-               && stream->chunk_queue_head < stream->chunk_queue_tail) {
-            zend_string *chunk =
-                stream->chunk_queue[stream->chunk_queue_head];
-            const size_t chunk_len  = ZSTR_LEN(chunk);
-            const size_t avail      = chunk_len - stream->chunk_read_offset;
-            const size_t space      = length - written;
-            const size_t to_copy    = avail < space ? avail : space;
-
-            if (to_copy > 0) {
-                memcpy(buf + written,
-                       ZSTR_VAL(chunk) + stream->chunk_read_offset,
-                       to_copy);
-                stream->chunk_read_offset += to_copy;
-                stream->chunk_queue_bytes -= to_copy;
-                written += to_copy;
-            }
-
-            if (stream->chunk_read_offset == chunk_len) {
-                zend_string_release(chunk);
-                stream->chunk_queue[stream->chunk_queue_head] = NULL;
-                stream->chunk_queue_head++;
-                stream->chunk_read_offset = 0;
-            }
-        }
-
-        /* Wake producer parked on full ring (no-op if none parked). */
-        if (stream->chunk_queue_head > head_before
-            && stream->write_event != NULL) {
-            zend_async_trigger_event_t *trig =
-                (zend_async_trigger_event_t *)stream->write_event;
-
-            if (trig->trigger != NULL) { trig->trigger(trig); }
-        }
-
-        if (stream->chunk_queue_head == stream->chunk_queue_tail) {
-            if (stream->streaming_ended) {
-                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-                if (stream->has_trailers) {
-                    *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-                }
-            } else if (written == 0) {
-                return NGHTTP2_ERR_DEFERRED;
-            }
-        }
-
-        if (written > 0 && ds_session != NULL && ds_session->conn != NULL) {
-            http_server_on_h2_data_sent(ds_session->conn->counters,
-                                        (size_t)written);
-        }
-
-        return (ssize_t)written;
+        return rc;
     }
 
-    /* Buffered: emit context → NO_COPY (send_data_callback); else memcpy. */
-    const size_t left =
-        stream->response_body_len - stream->response_body_offset;
+    /* Buffered branch — single contiguous response_body slice. */
+    const size_t left    = stream->response_body_len - stream->response_body_offset;
     const size_t to_copy = left < length ? left : length;
 
-    if (ds_session != NULL && ds_session->emit_state != NULL) {
+    if (emit_ctx) {
         *data_flags |= NGHTTP2_DATA_FLAG_NO_COPY;
 
         if (left <= length) {
-            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-            if (stream->has_trailers) {
-                *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-            }
+            h2_dp_mark_eof(stream, data_flags);
         }
 
         return (ssize_t)to_copy;
@@ -1361,11 +1381,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
     }
 
     if (stream->response_body_offset >= stream->response_body_len) {
-        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-        if (stream->has_trailers) {
-            /* END_STREAM rides the terminal trailer HEADERS frame instead. */
-            *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
-        }
+        h2_dp_mark_eof(stream, data_flags);
     }
 
     return (ssize_t)to_copy;
