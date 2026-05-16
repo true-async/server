@@ -1394,6 +1394,49 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
  * stream_write_buffer_bytes high-water mark. */
 #define H2_CHUNK_RING_SLOTS 8
 
+/* First-send lazy: allocate ring + commit HEADERS. */
+static bool h2_stream_init_ring(http_connection_t *conn, http2_stream_t *stream)
+{
+    stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
+    stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
+                                        sizeof(zend_string *));
+    stream->chunk_queue_head  = 0;
+    stream->chunk_queue_tail  = 0;
+    stream->chunk_queue_bytes = 0;
+    stream->chunk_read_offset = 0;
+
+    if (!h2_commit_streaming_headers(conn, stream)) {
+        return false;
+    }
+
+    http_server_on_streaming_response_started(conn->counters);
+    return true;
+}
+
+/* Park producer until ring has room (slot free AND bytes < max_bytes).
+ * Returns false on timeout/cancel (caller releases chunk + bails). */
+static bool h2_stream_wait_for_room(http2_stream_t *stream,
+                                    http_connection_t *conn,
+                                    const uint32_t max_bytes)
+{
+    for (;;) {
+        http2_stream_compact_chunk_queue(stream);
+
+        if (stream->chunk_queue_tail < stream->chunk_queue_cap
+            && (max_bytes == 0 || stream->chunk_queue_bytes < max_bytes)) {
+            return true;
+        }
+
+        http_server_on_stream_backpressure(conn->counters);
+
+        if (!h2_wait_for_drain_event(stream, conn)) {
+            return false;
+        }
+
+        http2_session_emit(stream->session);
+    }
+}
+
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
@@ -1404,54 +1447,25 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    if (stream->chunk_queue == NULL) {
-        stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
-        stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
-                                            sizeof(zend_string *));
-        stream->chunk_queue_head  = 0;
-        stream->chunk_queue_tail  = 0;
-        stream->chunk_queue_bytes = 0;
-        stream->chunk_read_offset = 0;
-
-        if (!h2_commit_streaming_headers(conn, stream)) {
-            zend_string_release(chunk);
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-
-        http_server_on_streaming_response_started(conn->counters);
+    if (stream->chunk_queue == NULL && !h2_stream_init_ring(conn, stream)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
-
-    http_server_counters_t *counters = conn->counters;
 
     /* 0 disables byte cap; slot cap still bounds the ring. */
     const uint32_t max_bytes = conn->server != NULL
                              ? http_server_get_stream_write_buffer_bytes(conn->server)
                              : 0;
 
-    /* Backpressure: park until a slot frees AND queued bytes drop below
-     * max_bytes. Ring is compacted to index 0 so tail can advance. */
-    for (;;) {
-        http2_stream_compact_chunk_queue(stream);
-
-        if (stream->chunk_queue_tail < stream->chunk_queue_cap
-            && (max_bytes == 0 || stream->chunk_queue_bytes < max_bytes)) {
-            break;
-        }
-
-        http_server_on_stream_backpressure(counters);
-
-        if (!h2_wait_for_drain_event(stream, conn)) {
-            zend_string_release(chunk);
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-
-        http2_session_emit(stream->session);
+    if (!h2_stream_wait_for_room(stream, conn, max_bytes)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
     stream->chunk_queue[stream->chunk_queue_tail++] = chunk;
     stream->chunk_queue_bytes += ZSTR_LEN(chunk);
 
-    http_server_on_stream_send(counters, ZSTR_LEN(chunk));
+    http_server_on_stream_send(conn->counters, ZSTR_LEN(chunk));
 
     /* Resume DEFERRED data provider + emit. */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
