@@ -65,16 +65,8 @@ static bool tls_arm_one_shot_read(http_connection_t *conn);
 static void tls_advance_state(http_connection_t *conn);
 static bool tls_finalize_if_closing(http_connection_t *conn);
 
-/* ========================================================================
- * Producer + drain (issue #23).
- *
- * tls_push:  coroutine-only. Waits for `len` bytes of ring space, writes
- *            atomically, kicks the drain.
- * tls_drain: scheduler-side, never yields. SSL_writes plaintext into the
- *            cipher BIO, submits one cipher span via WRITE_EX.
- * tls_cipher_completion: WRITE_EX free_cb. Consumes the shipped slot,
- *            signals ring space, re-enters the drain.
- * ======================================================================== */
+/* Producer + drain (issue #23): tls_push (coroutine) → plaintext_bio →
+ * tls_drain (scheduler) → SSL_write → WRITE_EX → tls_cipher_completion. */
 
 static void tls_signal_space(http_connection_t *conn)
 {
@@ -91,12 +83,8 @@ void tls_release_waiters(http_connection_t *conn)
     }
 }
 
-/* Park the current coroutine until BIO_ctrl_get_write_guarantee returns
- * at least @p need bytes. The wake-and-recheck loop absorbs spurious
- * wakes and producers racing on shared space. Caller MUST be in a
- * coroutine — scheduler-context drain bypasses this helper and
- * BIO_write's directly under its own room check. */
-static bool tls_wait_space(http_connection_t *conn, size_t need)
+/* Park coroutine until plaintext_bio has `need` bytes of write room. */
+static bool tls_wait_space(http_connection_t *conn, const size_t need)
 {
     if (ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
         return false;
@@ -131,13 +119,7 @@ static bool tls_wait_space(http_connection_t *conn, size_t need)
     return true;
 }
 
-/* Move plaintext from the BIO ring through SSL_write into the cipher
- * BIO and submit one ciphertext span via WRITE_EX. Never yields. The
- * tls_draining re-entrancy guard folds the sync-complete fast path:
- * tls_cipher_completion calls back into tls_drain inline and sees the
- * guard, so the outer pass loops once more on its return — turning a
- * freed cipher BIO into more plaintext progress without an extra
- * event-loop tick. */
+/* Scheduler-side drain. tls_draining folds sync-complete re-entry. */
 bool tls_drain(http_connection_t *conn)
 {
     if (conn->tls == NULL || conn->tls_write_error) {
@@ -154,18 +136,9 @@ bool tls_drain(http_connection_t *conn)
     for (;;) {
         bool progress = false;
 
-        /* Single-in-flight gate: while libuv holds a slot pointer into
-         * network_bio, do not run a fresh SSL_write. SSL_write would
-         * BIO_write more ciphertext into the same ring, and the BIO
-         * pair reclaims space lazily — peek/consume cycles can hand the
-         * same offset back to a fresh write, racing libuv's still-
-         * pending read of the in-flight span (peer "bad record mac"
-         * under load). Serialise encrypt-and-ship on cipher_inflight;
-         * plaintext_bio absorbs producer backpressure (32 KiB ring) and
-         * h2 frames queue inside nghttp2's own outbound queue until the
-         * completion callback frees the slot. */
+        /* Gate SSL_write on cipher_inflight: a fresh BIO_write races
+         * libuv's pending read of the in-flight slot ("bad record mac"). */
         if (conn->tls_cipher_inflight == 0) {
-            /* 1) Push plaintext through SSL_write. */
             char     *plain = NULL;
             const int avail = BIO_nread0(conn->tls_plaintext_bio_app, &plain);
 
@@ -196,10 +169,6 @@ bool tls_drain(http_connection_t *conn)
             }
         }
 
-        /* 2) Submit one cipher span when no write is in flight. The
-         *    completion callback (tls_cipher_completion) consumes the
-         *    BIO ring, signals plaintext-ring space, and re-enters
-         *    this drain so the chain self-sustains. */
         if (conn->tls_cipher_inflight == 0) {
             if (UNEXPECTED(!tls_fsm_io_cb_attach(conn))) {
                 ok = false;
@@ -210,12 +179,7 @@ bool tls_drain(http_connection_t *conn)
             const size_t cipher_avail = tls_peek_cipher_out(conn->tls, &slot);
 
             if (cipher_avail > 0) {
-                /* Zero-copy: slot points into network_bio. Safe because
-                 * (a) step 1 above is gated on cipher_inflight, so no
-                 * concurrent SSL_write will mutate the BIO ring, and
-                 * (b) tls_cipher_completion calls BIO_nread to consume
-                 * only after libuv has released the buffer. The slot
-                 * bytes are stable for the entire WRITE_EX lifetime. */
+                /* Slot stays stable: SSL_write gated on cipher_inflight; consume after completion. */
                 conn->tls_cipher_inflight = cipher_avail;
                 const zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
                     conn->io, slot, cipher_avail, tls_cipher_completion);
@@ -228,8 +192,7 @@ bool tls_drain(http_connection_t *conn)
                 }
 
                 if (req->completed) {
-                    /* Sync-complete: free_cb already ran consume + cleared
-                     * cipher_inflight. Loop back to push more plaintext. */
+                    /* Sync-complete: free_cb cleared cipher_inflight already. */
                     progress = true;
                     continue;
                 }
@@ -250,12 +213,7 @@ bool tls_drain(http_connection_t *conn)
     return ok && !conn->tls_write_error;
 }
 
-/* Producer entry. Coroutine-only.
- *
- * For len ≤ ring_size: one atomic BIO_write after the wait. For
- * len > ring_size (h1 large body): the call chunks internally;
- * single-coroutine h1 has no concurrent producer so the chunks stay
- * contiguous on the wire. */
+/* Producer entry (coroutine-only). Chunks internally for len > ring_size. */
 bool tls_push(http_connection_t *conn, const char *data, const size_t len)
 {
     if (conn->tls_write_error) {
@@ -445,9 +403,6 @@ static bool tls_fsm_io_cb_attach(http_connection_t *conn)
  * tears down through the existing peer-FIN path. */
 static void tls_cipher_completion(void *data, zend_async_io_t *io)
 {
-    /* data is the network_bio slot pointer we handed to libuv —
-     * libuv-side accounting only; the actual ring consume happens via
-     * BIO_nread below, now that libuv is done reading from the slot. */
     (void)data;
 
     if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
@@ -473,40 +428,26 @@ static void tls_cipher_completion(void *data, zend_async_io_t *io)
         http_server_on_tls_io(conn->counters, 0, 0, 0, n);
     }
 
-    /* Connection-level destroy was deferred while this write was in
-     * flight (http_connection_destroy sees fsm_send_in_flight and sets
-     * destroy_pending). Now that the buffer is released, run the
-     * pending teardown. */
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
         conn->destroy_pending = false;
         http_connection_destroy(conn);
         return;
     }
 
-    /* Drain any ciphertext the FSM produced while we were waiting, and
-     * keep the state machine moving (e.g. a queued close_notify after
-     * the just-completed alert). */
     tls_advance_state(conn);
 
     if (tls_finalize_if_closing(conn)) {
         return;
     }
 
-    /* Plaintext BIO just gained room — drive the h2 emit pump
-     * synchronously to drain any frames nghttp2 has queued. Same
-     * scheduler context as http2_session_emit runs in; tls_drain's
-     * tls_draining guard handles re-entrancy. No-op on plain HTTP/1
-     * connections (NULL strategy / non-h2). */
+    /* Wake h2 emit — plaintext BIO has room now (no-op on non-h2). */
     {
         extern void http2_conn_notify_emit(http_connection_t *);
         http2_conn_notify_emit(conn);
     }
 
-    /* Static FSM observer hook: the static TLS path needs to know when
-     * wbio has drained so it can encrypt the next file chunk without
-     * SSL_ERROR_WANT_WRITE. Fire after tls_advance_state so any post-
-     * handshake bytes have already been re-kicked through this chain
-     * (and the observer sees a settled BIO state). */
+    /* Static FSM observer: signals wbio drained so the next file chunk
+     * can encrypt without SSL_ERROR_WANT_WRITE. */
     if (conn->tls_zc_write_done_cb != NULL) {
         void (*cb)(void *) = conn->tls_zc_write_done_cb;
         void *cb_data      = conn->tls_zc_write_done_cb_data;
@@ -748,24 +689,8 @@ static int tls_feed_parser_step(http_connection_t *conn)
     return 1;
 }
 
-/* Best-effort bidirectional close: queue our close_notify alert and
- * kick the async send. We deliberately do NOT wait for the peer's
- * close_notify (RFC 8446 §6.1 permits skipping the reply, and every
- * major HTTP client closes TCP immediately after their last response
- * read).
- *
- * Drain ordering: with the single-in-flight gate on SSL_write in
- * tls_drain (see the long comment there), application plaintext can
- * accumulate in plaintext_bio while a previous WRITE_EX is still in
- * flight — common on h1 pipelining over TLS, where N responses commit
- * before the first record ships. Calling SSL_shutdown before that
- * plaintext is encrypted would queue close_notify ahead of the unsent
- * application bytes; some peers (and our own bookkeeping) interpret
- * close_notify as "stream done" and drop everything after it. Defer
- * the shutdown until plaintext_bio is empty AND no cipher write is in
- * flight; tls_drain re-enters this function via the cipher_completion
- * → tls_advance_state chain after each record drains, so the close
- * eventually fires. */
+/* Defer SSL_shutdown until plaintext_bio drained + no cipher in flight —
+ * close_notify must not jump ahead of unsent app data (h1 pipelining). */
 static void tls_graceful_close(http_connection_t *conn)
 {
     if (conn->tls == NULL) {
@@ -798,23 +723,8 @@ static void tls_flush_pending_alert(http_connection_t *conn)
     tls_drain(conn);
 }
 
-/* When a libuv submission (read/write) fails in callback context, the
- * underlying ext/async layer signals it two ways at once:
- *   - returns NULL from the *_io_* fn,
- *   - throws an InputOutputException (or similar) into EG via
- *     async_throw_error.
- *
- * In coroutine context the exception is absorbed by the coroutine at
- * the next suspend point. The TLS read FSM has no coroutine — leaving
- * the exception in EG would propagate it up to the top of the PHP VM
- * as a fatal. This helper extracts the exception details for a single
- * structured E_NOTICE, clears EG, and returns; the caller is
- * responsible for flipping tls_write_error and transitioning to
- * CLOSING.
- *
- * One log line per failed submission keeps DDoS-shaped client churn
- * (peer-RST after every request) bounded — same volume policy as
- * tls_log_error. */
+/* FSM has no coroutine to absorb EG exception — log + clear; caller flips
+ * tls_write_error and transitions to CLOSING. */
 static void tls_absorb_io_submission_exception(const http_connection_t *conn,
                                                const char *op)
 {

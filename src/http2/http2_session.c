@@ -718,12 +718,6 @@ static int cb_on_stream_close(nghttp2_session *ng,
     return 0;
 }
 
-/* -------------------------------------------------------------------------
- * h2c iov emit helpers — append into session->emit_state from inside
- * nghttp2 send / send_data callbacks. emit_state is set by the caller
- * (http2_session_emit on plaintext connections) and NULL otherwise.
- * ------------------------------------------------------------------------- */
-
 static void h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t need)
 {
     if (need <= st->emit_buf_cap) { return; }
@@ -770,13 +764,7 @@ static void h2_emit_state_grow_refs(struct http2_emit_state *st)
     st->body_refs_cap = new_cap;
 }
 
-/* Append nghttp2 bytes into emit_buf. records[] is tracked lazily —
- * stays NULL until the first iov body record arrives (see append_body).
- * As long as nothing's gone through append_body, emit_buf grows as one
- * contiguous run and flush can ship it with a single write — no
- * records[] alloc, no body refcount, no per-pass bookkeeping cost. This
- * is the fast path for tiny REST responses where the whole pass fits in
- * one TLS record. */
+/* records[] stays NULL until the first body record (HEADERS-only fast path). */
 static void h2_emit_state_append_buf(struct http2_emit_state *st,
                                      const uint8_t *data, const size_t len)
 {
@@ -785,8 +773,6 @@ static void h2_emit_state_append_buf(struct http2_emit_state *st,
     const uint32_t offset = (uint32_t)st->emit_buf_len;
     st->emit_buf_len += len;
 
-    /* Fast path: no body record has arrived yet — emit_buf is the
-     * source of truth, nothing to track. */
     if (st->records == NULL) {
         return;
     }
@@ -808,14 +794,8 @@ static void h2_emit_state_append_buf(struct http2_emit_state *st,
     rec->buf.len    = (uint32_t)len;
 }
 
-/* First body record activates records[] tracking. Back-fill the current
- * emit_buf (everything seen via append_buf so far) as one contiguous buf
- * record so iov order is preserved. After this point, append_buf will
- * also append into records[].
- *
- * ref: zend_object (buffered/static) or zend_string (streaming chunk) —
- * both start with zend_refcounted_h, GC_ADDREF is type-agnostic. The
- * matching release branches on GC_TYPE (see h2_emit_ref_release). */
+/* Activates records[] on first body iov; back-fills emit_buf as one buf
+ * record. ref = zend_object (buffered) or zend_string (chunk). */
 static void h2_emit_state_append_body(struct http2_emit_state *st,
                                       const char *ptr, const size_t len,
                                       zend_refcounted *ref)
@@ -841,10 +821,8 @@ static void h2_emit_state_append_body(struct http2_emit_state *st,
     }
 }
 
-/* nghttp2 send_callback — used when http2_session_emit drives via
- * nghttp2_session_send (h2c iov path). For other callers (TLS via
- * mem_send, control-frame flush via drain) emit_state is NULL and this
- * callback never fires. */
+/* nghttp2 send_callback: appends control bytes into emit_state
+ * (NGHTTP2_ERR_WOULDBLOCK outside emit context). */
 static ssize_t h2_send_callback(nghttp2_session *ng,
                                 const uint8_t *data, size_t length,
                                 int flags, void *user_data)
@@ -856,8 +834,6 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_WOULDBLOCK;
     }
 
-    /* Per-pass byte budget (TLS path). First chunk always goes through
-     * so we make progress even if a single block exceeds the cap. */
     if (session->emit_state->byte_cap > 0
         && session->emit_state->bytes_appended >= session->emit_state->byte_cap) {
         return NGHTTP2_ERR_WOULDBLOCK;
@@ -868,16 +844,8 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
     return (ssize_t)length;
 }
 
-/* nghttp2 send_data_callback — fires for NO_COPY DATA frames during
- * session_send. Writes framehd[9] into emit_buf, then:
- *   - h2c buffered/static: one body iov pointing into
- *     stream->response_body, addrefs the response object.
- *   - streaming (h2c or TLS): walks the chunk ring for `length` bytes,
- *     one body iov per chunk slice, addrefs each chunk zend_string.
- *     Frees the drained ring slots and wakes a parked producer.
- *
- * On TLS the records[] iov is consumed in-order by SSL_write_ex in the
- * emit_flush — addrefs keep body bytes alive until cleanup releases them. */
+/* nghttp2 send_data_callback for NO_COPY DATA: framehd → emit_buf, body
+ * → iov record (or coalesced into emit_buf for small slices on TLS). */
 static int h2_send_data_callback(nghttp2_session *ng,
                                  nghttp2_frame *frame,
                                  const uint8_t *framehd,
@@ -893,8 +861,6 @@ static int h2_send_data_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
 
-    /* Per-pass byte budget (TLS path) — defer to next session_send if
-     * we'd exceed cipher_bio capacity. */
     if (session->emit_state->byte_cap > 0
         && session->emit_state->bytes_appended >= session->emit_state->byte_cap) {
         return NGHTTP2_ERR_WOULDBLOCK;
@@ -902,19 +868,9 @@ static int h2_send_data_callback(nghttp2_session *ng,
 
     h2_emit_state_append_buf(session->emit_state, framehd, 9);
 
-    /* On TLS each SSL_write produces (at least) one TLS record on the
-     * wire — separate SSL_writes can't share a record. So small body
-     * slices that would otherwise cost an extra record + AEAD setup
-     * per response are cheaper to memcpy into emit_buf and ship in one
-     * SSL_write together with the framehd. byte_cap is set only on TLS
-     * — h2c (writev, no per-write wire overhead) keeps zero-copy. */
+    /* TLS: coalesce small body slices into emit_buf — one SSL_write = one record. */
     const bool tls_small_coalesce = session->emit_state->byte_cap > 0;
 
-    /* Streaming path — walk the chunk ring for `length` bytes. Each
-     * slice either gets copied into emit_buf (small / TLS) or recorded
-     * as an iov (large / h2c). append_body addrefs each chunk; the
-     * ring's own ref is dropped as the slot drains, so the chunk stays
-     * alive solely via body_refs until cleanup releases it. */
     if (stream->chunk_queue != NULL) {
         const unsigned head_before = stream->chunk_queue_head;
         size_t remaining = length;
@@ -1269,12 +1225,9 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
 
     http2_stream_t *stream = (http2_stream_t *)source->ptr;
 
-    /* Streaming path — walk the chunk queue. */
     if (stream->chunk_queue != NULL) {
-        /* In emit context (h2c writev or TLS SSL_write) announce the
-         * available bytes via NO_COPY; h2_send_data_callback walks the
-         * ring into body iovs in records[]. The memcpy fallback below
-         * only fires for non-emit callers (control-flush drain etc.). */
+        /* Emit context: announce bytes via NO_COPY → send_data_callback walks
+         * the ring. Memcpy fallback below is for non-emit drain. */
         if (ds_session != NULL && ds_session->emit_state != NULL) {
             size_t avail = 0;
 
@@ -1295,14 +1248,12 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
 
                     return 0;
                 }
-                /* Handler still running — retry after resume_data. */
+
                 return NGHTTP2_ERR_DEFERRED;
             }
 
             const size_t to_emit = avail < length ? avail : length;
 
-            /* EOF rides the last frame: only when this frame drains the
-             * whole ring AND the handler has already called end(). */
             if (to_emit == avail && stream->streaming_ended) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
                 if (stream->has_trailers) {
@@ -1335,7 +1286,6 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
                 written += to_copy;
             }
 
-            /* Chunk fully drained — release refcount, advance head. */
             if (stream->chunk_read_offset == chunk_len) {
                 zend_string_release(chunk);
                 stream->chunk_queue[stream->chunk_queue_head] = NULL;
@@ -1344,11 +1294,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
             }
         }
 
-        /* Freed at least one ring slot — wake a producer coroutine
-         * parked in h2_stream_append_chunk on a full ring. Whoever
-         * drives the emit pump (writev completion, inbound feed) thus
-         * wakes the producer; the producer itself never has to poll.
-         * Harmless when no producer is parked (trigger no-op). */
+        /* Wake producer parked on full ring (no-op if none parked). */
         if (stream->chunk_queue_head > head_before
             && stream->write_event != NULL) {
             zend_async_trigger_event_t *trig =
@@ -1357,7 +1303,6 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
             if (trig->trigger != NULL) { trig->trigger(trig); }
         }
 
-        /* Queue empty — decide EOF vs DEFERRED. */
         if (stream->chunk_queue_head == stream->chunk_queue_tail) {
             if (stream->streaming_ended) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
@@ -1365,15 +1310,8 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
                     *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
                 }
             } else if (written == 0) {
-                /* Park. The handler is still running and has more to
-                 * send — nghttp2 will retry once we call
-                 * nghttp2_session_resume_data(stream_id). */
                 return NGHTTP2_ERR_DEFERRED;
             }
-            /* If written > 0 and !streaming_ended: we return the
-             * partial fill; nghttp2 will ask again for more, at
-             * which point the queue being still empty falls into
-             * the DEFERRED branch above. */
         }
 
         if (written > 0 && ds_session != NULL && ds_session->conn != NULL) {
@@ -1384,13 +1322,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
         return (ssize_t)written;
     }
 
-    /* Buffered path. Two modes:
-     *   - iov mode (h2c plaintext emit set emit_state): announce the
-     *     bytes via NGHTTP2_DATA_FLAG_NO_COPY; h2_send_data_callback
-     *     writes payload pointer into the iov record and advances
-     *     response_body_offset.
-     *   - legacy memcpy mode (TLS, control-flush): copy into nghttp2's
-     *     buf as before. */
+    /* Buffered: emit context → NO_COPY (send_data_callback); else memcpy. */
     const size_t left =
         stream->response_body_len - stream->response_body_offset;
     const size_t to_copy = left < length ? left : length;
@@ -1421,9 +1353,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
     if (stream->response_body_offset >= stream->response_body_len) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
         if (stream->has_trailers) {
-            /* Defer END_STREAM — nghttp2 will emit a terminal
-             * HEADERS(trailers) frame carrying END_STREAM instead
-             * (queued via nghttp2_submit_trailer). */
+            /* END_STREAM rides the terminal trailer HEADERS frame instead. */
             *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
         }
     }
@@ -1431,12 +1361,7 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
     return (ssize_t)to_copy;
 }
 
-/* Public-ish trampoline so the static-response module can reuse the
- * stream's buffered data_provider for inline-body responses without
- * having to re-implement the chunk-queue / response_body machinery.
- * Same identity as http2_response_data_read — kept as a separate
- * symbol so the static_response TU doesn't need to know the static
- * function's name. */
+/* Exported alias of http2_response_data_read for the static-response TU. */
 ssize_t http2_static_buffered_data_read(nghttp2_session *ng,
                                         int32_t stream_id,
                                         uint8_t *buf,

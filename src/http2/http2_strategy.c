@@ -101,10 +101,8 @@ static void h2_stream_mark_ended(void *ctx);
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn);
 
-/* Submit ownership context handed to send_batched_writev. free_cb
- * releases the body addrefs (response zend_object / streaming chunk
- * zend_string — see h2_emit_ref_release), the iov array, the heap
- * emit_buf, and the ctx itself. */
+/* Ownership ctx for send_batched_writev — free_cb releases body refs +
+ * iov + emit_buf + ctx. */
 typedef struct {
     char             *emit_buf;
     zend_async_buf_t *iov;
@@ -166,11 +164,6 @@ static void h2_static_on_static_done(void *user, int status)
             conn->handler_refcount--;
         }
 
-        /* Deferred teardown — h2_static_on_static_done runs from
-         * cb_on_stream_close, which nghttp2 fires from inside
-         * nghttp2_session_send. A synchronous http_connection_destroy
-         * here frees the nghttp2 session mid-send (use-after-free); the
-         * microtask runs it once the call stack has unwound. */
         http_connection_destroy_if_idle_deferred(conn);
     }
 
@@ -569,11 +562,7 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         return;
     }
 
-    /* Streaming path (send() was called): HEADERS + DATA already
-     * committed via h2_stream_ops. Just make sure the stream is
-     * marked ended — if the handler forgot to call end(), we do it
-     * here so the data provider emits EOF. Skip the buffered-mode
-     * commit entirely (re-submitting response would RST the stream). */
+    /* Streaming: skip buffered commit (would RST); just mark ended for EOF. */
     const bool is_streaming = !Z_ISUNDEF(stream->response_zv)
                               && http_response_is_streaming(Z_OBJ(stream->response_zv));
 
@@ -582,31 +571,18 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             h2_stream_mark_ended(stream);
         }
     } else if (conn != NULL && !Z_ISUNDEF(stream->response_zv)) {
-        /* Buffered-mode commit (normal REST path). */
         (void)http2_commit_stream_response(conn, stream);
     }
 
-    /* Release our refcount — the per-stream zvals are dtor'd by the
-     * stream destructor only when refcount finally hits zero. Keeping
-     * them alive past dispose matters for the buffered-response path:
-     * commit_stream_response submitted a nghttp2 data_provider that
-     * borrows the body via stream->response_body (a raw pointer into
-     * response_zv's body buffer). The emit pump runs the provider
-     * later from scheduler context, so the body must outlive
-     * dispose. */
+    /* zvals must outlive dispose: data_provider borrows response_body
+     * past dispose (emit runs later from scheduler context). */
     http2_stream_release(stream);
 
-    /* Release the conn-level handler ref and finalise a deferred
-     * destroy if the read-callback marked one while we ran. Stash
-     * conn locally because the release may free it. */
     if (conn != NULL) {
         if (conn->handler_refcount > 0) {
             conn->handler_refcount--;
         }
 
-        /* Deferred — this may run inside an nghttp2 callback (e.g. a
-         * stream close fired from within nghttp2_session_send); a direct
-         * destroy would free the session nghttp2 is still using. */
         http_connection_destroy_if_idle_deferred(conn);
     }
 }
@@ -643,9 +619,6 @@ static void h2_sendfile_on_done(void *user, int status)
             conn->handler_refcount--;
         }
 
-        /* Deferred — this may run inside an nghttp2 callback (e.g. a
-         * stream close fired from within nghttp2_session_send); a direct
-         * destroy would free the session nghttp2 is still using. */
         http_connection_destroy_if_idle_deferred(conn);
     }
 }
@@ -673,9 +646,6 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 
         if (conn->handler_refcount > 0) conn->handler_refcount--;
 
-        /* Deferred — this may run inside an nghttp2 callback (e.g. a
-         * stream close fired from within nghttp2_session_send); a direct
-         * destroy would free the session nghttp2 is still using. */
         http_connection_destroy_if_idle_deferred(conn);
 
         return;
@@ -699,9 +669,6 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 
         if (conn->handler_refcount > 0) conn->handler_refcount--;
 
-        /* Deferred — this may run inside an nghttp2 callback (e.g. a
-         * stream close fired from within nghttp2_session_send); a direct
-         * destroy would free the session nghttp2 is still using. */
         http_connection_destroy_if_idle_deferred(conn);
     }
 }
@@ -1130,10 +1097,7 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     return rc == 0;
 }
 
-/* Drop one body-iov hold-alive ref. Polymorphic: buffered/static
- * responses store the response zend_object, streaming chunks store the
- * chunk zend_string — both carry zend_refcounted_h, so GC_TYPE tells
- * them apart. addref is type-agnostic GC_ADDREF (h2_emit_state_append_body). */
+/* Release body ref: zend_object (buffered) or zend_string (chunk), via GC_TYPE. */
 static void h2_emit_ref_release(zend_refcounted *ref)
 {
     if (GC_TYPE(ref) == IS_STRING) {
@@ -1144,11 +1108,7 @@ static void h2_emit_ref_release(zend_refcounted *ref)
     }
 }
 
-/* Release everything an emit_state owns: body addrefs, the records and
- * body_refs arrays, and the heap-promoted emit_buf. Safe on a zeroed
- * state and on the TLS contiguous path (records / body_refs stay NULL).
- * NOT for the h2c success path — there ownership moves into the writev
- * hand-off ctx. */
+/* NOT for the h2c success path — there ownership moves into the writev ctx. */
 static void h2_emit_state_cleanup(struct http2_emit_state *st)
 {
     for (unsigned i = 0; i < st->body_refs_count; i++) {
@@ -1163,10 +1123,8 @@ static void h2_emit_state_cleanup(struct http2_emit_state *st)
 }
 
 #ifdef HAVE_OPENSSL
-/* Helper: drive SSL_write_ex until the buffer is fully consumed (or
- * fails). Returns true if the whole len was written. */
 static bool h2_tls_write_chunk(http_connection_t *conn,
-                               const char *ptr, size_t len)
+                               const char *ptr, const size_t len)
 {
     size_t off = 0;
 
@@ -1189,31 +1147,13 @@ static bool h2_tls_write_chunk(http_connection_t *conn,
     return true;
 }
 
-/* TLS emit branch. nghttp2 callbacks have already filled st->records[]
- * with the order of frame bytes. Walk those records honouring the TLS
- * record-payload boundary (16 KiB plaintext):
- *
- *   - Body records >= the boundary are written straight through — they
- *     fill (at least) one full TLS record on the wire by themselves, so
- *     copying them into a staging buffer would only waste a memcpy.
- *   - Everything smaller is packed into the same staging buffer (we
- *     re-use emit_buf since the control bytes already live there). As
- *     soon as one more record would overflow the boundary, we flush the
- *     staging buffer with a single SSL_write — exactly one TLS record.
- *
- * Result: minimum number of TLS records on the wire AND minimum body
- * memcpy, because each decision is forced by the wire's own boundary
- * instead of a tunable threshold. cipher_bio receives the ciphertext,
- * tls_drain ships it. body refs stay alive in body_refs[] until cleanup. */
+/* TLS emit: body records >= H2_TLS_RECORD_PAYLOAD_MAX go zero-copy;
+ * smaller records pack into one TLS record via stage[]. */
 static void h2_emit_flush_tls(http_connection_t *conn,
                               http2_session_t *session,
                               struct http2_emit_state *st)
 {
-    /* Gate on cipher_inflight: while a WRITE_EX is shipping ciphertext,
-     * producing more frames would fight cipher_bio capacity or stall.
-     * Bail — tls_cipher_completion re-enters after the slot lands. The
-     * tls_drain first flushes any plaintext queued by h1 producers /
-     * FSM alerts so it ships BEFORE the new frames. */
+    /* Gate on cipher_inflight; tls_cipher_completion re-enters us. */
     (void)tls_drain(conn);
     if (conn->tls_cipher_inflight > 0) {
         session->emit_state = NULL;
@@ -1225,11 +1165,6 @@ static void h2_emit_flush_tls(http_connection_t *conn,
 
     bool ok = (rc == 0);
 
-    /* Fast path: no body record ever activated records[] — everything
-     * lives contiguous in emit_buf. One SSL_write ships the whole pass
-     * and OpenSSL handles the record-boundary split. No stage buffer,
-     * no records[]/body_refs[] allocations were made (lazy in
-     * h2_emit_state_append_*) — minimum work for tiny REST responses. */
     if (ok && st->records == NULL) {
         if (st->emit_buf_len > 0) {
             ok = h2_tls_write_chunk(conn, st->emit_buf, st->emit_buf_len);
@@ -1243,9 +1178,6 @@ static void h2_emit_flush_tls(http_connection_t *conn,
         return;
     }
 
-    /* Slow path: records[] has at least one body iov — walk it,
-     * staging small records into one TLS record and shipping large
-     * body slices zero-copy direct. */
     char   stage[H2_TLS_RECORD_PAYLOAD_MAX];
     size_t stage_len = 0;
 
@@ -1256,8 +1188,6 @@ static void h2_emit_flush_tls(http_connection_t *conn,
                             : st->emit_buf + rec->buf.offset;
         const size_t len = rec->is_body ? rec->body.len : rec->buf.len;
 
-        /* Large body: writes one (or more) full TLS records on its own —
-         * no point copying. Flush any pending stage first, then ship. */
         if (len >= H2_TLS_RECORD_PAYLOAD_MAX) {
             if (stage_len > 0) {
                 ok = h2_tls_write_chunk(conn, stage, stage_len);
@@ -1269,8 +1199,6 @@ static void h2_emit_flush_tls(http_connection_t *conn,
             continue;
         }
 
-        /* Small record: pack into the stage. If adding this one would
-         * push past the TLS record boundary, flush first. */
         if (stage_len + len > H2_TLS_RECORD_PAYLOAD_MAX) {
             ok = h2_tls_write_chunk(conn, stage, stage_len);
             stage_len = 0;
@@ -1295,9 +1223,8 @@ static void h2_emit_flush_tls(http_connection_t *conn,
 }
 #endif
 
-/* h2c emit branch. The send callbacks build records[] over emit_buf +
- * NO_COPY body pointers; flatten that into an iov[] and ship it through
- * one zero-copy writev_ex. */
+/* h2c emit: flatten records[] (emit_buf slices + NO_COPY body) into an
+ * iov[] shipped through one zero-copy writev_ex. */
 static void h2_emit_flush_h2c(http_connection_t *conn,
                               http2_session_t *session,
                               struct http2_emit_state *st)
@@ -1310,8 +1237,7 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
         return;
     }
 
-    /* Heap-promote emit_buf so the iov pointers we hand to the reactor
-     * outlive this stack frame. */
+    /* iov pointers outlive this frame — heap-promote. */
     if (!st->emit_buf_on_heap) {
         char *heap = emalloc(st->emit_buf_len);
         memcpy(heap, st->emit_buf, st->emit_buf_len);
@@ -1319,9 +1245,7 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
         st->emit_buf_on_heap = true;
     }
 
-    /* records[] is lazy — NULL when nothing went through append_body
-     * (HEADERS-only / control-only pass). Synthesize a single iov entry
-     * over emit_buf in that case. */
+    /* HEADERS-only pass: synthesize one iov over emit_buf. */
     const unsigned niov = st->records != NULL ? st->records_count : 1u;
     zend_async_buf_t *iov = emalloc(niov * sizeof(*iov));
 
@@ -1341,8 +1265,6 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
         }
     }
 
-    /* Hand-off ctx: free_cb releases emit_buf + body refs + iov. The
-     * records[] array is consumed here. */
     h2_writev_ctx_t *ctx = emalloc(sizeof(*ctx));
     ctx->emit_buf      = st->emit_buf;
     ctx->iov           = iov;
@@ -1355,15 +1277,8 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
                                               h2c_writev_free_cb, ctx);
 }
 
-/* zend_bailout firewall for the emit pump. Frame serialisation runs
- * emalloc (emit_buf growth, iov, hand-off ctx); under memory_limit
- * pressure that longjmps. emit is driven from scheduler context too
- * (writev completion → http2_conn_notify_emit), where an escaping
- * bailout unwinds straight into the scheduler fiber and leaves the
- * reactor loop alive at finalize — the assert in scheduler.c. Catch
- * it here, reclaim the partial buffers, latch the connection's write
- * side dead and close the socket; the streams unwind via the normal
- * write-dead path. */
+/* zend_bailout firewall: emalloc inside emit can longjmp out of scheduler
+ * context (writev completion → notify_emit) and crash finalize. */
 static void http2_emit_log_bailout(const http_connection_t *conn)
 {
     const zend_string *last_err = PG(last_error_message);
@@ -1375,15 +1290,10 @@ static void http2_emit_log_bailout(const http_connection_t *conn)
     fflush(stderr);
 }
 
-/* Scheduler-context drain of nghttp2's outbound queue. Sets up the
- * per-emit accumulator on the stack and dispatches to the TLS or h2c
- * branch — see h2_emit_flush_tls / h2_emit_flush_h2c. */
 void http2_session_emit(http2_session_t *session)
 {
     http_connection_t *conn = http2_session_get_conn(session);
 
-    /* Connection's write side already dead (timeout / earlier emit
-     * bailout) — nothing more goes on the wire. */
     if (conn->write_timed_out) {
         return;
     }
@@ -1399,22 +1309,14 @@ void http2_session_emit(http2_session_t *session)
     {
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
-            /* byte_cap bounds plaintext per emit pass so SSL_write never
-             * WANT_WRITEs on cipher_bio. The callback returning WOULDBLOCK
-             * may overshoot by one chunk (≤ 16 KiB + 9 B framehd), so the
-             * worst-case plaintext is byte_cap + 16 KiB. For ring = 64 KiB,
-             * byte_cap = 32 KiB → ~48 KiB plaintext = 3 TLS records ≤ 64 KiB
-             * after AES-GCM expansion. */
+            /* byte_cap = ring/2 keeps plaintext under cipher_bio after one
+             * chunk overshoot (16 KiB + framehd). */
             st.byte_cap   = 32 * 1024;
             session->emit_state = &st;
             h2_emit_flush_tls(conn, session, &st);
         } else
 #endif
-        /* Completion-driven chain: if a writev is already in flight, skip.
-         * http_send_batched_writev_completion_cb re-drives the pump via
-         * http2_conn_notify_emit once the chain goes idle, picking up
-         * everything that queued in the meantime — one writev per
-         * round-trip instead of one per write(). */
+        /* Skip if writev in flight; completion re-drives via notify_emit. */
         if (!conn->out_in_flight) {
             session->emit_state = &st;
             h2_emit_flush_h2c(conn, session, &st);
@@ -1459,24 +1361,8 @@ static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
     efree(ctx);
 }
 
-/* Suspend-until-drain-event helper. Called from append_chunk's tail
- * loop when flow control keeps bytes in the queue after a drain pass.
- * See the "Race-free" comment block at the call site for why this
- * doesn't deadlock.
- *
- * Two wake sources, whichever fires first wins:
- *   1. stream->write_event (trigger event) — fired from
- *      cb_on_frame_recv on WINDOW_UPDATE.
- *   2. write_timeout timer — defensive, caps wait. Maps write_timeout
- *      from the connection; 0 disables the timer (wait forever, used
- *      only in tests / bring-up).
- *
- * Returns true on event wake, false on timeout (EG(exception) set) or
- * cancellation (peer RST — also sets exception). Caller must not
- * suspend outside a coroutine — we check up front.
- *
- * Lifecycle: stream->write_event is lazy — created on first wait, kept
- * across subsequent waits, disposed in http2_stream_release. */
+/* Park on stream->write_event (woken by WINDOW_UPDATE / ring-slot drain)
+ * with write_timeout fallback. false on timeout/cancel (exception set). */
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
                                     http_connection_t *conn)
 {
@@ -1486,7 +1372,6 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
         return false;
     }
 
-    /* Lazy-create the wake event once per stream. */
     if (stream->write_event == NULL) {
         stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
 
@@ -1501,9 +1386,6 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     zend_async_resume_when(co, wake_ev, false,
                            zend_async_waker_callback_resolve, NULL);
 
-    /* Write-timeout fallback for dead / misbehaving peers. Without
-     * this, a peer that stops acknowledging WINDOW_UPDATE can pin
-     * the handler forever. */
     if (conn != NULL && conn->write_timeout_ms > 0) {
         zend_async_event_t *timer =
             &ZEND_ASYNC_NEW_TIMER_EVENT(
@@ -1516,23 +1398,14 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     zend_async_waker_clean(co);
 
     if (EG(exception) != NULL) {
-        /* Timeout exception is expected for genuinely stalled clients;
-         * map to "stream dead" so send() unwinds cleanly. Other
-         * exceptions (peer RST propagated as cancel) likewise exit. */
         return false;
     }
 
     return true;
 }
 
-/* Staging-ring slot count for $response->write(). The ring holds owned
- * zend_string chunk refs waiting for nghttp2's data_provider to pull
- * them. Dual-bounded backpressure: the producer coroutine suspends when
- * EITHER all H2_CHUNK_RING_SLOTS slots are live (caps the pointer array
- * + bounds pathological tiny-chunk handlers) OR the queued bytes reach
- * the server's stream_write_buffer_bytes high-water mark (the real
- * memory bound, set via HttpServerConfig::setStreamWriteBufferBytes).
- * It proceeds again as soon as read_callback frees room. */
+/* Per-stream ring slot count. Dual-bounded backpressure: slot cap OR
+ * stream_write_buffer_bytes high-water mark. */
 #define H2_CHUNK_RING_SLOTS 8
 
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
@@ -1551,14 +1424,11 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* Write side latched dead (timeout / emit bailout) — stop feeding
-     * the ring; the handler unwinds via the stream-dead path. */
     if (conn->write_timed_out) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* Lazy ring allocation + first-send HEADERS commit. */
     if (stream->chunk_queue == NULL) {
         stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
         stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
@@ -1572,32 +1442,19 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
             zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
-        /* One new streaming response activated. */
+
         http_server_on_streaming_response_started(conn->counters);
     }
 
     http_server_counters_t *counters = conn->counters;
 
-    /* Per-stream byte high-water mark. 0 (no server / unconfigured)
-     * disables the byte cap — the slot cap still bounds the ring. */
+    /* 0 disables byte cap; slot cap still bounds the ring. */
     const uint32_t max_bytes = conn->server != NULL
                              ? http_server_get_stream_write_buffer_bytes(conn->server)
                              : 0;
 
-    /* Make room for one chunk. The ring is a fixed-depth linear buffer:
-     * compact (shift live entries to index 0) so tail can advance. The
-     * producer has room while a slot is free AND the queued bytes are
-     * under max_bytes; otherwise this is the backpressure point —
-     * suspend until read_callback drains room. Whoever drives the emit
-     * pump (writev completion, inbound feed) drains the ring; the
-     * read_callback then fires write_event to wake us. We also re-drive
-     * the pump on wake — emit self-guards on out_in_flight, so it is a
-     * cheap no-op while a writev is in flight. The producer proceeds as
-     * soon as room appears — it does not wait for the ring to empty.
-     *
-     * Race-free: h2_wait_for_drain_event registers the waker BEFORE
-     * suspending; the trigger fires only from scheduler context, which
-     * cannot run concurrently with this coroutine. */
+    /* Backpressure: park until a slot frees AND queued bytes drop below
+     * max_bytes. Ring is compacted to index 0 so tail can advance. */
     for (;;) {
         if (stream->chunk_queue_head > 0) {
             const size_t live =
@@ -1621,7 +1478,6 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
         http_server_on_stream_backpressure(counters);
 
         if (!h2_wait_for_drain_event(stream, conn)) {
-            /* Timeout / cancel / peer gone. PHP exception set. */
             zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
@@ -1634,11 +1490,7 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 
     http_server_on_stream_send(counters, ZSTR_LEN(chunk));
 
-    /* Kick nghttp2: the data provider was DEFERRED while the ring was
-     * empty; resume_data + emit ship whatever the flow-control window
-     * allows right now. Fire-and-forget — no wait here; the chunk lives
-     * in the ring (owned ref) until read_callback drains and releases
-     * it. Backpressure happens at the NEXT write() if the ring fills. */
+    /* Resume DEFERRED data provider + emit. */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
     http2_session_emit(stream->session);
 
@@ -1655,18 +1507,12 @@ static void h2_stream_mark_ended(void *ctx)
 
     stream->streaming_ended = true;
 
-    /* If the peer already RST'd this stream, nghttp2's internal state
-     * for stream_id is gone. resume_stream_data is a no-op in that
-     * case per the nghttp2 API, but the subsequent mem_send call can
-     * still walk a stale data-provider pointer and dereference a NULL
-     * function slot — crashes under concurrent peer-reset-mid-stream
-     * loads (phpt 092). Nothing more to push; dispose unwinds. */
+    /* Peer-RST removed nghttp2's stream state; resume + mem_send would
+     * walk a stale data_provider and crash (phpt 092). */
     if (stream->peer_closed) {
         return;
     }
 
-    /* Wake the data provider one last time — it'll see empty queue
-     * + streaming_ended and flag EOF (or NO_END_STREAM + trailers). */
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
 
     http2_session_emit(stream->session);
@@ -1687,9 +1533,7 @@ static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
                : NULL;
 }
 
-/* Advisory backpressure check — true when h2_stream_append_chunk would
- * accept a chunk without suspending. Mirrors the ring "has room"
- * condition there (slot cap AND byte high-water mark). */
+/* sendable() backing: true if append_chunk would proceed without suspend. */
 static bool h2_stream_sendable(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
@@ -1723,10 +1567,7 @@ const http_response_stream_ops_t h2_stream_ops = {
     .send_static_response = h2_stream_send_static_response,
 };
 
-/* External entry for non-h2 TUs (tls_cipher_completion): drive the
- * emit pump after a cipher write freed BIO ring space. Direct C call,
- * same scheduler context. tls_draining guards re-entrancy inside
- * tls_drain. Cheap on plain HTTP/1 (NULL/non-h2 strategy). */
+/* External entry for tls_cipher_completion. No-op on non-h2. */
 void http2_conn_notify_emit(http_connection_t *conn)
 {
     if (conn == NULL || conn->strategy == NULL ||

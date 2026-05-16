@@ -64,13 +64,7 @@ typedef void (*http2_request_ready_cb_t)(struct http_request_t *request,
 #define HTTP2_SETTINGS_MAX_FRAME           16384u
 #define HTTP2_SETTINGS_MAX_CONCURRENT      100u
 
-/* TLS record payload ceiling per RFC 8446 §5.1 / RFC 5246 §6.2.1.
- * OpenSSL splits any SSL_write longer than this into multiple records.
- * Used as the natural switch point on the TLS emit path: body slices
- * smaller than this are coalesced into emit_buf (one SSL_write = one
- * TLS record, no records[] bookkeeping); slices >= this each become
- * their own TLS record on the wire, so we keep them zero-copy through
- * the records[] iov. */
+/* TLS record payload ceiling (RFC 8446 §5.1). SSL_write splits at this size. */
 #define H2_TLS_RECORD_PAYLOAD_MAX          16384u
 
 /* Flood-defence constants. These are the ceilings we set on
@@ -129,21 +123,13 @@ struct http2_session_t {
     uint32_t       last_peer_stream_id;
     bool           bad_preface_emit_goaway;
 
-    /* h2c iov emit state. Pointer set by http2_session_emit (plaintext
-     * connections only) to a stack-allocated context for the duration
-     * of nghttp2_session_send; the send_callback / send_data_callback
-     * append output bytes into it. NULL outside emit and for TLS. */
+    /* Set by http2_session_emit for the duration of nghttp2_session_send;
+     * NULL otherwise. */
     struct http2_emit_state *emit_state;
 };
 
-/* Per-emit accumulator. emit_buf holds copied nghttp2 control/HEADERS
- * bytes (and framehd[9] for NO_COPY DATA frames). records[] tracks the
- * order in which output chunks were produced — converted into the final
- * iov[] after nghttp2_session_send returns (offsets remain valid through
- * emit_buf realloc). body_refs[] holds addrefs to keep the NO_COPY body
- * memory alive across the in-flight writev (released by the submit
- * free_cb) — a response zend_object for buffered/static responses, a
- * chunk zend_string for streaming. */
+/* Per-emit accumulator: copied control bytes (emit_buf) + ordered body iov
+ * records + addrefs that keep body memory alive across the in-flight writev. */
 typedef struct http2_emit_record {
     bool is_body;
     union {
@@ -166,12 +152,8 @@ struct http2_emit_state {
     unsigned          body_refs_count;
     unsigned          body_refs_cap;
 
-    /* Optional output-byte budget per nghttp2_session_send call. When
-     * set (TLS path), the send / send_data callbacks return WOULDBLOCK
-     * once `bytes_appended` reaches `byte_cap`, pausing nghttp2 so the
-     * gather + SSL_write cycle never produces more plaintext than the
-     * cipher BIO ring can encrypt in one record. h2c sets byte_cap = 0
-     * (no limit; writev_ex handles arbitrary sizes). */
+    /* TLS: WOULDBLOCK once bytes_appended >= byte_cap (keeps plaintext
+     * under cipher BIO ring). h2c sets 0 = unlimited. */
     size_t   byte_cap;
     size_t   bytes_appended;
 };
@@ -189,22 +171,7 @@ static inline http_connection_t *http2_session_get_conn(http2_session_t *session
     return session->conn;
 }
 
-/* -------------------------------------------------------------------------
- * h2 + TLS write pipeline (issue #23). Single-threaded, no cross-TU events.
- *
- *   producer → nghttp2_submit_* → http2_session_emit(session)
- *     emit: mem_send into plaintext_bio; tls_drain(conn)
- *     tls_drain (gated on cipher_inflight): SSL_write → BIO_nread0 →
- *       ZEND_ASYNC_IO_WRITE_EX; sets cipher_inflight; returns.
- *   completion (libuv cb, scheduler ctx): BIO_nread, cipher_inflight=0,
- *     direct http2_session_emit(session) — no event, no timer.
- *
- * Coroutine producer suspends on tls_space_event when plaintext_bio is
- * full; tls_signal_space wakes it from inside tls_drain after SSL_write
- * actually freed plaintext room. The h2 machine itself knows nothing
- * about coroutines.
- * ------------------------------------------------------------------------- */
-
+/* h2 emit pump (issue #23): h2c → one writev; TLS → SSL_write + tls_drain. */
 void http2_session_emit(http2_session_t *session);
 
 /* -------------------------------------------------------------------------
