@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 13531,
-      "hit": 10514
+      "hit": 10511
     },
     "functions": {
       "total": 901,
@@ -283,7 +283,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 505,
-        "hit": 400
+        "hit": 397
       },
       "functions": {
         "total": 31,
