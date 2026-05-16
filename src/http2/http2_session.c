@@ -814,7 +814,11 @@ static void h2_emit_state_append_body(struct http2_emit_state *st,
     rec->body.ptr  = ptr;
     rec->body.len  = (uint32_t)len;
 
-    if (ref != NULL) {
+    /* Interned strings live in opcache SHM (read-only under ZTS) — addref
+     * SEGVs and the matching release is a no-op anyway. */
+    if (ref != NULL
+        && !(GC_TYPE(ref) == IS_STRING
+             && ZSTR_IS_INTERNED((zend_string *)ref))) {
         h2_emit_state_grow_refs(st);
         GC_ADDREF(ref);
         st->body_refs[st->body_refs_count++] = ref;
