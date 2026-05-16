@@ -67,6 +67,15 @@ typedef void (*http2_request_ready_cb_t)(struct http_request_t *request,
 /* TLS record payload ceiling (RFC 8446 §5.1). SSL_write splits at this size. */
 #define H2_TLS_RECORD_PAYLOAD_MAX          16384u
 
+/* Per-emit accumulator initial capacities (geometric growth × 2 after). */
+#define H2_EMIT_BUF_INITIAL_CAP            32768u
+#define H2_EMIT_RECORDS_INITIAL_CAP        64u
+#define H2_EMIT_REFS_INITIAL_CAP           32u
+
+/* TLS emit byte budget: half the cipher BIO ring so plaintext stays bounded
+ * after one chunk overshoot (≤ 16 KiB + 9 B framehd). */
+#define H2_EMIT_TLS_BYTE_CAP               (32u * 1024u)
+
 /* Flood-defence constants. These are the ceilings we set on
  * nghttp2's internal queues; exceeding them makes the library answer
  * with GOAWAY(ENHANCE_YOUR_CALM) without any work on our side. */

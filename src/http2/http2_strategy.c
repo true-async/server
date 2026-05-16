@@ -1277,7 +1277,7 @@ void http2_session_emit(http2_session_t *session)
         return;
     }
 
-    char stack_buf[32768];
+    char stack_buf[H2_EMIT_BUF_INITIAL_CAP];
     struct http2_emit_state st = {
         .emit_buf     = stack_buf,
         .emit_buf_cap = sizeof(stack_buf),
@@ -1288,9 +1288,7 @@ void http2_session_emit(http2_session_t *session)
     {
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
-            /* byte_cap = ring/2 keeps plaintext under cipher_bio after one
-             * chunk overshoot (16 KiB + framehd). */
-            st.byte_cap   = 32 * 1024;
+            st.byte_cap   = H2_EMIT_TLS_BYTE_CAP;
             session->emit_state = &st;
             h2_emit_flush_tls(conn, session, &st);
         } else

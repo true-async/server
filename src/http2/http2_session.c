@@ -722,7 +722,7 @@ static void h2_emit_state_grow_buf(struct http2_emit_state *st, const size_t nee
 {
     if (need <= st->emit_buf_cap) { return; }
 
-    size_t new_cap = st->emit_buf_cap ? st->emit_buf_cap * 2 : 32768;
+    size_t new_cap = st->emit_buf_cap ? st->emit_buf_cap * 2 : H2_EMIT_BUF_INITIAL_CAP;
 
     while (new_cap < need) { new_cap *= 2; }
 
@@ -746,7 +746,7 @@ static void h2_emit_state_grow_records(struct http2_emit_state *st)
 {
     if (st->records_count < st->records_cap) { return; }
 
-    const unsigned new_cap = st->records_cap ? st->records_cap * 2 : 64;
+    const unsigned new_cap = st->records_cap ? st->records_cap * 2 : H2_EMIT_RECORDS_INITIAL_CAP;
     st->records = st->records == NULL
                 ? emalloc(new_cap * sizeof(*st->records))
                 : erealloc(st->records, new_cap * sizeof(*st->records));
@@ -757,7 +757,7 @@ static void h2_emit_state_grow_refs(struct http2_emit_state *st)
 {
     if (st->body_refs_count < st->body_refs_cap) { return; }
 
-    const unsigned new_cap = st->body_refs_cap ? st->body_refs_cap * 2 : 32;
+    const unsigned new_cap = st->body_refs_cap ? st->body_refs_cap * 2 : H2_EMIT_REFS_INITIAL_CAP;
     st->body_refs = st->body_refs == NULL
                   ? emalloc(new_cap * sizeof(*st->body_refs))
                   : erealloc(st->body_refs, new_cap * sizeof(*st->body_refs));
