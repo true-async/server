@@ -494,14 +494,30 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		const char *content_type = NULL;
 		size_t content_type_len = 0;
 
-		if (!mount_resolve_content_type(mount, fs_path, fs_path_len, &content_type,
-										&content_type_len)) {
+		/* Precompressed sidecar: prefer the override Content-Type that
+		 * was resolved against the ORIGINAL file's extension (the .br /
+		 * .gz sidecar's own extension is not in the MIME table and
+		 * would fall through to application/octet-stream — and a
+		 * browser that sees that without Content-Encoding will render
+		 * the compressed payload as garbage). */
+		if (override_ct != NULL && override_ct_len > 0) {
+			content_type = override_ct;
+			content_type_len = override_ct_len;
+		} else if (!mount_resolve_content_type(mount, fs_path, fs_path_len, &content_type,
+											   &content_type_len)) {
 			content_type = "application/octet-stream";
 			content_type_len = sizeof("application/octet-stream") - 1;
 		}
 
 		http_response_static_set_header(response_obj, "content-type", 12, content_type,
 										content_type_len);
+
+		if (picked_encoding != NULL && picked_encoding_len > 0) {
+			http_response_static_set_header(response_obj, "content-encoding", 16,
+											picked_encoding, picked_encoding_len);
+			http_response_static_set_header(response_obj, "vary", 4,
+											"Accept-Encoding", 15);
+		}
 
 		if (etag_enabled) {
 			http_response_static_set_header(response_obj, "etag", 4, etag_buf,
