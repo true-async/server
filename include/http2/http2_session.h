@@ -64,6 +64,15 @@ typedef void (*http2_request_ready_cb_t)(struct http_request_t *request,
 #define HTTP2_SETTINGS_MAX_FRAME           16384u
 #define HTTP2_SETTINGS_MAX_CONCURRENT      100u
 
+/* TLS record payload ceiling per RFC 8446 §5.1 / RFC 5246 §6.2.1.
+ * OpenSSL splits any SSL_write longer than this into multiple records.
+ * Used as the natural switch point on the TLS emit path: body slices
+ * smaller than this are coalesced into emit_buf (one SSL_write = one
+ * TLS record, no records[] bookkeeping); slices >= this each become
+ * their own TLS record on the wire, so we keep them zero-copy through
+ * the records[] iov. */
+#define H2_TLS_RECORD_PAYLOAD_MAX          16384u
+
 /* Flood-defence constants. These are the ceilings we set on
  * nghttp2's internal queues; exceeding them makes the library answer
  * with GOAWAY(ENHANCE_YOUR_CALM) without any work on our side. */
@@ -165,14 +174,6 @@ struct http2_emit_state {
      * (no limit; writev_ex handles arbitrary sizes). */
     size_t   byte_cap;
     size_t   bytes_appended;
-
-    /* TLS path: emit_buf is the final contiguous plaintext fed straight
-     * to SSL_write. The send_data callback copies body bytes into
-     * emit_buf in-place (the response object is alive for the whole
-     * synchronous nghttp2_session_send) instead of recording an iov
-     * entry — so records[] / body_refs[] stay unused. h2c keeps it
-     * false: it needs the iov indirection for zero-copy writev. */
-    bool     contiguous;
 };
 
 static inline http2_stream_t *http2_session_find_stream(

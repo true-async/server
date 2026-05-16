@@ -770,9 +770,13 @@ static void h2_emit_state_grow_refs(struct http2_emit_state *st)
     st->body_refs_cap = new_cap;
 }
 
-/* Append nghttp2 bytes into emit_buf. Coalesce with the previous record
- * if it was a contiguous emit_buf chunk. In contiguous mode (TLS)
- * emit_buf IS the plaintext — no iov records are tracked. */
+/* Append nghttp2 bytes into emit_buf. records[] is tracked lazily —
+ * stays NULL until the first iov body record arrives (see append_body).
+ * As long as nothing's gone through append_body, emit_buf grows as one
+ * contiguous run and flush can ship it with a single write — no
+ * records[] alloc, no body refcount, no per-pass bookkeeping cost. This
+ * is the fast path for tiny REST responses where the whole pass fits in
+ * one TLS record. */
 static void h2_emit_state_append_buf(struct http2_emit_state *st,
                                      const uint8_t *data, const size_t len)
 {
@@ -781,10 +785,13 @@ static void h2_emit_state_append_buf(struct http2_emit_state *st,
     const uint32_t offset = (uint32_t)st->emit_buf_len;
     st->emit_buf_len += len;
 
-    if (st->contiguous) {
+    /* Fast path: no body record has arrived yet — emit_buf is the
+     * source of truth, nothing to track. */
+    if (st->records == NULL) {
         return;
     }
 
+    /* Coalesce with previous adjacent buf record. */
     if (st->records_count > 0) {
         http2_emit_record_t *last = &st->records[st->records_count - 1];
         if (!last->is_body
@@ -801,13 +808,26 @@ static void h2_emit_state_append_buf(struct http2_emit_state *st,
     rec->buf.len    = (uint32_t)len;
 }
 
-/* ref: zend_object (buffered/static) or zend_string (streaming chunk) —
+/* First body record activates records[] tracking. Back-fill the current
+ * emit_buf (everything seen via append_buf so far) as one contiguous buf
+ * record so iov order is preserved. After this point, append_buf will
+ * also append into records[].
+ *
+ * ref: zend_object (buffered/static) or zend_string (streaming chunk) —
  * both start with zend_refcounted_h, GC_ADDREF is type-agnostic. The
  * matching release branches on GC_TYPE (see h2_emit_ref_release). */
 static void h2_emit_state_append_body(struct http2_emit_state *st,
                                       const char *ptr, const size_t len,
                                       zend_refcounted *ref)
 {
+    if (st->records == NULL && st->emit_buf_len > 0) {
+        h2_emit_state_grow_records(st);
+        http2_emit_record_t *back = &st->records[st->records_count++];
+        back->is_body    = false;
+        back->buf.offset = 0;
+        back->buf.len    = (uint32_t)st->emit_buf_len;
+    }
+
     h2_emit_state_grow_records(st);
     http2_emit_record_t *rec = &st->records[st->records_count++];
     rec->is_body   = true;
@@ -852,13 +872,12 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
  * session_send. Writes framehd[9] into emit_buf, then:
  *   - h2c buffered/static: one body iov pointing into
  *     stream->response_body, addrefs the response object.
- *   - h2c streaming: walks the chunk ring for `length` bytes, one body
- *     iov per chunk slice, addrefs each chunk zend_string. Frees the
- *     drained ring slots and wakes a parked producer.
- *   - TLS (contiguous): copies the body into emit_buf in-place — it is
- *     consumed by SSL_write before nghttp2_session_send returns, so no
- *     addref is needed. (Streaming over TLS stays on the read_callback
- *     copy path — it never sets NO_COPY — so it never reaches here.) */
+ *   - streaming (h2c or TLS): walks the chunk ring for `length` bytes,
+ *     one body iov per chunk slice, addrefs each chunk zend_string.
+ *     Frees the drained ring slots and wakes a parked producer.
+ *
+ * On TLS the records[] iov is consumed in-order by SSL_write_ex in the
+ * emit_flush — addrefs keep body bytes alive until cleanup releases them. */
 static int h2_send_data_callback(nghttp2_session *ng,
                                  nghttp2_frame *frame,
                                  const uint8_t *framehd,
@@ -883,10 +902,19 @@ static int h2_send_data_callback(nghttp2_session *ng,
 
     h2_emit_state_append_buf(session->emit_state, framehd, 9);
 
-    /* Streaming path — record one body iov per chunk slice the frame
-     * spans. append_body addrefs each chunk; the ring's own ref is
-     * dropped as the slot drains, so the chunk stays alive solely via
-     * body_refs until the writev free_cb releases it. */
+    /* On TLS each SSL_write produces (at least) one TLS record on the
+     * wire — separate SSL_writes can't share a record. So small body
+     * slices that would otherwise cost an extra record + AEAD setup
+     * per response are cheaper to memcpy into emit_buf and ship in one
+     * SSL_write together with the framehd. byte_cap is set only on TLS
+     * — h2c (writev, no per-write wire overhead) keeps zero-copy. */
+    const bool tls_small_coalesce = session->emit_state->byte_cap > 0;
+
+    /* Streaming path — walk the chunk ring for `length` bytes. Each
+     * slice either gets copied into emit_buf (small / TLS) or recorded
+     * as an iov (large / h2c). append_body addrefs each chunk; the
+     * ring's own ref is dropped as the slot drains, so the chunk stays
+     * alive solely via body_refs until cleanup releases it. */
     if (stream->chunk_queue != NULL) {
         const unsigned head_before = stream->chunk_queue_head;
         size_t remaining = length;
@@ -898,10 +926,16 @@ static int h2_send_data_callback(nghttp2_session *ng,
             const size_t chunk_len = ZSTR_LEN(chunk);
             const size_t avail     = chunk_len - stream->chunk_read_offset;
             const size_t take      = avail < remaining ? avail : remaining;
+            const char *slice_ptr  = ZSTR_VAL(chunk)
+                                      + stream->chunk_read_offset;
 
-            h2_emit_state_append_body(session->emit_state,
-                ZSTR_VAL(chunk) + stream->chunk_read_offset, take,
-                (zend_refcounted *)chunk);
+            if (tls_small_coalesce && take < H2_TLS_RECORD_PAYLOAD_MAX) {
+                h2_emit_state_append_buf(session->emit_state,
+                                         (const uint8_t *)slice_ptr, take);
+            } else {
+                h2_emit_state_append_body(session->emit_state,
+                    slice_ptr, take, (zend_refcounted *)chunk);
+            }
 
             stream->chunk_read_offset += take;
             stream->chunk_queue_bytes -= take;
@@ -935,7 +969,7 @@ static int h2_send_data_callback(nghttp2_session *ng,
 
     const char *payload = stream->response_body + stream->response_body_offset;
 
-    if (session->emit_state->contiguous) {
+    if (tls_small_coalesce && length < H2_TLS_RECORD_PAYLOAD_MAX) {
         h2_emit_state_append_buf(session->emit_state,
                                  (const uint8_t *)payload, length);
     } else {
@@ -1237,12 +1271,11 @@ static ssize_t http2_response_data_read(nghttp2_session *ng,
 
     /* Streaming path — walk the chunk queue. */
     if (stream->chunk_queue != NULL) {
-        /* h2c iov mode: announce the available bytes via NO_COPY and let
-         * h2_send_data_callback walk the ring into body iovs (zero-copy
-         * — the chunk zend_strings are not copied). The TLS contiguous
-         * path and any non-emit caller fall through to the memcpy path. */
-        if (ds_session != NULL && ds_session->emit_state != NULL
-            && !ds_session->emit_state->contiguous) {
+        /* In emit context (h2c writev or TLS SSL_write) announce the
+         * available bytes via NO_COPY; h2_send_data_callback walks the
+         * ring into body iovs in records[]. The memcpy fallback below
+         * only fires for non-emit callers (control-flush drain etc.). */
+        if (ds_session != NULL && ds_session->emit_state != NULL) {
             size_t avail = 0;
 
             if (stream->chunk_queue_head < stream->chunk_queue_tail) {

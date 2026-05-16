@@ -1163,10 +1163,48 @@ static void h2_emit_state_cleanup(struct http2_emit_state *st)
 }
 
 #ifdef HAVE_OPENSSL
-/* TLS emit branch. The send callbacks append straight into emit_buf
- * (contiguous mode — control bytes, framehd and body all copied in),
- * so emit_buf IS the finished plaintext: one SSL_write ships it into
- * cipher_bio, tls_drain pushes ciphertext to the socket. */
+/* Helper: drive SSL_write_ex until the buffer is fully consumed (or
+ * fails). Returns true if the whole len was written. */
+static bool h2_tls_write_chunk(http_connection_t *conn,
+                               const char *ptr, size_t len)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        size_t written = 0;
+        const tls_io_result_t wrc = tls_write_plaintext(
+            conn->tls, ptr + off, len - off, &written);
+
+        off += written;
+
+        if (written > 0) {
+            http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+        }
+
+        if (wrc != TLS_IO_OK) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* TLS emit branch. nghttp2 callbacks have already filled st->records[]
+ * with the order of frame bytes. Walk those records honouring the TLS
+ * record-payload boundary (16 KiB plaintext):
+ *
+ *   - Body records >= the boundary are written straight through — they
+ *     fill (at least) one full TLS record on the wire by themselves, so
+ *     copying them into a staging buffer would only waste a memcpy.
+ *   - Everything smaller is packed into the same staging buffer (we
+ *     re-use emit_buf since the control bytes already live there). As
+ *     soon as one more record would overflow the boundary, we flush the
+ *     staging buffer with a single SSL_write — exactly one TLS record.
+ *
+ * Result: minimum number of TLS records on the wire AND minimum body
+ * memcpy, because each decision is forced by the wire's own boundary
+ * instead of a tunable threshold. cipher_bio receives the ciphertext,
+ * tls_drain ships it. body refs stay alive in body_refs[] until cleanup. */
 static void h2_emit_flush_tls(http_connection_t *conn,
                               http2_session_t *session,
                               struct http2_emit_state *st)
@@ -1187,29 +1225,64 @@ static void h2_emit_flush_tls(http_connection_t *conn,
 
     bool ok = (rc == 0);
 
-    /* SSL_write the gathered plaintext — PARTIAL_WRITE + the byte_cap
-     * budget keep this to one or two iterations. WANT_WRITE would mean
-     * cipher_bio is full despite the entry gate + budgeting; fatal. */
-    if (ok && st->emit_buf_len > 0) {
-        size_t off = 0;
-
-        while (off < st->emit_buf_len) {
-            size_t written = 0;
-            const tls_io_result_t wrc = tls_write_plaintext(
-                conn->tls, st->emit_buf + off, st->emit_buf_len - off,
-                &written);
-
-            off += written;
-
-            if (written > 0) {
-                http_server_on_tls_io(conn->counters, 0, written, 0, 0);
-            }
-
-            if (wrc != TLS_IO_OK) {
-                ok = false;
-                break;
-            }
+    /* Fast path: no body record ever activated records[] — everything
+     * lives contiguous in emit_buf. One SSL_write ships the whole pass
+     * and OpenSSL handles the record-boundary split. No stage buffer,
+     * no records[]/body_refs[] allocations were made (lazy in
+     * h2_emit_state_append_*) — minimum work for tiny REST responses. */
+    if (ok && st->records == NULL) {
+        if (st->emit_buf_len > 0) {
+            ok = h2_tls_write_chunk(conn, st->emit_buf, st->emit_buf_len);
         }
+
+        h2_emit_state_cleanup(st);
+
+        if (!ok) { conn->tls_write_error = true; }
+
+        (void)tls_drain(conn);
+        return;
+    }
+
+    /* Slow path: records[] has at least one body iov — walk it,
+     * staging small records into one TLS record and shipping large
+     * body slices zero-copy direct. */
+    char   stage[H2_TLS_RECORD_PAYLOAD_MAX];
+    size_t stage_len = 0;
+
+    for (unsigned i = 0; ok && i < st->records_count; i++) {
+        const http2_emit_record_t *rec = &st->records[i];
+        const char *ptr = rec->is_body
+                            ? rec->body.ptr
+                            : st->emit_buf + rec->buf.offset;
+        const size_t len = rec->is_body ? rec->body.len : rec->buf.len;
+
+        /* Large body: writes one (or more) full TLS records on its own —
+         * no point copying. Flush any pending stage first, then ship. */
+        if (len >= H2_TLS_RECORD_PAYLOAD_MAX) {
+            if (stage_len > 0) {
+                ok = h2_tls_write_chunk(conn, stage, stage_len);
+                stage_len = 0;
+                if (!ok) { break; }
+            }
+
+            ok = h2_tls_write_chunk(conn, ptr, len);
+            continue;
+        }
+
+        /* Small record: pack into the stage. If adding this one would
+         * push past the TLS record boundary, flush first. */
+        if (stage_len + len > H2_TLS_RECORD_PAYLOAD_MAX) {
+            ok = h2_tls_write_chunk(conn, stage, stage_len);
+            stage_len = 0;
+            if (!ok) { break; }
+        }
+
+        memcpy(stage + stage_len, ptr, len);
+        stage_len += len;
+    }
+
+    if (ok && stage_len > 0) {
+        ok = h2_tls_write_chunk(conn, stage, stage_len);
     }
 
     h2_emit_state_cleanup(st);
@@ -1232,7 +1305,7 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
     const int rc = nghttp2_session_send(session->ng);
     session->emit_state = NULL;
 
-    if (UNEXPECTED(rc != 0) || st->records_count == 0) {
+    if (UNEXPECTED(rc != 0) || st->emit_buf_len == 0) {
         h2_emit_state_cleanup(st);
         return;
     }
@@ -1246,17 +1319,25 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
         st->emit_buf_on_heap = true;
     }
 
-    /* Build iov from records. emit_buf base is now final. */
-    zend_async_buf_t *iov = emalloc(st->records_count * sizeof(*iov));
+    /* records[] is lazy — NULL when nothing went through append_body
+     * (HEADERS-only / control-only pass). Synthesize a single iov entry
+     * over emit_buf in that case. */
+    const unsigned niov = st->records != NULL ? st->records_count : 1u;
+    zend_async_buf_t *iov = emalloc(niov * sizeof(*iov));
 
-    for (unsigned i = 0; i < st->records_count; i++) {
-        const http2_emit_record_t *rec = &st->records[i];
-        if (rec->is_body) {
-            iov[i].base = (char *)rec->body.ptr;
-            iov[i].len  = rec->body.len;
-        } else {
-            iov[i].base = st->emit_buf + rec->buf.offset;
-            iov[i].len  = rec->buf.len;
+    if (st->records == NULL) {
+        iov[0].base = st->emit_buf;
+        iov[0].len  = st->emit_buf_len;
+    } else {
+        for (unsigned i = 0; i < st->records_count; i++) {
+            const http2_emit_record_t *rec = &st->records[i];
+            if (rec->is_body) {
+                iov[i].base = (char *)rec->body.ptr;
+                iov[i].len  = rec->body.len;
+            } else {
+                iov[i].base = st->emit_buf + rec->buf.offset;
+                iov[i].len  = rec->buf.len;
+            }
         }
     }
 
@@ -1267,8 +1348,6 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
     ctx->iov           = iov;
     ctx->body_refs     = st->body_refs;
     ctx->body_refs_cnt = st->body_refs_count;
-
-    const unsigned niov = st->records_count;
 
     if (st->records != NULL) { efree(st->records); }
 
@@ -1324,10 +1403,9 @@ void http2_session_emit(http2_session_t *session)
              * WANT_WRITEs on cipher_bio. The callback returning WOULDBLOCK
              * may overshoot by one chunk (≤ 16 KiB + 9 B framehd), so the
              * worst-case plaintext is byte_cap + 16 KiB. For ring = 64 KiB,
-             * byte_cap = 32 KiB → ~48 KiB plaintext = 3 records ≤ 64 KiB.
-             * contiguous: emit_buf is the plaintext — no records[]. */
+             * byte_cap = 32 KiB → ~48 KiB plaintext = 3 TLS records ≤ 64 KiB
+             * after AES-GCM expansion. */
             st.byte_cap   = 32 * 1024;
-            st.contiguous = true;
             session->emit_state = &st;
             h2_emit_flush_tls(conn, session, &st);
         } else
