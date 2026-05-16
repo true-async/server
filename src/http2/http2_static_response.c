@@ -204,19 +204,7 @@ static bool h2_static_want_more_reads(const h2_static_state_t *state)
 /* Compact + append (send_data_callback advances head but never shifts). */
 static void h2_static_ring_push(http2_stream_t *stream, zend_string *chunk)
 {
-    if (stream->chunk_queue_head > 0) {
-        const size_t live =
-            stream->chunk_queue_tail - stream->chunk_queue_head;
-
-        if (live > 0) {
-            memmove(stream->chunk_queue,
-                    stream->chunk_queue + stream->chunk_queue_head,
-                    live * sizeof(zend_string *));
-        }
-
-        stream->chunk_queue_head = 0;
-        stream->chunk_queue_tail = live;
-    }
+    http2_stream_compact_chunk_queue(stream);
 
     ZEND_ASSERT(stream->chunk_queue_tail < stream->chunk_queue_cap);
 

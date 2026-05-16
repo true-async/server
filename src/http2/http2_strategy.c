@@ -1422,19 +1422,7 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
     /* Backpressure: park until a slot frees AND queued bytes drop below
      * max_bytes. Ring is compacted to index 0 so tail can advance. */
     for (;;) {
-        if (stream->chunk_queue_head > 0) {
-            const size_t live =
-                stream->chunk_queue_tail - stream->chunk_queue_head;
-
-            if (live > 0) {
-                memmove(stream->chunk_queue,
-                        stream->chunk_queue + stream->chunk_queue_head,
-                        live * sizeof(zend_string *));
-            }
-
-            stream->chunk_queue_head = 0;
-            stream->chunk_queue_tail = live;
-        }
+        http2_stream_compact_chunk_queue(stream);
 
         if (stream->chunk_queue_tail < stream->chunk_queue_cap
             && (max_bytes == 0 || stream->chunk_queue_bytes < max_bytes)) {
