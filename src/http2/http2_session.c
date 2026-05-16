@@ -848,6 +848,73 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
     return (ssize_t)length;
 }
 
+/* Streaming branch: walk chunk_queue slicing into iov records (or
+ * coalescing on TLS). Returns bytes appended to emit body (== length). */
+static void h2_emit_streaming_body(struct http2_emit_state *st,
+                                   http2_stream_t *stream,
+                                   const size_t length,
+                                   const bool tls_small_coalesce)
+{
+    const unsigned head_before = stream->chunk_queue_head;
+    size_t remaining = length;
+
+    while (remaining > 0
+           && stream->chunk_queue_head < stream->chunk_queue_tail) {
+        zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
+        const size_t chunk_len = ZSTR_LEN(chunk);
+        const size_t avail     = chunk_len - stream->chunk_read_offset;
+        const size_t take      = avail < remaining ? avail : remaining;
+        const char *slice_ptr  = ZSTR_VAL(chunk) + stream->chunk_read_offset;
+
+        if (tls_small_coalesce && take < H2_TLS_RECORD_PAYLOAD_MAX) {
+            h2_emit_state_append_buf(st, (const uint8_t *)slice_ptr, take);
+        } else {
+            h2_emit_state_append_body(st, slice_ptr, take,
+                                      (zend_refcounted *)chunk);
+        }
+
+        stream->chunk_read_offset += take;
+        stream->chunk_queue_bytes -= take;
+        remaining                 -= take;
+
+        if (stream->chunk_read_offset == chunk_len) {
+            zend_string_release(chunk);
+            stream->chunk_queue[stream->chunk_queue_head] = NULL;
+            stream->chunk_queue_head++;
+            stream->chunk_read_offset = 0;
+        }
+    }
+
+    if (stream->chunk_queue_head > head_before
+        && stream->write_event != NULL) {
+        zend_async_trigger_event_t *trig =
+            (zend_async_trigger_event_t *)stream->write_event;
+
+        if (trig->trigger != NULL) { trig->trigger(trig); }
+    }
+}
+
+/* Buffered branch: one body iov over stream->response_body slice. */
+static void h2_emit_buffered_body(struct http2_emit_state *st,
+                                  http2_stream_t *stream,
+                                  const size_t length,
+                                  const bool tls_small_coalesce)
+{
+    const char *payload = stream->response_body + stream->response_body_offset;
+
+    if (tls_small_coalesce && length < H2_TLS_RECORD_PAYLOAD_MAX) {
+        h2_emit_state_append_buf(st, (const uint8_t *)payload, length);
+    } else {
+        zend_refcounted *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
+                             ? (zend_refcounted *)Z_OBJ(stream->response_zv)
+                             : NULL;
+
+        h2_emit_state_append_body(st, payload, length, ref);
+    }
+
+    stream->response_body_offset += length;
+}
+
 /* nghttp2 send_data_callback for NO_COPY DATA: framehd → emit_buf, body
  * → iov record (or coalesced into emit_buf for small slices on TLS). */
 static int h2_send_data_callback(nghttp2_session *ng,
@@ -857,7 +924,7 @@ static int h2_send_data_callback(nghttp2_session *ng,
                                  nghttp2_data_source *source,
                                  void *user_data)
 {
-    (void)ng;
+    (void)ng; (void)frame;
     http2_session_t *session = (http2_session_t *)user_data;
     http2_stream_t  *stream  = (http2_stream_t *)source->ptr;
 
@@ -865,90 +932,29 @@ static int h2_send_data_callback(nghttp2_session *ng,
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
 
-    if (session->emit_state->byte_cap > 0
-        && session->emit_state->bytes_appended >= session->emit_state->byte_cap) {
+    struct http2_emit_state *st = session->emit_state;
+
+    if (st->byte_cap > 0 && st->bytes_appended >= st->byte_cap) {
         return NGHTTP2_ERR_WOULDBLOCK;
     }
 
-    h2_emit_state_append_buf(session->emit_state, framehd, 9);
+    h2_emit_state_append_buf(st, framehd, 9);
 
     /* TLS: coalesce small body slices into emit_buf — one SSL_write = one record. */
-    const bool tls_small_coalesce = session->emit_state->byte_cap > 0;
+    const bool tls_small_coalesce = st->byte_cap > 0;
 
     if (stream->chunk_queue != NULL) {
-        const unsigned head_before = stream->chunk_queue_head;
-        size_t remaining = length;
-
-        while (remaining > 0
-               && stream->chunk_queue_head < stream->chunk_queue_tail) {
-            zend_string *chunk =
-                stream->chunk_queue[stream->chunk_queue_head];
-            const size_t chunk_len = ZSTR_LEN(chunk);
-            const size_t avail     = chunk_len - stream->chunk_read_offset;
-            const size_t take      = avail < remaining ? avail : remaining;
-            const char *slice_ptr  = ZSTR_VAL(chunk)
-                                      + stream->chunk_read_offset;
-
-            if (tls_small_coalesce && take < H2_TLS_RECORD_PAYLOAD_MAX) {
-                h2_emit_state_append_buf(session->emit_state,
-                                         (const uint8_t *)slice_ptr, take);
-            } else {
-                h2_emit_state_append_body(session->emit_state,
-                    slice_ptr, take, (zend_refcounted *)chunk);
-            }
-
-            stream->chunk_read_offset += take;
-            stream->chunk_queue_bytes -= take;
-            remaining                 -= take;
-
-            if (stream->chunk_read_offset == chunk_len) {
-                zend_string_release(chunk);
-                stream->chunk_queue[stream->chunk_queue_head] = NULL;
-                stream->chunk_queue_head++;
-                stream->chunk_read_offset = 0;
-            }
-        }
-
-        if (stream->chunk_queue_head > head_before
-            && stream->write_event != NULL) {
-            zend_async_trigger_event_t *trig =
-                (zend_async_trigger_event_t *)stream->write_event;
-
-            if (trig->trigger != NULL) { trig->trigger(trig); }
-        }
-
-        session->emit_state->bytes_appended += 9 + length;
-
-        if (session->conn != NULL && length > 0) {
-            http_server_on_h2_data_sent(session->conn->counters, length);
-        }
-
-        (void)frame;
-        return 0;
-    }
-
-    const char *payload = stream->response_body + stream->response_body_offset;
-
-    if (tls_small_coalesce && length < H2_TLS_RECORD_PAYLOAD_MAX) {
-        h2_emit_state_append_buf(session->emit_state,
-                                 (const uint8_t *)payload, length);
+        h2_emit_streaming_body(st, stream, length, tls_small_coalesce);
     } else {
-        zend_refcounted *ref = Z_TYPE(stream->response_zv) == IS_OBJECT
-                             ? (zend_refcounted *)Z_OBJ(stream->response_zv)
-                             : NULL;
-
-        h2_emit_state_append_body(session->emit_state, payload, length, ref);
+        h2_emit_buffered_body(st, stream, length, tls_small_coalesce);
     }
 
-    session->emit_state->bytes_appended += 9 + length;
-
-    stream->response_body_offset += length;
+    st->bytes_appended += 9 + length;
 
     if (session->conn != NULL && length > 0) {
         http_server_on_h2_data_sent(session->conn->counters, length);
     }
 
-    (void)frame;
     return 0;
 }
 
