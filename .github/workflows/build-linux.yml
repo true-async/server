@@ -504,9 +504,24 @@ jobs:
           /usr/local/bin/php -m | grep -i 'true_async_server'
           /usr/local/bin/php --ri true_async_server || true
 
+      - name: Enable core dumps
+        run: |
+          set -eux
+          sudo apt-get install -y --no-install-recommends gdb
+          sudo mkdir -p /var/coredumps
+          sudo chmod 777 /var/coredumps
+          # Pattern: /var/coredumps/core.<exe>.<pid>.<ts>
+          echo '/var/coredumps/core.%e.%p.%t' | sudo tee /proc/sys/kernel/core_pattern
+          # apport hijacks core delivery on Ubuntu; disable so the kernel writes the file.
+          sudo systemctl stop apport.service 2>/dev/null || true
+          sudo sysctl -w kernel.core_uses_pid=1
+          ulimit -c unlimited
+          ulimit -c
+
       - name: Run http_server phpt suite
         working-directory: http-server
         run: |
+          ulimit -c unlimited
           /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
             -P -q -j"$(nproc)" \
             -g FAIL,BORK,LEAK,XLEAK \
@@ -517,7 +532,34 @@ jobs:
             --set-timeout 120 \
             tests/phpt
 
-      - name: Upload failing test artifacts
+      - name: Collect core dumps + backtraces
+        if: failure()
+        run: |
+          set -eux
+          mkdir -p /tmp/cores
+          # Pick up any cores the kernel wrote.
+          sudo cp -a /var/coredumps/. /tmp/cores/ 2>/dev/null || true
+          # Some runners also drop cores in cwd.
+          find "$GITHUB_WORKSPACE/http-server" -maxdepth 4 -name 'core*' \
+               -size +0c -exec cp -a {} /tmp/cores/ \; 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" /tmp/cores || true
+          ls -la /tmp/cores || true
+          for c in /tmp/cores/core.*; do
+            [ -f "$c" ] || continue
+            echo "===== $c ====="
+            # exe is in field 5 of `file <core>`: "from 'php-cgi ...'"
+            EXE=$(file "$c" | sed -n "s/.*execfn: '\([^']*\)'.*/\1/p" | head -1)
+            [ -z "$EXE" ] && EXE=$(file "$c" | sed -n "s/.*from '\([^ ']*\).*/\1/p" | head -1)
+            [ -z "$EXE" ] && EXE=/usr/local/bin/php
+            echo "exe=$EXE"
+            gdb --batch \
+                -ex 'set pagination off' \
+                -ex 'thread apply all bt full' \
+                -ex 'info sharedlibrary' \
+                "$EXE" "$c" 2>&1 | tee "${c}.bt.txt" | tail -200 || true
+          done
+
+      - name: Upload failing test artifacts + cores
         if: failure()
         uses: actions/upload-artifact@v6
         with:
@@ -526,6 +568,11 @@ jobs:
             http-server/tests/phpt/**/*.out
             http-server/tests/phpt/**/*.diff
             http-server/tests/phpt/**/*.log
+            /tmp/cores/**
+            /usr/local/bin/php
+            /usr/local/bin/php-cgi
+            /usr/local/lib/php/extensions/**/true_async_server.so
+            http-server/modules/true_async_server.so
           if-no-files-found: ignore
           retention-days: 7
 
