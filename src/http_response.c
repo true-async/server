@@ -1523,6 +1523,9 @@ static inline void append_header_line(smart_str *out,
                                       const char *name, size_t name_len,
                                       const char *value, size_t value_len)
 {
+    if (UNEXPECTED(name_len > SIZE_MAX - 4 || value_len > SIZE_MAX - 4 - name_len)) {
+        return;
+    }
     const size_t need = name_len + 2 /* ": " */ + value_len + 2 /* "\r\n" */;
     char *p = smart_str_extend(out, need);
     memcpy(p, name, name_len);            p += name_len;
