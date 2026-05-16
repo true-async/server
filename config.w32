@@ -33,7 +33,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "src\\http_param_parse.c " +
         "src\\send_file.c " +
         "src\\http_send_file.c " +
-        "src\\http_send_file_options.c ";
+        "src\\http_send_file_options.c " +
+        "src\\http_body_stream.c ";
 
     var http_server_core =
         "conn_arena.c " +

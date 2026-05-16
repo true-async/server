@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-05-16
+
+### Fixed
+
+- **Windows / MSVC build**: add `src/http_body_stream.c` to `config.w32`.
+  v0.5.1 only patched the CMake unit-test build; the production NMAKE
+  build still failed to link with `unresolved external symbol
+  http_body_stream_{push,pop,close,dispose}` from `http_parser.obj`,
+  `http2_session.obj`, and `http_request.obj`.
+
 ## [0.5.1] - 2026-05-16
 
 ### Fixed
