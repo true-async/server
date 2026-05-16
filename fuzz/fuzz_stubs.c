@@ -61,6 +61,17 @@ __attribute__((weak)) void http_request_parse_trace_context(struct http_request_
     (void)req;
 }
 
+/* http2_session_emit lives in http2_strategy.c (not linked into the
+ * fuzz harness). The buffered data_provider's write_event subscriber
+ * — added to wake setBody >64K after WINDOW_UPDATE — references it,
+ * but parser-only fuzzing never actually fires that callback (no live
+ * connection, no real emit path). Stub to satisfy the linker. */
+struct http2_session_t;
+__attribute__((weak)) void http2_session_emit(struct http2_session_t *session)
+{
+    (void)session;
+}
+
 /* http_server module globals id — normally defined by
  * ZEND_DECLARE_MODULE_GLOBALS in src/http_server.c, which the fuzz
  * link does not pull in. ZTS-only (we always build PHP --enable-zts
