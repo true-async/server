@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-16
+
+### Fixed
+
+- **Windows / MSVC build**: restore the Win32 build after the streaming
+  request body merge (PR #27).
+  - CMake: add `src/http_body_stream.c` and the HTTP/2 sources to the
+    Win32 source list; guard TLS-only sources on `OpenSSL_FOUND`.
+  - Unit tests: stop letting PHP's `win32/unistd.h` / `win32/time.h`
+    shadow the CRT system headers; add the four sources that
+    `http_parser.c` and `multipart_processor.c` now depend on
+    (`http_body_stream.c`, `core/body_pool.c`, `http_rfc5987.c`,
+    `http_param_parse.c`); add a lightweight compression-vtable stub
+    for `test_compression_negotiate`; prepend `PHP_DLL_DIR` and
+    `CMOCKA_DLL_DIR` to PATH for every CTest target so DLL loading
+    no longer fails with 0xc0000135.
+
+Linux / macOS behaviour is unchanged — this release is Win32-only
+in terms of effect.
+
 ## [0.5.0] - 2026-05-16
 
 ### Added
