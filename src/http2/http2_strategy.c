@@ -1126,39 +1126,22 @@ static bool h2_tls_write_chunk(http_connection_t *conn,
     return true;
 }
 
-/* TLS emit: body records >= H2_TLS_RECORD_PAYLOAD_MAX go zero-copy;
- * smaller records pack into one TLS record via stage[]. */
-static void h2_emit_flush_tls(http_connection_t *conn,
-                              http2_session_t *session,
-                              struct http2_emit_state *st)
+/* HEADERS-only fast path: everything sits contiguous in emit_buf, one SSL_write. */
+static bool h2_emit_flush_tls_contiguous(http_connection_t *conn,
+                                         const struct http2_emit_state *st)
 {
-    /* Gate on cipher_inflight; tls_cipher_completion re-enters us. */
-    (void)tls_drain(conn);
-    if (conn->tls_cipher_inflight > 0) {
-        session->emit_state = NULL;
-        return;
-    }
+    return st->emit_buf_len == 0
+         || h2_tls_write_chunk(conn, st->emit_buf, st->emit_buf_len);
+}
 
-    const int rc = nghttp2_session_send(session->ng);
-    session->emit_state = NULL;
-
-    bool ok = (rc == 0);
-
-    if (ok && st->records == NULL) {
-        if (st->emit_buf_len > 0) {
-            ok = h2_tls_write_chunk(conn, st->emit_buf, st->emit_buf_len);
-        }
-
-        h2_emit_state_cleanup(st);
-
-        if (!ok) { conn->tls_write_error = true; }
-
-        (void)tls_drain(conn);
-        return;
-    }
-
+/* Walk records[] honouring TLS record boundary: large body slices ship
+ * direct, small records pack into one staged TLS record. */
+static bool h2_emit_flush_tls_records(http_connection_t *conn,
+                                      const struct http2_emit_state *st)
+{
     char   stage[H2_TLS_RECORD_PAYLOAD_MAX];
     size_t stage_len = 0;
+    bool   ok = true;
 
     for (unsigned i = 0; ok && i < st->records_count; i++) {
         const http2_emit_record_t *rec = &st->records[i];
@@ -1191,6 +1174,29 @@ static void h2_emit_flush_tls(http_connection_t *conn,
     if (ok && stage_len > 0) {
         ok = h2_tls_write_chunk(conn, stage, stage_len);
     }
+
+    return ok;
+}
+
+/* TLS emit: body records >= H2_TLS_RECORD_PAYLOAD_MAX go zero-copy;
+ * smaller records pack into one TLS record via stage[]. */
+static void h2_emit_flush_tls(http_connection_t *conn,
+                              http2_session_t *session,
+                              struct http2_emit_state *st)
+{
+    /* Gate on cipher_inflight; tls_cipher_completion re-enters us. */
+    (void)tls_drain(conn);
+    if (conn->tls_cipher_inflight > 0) {
+        session->emit_state = NULL;
+        return;
+    }
+
+    const int rc = nghttp2_session_send(session->ng);
+    session->emit_state = NULL;
+
+    const bool ok = (rc == 0) && (st->records == NULL
+                                  ? h2_emit_flush_tls_contiguous(conn, st)
+                                  : h2_emit_flush_tls_records(conn, st));
 
     h2_emit_state_cleanup(st);
 
