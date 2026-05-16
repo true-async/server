@@ -129,17 +129,11 @@ static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io);
 static void h2_static_on_hard_zero_armed(void *user)
 {
     http2_stream_t *stream = (http2_stream_t *)user;
-
-    if (stream == NULL || stream->session == NULL) {
-        return;
-    }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
-    if (conn != NULL) {
-        conn->handler_refcount++;
-        http_server_on_request_dispatch(conn->counters);
-    }
+    conn->handler_refcount++;
+    http_server_on_request_dispatch(conn->counters);
+
     /* Pin the stream itself so cb_on_stream_close + the static FSM
      * close hook can fire after the dispatch frame returns. Released
      * in h2_static_on_static_done. */
@@ -150,25 +144,17 @@ static void h2_static_on_static_done(void *user, int status)
 {
     (void)status;
     http2_stream_t *stream = (http2_stream_t *)user;
-
-    if (stream == NULL || stream->session == NULL) {
-        return;
-    }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
-    if (conn != NULL) {
-        http_server_on_request_dispose(conn->counters);
+    http_server_on_request_dispose(conn->counters);
 
-        if (conn->handler_refcount > 0) {
-            conn->handler_refcount--;
-        }
-
-        http_connection_destroy_if_idle_deferred(conn);
+    if (conn->handler_refcount > 0) {
+        conn->handler_refcount--;
     }
 
-    /* Release the dispatch-side refcount we took in on_hard_zero_armed.
-     * The session table still holds its own (released by stream_close). */
+    http_connection_destroy_if_idle_deferred(conn);
+
+    /* Released by stream_close — drop the dispatch-side ref taken in on_hard_zero_armed. */
     http2_stream_release(stream);
 }
 
@@ -363,12 +349,7 @@ static void http2_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     http2_stream_t *stream = (http2_stream_t *)co->extended_data;
-
-    if (stream == NULL || stream->session == NULL) { return; }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
-
-    if (conn == NULL) { return; }
 
     /* Static-handler HANDLED path: response_obj already carries the
      * synchronous 4xx error body. Skip the user handler entirely;
@@ -493,8 +474,6 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream);
 static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http2_stream_t *stream = (http2_stream_t *)coroutine->extended_data;
-
-    if (stream == NULL || stream->session == NULL) { return; }
 
     /* Break the back-pointer BEFORE anything else so a late
      * RST_STREAM handler can't re-enter ZEND_ASYNC_CANCEL on a
@@ -1411,18 +1390,7 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
 static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
-
-    if (stream == NULL || stream->session == NULL) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
-
-    if (conn == NULL) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
 
     if (conn->write_timed_out) {
         zend_string_release(chunk);
@@ -1501,7 +1469,7 @@ static void h2_stream_mark_ended(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    if (stream == NULL || stream->session == NULL || stream->streaming_ended) {
+    if (stream->streaming_ended) {
         return;
     }
 
@@ -1522,8 +1490,6 @@ static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    if (stream == NULL) { return NULL; }
-
     if (stream->write_event == NULL) {
         stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
     }
@@ -1538,10 +1504,6 @@ static bool h2_stream_sendable(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    if (stream == NULL || stream->session == NULL) {
-        return false;
-    }
-
     if (stream->chunk_queue == NULL) {
         return true;   /* not started — first send() always proceeds */
     }
@@ -1552,7 +1514,7 @@ static bool h2_stream_sendable(void *ctx)
     }
 
     const http_connection_t *conn = http2_session_get_conn(stream->session);
-    const uint32_t max_bytes = (conn != NULL && conn->server != NULL)
+    const uint32_t max_bytes = conn->server != NULL
                              ? http_server_get_stream_write_buffer_bytes(conn->server)
                              : 0;
 
