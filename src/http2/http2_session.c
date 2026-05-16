@@ -380,9 +380,16 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 
     /* Streaming mode (issue #26) — push the chunk into the per-request
      * queue instead of accumulating into stream->request_body_buf. The
-     * cumulative max_body_size cap still applies; backpressure is left
-     * to follow-up PR (nghttp2 flow-control window naturally throttles
-     * to the default initial_window_size = 64 KiB per stream). */
+     * cumulative max_body_size cap still applies as a hard ceiling.
+     *
+     * TODO(issue #26 backpressure): nghttp2's auto window update is on
+     * by default, so the queue can grow up to max_body_size if the
+     * handler is slower than the network. The follow-up PR will set
+     * NGHTTP2_OPT_NO_AUTO_WINDOW_UPDATE and call
+     * nghttp2_session_consume from readBody after each pop to bound
+     * the queue at HTTP_BODY_QUEUE_WATERMARK. The /upload bench
+     * handler is faster than the network, so the queue stays tiny
+     * in practice — no correctness issue today. */
     if (stream->request != NULL && stream->request->body_streaming) {
         http_request_t *req = stream->request;
         size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;

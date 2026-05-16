@@ -182,21 +182,23 @@ struct http_request_t {
      * true, parser callbacks push DATA chunks into body_queue_head/tail
      * instead of accumulating into req->body. PHP-side HttpRequest::
      * readBody() pops from the queue and parks on body_data_event when
-     * empty. Set at on_headers_complete from the server config; never
-     * mutates after that. body_paused tracks H1 llhttp pause state for
-     * backpressure when queued bytes cross the watermark. */
+     * empty. body_streaming is set once at on_headers_complete from the
+     * server config and never mutates after that. */
     struct http_body_chunk_t *body_queue_head;
     struct http_body_chunk_t *body_queue_tail;
     size_t                    body_bytes_queued;
     size_t                    body_bytes_consumed;
     zend_async_event_t       *body_data_event;
-    /* H2-only: snapshot of session+stream so readBody can call
-     * nghttp2_session_consume after popping a chunk (deferred window
-     * update). NULL on H1. */
+
+    /* TODO(issue #26 backpressure): reserved for the follow-up PR that
+     * gates H2/H3 window updates. body_h2_* will snapshot
+     * (session, stream_id, pending_consume_bytes) at dispatch so
+     * readBody() can call nghttp2_session_consume after popping; the
+     * MVP relies on nghttp2's auto window update and never reads
+     * these fields. body_h3_stream is the matching ngtcp2 hook. */
     void                     *body_h2_session;
     int32_t                   body_h2_stream_id;
     int32_t                   body_h2_consume_pending;
-    /* H3-only: stream context for ngtcp2_conn_extend_max_stream_offset. */
     void                     *body_h3_stream;
 
     /* 1-byte fields clustered */
@@ -209,6 +211,9 @@ struct http_request_t {
     bool         body_streaming;
     bool         body_eof;
     bool         body_error;
+    /* TODO(issue #26 backpressure): set true when on_body trips
+     * llhttp_pause; readBody clears it via llhttp_resume below the
+     * low-water mark. Unused by the MVP — see TODO in on_body. */
     bool         body_paused;
 };
 
@@ -220,10 +225,11 @@ struct http_body_chunk_t {
 };
 typedef struct http_body_chunk_t http_body_chunk_t;
 
-/* Per-stream backpressure watermark (bytes). When body_bytes_queued
- * crosses this, parser is paused (H1) or session_consume is withheld
- * (H2/H3). resume threshold is half this. Hardcoded for MVP — see
- * issue #26 plan for future setMaxBodyQueueBytes config. */
+/* TODO(issue #26 backpressure): per-stream watermark in bytes. The
+ * follow-up PR will pause llhttp / withhold nghttp2_session_consume
+ * when body_bytes_queued crosses this, and resume at the 50 %
+ * low-water mark. Unused by the MVP — kept as the single point of
+ * truth for the eventual setMaxBodyQueueBytes config setter. */
 #define HTTP_BODY_QUEUE_WATERMARK 262144u  /* 256 KiB */
 
 /* HTTP/1 parser.

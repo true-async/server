@@ -531,13 +531,16 @@ ZEND_METHOD(TrueAsync_HttpRequest, awaitBody)
  * HttpServerConfig::setBodyStreamingEnabled(true) was set at server
  * start. Returns a non-empty string per chunk, or null at EOF.
  *
- * $maxLen is advisory for MVP: each call returns up to one whole
- * parser-supplied chunk (DATA frame for H2, llhttp on_body slice for
- * H1). Typical chunk sizes: 16 KiB (H2 default) or socket-read sized
- * (H1, up to a few KiB).
+ * Each call returns exactly one parser-supplied chunk: an H2 DATA
+ * frame payload (peer-side SETTINGS_MAX_FRAME_SIZE, default 16 KiB)
+ * or one llhttp on_body slice (bounded by the H1 socket read,
+ * DEFAULT_READ_BUFFER_SIZE = 8 KiB). TODO(issue #26): honour $maxLen
+ * by coalescing consecutive queued chunks up to that cap so userland
+ * can amortise the readBody() call overhead. Ignored today — kept in
+ * the signature so the future change is binary-compatible.
  *
- * Throws RuntimeException if the body stream errored (peer reset,
- * size cap exceeded). Returns null idempotently at EOF.
+ * Throws \Exception if the body stream errored (peer reset, size cap
+ * exceeded). Returns null idempotently at EOF.
  */
 ZEND_METHOD(TrueAsync_HttpRequest, readBody)
 {
@@ -548,7 +551,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         Z_PARAM_LONG(max_len)
     ZEND_PARSE_PARAMETERS_END();
 
-    (void)max_len;  /* advisory for MVP */
+    (void)max_len;  /* TODO(issue #26): wire into a pop-side coalesce. */
 
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     http_request_t *req = intern->request;

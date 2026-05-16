@@ -625,9 +625,9 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
         return 0;
     }
 
-    /* Streaming mode (issue #26) — push to per-request queue. Apply
-     * cumulative body-size cap and backpressure-pause when queued
-     * bytes cross the watermark. */
+    /* Streaming mode (issue #26) — push to the per-request queue
+     * instead of accumulating into req->body. Cumulative max_body_size
+     * still caps the total. */
     if (req->body_streaming) {
         const size_t total = req->body_bytes_consumed + req->body_bytes_queued + length;
 
@@ -645,10 +645,12 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
             return -1;
         }
 
-        /* TODO(issue #26 PR-followup): llhttp_pause when queue crosses
-         * HTTP_BODY_QUEUE_WATERMARK and llhttp_resume from readBody at
-         * the 50% low-water mark. MVP relies on max_body_size + handler
-         * being faster than network (true for the /upload counter loop). */
+        /* TODO(issue #26 backpressure): call llhttp_pause once
+         * body_bytes_queued >= HTTP_BODY_QUEUE_WATERMARK and
+         * llhttp_resume from readBody() below the 50 % low-water mark.
+         * The MVP relies on max_body_size as the hard ceiling — fine
+         * when the handler keeps up with the network, which is the
+         * common case and is what the /upload bench exercises. */
         return 0;
     }
 
