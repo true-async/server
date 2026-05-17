@@ -1,8 +1,8 @@
 {
   "totals": {
     "lines": {
-      "total": 13683,
-      "hit": 10648
+      "total": 13716,
+      "hit": 10665
     },
     "functions": {
       "total": 914,
@@ -142,8 +142,8 @@
     },
     "src/core/http_connection_tls.c": {
       "lines": {
-        "total": 343,
-        "hit": 263
+        "total": 353,
+        "hit": 268
       },
       "functions": {
         "total": 22,
@@ -272,8 +272,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 633,
-        "hit": 462
+        "total": 648,
+        "hit": 468
       },
       "functions": {
         "total": 33,
@@ -522,8 +522,8 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1176,
-        "hit": 892
+        "total": 1184,
+        "hit": 898
       },
       "functions": {
         "total": 63,
