@@ -311,6 +311,18 @@ static void tls_fsm_io_callback_fn(
         return;
     }
 
+    /* zend_bailout firewall — topmost extension entry from libuv read
+     * completion (io_pipe_read_cb → callbacks_notify → here). Catches
+     * memory_limit OOM in tls_advance_state (nghttp2 callbacks, static
+     * slurp, request/response init) and tls_arm_one_shot_read
+     * (per-request ecalloc). Without this catch the bailout escapes
+     * libuv → scheduler → worker abort. With catch, OOM kills only
+     * this connection (write_timed_out, abort streams, deferred destroy).
+     * Per-stream rollback is structurally impossible because nghttp2 /
+     * HPACK / TLS state is shared. */
+    volatile bool bailout = false;
+    zend_try {
+
     /* Read completion. */
     {
         zend_async_io_req_t *req = cb->read_req;
@@ -329,31 +341,42 @@ static void tls_fsm_io_callback_fn(
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
             (void)tls_finalize_if_closing(conn);
-            return;
-        }
-
-        if (UNEXPECTED(!tls_commit_cipher_in(conn->tls, (size_t)bytes_read))) {
+        } else if (UNEXPECTED(!tls_commit_cipher_in(conn->tls, (size_t)bytes_read))) {
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
             (void)tls_finalize_if_closing(conn);
-            return;
-        }
+        } else {
+            http_server_on_tls_io(conn->counters, 0, 0, (size_t)bytes_read, 0);
 
-        http_server_on_tls_io(conn->counters, 0, 0, (size_t)bytes_read, 0);
+            tls_advance_state(conn);
 
-        tls_advance_state(conn);
-
-        if (tls_finalize_if_closing(conn)) {
-            return;
-        }
-
-        if (!conn->tls_awaiting_handler) {
-            if (UNEXPECTED(!tls_arm_one_shot_read(conn))) {
-                conn->state = CONN_STATE_CLOSING;
-                tls_advance_state(conn);
-                (void)tls_finalize_if_closing(conn);
+            if (!tls_finalize_if_closing(conn)) {
+                if (!conn->tls_awaiting_handler) {
+                    if (UNEXPECTED(!tls_arm_one_shot_read(conn))) {
+                        conn->state = CONN_STATE_CLOSING;
+                        tls_advance_state(conn);
+                        (void)tls_finalize_if_closing(conn);
+                    }
+                }
             }
         }
+    }
+
+    } zend_catch {
+        bailout = true;
+    } zend_end_try();
+
+    if (UNEXPECTED(bailout)) {
+        conn->write_timed_out = true;
+
+        fprintf(stderr,
+                "[true-async-server] zend_bailout in tls read-cb: conn=%p — %s\n",
+                (const void *)conn,
+                PG(last_error_message) != NULL
+                    ? ZSTR_VAL(PG(last_error_message)) : "(no PG message)");
+        fflush(stderr);
+
+        ZEND_ASYNC_SHUTDOWN();
     }
 }
 

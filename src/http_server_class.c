@@ -2189,15 +2189,30 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     zend_async_resume_when(coroutine, server->wait_event, true,
                            zend_async_waker_callback_resolve, NULL);
 
-    /* Suspend coroutine - control returns to event loop */
-    ZEND_ASYNC_SUSPEND();
+    /* Suspend coroutine - control returns to event loop. zend_try is
+     * the only way to run deadline_tick_stop on a bailout exit too —
+     * otherwise longjmp skips it and the periodic timer keeps libuv
+     * loop alive past worker shutdown (scheduler.c:1964 asserts). */
+    volatile bool bailout = false;
+    zend_try {
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(coroutine);
 
-    /* Cleanup waker after resume */
-    zend_async_waker_clean(coroutine);
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+    } zend_catch {
+        bailout = true;
+    } zend_end_try();
 
-    /* Clear any cancellation exceptions */
-    if (EG(exception)) {
-        zend_clear_exception();
+    /* Pair to deadline_tick_start above — same lifecycle, runs on every
+     * exit (normal, cancellation, bailout). Without this the periodic
+     * timer keeps libuv loop alive past worker shutdown and
+     * scheduler.c:1964 asserts ("The event loop must be stopped"). */
+    http_server_deadline_tick_stop(server);
+
+    if (UNEXPECTED(bailout)) {
+        zend_bailout();
     }
 
     RETURN_TRUE;

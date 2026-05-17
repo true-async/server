@@ -207,6 +207,12 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         return;
     }
 
+    /* OOM-bailout protection for this read-path is provided by the
+     * outer tls_fsm_io_callback_fn firewall (see http_connection_tls.c).
+     * Wrapping dispatch in its own zend_try adds a setjmp on every
+     * request (~50% perf regression measured); the outer firewall
+     * catches with same emergency-abort semantics. */
+
     /* Build the PHP HttpRequest object from the parsed request. The
      * object takes ownership of the http_request_t — stream_free's
      * `request_dispatched` guard already knows not to free it again. */
@@ -676,7 +682,45 @@ static int http2_feed(http_protocol_strategy_t *strategy,
         }
     }
 
-    const int rc = http2_session_feed(self->session, data, len, consumed_out);
+    /* Outer zend_bailout firewall — covers every nghttp2 callback
+     * (cb_on_begin_headers → http2_stream_new ecalloc,
+     * cb_on_data_chunk_recv → smart_str grow, cb_on_header → emalloc
+     * for header zval, cb_on_frame_recv → http2_strategy_dispatch).
+     * Dispatch has its own inner zend_try too — that catches first
+     * and gives a finer-grained log site. This outer one is the
+     * safety net for all the other nghttp2 callbacks plus any new
+     * sites added in the future. Without it OOM in any of those
+     * callbacks longjmps through nghttp2's C frames into libuv's
+     * read-callback and dies in "Bailed out without a bailout
+     * address". */
+    /* zend_bailout firewall around nghttp2 callback chain (begin_headers,
+     * on_header, on_data_chunk, on_frame_recv → http2_strategy_dispatch).
+     * The outer TLS firewall would also catch but this one gives a
+     * finer-grained log site and lets feed return a proper error code. */
+    int rc;
+    volatile bool feed_bailout = false;
+    zend_try {
+        rc = http2_session_feed(self->session, data, len, consumed_out);
+    } zend_catch {
+        feed_bailout = true;
+        rc = -1;
+    } zend_end_try();
+
+    if (UNEXPECTED(feed_bailout)) {
+        conn->write_timed_out = true;
+
+        fprintf(stderr,
+                "[true-async-server] zend_bailout in h2 feed: conn=%p — %s\n",
+                (const void *)conn,
+                PG(last_error_message) != NULL
+                    ? ZSTR_VAL(PG(last_error_message)) : "(no PG message)");
+        fflush(stderr);
+
+        ZEND_ASYNC_SHUTDOWN();
+
+        if (consumed_out != NULL) { *consumed_out = 0; }
+        return -1;
+    }
 
     if (rc < 0) {
         /* Error-path drain. When feed() flagged a bad connection preface
@@ -1322,11 +1366,15 @@ void http2_session_emit(http2_session_t *session)
          * leave the chain wedged forever (no completion to clear it). */
         conn->out_in_flight = false;
 
-        if (conn->io != NULL) {
-            ZEND_ASYNC_IO_CLOSE(conn->io);
-        }
-
         http2_emit_log_bailout(conn);
+
+        /* Hand off to the scheduler: ZEND_ASYNC_SHUTDOWN cancels every
+         * live coroutine globally (cancel_queued_coroutines in
+         * scheduler.c:813 uses a single shared CancellationException —
+         * cheap and allocation-light even in OOM aftermath), starts
+         * graceful shutdown, then start()'s deadline_tick_stop runs on
+         * the way out and the worker thread exits cleanly. */
+        ZEND_ASYNC_SHUTDOWN();
     }
 }
 
