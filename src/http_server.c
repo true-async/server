@@ -17,6 +17,9 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "core/body_pool.h"
+#ifdef HAVE_HTTP_COMPRESSION
+# include "compression/http_compression_pool.h"
+#endif
 #include "http_known_strings.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
@@ -223,6 +226,9 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 	}
 
 	body_pool_shutdown();
+#ifdef HAVE_HTTP_COMPRESSION
+	http_compression_pool_shutdown();
+#endif
 
 	return SUCCESS;
 }

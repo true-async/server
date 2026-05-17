@@ -30,17 +30,22 @@
 #  define ZS_DEFLATE_INIT2    zng_deflateInit2
 #  define ZS_DEFLATE          zng_deflate
 #  define ZS_DEFLATE_END      zng_deflateEnd
+#  define ZS_DEFLATE_RESET    zng_deflateReset
+#  define ZS_DEFLATE_PARAMS   zng_deflateParams
 #else
 #  include <zlib.h>
 #  define ZS                  z_stream
 #  define ZS_DEFLATE_INIT2    deflateInit2
 #  define ZS_DEFLATE          deflate
 #  define ZS_DEFLATE_END      deflateEnd
+#  define ZS_DEFLATE_RESET    deflateReset
+#  define ZS_DEFLATE_PARAMS   deflateParams
 #endif
 
 typedef struct {
     http_encoder_t base;
     ZS             stream;
+    int            level;
     bool           stream_initialised;
 } gzip_encoder_t;
 
@@ -65,7 +70,36 @@ static http_encoder_t *gz_create(int level)
     }
 
     enc->stream_initialised = true;
+    enc->level              = level;
     return &enc->base;
+}
+
+static bool gz_reset(http_encoder_t *base, int level)
+{
+    gzip_encoder_t *enc = (gzip_encoder_t *)base;
+
+    if (UNEXPECTED(!enc->stream_initialised)) return false;
+
+    if (level < 1) level = 1;
+
+    if (level > 9) level = 9;
+
+    if (UNEXPECTED(ZS_DEFLATE_RESET(&enc->stream) != Z_OK)) return false;
+    /* deflateReset preserves the level baked at init time. Adjust via
+     * deflateParams only when the caller asks for a different one — the
+     * common case (one level per server) avoids the param re-pack. */
+    if (level != enc->level) {
+        /* deflateParams may emit pending output if a stream was active;
+         * we only reset()-then-write fresh streams, so avail_in/out=0
+         * here is safe and the call cannot fail with Z_BUF_ERROR. */
+        if (UNEXPECTED(ZS_DEFLATE_PARAMS(&enc->stream, level, Z_DEFAULT_STRATEGY) != Z_OK)) {
+            return false;
+        }
+
+        enc->level = level;
+    }
+
+    return true;
 }
 
 static http_encoder_status_t gz_write(http_encoder_t *base,
@@ -138,5 +172,6 @@ const http_encoder_vtable_t http_compression_gzip_vt = {
     .create  = gz_create,
     .write   = gz_write,
     .finish  = gz_finish,
+    .reset   = gz_reset,
     .destroy = gz_destroy,
 };

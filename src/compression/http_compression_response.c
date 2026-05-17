@@ -30,6 +30,7 @@
 #include "compression/http_compression_response.h"
 #include "compression/http_compression_negotiate.h"
 #include "compression/http_compression_defaults.h"
+#include "compression/http_compression_pool.h"
 
 #include <string.h>
 
@@ -300,8 +301,8 @@ void http_compression_state_free(zend_object *response_obj)
 
     if (st == NULL) return;
 
-    if (st->encoder && st->encoder->vt && st->encoder->vt->destroy) {
-        st->encoder->vt->destroy(st->encoder);
+    if (st->encoder) {
+        http_compression_pool_release(st->encoder);
     }
 
     if (st->wrapper_ctx) {
@@ -348,12 +349,11 @@ void http_compression_apply_buffered(zend_object *response_obj)
         return;
     }
 
-    const http_encoder_vtable_t *vt = http_compression_lookup(codec);
-
-    if (UNEXPECTED(vt == NULL)) return;
-    http_encoder_t *enc = vt->create(level_for_codec(st->cfg, codec));
+    http_encoder_t *enc = http_compression_pool_acquire(
+        codec, level_for_codec(st->cfg, codec));
 
     if (UNEXPECTED(enc == NULL)) return;
+    const http_encoder_vtable_t *vt = enc->vt;
 
     /* Pre-size for the worst-case output: gzip overhead on text is
      * <0.1% + 18-byte header/trailer; on already-compressed input deflate
@@ -384,6 +384,8 @@ void http_compression_apply_buffered(zend_object *response_obj)
         fed             += consumed;
 
         if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
+            /* Encoder may be in an indeterminate state — drop it
+             * outright rather than risk poisoning the pool. */
             vt->destroy(enc);
             smart_str_free(&out);
             return;  /* Leave body as-is; identity wins. */
@@ -414,7 +416,9 @@ void http_compression_apply_buffered(zend_object *response_obj)
         return;
     }
 
-    vt->destroy(enc);
+    /* Clean exit — return the encoder to the per-thread pool so the
+     * next response on this worker skips deflateInit/setup. */
+    http_compression_pool_release(enc);
     smart_str_0(&out);
 
     /* Swap body — release old, transfer ownership of out's zend_string. */
@@ -589,10 +593,8 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
 
     if (codec == HTTP_CODEC_IDENTITY) return;
 
-    const http_encoder_vtable_t *vt = http_compression_lookup(codec);
-
-    if (UNEXPECTED(vt == NULL)) return;
-    http_encoder_t *enc = vt->create(level_for_codec(st->cfg, codec));
+    http_encoder_t *enc = http_compression_pool_acquire(
+        codec, level_for_codec(st->cfg, codec));
 
     if (UNEXPECTED(enc == NULL)) return;
 
@@ -601,8 +603,9 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     void *under_ctx = http_response_get_stream_ctx(response_obj);
 
     if (under_ops == NULL) {
-        /* No underlying ops to wrap — abort cleanly. */
-        vt->destroy(enc);
+        /* No underlying ops to wrap — return the encoder to the pool
+         * (it was never used, so its state is still clean). */
+        http_compression_pool_release(enc);
         return;
     }
 

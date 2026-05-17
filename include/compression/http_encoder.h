@@ -53,6 +53,12 @@ typedef struct http_encoder_vtable {
     http_encoder_status_t (*finish)(http_encoder_t *enc,
                                     void *out, size_t out_cap, size_t *out_produced);
 
+    /* Optional: cheap re-init for pool reuse. Returns true on success.
+     * NULL or false → caller must destroy and create a fresh encoder.
+     * Codec libs that expose deflateReset / ZSTD_CCtx_reset implement
+     * this; Brotli doesn't, so its slot stays NULL. */
+    bool (*reset)(http_encoder_t *enc, int level);
+
     void (*destroy)(http_encoder_t *enc);
 } http_encoder_vtable_t;
 

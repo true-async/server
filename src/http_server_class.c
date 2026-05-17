@@ -21,6 +21,9 @@
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
 #include "core/body_pool.h"
+#ifdef HAVE_HTTP_COMPRESSION
+# include "compression/http_compression_pool.h"
+#endif
 #include "core/conn_arena.h"
 #include "core/http_protocol_handlers.h"
 #include "core/http_protocol_strategy.h"
@@ -2295,6 +2298,9 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
      * Workers that don't accept further requests don't need their pool
      * any more; keeping it would just inflate RSS until module shutdown. */
     body_pool_shutdown();
+#ifdef HAVE_HTTP_COMPRESSION
+    http_compression_pool_shutdown();
+#endif
 
     RETURN_TRUE;
 }

@@ -31,6 +31,7 @@
 typedef struct {
     http_encoder_t base;
     ZSTD_CStream  *cstream;
+    int            level;
 } zstd_encoder_t;
 
 extern const http_encoder_vtable_t http_compression_zstd_vt;
@@ -61,7 +62,36 @@ static http_encoder_t *zs_create(int level)
     zstd_encoder_t *enc = ecalloc(1, sizeof(*enc));
     enc->base.vt = &http_compression_zstd_vt;
     enc->cstream = cs;
+    enc->level   = level;
     return &enc->base;
+}
+
+static bool zs_reset(http_encoder_t *base, int level)
+{
+    zstd_encoder_t *enc = (zstd_encoder_t *)base;
+
+    if (level < HTTP_COMPRESSION_ZSTD_LEVEL_MIN) level = HTTP_COMPRESSION_ZSTD_LEVEL_MIN;
+
+    if (level > HTTP_COMPRESSION_ZSTD_LEVEL_MAX) level = HTTP_COMPRESSION_ZSTD_LEVEL_MAX;
+    const int max_cl = ZSTD_maxCLevel();
+
+    if (level > max_cl) level = max_cl;
+
+    if (UNEXPECTED(ZSTD_isError(
+            ZSTD_CCtx_reset(enc->cstream, ZSTD_reset_session_only)))) {
+        return false;
+    }
+
+    if (level != enc->level) {
+        if (UNEXPECTED(ZSTD_isError(ZSTD_CCtx_setParameter(
+                enc->cstream, ZSTD_c_compressionLevel, level)))) {
+            return false;
+        }
+
+        enc->level = level;
+    }
+
+    return true;
 }
 
 static http_encoder_status_t zs_write(http_encoder_t *base,
@@ -133,6 +163,7 @@ const http_encoder_vtable_t http_compression_zstd_vt = {
     .create  = zs_create,
     .write   = zs_write,
     .finish  = zs_finish,
+    .reset   = zs_reset,
     .destroy = zs_destroy,
 };
 

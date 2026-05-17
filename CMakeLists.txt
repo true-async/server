@@ -275,6 +275,7 @@ if(ENABLE_HTTP_COMPRESSION)
             src/compression/http_compression_negotiate.c
             src/compression/http_compression_response.c
             src/compression/http_compression_request.c
+            src/compression/http_compression_pool.c
         )
         # Brotli + zstd plug into the existing http_encoder vtable —
         # gated by HAVE_HTTP_COMPRESSION (no point without the base layer).
