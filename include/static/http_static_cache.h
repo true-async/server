@@ -32,6 +32,7 @@
 
 #include "php.h"
 #include "Zend/zend_stream.h"  /* zend_stat_t */
+#include "Zend/zend_async_API.h" /* zend_async_event_t */
 #include <time.h>
 
 typedef struct http_static_cache_s http_static_cache_t;
@@ -75,5 +76,53 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 
 /* Forcibly drop all entries — used at shutdown / config reload. */
 void http_static_cache_clear(http_static_cache_t *cache);
+
+/* === Body dedup ================================================== */
+/* Single-flight in-memory body cache for the inline-slurp path: when
+ * N streams ask for the same small file, only the first reads — the
+ * rest reuse the persistent zend_string buffer. Refcount-only, no
+ * separate budget: entry holds one ref, each emitting stream addrefs
+ * its own; eviction releases the entry's ref, in-flight streams keep
+ * the buffer alive until the last release. */
+
+typedef enum
+{
+	HTTP_STATIC_BODY_HIT,	   /* *out_body addref'd; caller owns the ref */
+	HTTP_STATIC_BODY_MISS,	   /* metadata entry exists but no body; caller should begin_load */
+	HTTP_STATIC_BODY_INFLIGHT, /* loader in progress; *out_event set, caller awaits */
+	HTTP_STATIC_BODY_FAILED,   /* last load failed (errno in *out_err); caller should retry */
+	HTTP_STATIC_BODY_NO_ENTRY  /* no metadata entry — body cache N/A for this path */
+} http_static_body_status_t;
+
+/* Acquire body for a previously cached path. Outputs depend on status:
+ *   HIT      → *out_body = addref'd zend_string (caller releases).
+ *   INFLIGHT → *out_event = the loader's ready event (caller awaits).
+ *   FAILED   → *out_err = errno; cache clears the failure marker.
+ *   MISS/NO_ENTRY → all outputs untouched.
+ * Safe to call with NULL out_body/out_event/out_err. */
+http_static_body_status_t http_static_cache_body_acquire(
+	http_static_cache_t *cache, const char *path, size_t path_len,
+	zend_string **out_body, zend_async_event_t **out_event, int *out_err);
+
+/* Mark in-flight before slurping. Creates the ready event if missing.
+ * Must be called only after a MISS from body_acquire (i.e. metadata
+ * entry exists and body is NULL). Returns true if this caller is the
+ * loader (must call publish or fail); false if cache lost the entry
+ * or another loader raced in (caller should fall back to private
+ * slurp without publishing). */
+bool http_static_cache_body_begin_load(http_static_cache_t *cache, const char *path, size_t path_len);
+
+/* Publish a successfully slurped body. Cache makes a persistent copy
+ * (one extra memcpy) and stores it; fires + disposes the ready event
+ * so parked waiters wake and see HIT. If the metadata entry was
+ * evicted in the meantime, publish is a no-op (loader keeps its own
+ * copy for the current response). */
+void http_static_cache_body_publish(http_static_cache_t *cache, const char *path, size_t path_len,
+									const char *body, size_t body_len);
+
+/* Publish a load failure (errno). Waiters wake and see FAILED →
+ * fall back to private slurp. */
+void http_static_cache_body_fail(http_static_cache_t *cache, const char *path, size_t path_len,
+								 int err);
 
 #endif /* HTTP_STATIC_CACHE_H */
