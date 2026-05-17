@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 13876,
-      "hit": 10754
+      "hit": 10762
     },
     "functions": {
       "total": 924,
@@ -583,7 +583,7 @@
     "src/static/http_static.c": {
       "lines": {
         "total": 244,
-        "hit": 193
+        "hit": 201
       },
       "functions": {
         "total": 4,
