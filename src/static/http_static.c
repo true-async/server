@@ -45,7 +45,6 @@
 #include "static/http_static_cache.h"
 #include "http_response_internal.h"
 
-#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #ifndef PHP_WIN32
@@ -347,17 +346,12 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		                           && (uint64_t)cv.st.st_size <= (uint64_t)SEND_FILE_SLURP_THRESHOLD
 		                           && http_request_find_header(request, "range", 5) == NULL;
 
-		/* Hot HIT fast-path: body-cache + metadata-cache HIT means we
-		 * have st/etag/CT/last_modified already pre-baked AND the body
-		 * bytes in a persistent zend_string. Skip open/fstat/close
-		 * entirely — emit straight from cv + addref'd body. Saves the
-		 * 37% of static-path syscall time spent on open+fstat+close
-		 * that hot files would otherwise pay per request. */
+		/* Hot HIT: build response from cv + cached body, skip open/fstat/close. */
 		if (prefer_inline && cache != NULL) {
-			zend_string *cached_body = NULL;
+			zend_string *const cached_body =
+				http_static_cache_body_acquire(cache, fs_path, fs_path_len);
 
-			if (http_static_cache_body_acquire(cache, fs_path, fs_path_len, &cached_body,
-											   NULL, NULL) == HTTP_STATIC_BODY_HIT) {
+			if (cached_body != NULL) {
 				const bool etag_enabled = (mount->flags & HTTP_STATIC_FLAG_ETAG) != 0;
 				const zend_string *const if_none_match =
 					http_request_find_header(request, "if-none-match", 13);
@@ -564,73 +558,18 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		zend_string *body = NULL;
 
-		/* Body dedup: when prefer_inline brings us here, the same path
-		 * may already be cached as a persistent zend_string from a
-		 * previous request. Skip the read(2) entirely on hit. On miss
-		 * the first reader becomes the loader; later streams (in the
-		 * async-slurp future or under bursty arrival) park on the
-		 * loader's ready event. */
-		const bool dedup_eligible = is_get && prefer_inline && cache != NULL;
-		bool loaded_self = false;
-
-		if (dedup_eligible) {
-			zend_async_event_t *ready = NULL;
-
-			for (;;) {
-				const http_static_body_status_t s = http_static_cache_body_acquire(
-					cache, fs_path, fs_path_len, &body, &ready, NULL);
-
-				if (s == HTTP_STATIC_BODY_HIT) {
-					break;
-				}
-
-				if (s == HTTP_STATIC_BODY_INFLIGHT && ready != NULL) {
-					zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
-
-					if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT
-						|| ZEND_ASYNC_WAKER_NEW(co) == NULL) {
-						break;
-					}
-
-					zend_async_resume_when(co, ready, false,
-										   zend_async_waker_callback_resolve, NULL);
-					ZEND_ASYNC_SUSPEND();
-					zend_async_waker_clean(co);
-
-					if (UNEXPECTED(EG(exception) != NULL)) {
-						close(fd);
-						return HTTP_STATIC_HANDLED;
-					}
-
-					ready = NULL;
-					continue;
-				}
-
-				if (s == HTTP_STATIC_BODY_MISS
-					&& http_static_cache_body_begin_load(cache, fs_path, fs_path_len)) {
-					loaded_self = true;
-				}
-
-				break;
-			}
-		}
-
-		if (is_get && body == NULL) {
+		if (is_get) {
 			body = fs_slurp_fd(fd, (size_t)st.st_size);
 
 			if (UNEXPECTED(body == NULL)) {
-				if (loaded_self) {
-					http_static_cache_body_fail(cache, fs_path, fs_path_len, errno);
-				}
-
 				close(fd);
 				http_response_emit_status_body(response_obj, 500, "Internal Server Error", 21);
 				return HTTP_STATIC_HANDLED;
 			}
 
-			if (loaded_self) {
-				http_static_cache_body_publish(cache, fs_path, fs_path_len,
-											   ZSTR_VAL(body), ZSTR_LEN(body));
+			if (prefer_inline && cache != NULL) {
+				http_static_cache_body_store(cache, fs_path, fs_path_len, ZSTR_VAL(body),
+											 ZSTR_LEN(body));
 			}
 		}
 

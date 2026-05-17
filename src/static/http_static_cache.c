@@ -22,8 +22,6 @@
 #include "zend_smart_str.h"
 
 #include "static/http_static_cache.h"
-#include "core/async_plain_event.h"
-#include "Zend/zend_async_API.h"
 
 #include <string.h>
 #include <time.h>
@@ -58,21 +56,8 @@ typedef struct entry_s
 	char *last_modified;
 	size_t last_modified_len;
 
-	/* Body cache (inline-slurp dedup). Populated lazily on first
-	 * prefer_inline request that reads the file. Persistent zend_string
-	 * so its refcount survives across requests; entry owns one ref,
-	 * each emitting stream addrefs its own. NULL = not loaded.
-	 *
-	 * ready != NULL while a loader is reading: subsequent requests
-	 * find body==NULL+ready!=NULL and park on the event. Loader fires
-	 * + disposes ready at publish/fail time.
-	 *
-	 * load_error stores errno from the loader on failure (0 = ok).
-	 * Set only when ready transitions to NULL via fail; tells the
-	 * woken-up waiters to fall back to their own slurp. */
+	/* Persistent body for inline-slurp dedup; NULL until first reader stores it. */
 	zend_string *body;
-	zend_async_event_t *ready;
-	int load_error;
 
 	struct entry_s *prev; /* LRU links: NULL on head */
 	struct entry_s *next; /* NULL on tail */
@@ -119,16 +104,6 @@ static void entry_free(entry_t *e)
 	if (e->body != NULL) {
 		zend_string_release(e->body);
 		e->body = NULL;
-	}
-
-	if (e->ready != NULL) {
-		/* Eviction during in-flight: waiters parked on the event will
-		 * wake with body==NULL+entry-gone → fall back to own slurp. */
-		if (e->ready->dispose != NULL) {
-			e->ready->dispose(e->ready);
-		}
-
-		e->ready = NULL;
 	}
 
 	pefree(e, 1);
@@ -350,120 +325,37 @@ static entry_t *find_entry(http_static_cache_t *cache, const char *path, const s
 	return (entry_t *)zend_hash_str_find_ptr(&cache->index, path, path_len);
 }
 
-http_static_body_status_t http_static_cache_body_acquire(
-	http_static_cache_t *const cache, const char *const path, const size_t path_len,
-	zend_string **const out_body, zend_async_event_t **const out_event, int *const out_err)
+zend_string *http_static_cache_body_acquire(http_static_cache_t *const cache,
+											const char *const path, const size_t path_len)
 {
 	ZEND_ASSERT(cache != NULL);
 	ZEND_ASSERT(path != NULL);
 
 	entry_t *const e = find_entry(cache, path, path_len);
 
-	if (e == NULL) {
-		return HTTP_STATIC_BODY_NO_ENTRY;
+	if (e == NULL || e->body == NULL) {
+		return NULL;
 	}
 
-	if (e->body != NULL) {
-		if (out_body != NULL) {
-			zend_string_addref(e->body);
-			*out_body = e->body;
-		}
-
-		return HTTP_STATIC_BODY_HIT;
-	}
-
-	if (e->ready != NULL) {
-		if (out_event != NULL) {
-			*out_event = e->ready;
-		}
-
-		return HTTP_STATIC_BODY_INFLIGHT;
-	}
-
-	if (e->load_error != 0) {
-		const int err = e->load_error;
-		e->load_error = 0;
-
-		if (out_err != NULL) {
-			*out_err = err;
-		}
-
-		return HTTP_STATIC_BODY_FAILED;
-	}
-
-	return HTTP_STATIC_BODY_MISS;
+	zend_string_addref(e->body);
+	return e->body;
 }
 
-bool http_static_cache_body_begin_load(http_static_cache_t *const cache, const char *const path,
-									   const size_t path_len)
-{
-	ZEND_ASSERT(cache != NULL);
-
-	entry_t *const e = find_entry(cache, path, path_len);
-
-	if (e == NULL || e->body != NULL || e->ready != NULL) {
-		return false;
-	}
-
-	e->ready = async_plain_event_new();
-	return e->ready != NULL;
-}
-
-void http_static_cache_body_publish(http_static_cache_t *const cache, const char *const path,
-									const size_t path_len, const char *const body,
-									const size_t body_len)
+void http_static_cache_body_store(http_static_cache_t *const cache, const char *const path,
+								  const size_t path_len, const char *const body,
+								  const size_t body_len)
 {
 	ZEND_ASSERT(cache != NULL);
 	ZEND_ASSERT(body != NULL);
 
 	entry_t *const e = find_entry(cache, path, path_len);
 
-	if (e == NULL) {
+	if (e == NULL || e->body != NULL || body_len == 0) {
 		return;
 	}
 
-	if (e->body == NULL && body_len > 0) {
-		zend_string *const persistent = zend_string_alloc(body_len, 1);
-		memcpy(ZSTR_VAL(persistent), body, body_len);
-		ZSTR_VAL(persistent)[body_len] = '\0';
-		e->body = persistent;
-	}
-
-	e->load_error = 0;
-
-	zend_async_event_t *const ready = e->ready;
-	e->ready = NULL;
-
-	if (ready != NULL) {
-		async_plain_event_fire(ready);
-
-		if (ready->dispose != NULL) {
-			ready->dispose(ready);
-		}
-	}
-}
-
-void http_static_cache_body_fail(http_static_cache_t *const cache, const char *const path,
-								 const size_t path_len, const int err)
-{
-	ZEND_ASSERT(cache != NULL);
-
-	entry_t *const e = find_entry(cache, path, path_len);
-
-	if (e == NULL) {
-		return;
-	}
-
-	e->load_error = err != 0 ? err : EIO;
-
-	zend_async_event_t *const ready = e->ready;
-	e->ready = NULL;
-
-	if (ready != NULL) {
-		async_plain_event_fire(ready);
-
-		if (ready->dispose != NULL) {
-			ready->dispose(ready);
-		}
-	}
+	zend_string *const persistent = zend_string_alloc(body_len, 1);
+	memcpy(ZSTR_VAL(persistent), body, body_len);
+	ZSTR_VAL(persistent)[body_len] = '\0';
+	e->body = persistent;
 }
