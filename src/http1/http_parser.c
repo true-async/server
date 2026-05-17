@@ -445,10 +445,12 @@ static void http1_request_body_upgrade(http_request_t *req)
     zend_string    *initial = NULL;
 
     if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
-        /* body_pool buffer is IS_STR_INTERNED — copy into a regular
-         * zend_string before pushing or the queue chunk leaks the slot. */
-        initial = zend_string_init(ZSTR_VAL(req->body), parser->body_offset, 0);
-        body_release(req->body);
+        /* Pre-sized path: on_headers_complete allocated a regular
+         * zend_string (not body_pool — see body_streaming_enabled
+         * branch there). Hand it off as the first queued chunk. */
+        ZSTR_LEN(req->body) = parser->body_offset;
+        ZSTR_VAL(req->body)[parser->body_offset] = '\0';
+        initial = req->body;
         req->body = NULL;
         parser->body_offset = 0;
     } else if (parser != NULL && parser->body_builder.s != NULL
@@ -614,9 +616,16 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
          * connection layer emits 503 and closes cleanly — without this
          * the longjmp escapes the reactor callback and takes the
          * scheduler down with it. Same pattern below for chunked. */
+        /* body_pool slots are IS_STR_INTERNED — opaque to PHP's refcount,
+         * lifecycle owned here. Fine for getBody (RETURN_STR_COPY hands
+         * out a view), but readBody/upgrade transfer ownership to PHP
+         * and a pool slot would leak. Skip the pool when streaming is
+         * enabled — the body may be transferred. */
+        const bool can_pool = (parser->conn == NULL || parser->conn->view == NULL
+                               || !parser->conn->view->body_streaming_enabled);
         volatile bool oom = false;
         zend_try {
-            req->body = body_pool_acquire(req->content_length);
+            req->body = can_pool ? body_pool_acquire(req->content_length) : NULL;
             if (req->body == NULL) {
                 req->body = zend_string_alloc(req->content_length, 0);
             }

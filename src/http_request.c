@@ -15,7 +15,6 @@
 #include "http1/http_parser.h"
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
-#include "core/body_pool.h"
 #include "log/trace_context.h"
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_exceptions.h"
@@ -567,13 +566,6 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
             zend_string *body = req->body;
             req->body = NULL;
-            /* body_pool slot is IS_STR_INTERNED — PHP cannot release it.
-             * Copy to a regular zend_string and return the slot to the pool. */
-            if (body_pool_owns(body)) {
-                zend_string *copy = zend_string_init(ZSTR_VAL(body), ZSTR_LEN(body), 0);
-                body_pool_release(body);
-                body = copy;
-            }
             RETURN_STR(body);
         }
 
@@ -621,11 +613,6 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
             zend_string *body = req->body;
             req->body = NULL;
-            if (body_pool_owns(body)) {
-                zend_string *copy = zend_string_init(ZSTR_VAL(body), ZSTR_LEN(body), 0);
-                body_pool_release(body);
-                body = copy;
-            }
             RETURN_STR(body);
         }
 

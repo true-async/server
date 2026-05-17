@@ -81,3 +81,13 @@ __attribute__((weak)) void http2_session_emit(struct http2_session_t *session)
 #ifdef ZTS
 __attribute__((weak)) int http_server_globals_id = 0;
 #endif
+
+/* async_plain_event_new — invoked by http_body_stream_push for the
+ * body_data_event wake. Fuzz harnesses don't drive a real coroutine
+ * reader, so returning NULL is acceptable: http_body_stream_push then
+ * marks body_error and bails out, exercising the error path. */
+struct zend_async_event_s;
+__attribute__((weak)) struct zend_async_event_s *async_plain_event_new(void)
+{
+    return NULL;
+}
