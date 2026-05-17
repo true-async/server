@@ -109,3 +109,16 @@ __attribute__((weak)) void h2_session_schedule_emit(struct http2_session_t *sess
 {
     (void)session;
 }
+
+/* h2_static_account_debit lives in http2_static_response.c (not linked
+ * into the fuzz harness). The inline release wrappers in
+ * include/http2/http2_stream.h call it from drain paths in http2_session.c
+ * and http2_stream.c via stream->static_tracks_chunks gating — fuzz
+ * inputs never set that flag (no static FSM), so the symbol is never
+ * actually invoked at run-time. Stub satisfies the linker only. */
+struct _http_connection_t;
+__attribute__((weak)) void h2_static_account_debit(struct _http_connection_t *conn,
+                                                   size_t n)
+{
+    (void)conn; (void)n;
+}

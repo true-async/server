@@ -14,7 +14,6 @@
 #include "php.h"
 #include "Zend/zend_async_API.h"    /* zend_async_trigger_event_t dispose */
 #include "http2/http2_stream.h"
-#include "http2/http2_static_accounting.h"
 #include "http1/http_parser.h"     /* http_request_destroy */
 
 /*

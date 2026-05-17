@@ -21,7 +21,6 @@
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
-#include "http2/http2_static_accounting.h"
 #include "http_response_internal.h"
 #include "core/async_plain_event.h"
 
@@ -88,7 +87,9 @@ ZEND_TLS long active_static_streams = 0;
 /* 0 = not yet initialised — see h2_static_budget_init_once. */
 ZEND_TLS size_t h2_static_budget_bytes = 0;
 
-/* Public counters (see http2_static_accounting.h). */
+/* Per-worker counters. Modified via h2_static_account_alloc (alloc
+ * path, in this TU) and h2_static_account_debit (debit path, called
+ * from the inline release wrappers in include/http2/http2_stream.h). */
 ZEND_TLS size_t h2_static_global_bytes_in_flight = 0;
 ZEND_TLS size_t h2_static_global_high_water       = 0;
 
@@ -211,9 +212,10 @@ static inline void h2_static_account_alloc(h2_static_state_t *state,
     }
 }
 
-/* Symmetric debit + hysteresis wake. Used by both wrappers below. */
-static inline void h2_static_account_free_bytes(http_connection_t *conn,
-                                                const size_t n)
+/* Symmetric debit + hysteresis wake. The fast non-static drain path
+ * never reaches here — h2_static_account_release_chunk in http2_stream.h
+ * gates on stream->static_tracks_chunks and inline-releases otherwise. */
+void h2_static_account_debit(http_connection_t *conn, const size_t n)
 {
     ZEND_ASSERT(h2_static_global_bytes_in_flight >= n);
     h2_static_global_bytes_in_flight -= n;
@@ -230,25 +232,6 @@ static inline void h2_static_account_free_bytes(http_connection_t *conn,
         h2_static_global_throttled = false;
         h2_static_throttle_kick_all();
     }
-}
-
-void h2_static_account_release_pending(http_connection_t *conn,
-                                       zend_string *chunk)
-{
-    const size_t n = ZSTR_LEN(chunk);
-    h2_static_account_free_bytes(conn, n);
-    zend_string_release(chunk);
-}
-
-void h2_static_account_release_chunk(http2_stream_t *stream,
-                                     zend_string *chunk)
-{
-    if (stream != NULL && stream->static_tracks_chunks) {
-        const size_t n = ZSTR_LEN(chunk);
-        h2_static_account_free_bytes(stream->conn, n);
-    }
-
-    zend_string_release(chunk);
 }
 
 static void h2_static_throttle_park(h2_static_state_t *state)

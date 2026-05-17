@@ -18,7 +18,6 @@
 #include "core/http_connection.h"
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
-#include "http2/http2_static_accounting.h"
 #include "http_known_strings.h"
 #include "log/trace_context.h"
 #include "http_body_stream.h"

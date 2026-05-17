@@ -221,4 +221,36 @@ http2_stream_t *http2_stream_new(http2_session_t *session, uint32_t stream_id);
 /* Destroy a stream (including its request). Safe with NULL. */
 void http2_stream_free(http2_stream_t *stream);
 
+/* h2 static-FSM memory accounting.
+ *
+ * Single non-inline helper that the inline release wrappers below call
+ * when the chunk actually belongs to a static FSM. Debits per-worker
+ * and per-conn counters and wakes any throttled FSMs. Defined in
+ * src/http2/http2_static_response.c. */
+void h2_static_account_debit(http_connection_t *conn, size_t n);
+
+/* Inline wrappers around zend_string_release. The common case is
+ * user-streaming chunks (static_tracks_chunks == false) where we just
+ * release with no extra work — having this fast path in the call site
+ * matters for h2_emit_streaming_body / h2_dp_streaming_copy on the hot
+ * drain path. */
+static zend_always_inline void
+h2_static_account_release_chunk(http2_stream_t *stream, zend_string *chunk)
+{
+    if (stream != NULL && stream->static_tracks_chunks) {
+        h2_static_account_debit(stream->conn, ZSTR_LEN(chunk));
+    }
+
+    zend_string_release(chunk);
+}
+
+/* Release for pending_chunk (FSM finalize path) — caller has already
+ * decided the chunk is static-owned, so no flag check. */
+static zend_always_inline void
+h2_static_account_release_pending(http_connection_t *conn, zend_string *chunk)
+{
+    h2_static_account_debit(conn, ZSTR_LEN(chunk));
+    zend_string_release(chunk);
+}
+
 #endif /* HTTP2_STREAM_H */
