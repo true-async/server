@@ -405,6 +405,13 @@ void http_connection_destroy(http_connection_t *conn)
     }
 #endif
 
+    /* By here every h2 stream tied to this conn has gone through
+     * stream_dtor (drains queue via h2_static_account_release_chunk)
+     * and every h2 static FSM through finalize (releases pending_chunk
+     * via h2_static_account_release_pending). Anything > 0 means a
+     * release path was missed — catch it in debug. */
+    ZEND_ASSERT(conn->static_conn_bytes_in_flight == 0);
+
     /* Capture server before returning the slot — conn is gone after
      * arena_free. release() drops our ref; if this was the last one,
      * http_server_state_finalize runs (arena cleanup + pefree). */

@@ -115,7 +115,7 @@ http2_session_t *http2_session_new(http_connection_t *conn,
 void             http2_session_free(http2_session_t *session);
 
 /* Session struct exposed for inline hot-path accessors below. Internal
- * to the h2 TUs (header is only included by src/http2/*.c). */
+ * to the h2 TUs (header is only included by the src/http2 sources). */
 struct http2_session_t {
     nghttp2_session   *ng;
     http_connection_t *conn;

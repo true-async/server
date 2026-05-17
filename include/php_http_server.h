@@ -192,6 +192,13 @@ struct _http_server_config_t {
      * path ignores this — the kernel send buffer IS the queue. */
     uint32_t stream_write_buffer_bytes;
 
+    /* HTTP/2 static-file global memory cap (bytes, per worker).
+     * 0 = auto: memory_limit/4 (25%). Whatever the source, the actual
+     * budget is clamped to keep ≥ memory_limit/8 reserved for PHP heap
+     * + nghttp2/TLS overhead, so it cannot starve the rest of the
+     * worker. Drives the throttle in src/http2/http2_static_response.c. */
+    size_t h2_static_budget_max;
+
     /* Maximum request body size accepted by both H1 parser and H2 session
      * (bytes). Default 10 MiB. At server start the value is mirrored into
      * the global parser pool and read by the H2 DATA-frame guard. */

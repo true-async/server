@@ -21,6 +21,7 @@
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
+#include "http2/http2_static_accounting.h"
 #include "http_response_internal.h"
 #include "core/async_plain_event.h"
 
@@ -41,9 +42,25 @@
  *   - Reactor timer reading /proc/meminfo MemAvailable + cgroup v2,
  *     divided across workers; EWMA-smoothed.
  *   - Low/high watermarks in want_more_reads to avoid stop-and-go. */
-#define H2_STATIC_BUDGET_CEILING (64u * 1024u * 1024u)  /* fallback / hard cap */
-#define H2_STATIC_BUDGET_FLOOR   (4u * 1024u * 1024u)   /* minimum on tight memory_limit */
-#define H2_STATIC_TARGET_MIN     (128u * 1024u)
+/* Static-file budget bounds.
+ *
+ * Default formula: memory_limit / 8 (give the static FSM 12.5% of the
+ * worker's heap). Operators can override per-server via
+ * HttpServerConfig::setH2StaticBudgetMax(int $bytes).
+ *
+ * SAFETY: whatever the source (auto or explicit), the resulting budget
+ * is clamped so it never exceeds memory_limit minus a reserve, so it
+ * can't starve PHP heap / nghttp2 / TLS buffers. */
+#define H2_STATIC_BUDGET_FLOOR    (4u * 1024u * 1024u)  /* minimum on tight memory_limit */
+#define H2_STATIC_BUDGET_FALLBACK (64u * 1024u * 1024u) /* used when memory_limit = -1 */
+/* Reserve = memory_limit/8. Hard ceiling = memory_limit - reserve = 87.5% of memory_limit. */
+#define H2_STATIC_BUDGET_RESERVE_FRAC 8u
+/* TARGET_MIN was the original FLOOR bug: at high fanout
+ * (N >> budget/MIN) it became `total = N * MIN` and the per-stream
+ * "budget / active" formula stopped being a global cap. Lowered to a
+ * value matched to I/O efficiency (≈ 2 TLS records) — the real hard cap
+ * is the global counter below. */
+#define H2_STATIC_TARGET_MIN     (16u * 1024u)
 #define H2_STATIC_TARGET_MAX     (2u * 1024u * 1024u)
 #define H2_STATIC_CHUNK_MAX      (256u * 1024u)
 
@@ -52,6 +69,18 @@
 
 #define H2_STATIC_RING_SLOTS 8
 
+/* Per-connection soft budget — beyond it the FSM degrades to single
+ * in-flight read with empty ring (still serves the stream, just no
+ * read-ahead). Distinct from the global hard cap below, which is the
+ * only memory limit that may actually refuse / park new reads. */
+#define H2_STATIC_CONN_BUDGET_SOFT (2u * 1024u * 1024u)
+
+/* Hysteresis: once parked on the global cap, only wake when usage falls
+ * below this fraction of the budget. Without it every release of N
+ * bytes would re-arm everyone and we'd ping-pong in/out of throttle. */
+#define H2_STATIC_GLOBAL_RESUME_NUM 4u
+#define H2_STATIC_GLOBAL_RESUME_DEN 5u  /* 80% */
+
 extern nghttp2_session *http2_session_get_ng(http2_session_t *session);
 
 ZEND_TLS long active_static_streams = 0;
@@ -59,8 +88,26 @@ ZEND_TLS long active_static_streams = 0;
 /* 0 = not yet initialised — see h2_static_budget_init_once. */
 ZEND_TLS size_t h2_static_budget_bytes = 0;
 
-/* Budget = limit/8 clamped to [FLOOR, CEILING]; -1 → CEILING. */
-static void h2_static_budget_init_once(void)
+/* Public counters (see http2_static_accounting.h). */
+ZEND_TLS size_t h2_static_global_bytes_in_flight = 0;
+ZEND_TLS size_t h2_static_global_high_water       = 0;
+
+/* True while we've withheld reads because of the global cap. Cleared
+ * by account_free once usage drops below the hysteresis threshold,
+ * which also drains the throttled-FSMs list. */
+ZEND_TLS bool h2_static_global_throttled = false;
+
+/* Compute the per-worker static budget.
+ *
+ *   user_max == 0  → auto: memory_limit / 4  (25%)
+ *   user_max  > 0  → explicit (still capped at hard_top)
+ *
+ * Always clamped to [FLOOR, hard_top] where
+ *   hard_top = memory_limit - memory_limit / RESERVE_FRAC (87.5%)
+ * (so static buffers can never starve PHP heap + nghttp2/TLS).
+ *
+ * memory_limit = -1 (unlimited) → fallback = FALLBACK, no hard_top. */
+static void h2_static_budget_init_once(const size_t user_max)
 {
     if (h2_static_budget_bytes != 0) {
         return;
@@ -70,14 +117,18 @@ static void h2_static_budget_init_once(void)
     size_t budget;
 
     if (limit <= 0) {
-        budget = H2_STATIC_BUDGET_CEILING;
+        budget = (user_max > 0) ? user_max : H2_STATIC_BUDGET_FALLBACK;
     } else {
-        budget = (size_t)limit / 8u;
+        const size_t mem = (size_t)limit;
+        const size_t reserve = mem / H2_STATIC_BUDGET_RESERVE_FRAC;
+        const size_t hard_top = mem > reserve ? mem - reserve : mem;
 
-        if (budget < H2_STATIC_BUDGET_FLOOR) { budget = H2_STATIC_BUDGET_FLOOR; }
+        budget = (user_max > 0) ? user_max : (mem / 4u);
 
-        if (budget > H2_STATIC_BUDGET_CEILING) { budget = H2_STATIC_BUDGET_CEILING; }
+        if (budget > hard_top) { budget = hard_top; }
     }
+
+    if (budget < H2_STATIC_BUDGET_FLOOR) { budget = H2_STATIC_BUDGET_FLOOR; }
 
     h2_static_budget_bytes = budget;
 }
@@ -89,7 +140,9 @@ extern ssize_t http2_static_buffered_data_read(nghttp2_session *,
                                                nghttp2_data_source *,
                                                void *);
 
-typedef struct {
+typedef struct h2_static_state_s h2_static_state_t;
+
+struct h2_static_state_s {
     http2_stream_t              *stream;
     http2_session_t             *session;
     http_connection_t           *conn;
@@ -116,7 +169,18 @@ typedef struct {
     void                        *user;
     int                          status;       /* 0 ok, -1 error */
     bool                         done_fired;
-} h2_static_state_t;
+
+    /* TLS doubly-linked list of FSMs waiting on the global cap. The
+     * head is h2_static_throttled_head; account_free drains the list
+     * once usage crosses the resume threshold. NULL `throttled_prev`
+     * with non-NULL `throttled_next` is the head; both NULL = not in
+     * the list. Finalize unlinks before efree. */
+    h2_static_state_t           *throttled_prev;
+    h2_static_state_t           *throttled_next;
+    bool                         in_throttled_list;
+};
+
+ZEND_TLS h2_static_state_t *h2_static_throttled_head = NULL;
 
 typedef struct {
     zend_async_event_callback_t base;
@@ -125,6 +189,147 @@ typedef struct {
 
 static void h2_static_finalize(h2_static_state_t *state, int status);
 static bool h2_static_submit_read(h2_static_state_t *state);
+static void h2_static_kick(h2_static_state_t *state);
+static void h2_static_throttle_park(h2_static_state_t *state);
+static void h2_static_throttle_unlink(h2_static_state_t *state);
+static void h2_static_throttle_kick_all(void);
+
+/* Bump counters atomically w.r.t. bailout: caller has already stored
+ * the returned zend_string into state->pending_chunk so a bailout
+ * before the next instruction still finds it via finalize. */
+static inline void h2_static_account_alloc(h2_static_state_t *state,
+                                           const size_t n)
+{
+    h2_static_global_bytes_in_flight += n;
+
+    if (state->conn != NULL) {
+        state->conn->static_conn_bytes_in_flight += n;
+    }
+
+    if (h2_static_global_bytes_in_flight > h2_static_global_high_water) {
+        h2_static_global_high_water = h2_static_global_bytes_in_flight;
+    }
+}
+
+/* Symmetric debit + hysteresis wake. Used by both wrappers below. */
+static inline void h2_static_account_free_bytes(http_connection_t *conn,
+                                                const size_t n)
+{
+    ZEND_ASSERT(h2_static_global_bytes_in_flight >= n);
+    h2_static_global_bytes_in_flight -= n;
+
+    if (conn != NULL) {
+        ZEND_ASSERT(conn->static_conn_bytes_in_flight >= n);
+        conn->static_conn_bytes_in_flight -= n;
+    }
+
+    if (h2_static_global_throttled
+        && h2_static_global_bytes_in_flight
+               < h2_static_budget_bytes * H2_STATIC_GLOBAL_RESUME_NUM
+                                        / H2_STATIC_GLOBAL_RESUME_DEN) {
+        h2_static_global_throttled = false;
+        h2_static_throttle_kick_all();
+    }
+}
+
+void h2_static_account_release_pending(http_connection_t *conn,
+                                       zend_string *chunk)
+{
+    const size_t n = ZSTR_LEN(chunk);
+    h2_static_account_free_bytes(conn, n);
+    zend_string_release(chunk);
+}
+
+void h2_static_account_release_chunk(http2_stream_t *stream,
+                                     zend_string *chunk)
+{
+    if (stream != NULL && stream->static_tracks_chunks) {
+        const size_t n = ZSTR_LEN(chunk);
+        h2_static_account_free_bytes(stream->conn, n);
+    }
+
+    zend_string_release(chunk);
+}
+
+static void h2_static_throttle_park(h2_static_state_t *state)
+{
+    if (state->in_throttled_list) {
+        return;
+    }
+
+    state->throttled_prev = NULL;
+    state->throttled_next = h2_static_throttled_head;
+
+    if (h2_static_throttled_head != NULL) {
+        h2_static_throttled_head->throttled_prev = state;
+    }
+
+    h2_static_throttled_head = state;
+    state->in_throttled_list = true;
+    h2_static_global_throttled = true;
+
+}
+
+static void h2_static_throttle_unlink(h2_static_state_t *state)
+{
+    if (!state->in_throttled_list) {
+        return;
+    }
+
+    if (state->throttled_prev != NULL) {
+        state->throttled_prev->throttled_next = state->throttled_next;
+    } else {
+        h2_static_throttled_head = state->throttled_next;
+    }
+
+    if (state->throttled_next != NULL) {
+        state->throttled_next->throttled_prev = state->throttled_prev;
+    }
+
+    state->throttled_prev = NULL;
+    state->throttled_next = NULL;
+    state->in_throttled_list = false;
+}
+
+/* Iterate the list once, unlinking each entry before re-trying its
+ * submit_read.
+ *
+ * MUST stay re-entry-safe with nghttp2: account_free is called from
+ * h2_emit_streaming_body which itself runs inside send_data_callback
+ * inside nghttp2_session_send. h2_static_submit_read only enqueues an
+ * async IO_READ (no nghttp2 calls), so it's safe here. We deliberately
+ * skip the synchronous h2_static_kick that would recurse into
+ * http2_session_emit → nghttp2_session_send — once the IO completes,
+ * the dispatch callback fires kick on its own. */
+ZEND_TLS bool h2_static_kick_in_progress = false;
+
+static void h2_static_throttle_kick_all(void)
+{
+    if (h2_static_kick_in_progress) {
+            return;
+    }
+    h2_static_kick_in_progress = true;
+
+    h2_static_state_t *state = h2_static_throttled_head;
+    int n = 0; for (h2_static_state_t *p=state; p; p=p->throttled_next) n++;
+    h2_static_throttled_head = NULL;
+
+    while (state != NULL) {
+        h2_static_state_t *next = state->throttled_next;
+        state->throttled_prev = NULL;
+        state->throttled_next = NULL;
+        state->in_throttled_list = false;
+
+        if (state->stream != NULL && !state->stream->peer_closed
+            && !state->read_in_flight && !state->eof_reached) {
+            (void)h2_static_submit_read(state);
+        }
+
+        state = next;
+    }
+
+    h2_static_kick_in_progress = false;
+}
 
 static void h2_static_cb_dispose(zend_async_event_callback_t *cb,
                                  zend_async_event_t *event)
@@ -136,7 +341,9 @@ static void h2_static_cb_dispose(zend_async_event_callback_t *cb,
 /* Per-stream read-ahead target = budget / active_streams, clamped. */
 static size_t h2_static_target_bytes(void)
 {
-    h2_static_budget_init_once();
+    /* Fallback init for paths that never went through send_static_response
+     * (defensive — in practice send_static_response always inits first). */
+    h2_static_budget_init_once(0);
 
     const long active = active_static_streams > 0 ? active_static_streams : 1;
     size_t target = h2_static_budget_bytes / (size_t)active;
@@ -181,7 +388,13 @@ static size_t h2_static_fit_to_arena(const size_t want)
     return avail < H2_STATIC_CHUNK_MIN ? 0 : avail;
 }
 
-/* Pull another chunk while outstanding < target AND a ring slot is free. */
+/* Pull another chunk while outstanding < target AND a ring slot is free.
+ *
+ * NOTE: global hard cap is NOT checked here — it is handled inside
+ * h2_static_submit_read, which also parks the stream on the throttled
+ * list so it can be woken when memory frees up. Gating on cap here
+ * (without parking) would silently leak the stream: it would just stop
+ * reading with no wake source. */
 static bool h2_static_want_more_reads(const h2_static_state_t *state)
 {
     const http2_stream_t *stream = state->stream;
@@ -199,6 +412,16 @@ static bool h2_static_want_more_reads(const h2_static_state_t *state)
         + (state->read_in_flight && state->pending_chunk != NULL
                ? ZSTR_LEN(state->pending_chunk) : 0u);
 
+    /* SOFT per-conn: when over the soft budget, only schedule a read
+     * when the ring is empty and nothing is in flight on this stream.
+     * Even when degraded, we still call submit_read — which will park
+     * on the global cap if necessary. */
+    if (state->conn != NULL
+        && state->conn->static_conn_bytes_in_flight
+               >= H2_STATIC_CONN_BUDGET_SOFT) {
+        return outstanding == 0;
+    }
+
     return outstanding < h2_static_target_bytes();
 }
 
@@ -215,6 +438,11 @@ static void h2_static_ring_push(http2_stream_t *stream, zend_string *chunk)
 
 static void h2_static_finalize(h2_static_state_t *state, const int status)
 {
+
+    /* Unlink from the throttled list FIRST — kick_all may be walking
+     * it via account_free triggered by a concurrent stream release. */
+    h2_static_throttle_unlink(state);
+
     if (state->cb != NULL && state->file_io != NULL) {
         (void)state->file_io->event.del_callback(&state->file_io->event,
                                                  state->cb);
@@ -238,8 +466,9 @@ static void h2_static_finalize(h2_static_state_t *state, const int status)
     }
 
     if (state->pending_chunk != NULL) {
-        zend_string_release(state->pending_chunk);
+        zend_string *pc = state->pending_chunk;
         state->pending_chunk = NULL;
+        h2_static_account_release_pending(state->conn, pc);
     }
 
     void (*on_done)(void *, int) = state->on_done;
@@ -286,7 +515,7 @@ static void h2_static_kick(h2_static_state_t *state)
 {
     if (state->session == NULL || state->stream == NULL
         || state->stream->peer_closed) {
-        return;
+            return;
     }
 
     nghttp2_session *ng = http2_session_get_ng(state->session);
@@ -297,9 +526,11 @@ static void h2_static_kick(h2_static_state_t *state)
 
     (void)nghttp2_session_resume_data(ng, (int32_t)state->stream->stream_id);
 
+
     if (state->conn != NULL) {
         http2_session_emit(state->session);
     }
+
 }
 
 /* Wakes on ring-slot drain or inbound WINDOW_UPDATE; idempotent. */
@@ -313,6 +544,7 @@ static void h2_static_on_window_open(zend_async_event_t *event,
     (void)exception;
 
     h2_static_state_t *state = ((h2_static_cb_t *)callback)->state;
+
 
     if (state->stream == NULL || state->stream->peer_closed) {
         return;
@@ -344,6 +576,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
     h2_static_state_t *state = ((h2_static_cb_t *)callback)->state;
     zend_async_io_req_t *req = (zend_async_io_req_t *)result;
 
+
     /* Spurious-fire guard: freed req address may be reused — gate on `completed`. */
     if (req == NULL || req != state->pending_req || !req->completed) {
         return;
@@ -368,8 +601,8 @@ static void h2_static_dispatch(zend_async_event_t *event,
     state->pending_chunk = NULL;
 
     if (UNEXPECTED(err) || transferred <= 0) {
-        if (chunk != NULL) {
-            zend_string_release(chunk);
+            if (chunk != NULL) {
+            h2_static_account_release_pending(state->conn, chunk);
         }
 
         if (err || transferred < 0) {
@@ -381,15 +614,18 @@ static void h2_static_dispatch(zend_async_event_t *event,
         return;
     }
 
-    /* Shrink to actual bytes — alloc was sized for the request. */
+    /* Shrink to actual bytes — alloc was sized for the request. The
+     * delta (alloc_want - transferred) stays charged against the
+     * counters until release; minor overcounting, not worth a debit. */
     ZSTR_LEN(chunk) = (size_t)transferred;
     ZSTR_VAL(chunk)[transferred] = '\0';
     state->bytes_read += (uint64_t)transferred;
 
     if (state->stream == NULL || state->stream->peer_closed) {
-        zend_string_release(chunk);
+            h2_static_account_release_pending(state->conn, chunk);
         return;
     }
+
 
     h2_static_ring_push(state->stream, chunk);
 
@@ -410,7 +646,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
 static bool h2_static_submit_read(h2_static_state_t *state)
 {
     if (state->file_io == NULL) {
-        return false;
+            return false;
     }
 
     const uint64_t remaining = state->body_length > state->bytes_read
@@ -440,23 +676,47 @@ static bool h2_static_submit_read(h2_static_state_t *state)
                             ? (size_t)remaining
                             : chunk_sz;
 
-    const size_t want = h2_static_fit_to_arena(ideal);
+    /* Global hard cap: clamp to room left in the budget. Treats `0
+     * room` as "park, retry on release" rather than terminal failure. */
+    size_t global_room;
+
+    if (h2_static_global_bytes_in_flight >= h2_static_budget_bytes) {
+        global_room = 0;
+    } else {
+        global_room = h2_static_budget_bytes
+                    - h2_static_global_bytes_in_flight;
+    }
+
+    if (global_room == 0) {
+        h2_static_throttle_park(state);
+        return true;  /* deferred — not a terminal failure */
+    }
+
+    size_t want = ideal < global_room ? ideal : global_room;
+    want = h2_static_fit_to_arena(want);
 
     if (want == 0) {
+        /* memory_limit is the actual blocker — terminal. */
         return false;
     }
 
     zend_string *chunk = zend_string_alloc(want, 0);
 
+    /* STORE pending_chunk + count BEFORE anything that can bailout. A
+     * bailout in ZEND_ASYNC_IO_READ → finalize → account_release_pending
+     * unwinds cleanly. */
+    state->pending_chunk = chunk;
+    h2_static_account_alloc(state, want);
+
     state->pending_req = ZEND_ASYNC_IO_READ(state->file_io,
                                             ZSTR_VAL(chunk), want);
 
     if (state->pending_req == NULL) {
-        zend_string_release(chunk);
-        return false;
+        state->pending_chunk = NULL;
+        h2_static_account_release_pending(state->conn, chunk);
+            return false;
     }
 
-    state->pending_chunk = chunk;
     state->read_in_flight = true;
     return true;
 }
@@ -624,9 +884,17 @@ int h2_stream_send_static_response(void *ctx,
                                          nv, nv_count, NULL);
         }
     } else {
+        /* First-FSM hook: lock in the per-worker static budget. Picks up
+         * an explicit HttpServerConfig::setH2StaticBudgetMax() when set,
+         * otherwise falls back to memory_limit/8. Idempotent — subsequent
+         * FSMs on the same worker no-op. */
+        h2_static_budget_init_once(
+            (conn != NULL && conn->config != NULL)
+                ? conn->config->h2_static_budget_max : 0);
+
         state = ecalloc(1, sizeof(*state));
         active_static_streams++;
-        state->stream      = stream;
+            state->stream      = stream;
         state->session     = stream->session;
         state->conn        = conn;
         state->file_io     = file_io;
@@ -644,6 +912,12 @@ int h2_stream_send_static_response(void *ctx,
             stream->chunk_queue_bytes = 0;
             stream->chunk_read_offset = 0;
         }
+
+        /* Stash conn + mark queue as static-owned so every chunk
+         * release path (drain, dtor, finalize pending) routes through
+         * the accounting wrapper. */
+        stream->conn                 = conn;
+        stream->static_tracks_chunks = true;
 
         h2_static_cb_t *cb = (h2_static_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
             h2_static_dispatch, sizeof(h2_static_cb_t));

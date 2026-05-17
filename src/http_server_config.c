@@ -73,6 +73,7 @@ struct _http_server_shared_config_t {
     uint32_t                drain_cooldown_ms;
     uint32_t                stream_write_buffer_bytes;
     size_t                  max_body_size;
+    size_t                  h2_static_budget_max;
 
     /* H3 production knobs — see header for semantics. */
     uint32_t                http3_idle_timeout_ms;
@@ -369,6 +370,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->drain_cooldown_ms            = DEFAULT_DRAIN_COOLDOWN_MS;
     config->stream_write_buffer_bytes    = DEFAULT_STREAM_WRITE_BUFFER_BYTES;
     config->max_body_size                = DEFAULT_MAX_BODY_SIZE;
+    config->h2_static_budget_max         = 0;  /* 0 = auto from memory_limit */
     config->http3_idle_timeout_ms        = DEFAULT_HTTP3_IDLE_TIMEOUT_MS;
     config->http3_stream_window_bytes    = DEFAULT_HTTP3_STREAM_WINDOW_BYTES;
     config->http3_max_concurrent_streams = DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS;
@@ -1134,6 +1136,41 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getStreamWriteBufferBytes)
     ZEND_PARSE_PARAMETERS_NONE();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     RETURN_LONG(config->stream_write_buffer_bytes);
+}
+
+/* proto HttpServerConfig::setH2StaticBudgetMax(int $bytes): static
+ *
+ * Per-worker memory cap for HTTP/2 static-file body buffers (read-ahead
+ * chunks + ring queues). 0 = auto (memory_limit/8). Explicit value is
+ * still clamped at runtime so the static budget never exceeds
+ * memory_limit minus a small reserve for the rest of the worker. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setH2StaticBudgetMax)
+{
+    zend_long bytes;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(bytes)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) { return; }
+
+    if (bytes < 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "H2StaticBudgetMax must be >= 0 (0 = auto)", 0);
+        return;
+    }
+
+    config->h2_static_budget_max = (size_t)bytes;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getH2StaticBudgetMax(): int  0 = auto */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getH2StaticBudgetMax)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->h2_static_budget_max);
 }
 
 /* proto HttpServerConfig::setMaxBodySize(int $bytes): static
@@ -2251,6 +2288,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->drain_cooldown_ms           = 0;
     config->stream_write_buffer_bytes   = 0;
     config->max_body_size               = 0;
+    config->h2_static_budget_max        = 0;
     config->http3_idle_timeout_ms        = 0;
     config->http3_stream_window_bytes    = 0;
     config->http3_max_concurrent_streams = 0;
@@ -2378,6 +2416,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->drain_cooldown_ms           = src->drain_cooldown_ms;
     shared->stream_write_buffer_bytes   = src->stream_write_buffer_bytes;
     shared->max_body_size               = src->max_body_size;
+    shared->h2_static_budget_max        = src->h2_static_budget_max;
     shared->http3_idle_timeout_ms        = src->http3_idle_timeout_ms;
     shared->http3_stream_window_bytes    = src->http3_stream_window_bytes;
     shared->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
@@ -2526,6 +2565,7 @@ static void http_server_config_populate_from_shared(
     dst->drain_cooldown_ms           = src->drain_cooldown_ms;
     dst->stream_write_buffer_bytes   = src->stream_write_buffer_bytes;
     dst->max_body_size               = src->max_body_size;
+    dst->h2_static_budget_max        = src->h2_static_budget_max;
     dst->http3_idle_timeout_ms        = src->http3_idle_timeout_ms;
     dst->http3_stream_window_bytes    = src->http3_stream_window_bytes;
     dst->http3_max_concurrent_streams = src->http3_max_concurrent_streams;

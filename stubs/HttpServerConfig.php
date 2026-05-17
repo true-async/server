@@ -346,6 +346,21 @@ final class HttpServerConfig
     public function getStreamWriteBufferBytes(): int {}
 
     /**
+     * Set the per-worker memory cap for HTTP/2 static-file body buffers
+     * (read-ahead chunks + ring queues). 0 = auto (memory_limit/8). Any
+     * explicit value is clamped so the static budget never exceeds
+     * memory_limit minus a small reserve for PHP heap + nghttp2/TLS
+     * overhead. See src/http2/http2_static_response.c.
+     *
+     * @param int $bytes  0 for auto, otherwise byte ceiling.
+     * @return static
+     */
+    public function setH2StaticBudgetMax(int $bytes): static {}
+
+    /** @return int  0 if not explicitly set (auto = memory_limit/8) */
+    public function getH2StaticBudgetMax(): int {}
+
+    /**
      * Set the maximum request body size accepted on both HTTP/1 and HTTP/2
      * listeners (bytes). H1 rejects with 413 + connection close; H2 rejects
      * with RST_STREAM(INTERNAL_ERROR) and the connection stays up for other

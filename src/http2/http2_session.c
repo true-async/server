@@ -18,6 +18,7 @@
 #include "core/http_connection.h"
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
+#include "http2/http2_static_accounting.h"
 #include "http_known_strings.h"
 #include "log/trace_context.h"
 #include "http_body_stream.h"
@@ -353,6 +354,8 @@ static int cb_on_header(nghttp2_session *ng,
 
 /* Accumulate a DATA-frame chunk into the stream's request body buffer.
  * Enforces HTTP2_MAX_BODY_SIZE (plan §4) as a belt-and-braces cap on
+ * per-stream body size; nghttp2 will RST_STREAM on overflow. */
+
 /* Splice whatever the h2 parser has already accumulated for this stream
  * into the body queue as a single chunk, then flip body_streaming so
  * subsequent cb_on_data_chunk_recv calls push directly. Invoked from
@@ -966,10 +969,10 @@ static void h2_emit_streaming_body(struct http2_emit_state *st,
         remaining                 -= take;
 
         if (stream->chunk_read_offset == chunk_len) {
-            zend_string_release(chunk);
             stream->chunk_queue[stream->chunk_queue_head] = NULL;
             stream->chunk_queue_head++;
             stream->chunk_read_offset = 0;
+            h2_static_account_release_chunk(stream, chunk);
         }
     }
 
@@ -1460,10 +1463,10 @@ static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
         }
 
         if (stream->chunk_read_offset == chunk_len) {
-            zend_string_release(chunk);
             stream->chunk_queue[stream->chunk_queue_head] = NULL;
             stream->chunk_queue_head++;
             stream->chunk_read_offset = 0;
+            h2_static_account_release_chunk(stream, chunk);
         }
     }
 

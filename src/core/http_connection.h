@@ -162,6 +162,13 @@ struct _http_connection_t {
     size_t                   read_buffer_size;
     size_t                   read_buffer_len;
 
+    /* Bytes currently held by h2 static-file FSMs on this connection
+     * (pending_chunk + queued chunks awaiting drain). Maintained by
+     * h2_static_account_alloc / free in src/http2/http2_static_response.c.
+     * MUST be 0 by the time the connection slot is returned to the arena
+     * — destroy ASSERTs this. */
+    size_t                   static_conn_bytes_in_flight;
+
     /* Batched plaintext output: amortises N consecutive writes to one
      * socket into a single in-flight uv_write + a growing pending
      * buffer. While `out_in_flight` is true, http_connection_send_batched

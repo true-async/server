@@ -22,6 +22,7 @@
 
 typedef struct http2_session_t http2_session_t;
 typedef struct http2_stream_t  http2_stream_t;
+typedef struct _http_connection_t http_connection_t;
 
 /* Per-stream state machine — mirrors RFC 9113 §5.1 but collapses
  * (IDLE, RESERVED_LOCAL, RESERVED_REMOTE) into a single IDLE because
@@ -154,6 +155,20 @@ struct http2_stream_t {
      * is_streaming==false / response committed and is a no-op for
      * the static delivery). Mirrors h1_request_ctx_t::skip_php_handler. */
     bool                 skip_handler;
+
+    /* Owning connection. Resolved once at h2 static FSM init via
+     * http2_session_get_conn(stream->session) and stashed here so the
+     * stream destructor can decrement per-conn accounting without
+     * re-touching a possibly torn-down session. NULL outside static
+     * delivery. */
+    http_connection_t   *conn;
+
+    /* True while the h2 static FSM owns this stream's chunk_queue —
+     * every chunk allocated by h2_static_alloc_chunk and every release
+     * (drain, dtor, pending_chunk on finalize) must go through the
+     * accounting wrapper. User-driven setBody / streaming send() paths
+     * leave this false. */
+    bool                 static_tracks_chunks;
 
     /* Optional close hook for protocol-owned static delivery. Fires
      * exactly once from cb_on_stream_close right after nghttp2 tears

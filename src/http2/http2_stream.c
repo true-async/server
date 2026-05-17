@@ -14,6 +14,7 @@
 #include "php.h"
 #include "Zend/zend_async_API.h"    /* zend_async_trigger_event_t dispose */
 #include "http2/http2_stream.h"
+#include "http2/http2_static_accounting.h"
 #include "http1/http_parser.h"     /* http_request_destroy */
 
 /*
@@ -87,13 +88,18 @@ void http2_stream_release(http2_stream_t *stream)
     if (stream->chunk_queue != NULL) {
         for (size_t i = stream->chunk_queue_head; i < stream->chunk_queue_tail; i++) {
             if (stream->chunk_queue[i] != NULL) {
-                zend_string_release(stream->chunk_queue[i]);
+                h2_static_account_release_chunk(stream, stream->chunk_queue[i]);
             }
         }
 
         efree(stream->chunk_queue);
         stream->chunk_queue = NULL;
     }
+
+    /* Defensive: if the static FSM finalized first it already drained
+     * its accounting; this only matters when stream_dtor races ahead. */
+    stream->static_tracks_chunks = false;
+    stream->conn = NULL;
 
     /* write_event — plain in-thread event lazily created by
      * h2_wait_for_drain_event. Dispose explicitly so the backing

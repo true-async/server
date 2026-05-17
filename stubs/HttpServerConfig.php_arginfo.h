@@ -107,6 +107,8 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_getStreamWriteBufferBytes   arginfo_class_TrueAsync_HttpServerConfig_getBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_setMaxBodySize              arginfo_class_TrueAsync_HttpServerConfig_setBacklog
 #define arginfo_class_TrueAsync_HttpServerConfig_getMaxBodySize              arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_setH2StaticBudgetMax        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+#define arginfo_class_TrueAsync_HttpServerConfig_getH2StaticBudgetMax        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
 
 /* HTTP/3 production knobs (NEXT_STEPS.md §5) */
 #define arginfo_class_TrueAsync_HttpServerConfig_setHttp3IdleTimeoutMs        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
@@ -257,6 +259,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getStreamWriteBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxBodySize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxBodySize);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setH2StaticBudgetMax);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getH2StaticBudgetMax);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3IdleTimeoutMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3StreamWindowBytes);
@@ -348,6 +352,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes,   arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes,   ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getStreamWriteBufferBytes,   arginfo_class_TrueAsync_HttpServerConfig_getStreamWriteBufferBytes,   ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setMaxBodySize,              arginfo_class_TrueAsync_HttpServerConfig_setMaxBodySize,              ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setH2StaticBudgetMax,        arginfo_class_TrueAsync_HttpServerConfig_setH2StaticBudgetMax,        ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getH2StaticBudgetMax,        arginfo_class_TrueAsync_HttpServerConfig_getH2StaticBudgetMax,        ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getMaxBodySize,              arginfo_class_TrueAsync_HttpServerConfig_getMaxBodySize,              ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs,        arginfo_class_TrueAsync_HttpServerConfig_setHttp3IdleTimeoutMs,        ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3IdleTimeoutMs,        arginfo_class_TrueAsync_HttpServerConfig_getHttp3IdleTimeoutMs,        ZEND_ACC_PUBLIC)
