@@ -220,16 +220,15 @@ static bool tls_apply_security_defaults(SSL_CTX *ssl_ctx,
 
     SSL_CTX_set_options(ssl_ctx, options);
 
-    /* Coalescing-write friendliness for the h2 emit pump:
-     *   ENABLE_PARTIAL_WRITE        — SSL_write may return short, caller
-     *                                 advances offset and retries with
-     *                                 the tail. Required for our retry
-     *                                 loop in http2_session_emit.
-     *   ACCEPT_MOVING_WRITE_BUFFER  — retry buffer may sit at a different
-     *                                 address (we heap-promote the emit
-     *                                 buf on overflow). */
+    /* PARTIAL_WRITE + MOVING_WRITE_BUFFER: required by h2 emit retry loop.
+     * RELEASE_BUFFERS: drop record bufs between I/O — saves ~32 KB/idle conn. */
     SSL_CTX_set_mode(ssl_ctx,
-        SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+        SSL_MODE_ENABLE_PARTIAL_WRITE
+      | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER
+#ifdef SSL_MODE_RELEASE_BUFFERS
+      | SSL_MODE_RELEASE_BUFFERS
+#endif
+    );
 
     /* Reject SHA1 in chains, RSA <2048, and other <112-bit primitives.
      * OpenSSL default is level 1 (legacy). */
