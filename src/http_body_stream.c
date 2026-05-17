@@ -13,6 +13,9 @@
 #include "Zend/zend_alloc.h"
 #include "core/async_plain_event.h"
 
+#include <nghttp2/nghttp2.h>
+#include "http2/http2_session.h"
+
 static void fire_data_event(const http_request_t *req)
 {
     async_plain_event_fire(req->body_data_event);
@@ -89,6 +92,17 @@ zend_string *http_body_stream_pop(http_request_t *req)
 
     req->body_bytes_queued  -= ZSTR_LEN(data);
     req->body_bytes_consumed += ZSTR_LEN(data);
+
+    /* Flow-control credit: grant peer permission to send another len bytes
+     * now that PHP has actually drained them. h_session_schedule_emit pushes
+     * the resulting WINDOW_UPDATE on the wire. */
+    if (req->body_h2_session != NULL) {
+        http2_session_t *s = req->body_h2_session;
+        (void)nghttp2_session_consume(s->ng, req->body_h2_stream_id,
+                                      ZSTR_LEN(data));
+        h2_session_schedule_emit(s);
+    }
+
     return data;
 }
 

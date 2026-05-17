@@ -58,7 +58,7 @@ typedef void (*http2_request_ready_cb_t)(struct http_request_t *request,
  * 64 KiB header list cap (matches HTTP_MAX_HEADERS_TOTAL), RFC-min
  * frame size. Exposed so unit tests can cross-check each value
  * against bytes on the wire. */
-#define HTTP2_SETTINGS_INITIAL_WINDOW      (1u << 20)   /* 1 MiB per stream */
+#define HTTP2_SETTINGS_INITIAL_WINDOW      65535u       /* 64 KiB per stream (RFC default; matches nginx/h2o) */
 #define HTTP2_SETTINGS_CONNECTION_WINDOW   (16u << 20)  /* 16 MiB whole conn (h2o-style) */
 #define HTTP2_SETTINGS_MAX_HEADER_LIST     (64u * 1024) /* 64 KiB */
 #define HTTP2_SETTINGS_HEADER_TABLE_BYTES  4096u

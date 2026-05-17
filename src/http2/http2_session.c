@@ -489,6 +489,11 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     }
 
+    /* Buffered branch: handler will read the full body via $request->body
+     * after END_STREAM. No streaming pop will fire, so grant peer credit
+     * here — otherwise CL > INITIAL_WINDOW stalls on the next chunk. */
+    (void)nghttp2_session_consume(ng, stream_id, len);
+
     return 0;
 }
 
@@ -1059,6 +1064,10 @@ static void apply_hardened_options(nghttp2_option *opt)
 {
     nghttp2_option_set_max_settings(opt, HTTP2_OPT_MAX_SETTINGS);
     nghttp2_option_set_max_outbound_ack(opt, HTTP2_OPT_MAX_OUTBOUND_ACK);
+    /* Window updates are sent by us via nghttp2_session_consume after
+     * the body chunk is drained by the handler — see http_body_stream_pop
+     * and the buffered branch in cb_on_data_chunk_recv. */
+    nghttp2_option_set_no_auto_window_update(opt, 1);
 }
 
 static int submit_initial_settings(http2_session_t *session)
