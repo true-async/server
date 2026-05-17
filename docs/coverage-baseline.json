@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 13876,
-      "hit": 10762
+      "total": 13927,
+      "hit": 10807
     },
     "functions": {
-      "total": 924,
-      "hit": 810
+      "total": 929,
+      "hit": 815
     }
   },
   "files": {
@@ -32,12 +32,12 @@
     },
     "src/compression/http_compression_gzip.c": {
       "lines": {
-        "total": 39,
-        "hit": 35
+        "total": 48,
+        "hit": 42
       },
       "functions": {
-        "total": 4,
-        "hit": 4
+        "total": 5,
+        "hit": 5
       }
     },
     "src/compression/http_compression_negotiate.c": {
@@ -48,6 +48,16 @@
       "functions": {
         "total": 6,
         "hit": 6
+      }
+    },
+    "src/compression/http_compression_pool.c": {
+      "lines": {
+        "total": 31,
+        "hit": 29
+      },
+      "functions": {
+        "total": 3,
+        "hit": 3
       }
     },
     "src/compression/http_compression_request.c": {
@@ -62,8 +72,8 @@
     },
     "src/compression/http_compression_response.c": {
       "lines": {
-        "total": 256,
-        "hit": 206
+        "total": 255,
+        "hit": 205
       },
       "functions": {
         "total": 16,
@@ -72,12 +82,12 @@
     },
     "src/compression/http_compression_zstd.c": {
       "lines": {
-        "total": 81,
-        "hit": 66
+        "total": 91,
+        "hit": 74
       },
       "functions": {
-        "total": 5,
-        "hit": 5
+        "total": 6,
+        "hit": 6
       }
     },
     "src/core/async_plain_event.c": {
@@ -512,8 +522,8 @@
     },
     "src/http_server.c": {
       "lines": {
-        "total": 111,
-        "hit": 105
+        "total": 112,
+        "hit": 106
       },
       "functions": {
         "total": 12,
@@ -522,8 +532,8 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1184,
-        "hit": 898
+        "total": 1185,
+        "hit": 899
       },
       "functions": {
         "total": 63,
