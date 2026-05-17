@@ -87,4 +87,33 @@ zend_string *http_static_cache_body_acquire(http_static_cache_t *cache, const ch
 void http_static_cache_body_store(http_static_cache_t *cache, const char *path, size_t path_len,
 								  const char *body, size_t body_len);
 
+/* === Existence probe (nginx open_file_cache style) =============
+ *
+ * The precompressed-sidecar selector needs to ask "does foo.js.gz
+ * exist?" before every request. Doing it with stat() is the dominant
+ * cost on warm precomp HITs (~20 µs per request on the static-h2
+ * benchmark). The probe API reuses the same HashTable with two extra
+ * states per entry — positive (the normal cached metadata), and
+ * negative ("we checked, file is absent") — so subsequent probes for
+ * the same path skip the syscall. Negative entries respect the same
+ * TTL as positives. */
+typedef enum
+{
+	HTTP_STATIC_CACHE_PROBE_UNKNOWN = 0, /* no entry / TTL expired */
+	HTTP_STATIC_CACHE_PROBE_EXISTS,	     /* positive cache hit */
+	HTTP_STATIC_CACHE_PROBE_NOT_FOUND,   /* negative cache hit */
+} http_static_cache_probe_t;
+
+/* Pure read — does not mutate LRU/TTL state. Use this in the selector's
+ * hot loop where the caller hasn't yet decided whether to act on the
+ * answer. */
+http_static_cache_probe_t http_static_cache_probe(http_static_cache_t *cache, const char *path,
+												  size_t path_len);
+
+/* Record a negative result (the stat we just ran said "no"). Memory
+ * footprint is one entry — no body, no etag, no MIME — so negatives
+ * cost ~80 bytes apiece. Eviction is the shared LRU at max_entries. */
+void http_static_cache_negative_insert(http_static_cache_t *cache, const char *path,
+									   size_t path_len);
+
 #endif /* HTTP_STATIC_CACHE_H */

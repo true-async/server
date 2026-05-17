@@ -59,6 +59,13 @@ typedef struct entry_s
 	/* Persistent body for inline-slurp dedup; NULL until first reader stores it. */
 	zend_string *body;
 
+	/* nginx open_file_cache 'errors on' analogue: when set, this entry
+	 * is a negative-cache marker — we stat()'d the path and the file
+	 * was absent. cache_lookup ignores these (returns miss), so the
+	 * engine never tries to serve from them; only the precomp existence
+	 * probe consults them. */
+	bool not_found;
+
 	struct entry_s *prev; /* LRU links: NULL on head */
 	struct entry_s *next; /* NULL on tail */
 } entry_t;
@@ -115,6 +122,7 @@ static void index_dtor(zval *pZv)
 	entry_t *e = (entry_t *)Z_PTR_P(pZv);
 	entry_free(e);
 }
+
 
 static void lru_unlink(http_static_cache_t *cache, entry_t *e)
 {
@@ -227,6 +235,12 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 	entry_t *e = (entry_t *)zend_hash_str_find_ptr(&cache->index, path, path_len);
 
 	if (e == NULL) {
+		return false;
+	}
+
+	/* Negative entries are visible only to the existence probe; the
+	 * engine has no metadata to serve from them, so treat as miss. */
+	if (e->not_found) {
 		return false;
 	}
 
@@ -358,4 +372,66 @@ void http_static_cache_body_store(http_static_cache_t *const cache, const char *
 	memcpy(ZSTR_VAL(persistent), body, body_len);
 	ZSTR_VAL(persistent)[body_len] = '\0';
 	e->body = persistent;
+}
+
+/* === Existence probe ============================================= */
+
+http_static_cache_probe_t http_static_cache_probe(http_static_cache_t *const cache,
+												  const char *const path, const size_t path_len)
+{
+	ZEND_ASSERT(cache != NULL);
+	ZEND_ASSERT(path != NULL);
+
+	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+		return HTTP_STATIC_CACHE_PROBE_UNKNOWN;
+	}
+
+	entry_t *const e = (entry_t *)zend_hash_str_find_ptr(&cache->index, path, path_len);
+
+	if (e == NULL) {
+		return HTTP_STATIC_CACHE_PROBE_UNKNOWN;
+	}
+
+	/* TTL applies to both positive and negative entries — operator's
+	 * "how long am I willing to be stale" knob holds for absence too. */
+	if (time(NULL) - e->cached_at > cache->ttl_seconds) {
+		evict_entry(cache, e);
+		return HTTP_STATIC_CACHE_PROBE_UNKNOWN;
+	}
+
+	return e->not_found ? HTTP_STATIC_CACHE_PROBE_NOT_FOUND
+						: HTTP_STATIC_CACHE_PROBE_EXISTS;
+}
+
+void http_static_cache_negative_insert(http_static_cache_t *const cache,
+									   const char *const path, const size_t path_len)
+{
+	ZEND_ASSERT(cache != NULL);
+	ZEND_ASSERT(path != NULL);
+
+	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+		return;
+	}
+
+	/* If a stale entry already lives here (positive or negative), drop
+	 * it first — we're recording fresh evidence. */
+	zend_string *key = zend_string_init(path, path_len, 1);
+	entry_t *existing = (entry_t *)zend_hash_find_ptr(&cache->index, key);
+
+	if (existing != NULL) {
+		evict_entry(cache, existing);
+	}
+
+	if (cache->count >= cache->max_entries) {
+		evict_lru(cache);
+	}
+
+	entry_t *e = pecalloc(1, sizeof(*e), 1);
+	e->path_key  = key;
+	e->cached_at = time(NULL);
+	e->not_found = true;
+
+	lru_push_head(cache, e);
+	cache->count++;
+	zend_hash_add_ptr(&cache->index, key, e);
 }

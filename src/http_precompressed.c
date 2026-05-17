@@ -14,6 +14,7 @@
 #include "php_http_server.h"
 #include "http_precompressed.h"
 #include "compression/http_compression_negotiate.h"
+#include "static/http_static_cache.h"
 
 #include "Zend/zend_stream.h"    /* zend_stat_t */
 #include "Zend/zend_virtual_cwd.h" /* VCWD_STAT */
@@ -33,7 +34,8 @@
 
 bool http_precompressed_select(const http_request_t *request, const uint32_t enabled_mask,
 							   char *path_buf, const size_t buf_cap, size_t *path_len,
-							   const char **out_encoding, size_t *out_encoding_len)
+							   const char **out_encoding, size_t *out_encoding_len,
+							   http_static_cache_t *const cache)
 {
 	if (enabled_mask == 0) {
 		return false;
@@ -85,16 +87,43 @@ bool http_precompressed_select(const http_request_t *request, const uint32_t ena
 		char candidate[MAXPATHLEN];
 		memcpy(candidate, path_buf, *path_len);
 		memcpy(candidate + *path_len, codecs[i].suffix, codecs[i].suffix_len);
-		candidate[*path_len + codecs[i].suffix_len] = '\0';
+		const size_t candidate_len = *path_len + codecs[i].suffix_len;
+		candidate[candidate_len] = '\0';
+
+		/* Cache probe (nginx open_file_cache analogue). Positive entries
+		 * are seeded by the engine's cache_insert after a real serve;
+		 * negative entries are seeded just below. Either way, a probe
+		 * hit lets us skip the stat. */
+		if (cache != NULL) {
+			const http_static_cache_probe_t pr =
+				http_static_cache_probe(cache, candidate, candidate_len);
+
+			if (pr == HTTP_STATIC_CACHE_PROBE_NOT_FOUND) {
+				continue;
+			}
+
+			if (pr == HTTP_STATIC_CACHE_PROBE_EXISTS) {
+				goto take;
+			}
+			/* UNKNOWN — fall through to stat. */
+		}
 
 		zend_stat_t st;
 
 		if (VCWD_STAT(candidate, &st) != 0 || !S_ISREG(st.st_mode)) {
+			if (cache != NULL) {
+				http_static_cache_negative_insert(cache, candidate, candidate_len);
+			}
+
 			continue;
 		}
+		/* Positive existence — let the engine's cache_insert publish
+		 * the full metadata entry later. We don't seed a stub here so
+		 * the entry that lands carries real etag/MIME/last-modified. */
 
+take:
 		memcpy(path_buf + *path_len, codecs[i].suffix, codecs[i].suffix_len);
-		*path_len += codecs[i].suffix_len;
+		*path_len = candidate_len;
 		path_buf[*path_len] = '\0';
 		*out_encoding = codecs[i].token;
 		*out_encoding_len = codecs[i].token_len;

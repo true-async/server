@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 typedef struct http_request_t http_request_t;
+typedef struct http_static_cache_s http_static_cache_t;
 
 enum {
 	HTTP_PRECOMP_BR = 1u << 0,
@@ -40,9 +41,17 @@ enum {
  * untouched and the function returns false.
  *
  * `enabled_mask` is a bitwise-OR of HTTP_PRECOMP_* — codecs not in the
- * mask are skipped even if the client accepts them. */
+ * mask are skipped even if the client accepts them.
+ *
+ * `cache` is optional; when non-NULL the selector consults the cache's
+ * existence probe before stat()ing each candidate, and records negative
+ * results so subsequent probes skip the syscall. Positive results are
+ * left to the engine's own cache_insert (which carries full metadata).
+ * Pass NULL when the caller has no static cache (e.g. Response::sendFile),
+ * preserving the original stat-per-codec behaviour. */
 bool http_precompressed_select(const http_request_t *request, uint32_t enabled_mask,
 							   char *path_buf, size_t buf_cap, size_t *path_len,
-							   const char **out_encoding, size_t *out_encoding_len);
+							   const char **out_encoding, size_t *out_encoding_len,
+							   http_static_cache_t *cache);
 
 #endif

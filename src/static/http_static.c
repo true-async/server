@@ -297,8 +297,11 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				pre_ct_len = sizeof("application/octet-stream") - 1;
 			}
 
+			http_static_cache_t *const probe_cache = http_static_cache_acquire(server);
+
 			if (http_precompressed_select(request, precomp_mask, fs_path, sizeof(fs_path),
-										  &fs_path_len, &picked_encoding, &picked_encoding_len)) {
+										  &fs_path_len, &picked_encoding, &picked_encoding_len,
+										  probe_cache)) {
 				override_ct = pre_ct;
 				override_ct_len = pre_ct_len;
 			}

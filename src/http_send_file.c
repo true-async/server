@@ -171,8 +171,11 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	size_t picked_encoding_len = 0;
 
 	if (req->opts.precompressed) {
+		/* sendFile() has no shared static cache to consult — pass NULL
+		 * to keep the original stat-per-codec behaviour. */
 		(void)http_precompressed_select(request, HTTP_PRECOMP_ALL, fs_path, sizeof(fs_path),
-										&fs_path_len, &picked_encoding, &picked_encoding_len);
+										&fs_path_len, &picked_encoding, &picked_encoding_len,
+										NULL);
 	}
 
 	zend_string *cd = sf_build_content_disposition(&req->opts);
