@@ -463,6 +463,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/http_connection.c
     src/core/conn_arena.c
     src/core/body_pool.c
+    src/core/async_plain_event.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c

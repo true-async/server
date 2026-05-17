@@ -48,6 +48,71 @@ traffic, USL β > 0). The only acceptable off-load is the **TLS handshake**
 (asymmetric crypto), because handshakes are rare enough that the
 cross-core transfer cost is amortised.
 
+### 1.4 Choosing an event primitive for in-thread wakeups
+
+When a piece of code needs to be woken up by a producer that runs on the
+same reactor thread (which is virtually every wakeup the server itself
+raises — `body_event`, `body_data_event`, `write_event`,
+`tls_space_event`, ...), the choice of event primitive is dictated by
+**what kind of consumer is waiting**, not by how often it fires.
+
+Two and only two cases:
+
+**(1) The consumer is a coroutine waiting on the event.**
+
+The waker callback (`zend_async_waker_callback_resolve`) does nothing
+heavier than enqueueing the coroutine into `ASYNC_G(coroutine_queue)` —
+the actual fiber switch happens at the next scheduler tick, **never
+inline**. Reentrancy is impossible by construction.
+
+Use **`async_plain_event`** (`include/core/async_plain_event.h`). It
+allocates a bare `zend_async_event_t` with no libuv handle behind it;
+firing is a direct `zend_async_callbacks_notify`. Zero syscalls per
+wake. The trigger event's `uv_async_send` (eventfd_write) buys nothing
+in this case and costs one syscall per fire.
+
+**(2) The consumer is a callback that performs I/O.**
+
+If a callback attached to the event itself drives I/O — calls
+`http2_session_emit`, dispatches a read, pushes more bytes through
+nghttp2/OpenSSL — then firing the event from inside an I/O-bearing
+stack frame can recurse back into the same function (notably
+`nghttp2_session_send`, which is not reentrant). The wake **must be
+deferred** off the current stack.
+
+Use a **microtask** (`zend_async_microtask_t` + `ZEND_ASYNC_ADD_MICROTASK`,
+from `Zend/zend_async_API.h`). The scheduler drains the microtask buffer
+between reactor iterations (`execute_microtasks()` in
+`ext/async/scheduler.c`) — the work runs on a clean stack, after every
+in-flight nghttp2/OpenSSL/parser call has returned. Producer just
+`ZEND_ASYNC_ADD_MICROTASK(&task->base)`; no event object, no
+`uv_async_send`, no syscall. Reference impl:
+`src/core/http_connection.c::conn_destroy_microtask_handler` — the
+deferred-teardown path that protected `nghttp2_session_*` from
+mid-callback `http_connection_destroy`.
+
+Worked example:
+
+- `body_data_event` — consumer is `readBody()` parking in a coroutine.
+  → **plain event**.
+- `write_event` (h2 stream) — consumers include `h2_static_on_window_open`
+  and `h2_buffered_on_window_open`, both of which call
+  `http2_session_emit` directly from the callback.
+  → **microtask**: the callback enqueues a microtask that calls
+  `http2_session_emit` later; the event itself can then be a plain event.
+
+When migrating an existing wakeup, audit every `add_callback` on the
+event before flipping it to plain. If any callback does I/O, move that
+callback's I/O into a microtask — or refactor it to a flag-set pattern
+(the emit loop picks the flag up on its next iteration) so it becomes
+a case-1 consumer.
+
+Trigger event (`ZEND_ASYNC_NEW_TRIGGER_EVENT` / `uv_async_send`) is
+reserved for **cross-thread** wakeups — that is the only purpose its
+eventfd indirection actually serves. Do not use it as a defer mechanism
+for in-thread work; microtasks are cheaper (no syscall) and clearer
+about intent.
+
 ---
 
 ## 2. Branch prediction: `EXPECTED` / `UNEXPECTED`

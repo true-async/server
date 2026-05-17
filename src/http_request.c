@@ -14,6 +14,7 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "http_body_stream.h"
+#include "core/async_plain_event.h"
 #include "log/trace_context.h"
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_exceptions.h"
@@ -646,15 +647,16 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         }
 
         /* Park on body_data_event. Lazy-create if no chunk has been
-         * pushed yet (early-call before parser delivered anything). */
+         * pushed yet (early-call before parser delivered anything).
+         * Plain in-thread event — producer (parser callback) runs on
+         * the same reactor thread, so the uv_async_t indirection is
+         * pure waste. */
         if (req->body_data_event == NULL) {
-            zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+            req->body_data_event = async_plain_event_new();
 
-            if (trig == NULL) {
+            if (req->body_data_event == NULL) {
                 RETURN_NULL();
             }
-
-            req->body_data_event = &trig->base;
         }
 
         zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;

@@ -11,19 +11,11 @@
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_string.h"
 #include "Zend/zend_alloc.h"
+#include "core/async_plain_event.h"
 
 static void fire_data_event(const http_request_t *req)
 {
-    if (req->body_data_event == NULL) {
-        return;
-    }
-
-    zend_async_trigger_event_t *trig =
-        (zend_async_trigger_event_t *)req->body_data_event;
-
-    if (trig->trigger != NULL) {
-        trig->trigger(trig);
-    }
+    async_plain_event_fire(req->body_data_event);
 }
 
 static bool ensure_data_event(http_request_t *req)
@@ -32,14 +24,10 @@ static bool ensure_data_event(http_request_t *req)
         return true;
     }
 
-    zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
-
-    if (trig == NULL) {
-        return false;
-    }
-
-    req->body_data_event = &trig->base;
-    return true;
+    /* Producer (parser on_data) and consumer (readBody) both run on the
+     * same reactor thread — no need for uv_async_t indirection. */
+    req->body_data_event = async_plain_event_new();
+    return req->body_data_event != NULL;
 }
 
 bool http_body_stream_push(http_request_t *req, zend_string *data)

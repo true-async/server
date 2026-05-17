@@ -126,7 +126,12 @@ struct http2_stream_t {
 
     /* Trigger event handler awaits on when backpressure fires. The
      * data provider fires it (on drain) to wake a suspended send().
-     * Lazy-created on first need. */
+     * Lazy-created on first need.
+     *
+     * MUST stay a trigger event (uv_async_send under the hood) — fires
+     * happen from inside nghttp2_session_send / data-provider callbacks;
+     * the deferred wake breaks reentrancy back into session_send. A
+     * plain in-thread event would recurse and corrupt nghttp2 state. */
     void                *write_event;  /* zend_async_trigger_event_t *; void to avoid
                                           zend_async_API.h include pollution here */
 
