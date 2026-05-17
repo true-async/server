@@ -29,6 +29,7 @@
 static void save_current_header(http1_parser_t *parser);
 static char* extract_boundary(const char *content_type);
 static void finalize_multipart(http1_parser_t *parser);
+static void http1_request_body_upgrade(http_request_t *req);
 
 /* Strict Content-Length parser per RFC 9110 §8.6 (Content-Length = 1*DIGIT)
  * and RFC 9112 §6.3. Rejects:
@@ -430,6 +431,45 @@ static void save_current_header(http1_parser_t *parser)
     parser->header_value_builder.s = NULL;
 }
 
+/* Splice whatever the H1 parser has already accumulated into the body
+ * queue as a single chunk, then flip body_streaming so subsequent
+ * on_body calls push directly. Called from HttpRequest::readBody() for
+ * the "buffered → stream" upgrade (Case 2). Idempotent. */
+static void http1_request_body_upgrade(http_request_t *req)
+{
+    if (req->body_streaming) {
+        return;
+    }
+
+    http1_parser_t *parser = (http1_parser_t *)req->body_transport_ctx;
+    zend_string    *initial = NULL;
+
+    if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
+        /* Pre-sized path (Content-Length known): on_body wrote directly
+         * into req->body up to parser->body_offset. Hand it off as the
+         * first chunk and clear the slot — body_streaming below makes
+         * future on_body calls take the streaming branch. */
+        ZSTR_LEN(req->body) = parser->body_offset;
+        ZSTR_VAL(req->body)[parser->body_offset] = '\0';
+        initial = req->body;
+        req->body = NULL;
+        parser->body_offset = 0;
+    } else if (parser != NULL && parser->body_builder.s != NULL
+               && ZSTR_LEN(parser->body_builder.s) > 0) {
+        /* Chunked / unknown-length path: bytes are in body_builder. */
+        smart_str_0(&parser->body_builder);
+        initial = parser->body_builder.s;
+        parser->body_builder.s = NULL;
+    }
+
+    if (initial != NULL) {
+        http_body_stream_push(req, initial);
+        zend_string_release(initial);
+    }
+
+    req->body_streaming = true;
+}
+
 static int on_headers_complete(llhttp_t* llhttp_parser)
 {
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
@@ -545,14 +585,22 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         }
     }
 
-    /* Streaming body mode (issue #26). When the server-wide flag is on,
-     * parser does NOT accumulate body into req->body — instead on_body
-     * pushes chunks into a per-request queue drained by readBody().
-     * Multipart still goes through the multipart processor (no current
-     * use case for streaming raw multipart; see plan §5 edge-case). */
+    /* Streaming body mode (issue #26). Three-case policy by Content-Length:
+     *   CL >= AUTO_THRESHOLD or CL == 0 (chunked) → stream immediately;
+     *   CL >= SMALL but < AUTO → buffer, upgrade if readBody is called;
+     *   CL <  SMALL                       → buffer, never upgrade.
+     * Multipart bypasses streaming entirely (no current use case for
+     * raw-multipart streaming; see plan §5 edge-case). */
     if (!req->use_multipart && parser->conn != NULL && parser->conn->view != NULL
         && parser->conn->view->body_streaming_enabled) {
-        req->body_streaming = true;
+        if (req->content_length == 0
+            || req->content_length >= HTTP_BODY_STREAM_AUTO_THRESHOLD) {
+            req->body_streaming = true;
+        } else if (req->content_length >= HTTP_BODY_STREAM_THRESHOLD) {
+            req->body_upgrade_to_stream = http1_request_body_upgrade;
+            req->body_transport_ctx     = parser;
+        }
+        /* else: CL < SMALL — pure buffered, no upgrade hook. */
     }
 
     /* Prepare body buffer based on Content-Length (only if not multipart

@@ -352,7 +352,33 @@ static int cb_on_header(nghttp2_session *ng,
 
 /* Accumulate a DATA-frame chunk into the stream's request body buffer.
  * Enforces HTTP2_MAX_BODY_SIZE (plan §4) as a belt-and-braces cap on
- * top of the per-stream flow-control window — if the peer ignores
+/* Splice whatever the h2 parser has already accumulated for this stream
+ * into the body queue as a single chunk, then flip body_streaming so
+ * subsequent cb_on_data_chunk_recv calls push directly. Invoked from
+ * HttpRequest::readBody() for the "buffered → stream" upgrade (Case 2).
+ * Idempotent. */
+static void http2_request_body_upgrade(http_request_t *req)
+{
+    if (req->body_streaming) {
+        return;
+    }
+
+    http2_stream_t *stream = (http2_stream_t *)req->body_transport_ctx;
+
+    if (stream != NULL && stream->request_body_buf.s != NULL
+        && ZSTR_LEN(stream->request_body_buf.s) > 0) {
+        smart_str_0(&stream->request_body_buf);
+        zend_string *initial = stream->request_body_buf.s;
+        stream->request_body_buf.s = NULL;
+
+        http_body_stream_push(req, initial);
+        zend_string_release(initial);
+    }
+
+    req->body_streaming = true;
+}
+
+/* top of the per-stream flow-control window — if the peer ignores
  * the window and somehow keeps shipping bytes, we refuse at this
  * layer too. Returns NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE for a
  * stream-level reset; connection stays up for other streams. */
@@ -542,10 +568,22 @@ static int cb_on_frame_recv(nghttp2_session *ng,
                 http_request_parse_trace_context(stream->request);
             }
 
-            /* Streaming body mode (issue #26) — see H1 parser equivalent. */
+            /* Streaming body mode (issue #26). Three-case policy by
+             * Content-Length, see H1 parser for the full doc:
+             *   CL == 0 (chunked) or CL >= AUTO → stream immediately
+             *   SMALL <= CL < AUTO → buffer + install upgrade hook
+             *   CL <  SMALL → buffer, never stream. */
             if (session->conn != NULL && session->conn->view != NULL
                 && session->conn->view->body_streaming_enabled) {
-                stream->request->body_streaming = true;
+                http_request_t *r = stream->request;
+
+                if (r->content_length == 0
+                    || r->content_length >= HTTP_BODY_STREAM_AUTO_THRESHOLD) {
+                    r->body_streaming = true;
+                } else if (r->content_length >= HTTP_BODY_STREAM_THRESHOLD) {
+                    r->body_upgrade_to_stream = http2_request_body_upgrade;
+                    r->body_transport_ctx     = stream;
+                }
             }
             /* Bump request refcount BEFORE handing it to PHP.
              * The stream keeps writing body bytes / firing body_event

@@ -560,8 +560,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         RETURN_NULL();
     }
 
-    if (UNEXPECTED(!req->body_streaming)) {
-        /* Buffered mode: drain req->body once, then EOF. */
+    /* ─── Case 0/1: body already fully buffered. Return whole, then EOF. */
+    if (!req->body_streaming && req->complete) {
         if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
             zend_string *body = req->body;
             req->body = NULL;
@@ -571,6 +571,63 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         RETURN_NULL();
     }
 
+    /* ─── Case 1 (still arriving, small body): just wait for completion
+     * and return the whole accumulated body. No streaming machinery —
+     * no body_data_event, no queue, no per-chunk overhead. The Case
+     * triggers when the parser saw a Content-Length below
+     * HTTP_BODY_STREAM_THRESHOLD and therefore left body_streaming=false
+     * AND did NOT install body_upgrade_to_stream. */
+    if (!req->body_streaming && req->body_upgrade_to_stream == NULL) {
+        if (req->body_event == NULL) {
+            zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+            if (trig == NULL) {
+                RETURN_NULL();
+            }
+
+            req->body_event = &trig->base;
+        }
+
+        zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+            RETURN_NULL();
+        }
+
+        if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+            return;
+        }
+
+        zend_async_resume_when(co, req->body_event, false,
+                               zend_async_waker_callback_resolve, NULL);
+
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
+
+        if (EG(exception) != NULL) {
+            return;
+        }
+
+        /* Body is now complete — drain req->body once. */
+        if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
+            zend_string *body = req->body;
+            req->body = NULL;
+            RETURN_STR(body);
+        }
+
+        RETURN_NULL();
+    }
+
+    /* ─── Case 2: middle band (SMALL <= CL < AUTO). Parser was buffering
+     * the body into the transport accumulator; upgrade NOW so this and
+     * future on_data callbacks push into the queue. */
+    if (!req->body_streaming && req->body_upgrade_to_stream != NULL) {
+        req->body_upgrade_to_stream(req);
+        /* body_streaming is now true; fall through to the streaming
+         * pop/park loop below. */
+    }
+
+    /* ─── Case 3: streaming — pop from queue, park on body_data_event. */
     for (;;) {
         zend_string *chunk = http_body_stream_pop(req);
 

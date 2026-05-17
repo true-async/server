@@ -178,17 +178,34 @@ struct http_request_t {
     zend_string *traceparent_raw;
     zend_string *tracestate_raw;
 
-    /* ─── Streaming request body (issue #26). When body_streaming is
-     * true, parser callbacks push DATA chunks into body_queue_head/tail
-     * instead of accumulating into req->body. PHP-side HttpRequest::
-     * readBody() pops from the queue and parks on body_data_event when
-     * empty. body_streaming is set once at on_headers_complete from the
-     * server config and never mutates after that. */
+    /* ─── Streaming request body (issue #26). Three-case policy keyed
+     * on Content-Length, see HTTP_BODY_STREAM_* in http_body_stream.h:
+     *
+     *  CL >= AUTO_THRESHOLD or CL == 0 (chunked):
+     *    body_streaming = true at on_headers_complete. Parser pushes
+     *    DATA chunks straight into body_queue_head/tail.
+     *
+     *  SMALL <= CL < AUTO_THRESHOLD:
+     *    body_streaming = false; parser writes into the transport-
+     *    specific accumulator (h1: parser->body_builder or pre-sized
+     *    req->body; h2: stream->request_body_buf). body_upgrade_to_
+     *    stream is installed so HttpRequest::readBody() can flip the
+     *    request into streaming mode on demand — splicing the current
+     *    accumulator into body_queue_head as the first chunk and
+     *    flipping body_streaming on. body_transport_ctx is the opaque
+     *    argument (h1: http1_parser_t*, h2: http2_stream_t*).
+     *
+     *  CL < SMALL:
+     *    Same as the middle case at the parser level — buffered into
+     *    the accumulator — but readBody() refuses to upgrade and
+     *    simply waits for body_event then returns the whole body. */
     struct http_body_chunk_t *body_queue_head;
     struct http_body_chunk_t *body_queue_tail;
     size_t                    body_bytes_queued;
     size_t                    body_bytes_consumed;
     zend_async_event_t       *body_data_event;
+    void                    (*body_upgrade_to_stream)(http_request_t *req);
+    void                     *body_transport_ctx;
 
     /* TODO(issue #26 backpressure): reserved for the follow-up PR that
      * gates H2/H3 window updates. body_h2_* will snapshot
