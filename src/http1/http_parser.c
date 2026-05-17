@@ -445,18 +445,14 @@ static void http1_request_body_upgrade(http_request_t *req)
     zend_string    *initial = NULL;
 
     if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
-        /* Pre-sized path (Content-Length known): on_body wrote directly
-         * into req->body up to parser->body_offset. Hand it off as the
-         * first chunk and clear the slot — body_streaming below makes
-         * future on_body calls take the streaming branch. */
-        ZSTR_LEN(req->body) = parser->body_offset;
-        ZSTR_VAL(req->body)[parser->body_offset] = '\0';
-        initial = req->body;
+        /* body_pool buffer is IS_STR_INTERNED — copy into a regular
+         * zend_string before pushing or the queue chunk leaks the slot. */
+        initial = zend_string_init(ZSTR_VAL(req->body), parser->body_offset, 0);
+        body_release(req->body);
         req->body = NULL;
         parser->body_offset = 0;
     } else if (parser != NULL && parser->body_builder.s != NULL
                && ZSTR_LEN(parser->body_builder.s) > 0) {
-        /* Chunked / unknown-length path: bytes are in body_builder. */
         smart_str_0(&parser->body_builder);
         initial = parser->body_builder.s;
         parser->body_builder.s = NULL;
