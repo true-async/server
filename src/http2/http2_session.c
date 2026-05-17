@@ -21,6 +21,7 @@
 #include "http_known_strings.h"
 #include "log/trace_context.h"
 #include "http_body_stream.h"
+#include "core/async_plain_event.h"
 
 #include <stdio.h>            /* snprintf for :status value */
 #include <string.h>
@@ -678,22 +679,16 @@ static int cb_on_frame_recv(nghttp2_session *ng,
             http2_stream_t *s = (http2_stream_t *)
                 nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
 
-            if (s != NULL && s->write_event != NULL) {
-                zend_async_trigger_event_t *trig =
-                    (zend_async_trigger_event_t *)s->write_event;
-
-                if (trig->trigger != NULL) { trig->trigger(trig); }
+            if (s != NULL) {
+                async_plain_event_fire((zend_async_event_t *)s->write_event);
             }
         } else {
             zval *zv;
             ZEND_HASH_FOREACH_VAL(&session->streams, zv) {
                 http2_stream_t *s = (http2_stream_t *)Z_PTR_P(zv);
 
-                if (s != NULL && s->write_event != NULL) {
-                    zend_async_trigger_event_t *trig =
-                        (zend_async_trigger_event_t *)s->write_event;
-
-                    if (trig->trigger != NULL) { trig->trigger(trig); }
+                if (s != NULL) {
+                    async_plain_event_fire((zend_async_event_t *)s->write_event);
                 }
             } ZEND_HASH_FOREACH_END();
         }
@@ -973,12 +968,8 @@ static void h2_emit_streaming_body(struct http2_emit_state *st,
         }
     }
 
-    if (stream->chunk_queue_head > head_before
-        && stream->write_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)stream->write_event;
-
-        if (trig->trigger != NULL) { trig->trigger(trig); }
+    if (stream->chunk_queue_head > head_before) {
+        async_plain_event_fire((zend_async_event_t *)stream->write_event);
     }
 }
 
@@ -1045,6 +1036,8 @@ static int h2_send_data_callback(nghttp2_session *ng,
 
     return 0;
 }
+
+static zend_async_microtask_t *h2_session_emit_mt_new(http2_session_t *session);
 
 static void install_callbacks(nghttp2_session_callbacks *cbs)
 {
@@ -1147,13 +1140,82 @@ http2_session_t *http2_session_new(http_connection_t *conn,
         return NULL;
     }
 
+    session->emit_mt = h2_session_emit_mt_new(session);
+
+    if (session->emit_mt == NULL) {
+        nghttp2_session_del(session->ng);
+        zend_hash_destroy(&session->streams);
+        efree(session);
+        return NULL;
+    }
+
     return session;
+}
+
+/* Reusable deferred-emit microtask. See CODING_STANDARDS §1.4. */
+typedef struct {
+    zend_async_microtask_t base;
+    http2_session_t       *session;
+} h2_emit_mt_t;
+
+static void h2_emit_mt_handler(zend_async_microtask_t *mt)
+{
+    http2_session_t *session = ((h2_emit_mt_t *)mt)->session;
+
+    if (session == NULL) {
+        return;
+    }
+
+    session->emit_mt_queued = false;
+    http2_session_emit(session);
+}
+
+static void h2_emit_mt_dtor(zend_async_microtask_t *mt)
+{
+    efree(mt);
+}
+
+static zend_async_microtask_t *h2_session_emit_mt_new(http2_session_t *session)
+{
+    h2_emit_mt_t *mt = ecalloc(1, sizeof(*mt));
+    mt->base.handler   = h2_emit_mt_handler;
+    mt->base.dtor      = h2_emit_mt_dtor;
+    mt->base.ref_count = 1;  /* persistent pin */
+    mt->session        = session;
+    return &mt->base;
+}
+
+void h2_session_schedule_emit(http2_session_t *session)
+{
+    if (session == NULL || session->emit_mt == NULL
+        || session->emit_mt_queued
+        || session->emit_mt->is_cancelled) {
+        return;
+    }
+
+    session->emit_mt_queued = true;
+    ZEND_ASYNC_ADD_MICROTASK(session->emit_mt);
 }
 
 void http2_session_free(http2_session_t *session)
 {
     if (session == NULL) {
         return;
+    }
+
+    if (session->emit_mt != NULL) {
+        if (session->emit_mt_queued) {
+            /* Scheduler still owns the pointer — let dtor free it. */
+            ((h2_emit_mt_t *)session->emit_mt)->session = NULL;
+            session->emit_mt->is_cancelled = true;
+            if (session->emit_mt->ref_count > 0) {
+                session->emit_mt->ref_count--;
+            }
+        } else {
+            efree(session->emit_mt);
+        }
+        session->emit_mt = NULL;
+        session->emit_mt_queued = false;
     }
 
     /* nghttp2_session_del invokes on_stream_close for every live stream;
@@ -1395,12 +1457,8 @@ static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
     }
 
     /* Wake producer parked on full ring (no-op if none parked). */
-    if (stream->chunk_queue_head > head_before
-        && stream->write_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)stream->write_event;
-
-        if (trig->trigger != NULL) { trig->trigger(trig); }
+    if (stream->chunk_queue_head > head_before) {
+        async_plain_event_fire((zend_async_event_t *)stream->write_event);
     }
 
     if (stream->chunk_queue_head == stream->chunk_queue_tail) {
@@ -1520,11 +1578,7 @@ static void h2_buffered_on_window_open(zend_async_event_t *event,
     (void)event;
     (void)result;
     (void)exception;
-    http2_session_t *session = ((h2_buffered_wcb_t *)callback)->session;
-
-    if (session != NULL) {
-        http2_session_emit(session);
-    }
+    h2_session_schedule_emit(((h2_buffered_wcb_t *)callback)->session);
 }
 
 int http2_session_submit_response(http2_session_t *session,
@@ -1605,7 +1659,7 @@ int http2_session_submit_response(http2_session_t *session,
          * cb freed via dispose when event is torn down. */
         if (rc == 0) {
             if (stream->write_event == NULL) {
-                stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+                stream->write_event = async_plain_event_new();
             }
 
             if (stream->write_event != NULL) {
@@ -1616,8 +1670,7 @@ int http2_session_submit_response(http2_session_t *session,
                 if (wcb != NULL) {
                     wcb->base.dispose = h2_buffered_wcb_dispose;
                     wcb->session      = session;
-                    zend_async_event_t *we = &((zend_async_trigger_event_t *)
-                                               stream->write_event)->base;
+                    zend_async_event_t *we = (zend_async_event_t *)stream->write_event;
 
                     if (!we->add_callback(we, &wcb->base)) {
                         efree(wcb);

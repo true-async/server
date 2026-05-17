@@ -21,6 +21,7 @@
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
+#include "core/async_plain_event.h"
 
 #ifdef HAVE_OPENSSL
 #include <openssl/bio.h>
@@ -1359,13 +1360,12 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     }
 
     if (stream->write_event == NULL) {
-        stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+        stream->write_event = async_plain_event_new();
 
         if (stream->write_event == NULL) { return false; }
     }
 
-    zend_async_event_t *wake_ev =
-        &((zend_async_trigger_event_t *)stream->write_event)->base;
+    zend_async_event_t *wake_ev = (zend_async_event_t *)stream->write_event;
 
     if (ZEND_ASYNC_WAKER_NEW(co) == NULL) { return false; }
 
@@ -1500,12 +1500,10 @@ static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
     if (stream->write_event == NULL) {
-        stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+        stream->write_event = async_plain_event_new();
     }
 
-    return stream->write_event != NULL
-               ? &((zend_async_trigger_event_t *)stream->write_event)->base
-               : NULL;
+    return (zend_async_event_t *)stream->write_event;
 }
 
 /* sendable() backing: true if append_chunk would proceed without suspend. */

@@ -91,12 +91,11 @@ void http2_stream_release(http2_stream_t *stream)
         stream->chunk_queue = NULL;
     }
 
-    /* write_event — trigger event lazily created by
-     * h2_wait_for_drain_event. Dispose explicitly so TrueAsync's
-     * event registry releases backing memory. Safe on NULL. */
+    /* write_event — plain in-thread event lazily created by
+     * h2_wait_for_drain_event. Dispose explicitly so the backing
+     * struct is freed. Safe on NULL. */
     if (stream->write_event != NULL) {
-        zend_async_event_t *ev =
-            &((zend_async_trigger_event_t *)stream->write_event)->base;
+        zend_async_event_t *ev = (zend_async_event_t *)stream->write_event;
 
         if (ev->dispose != NULL) {
             ev->dispose(ev);

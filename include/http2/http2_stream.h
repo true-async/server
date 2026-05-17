@@ -124,16 +124,10 @@ struct http2_stream_t {
      * this before invoking drain on a dead stream. */
     bool                 peer_closed;
 
-    /* Trigger event handler awaits on when backpressure fires. The
-     * data provider fires it (on drain) to wake a suspended send().
-     * Lazy-created on first need.
-     *
-     * MUST stay a trigger event (uv_async_send under the hood) — fires
-     * happen from inside nghttp2_session_send / data-provider callbacks;
-     * the deferred wake breaks reentrancy back into session_send. A
-     * plain in-thread event would recurse and corrupt nghttp2 state. */
-    void                *write_event;  /* zend_async_trigger_event_t *; void to avoid
-                                          zend_async_API.h include pollution here */
+    /* Plain in-thread event awoken by ring drain / WINDOW_UPDATE. All
+     * callbacks MUST defer session_emit via h2_session_schedule_emit
+     * (fires happen inside session_send — direct emit recurses). */
+    void                *write_event;  /* zend_async_event_t * (void to avoid hdr pollution) */
 
     /* Per-stream PHP objects. HTTP/2 multiplexes
      * N concurrent requests on one TCP connection — each needs its

@@ -22,6 +22,7 @@
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
 #include "http_response_internal.h"
+#include "core/async_plain_event.h"
 
 #include <nghttp2/nghttp2.h>
 #include <errno.h>
@@ -223,8 +224,7 @@ static void h2_static_finalize(h2_static_state_t *state, const int status)
     if (state->window_cb != NULL
         && state->stream != NULL
         && state->stream->write_event != NULL) {
-        zend_async_event_t *we = &((zend_async_trigger_event_t *)
-                                   state->stream->write_event)->base;
+        zend_async_event_t *we = (zend_async_event_t *)state->stream->write_event;
         (void)we->del_callback(we, state->window_cb);
         state->window_cb = NULL;
     }
@@ -326,8 +326,12 @@ static void h2_static_on_window_open(zend_async_event_t *event,
         }
     }
 
+    /* Direct http2_session_emit would recurse into nghttp2_session_send
+     * (write_event fires from inside cb_send_data); defer via microtask
+     * — see CODING_STANDARDS §1.4. h2_static_submit_read above is an
+     * async uv_fs_read submission and does not enter session_send. */
     if (state->session != NULL && state->conn != NULL) {
-        http2_session_emit(state->session);
+        h2_session_schedule_emit(state->session);
     }
 }
 
@@ -667,7 +671,7 @@ int h2_stream_send_static_response(void *ctx,
 
         /* Subscribe to write_event for ring-drain / WINDOW_UPDATE wake. */
         if (stream->write_event == NULL) {
-            stream->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+            stream->write_event = async_plain_event_new();
         }
 
         if (stream->write_event != NULL) {
@@ -677,8 +681,7 @@ int h2_stream_send_static_response(void *ctx,
             if (wcb != NULL) {
                 wcb->base.dispose = h2_static_cb_dispose;
                 wcb->state        = state;
-                zend_async_event_t *we = &((zend_async_trigger_event_t *)
-                                           stream->write_event)->base;
+                zend_async_event_t *we = (zend_async_event_t *)stream->write_event;
 
                 if (we->add_callback(we, &wcb->base)) {
                     state->window_cb = &wcb->base;

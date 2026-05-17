@@ -135,7 +135,14 @@ struct http2_session_t {
     /* Set by http2_session_emit for the duration of nghttp2_session_send;
      * NULL otherwise. */
     struct http2_emit_state *emit_state;
+
+    /* Reusable deferred-emit microtask (CODING_STANDARDS §1.4).
+     * emit_mt_queued coalesces concurrent schedule calls. */
+    zend_async_microtask_t *emit_mt;
+    bool                    emit_mt_queued;
 };
+
+void h2_session_schedule_emit(http2_session_t *session);
 
 /* Per-emit accumulator: copied control bytes (emit_buf) + ordered body iov
  * records + addrefs that keep body memory alive across the in-flight writev. */

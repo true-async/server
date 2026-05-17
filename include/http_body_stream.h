@@ -17,25 +17,10 @@
 
 #include "http1/http_parser.h"   /* http_request_t, http_body_chunk_t */
 
-/* Body-size thresholds for the three-case streaming policy (issue #26).
- *
- * SMALL (64 KiB):
- *   Bodies below this never stream. readBody() waits for completion
- *   (body_event) and returns the whole body as one string. No queue,
- *   no body_data_event, no per-chunk uv_async_send. 64 KiB lines up
- *   with the default readBody($maxLen=65536) ceiling.
- *
- * AUTO (1 MiB):
- *   Bodies at/above this stream IMMEDIATELY from on_headers_complete
- *   regardless of whether the handler ever calls readBody — buffering
- *   them would risk OOM under any reasonable concurrency. Unknown-
- *   length (chunked, CL == 0) also takes this path for the same
- *   reason.
- *
- * SMALL ≤ CL < AUTO:
- *   Buffered initially; if the handler calls readBody() the request
- *   upgrades to streaming on the spot (current accumulator becomes
- *   the first queued chunk). Handlers that never read pay zero. */
+/* 3-case streaming policy (issue #26):
+ *   CL <  SMALL              never stream — wait body_event, return whole
+ *   SMALL <= CL < AUTO       buffer; upgrade on first readBody()
+ *   CL >= AUTO or unknown    stream from on_headers_complete            */
 #define HTTP_BODY_STREAM_THRESHOLD      (64u * 1024u)
 #define HTTP_BODY_STREAM_AUTO_THRESHOLD (1u * 1024u * 1024u)
 

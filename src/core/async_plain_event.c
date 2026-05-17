@@ -4,10 +4,6 @@
  * +----------------------------------------------------------------------+
  *
  * Plain in-thread event — see include/core/async_plain_event.h.
- *
- * Pattern lifted from ext/async/task_group.c::task_group_event_init —
- * the existing canonical in-thread event in PHP-async. We replicate it
- * here as a server-local helper to keep ABI bumps out of scope.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -30,7 +26,6 @@ static bool plain_del_callback(zend_async_event_t *event, zend_async_event_callb
 
 static bool plain_start(zend_async_event_t *event)
 {
-    /* No reactor handle to ref — start/stop are bookkeeping only. */
     (void)event;
     return true;
 }
