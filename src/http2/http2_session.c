@@ -1077,9 +1077,11 @@ static int submit_initial_settings(http2_session_t *session)
         return -1;
     }
 
+    /* stream_id=0 == connection-level window; raise above per-stream
+     * INITIAL_WINDOW so multi-stream conns don't bottleneck on the shared pool. */
     (void)nghttp2_session_set_local_window_size(
         session->ng, NGHTTP2_FLAG_NONE, 0,
-        (int32_t)HTTP2_SETTINGS_INITIAL_WINDOW);
+        (int32_t)HTTP2_SETTINGS_CONNECTION_WINDOW);
 
     return 0;
 }
