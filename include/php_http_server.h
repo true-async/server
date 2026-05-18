@@ -1095,6 +1095,10 @@ void http_response_static_set_header   (zend_object *obj,
 void http_response_static_set_body_str (zend_object *obj, zend_string *body);
 void http_response_static_set_body_cstr(zend_object *obj,
                                         const char *body, size_t body_len);
+/* Zero-copy body: takes a ref on `body`; send-path emits it as a
+ * separate iov entry — no smart_str copy. Caller may release its
+ * own ref immediately after. Empty bodies are stored as no-body. */
+void http_response_static_set_body_view (zend_object *obj, zend_string *body);
 
 /* High-level response builders. Wrappers over the static_set_* primitives
  * for patterns that recurred in static handler / send_file / compression

@@ -424,7 +424,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 				apply_mount_headers(response_obj, mount, true);
 
-				http_response_static_set_body_str(response_obj, cached_body);
+				http_response_static_set_body_view(response_obj, cached_body);
 				zend_string_release(cached_body);
 				return HTTP_STATIC_HANDLED;
 			}
@@ -623,7 +623,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			 * the would-be size explicitly. */
 			http_response_set_content_length(response_obj, (uint64_t)st.st_size);
 		} else {
-			http_response_static_set_body_str(response_obj, body);
+			http_response_static_set_body_view(response_obj, body);
 			zend_string_release(body);
 		}
 

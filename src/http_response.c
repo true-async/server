@@ -82,6 +82,14 @@ typedef struct {
     zend_string     *protocol_version;  /* HTTP version (e.g., "1.1") */
     smart_str        body;              /* Body buffer (pointer + size_t) */
 
+    /* Non-owning view onto someone else's body bytes. When non-NULL,
+     * holds an addref'd zend_string (typically from the persistent
+     * static body cache) and the send-path emits it as a separate
+     * iov entry — zero memcpy on the response side. Mutually
+     * exclusive with `body`: any path that mutates the smart_str
+     * must first drop this view via response_clear_body_view(). */
+    zend_string     *body_view;
+
     /* Streaming ops + ctx. Installed by
      * the protocol strategy at dispatch; NULL for buffered-mode
      * responses. send() activates streaming by reading these; the
@@ -132,6 +140,16 @@ static inline http_response_object *http_response_from_obj(zend_object *obj) {
     return (http_response_object *)((char *)(obj) - XtOffsetOf(http_response_object, std));
 }
 #define Z_HTTP_RESPONSE_P(zv) http_response_from_obj(Z_OBJ_P(zv))
+
+/* Drop the borrowed-body ref if held. Call before any path that
+ * mutates the smart_str body — they assume body.s is the truth. */
+static inline void response_clear_body_view(http_response_object *r)
+{
+    if (r->body_view != NULL) {
+        zend_string_release(r->body_view);
+        r->body_view = NULL;
+    }
+}
 
 /* Helper: gate every status/header/body mutation. A response is
  * no-longer-mutable in two states:
@@ -680,6 +698,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
      * unknown up front — scalable-grow flips to doubling above 2 MiB
      * so a handler writing a 256 MiB body doesn't take 40 k mremap
      * calls. See smart_str_scalable.h. */
+    response_clear_body_view(response);
     http_smart_str_append_scalable(&response->body,
                                    ZSTR_VAL(data), ZSTR_LEN(data));
 
@@ -693,6 +712,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, getBody)
     ZEND_PARSE_PARAMETERS_NONE();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->body_view != NULL) {
+        /* Borrowed body is immutable from the response side — a refcount
+         * bump is safe (no realloc/free path mutates it in place). */
+        RETURN_STR_COPY(response->body_view);
+    }
 
     if (response->body.s) {
         /* Deep copy: smart_str_appendl/_free in subsequent write()/setBody
@@ -725,6 +750,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setBody)
     }
 
     /* Clear and set new body */
+    response_clear_body_view(response);
     smart_str_free(&response->body);
     smart_str_append(&response->body, body);
 
@@ -835,6 +861,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
 
     /* Pre-encoded passthrough: caller hands us JSON bytes directly. */
     if (Z_TYPE_P(data) == IS_STRING) {
+        response_clear_body_view(response);
         smart_str_free(&response->body);
         smart_str_appendl(&response->body, Z_STRVAL_P(data), Z_STRLEN_P(data));
         smart_str_0(&response->body);
@@ -853,6 +880,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
          * a partial encode (which is what php_json_encode would have
          * left in `encoded` on failure without PARTIAL_OUTPUT_ON_ERROR). */
         smart_str_free(&encoded);
+        response_clear_body_view(response);
         smart_str_free(&response->body);
         static const char err_body[] = "{\"error\":\"json encoding failed\"}";
         smart_str_appendl(&response->body, err_body, sizeof(err_body) - 1);
@@ -861,6 +889,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
+    response_clear_body_view(response);
     smart_str_free(&response->body);
     response->body = encoded;
 
@@ -892,6 +921,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, html)
     zval_ptr_dtor(&content_type);
 
     /* Set body */
+    response_clear_body_view(response);
     smart_str_free(&response->body);
     smart_str_append(&response->body, html);
 
@@ -1184,6 +1214,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
 
     /* Append final data if provided */
     if (data) {
+        response_clear_body_view(response);
         smart_str_append(&response->body, data);
     }
 
@@ -1251,6 +1282,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->send_file_req = NULL;
     response->socket_fd = SOCK_ERR;
     memset(&response->body, 0, sizeof(smart_str));
+    response->body_view = NULL;
 
     /* Initialize headers hash table */
     ALLOC_HASHTABLE(response->headers);
@@ -1289,6 +1321,7 @@ static void http_response_free(zend_object *obj)
         FREE_HASHTABLE(response->trailers);
     }
 
+    response_clear_body_view(response);
     smart_str_free(&response->body);
 
     /* Aborted-request safety: dispose never picked up the descriptor. */
@@ -1406,6 +1439,7 @@ void http_response_set_error(zend_object *obj, int status, const char *message)
     zval ct_z;
     ZVAL_STR(&ct_z, zend_string_init("text/plain; charset=utf-8", 25, 0));
     zend_hash_str_update(r->headers, "content-type", 12, &ct_z);
+    response_clear_body_view(r);
     smart_str_free(&r->body);
     smart_str_appends(&r->body, message);
     smart_str_0(&r->body);
@@ -1590,6 +1624,10 @@ static void emit_headers_block(smart_str *result, http_response_object *response
 size_t http_response_get_body_len(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
+    if (response->body_view != NULL) {
+        return ZSTR_LEN(response->body_view);
+    }
+
     return response->body.s != NULL ? ZSTR_LEN(response->body.s) : 0;
 }
 
@@ -1618,14 +1656,23 @@ void http_response_format_parts(zend_object *obj,
     }
 #endif
 
-    smart_str_0(&response->body);
-    const size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;
+    zend_string *const view = response->body_view;
+    if (view == NULL) {
+        smart_str_0(&response->body);
+    }
+
+    const size_t body_len = view != NULL
+        ? ZSTR_LEN(view)
+        : (response->body.s ? ZSTR_LEN(response->body.s) : 0);
 
     emit_headers_block(&result, response, body_len);
     smart_str_0(&result);
 
     *headers_out = result.s ? result.s : zend_empty_string;
-    if (response->body.s != NULL && body_len > 0) {
+    if (view != NULL) {
+        zend_string_addref(view);
+        *body_out = view;
+    } else if (response->body.s != NULL && body_len > 0) {
         zend_string_addref(response->body.s);
         *body_out = response->body.s;
     } else {
@@ -1651,12 +1698,20 @@ zend_string *http_response_format(zend_object *obj)
     }
 #endif
 
-    smart_str_0(&response->body);
-    const size_t body_len = response->body.s ? ZSTR_LEN(response->body.s) : 0;
+    zend_string *const view = response->body_view;
+    if (view == NULL) {
+        smart_str_0(&response->body);
+    }
+
+    const size_t body_len = view != NULL
+        ? ZSTR_LEN(view)
+        : (response->body.s ? ZSTR_LEN(response->body.s) : 0);
 
     emit_headers_block(&result, response, body_len);
 
-    if (response->body.s && body_len > 0) {
+    if (view != NULL) {
+        smart_str_append(&result, view);
+    } else if (response->body.s && body_len > 0) {
         smart_str_append(&result, response->body.s);
     }
 
@@ -1743,10 +1798,14 @@ zend_string *http_response_format_static_head(zend_object *obj,
     smart_str_appendl(&result, "\r\n", 2);
 
     if (include_inline_body) {
-        smart_str_0(&response->body);
+        if (response->body_view != NULL) {
+            smart_str_append(&result, response->body_view);
+        } else {
+            smart_str_0(&response->body);
 
-        if (response->body.s != NULL && ZSTR_LEN(response->body.s) > 0) {
-            smart_str_append(&result, response->body.s);
+            if (response->body.s != NULL && ZSTR_LEN(response->body.s) > 0) {
+                smart_str_append(&result, response->body.s);
+            }
         }
     }
 
@@ -1887,6 +1946,12 @@ HashTable *http_response_get_trailers(zend_object *obj)
 const char *http_response_get_body(zend_object *obj, size_t *len_out)
 {
     http_response_object *response = http_response_from_obj(obj);
+
+    if (response->body_view != NULL) {
+        if (len_out != NULL) { *len_out = ZSTR_LEN(response->body_view); }
+        return ZSTR_VAL(response->body_view);
+    }
+
     smart_str_0(&response->body);
 
     if (response->body.s == NULL) {
@@ -1901,6 +1966,11 @@ const char *http_response_get_body(zend_object *obj, size_t *len_out)
 zend_string *http_response_get_body_str(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
+
+    if (response->body_view != NULL) {
+        return response->body_view;
+    }
+
     smart_str_0(&response->body);
     return response->body.s;  /* may be NULL */
 }
@@ -1944,6 +2014,7 @@ void http_response_static_set_header(zend_object *obj,
 void http_response_static_set_body_str(zend_object *obj, zend_string *body)
 {
     http_response_object *r = http_response_from_obj(obj);
+    response_clear_body_view(r);
     smart_str_free(&r->body);
 
     if (body != NULL && ZSTR_LEN(body) > 0) {
@@ -1951,6 +2022,22 @@ void http_response_static_set_body_str(zend_object *obj, zend_string *body)
     }
 
     smart_str_0(&r->body);
+}
+
+/* Zero-copy variant: keep a refcount on the caller's zend_string and
+ * let the send-path emit it as a separate iov entry. The caller may
+ * release its own ref immediately after — we hold our own bump. Body
+ * must be non-empty (zero-length bodies use the smart_str path). */
+void http_response_static_set_body_view(zend_object *obj, zend_string *body)
+{
+    http_response_object *r = http_response_from_obj(obj);
+    response_clear_body_view(r);
+    smart_str_free(&r->body);
+
+    if (body != NULL && ZSTR_LEN(body) > 0) {
+        zend_string_addref(body);
+        r->body_view = body;
+    }
 }
 
 /* C-string variant — skips the zend_string init/release dance the
@@ -1961,6 +2048,7 @@ void http_response_static_set_body_cstr(zend_object *obj,
                                         const char *body, size_t body_len)
 {
     http_response_object *r = http_response_from_obj(obj);
+    response_clear_body_view(r);
     smart_str_free(&r->body);
 
     if (body != NULL && body_len > 0) {
@@ -1978,6 +2066,7 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
     response->status_code = status_code;
 
     /* Reset body */
+    response_clear_body_view(response);
     smart_str_free(&response->body);
     smart_str_appends(&response->body, message);
     smart_str_0(&response->body);
