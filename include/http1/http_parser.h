@@ -289,11 +289,16 @@ typedef struct http1_parser_t {
 
     bool              owns_request;          /* True while `request` is still parser-owned.
                                               * Cleared the moment we hand the request over
-                                              * to dispatch_cb (on_headers_complete); cleanup
-                                              * paths only destroy the request if this is true.
-                                              * Independent of the req's own state — crucial
-                                              * because after handoff `request` may dangle
-                                              * (handler may have already freed it). */
+                                              * to dispatch_cb; cleanup paths only destroy
+                                              * the request if this is true. Independent of
+                                              * the req's own state — crucial because after
+                                              * handoff `request` may dangle (handler may
+                                              * have already freed it). */
+    bool              dispatched;            /* True once dispatch_cb fired for the current
+                                              * request. Set at on_headers_complete (streaming)
+                                              * or on_message_complete (buffered). Prevents
+                                              * a second dispatch on END-STREAM for streaming
+                                              * requests. Reset by on_message_begin. */
 } http1_parser_t;
 
 /* Parser API */

@@ -212,6 +212,7 @@ static int on_message_begin(llhttp_t* llhttp_parser)
     parser->request = ecalloc(1, sizeof(http_request_t));
     parser->request->refcount = 1;
     parser->owns_request = true;
+    parser->dispatched = false;
 
     /* Don't allocate headers HashTable yet - do it lazily */
     parser->request->headers = NULL;
@@ -654,7 +655,14 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         http_request_parse_trace_context(req);
     }
 
-    if (parser->dispatch_cb != NULL) {
+    /* Defer dispatch to on_message_complete for buffered bodies so the
+     * handler always sees the full body in $req->getBody() — TCP-level
+     * fragmentation would otherwise run the handler against a partial
+     * body. Streaming handlers must dispatch immediately to consume
+     * incoming chunks via readBody(). Multipart populates files/post
+     * arrays during parse and is only safe to expose when complete. */
+    if (parser->dispatch_cb != NULL && req->body_streaming) {
+        parser->dispatched = true;
         parser->dispatch_cb(parser->conn, req);
     }
 
@@ -794,6 +802,14 @@ static int on_message_complete(llhttp_t* llhttp_parser)
         trig->trigger(trig);
     }
 
+    /* Deferred dispatch (buffered body path): hand the now-complete
+     * request to the connection. Streaming requests were dispatched
+     * at headers-complete and run in parallel with body chunks. */
+    if (!parser->dispatched && parser->dispatch_cb != NULL) {
+        parser->dispatched = true;
+        parser->dispatch_cb(parser->conn, req);
+    }
+
     /* Pause parsing so llhttp doesn't roll straight into the next
      * pipelined request in the same buffer — that would fire
      * on_headers_complete (and dispatch_cb) for request N+1 while
@@ -905,6 +921,7 @@ void http_parser_reset(http1_parser_t *parser)
 
     parser->request = NULL;
     parser->owns_request = false;
+    parser->dispatched = false;
 
     /* Free smart_str builders */
     smart_str_free(&parser->uri_builder);
@@ -1115,6 +1132,7 @@ void http_parser_reset_for_reuse(http1_parser_t *parser)
 
     parser->request = NULL;
     parser->owns_request = false;
+    parser->dispatched = false;
 
     /* Clear dispatch wiring — new user must re-attach */
     parser->conn = NULL;
