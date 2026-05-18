@@ -7,15 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-18
+
 ### Added
 
-- **`HttpServerConfig::setBootloader(?Closure)` / `getBootloader()`**:
-  optional closure handed to the built-in worker pool. Deep-copied once
-  by `ZEND_ASYNC_NEW_THREAD_POOL_EX` and executed on every worker
-  before its task loop — natural home for per-worker `require` /
-  autoload / DB-pool warm-up that previously lived inside the handler
-  closure. Only consulted when `setWorkers(N) > 1`; requires TrueAsync
-  ABI v0.15+. Test: `server/core/021-bootloader.phpt`.
+- `HttpServerConfig::setBootloader(?Closure)` / `getBootloader()` — closure deep-copied into each worker, runs before task loop. Requires TrueAsync ABI v0.15+. Test: `server/core/021-bootloader.phpt`.
+
+### Fixed
+
+- Double-destroy in `conn_arena_free` under TLS load (re-entrant destroy via `tls_finalize_if_closing` on freed conn). Guarded by `conn->destroying` bit.
+
+### Changed
+
+- Asymmetric TLS BIO ring sizes: CT-in 64K→17K, PT-app back-channel 32K→17K. CT-out/PT-out unchanged. Saves ~62 KiB per TLS conn, no throughput impact.
 
 ## [0.5.3] - 2026-05-16
 

@@ -706,8 +706,11 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
     BIO *internal_bio = NULL;
     BIO *network_bio  = NULL;
 
+    /* internal_bio writebuf = CT-out (OpenSSL writes ciphertext for us to send) — 64K for
+     * multi-record batching on static / h2. network_bio writebuf = CT-in (we feed bytes
+     * from socket for OpenSSL to decrypt) — capped by one TLS record = 17K. */
     if (BIO_new_bio_pair(&internal_bio, TLS_BIO_RING_SIZE,
-                         &network_bio,  TLS_BIO_RING_SIZE) != 1) {
+                         &network_bio,  TLS_BIO_RING_SIZE_SMALL) != 1) {
         SSL_free(ssl);
         ERR_clear_error();
         return NULL;

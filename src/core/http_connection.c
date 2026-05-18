@@ -267,6 +267,13 @@ void http_connection_destroy(http_connection_t *conn)
 {
     if (!conn) return;
 
+    /* Re-entry guard: a sync write-completion deep inside tls_advance_state
+     * can finalize+destroy us, then on stack-unwind the outer
+     * tls_finalize_if_closing fires destroy a second time on the freed slot. */
+    if (conn->destroying) {
+        return;
+    }
+
     /* Cancel any pending teardown microtask — direct destroy taking over. */
     if (conn->destroy_microtask != NULL) {
         conn->destroy_microtask->is_cancelled = true;
@@ -290,6 +297,9 @@ void http_connection_destroy(http_connection_t *conn)
         conn->destroy_pending = true;
         return;
     }
+
+    /* Past defer gates — arm the re-entry guard before any callback removal. */
+    conn->destroying = 1;
 
     if (conn->out_pending_buf != NULL) {
         efree(conn->out_pending_buf);
@@ -2648,7 +2658,7 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
         if (BIO_new_bio_pair(&conn->tls_plaintext_bio,
                              HTTP_TLS_PLAINTEXT_RING_BYTES,
                              &conn->tls_plaintext_bio_app,
-                             HTTP_TLS_PLAINTEXT_RING_BYTES) != 1) {
+                             HTTP_TLS_PLAINTEXT_RING_BACK_BYTES) != 1) {
             ERR_clear_error();
             conn->tls_plaintext_bio = NULL;
             conn->tls_plaintext_bio_app = NULL;

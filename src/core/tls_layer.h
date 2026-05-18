@@ -142,7 +142,9 @@ typedef enum {
  *
  * Memory cost: +47 KiB per TLS connection vs the old 17 KiB.
  */
-#define TLS_BIO_RING_SIZE (64 * 1024)
+#define TLS_BIO_RING_SIZE       (64 * 1024)
+/* CT-in (network → OpenSSL): bounded by one TLS record = 16 KiB max. */
+#define TLS_BIO_RING_SIZE_SMALL (17 * 1024)
 
 /**
  * Maximum length of an error string written by tls_context_new().

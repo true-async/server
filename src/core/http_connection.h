@@ -23,7 +23,10 @@
 
 /* Plaintext ring fed by tls_push. Sized for one MAX_FRAME_SIZE H2
  * frame (16 KiB) plus one in-flight TLS record (16 KiB). */
-#define HTTP_TLS_PLAINTEXT_RING_BYTES (32 * 1024)
+#define HTTP_TLS_PLAINTEXT_RING_BYTES      (32 * 1024)
+/* Back-channel half of the plaintext BIO pair is unused (we never write into
+ * tls_plaintext_bio_app), so cap at one TLS record. */
+#define HTTP_TLS_PLAINTEXT_RING_BACK_BYTES (17 * 1024)
 
 typedef struct http1_parser_t http1_parser_t;
 typedef struct http_request_t http_request_t;
@@ -236,6 +239,8 @@ struct _http_connection_t {
     unsigned                 drain_pending : 1;     /* decision: this conn should drain */
     unsigned                 drain_submitted : 1;   /* HTTP/2: GOAWAY already queued on this session */
     unsigned                 destroy_pending : 1;   /* destroy deferred — a handler coroutine is mid-dispose */
+    unsigned                 destroying : 1;        /* set inside http_connection_destroy past all defer gates;
+                                                       prevents the sync-completion unwind from re-entering. */
     /* True between dispatch_request and handler_coroutine_dispose end. While
      * set, the multishot read callback only buffers bytes — it must NOT feed
      * the parser, because dispatching another request on the same conn while
