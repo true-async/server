@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`HttpServerConfig::setBootloader(?Closure)` / `getBootloader()`**:
+  optional closure handed to the built-in worker pool. Deep-copied once
+  by `ZEND_ASYNC_NEW_THREAD_POOL_EX` and executed on every worker
+  before its task loop — natural home for per-worker `require` /
+  autoload / DB-pool warm-up that previously lived inside the handler
+  closure. Only consulted when `setWorkers(N) > 1`; requires TrueAsync
+  ABI v0.15+. Test: `server/core/021-bootloader.phpt`.
+
 ## [0.5.3] - 2026-05-16
 
 ### Fixed
