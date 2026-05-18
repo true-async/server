@@ -1534,11 +1534,27 @@ static int http_server_start_pool(http_server_object *server,
         return FAILURE;
     }
 
+    /* Pull bootloader off the config (if any) and assemble a zend_fcall_t
+     * for the pool factory. The factory deep-copies once into the
+     * pool's snapshot, so the on-stack fcall has no lifetime beyond the
+     * call itself. */
+    http_server_config_t *boot_cfg = http_server_get_config(server);
+    zend_fcall_t boot, *boot_ptr = NULL;
+    if (boot_cfg != NULL
+        && Z_TYPE(boot_cfg->bootloader) != IS_UNDEF
+        && zend_fcall_info_init(&boot_cfg->bootloader, 0,
+                                &boot.fci, &boot.fci_cache,
+                                NULL, NULL) == SUCCESS) {
+        boot_ptr = &boot;
+    }
+
     /* queue_size = workers so submit doesn't block before workers reach
      * the receive loop — fresh-pool boot-up is otherwise faster on the
      * parent than on worker threads. */
     zend_async_thread_pool_t *pool =
-        ZEND_ASYNC_NEW_THREAD_POOL((int32_t)workers, (int32_t)workers);
+        ZEND_ASYNC_NEW_THREAD_POOL_EX((int32_t)workers, (int32_t)workers,
+                                      boot_ptr, /*coroutine_mode=*/false,
+                                      /*concurrency=*/0);
 
     if (UNEXPECTED(pool == NULL || pool->submit_internal == NULL)) {
         if (pool != NULL) {

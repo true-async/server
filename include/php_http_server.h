@@ -274,6 +274,13 @@ struct _http_server_config_t {
      * error body, not propagate an exception out of the handler). */
     uint32_t json_encode_flags;
 
+    /* Optional Closure deep-copied once per worker by the built-in pool and
+     * executed before the worker's task loop. NULL/IS_UNDEF when unset.
+     * Held as a zval (IS_OBJECT, instanceof Closure) so transfer through
+     * setBootloader is a single addref; converted to zend_fcall_t on the
+     * fly inside http_server_start_pool. */
+    zval bootloader;
+
     /* Log + telemetry. log_severity is an http_log_severity_t int value
      * (0/5/9/13/17), set via setLogSeverity(LogSeverity). log_stream is
      * an IS_RESOURCE zval pointing at any

@@ -17,6 +17,7 @@
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_virtual_cwd.h"        /* VCWD_STAT, VCWD_ACCESS — crossplat */
 #include "Zend/zend_enum.h"
+#include "Zend/zend_closures.h"           /* zend_ce_closure */
 #include "php_streams.h"                  /* php_stream_from_zval_no_verify */
 #include "php_http_server.h"
 #include "core/http_protocol_strategy.h"  /* HTTP_PROTO_MASK_* */
@@ -378,6 +379,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
     config->auto_await_body = true;  /* Default: wait for body on non-multipart */
+    ZVAL_UNDEF(&config->bootloader);
 
     /* Add default listener if host provided */
     if (host) {
@@ -674,6 +676,56 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getWorkers)
     ZEND_PARSE_PARAMETERS_NONE();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     RETURN_LONG(config->workers);
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::setBootloader(?Closure $bootloader): static
+ *
+ * Optional bootloader Closure handed to the built-in worker pool. The
+ * pool deep-copies it once and runs it on every worker before that
+ * worker's task loop — the right place for per-worker autoload, DB
+ * pool warm-up, opcache primes, or any other one-shot init that would
+ * otherwise need to run inside the handler closure on every request.
+ *
+ * Only consulted when setWorkers(N) > 1. Pass NULL to clear. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setBootloader)
+{
+    zval *bootloader_zv = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_OBJECT_OF_CLASS_OR_NULL(bootloader_zv, zend_ce_closure)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (Z_TYPE(config->bootloader) != IS_UNDEF) {
+        zval_ptr_dtor(&config->bootloader);
+        ZVAL_UNDEF(&config->bootloader);
+    }
+
+    if (bootloader_zv != NULL) {
+        ZVAL_COPY(&config->bootloader, bootloader_zv);
+    }
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::getBootloader(): ?Closure */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getBootloader)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (Z_TYPE(config->bootloader) == IS_UNDEF) {
+        RETURN_NULL();
+    }
+
+    ZVAL_COPY(return_value, &config->bootloader);
 }
 /* }}} */
 
@@ -2305,6 +2357,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->is_locked = false;
     config->log_severity = 0;          /* HTTP_LOG_OFF */
     ZVAL_UNDEF(&config->log_stream);
+    ZVAL_UNDEF(&config->bootloader);
     config->telemetry_enabled = false;
     config->body_streaming_enabled = false;
     config->frozen = NULL;
@@ -2366,6 +2419,11 @@ static void http_server_config_free(zend_object *obj)
     if (Z_TYPE(config->log_stream) != IS_UNDEF) {
         zval_ptr_dtor(&config->log_stream);
         ZVAL_UNDEF(&config->log_stream);
+    }
+
+    if (Z_TYPE(config->bootloader) != IS_UNDEF) {
+        zval_ptr_dtor(&config->bootloader);
+        ZVAL_UNDEF(&config->bootloader);
     }
 
     /* Release our ref on the frozen snapshot (may destroy it if last). */

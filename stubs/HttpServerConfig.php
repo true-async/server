@@ -124,6 +124,26 @@ final class HttpServerConfig
     public function getWorkers(): int {}
 
     /**
+     * Optional bootloader Closure handed to the built-in worker pool.
+     *
+     * The pool deep-copies the closure once and runs it on every worker
+     * before that worker's task loop — the right place for per-worker
+     * autoload, DB pool warm-up, opcache primes, or any other one-shot
+     * init that would otherwise need to run inside the handler closure
+     * on every request.
+     *
+     * Only consulted when {@see setWorkers()} > 1. Pass `null` to clear.
+     *
+     * @return static
+     */
+    public function setBootloader(?\Closure $bootloader): static {}
+
+    /**
+     * Returns the bootloader previously set, or null.
+     */
+    public function getBootloader(): ?\Closure {}
+
+    /**
      * Get socket backlog
      */
     public function getBacklog(): int {}
@@ -767,6 +787,22 @@ final class HttpServerConfig
      * Check whether telemetry is enabled.
      */
     public function isTelemetryEnabled(): bool {}
+
+    // === Streaming (issue #26) ===
+
+    /**
+     * Stream request bodies into a per-request queue (issue #26) instead
+     * of accumulating into `req->body`. Handlers must consume via
+     * {@see HttpRequest::readBody()}; getBody() throws.
+     *
+     * @return static
+     */
+    public function setBodyStreamingEnabled(bool $enabled): static {}
+
+    /**
+     * Check whether request-body streaming is enabled.
+     */
+    public function isBodyStreamingEnabled(): bool {}
 
     // === State ===
 

@@ -1,206 +1,217 @@
-/* This is a generated file, edit HttpServerConfig.php instead. */
+/* This is a generated file, edit HttpServerConfig.php.stub.php instead.
+ * Stub hash: 40375bbee0d2c4dc47b40ce24fdd1dc6188c6a70 */
 
-/* Constructor */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, port, IS_LONG, 0, "8080")
 ZEND_END_ARG_INFO()
 
-/* addListener */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_addListener, 0, 2, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, host, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, port, IS_LONG, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, tls, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
-/* addHttp1Listener */
 #define arginfo_class_TrueAsync_HttpServerConfig_addHttp1Listener arginfo_class_TrueAsync_HttpServerConfig_addListener
 
-/* addHttp2Listener */
 #define arginfo_class_TrueAsync_HttpServerConfig_addHttp2Listener arginfo_class_TrueAsync_HttpServerConfig_addListener
 
-/* addUnixListener */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_addUnixListener, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
-/* addHttp3Listener */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_addHttp3Listener, 0, 2, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, host, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, port, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-/* getListeners */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getListeners, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
-/* setBacklog */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setBacklog, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, backlog, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-/* getBacklog */
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getBacklog, 0, 0, IS_LONG, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setWorkers, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, workers, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-/* setWorkers */
-#define arginfo_class_TrueAsync_HttpServerConfig_setWorkers arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getWorkers */
-#define arginfo_class_TrueAsync_HttpServerConfig_getWorkers arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setMaxConnections */
-#define arginfo_class_TrueAsync_HttpServerConfig_setMaxConnections arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getMaxConnections */
-#define arginfo_class_TrueAsync_HttpServerConfig_getMaxConnections arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setMaxInflightRequests */
-#define arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getMaxInflightRequests */
-#define arginfo_class_TrueAsync_HttpServerConfig_getMaxInflightRequests arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setReadTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_setReadTimeout arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getReadTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_getReadTimeout arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setWriteTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_setWriteTimeout arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getWriteTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_getWriteTimeout arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setKeepAliveTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_setKeepAliveTimeout arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getKeepAliveTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_getKeepAliveTimeout arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setShutdownTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_setShutdownTimeout arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getShutdownTimeout */
-#define arginfo_class_TrueAsync_HttpServerConfig_getShutdownTimeout arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* setBackpressureTargetMs */
-#define arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-
-/* getBackpressureTargetMs */
-#define arginfo_class_TrueAsync_HttpServerConfig_getBackpressureTargetMs arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* Step 8 — connection-drain knobs (all int-arg setters alias setBacklog,
- * all int-return getters alias getBacklog — same shape). */
-#define arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeMs       arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeMs       arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeGraceMs  arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeGraceMs  arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setDrainSpreadMs            arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getDrainSpreadMs            arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setDrainCooldownMs          arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getDrainCooldownMs          arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* Streaming (PLAN_STREAMING) */
-#define arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes   arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getStreamWriteBufferBytes   arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setMaxBodySize              arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getMaxBodySize              arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setH2StaticBudgetMax        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getH2StaticBudgetMax        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-
-/* HTTP/3 production knobs (NEXT_STEPS.md §5) */
-#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3IdleTimeoutMs        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3IdleTimeoutMs        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3StreamWindowBytes    arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3StreamWindowBytes    arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3MaxConcurrentStreams arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3MaxConcurrentStreams arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled        arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
-#define arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled         arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
-
-/* HTTP body compression (issue #8) */
-#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled        arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
-#define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled         arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
-#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel          arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel          arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setBrotliLevel               arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel               arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel                 arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel                 arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_setJsonEncodeFlags           arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getJsonEncodeFlags           arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings        arginfo_class_TrueAsync_HttpServerConfig_getListeners
-#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize        arginfo_class_TrueAsync_HttpServerConfig_getBacklog
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes, 0, 1, IS_STATIC, 0)
-	ZEND_ARG_TYPE_INFO(0, types, IS_ARRAY, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getWorkers, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
-#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMimeTypes      arginfo_class_TrueAsync_HttpServerConfig_getListeners
-#define arginfo_class_TrueAsync_HttpServerConfig_setRequestMaxDecompressedSize arginfo_class_TrueAsync_HttpServerConfig_setBacklog
-#define arginfo_class_TrueAsync_HttpServerConfig_getRequestMaxDecompressedSize arginfo_class_TrueAsync_HttpServerConfig_getBacklog
 
-/* setWriteBufferSize */
-#define arginfo_class_TrueAsync_HttpServerConfig_setWriteBufferSize arginfo_class_TrueAsync_HttpServerConfig_setBacklog
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setBootloader, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_OBJ_INFO(0, bootloader, Closure, 1)
+ZEND_END_ARG_INFO()
 
-/* getWriteBufferSize */
-#define arginfo_class_TrueAsync_HttpServerConfig_getWriteBufferSize arginfo_class_TrueAsync_HttpServerConfig_getBacklog
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getBootloader, 0, 0, Closure, 1)
+ZEND_END_ARG_INFO()
 
-/* enableHttp2 */
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_enableHttp2, 0, 1, IS_STATIC, 0)
+#define arginfo_class_TrueAsync_HttpServerConfig_getBacklog arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setMaxConnections, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, maxConnections, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getMaxConnections arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, n, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getMaxInflightRequests arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setReadTimeout, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, timeout, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getReadTimeout arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setWriteTimeout arginfo_class_TrueAsync_HttpServerConfig_setReadTimeout
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getWriteTimeout arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setKeepAliveTimeout arginfo_class_TrueAsync_HttpServerConfig_setReadTimeout
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getKeepAliveTimeout arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setShutdownTimeout arginfo_class_TrueAsync_HttpServerConfig_setReadTimeout
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getShutdownTimeout arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, ms, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getBackpressureTargetMs arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeMs arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeMs arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeGraceMs arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeGraceMs arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setDrainSpreadMs arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getDrainSpreadMs arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setDrainCooldownMs arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getDrainCooldownMs arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, bytes, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getStreamWriteBufferBytes arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setH2StaticBudgetMax arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getH2StaticBudgetMax arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setMaxBodySize arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getMaxBodySize arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3IdleTimeoutMs arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3IdleTimeoutMs arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3StreamWindowBytes arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3StreamWindowBytes arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3MaxConcurrentStreams arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3MaxConcurrentStreams arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, enable, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-/* isHttp2Enabled */
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled, 0, 0, _IS_BOOL, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-/* enableWebSocket */
-#define arginfo_class_TrueAsync_HttpServerConfig_enableWebSocket arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
+#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
-/* isWebSocketEnabled */
-#define arginfo_class_TrueAsync_HttpServerConfig_isWebSocketEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
+#define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
 
-/* enableProtocolDetection */
-#define arginfo_class_TrueAsync_HttpServerConfig_enableProtocolDetection arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
-
-/* isProtocolDetectionEnabled */
-#define arginfo_class_TrueAsync_HttpServerConfig_isProtocolDetectionEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
-
-/* enableTls */
-#define arginfo_class_TrueAsync_HttpServerConfig_enableTls arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
-
-/* isTlsEnabled */
-#define arginfo_class_TrueAsync_HttpServerConfig_isTlsEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
-
-/* setCertificate */
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCertificate, 0, 1, IS_STATIC, 0)
-	ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, level, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-/* getCertificate */
+#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setBrotliLevel arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setJsonEncodeFlags, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, flags, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getJsonEncodeFlags arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings arginfo_class_TrueAsync_HttpServerConfig_getListeners
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, types, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getCompressionMimeTypes arginfo_class_TrueAsync_HttpServerConfig_getListeners
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setRequestMaxDecompressedSize arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getRequestMaxDecompressedSize arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setWriteBufferSize, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, size, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getWriteBufferSize arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_enableHttp2 arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_enableWebSocket arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isWebSocketEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_enableProtocolDetection arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isProtocolDetectionEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_enableTls arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isTlsEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setCertificate arginfo_class_TrueAsync_HttpServerConfig_addUnixListener
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getCertificate, 0, 0, IS_STRING, 1)
 ZEND_END_ARG_INFO()
 
-/* setPrivateKey */
-#define arginfo_class_TrueAsync_HttpServerConfig_setPrivateKey arginfo_class_TrueAsync_HttpServerConfig_setCertificate
+#define arginfo_class_TrueAsync_HttpServerConfig_setPrivateKey arginfo_class_TrueAsync_HttpServerConfig_addUnixListener
 
-/* getPrivateKey */
 #define arginfo_class_TrueAsync_HttpServerConfig_getPrivateKey arginfo_class_TrueAsync_HttpServerConfig_getCertificate
 
-/* setAutoAwaitBody */
-#define arginfo_class_TrueAsync_HttpServerConfig_setAutoAwaitBody arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
+#define arginfo_class_TrueAsync_HttpServerConfig_setAutoAwaitBody arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
-/* isAutoAwaitBodyEnabled */
-#define arginfo_class_TrueAsync_HttpServerConfig_isAutoAwaitBodyEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
+#define arginfo_class_TrueAsync_HttpServerConfig_isAutoAwaitBodyEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
 
-/* isLocked */
-#define arginfo_class_TrueAsync_HttpServerConfig_isLocked arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
-
-/* Logging / telemetry — Step 1 PLAN_LOG.md */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setLogSeverity, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_OBJ_INFO(0, level, TrueAsync\\LogSeverity, 0)
 ZEND_END_ARG_INFO()
@@ -215,13 +226,18 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getLogStream, 0, 0, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 
-#define arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
-#define arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled  arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, enabled, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
 
-#define arginfo_class_TrueAsync_HttpServerConfig_setBodyStreamingEnabled arginfo_class_TrueAsync_HttpServerConfig_enableHttp2
-#define arginfo_class_TrueAsync_HttpServerConfig_isBodyStreamingEnabled  arginfo_class_TrueAsync_HttpServerConfig_isHttp2Enabled
+#define arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
 
-/* Method declarations */
+#define arginfo_class_TrueAsync_HttpServerConfig_setBodyStreamingEnabled arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isBodyStreamingEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isLocked arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
 ZEND_METHOD(TrueAsync_HttpServerConfig, __construct);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addListener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp1Listener);
@@ -230,9 +246,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addUnixListener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp3Listener);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getListeners);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBacklog);
-ZEND_METHOD(TrueAsync_HttpServerConfig, getBacklog);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWorkers);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWorkers);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setBootloader);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getBootloader);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getBacklog);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnections);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxConnections);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxInflightRequests);
@@ -257,10 +275,10 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setDrainCooldownMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getDrainCooldownMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getStreamWriteBufferBytes);
-ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxBodySize);
-ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxBodySize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setH2StaticBudgetMax);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getH2StaticBudgetMax);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxBodySize);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxBodySize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3IdleTimeoutMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3StreamWindowBytes);
@@ -304,7 +322,6 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setPrivateKey);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getPrivateKey);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setAutoAwaitBody);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isAutoAwaitBodyEnabled);
-ZEND_METHOD(TrueAsync_HttpServerConfig, isLocked);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSeverity);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getLogSeverity);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setLogStream);
@@ -313,8 +330,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setTelemetryEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isTelemetryEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBodyStreamingEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isBodyStreamingEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, isLocked);
 
-/* Method table */
 static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, __construct, arginfo_class_TrueAsync_HttpServerConfig___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, addListener, arginfo_class_TrueAsync_HttpServerConfig_addListener, ZEND_ACC_PUBLIC)
@@ -324,9 +341,11 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, addHttp3Listener, arginfo_class_TrueAsync_HttpServerConfig_addHttp3Listener, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getListeners, arginfo_class_TrueAsync_HttpServerConfig_getListeners, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setBacklog, arginfo_class_TrueAsync_HttpServerConfig_setBacklog, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getBacklog, arginfo_class_TrueAsync_HttpServerConfig_getBacklog, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setWorkers, arginfo_class_TrueAsync_HttpServerConfig_setWorkers, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getWorkers, arginfo_class_TrueAsync_HttpServerConfig_getWorkers, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setBootloader, arginfo_class_TrueAsync_HttpServerConfig_setBootloader, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getBootloader, arginfo_class_TrueAsync_HttpServerConfig_getBootloader, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getBacklog, arginfo_class_TrueAsync_HttpServerConfig_getBacklog, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnections, arginfo_class_TrueAsync_HttpServerConfig_setMaxConnections, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getMaxConnections, arginfo_class_TrueAsync_HttpServerConfig_getMaxConnections, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setMaxInflightRequests, arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests, ZEND_ACC_PUBLIC)
@@ -341,45 +360,45 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getShutdownTimeout, arginfo_class_TrueAsync_HttpServerConfig_getShutdownTimeout, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setBackpressureTargetMs, arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getBackpressureTargetMs, arginfo_class_TrueAsync_HttpServerConfig_getBackpressureTargetMs, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnectionAgeMs,       arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeMs,       ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getMaxConnectionAgeMs,       arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeMs,       ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnectionAgeGraceMs,  arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeGraceMs,  ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getMaxConnectionAgeGraceMs,  arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeGraceMs,  ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setDrainSpreadMs,            arginfo_class_TrueAsync_HttpServerConfig_setDrainSpreadMs,            ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getDrainSpreadMs,            arginfo_class_TrueAsync_HttpServerConfig_getDrainSpreadMs,            ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setDrainCooldownMs,          arginfo_class_TrueAsync_HttpServerConfig_setDrainCooldownMs,          ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getDrainCooldownMs,          arginfo_class_TrueAsync_HttpServerConfig_getDrainCooldownMs,          ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes,   arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes,   ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getStreamWriteBufferBytes,   arginfo_class_TrueAsync_HttpServerConfig_getStreamWriteBufferBytes,   ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setMaxBodySize,              arginfo_class_TrueAsync_HttpServerConfig_setMaxBodySize,              ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setH2StaticBudgetMax,        arginfo_class_TrueAsync_HttpServerConfig_setH2StaticBudgetMax,        ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getH2StaticBudgetMax,        arginfo_class_TrueAsync_HttpServerConfig_getH2StaticBudgetMax,        ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getMaxBodySize,              arginfo_class_TrueAsync_HttpServerConfig_getMaxBodySize,              ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs,        arginfo_class_TrueAsync_HttpServerConfig_setHttp3IdleTimeoutMs,        ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3IdleTimeoutMs,        arginfo_class_TrueAsync_HttpServerConfig_getHttp3IdleTimeoutMs,        ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3StreamWindowBytes,    arginfo_class_TrueAsync_HttpServerConfig_setHttp3StreamWindowBytes,    ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3StreamWindowBytes,    arginfo_class_TrueAsync_HttpServerConfig_getHttp3StreamWindowBytes,    ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnectionAgeMs, arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getMaxConnectionAgeMs, arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnectionAgeGraceMs, arginfo_class_TrueAsync_HttpServerConfig_setMaxConnectionAgeGraceMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getMaxConnectionAgeGraceMs, arginfo_class_TrueAsync_HttpServerConfig_getMaxConnectionAgeGraceMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setDrainSpreadMs, arginfo_class_TrueAsync_HttpServerConfig_setDrainSpreadMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getDrainSpreadMs, arginfo_class_TrueAsync_HttpServerConfig_getDrainSpreadMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setDrainCooldownMs, arginfo_class_TrueAsync_HttpServerConfig_setDrainCooldownMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getDrainCooldownMs, arginfo_class_TrueAsync_HttpServerConfig_getDrainCooldownMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setStreamWriteBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getStreamWriteBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_getStreamWriteBufferBytes, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setH2StaticBudgetMax, arginfo_class_TrueAsync_HttpServerConfig_setH2StaticBudgetMax, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getH2StaticBudgetMax, arginfo_class_TrueAsync_HttpServerConfig_getH2StaticBudgetMax, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setMaxBodySize, arginfo_class_TrueAsync_HttpServerConfig_setMaxBodySize, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getMaxBodySize, arginfo_class_TrueAsync_HttpServerConfig_getMaxBodySize, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3IdleTimeoutMs, arginfo_class_TrueAsync_HttpServerConfig_setHttp3IdleTimeoutMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3IdleTimeoutMs, arginfo_class_TrueAsync_HttpServerConfig_getHttp3IdleTimeoutMs, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3StreamWindowBytes, arginfo_class_TrueAsync_HttpServerConfig_setHttp3StreamWindowBytes, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3StreamWindowBytes, arginfo_class_TrueAsync_HttpServerConfig_getHttp3StreamWindowBytes, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3MaxConcurrentStreams, arginfo_class_TrueAsync_HttpServerConfig_setHttp3MaxConcurrentStreams, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3MaxConcurrentStreams, arginfo_class_TrueAsync_HttpServerConfig_getHttp3MaxConcurrentStreams, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled,        arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled,        ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled,         arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled,         ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled,         arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled,         ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled,          arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled,          ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel,           arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel,           ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionLevel,           arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel,           ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setBrotliLevel,                arginfo_class_TrueAsync_HttpServerConfig_setBrotliLevel,                ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getBrotliLevel,                arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel,                ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setZstdLevel,                  arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel,                  ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getZstdLevel,                  arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel,                  ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setJsonEncodeFlags,            arginfo_class_TrueAsync_HttpServerConfig_setJsonEncodeFlags,            ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getJsonEncodeFlags,            arginfo_class_TrueAsync_HttpServerConfig_getJsonEncodeFlags,            ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getSupportedEncodings,         arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings,         ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize,         ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMinSize,         arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize,         ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMimeTypes,       arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes,       ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMimeTypes,       arginfo_class_TrueAsync_HttpServerConfig_getCompressionMimeTypes,       ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled, arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled, arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel, arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionLevel, arginfo_class_TrueAsync_HttpServerConfig_getCompressionLevel, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setBrotliLevel, arginfo_class_TrueAsync_HttpServerConfig_setBrotliLevel, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getBrotliLevel, arginfo_class_TrueAsync_HttpServerConfig_getBrotliLevel, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setZstdLevel, arginfo_class_TrueAsync_HttpServerConfig_setZstdLevel, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getZstdLevel, arginfo_class_TrueAsync_HttpServerConfig_getZstdLevel, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setJsonEncodeFlags, arginfo_class_TrueAsync_HttpServerConfig_setJsonEncodeFlags, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getJsonEncodeFlags, arginfo_class_TrueAsync_HttpServerConfig_getJsonEncodeFlags, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getSupportedEncodings, arginfo_class_TrueAsync_HttpServerConfig_getSupportedEncodings, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMinSize, arginfo_class_TrueAsync_HttpServerConfig_setCompressionMinSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMinSize, arginfo_class_TrueAsync_HttpServerConfig_getCompressionMinSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionMimeTypes, arginfo_class_TrueAsync_HttpServerConfig_setCompressionMimeTypes, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getCompressionMimeTypes, arginfo_class_TrueAsync_HttpServerConfig_getCompressionMimeTypes, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setRequestMaxDecompressedSize, arginfo_class_TrueAsync_HttpServerConfig_setRequestMaxDecompressedSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getRequestMaxDecompressedSize, arginfo_class_TrueAsync_HttpServerConfig_getRequestMaxDecompressedSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setWriteBufferSize, arginfo_class_TrueAsync_HttpServerConfig_setWriteBufferSize, ZEND_ACC_PUBLIC)
@@ -398,25 +417,24 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getPrivateKey, arginfo_class_TrueAsync_HttpServerConfig_getPrivateKey, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setAutoAwaitBody, arginfo_class_TrueAsync_HttpServerConfig_setAutoAwaitBody, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isAutoAwaitBodyEnabled, arginfo_class_TrueAsync_HttpServerConfig_isAutoAwaitBodyEnabled, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, isLocked, arginfo_class_TrueAsync_HttpServerConfig_isLocked, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setLogSeverity,      arginfo_class_TrueAsync_HttpServerConfig_setLogSeverity,      ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getLogSeverity,      arginfo_class_TrueAsync_HttpServerConfig_getLogSeverity,      ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, setLogStream,        arginfo_class_TrueAsync_HttpServerConfig_setLogStream,        ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, getLogStream,        arginfo_class_TrueAsync_HttpServerConfig_getLogStream,        ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setLogSeverity, arginfo_class_TrueAsync_HttpServerConfig_setLogSeverity, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getLogSeverity, arginfo_class_TrueAsync_HttpServerConfig_getLogSeverity, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setLogStream, arginfo_class_TrueAsync_HttpServerConfig_setLogStream, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getLogStream, arginfo_class_TrueAsync_HttpServerConfig_getLogStream, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setTelemetryEnabled, arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, isTelemetryEnabled,  arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled,  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isTelemetryEnabled, arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setBodyStreamingEnabled, arginfo_class_TrueAsync_HttpServerConfig_setBodyStreamingEnabled, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServerConfig, isBodyStreamingEnabled,  arginfo_class_TrueAsync_HttpServerConfig_isBodyStreamingEnabled,  ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isBodyStreamingEnabled, arginfo_class_TrueAsync_HttpServerConfig_isBodyStreamingEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isLocked, arginfo_class_TrueAsync_HttpServerConfig_isLocked, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
-/* Class registration */
 static zend_class_entry *register_class_TrueAsync_HttpServerConfig(void)
 {
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "TrueAsync", "HttpServerConfig", class_TrueAsync_HttpServerConfig_methods);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
 
 	return class_entry;
 }
