@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- H1 handler dispatch deferred from `on_headers_complete` to `on_message_complete` for buffered bodies — a TCP-fragmented request no longer runs the handler against a partial `$req->getBody()`. Streaming handlers (`setBodyStreamingEnabled(true)`) still dispatch at headers-complete. Test: `h1/018-tcp-fragmentation.phpt`.
+
 ## [0.6.0] - 2026-05-18
 
 ### Added

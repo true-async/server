@@ -642,14 +642,6 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     }
     /* For chunked or unknown length, we'll allocate in on_body if needed */
 
-    /* From here on the request belongs to someone else — either dispatch_cb
-     * (async path), or the synchronous caller that'll pull it out via
-     * http_parser_get_request (see http_parse_request in http_server.c).
-     * Flip ownership unconditionally; cleanup paths won't touch `request`
-     * after this, which is exactly what we need: the handler may free it
-     * before the next on_message_begin fires. */
-    parser->owns_request = false;
-
     if (parser->conn != NULL && parser->conn->view != NULL
         && parser->conn->view->telemetry_enabled) {
         http_request_parse_trace_context(req);
@@ -660,8 +652,16 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
      * fragmentation would otherwise run the handler against a partial
      * body. Streaming handlers must dispatch immediately to consume
      * incoming chunks via readBody(). Multipart populates files/post
-     * arrays during parse and is only safe to expose when complete. */
+     * arrays during parse and is only safe to expose when complete.
+     *
+     * For the sync caller (dispatch_cb == NULL, http_parse_request) we
+     * also defer ownership transfer — the caller fetches the request
+     * via http_parser_get_request *after* on_message_complete, so until
+     * then the parser keeps owns_request = true to safely free the
+     * request on a mid-stream parse error (e.g. chunked body cap hit
+     * between headers-complete and message-complete). */
     if (parser->dispatch_cb != NULL && req->body_streaming) {
+        parser->owns_request = false;
         parser->dispatched = true;
         parser->dispatch_cb(parser->conn, req);
     }
@@ -802,12 +802,19 @@ static int on_message_complete(llhttp_t* llhttp_parser)
         trig->trigger(trig);
     }
 
-    /* Deferred dispatch (buffered body path): hand the now-complete
-     * request to the connection. Streaming requests were dispatched
-     * at headers-complete and run in parallel with body chunks. */
-    if (!parser->dispatched && parser->dispatch_cb != NULL) {
-        parser->dispatched = true;
-        parser->dispatch_cb(parser->conn, req);
+    /* Hand off ownership at message-complete for every not-yet-handed
+     * path: the async dispatch_cb branch (buffered handler runs here so
+     * $req->getBody() is fully populated) AND the sync caller branch
+     * (http_parse_request reads parser->request via
+     * http_parser_get_request after execute returns; parser_pool_return
+     * must NOT destroy the request the caller is about to take). */
+    if (!parser->dispatched) {
+        parser->owns_request = false;
+
+        if (parser->dispatch_cb != NULL) {
+            parser->dispatched = true;
+            parser->dispatch_cb(parser->conn, req);
+        }
     }
 
     /* Pause parsing so llhttp doesn't roll straight into the next
