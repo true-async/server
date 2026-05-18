@@ -20,18 +20,17 @@ rem ---- project root (parent of this scripts\ folder) ----
 set "PROJECT_ROOT=%~dp0.."
 
 rem ---- defaults ----
-if "%PHP_SRC%"==""   set "PHP_SRC=E:\php\php-src"
-if "%PHP_BUILD%"=="" set "PHP_BUILD=%PHP_SRC%\x64\Debug_TS"
-if "%DEPS_BIN%"==""  set "DEPS_BIN=E:\php\deps\bin"
-if "%TEST_INI%"==""  set "TEST_INI=%TEMP%\php-http-server-test.ini"
+if "%PHP_SRC%"==""    set "PHP_SRC=E:\php\php-src"
+if "%PHP_BUILD%"==""  set "PHP_BUILD=%PHP_SRC%\x64\Debug_TS"
+if "%EXT_BUILD%"==""  set "EXT_BUILD=E:\php\true-async-server\x64\Debug_TS"
+if "%DEPS_BIN%"==""   set "DEPS_BIN=E:\php\deps\bin"
+if "%TEST_INI%"==""   set "TEST_INI=%TEMP%\php-http-server-test.ini"
 
-rem ---- generate ini if missing ----
-if not exist "%TEST_INI%" (
-    > "%TEST_INI%" echo extension_dir=%PHP_BUILD%
-    >> "%TEST_INI%" echo extension=php_openssl.dll
-    >> "%TEST_INI%" echo extension=php_http_server.dll
-    echo Generated %TEST_INI%
-)
+rem ---- always regenerate ini so extension_dir and dll name stay correct ----
+> "%TEST_INI%" echo extension_dir=%EXT_BUILD%
+>> "%TEST_INI%" echo extension=%PHP_BUILD%\php_openssl.dll
+>> "%TEST_INI%" echo extension=%EXT_BUILD%\php_true_async_server.dll
+echo Generated %TEST_INI%
 
 rem ---- add deps\bin so openssl + curl are on PATH ----
 set "PATH=%DEPS_BIN%;%PATH%"

@@ -39,6 +39,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     var http_server_core =
         "conn_arena.c " +
         "body_pool.c " +
+        "async_plain_event.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +
@@ -59,7 +60,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "http3_callbacks.c " +
         "http3_dispatch.c " +
         "http3_stream.c " +
-        "http3_stream_pool.c ";
+        "http3_stream_pool.c " +
+        "http3_static_response.c ";
 
     var http_server_formats =
         "multipart_parser.c " +
@@ -207,6 +209,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     var http_server_compression =
         "http_compression.c " +
         "http_compression_gzip.c " +
+        "http_compression_pool.c " +
         "http_compression_defaults.c " +
         "http_compression_negotiate.c " +
         "http_compression_response.c " +
