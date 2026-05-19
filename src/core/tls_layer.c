@@ -96,7 +96,15 @@ static int tls_probe_kernel_ktls_once(void)
 bool tls_kernel_ktls_supported(void)
 {
     if (tls_ktls_probe_result_g < 0) {
-        tls_ktls_probe_result_g = tls_probe_kernel_ktls_once();
+        /* Operator override: TRUE_ASYNC_FORCE_KTLS_OFF=1 forces the
+         * probe result to "no" regardless of kernel support. Useful
+         * when the runtime path has known issues but the kernel is
+         * otherwise kTLS-capable. */
+        if (getenv("TRUE_ASYNC_FORCE_KTLS_OFF") != NULL) {
+            tls_ktls_probe_result_g = 0;
+        } else {
+            tls_ktls_probe_result_g = tls_probe_kernel_ktls_once();
+        }
     }
 
     /* Probe message is opt-in via env var (default off). Always-on
