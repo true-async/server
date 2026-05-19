@@ -757,7 +757,10 @@ static tls_alpn_t tls_lookup_alpn(SSL *ssl)
     return TLS_ALPN_NONE;
 }
 
-tls_session_t *tls_session_new(tls_context_t *ctx)
+/* Common SSL allocation step shared by the memory-BIO and socket-BIO
+ * constructors. Caller owns the returned SSL on success and is responsible
+ * for SSL_set_bio + SSL_set_accept_state. */
+static SSL *tls_session_alloc_ssl(tls_context_t *ctx)
 {
     if (ctx == NULL || ctx->ctx == NULL) {
         return NULL;
@@ -767,6 +770,17 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
 
     if (ssl == NULL) {
         ERR_clear_error();
+        return NULL;
+    }
+
+    return ssl;
+}
+
+tls_session_t *tls_session_new(tls_context_t *ctx)
+{
+    SSL *ssl = tls_session_alloc_ssl(ctx);
+
+    if (ssl == NULL) {
         return NULL;
     }
 
@@ -799,6 +813,53 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
         .alpn_selected = TLS_ALPN_NONE,
     };
     return session;
+}
+
+tls_session_t *tls_session_new_socket(tls_context_t *ctx, const int socket_fd)
+{
+    SSL *ssl = tls_session_alloc_ssl(ctx);
+
+    if (ssl == NULL) {
+        return NULL;
+    }
+
+    if (socket_fd < 0) {
+        SSL_free(ssl);
+        return NULL;
+    }
+
+    /* BIO_NOCLOSE: the connection layer (uv_tcp_t / libuv handle) keeps
+     * fd ownership. SSL_free will free the BIO struct but must not close
+     * the underlying fd — closing it from two places is the classic
+     * double-close UAF. */
+    BIO *sbio = BIO_new_socket(socket_fd, BIO_NOCLOSE);
+
+    if (sbio == NULL) {
+        SSL_free(ssl);
+        ERR_clear_error();
+        return NULL;
+    }
+
+    /* Same BIO for read + write (socket is full-duplex). SSL_set_bio
+     * takes ownership; SSL_free will BIO_free(sbio) for us. */
+    SSL_set_bio(ssl, sbio, sbio);
+    SSL_set_accept_state(ssl);
+
+    tls_session_t *session = pemalloc(sizeof(*session), 0);
+    *session = (tls_session_t){
+        .ssl           = ssl,
+        .internal_bio  = sbio,
+        .network_bio   = NULL,        /* marker for socket-BIO mode */
+        .state         = TLS_HANDSHAKING,
+        .alpn_selected = TLS_ALPN_NONE,
+    };
+    return session;
+}
+
+bool tls_session_is_socket_bio(const tls_session_t *session)
+{
+    return session != NULL && session->network_bio == NULL
+        && session->internal_bio != NULL;
 }
 
 void tls_session_free(tls_session_t *session)

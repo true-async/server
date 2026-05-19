@@ -208,7 +208,32 @@ void tls_context_free(tls_context_t *ctx);
 
 /* --- Session lifecycle (per connection). --- */
 tls_session_t *tls_session_new(tls_context_t *ctx);
+
+/**
+ * Socket-BIO variant: OpenSSL owns @p socket_fd directly via BIO_new_socket,
+ * so the kernel sees `SSL_write` as a plain `send()` and (with kTLS active)
+ * does AES-GCM in-kernel. The fd is wrapped BIO_NOCLOSE — the connection
+ * layer keeps ownership and closes it as usual.
+ *
+ * @p socket_fd MUST be the same fd backing the connection's existing IO
+ * handle (libuv's uv_tcp_t internal fd). Caller arranges non-blocking via
+ * the standard libuv accept path; this function does not touch O_NONBLOCK.
+ *
+ * Returns NULL on allocation / BIO failure. Sessions returned here have
+ * network_bio == NULL, which is the marker used by the rest of the layer
+ * to distinguish them from memory-BIO sessions.
+ *
+ * Used only when tls_kernel_ktls_supported() is true; otherwise sessions
+ * continue to go through the memory-BIO path.
+ */
+tls_session_t *tls_session_new_socket(tls_context_t *ctx, int socket_fd);
+
 void           tls_session_free(tls_session_t *s);
+
+/* True when the session's transport is a socket BIO (kTLS-eligible),
+ * false for the memory-BIO bridge path. Cheap pointer check on
+ * session->network_bio — no SSL state is consulted. */
+bool           tls_session_is_socket_bio(const tls_session_t *s);
 
 /* --- State-machine primitives. --- */
 tls_io_result_t tls_feed_ciphertext(tls_session_t *s, const char *buf, size_t len, size_t *consumed);
