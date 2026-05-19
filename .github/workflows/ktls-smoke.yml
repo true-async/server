@@ -1,0 +1,372 @@
+name: kTLS smoke (Linux)
+
+# Focused CI for issue #30 Phase 2 (kernel TLS). Loads the `tls` kernel
+# module on the runner, builds http_server, runs the TLS-only phpt
+# subset, and confirms the server's runtime probe reported
+# `kernel=yes` (i.e. the kTLS path actually engaged).
+#
+# Triggers on pushes to branches that carry the kTLS work
+# (issue #30 — *-performance-opt-* / ktls-*) and on manual dispatch.
+# Doesn't gate main — main is covered by build-linux.yml; this one is
+# additive validation that the kTLS data path didn't silently fall back
+# to memory-BIO.
+
+on:
+  push:
+    branches:
+      - '30-*'
+      - 'ktls-*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/core/tls_layer.*'
+      - 'src/core/http_connection_tls.*'
+      - 'src/core/http_connection_ktls.*'
+      - '.github/workflows/ktls-smoke.yml'
+  workflow_dispatch:
+
+env:
+  OPENSSL_VERSION: 3.5.0
+  NGHTTP2_VERSION: 1.59.0
+  NGHTTP3_VERSION: 1.15.0
+  NGTCP2_VERSION: 1.22.1
+  LIBUV_VERSION: 1.52.1
+  CURL_VERSION: 8.12.1
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+
+jobs:
+  ktls-smoke:
+    name: kTLS phpt + probe verification
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout php-http-server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Make /usr/local writable
+        run: |
+          sudo mkdir -p /usr/local/lib/pkgconfig /usr/local/include /usr/local/bin
+          sudo chown -R "$(id -u):$(id -g)" /usr/local/lib /usr/local/include /usr/local/bin
+
+      # Same cache keys as build-linux.yml so we ride that pipeline's
+      # warm caches when both run on the same branch. If absent, we
+      # rebuild from source (~25 minutes cold path).
+      - name: Restore OpenSSL cache
+        id: cache-openssl
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libssl*
+            /usr/local/lib/libcrypto*
+            /usr/local/include/openssl
+            /usr/local/lib/pkgconfig/openssl.pc
+            /usr/local/lib/pkgconfig/libssl.pc
+            /usr/local/lib/pkgconfig/libcrypto.pc
+            /usr/local/bin/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-r4
+
+      - name: Build OpenSSL from source
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz
+          tar -xzf openssl-${OPENSSL_VERSION}.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+          ./Configure --prefix=/usr/local --libdir=lib --openssldir=/etc/ssl \
+            enable-tls1_3 enable-ktls shared
+          make -j"$(nproc)"
+          sudo make install_sw
+
+      - name: Save OpenSSL cache
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libssl*
+            /usr/local/lib/libcrypto*
+            /usr/local/include/openssl
+            /usr/local/lib/pkgconfig/openssl.pc
+            /usr/local/lib/pkgconfig/libssl.pc
+            /usr/local/lib/pkgconfig/libcrypto.pc
+            /usr/local/bin/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-r4
+
+      - name: Verify OpenSSL was built with kTLS support
+        run: |
+          set -eux
+          # OPENSSL_KTLS_LINUX appears in headers when enable-ktls was set.
+          # If absent, our HAVE_KTLS define won't be set either → probe
+          # short-circuits to false and this entire workflow is useless.
+          grep -q 'BIO_get_ktls_send' /usr/local/include/openssl/bio.h \
+            || { echo "ERROR: OpenSSL build lacks kTLS support"; exit 1; }
+
+      - name: Restore nghttp2 cache
+        id: cache-nghttp2
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp2*
+            /usr/local/include/nghttp2
+            /usr/local/lib/pkgconfig/libnghttp2.pc
+          key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
+
+      - name: Build nghttp2 from source
+        if: steps.cache-nghttp2.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth=1 --branch=v${NGHTTP2_VERSION} \
+            https://github.com/nghttp2/nghttp2.git
+          cd nghttp2
+          autoreconf -i
+          ./configure --prefix=/usr/local --enable-lib-only
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Save nghttp2 cache
+        if: steps.cache-nghttp2.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp2*
+            /usr/local/include/nghttp2
+            /usr/local/lib/pkgconfig/libnghttp2.pc
+          key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
+
+      - name: Restore nghttp3 cache
+        id: cache-nghttp3
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp3*
+            /usr/local/include/nghttp3
+            /usr/local/lib/pkgconfig/libnghttp3.pc
+          key: ${{ runner.os }}-nghttp3-${{ env.NGHTTP3_VERSION }}-r4
+
+      - name: Build nghttp3 from source
+        if: steps.cache-nghttp3.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth=1 --branch=v${NGHTTP3_VERSION} --recurse-submodules \
+            https://github.com/ngtcp2/nghttp3.git
+          cd nghttp3
+          autoreconf -i
+          ./configure --prefix=/usr/local --enable-lib-only
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Save nghttp3 cache
+        if: steps.cache-nghttp3.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp3*
+            /usr/local/include/nghttp3
+            /usr/local/lib/pkgconfig/libnghttp3.pc
+          key: ${{ runner.os }}-nghttp3-${{ env.NGHTTP3_VERSION }}-r4
+
+      - name: Restore ngtcp2 cache
+        id: cache-ngtcp2
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libngtcp2*
+            /usr/local/include/ngtcp2
+            /usr/local/lib/pkgconfig/libngtcp2.pc
+            /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc
+          key: ${{ runner.os }}-ngtcp2-${{ env.NGTCP2_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r5
+
+      - name: Build ngtcp2 from source
+        if: steps.cache-ngtcp2.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth=1 --branch=v${NGTCP2_VERSION} --recurse-submodules \
+            https://github.com/ngtcp2/ngtcp2.git
+          cd ngtcp2
+          autoreconf -i
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+          ./configure --prefix=/usr/local --with-openssl --enable-lib-only
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Save ngtcp2 cache
+        if: steps.cache-ngtcp2.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libngtcp2*
+            /usr/local/include/ngtcp2
+            /usr/local/lib/pkgconfig/libngtcp2.pc
+            /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc
+          key: ${{ runner.os }}-ngtcp2-${{ env.NGTCP2_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r5
+
+      - name: Restore libuv cache
+        id: cache-libuv
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libuv*
+            /usr/local/include/uv*
+            /usr/local/lib/pkgconfig/libuv.pc
+          key: ${{ runner.os }}-libuv-${{ env.LIBUV_VERSION }}-r4
+
+      - name: Build libuv from source
+        if: steps.cache-libuv.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+          wget -q https://github.com/libuv/libuv/archive/v${LIBUV_VERSION}.tar.gz
+          tar -xzf v${LIBUV_VERSION}.tar.gz
+          cd libuv-${LIBUV_VERSION}
+          mkdir build && cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          ninja
+          sudo ninja install
+
+      - name: Save libuv cache
+        if: steps.cache-libuv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            /usr/local/lib/libuv*
+            /usr/local/include/uv*
+            /usr/local/lib/pkgconfig/libuv.pc
+          key: ${{ runner.os }}-libuv-${{ env.LIBUV_VERSION }}-r4
+
+      - name: Refresh ldconfig
+        run: sudo ldconfig
+
+      - name: Install PHP build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c \
+            libxml2-dev pkg-config libsqlite3-dev libonig-dev \
+            wget ca-certificates
+
+      - name: Load kernel TLS module
+        run: |
+          set -eux
+          # GitHub-hosted ubuntu-22.04 ships CONFIG_TLS=m. Module is on
+          # disk but not auto-loaded — load it explicitly for the probe
+          # to return true.
+          sudo modprobe tls
+          lsmod | grep -E '^tls\b'
+          # /proc/sys/net/tls is the kernel-side breadcrumb; print for log.
+          ls -la /proc/sys/net/tls 2>/dev/null || true
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch=${PHP_SRC_BRANCH} \
+            https://github.com/true-async/php-src.git php-src
+          git clone --depth=1 --branch=${PHP_ASYNC_BRANCH} \
+            https://github.com/true-async/php-async.git php-src/ext/async
+
+      - name: Configure & build PHP (release ZTS)
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all \
+            --without-pear \
+            --enable-async \
+            --enable-pdo \
+            --with-pdo-sqlite \
+            --enable-sockets \
+            --enable-posix \
+            --enable-pcntl \
+            --enable-opcache \
+            --with-openssl \
+            --with-config-file-path=/etc \
+            --with-config-file-scan-dir=/etc/php.d \
+            --disable-debug \
+            --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+          sudo mkdir -p /etc/php.d
+          echo "opcache.enable_cli=1" | sudo tee /etc/php.d/opcache.ini
+
+      - name: Build & install http_server
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server \
+            --enable-http2 \
+            --enable-http3 \
+            --with-openssl \
+            --with-nghttp2=/usr/local \
+            --with-nghttp3=/usr/local \
+            --with-ngtcp2=/usr/local
+          make -j"$(nproc)"
+          sudo make install
+          echo "extension=true_async_server.so" | sudo tee /etc/php.d/true_async_server.ini
+
+      - name: Smoke probe — confirm "kernel=yes"
+        working-directory: http-server
+        run: |
+          set -eux
+          # The probe fires from tls_context_create on the first SSL_CTX
+          # build, so we need a HttpServer instance with TLS enabled.
+          # Self-sign a throwaway cert via openssl CLI.
+          mkdir -p /tmp/ktls-probe
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+            -keyout /tmp/ktls-probe/key.pem \
+            -out    /tmp/ktls-probe/cert.pem \
+            -subj '/CN=localhost' >/dev/null 2>&1
+          cat > /tmp/ktls-probe/probe.php <<'PHP'
+          <?php
+          use TrueAsync\HttpServer;
+          use TrueAsync\HttpServerConfig;
+          $cfg = (new HttpServerConfig())
+              ->addListener('127.0.0.1', 0, true)
+              ->enableTls(true)
+              ->setCertificate('/tmp/ktls-probe/cert.pem')
+              ->setPrivateKey('/tmp/ktls-probe/key.pem');
+          new HttpServer($cfg);
+          PHP
+          /usr/local/bin/php /tmp/ktls-probe/probe.php 2>&1 | tee /tmp/probe.log
+          grep -F 'kTLS probe:' /tmp/probe.log
+          grep -F 'kernel=yes'  /tmp/probe.log \
+            || { echo "ERROR: probe reported kernel=no despite modprobe tls"; \
+                 cat /tmp/probe.log; \
+                 echo '--- /proc/sys/net/tls ---'; \
+                 ls -la /proc/sys/net/tls 2>/dev/null || true; \
+                 exit 1; }
+
+      - name: Run TLS-related phpt
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            -P -q -j"$(nproc)" \
+            -g FAIL,BORK,LEAK,XLEAK \
+            --no-progress --offline --show-diff \
+            --set-timeout 120 \
+            tests/phpt/server/tls \
+            tests/phpt/server/h2
+
+      - name: Upload phpt failures
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ktls-phpt-failures-${{ github.run_id }}
+          path: |
+            http-server/tests/phpt/**/*.out
+            http-server/tests/phpt/**/*.diff
+            http-server/tests/phpt/**/*.log
+            /tmp/probe.log
+          if-no-files-found: ignore
+          retention-days: 7
