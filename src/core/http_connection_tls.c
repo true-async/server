@@ -642,10 +642,19 @@ static void tls_cipher_completion(void *data, zend_async_io_t *io)
  * healthy. Returns true on full encrypt + kick. */
 bool http_connection_tls_fsm_send_plaintext_atomic(http_connection_t *conn,
                                                    const char *data,
-                                                   size_t len)
+                                                   const size_t len)
 {
     if (conn->tls == NULL || conn->tls_write_error || len == 0) {
         return false;
+    }
+
+    /* kTLS: no memory-BIO ring + no cipher_inflight gating — delegate to
+     * tls_push, which writes synchronously via SSL_write_ex and parks
+     * any WANT_WRITE residue in conn->ktls_pending. Atomicity is not a
+     * meaningful contract here (there is no userspace ring); success
+     * means the bytes are owned by the kernel or the pending buffer. */
+    if (conn->ktls_mode) {
+        return tls_push(conn, data, len);
     }
 
     size_t written = 0;

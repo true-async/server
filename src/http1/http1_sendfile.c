@@ -366,6 +366,17 @@ static void h1_send_handle_sendfile_done(h1_send_state_t *state)
 static bool h1_send_tls_submit_next_read(h1_send_state_t *state)
 {
     if (state->bytes_sent >= state->body_length) {
+        /* kTLS: no cipher_inflight tracking — kernel owns bytes the
+         * moment SSL_write_ex returns, and any WANT_WRITE residue lives
+         * in ktls_pending whose drain runs independently of this FSM.
+         * Finalize immediately so the static handler's on_done fires;
+         * pending bytes still on their way out are the keep-alive
+         * verdict's problem. */
+        if (state->conn->ktls_mode) {
+            h1_send_finalize(state);
+            return true;
+        }
+
         /* Body fully shipped. Wait for any trailing in-flight cipher
          * write to finish before finalizing — but if it's already
          * settled, finalize now. The DRAIN cb path handles the not-
@@ -432,6 +443,19 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
     }
 
     state->bytes_sent += (uint64_t)bytes_read;
+
+    /* kTLS: no cipher_inflight gating (no memory-BIO ring). The atomic
+     * helper routed through tls_push, which either flushed to the
+     * kernel or parked residue in conn->ktls_pending — the WRITABLE
+     * poll callback drains it independently. Loop directly. */
+    if (state->conn->ktls_mode) {
+        if (UNEXPECTED(!h1_send_tls_submit_next_read(state))) {
+            state->status = -1;
+            h1_send_finalize(state);
+        }
+
+        return;
+    }
 
     /* Sync-complete cipher write (rare on Linux, common on Windows
      * try-write fast path): zc_write_n already back to 0, no DRAIN
@@ -563,11 +587,15 @@ int h1_stream_send_static_response(void *ctx_void,
      * any in-flight head bytes have settled. */
     if (state->head_only) {
 #ifdef HAVE_OPENSSL
-        if (state->is_tls) {
+        if (state->is_tls && !conn->ktls_mode) {
             /* Head went through SSL_write; if the cipher write is
              * still in flight, park on the drain cb so on_done
              * fires after the bytes are actually queued to libuv.
-             * Sync-complete: finalize directly. */
+             * Sync-complete: finalize directly.
+             *
+             * kTLS path skips this: tls_push already handed the head
+             * to the kernel (or to ktls_pending) by the time we got
+             * here, and there is no cipher_inflight to gate on. */
             if (conn->tls_cipher_inflight != 0) {
                 conn->tls_zc_write_done_cb = h1_send_tls_drain_done_cb;
                 conn->tls_zc_write_done_cb_data = state;
@@ -614,6 +642,18 @@ int h1_stream_send_static_response(void *ctx_void,
          * every iteration of the loop. */
         if (state->chunk_buf == NULL) {
             state->chunk_buf = emalloc(H1_SEND_TLS_CHUNK_BYTES);
+        }
+
+        /* kTLS: no cipher BIO, no zc_write_done observer needed —
+         * tls_push owns kernel-side draining. Jump straight into the
+         * read loop. */
+        if (conn->ktls_mode) {
+            if (UNEXPECTED(!h1_send_tls_submit_next_read(state))) {
+                state->status = -1;
+                h1_send_finalize(state);
+            }
+
+            return 0;
         }
 
         /* Hook the cipher-write completion observer so the FSM-send
