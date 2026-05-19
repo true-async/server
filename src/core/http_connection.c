@@ -2658,25 +2658,42 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
 
 #ifdef HAVE_OPENSSL
     if (tls_ctx != NULL) {
-        conn->tls = tls_session_new(tls_ctx);
+        /* kTLS path (issue #30 Phase 2): tls_ctx->ktls_enabled is
+         * true only when the runtime kernel probe succeeded AND the
+         * OpenSSL build supports kTLS. New TLS sessions then go through
+         * the socket-BIO transport (kernel does AES-GCM on send/recv)
+         * instead of the memory-BIO pair + tls_drain pump. */
+        const bool use_ktls = tls_ctx->ktls_enabled;
+
+        conn->tls = use_ktls
+            ? tls_session_new_socket(tls_ctx, client_fd)
+            : tls_session_new(tls_ctx);
 
         if (conn->tls == NULL) {
             http_connection_destroy(conn);
             return false;
         }
-        /* Plaintext queue feeding the cooperative flusher. Freed in
-         * http_connection_destroy — each half of the BIO pair must be
-         * released independently (BIO_free on one does not free the
-         * other). */
-        if (BIO_new_bio_pair(&conn->tls_plaintext_bio,
-                             HTTP_TLS_PLAINTEXT_RING_BYTES,
-                             &conn->tls_plaintext_bio_app,
-                             HTTP_TLS_PLAINTEXT_RING_BACK_BYTES) != 1) {
-            ERR_clear_error();
-            conn->tls_plaintext_bio = NULL;
-            conn->tls_plaintext_bio_app = NULL;
-            http_connection_destroy(conn);
-            return false;
+
+        if (use_ktls) {
+            conn->ktls_mode = 1;
+            /* No plaintext BIO pair: socket-BIO sessions write directly
+             * to the fd via SSL_write, the kernel handles encryption,
+             * there is no userspace ciphertext queue to drain. */
+        } else {
+            /* Plaintext queue feeding the cooperative flusher. Freed in
+             * http_connection_destroy — each half of the BIO pair must
+             * be released independently (BIO_free on one does not free
+             * the other). */
+            if (BIO_new_bio_pair(&conn->tls_plaintext_bio,
+                                 HTTP_TLS_PLAINTEXT_RING_BYTES,
+                                 &conn->tls_plaintext_bio_app,
+                                 HTTP_TLS_PLAINTEXT_RING_BACK_BYTES) != 1) {
+                ERR_clear_error();
+                conn->tls_plaintext_bio = NULL;
+                conn->tls_plaintext_bio_app = NULL;
+                http_connection_destroy(conn);
+                return false;
+            }
         }
         /* TLS records are up to 16 KiB of plaintext. Size read_buffer
          * so one full record lands without a realloc; the growth path
@@ -2773,6 +2790,19 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
          * then reads zero-init garbage and alerts decode_error. */
         ZEND_ASYNC_IO_CLR_MULTISHOT(conn->io);
         conn->io->alloc_cb = NULL;
+
+        if (conn->ktls_mode) {
+            /* No libuv read armed — the kTLS poll_event owns
+             * readiness. conn->io is kept around for fd lifecycle
+             * + timer integration only. */
+            if (UNEXPECTED(!http_connection_ktls_arm_handshake(
+                               conn, client_fd))) {
+                http_connection_destroy(conn);
+                return false;
+            }
+            return true;
+        }
+
         return http_connection_tls_arm_read(conn);
     }
 #endif

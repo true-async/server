@@ -65,6 +65,12 @@ static bool tls_arm_one_shot_read(http_connection_t *conn);
 static void tls_advance_state(http_connection_t *conn);
 static bool tls_finalize_if_closing(http_connection_t *conn);
 
+/* kTLS (#30 Phase 2). Definitions live at the end of the file; forward
+ * decls so tls_push / tls_resume_after_handler / ktls_poll_callback can
+ * reach them without reordering. */
+static void ktls_advance(http_connection_t *conn);
+static bool ktls_arm_for(http_connection_t *conn, async_poll_event events);
+
 /* Producer + drain (issue #23): tls_push (coroutine) → plaintext_bio →
  * tls_drain (scheduler) → SSL_write → WRITE_EX → tls_cipher_completion. */
 
@@ -213,6 +219,11 @@ bool tls_drain(http_connection_t *conn)
     return ok && !conn->tls_write_error;
 }
 
+/* Park coroutine until socket is writable (kTLS mode). The poll
+ * callback triggers tls_space_event on ASYNC_WRITABLE so the producer
+ * resumes and retries SSL_write_ex. */
+static bool tls_wait_writable_ktls(http_connection_t *conn);
+
 /* Producer entry (coroutine-only). Chunks internally for len > ring_size. */
 bool tls_push(http_connection_t *conn, const char *data, const size_t len)
 {
@@ -221,6 +232,42 @@ bool tls_push(http_connection_t *conn, const char *data, const size_t len)
     }
 
     if (len == 0) {
+        return true;
+    }
+
+    /* kTLS path: SSL_write_ex goes straight to the socket (kernel
+     * encrypts via TLS_TX). On WANT_WRITE the kernel's sndbuf is full;
+     * park on poll WRITABLE and retry. No memory-BIO ring, no drain. */
+    if (conn->ktls_mode) {
+        size_t off = 0;
+        while (off < len) {
+            if (UNEXPECTED(conn->tls == NULL || conn->tls_write_error)) {
+                return false;
+            }
+
+            size_t                written = 0;
+            const tls_io_result_t rc      = tls_write_plaintext(
+                conn->tls, data + off, len - off, &written);
+
+            if (written > 0) {
+                http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+                off += written;
+            }
+
+            if (rc == TLS_IO_OK) {
+                continue;
+            }
+
+            if (rc == TLS_IO_WANT_WRITE || rc == TLS_IO_WANT_READ) {
+                if (!tls_wait_writable_ktls(conn)) {
+                    return false;
+                }
+                continue;
+            }
+
+            conn->tls_write_error = true;
+            return false;
+        }
         return true;
     }
 
@@ -246,6 +293,53 @@ bool tls_push(http_connection_t *conn, const char *data, const size_t len)
             return false;
         }
     }
+
+    return true;
+}
+
+static bool tls_wait_writable_ktls(http_connection_t *conn)
+{
+    if (ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+        /* Producer must be a coroutine; if we're called from
+         * scheduler-side (e.g. h2 emit), the caller should not be
+         * using tls_push at all — those paths take h2_emit_flush_tls
+         * variants that don't suspend. */
+        return false;
+    }
+
+    if (conn->tls_space_event == NULL) {
+        conn->tls_space_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+        if (conn->tls_space_event == NULL) {
+            return false;
+        }
+    }
+
+    if (UNEXPECTED(!ktls_arm_for(conn, ASYNC_WRITABLE))) {
+        return false;
+    }
+
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    if (UNEXPECTED(co == NULL || ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
+        return false;
+    }
+
+    zend_async_resume_when(co, &conn->tls_space_event->base, false,
+                           zend_async_waker_callback_resolve, NULL);
+
+    ZEND_ASYNC_SUSPEND();
+    zend_async_waker_clean(co);
+
+    if (EG(exception) != NULL || conn->tls == NULL || conn->tls_write_error) {
+        return false;
+    }
+
+    /* After waking, restore poll to READABLE — the read FSM is the
+     * common case (waiting for next request). The next SSL_write call
+     * in the loop above will re-arm WRITABLE if it still gets
+     * WANT_WRITE. */
+    (void)ktls_arm_for(conn, ASYNC_READABLE);
 
     return true;
 }
@@ -1040,6 +1134,16 @@ void http_connection_tls_resume_after_handler(http_connection_t *conn)
 {
     conn->tls_awaiting_handler = false;
 
+    if (conn->ktls_mode) {
+        /* kTLS: poll-event-driven; advance + arm READABLE if still
+         * waiting for the next request. ktls_advance arms its own
+         * readiness if it parks itself, so we only re-arm here when
+         * it returned having drained the buffer without parking. */
+        ktls_advance(conn);
+        (void)tls_finalize_if_closing(conn);
+        return;
+    }
+
     tls_advance_state(conn);
 
     if (tls_finalize_if_closing(conn)) {
@@ -1108,31 +1212,36 @@ static bool ktls_arm_for(http_connection_t *conn, const async_poll_event events)
     return conn->ktls_poll->base.start(&conn->ktls_poll->base);
 }
 
-/* FSM step for a kTLS connection. Loops while we can make synchronous
- * progress; returns once we need to wait for socket readiness (poll
- * callback re-enters here) or the connection has transitioned to
- * CLOSING (caller finalises). */
+/* FSM step for a kTLS connection. Mirrors tls_advance_state but uses
+ * direct SSL_read on the socket-BIO session — no memory-BIO drain pump
+ * — and parks on socket readiness via the poll event instead of arming
+ * a libuv read. Loops while it can make synchronous progress; returns
+ * once we need to wait for socket readiness or the connection has
+ * transitioned to CLOSING (caller finalises). */
 static void ktls_advance(http_connection_t *conn)
 {
     while (conn->state != CONN_STATE_CLOSING) {
+        if (UNEXPECTED(conn->tls == NULL)) {
+            return;
+        }
+
+        if (UNEXPECTED(conn->tls_write_error)) {
+            tls_log_error(conn, "ktls-fsm");
+            conn->state = CONN_STATE_CLOSING;
+            continue;
+        }
+
         if (conn->state == CONN_STATE_TLS_HANDSHAKE) {
             const tls_io_result_t step = tls_handshake_step(conn->tls);
 
             if (step == TLS_IO_OK) {
                 tls_on_handshake_done(conn, tls_handshake_start_ns(conn));
                 conn->state = CONN_STATE_READING_HEADERS;
-                /* Data path lands in the next commit — for now arm a
-                 * read so the FSM at least sleeps on readability when
-                 * the data path arrives. */
-                if (!ktls_arm_for(conn, ASYNC_READABLE)) {
-                    conn->state = CONN_STATE_CLOSING;
-                    continue;
-                }
-                return;
+                continue;   /* drop into the data loop below */
             }
 
             if (step == TLS_IO_WANT_READ) {
-                if (!ktls_arm_for(conn, ASYNC_READABLE)) {
+                if (UNEXPECTED(!ktls_arm_for(conn, ASYNC_READABLE))) {
                     conn->state = CONN_STATE_CLOSING;
                     continue;
                 }
@@ -1140,7 +1249,7 @@ static void ktls_advance(http_connection_t *conn)
             }
 
             if (step == TLS_IO_WANT_WRITE) {
-                if (!ktls_arm_for(conn, ASYNC_WRITABLE)) {
+                if (UNEXPECTED(!ktls_arm_for(conn, ASYNC_WRITABLE))) {
                     conn->state = CONN_STATE_CLOSING;
                     continue;
                 }
@@ -1154,12 +1263,66 @@ static void ktls_advance(http_connection_t *conn)
             continue;
         }
 
-        /* Data states (READING_HEADERS, READING_BODY, ...) — TODO next
-         * commit. Returning here without arming I/O parks the
-         * connection; deadline_tick eventually force-closes it. */
-        return;
+        /* Data states. tls_decrypt_into_buffer just calls SSL_read_ex —
+         * mode-agnostic, works against socket BIO the same way it works
+         * against the memory-BIO drained one. No tls_drain() afterwards:
+         * for socket-BIO, OpenSSL sends post-handshake messages straight
+         * through the kernel on the wbio (= same socket). */
+        if (UNEXPECTED(!tls_decrypt_into_buffer(conn))) {
+            tls_log_error(conn, "ktls-decrypt");
+            conn->state = CONN_STATE_CLOSING;
+            continue;
+        }
+
+        if (conn->state == CONN_STATE_CLOSING) {
+            continue;   /* peer close_notify recognised in SSL_read */
+        }
+
+        if (conn->read_buffer_len == 0) {
+            /* Out of bytes for now — wait for socket readability. */
+            if (UNEXPECTED(!ktls_arm_for(conn, ASYNC_READABLE))) {
+                conn->state = CONN_STATE_CLOSING;
+                continue;
+            }
+            return;
+        }
+
+        /* Pipelining gate: handler in flight; park until it disposes,
+         * which calls tls_resume_after_handler → ktls_advance. */
+        if (conn->tls_awaiting_handler) {
+            return;
+        }
+
+        const int feed = tls_feed_parser_step(conn);
+
+        if (feed < 0) {
+            if (conn->parse_error_handled) {
+                conn->state = CONN_STATE_CLOSING;
+                continue;
+            }
+
+            if (conn->current_request != NULL
+                && conn->current_request->coroutine != NULL) {
+                http_connection_cancel_handler_for_parse_error(conn);
+                conn->tls_awaiting_handler = true;
+                return;
+            }
+
+            conn->state = CONN_STATE_CLOSING;
+            continue;
+        }
+
+        /* feed == 0 → handler dispatched; parser sits idle until the
+         * handler completes. feed == 1 → need more bytes; loop and let
+         * tls_decrypt_into_buffer try another SSL_read (or park on
+         * READABLE if WANT_READ). */
+        if (feed == 0) {
+            conn->tls_awaiting_handler = true;
+            return;
+        }
     }
 
+    /* Loop exited with state == CLOSING. */
     (void)tls_finalize_if_closing(conn);
 }
 
@@ -1168,7 +1331,6 @@ static void ktls_poll_callback(zend_async_event_t *event,
                                void *result,
                                zend_object *exception)
 {
-    (void)event;
     (void)result;
 
     ktls_poll_cb_t *cb = (ktls_poll_cb_t *)callback;
@@ -1184,18 +1346,35 @@ static void ktls_poll_callback(zend_async_event_t *event,
         return;
     }
 
-    /* Bailout firewall: SSL_do_handshake → callbacks may emalloc. */
-    volatile bool bailout = false;
-    zend_try {
-        ktls_advance(conn);
-    } zend_catch {
-        bailout = true;
-    } zend_end_try();
+    const zend_async_poll_event_t *pe = (const zend_async_poll_event_t *)event;
+    const async_poll_event triggered = pe != NULL ? pe->triggered_events : 0;
 
-    if (UNEXPECTED(bailout)) {
-        conn->tls_write_error = true;
-        conn->state = CONN_STATE_CLOSING;
-        (void)tls_finalize_if_closing(conn);
+    /* WRITABLE: wake any coroutine parked in tls_wait_writable_ktls
+     * (h1 send path) before advancing reads. Reads commonly follow
+     * a successful response (keep-alive), so doing writes first lets
+     * the producer release its tls_push call before the same callback
+     * tries to feed more requests. */
+    if (triggered & ASYNC_WRITABLE) {
+        if (conn->tls_space_event != NULL) {
+            conn->tls_space_event->trigger(conn->tls_space_event);
+        }
+    }
+
+    /* READABLE: re-enter the data FSM. Bailout firewall for emalloc
+     * paths called by tls_decrypt_into_buffer / tls_feed_parser_step. */
+    if (triggered & (ASYNC_READABLE | ASYNC_DISCONNECT)) {
+        volatile bool bailout = false;
+        zend_try {
+            ktls_advance(conn);
+        } zend_catch {
+            bailout = true;
+        } zend_end_try();
+
+        if (UNEXPECTED(bailout)) {
+            conn->tls_write_error = true;
+            conn->state = CONN_STATE_CLOSING;
+            (void)tls_finalize_if_closing(conn);
+        }
     }
 }
 
