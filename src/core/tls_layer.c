@@ -77,16 +77,25 @@ bool tls_kernel_ktls_supported(void)
         tls_ktls_probe_result_g = tls_probe_kernel_ktls_once();
     }
 
+    /* Probe message is opt-in via env var (default off). Always-on
+     * stderr writes break phpt EXPECT for every TLS test — the message
+     * lands in captured output. Set TRUE_ASYNC_TLS_LOG_PROBE=1 in the
+     * CI smoke-probe step (or locally when investigating) to surface
+     * it; everywhere else, the probe still runs (gates ktls_enabled),
+     * silently. */
     if (!tls_ktls_logged_g) {
         tls_ktls_logged_g = true;
-        fprintf(stderr,
-                "[true-async-server] kTLS probe: kernel=%s, OpenSSL=yes (build) — "
-                "TLS sessions will use %s transport\n",
-                tls_ktls_probe_result_g == 1 ? "yes" : "no",
-                tls_ktls_probe_result_g == 1
-                    ? "socket-BIO (kernel crypto)"
-                    : "memory-BIO (user-space crypto)");
-        fflush(stderr);
+
+        if (getenv("TRUE_ASYNC_TLS_LOG_PROBE") != NULL) {
+            fprintf(stderr,
+                    "[true-async-server] kTLS probe: kernel=%s, OpenSSL=yes (build) — "
+                    "TLS sessions will use %s transport\n",
+                    tls_ktls_probe_result_g == 1 ? "yes" : "no",
+                    tls_ktls_probe_result_g == 1
+                        ? "socket-BIO (kernel crypto)"
+                        : "memory-BIO (user-space crypto)");
+            fflush(stderr);
+        }
     }
 
     return tls_ktls_probe_result_g == 1;

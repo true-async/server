@@ -317,11 +317,16 @@ jobs:
 
       - name: Smoke probe — confirm "kernel=yes"
         working-directory: http-server
+        env:
+          # Surfaces the one-shot probe stderr line. Off everywhere else
+          # (it would break phpt EXPECT). See tls_kernel_ktls_supported.
+          TRUE_ASYNC_TLS_LOG_PROBE: '1'
         run: |
           set -eux
-          # The probe fires from tls_context_create on the first SSL_CTX
-          # build, so we need a HttpServer instance with TLS enabled.
-          # Self-sign a throwaway cert via openssl CLI.
+          # tls_context_new (which gates ktls_enabled) is called from
+          # HttpServer::start(), not the constructor. Spawn a stop()
+          # coroutine and run a real start() round-trip — the probe
+          # message lands on stderr the moment the first SSL_CTX builds.
           mkdir -p /tmp/ktls-probe
           openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
             -keyout /tmp/ktls-probe/key.pem \
@@ -331,12 +336,23 @@ jobs:
           <?php
           use TrueAsync\HttpServer;
           use TrueAsync\HttpServerConfig;
+          use function Async\spawn;
           $cfg = (new HttpServerConfig())
               ->addListener('127.0.0.1', 19999, true)
               ->enableTls(true)
               ->setCertificate('/tmp/ktls-probe/cert.pem')
-              ->setPrivateKey('/tmp/ktls-probe/key.pem');
-          new HttpServer($cfg);
+              ->setPrivateKey('/tmp/ktls-probe/key.pem')
+              ->setReadTimeout(5)
+              ->setWriteTimeout(5);
+          $server = new HttpServer($cfg);
+          $server->addHttpHandler(function ($req, $res) {
+              $res->setStatusCode(200)->setBody('ok')->end();
+          });
+          spawn(function () use ($server) {
+              usleep(50000);
+              $server->stop();
+          });
+          $server->start();
           PHP
           /usr/local/bin/php /tmp/ktls-probe/probe.php 2>&1 | tee /tmp/probe.log
           grep -F 'kTLS probe:' /tmp/probe.log
