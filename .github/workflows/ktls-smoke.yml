@@ -6,15 +6,16 @@ name: kTLS smoke (Linux)
 # `kernel=yes` (i.e. the kTLS path actually engaged).
 #
 # Triggers on pushes to branches that carry the kTLS work
-# (issue #30 — *-performance-opt-* / ktls-*) and on manual dispatch.
-# Doesn't gate main — main is covered by build-linux.yml; this one is
-# additive validation that the kTLS data path didn't silently fall back
-# to memory-BIO.
+# (issues #30 / #31 / ktls-*) and on manual dispatch. Doesn't gate
+# main — main is covered by build-linux.yml; this one is additive
+# validation that the kTLS data path didn't silently fall back to
+# memory-BIO.
 
 on:
   push:
     branches:
       - '30-*'
+      - '31-*'
       - 'ktls-*'
   pull_request:
     branches: [main]
