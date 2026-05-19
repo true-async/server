@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-05-19
+
+### Added
+
+- One-shot brotli compress path with `BROTLI_PARAM_SIZE_HINT` (Step 4 of perf TODO): `apply_buffered` uses the stateless one-pass `BrotliEncoderCompress()` when the body is fully known. The size hint lets the encoder right-size its ring buffer / hash tables for the actual payload instead of for arbitrary streaming. New optional vtable slots `compress_oneshot` + `max_compressed_size`; streaming path stays for chunked / unknown-length responses. Closes the brotli encode gap vs Swoole's `BrotliEncoderCompress`-based path. C-side defaults stay production-typical (gzip 6, brotli 4); bench callers set `setCompressionLevel(1)` / `setBrotliLevel(1)` for Swoole-equivalent throughput.
+- Loud stderr logging on unexpected worker thread exits in `pool_worker_handler` — covers uncaught `$server->start()` exceptions, clean returns while the await loop still expects workers, and server-transfer failure. Previously each case silently dropped 1/N of accept capacity with no operator signal.
+
+### Fixed
+
+- `Connection: close` request header now produces `Connection: close` in the response too (RFC 9112 §9.6). The parser already flipped `req->keep_alive = false` and the dispose path closed the FD, but the missing response header left clients unable to tell the TCP was not reusable until the next write hit ECONNRESET — wrk under `-H 'Connection: close'` counted every reply as a read error. Side effect on the local short-lived bench (wrk c=512 d=10s): 174k → 230k RPS, p50 14.5 ms → 2.5 ms, read-errors 2.0M → 0.
+
+### Changed
+
+- Server-side codec preference order flipped to `zstd > gzip > brotli > identity`. Clients sending the common `gzip, br` Accept-Encoding now get gzip — the brotli pool can't reuse encoder state (libbrotli has no public reset API), so until the arena-allocator follow-up (TODO Step 4) lands, gzip's `deflateReset` path is the better default. Clients that explicitly want brotli via q-values (`br;q=1.0, gzip;q=0.5`) still get it.
+
 ## [0.6.2] - 2026-05-19
 
 ### Added
