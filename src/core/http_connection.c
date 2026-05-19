@@ -404,6 +404,13 @@ void http_connection_destroy(http_connection_t *conn)
         pe->base.dispose(&pe->base);
     }
 
+    if (conn->ktls_pending_buf != NULL) {
+        efree(conn->ktls_pending_buf);
+        conn->ktls_pending_buf = NULL;
+        conn->ktls_pending_len = 0;
+        conn->ktls_pending_cap = 0;
+    }
+
     /* TLS session lives only as long as its connection. Free *after*
      * the IO handle is torn down so any in-flight write can still
      * reach drain_ciphertext — but before efree(conn) obviously. */

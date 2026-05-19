@@ -219,10 +219,9 @@ bool tls_drain(http_connection_t *conn)
     return ok && !conn->tls_write_error;
 }
 
-/* Park coroutine until socket is writable (kTLS mode). The poll
- * callback triggers tls_space_event on ASYNC_WRITABLE so the producer
- * resumes and retries SSL_write_ex. */
-static bool tls_wait_writable_ktls(http_connection_t *conn);
+/* kTLS write helpers (poll-event-driven, no coroutine suspension). */
+static bool ktls_pending_append(http_connection_t *conn, const char *data, size_t len);
+static void ktls_drain_pending(http_connection_t *conn);
 
 /* Producer entry (coroutine-only). Chunks internally for len > ring_size. */
 bool tls_push(http_connection_t *conn, const char *data, const size_t len)
@@ -236,9 +235,27 @@ bool tls_push(http_connection_t *conn, const char *data, const size_t len)
     }
 
     /* kTLS path: SSL_write_ex goes straight to the socket (kernel
-     * encrypts via TLS_TX). On WANT_WRITE the kernel's sndbuf is full;
-     * park on poll WRITABLE and retry. No memory-BIO ring, no drain. */
+     * encrypts via TLS_TX). Fire-and-forget — analogue of IO_WRITE_EX:
+     * try a synchronous SSL_write_ex, and anything that doesn't fit
+     * (WANT_WRITE = kernel sndbuf full) is parked in conn->ktls_pending
+     * and drained by ktls_poll_callback on ASYNC_WRITABLE. The producer
+     * returns success once the bytes are accepted (either sent or
+     * queued); backpressure surfaces at a higher level via the existing
+     * tls_space_event when an HWM is crossed (wired separately). The
+     * TLS layer itself never suspends. */
     if (conn->ktls_mode) {
+        /* Preserve ordering: if a previous push left bytes in pending,
+         * append rather than re-attempting a synchronous SSL_write — the
+         * kernel sndbuf is still full and an inline attempt would
+         * re-queue out-of-order. */
+        if (conn->ktls_pending_len > 0) {
+            if (UNEXPECTED(!ktls_pending_append(conn, data, len))) {
+                conn->tls_write_error = true;
+                return false;
+            }
+            return true;
+        }
+
         size_t off = 0;
         while (off < len) {
             if (UNEXPECTED(conn->tls == NULL || conn->tls_write_error)) {
@@ -259,10 +276,17 @@ bool tls_push(http_connection_t *conn, const char *data, const size_t len)
             }
 
             if (rc == TLS_IO_WANT_WRITE || rc == TLS_IO_WANT_READ) {
-                if (!tls_wait_writable_ktls(conn)) {
+                if (UNEXPECTED(!ktls_pending_append(conn, data + off, len - off))) {
+                    conn->tls_write_error = true;
                     return false;
                 }
-                continue;
+
+                if (UNEXPECTED(!ktls_arm_for(conn, ASYNC_WRITABLE))) {
+                    conn->tls_write_error = true;
+                    return false;
+                }
+
+                return true;
             }
 
             conn->tls_write_error = true;
@@ -297,51 +321,90 @@ bool tls_push(http_connection_t *conn, const char *data, const size_t len)
     return true;
 }
 
-static bool tls_wait_writable_ktls(http_connection_t *conn)
+/* Grow + append to the conn-owned plaintext pending buffer. Returns
+ * false on alloc failure; caller marks the connection write-error. */
+static bool ktls_pending_append(http_connection_t *conn,
+                                const char *data,
+                                const size_t len)
 {
-    if (ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
-        /* Producer must be a coroutine; if we're called from
-         * scheduler-side (e.g. h2 emit), the caller should not be
-         * using tls_push at all — those paths take h2_emit_flush_tls
-         * variants that don't suspend. */
-        return false;
+    if (len == 0) {
+        return true;
     }
 
-    if (conn->tls_space_event == NULL) {
-        conn->tls_space_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+    const size_t need = conn->ktls_pending_len + len;
 
-        if (conn->tls_space_event == NULL) {
+    if (need > conn->ktls_pending_cap) {
+        size_t cap = conn->ktls_pending_cap ? conn->ktls_pending_cap : 4096;
+
+        while (cap < need) {
+            cap *= 2;
+        }
+
+        char *buf = erealloc(conn->ktls_pending_buf, cap);
+
+        if (UNEXPECTED(buf == NULL)) {
             return false;
         }
+
+        conn->ktls_pending_buf = buf;
+        conn->ktls_pending_cap = cap;
     }
 
-    if (UNEXPECTED(!ktls_arm_for(conn, ASYNC_WRITABLE))) {
-        return false;
-    }
-
-    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
-
-    if (UNEXPECTED(co == NULL || ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
-        return false;
-    }
-
-    zend_async_resume_when(co, &conn->tls_space_event->base, false,
-                           zend_async_waker_callback_resolve, NULL);
-
-    ZEND_ASYNC_SUSPEND();
-    zend_async_waker_clean(co);
-
-    if (EG(exception) != NULL || conn->tls == NULL || conn->tls_write_error) {
-        return false;
-    }
-
-    /* After waking, restore poll to READABLE — the read FSM is the
-     * common case (waiting for next request). The next SSL_write call
-     * in the loop above will re-arm WRITABLE if it still gets
-     * WANT_WRITE. */
-    (void)ktls_arm_for(conn, ASYNC_READABLE);
-
+    memcpy(conn->ktls_pending_buf + conn->ktls_pending_len, data, len);
+    conn->ktls_pending_len = need;
     return true;
+}
+
+/* Drain pending plaintext via SSL_write_ex. Called from the WRITABLE
+ * poll callback. On full drain re-arms READABLE so the read FSM can
+ * pick up the next request. On partial write / WANT_WRITE leaves
+ * WRITABLE armed (the poll event was last armed for WRITABLE by
+ * tls_push, so a re-arm is unnecessary — just return). */
+static void ktls_drain_pending(http_connection_t *conn)
+{
+    if (conn->ktls_pending_len == 0) {
+        return;
+    }
+
+    while (conn->ktls_pending_len > 0) {
+        if (UNEXPECTED(conn->tls == NULL || conn->tls_write_error)) {
+            return;
+        }
+
+        size_t                written = 0;
+        const tls_io_result_t rc      = tls_write_plaintext(conn->tls,
+                                                            conn->ktls_pending_buf,
+                                                            conn->ktls_pending_len,
+                                                            &written);
+
+        if (written > 0) {
+            http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+            const size_t rem = conn->ktls_pending_len - written;
+
+            if (rem > 0) {
+                memmove(conn->ktls_pending_buf,
+                        conn->ktls_pending_buf + written,
+                        rem);
+            }
+
+            conn->ktls_pending_len = rem;
+        }
+
+        if (rc == TLS_IO_OK) {
+            continue;
+        }
+
+        if (rc == TLS_IO_WANT_WRITE || rc == TLS_IO_WANT_READ) {
+            return;
+        }
+
+        conn->tls_write_error = true;
+        conn->state           = CONN_STATE_CLOSING;
+        return;
+    }
+
+    /* Fully drained — let the read FSM own readiness again. */
+    (void)ktls_arm_for(conn, ASYNC_READABLE);
 }
 
 /* ========================================================================
@@ -1349,20 +1412,36 @@ static void ktls_poll_callback(zend_async_event_t *event,
     const zend_async_poll_event_t *pe = (const zend_async_poll_event_t *)event;
     const async_poll_event triggered = pe != NULL ? pe->triggered_events : 0;
 
-    /* WRITABLE: wake any coroutine parked in tls_wait_writable_ktls
-     * (h1 send path) before advancing reads. Reads commonly follow
-     * a successful response (keep-alive), so doing writes first lets
-     * the producer release its tls_push call before the same callback
-     * tries to feed more requests. */
+    /* WRITABLE: drain whatever plaintext tls_push parked in
+     * conn->ktls_pending. Fire-and-forget — no coroutine to resume,
+     * the producer already returned success. If drain didn't finish,
+     * WRITABLE stays armed and the next tick continues; if it did,
+     * drain re-armed READABLE for the read FSM. */
     if (triggered & ASYNC_WRITABLE) {
-        if (conn->tls_space_event != NULL) {
-            conn->tls_space_event->trigger(conn->tls_space_event);
+        ktls_drain_pending(conn);
+
+        if (UNEXPECTED(conn->state == CONN_STATE_CLOSING)) {
+            (void)tls_finalize_if_closing(conn);
+            return;
+        }
+
+        /* Still bytes to push — keep WRITABLE armed, defer the read
+         * FSM until sndbuf clears. Avoids ktls_advance re-arming
+         * READABLE-only and starving the drain. */
+        if (conn->ktls_pending_len > 0) {
+            return;
         }
     }
 
-    /* READABLE: re-enter the data FSM. Bailout firewall for emalloc
-     * paths called by tls_decrypt_into_buffer / tls_feed_parser_step. */
-    if (triggered & (ASYNC_READABLE | ASYNC_DISCONNECT)) {
+    /* READABLE / handshake-WANT_WRITE re-entry: advance the FSM.
+     * Bailout firewall for emalloc paths called by
+     * tls_decrypt_into_buffer / tls_feed_parser_step. */
+    if (triggered & (ASYNC_READABLE | ASYNC_WRITABLE | ASYNC_DISCONNECT)) {
+        if (conn->state == CONN_STATE_CLOSING) {
+            (void)tls_finalize_if_closing(conn);
+            return;
+        }
+
         volatile bool bailout = false;
         zend_try {
             ktls_advance(conn);

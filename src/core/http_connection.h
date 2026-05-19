@@ -178,6 +178,16 @@ struct _http_connection_t {
     zend_async_poll_event_t       *ktls_poll;
     zend_async_event_callback_t   *ktls_poll_cb;
     php_socket_t                   ktls_fd;
+
+    /* Pending plaintext that did not fit into the kernel sndbuf during
+     * tls_push (SSL_write_ex returned WANT_WRITE). The producer returns
+     * success after appending here; the WRITABLE poll callback drains
+     * via SSL_write_ex. Lifetime owned by the connection — freed in
+     * destroy. Sized lazily on first WANT_WRITE; growth is 2× until
+     * it covers the partial-write residue. */
+    char                          *ktls_pending_buf;
+    size_t                         ktls_pending_len;
+    size_t                         ktls_pending_cap;
 #endif
 
     /* size_t fields (8 bytes on 64-bit) */
