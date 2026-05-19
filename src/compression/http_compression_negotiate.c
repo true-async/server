@@ -171,25 +171,27 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
 
 http_codec_id_t http_accept_encoding_select(const http_accept_encoding_t *ae)
 {
-    /* Server-side preference order: zstd > brotli > gzip > identity.
-     * Matches typical server policy (best-ratio-first, with gzip last
-     * as the most universal fallback). q-value-based client preference
-     * is a future extension — server preference covers ~99% of real
-     * Accept-Encoding strings. The registry lookup at the call site
-     * filters out codecs absent from the build, so picking a codec the
-     * client accepts but we cannot encode degrades to identity rather
-     * than failing. */
+    /* Server-side preference order: zstd > gzip > brotli > identity.
+     * gzip is preferred over brotli because our brotli backend lacks
+     * encoder state reuse — libbrotli has no public reset API, so every
+     * response pays a full BrotliEncoderCreateInstance / Destroy cycle
+     * (malloc storm on the encoder's internal hash tables and ring
+     * buffer). The gzip pool's deflateReset path is ~2× faster end-to-end
+     * even though brotli q=4 has comparable algorithmic encode speed.
+     * Clients that explicitly want brotli via q-values (`br;q=1.0,
+     * gzip;q=0.5`) still get it via the Q_OK branch above. See TODO Step 4
+     * for the arena-allocator fix that lets us revert this preference. */
 #ifdef HAVE_HTTP_COMPRESSION
     if (ae->zstd_acceptable && http_compression_lookup(HTTP_CODEC_ZSTD)) {
         return HTTP_CODEC_ZSTD;
     }
 
-    if (ae->brotli_acceptable && http_compression_lookup(HTTP_CODEC_BROTLI)) {
-        return HTTP_CODEC_BROTLI;
-    }
-
     if (ae->gzip_acceptable && http_compression_lookup(HTTP_CODEC_GZIP)) {
         return HTTP_CODEC_GZIP;
+    }
+
+    if (ae->brotli_acceptable && http_compression_lookup(HTTP_CODEC_BROTLI)) {
+        return HTTP_CODEC_BROTLI;
     }
 #endif
 
