@@ -254,12 +254,13 @@ jobs:
         run: |
           set -eux
           # GitHub-hosted ubuntu-22.04 ships CONFIG_TLS=m. Module is on
-          # disk but not auto-loaded — load it explicitly for the probe
-          # to return true.
+          # disk but not auto-loaded — load it explicitly so the probe
+          # sees "tls" in /proc/sys/net/ipv4/tcp_available_ulp.
           sudo modprobe tls
           lsmod | grep -E '^tls\b'
-          # /proc/sys/net/tls is the kernel-side breadcrumb; print for log.
-          ls -la /proc/sys/net/tls 2>/dev/null || true
+          # tcp_available_ulp is the kernel-side breadcrumb the probe
+          # reads. Must contain the word "tls" after modprobe.
+          cat /proc/sys/net/ipv4/tcp_available_ulp
 
       - name: Clone php-src + ext/async
         run: |
@@ -359,8 +360,10 @@ jobs:
           grep -F 'kernel=yes'  /tmp/probe.log \
             || { echo "ERROR: probe reported kernel=no despite modprobe tls"; \
                  cat /tmp/probe.log; \
-                 echo '--- /proc/sys/net/tls ---'; \
-                 ls -la /proc/sys/net/tls 2>/dev/null || true; \
+                 echo '--- /proc/sys/net/ipv4/tcp_available_ulp ---'; \
+                 cat /proc/sys/net/ipv4/tcp_available_ulp 2>/dev/null || true; \
+                 echo '--- lsmod tls ---'; \
+                 lsmod | grep -E '^tls\b' || true; \
                  exit 1; }
 
       - name: Run TLS-related phpt

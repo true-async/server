@@ -33,42 +33,64 @@
 # error "http_server TLS requires OpenSSL >= 3.0"
 #endif
 
-/* Kernel TLS (kTLS) probe. Tries setsockopt(SOL_TCP, TCP_ULP, "tls") on a
- * throwaway socket; success means the kernel accepts the TLS upper-layer
- * protocol, so post-handshake socket-BIO sessions can offload AES-GCM to
- * the kernel. Linux-only; everything else is a hard "no". Result cached
+/* Kernel TLS (kTLS) probe. Reads /proc/sys/net/ipv4/tcp_available_ulp
+ * and checks whether the kernel advertises the "tls" upper-layer
+ * protocol. Reading this pseudo-file is a non-disruptive way to detect
+ * support — setsockopt(TCP_ULP, "tls") on a *fresh* socket would return
+ * ENOTCONN because the kernel only accepts the option once the socket
+ * is in TCP_ESTABLISHED, so probing via setsockopt at startup is not
+ * possible. Linux-only; everything else is a hard "no". Result cached
  * after the first call. */
 #if defined(__linux__) && defined(HAVE_KTLS)
-# include <sys/socket.h>
-# include <netinet/in.h>
-# include <netinet/tcp.h>
+# include <fcntl.h>
 # include <unistd.h>
-# include <errno.h>
-# ifndef TCP_ULP
-#  define TCP_ULP 31
-# endif
+# include <string.h>
 
 static int  tls_ktls_probe_result_g = -1;   /* -1 unprobed, 0 no, 1 yes */
 static bool tls_ktls_logged_g       = false;
 
 static int tls_probe_kernel_ktls_once(void)
 {
-    const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+    const int fd = open("/proc/sys/net/ipv4/tcp_available_ulp",
+                        O_RDONLY | O_CLOEXEC);
 
     if (fd < 0) {
+        /* Pre-4.13 kernels lacked the sysctl; on those we can't probe
+         * safely. Same outcome as the file being empty: kernel=no. */
         return 0;
     }
 
-    const int rc = setsockopt(fd, IPPROTO_TCP, TCP_ULP, "tls", 4);
-    const int saved_errno = errno;
+    char        buf[128];
+    const ssize_t n = read(fd, buf, sizeof(buf) - 1);
 
     close(fd);
 
-    /* ENOENT or EPROTONOSUPPORT → tls module not loaded / not present in
-     * kernel. Anything else (EPERM, EINVAL on truly broken builds) is also
-     * a failure for our purposes — we can't rely on it. */
-    (void)saved_errno;
-    return rc == 0 ? 1 : 0;
+    if (n <= 0) {
+        return 0;
+    }
+
+    buf[n] = '\0';
+
+    /* Tokens are space-separated, e.g. "espresso tls". Match on a whole
+     * word to avoid a false positive against a future ULP like "tlsx". */
+    const char *p = buf;
+
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == '\n') {
+            p++;
+        }
+
+        if (strncmp(p, "tls", 3) == 0
+            && (p[3] == '\0' || p[3] == ' ' || p[3] == '\t' || p[3] == '\n')) {
+            return 1;
+        }
+
+        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n') {
+            p++;
+        }
+    }
+
+    return 0;
 }
 
 bool tls_kernel_ktls_supported(void)
