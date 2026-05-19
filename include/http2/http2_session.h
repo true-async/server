@@ -141,7 +141,19 @@ struct http2_session_t {
      * emit_mt_queued coalesces concurrent schedule calls. */
     zend_async_microtask_t *emit_mt;
     bool                    emit_mt_queued;
+
+    /* Phase 1 hybrid TLS emit (issue #30): streams whose response body
+     * exceeds H2_TLS_HYBRID_LARGE_THRESHOLD (or streaming, size unknown)
+     * pin this counter while in flight. TLS emit picks GATHER when > 0,
+     * DRAIN (mem_send + BIO_write) otherwise. */
+    unsigned large_streams_pending;
 };
+
+/* Threshold for hybrid TLS emit selector. Bodies <= threshold take the DRAIN
+ * path (mem_send + BIO_write loop, no gather alloc churn). Larger ones, or
+ * streaming responses with unknown size, take the GATHER path which
+ * amortises cipher setup over one SSL_write_ex. */
+#define H2_TLS_HYBRID_LARGE_THRESHOLD      (2u * 1024u)
 
 void h2_session_schedule_emit(http2_session_t *session);
 

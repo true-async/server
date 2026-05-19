@@ -1147,6 +1147,85 @@ static void h2_emit_state_cleanup(struct http2_emit_state *st)
 }
 
 #ifdef HAVE_OPENSSL
+/* Phase 1 hybrid TLS emit mode (issue #30). Two emit strategies coexist:
+ *
+ *   DRAIN  — drain nghttp2's outbound queue via mem_send into a 16 KiB stack
+ *            buffer, BIO_write straight into the plaintext BIO, let tls_drain
+ *            encrypt + ship. No records[] / body_refs[] gather machinery.
+ *            Wins on short responses (no per-pass alloc / addref churn).
+ *
+ *   GATHER — drive nghttp2 via session_send + NO_COPY callbacks, accumulate
+ *            frames in records[] (with body_refs[] keeping body memory alive),
+ *            then memcpy everything into one stage[] buffer and ship with one
+ *            SSL_write_ex. Wins on bodies >= one TLS record (amortises cipher
+ *            setup over a larger plaintext).
+ *
+ *   HYBRID — default. Pick DRAIN when no large stream is in flight, otherwise
+ *            GATHER (session->large_streams_pending tracks the threshold).
+ *
+ * Override with env var TRUE_ASYNC_H2_TLS_EMIT_MODE = drain | gather | hybrid.
+ * Read once, cached for process lifetime. */
+enum h2_tls_emit_mode {
+    H2_EMIT_HYBRID = 0,
+    H2_EMIT_DRAIN  = 1,
+    H2_EMIT_GATHER = 2,
+};
+
+static enum h2_tls_emit_mode h2_tls_emit_mode(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *m = getenv("TRUE_ASYNC_H2_TLS_EMIT_MODE");
+
+        if (m == NULL)                          { cached = H2_EMIT_HYBRID; }
+        else if (strcmp(m, "drain") == 0)       { cached = H2_EMIT_DRAIN;  }
+        else if (strcmp(m, "gather") == 0)      { cached = H2_EMIT_GATHER; }
+        else                                    { cached = H2_EMIT_HYBRID; }
+    }
+
+    return (enum h2_tls_emit_mode)cached;
+}
+
+/* DRAIN TLS emit (see enum doc above): mem_send + BIO_write, no gather
+ * machinery. h2_send_callback / h2_send_data_callback are never invoked
+ * because we drive nghttp2 via mem_send, not session_send. */
+static void h2_emit_flush_tls_drain(http_connection_t *conn,
+                                    http2_session_t *session)
+{
+    char buf[16384 + 9 + 256];
+    const int need = (int)sizeof(buf);
+
+    while (http2_session_want_write(session)) {
+        const int guarantee =
+            BIO_ctrl_get_write_guarantee(conn->tls_plaintext_bio);
+
+        if (guarantee < need) {
+            break;
+        }
+
+        const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
+
+        if (n < 0) {
+            conn->tls_write_error = true;
+            break;
+        }
+
+        if (n == 0) {
+            break;
+        }
+
+        const int w = BIO_write(conn->tls_plaintext_bio, buf, (int)n);
+
+        if (UNEXPECTED(w != (int)n)) {
+            conn->tls_write_error = true;
+            break;
+        }
+    }
+
+    (void)tls_drain(conn);
+}
+
 static bool h2_tls_write_chunk(http_connection_t *conn,
                                const char *ptr, const size_t len)
 {
@@ -1339,9 +1418,20 @@ void http2_session_emit(http2_session_t *session)
     {
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
-            st.byte_cap   = H2_EMIT_TLS_BYTE_CAP;
-            session->emit_state = &st;
-            h2_emit_flush_tls(conn, session, &st);
+            const enum h2_tls_emit_mode mode = h2_tls_emit_mode();
+            const bool use_drain =
+                (mode == H2_EMIT_DRAIN) ||
+                (mode == H2_EMIT_HYBRID && session->large_streams_pending == 0);
+
+            if (use_drain) {
+                /* DRAIN: mem_send + BIO_write, no records[]/body_refs[] gather,
+                 * no emit_state needed. */
+                h2_emit_flush_tls_drain(conn, session);
+            } else {
+                st.byte_cap   = H2_EMIT_TLS_BYTE_CAP;
+                session->emit_state = &st;
+                h2_emit_flush_tls(conn, session, &st);
+            }
         } else
 #endif
         /* Skip if writev in flight; completion re-drives via notify_emit. */
