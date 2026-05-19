@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 14109,
-      "hit": 10890
+      "total": 14156,
+      "hit": 10942
     },
     "functions": {
-      "total": 937,
-      "hit": 819
+      "total": 940,
+      "hit": 823
     }
   },
   "files": {
@@ -132,12 +132,12 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 936,
-        "hit": 635
+        "total": 983,
+        "hit": 687
       },
       "functions": {
-        "total": 52,
-        "hit": 44
+        "total": 55,
+        "hit": 48
       }
     },
     "src/core/http_connection_internal.h": {
