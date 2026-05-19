@@ -190,13 +190,63 @@ static void br_destroy(http_encoder_t *base)
     efree(enc);
 }
 
+/* Stateless one-shot compress. BrotliEncoderCompress() is a thin wrapper
+ * over BrotliEncoderCreateInstance + CompressStream(FINISH) + Destroy that
+ * additionally hands the input size in via BROTLI_PARAM_SIZE_HINT — the
+ * encoder then sizes its ring buffer / hash tables for THIS payload instead
+ * of for arbitrary streaming. The streaming path (br_write) leaves
+ * SIZE_HINT unset and ends up with the default (much larger) state — that
+ * is the actual reason our brotli encode lost to Swoole, not the API shape.
+ *
+ * Streaming path stays available for chunked-transfer / unknown-length
+ * responses; apply_buffered prefers this slot when the whole body is in
+ * hand, which is the common case. */
+static http_encoder_status_t br_compress_oneshot(int level,
+                                                 const void *in,  size_t in_len,
+                                                 void       *out, size_t out_cap,
+                                                 size_t *out_produced)
+{
+    if (level < HTTP_COMPRESSION_BROTLI_LEVEL_MIN) level = HTTP_COMPRESSION_BROTLI_LEVEL_MIN;
+
+    if (level > HTTP_COMPRESSION_BROTLI_LEVEL_MAX) level = HTTP_COMPRESSION_BROTLI_LEVEL_MAX;
+
+    /* Caller must have sized out_cap to at least BrotliEncoderMaxCompressedSize(in_len);
+     * a smaller buffer triggers BrotliEncoderCompress's internal fallback to an
+     * uncompressed framing or an outright error, which costs us a full encode
+     * pass for nothing. Return ERROR so the apply_buffered path can fall back
+     * to streaming on the rare oversized-output case. */
+    size_t encoded_size = out_cap;
+
+    if (UNEXPECTED(!BrotliEncoderCompress(level,
+                                          BROTLI_DEFAULT_WINDOW,
+                                          BROTLI_MODE_GENERIC,
+                                          in_len, (const uint8_t *)in,
+                                          &encoded_size, (uint8_t *)out))) {
+        return HTTP_ENC_ERROR;
+    }
+
+    if (out_produced) *out_produced = encoded_size;
+    return HTTP_ENC_DONE;
+}
+
+/* Worst-case output sizer for the one-shot path's pre-allocation. Exposed
+ * via the vtable so the caller — which doesn't link libbrotli directly —
+ * can right-size its buffer in one allocation instead of growing on
+ * NEED_OUTPUT. */
+static size_t br_max_compressed_size(size_t in_len)
+{
+    return BrotliEncoderMaxCompressedSize(in_len);
+}
+
 const http_encoder_vtable_t http_compression_brotli_vt = {
-    .name    = "br",
-    .id      = HTTP_CODEC_BROTLI,
-    .create  = br_create,
-    .write   = br_write,
-    .finish  = br_finish,
-    .destroy = br_destroy,
+    .name                = "br",
+    .id                  = HTTP_CODEC_BROTLI,
+    .create              = br_create,
+    .write               = br_write,
+    .finish              = br_finish,
+    .destroy             = br_destroy,
+    .compress_oneshot    = br_compress_oneshot,
+    .max_compressed_size = br_max_compressed_size,
 };
 
 /* ----- request decoder ----------------------------------------------- */

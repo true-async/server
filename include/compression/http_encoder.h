@@ -60,6 +60,25 @@ typedef struct http_encoder_vtable {
     bool (*reset)(http_encoder_t *enc, int level);
 
     void (*destroy)(http_encoder_t *enc);
+
+    /* Optional: stateless one-shot compress. When the body is fully
+     * buffered (the apply_buffered path), backends that ship a one-shot
+     * API can hand the input size to the encoder up front (Brotli's
+     * BROTLI_PARAM_SIZE_HINT) so it sizes its ring buffer / hash tables
+     * for THIS payload rather than for arbitrary streaming. The output
+     * buffer must be at least max_compressed_size(in_len) bytes; a tight
+     * buffer triggers the encoder's internal fallback and costs a full
+     * pass for nothing. NULL on the slot → caller falls back to the
+     * streaming Create / Write / Finish / Destroy path. */
+    http_encoder_status_t (*compress_oneshot)(int level,
+                                              const void *in,  size_t in_len,
+                                              void       *out, size_t out_cap,
+                                              size_t *out_produced);
+
+    /* Optional: worst-case output size for one-shot compression. Required
+     * when compress_oneshot is set so the caller can pre-allocate without
+     * linking the codec library. */
+    size_t (*max_compressed_size)(size_t in_len);
 } http_encoder_vtable_t;
 
 /* Common header. Backend-specific state follows in subclassed structs;

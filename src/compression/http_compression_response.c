@@ -349,8 +349,53 @@ void http_compression_apply_buffered(zend_object *response_obj)
         return;
     }
 
+    const int codec_level = level_for_codec(st->cfg, codec);
+
+    /* One-shot fast path. Backends that ship a stateless compress (currently
+     * brotli via BrotliEncoderCompress) skip the streaming Create / Write /
+     * Finish / Destroy machinery entirely — no per-response ring buffer
+     * alloc, no malloc storm. Closes the brotli encoding gap vs Swoole,
+     * which uses the same primitive. Falls through to the streaming path
+     * on ERROR (rare: typically only when our pre-sized output overflows
+     * on an incompressible payload). */
+    const http_encoder_vtable_t *vt_lookup = http_compression_lookup(codec);
+
+    if (vt_lookup != NULL && vt_lookup->compress_oneshot != NULL) {
+        /* Worst-case size from the codec (BrotliEncoderMaxCompressedSize:
+         * ~input + input/16 + 64). Sizing tighter than this triggers the
+         * encoder's internal fallback, which costs a full encode pass for
+         * nothing — the very mistake the earlier `body_len + 64` cap made. */
+        const size_t oneshot_cap = vt_lookup->max_compressed_size != NULL
+            ? vt_lookup->max_compressed_size(body_len)
+            : (body_len + (body_len >> 4) + 64);
+        smart_str oneshot_out = {0};
+        smart_str_alloc(&oneshot_out, oneshot_cap, 0);
+
+        size_t oneshot_produced = 0;
+        const http_encoder_status_t s = vt_lookup->compress_oneshot(
+            codec_level,
+            ZSTR_VAL(body->s), body_len,
+            ZSTR_VAL(oneshot_out.s), oneshot_cap, &oneshot_produced);
+
+        if (EXPECTED(s == HTTP_ENC_DONE)) {
+            ZSTR_LEN(oneshot_out.s) = oneshot_produced;
+            smart_str_0(&oneshot_out);
+
+            smart_str_free(body);
+            body->s = oneshot_out.s;
+            body->a = oneshot_out.a;
+
+            mutate_headers_for_codec(
+                http_response_get_headers(response_obj), codec);
+            return;
+        }
+
+        smart_str_free(&oneshot_out);
+        /* fall through to streaming path */
+    }
+
     http_encoder_t *enc = http_compression_pool_acquire(
-        codec, level_for_codec(st->cfg, codec));
+        codec, codec_level);
 
     if (UNEXPECTED(enc == NULL)) return;
     const http_encoder_vtable_t *vt = enc->vt;
