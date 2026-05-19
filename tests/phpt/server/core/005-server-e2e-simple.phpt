@@ -86,6 +86,7 @@ HTTP/1.1 200 OK
 Content-Length: 18
 content-type: text/plain
 x-test: hello
+connection: close
 
 Hello from server!
 === Server side ===

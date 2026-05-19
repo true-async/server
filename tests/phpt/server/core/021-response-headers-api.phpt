@@ -85,6 +85,7 @@ HTTP/1.1 200 OK
 Content-Length: 10
 content-type: text/plain
 x-final: shipped
+connection: close
 
 headers-ok
 === probe ===

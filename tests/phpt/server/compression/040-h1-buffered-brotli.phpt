@@ -126,6 +126,6 @@ case A body-not-empty: 1
 case A body-smaller-than-source: 1
 case B echo: len=1760
 case B match: ok
-case C content-encoding: br
+case C content-encoding: gzip
 case D content-encoding: gzip
 Done

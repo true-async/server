@@ -54,16 +54,19 @@ await($cli);
 HTTP/1.1 200 OK
 Content-Length: 16
 content-type: application/json%A
+connection: close
 
 {"k":"v","n":42}
 === /html ===
 HTTP/1.1 200 OK
 Content-Length: 11
 content-type: text/html%A
+connection: close
 
 <h1>hi</h1>
 === /redirect ===
 HTTP/1.1 301 Moved Permanently
 Content-Length: 0
 location: /elsewhere
+connection: close
 

@@ -65,6 +65,7 @@ foreach ($probe as $k => $v) echo "$k = " . var_export($v, true) . "\n";
 HTTP/1.1 201 Birthed
 Content-Length: 4
 content-type: text/plain
+connection: close
 
 born
 === probe ===

@@ -79,6 +79,7 @@ foreach ($lines as $l) echo "$l\n";
 HTTP/1.1 200 OK
 Content-Length: 10
 content-type: text/plain
+connection: close
 
 final-body
 === probe ===

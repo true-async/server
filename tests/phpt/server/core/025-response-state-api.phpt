@@ -59,6 +59,7 @@ foreach ($snap as $k => $v) echo "$k = " . var_export($v, true) . "\n";
 HTTP/1.1 200 OK
 Content-Length: 11
 content-type: text/plain
+connection: close
 
 state-check
 === state ===
