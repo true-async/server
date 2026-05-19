@@ -1187,6 +1187,36 @@ static enum h2_tls_emit_mode h2_tls_emit_mode(void)
     return (enum h2_tls_emit_mode)cached;
 }
 
+/* kTLS emit (#31): no memory-BIO ring, no DRAIN/GATHER selector. Drain
+ * nghttp2 frames into a stack buffer (one TLS record per pass) and hand
+ * to tls_push, which writes synchronously into the kernel via
+ * SSL_write_ex and parks any WANT_WRITE residue in conn->ktls_pending —
+ * the WRITABLE poll callback drains it. No coroutine suspension; works
+ * unchanged in scheduler context. */
+static void h2_emit_flush_tls_ktls(http_connection_t *conn,
+                                   http2_session_t *session)
+{
+    char buf[H2_TLS_RECORD_PAYLOAD_MAX];
+
+    while (http2_session_want_write(session)) {
+        const ssize_t n = http2_session_drain(session, buf, sizeof(buf));
+
+        if (n < 0) {
+            conn->tls_write_error = true;
+            return;
+        }
+
+        if (n == 0) {
+            return;
+        }
+
+        if (!tls_push(conn, buf, (size_t)n)) {
+            conn->tls_write_error = true;
+            return;
+        }
+    }
+}
+
 /* DRAIN TLS emit (see enum doc above): mem_send + BIO_write, no gather
  * machinery. h2_send_callback / h2_send_data_callback are never invoked
  * because we drive nghttp2 via mem_send, not session_send. */
@@ -1418,19 +1448,25 @@ void http2_session_emit(http2_session_t *session)
     {
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
-            const enum h2_tls_emit_mode mode = h2_tls_emit_mode();
-            const bool use_drain =
-                (mode == H2_EMIT_DRAIN) ||
-                (mode == H2_EMIT_HYBRID && session->large_streams_pending == 0);
-
-            if (use_drain) {
-                /* DRAIN: mem_send + BIO_write, no records[]/body_refs[] gather,
-                 * no emit_state needed. */
-                h2_emit_flush_tls_drain(conn, session);
+            if (conn->ktls_mode) {
+                /* kTLS path bypasses both memory-BIO drain and gather —
+                 * see h2_emit_flush_tls_ktls above. */
+                h2_emit_flush_tls_ktls(conn, session);
             } else {
-                st.byte_cap   = H2_EMIT_TLS_BYTE_CAP;
-                session->emit_state = &st;
-                h2_emit_flush_tls(conn, session, &st);
+                const enum h2_tls_emit_mode mode = h2_tls_emit_mode();
+                const bool use_drain =
+                    (mode == H2_EMIT_DRAIN) ||
+                    (mode == H2_EMIT_HYBRID && session->large_streams_pending == 0);
+
+                if (use_drain) {
+                    /* DRAIN: mem_send + BIO_write, no records[]/body_refs[] gather,
+                     * no emit_state needed. */
+                    h2_emit_flush_tls_drain(conn, session);
+                } else {
+                    st.byte_cap   = H2_EMIT_TLS_BYTE_CAP;
+                    session->emit_state = &st;
+                    h2_emit_flush_tls(conn, session, &st);
+                }
             }
         } else
 #endif
