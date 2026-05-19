@@ -159,6 +159,25 @@ struct _http_connection_t {
     unsigned                       tls_draining : 1;
     unsigned                       tls_write_error : 1;
     unsigned                       tls_awaiting_handler : 1;
+    /* kTLS mode (issue #30 Phase 2). When true, conn->tls is a
+     * socket-BIO session (tls_session_new_socket) and the kernel does
+     * AES-GCM on send/recv. No memory-BIO transport — no tls_drain
+     * pump, no plaintext_bio pair, no cipher_inflight gating. Reads
+     * and writes happen directly via SSL_read/SSL_write, scheduled by
+     * `ktls_poll` readiness signals. Set at spawn from
+     * tls_ctx->ktls_enabled (itself gated by the runtime kernel probe);
+     * always false on non-Linux / missing tls module / OpenSSL without
+     * ktls. */
+    unsigned                       ktls_mode : 1;
+
+    /* Poll event for socket readiness (kTLS mode only). Replaces the
+     * conn->io ZEND_ASYNC_IO_READ multishot used by the memory-BIO
+     * path; the kernel owns crypto so all we need is a wakeup when the
+     * socket is readable / writable, then we retry SSL_read / SSL_write.
+     * Lazily allocated at handshake start, disposed in destroy. */
+    zend_async_poll_event_t       *ktls_poll;
+    zend_async_event_callback_t   *ktls_poll_cb;
+    php_socket_t                   ktls_fd;
 #endif
 
     /* size_t fields (8 bytes on 64-bit) */

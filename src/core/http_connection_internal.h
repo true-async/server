@@ -150,6 +150,29 @@ bool http_connection_tls_fsm_send_plaintext_atomic(http_connection_t *conn,
 /* Dispose tls_space_event and wake every coroutine still parked on
  * it. Called from http_connection_destroy before BIOs go away. */
 void tls_release_waiters(http_connection_t *conn);
+
+/* === kTLS (issue #30 Phase 2) ============================================
+ *
+ * Connections in conn->ktls_mode use a socket-BIO TLS session and the
+ * kernel does the AES-GCM. No memory-BIO bridge, no tls_drain pump —
+ * SSL_read / SSL_write touch the fd directly and the only thing we have
+ * to manage is a socket readiness signal (poll event) so we know when
+ * to retry an SSL operation that returned WANT_READ / WANT_WRITE.
+ *
+ * Arm the handshake driver: creates the poll event, attaches the FSM
+ * callback, starts it, and runs an initial SSL_do_handshake step. The
+ * caller passes the raw socket fd because we capture it on conn for the
+ * lifetime of the poll event (conn->io's descriptor.socket can change
+ * shape during teardown). Returns false if any allocation step fails;
+ * caller destroys the connection.
+ *
+ * The data path (SSL_read into read_buffer + parser feed, SSL_write of
+ * h1/h2 plaintext) is the subject of the next commit on this branch and
+ * still TODO here — for now, after the handshake completes the FSM
+ * transitions to CONN_STATE_READING_HEADERS but never reads any bytes,
+ * so the connection idles until read_timeout fires it. */
+bool http_connection_ktls_arm_handshake(http_connection_t *conn,
+                                        php_socket_t socket_fd);
 #endif /* HAVE_OPENSSL */
 
 #endif /* HTTP_CONNECTION_INTERNAL_H */

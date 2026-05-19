@@ -391,6 +391,19 @@ void http_connection_destroy(http_connection_t *conn)
     }
 
 #ifdef HAVE_OPENSSL
+    /* kTLS poll event (issue #30 Phase 2). Allocated only when the
+     * connection took the socket-BIO path. Stop + dispose; the
+     * callback's own dispose hook frees its scratch. Always before
+     * tls_session_free so any callback fired after stop() but before
+     * dispose() still sees a valid session. */
+    if (conn->ktls_poll != NULL) {
+        zend_async_poll_event_t *pe = conn->ktls_poll;
+        conn->ktls_poll = NULL;
+        conn->ktls_poll_cb = NULL;
+        pe->base.stop(&pe->base);
+        pe->base.dispose(&pe->base);
+    }
+
     /* TLS session lives only as long as its connection. Free *after*
      * the IO handle is torn down so any in-flight write can still
      * reach drain_ciphertext — but before efree(conn) obviously. */

@@ -1054,3 +1054,208 @@ void http_connection_tls_resume_after_handler(http_connection_t *conn)
         }
     }
 }
+
+/* =====================================================================
+ * kTLS connection path (issue #30 Phase 2).
+ *
+ * Lives next to the memory-BIO FSM above so all TLS state-machine logic
+ * stays in one TU. Activated when the connection's tls_session was built
+ * by tls_session_new_socket(); recognised by conn->ktls_mode.
+ *
+ * Differences from the memory-BIO FSM:
+ *
+ *   - No tls_feed_ciphertext / tls_drain_ciphertext pump. OpenSSL talks
+ *     to the socket fd directly through BIO_new_socket, so SSL_read and
+ *     SSL_write just call recvmsg / sendmsg — the kernel decrypts /
+ *     encrypts in place when kTLS is engaged on the fd.
+ *
+ *   - I/O readiness is signalled by a zend_async_poll_event_t on the
+ *     raw fd (ASYNC_READABLE / ASYNC_WRITABLE) instead of a libuv
+ *     ZEND_ASYNC_IO_READ multishot.
+ *
+ *   - tls_drain() / tls_cipher_inflight / tls_zc_write_done_cb plumbing
+ *     is unused — there is no ciphertext queue to coalesce.
+ *
+ * The handshake driver in this commit only handles CONN_STATE_TLS_HANDSHAKE.
+ * Once it transitions to CONN_STATE_READING_HEADERS the data path is TBD
+ * and the connection idles until read_timeout fires it. The next commit
+ * on this branch fills in the data path.
+ * ===================================================================== */
+
+typedef struct {
+    zend_async_event_callback_t  base;
+    http_connection_t           *conn;
+} ktls_poll_cb_t;
+
+static void ktls_poll_cb_dispose(zend_async_event_callback_t *cb,
+                                 zend_async_event_t *event)
+{
+    (void)event;
+    efree(cb);
+}
+
+/* Re-arm the poll event for the requested direction. Stops + restarts
+ * with a new `events` mask — same recipe as ext/curl's curl_async.c. */
+static bool ktls_arm_for(http_connection_t *conn, const async_poll_event events)
+{
+    if (conn->ktls_poll == NULL) {
+        return false;
+    }
+
+    conn->ktls_poll->base.stop(&conn->ktls_poll->base);
+    conn->ktls_poll->events = events;
+    ZEND_ASYNC_EVENT_CLR_CLOSED(&conn->ktls_poll->base);
+    return conn->ktls_poll->base.start(&conn->ktls_poll->base);
+}
+
+/* FSM step for a kTLS connection. Loops while we can make synchronous
+ * progress; returns once we need to wait for socket readiness (poll
+ * callback re-enters here) or the connection has transitioned to
+ * CLOSING (caller finalises). */
+static void ktls_advance(http_connection_t *conn)
+{
+    while (conn->state != CONN_STATE_CLOSING) {
+        if (conn->state == CONN_STATE_TLS_HANDSHAKE) {
+            const tls_io_result_t step = tls_handshake_step(conn->tls);
+
+            if (step == TLS_IO_OK) {
+                tls_on_handshake_done(conn, tls_handshake_start_ns(conn));
+                conn->state = CONN_STATE_READING_HEADERS;
+                /* Data path lands in the next commit — for now arm a
+                 * read so the FSM at least sleeps on readability when
+                 * the data path arrives. */
+                if (!ktls_arm_for(conn, ASYNC_READABLE)) {
+                    conn->state = CONN_STATE_CLOSING;
+                    continue;
+                }
+                return;
+            }
+
+            if (step == TLS_IO_WANT_READ) {
+                if (!ktls_arm_for(conn, ASYNC_READABLE)) {
+                    conn->state = CONN_STATE_CLOSING;
+                    continue;
+                }
+                return;
+            }
+
+            if (step == TLS_IO_WANT_WRITE) {
+                if (!ktls_arm_for(conn, ASYNC_WRITABLE)) {
+                    conn->state = CONN_STATE_CLOSING;
+                    continue;
+                }
+                return;
+            }
+
+            /* TLS_IO_ERROR / TLS_IO_CLOSED. */
+            tls_log_error(conn, "ktls-handshake");
+            http_server_on_tls_handshake_failed(conn->server);
+            conn->state = CONN_STATE_CLOSING;
+            continue;
+        }
+
+        /* Data states (READING_HEADERS, READING_BODY, ...) — TODO next
+         * commit. Returning here without arming I/O parks the
+         * connection; deadline_tick eventually force-closes it. */
+        return;
+    }
+
+    (void)tls_finalize_if_closing(conn);
+}
+
+static void ktls_poll_callback(zend_async_event_t *event,
+                               zend_async_event_callback_t *callback,
+                               void *result,
+                               zend_object *exception)
+{
+    (void)event;
+    (void)result;
+
+    ktls_poll_cb_t *cb = (ktls_poll_cb_t *)callback;
+    http_connection_t *conn = cb->conn;
+
+    if (UNEXPECTED(conn == NULL || conn->state == CONN_STATE_CLOSING)) {
+        return;
+    }
+
+    if (UNEXPECTED(exception != NULL)) {
+        conn->state = CONN_STATE_CLOSING;
+        (void)tls_finalize_if_closing(conn);
+        return;
+    }
+
+    /* Bailout firewall: SSL_do_handshake → callbacks may emalloc. */
+    volatile bool bailout = false;
+    zend_try {
+        ktls_advance(conn);
+    } zend_catch {
+        bailout = true;
+    } zend_end_try();
+
+    if (UNEXPECTED(bailout)) {
+        conn->tls_write_error = true;
+        conn->state = CONN_STATE_CLOSING;
+        (void)tls_finalize_if_closing(conn);
+    }
+}
+
+bool http_connection_ktls_arm_handshake(http_connection_t *conn,
+                                        const php_socket_t socket_fd)
+{
+    if (UNEXPECTED(conn == NULL || conn->tls == NULL || socket_fd < 0)) {
+        return false;
+    }
+
+    if (UNEXPECTED(!tls_session_is_socket_bio(conn->tls))) {
+        /* Caller is supposed to build a socket-BIO session before
+         * arming the kTLS path. Refuse to attach to a memory-BIO
+         * session — would deadlock immediately on missing pump. */
+        return false;
+    }
+
+    conn->ktls_fd   = socket_fd;
+    conn->ktls_poll = ZEND_ASYNC_NEW_SOCKET_EVENT(socket_fd,
+                          ASYNC_READABLE | ASYNC_WRITABLE);
+
+    if (conn->ktls_poll == NULL) {
+        return false;
+    }
+
+    ktls_poll_cb_t *cb = (ktls_poll_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(ktls_poll_callback, sizeof(*cb));
+
+    if (UNEXPECTED(cb == NULL)) {
+        conn->ktls_poll->base.dispose(&conn->ktls_poll->base);
+        conn->ktls_poll = NULL;
+        return false;
+    }
+
+    cb->base.dispose = ktls_poll_cb_dispose;
+    cb->conn         = conn;
+
+    if (UNEXPECTED(!conn->ktls_poll->base.add_callback(
+                       &conn->ktls_poll->base, &cb->base))) {
+        ktls_poll_cb_dispose(&cb->base, NULL);
+        conn->ktls_poll->base.dispose(&conn->ktls_poll->base);
+        conn->ktls_poll = NULL;
+        return false;
+    }
+
+    conn->ktls_poll_cb = &cb->base;
+
+    if (UNEXPECTED(!conn->ktls_poll->base.start(&conn->ktls_poll->base))) {
+        /* Callback is now owned by the event; destroy path will dispose
+         * the event which calls our dispose on the callback. */
+        return false;
+    }
+
+    /* First synchronous tick — SSL_do_handshake's initial call doesn't
+     * need any peer bytes for the typical TLS 1.3 server-side state, so
+     * we try once before parking on readiness. Result is one of:
+     *   - WANT_READ  → already armed READABLE, return
+     *   - WANT_WRITE → re-arm WRITABLE, return
+     *   - OK         → transition to data path, arm READABLE
+     *   - ERROR      → state = CLOSING (caller finalises). */
+    ktls_advance(conn);
+    return true;
+}
