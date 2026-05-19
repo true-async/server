@@ -753,6 +753,13 @@ static int cb_on_stream_close(nghttp2_session *ng,
      * on already-cleared internal state. */
     if (stream != NULL) {
         stream->peer_closed = true;
+
+        /* Release the hybrid TLS emit counter pin so subsequent passes
+         * fall back to the DRAIN path. */
+        if (stream->counted_large && session->large_streams_pending > 0) {
+            session->large_streams_pending--;
+            stream->counted_large = false;
+        }
     }
 
     /* Static-delivery close hook. Fires before stream_table_remove so
@@ -1623,6 +1630,13 @@ int http2_session_submit_response(http2_session_t *session,
     stream->response_body_len    = body_len;
     stream->response_body_offset = 0;
 
+    /* Phase 1 hybrid TLS emit accounting: only bodies that won't fit in
+     * one TLS record need gather. */
+    if (body_len > H2_TLS_HYBRID_LARGE_THRESHOLD && !stream->counted_large) {
+        stream->counted_large = true;
+        session->large_streams_pending++;
+    }
+
     /* Build nghttp2_nv[]. Scratch lives on the stack for the common
      * case; heap fallback only when total exceeds HTTP2_NV_SCRATCH. */
     nghttp2_nv nv_scratch[HTTP2_NV_SCRATCH];
@@ -1762,6 +1776,13 @@ int http2_session_submit_response_streaming(http2_session_t *session,
     const int rc = nghttp2_submit_response(session->ng,
                                            (int32_t)stream_id,
                                            nv, total_nv, &prv);
+
+    /* Streaming response: total size unknown a priori, assume large for
+     * the hybrid TLS emit selector. */
+    if (rc == 0 && !stream->counted_large) {
+        stream->counted_large = true;
+        session->large_streams_pending++;
+    }
 
     if (nv_heap != NULL) { efree(nv_heap); }
     return rc == 0 ? 0 : -1;

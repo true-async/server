@@ -862,6 +862,16 @@ int h2_stream_send_static_response(void *ctx,
             prv.read_callback = http2_static_buffered_data_read;
             rc = nghttp2_submit_response(ng, (int32_t)stream->stream_id,
                                          nv, nv_count, &prv);
+
+            /* Hybrid TLS emit accounting (issue #30): same as
+             * http2_session_submit_response — count if body exceeds the
+             * single-record threshold. */
+            if (rc == 0
+                && stream->response_body_len > H2_TLS_HYBRID_LARGE_THRESHOLD
+                && !stream->counted_large) {
+                stream->counted_large = true;
+                stream->session->large_streams_pending++;
+            }
         } else {
             rc = nghttp2_submit_response(ng, (int32_t)stream->stream_id,
                                          nv, nv_count, NULL);
@@ -956,6 +966,15 @@ int h2_stream_send_static_response(void *ctx,
         prv.read_callback = http2_static_buffered_data_read;
         rc = nghttp2_submit_response(ng, (int32_t)stream->stream_id,
                                      nv, nv_count, &prv);
+
+        /* Hybrid TLS emit accounting (issue #30): streaming static delivery
+         * with a known body_length — gate GATHER vs DRAIN by file size. */
+        if (rc == 0
+            && body_length > H2_TLS_HYBRID_LARGE_THRESHOLD
+            && !stream->counted_large) {
+            stream->counted_large = true;
+            stream->session->large_streams_pending++;
+        }
 
         if (rc == 0 && UNEXPECTED(!h2_static_submit_read(state))) {
             state->status = -1;

@@ -156,6 +156,12 @@ struct http2_stream_t {
      * the static delivery). Mirrors h1_request_ctx_t::skip_php_handler. */
     bool                 skip_handler;
 
+    /* Phase 1 hybrid TLS emit accounting (issue #30): set true at submit
+     * time if the response is too big for the DRAIN path (body >
+     * H2_TLS_HYBRID_LARGE_THRESHOLD, or streaming with unknown size).
+     * cb_on_stream_close uses this to decrement session->large_streams_pending. */
+    bool                 counted_large;
+
     /* Owning connection. Resolved once at h2 static FSM init via
      * http2_session_get_conn(stream->session) and stashed here so the
      * stream destructor can decrement per-conn accounting without
