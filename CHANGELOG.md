@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-19
+
+### Added
+
+- HTTP/2 over TLS hybrid emit selector (#30): small responses take the DRAIN path (mem_send + BIO_write, no gather alloc churn); bodies > 2 KiB or streaming take GATHER (NO_COPY refs + one SSL_write_ex). Streams pin a per-session counter at submit time. Bench (release PHP, c=100 m=32, h2load -t 1): dyn 3B 243k / 16K 57k / 64K 18k — hybrid best-of-three across the matrix. Env override `TRUE_ASYNC_H2_TLS_EMIT_MODE = drain | gather | hybrid` for A/B.
+- `docs/H2_TLS_EMIT_STRATEGIES.md` describes the three paths and the cross-over arithmetic.
+
 ## [0.6.1] - 2026-05-18
 
 ### Fixed
