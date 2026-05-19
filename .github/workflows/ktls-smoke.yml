@@ -331,7 +331,7 @@ jobs:
           use TrueAsync\HttpServer;
           use TrueAsync\HttpServerConfig;
           $cfg = (new HttpServerConfig())
-              ->addListener('127.0.0.1', 0, true)
+              ->addListener('127.0.0.1', 19999, true)
               ->enableTls(true)
               ->setCertificate('/tmp/ktls-probe/cert.pem')
               ->setPrivateKey('/tmp/ktls-probe/key.pem');
