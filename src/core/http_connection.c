@@ -2514,6 +2514,11 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_force_connection_close(Z_OBJ(ctx->response_zv));
         conn->keep_alive = false;
         http_server_on_h1_connection_close_sent(conn->counters);
+    } else if (!conn->keep_alive) {
+        /* Request opted out of keep-alive (Connection: close in request,
+         * or HTTP/1.0 default). RFC 9112 §9.6 — the response MUST advertise
+         * `Connection: close` so the client knows not to reuse this TCP. */
+        http_response_force_connection_close(Z_OBJ(ctx->response_zv));
     }
 
     /* sendFile() handoff (issue #13): handler called $res->sendFile()
