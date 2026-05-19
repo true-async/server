@@ -391,6 +391,13 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body);
 bool http_connection_send_batched(http_connection_t *conn,
                                   void *buf, size_t len);
 
+/* zend_string-owned variant of send_batched. Zero-copy when no write is in
+ * flight (reactor releases @p body on completion). When a write is already
+ * in flight, the bytes are COPIED into out_pending_buf, the zstr is released
+ * immediately, and the coalesced pending tail is drained in a single uv_write
+ * by the completion chain — the pipeline win. */
+bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *body);
+
 /* Vectored variant of send_batched. iov[] is an array of (base, len)
  * descriptors pointing into caller-owned memory; free_cb is invoked once
  * with user_data + io on completion (or after the bytes are accepted into

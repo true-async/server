@@ -1378,6 +1378,105 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
     http2_conn_notify_emit(conn);
 }
 
+/* Drain pending-buf tail via the regular efree completion chain. Shared by
+ * the zstr-batched completion (which can't reuse the efree cb directly —
+ * its data pointer is a zstr->val, not an emalloc'd buffer). */
+static bool h1_batched_drain_pending(http_connection_t *conn)
+{
+    if (conn->out_pending_len == 0) {
+        return false;
+    }
+
+    char  *next_buf = conn->out_pending_buf;
+    const size_t next_len = conn->out_pending_len;
+    conn->out_pending_buf = NULL;
+    conn->out_pending_len = 0;
+    conn->out_pending_cap = 0;
+
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+        conn->io, next_buf, next_len, http_send_batched_completion_cb);
+
+    if (UNEXPECTED(req == NULL)) {
+        conn->out_in_flight = false;
+        return false;
+    }
+
+    return true;
+}
+
+static void http_send_batched_zstr_completion_cb(void *data, zend_async_io_t *io)
+{
+    zend_string *str = (zend_string *)((char *)data - offsetof(zend_string, val));
+    zend_string_release(str);
+
+    if (UNEXPECTED(io == NULL || io->user_data == NULL)) {
+        return;
+    }
+
+    http_connection_t *conn = (http_connection_t *)io->user_data;
+
+    if (h1_batched_drain_pending(conn)) {
+        return;
+    }
+
+    conn->out_in_flight = false;
+
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+        return;
+    }
+
+    http2_conn_notify_emit(conn);
+}
+
+bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *body)
+{
+    if (body == NULL) {
+        return true;
+    }
+
+    if (ZSTR_LEN(body) == 0) {
+        zend_string_release(body);
+        return true;
+    }
+
+    if (UNEXPECTED(conn->write_timed_out)) {
+        zend_string_release(body);
+        return false;
+    }
+
+    if (conn->out_in_flight) {
+        const size_t len  = ZSTR_LEN(body);
+        const size_t need = conn->out_pending_len + len;
+
+        if (need > conn->out_pending_cap) {
+            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
+
+            while (new_cap < need) { new_cap *= 2; }
+
+            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
+            conn->out_pending_cap = new_cap;
+        }
+
+        memcpy(conn->out_pending_buf + conn->out_pending_len, ZSTR_VAL(body), len);
+        conn->out_pending_len += len;
+        zend_string_release(body);
+        return true;
+    }
+
+    conn->out_in_flight = true;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+        conn->io, ZSTR_VAL(body), ZSTR_LEN(body),
+        http_send_batched_zstr_completion_cb);
+
+    if (UNEXPECTED(req == NULL)) {
+        return false;
+    }
+
+    return true;
+}
+
 bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len)
 {
     if (buf == NULL || len == 0) {
@@ -2483,7 +2582,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                 zend_string *response_str =
                         http_response_format(Z_OBJ(ctx->response_zv));
                 sent = response_str
-                        ? http_connection_send_str_owned(conn, response_str)
+                        ? http_connection_send_zstr_batched(conn, response_str)
                         : false;
             } else {
                 /* Large body: skip the concat memcpy; reactor consumes
