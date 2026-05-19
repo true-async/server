@@ -1498,10 +1498,35 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
         zend_call_method_with_0_params(Z_OBJ(server_zv), NULL, NULL, "start", NULL);
         /* Exception in worker is captured by the future state via the
          * ext/async dispatcher — clear locally so the handler returns
-         * cleanly. */
+         * cleanly. Log loudly first: a silently-cleared worker exception
+         * means one whole thread's worth of accept capacity is gone for
+         * the rest of the process lifetime, and we'd otherwise have no
+         * visibility into the loss. */
         if (UNEXPECTED(EG(exception))) {
+            zend_object  *ex      = EG(exception);
+            const char   *cls     = ZSTR_VAL(ex->ce->name);
+            zval         *msg_zv  = zend_read_property(ex->ce, ex,
+                                        "message", sizeof("message") - 1,
+                                        /*silent=*/1, NULL);
+            const char   *msg     = (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING)
+                                        ? Z_STRVAL_P(msg_zv) : "";
+            fprintf(stderr,
+                "[true-async-server] worker thread died: %s: %s\n",
+                cls, msg);
+            fflush(stderr);
             zend_clear_exception();
+        } else {
+            /* Even no-exception exit while server should still be running
+             * is suspicious — e.g. a bailout that left EG(exception) NULL
+             * (OOM during cleanup). Log a lighter notice. */
+            fprintf(stderr,
+                "[true-async-server] worker thread exited cleanly\n");
+            fflush(stderr);
         }
+    } else {
+        fprintf(stderr,
+            "[true-async-server] worker thread: server transfer failed\n");
+        fflush(stderr);
     }
 
     zval_ptr_dtor(&server_zv);
