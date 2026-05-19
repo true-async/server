@@ -33,6 +33,71 @@
 # error "http_server TLS requires OpenSSL >= 3.0"
 #endif
 
+/* Kernel TLS (kTLS) probe. Tries setsockopt(SOL_TCP, TCP_ULP, "tls") on a
+ * throwaway socket; success means the kernel accepts the TLS upper-layer
+ * protocol, so post-handshake socket-BIO sessions can offload AES-GCM to
+ * the kernel. Linux-only; everything else is a hard "no". Result cached
+ * after the first call. */
+#if defined(__linux__) && defined(HAVE_KTLS)
+# include <sys/socket.h>
+# include <netinet/in.h>
+# include <netinet/tcp.h>
+# include <unistd.h>
+# include <errno.h>
+# ifndef TCP_ULP
+#  define TCP_ULP 31
+# endif
+
+static int  tls_ktls_probe_result_g = -1;   /* -1 unprobed, 0 no, 1 yes */
+static bool tls_ktls_logged_g       = false;
+
+static int tls_probe_kernel_ktls_once(void)
+{
+    const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+
+    if (fd < 0) {
+        return 0;
+    }
+
+    const int rc = setsockopt(fd, IPPROTO_TCP, TCP_ULP, "tls", 4);
+    const int saved_errno = errno;
+
+    close(fd);
+
+    /* ENOENT or EPROTONOSUPPORT → tls module not loaded / not present in
+     * kernel. Anything else (EPERM, EINVAL on truly broken builds) is also
+     * a failure for our purposes — we can't rely on it. */
+    (void)saved_errno;
+    return rc == 0 ? 1 : 0;
+}
+
+bool tls_kernel_ktls_supported(void)
+{
+    if (tls_ktls_probe_result_g < 0) {
+        tls_ktls_probe_result_g = tls_probe_kernel_ktls_once();
+    }
+
+    if (!tls_ktls_logged_g) {
+        tls_ktls_logged_g = true;
+        fprintf(stderr,
+                "[true-async-server] kTLS probe: kernel=%s, OpenSSL=yes (build) — "
+                "TLS sessions will use %s transport\n",
+                tls_ktls_probe_result_g == 1 ? "yes" : "no",
+                tls_ktls_probe_result_g == 1
+                    ? "socket-BIO (kernel crypto)"
+                    : "memory-BIO (user-space crypto)");
+        fflush(stderr);
+    }
+
+    return tls_ktls_probe_result_g == 1;
+}
+#else
+bool tls_kernel_ktls_supported(void)
+{
+    return false;
+}
+#endif
+
 /*
  * TLS 1.3 ciphersuites and TLS 1.2 cipher list — Mozilla "intermediate"
  * compatibility profile (Jan 2026 snapshot). Kept as file-scope constants
@@ -524,7 +589,9 @@ tls_context_t *tls_context_new(const char *cert_path,
     ctx->cert_path = zend_string_init(cert_path, strlen(cert_path), 0);
     ctx->key_path  = zend_string_init(key_path, strlen(key_path), 0);
 #ifdef HAVE_KTLS
-    ctx->ktls_enabled = true;
+    /* Effective only when the running kernel also accepts the `tls` ULP.
+     * The probe is cached + logged on its first call. */
+    ctx->ktls_enabled = tls_kernel_ktls_supported();
 #endif
 
     if (!tls_install_ticket_key_cb(ctx, err_buf, err_cap)) {

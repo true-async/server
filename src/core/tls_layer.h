@@ -284,6 +284,23 @@ bool tls_session_ktls_tx_active(const tls_session_t *s);
 bool tls_session_ktls_rx_active(const tls_session_t *s);
 
 /**
+ * Runtime probe: does the host kernel support the `tls` ULP (i.e. can the
+ * server actually offload TLS crypto via setsockopt(SOL_TCP, TCP_ULP, "tls")
+ * + setsockopt(SOL_TLS, TLS_TX/TLS_RX, ...))? Cached after the first call.
+ *
+ * Returns false on non-Linux, on kernels without the `tls` module, and on
+ * builds where OpenSSL was compiled without kTLS support. Returning false
+ * means new TLS sessions stay on the user-space (memory-BIO) transport;
+ * returning true means the socket-BIO + kernel-crypto fast path is
+ * available and will be selected automatically.
+ *
+ * Has no side effects beyond the one-time probe socket (immediately closed)
+ * and a single stderr log line on the first call. Safe to call early or
+ * lazily.
+ */
+bool tls_kernel_ktls_supported(void);
+
+/**
  * Return a pointer to the session's most recent error record. The
  * pointer is valid for the session's lifetime; the struct is mutated
  * in place on each new failure. NULL only if @p s is NULL.
