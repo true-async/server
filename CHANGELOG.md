@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-05-20
+
+### Added
+
+- Per-request scope: each request handler coroutine now runs in its own scope, a child of the server scope, so `Async\request_context()` resolves to a context shared across the whole request coroutine subtree while `Async\current_context()` stays per-coroutine.
+- IDE stubs (`ide-stubs/true-async-server.php`) for editor autocompletion of the `TrueAsync\*` API.
+
+### Fixed
+
+- `stubs/HttpRequest.php` was missing the `readBody()` declaration although the method ships in the extension — the stub now matches the generated arginfo.
+
 ## [0.6.4] - 2026-05-20
 
 ### Fixed
