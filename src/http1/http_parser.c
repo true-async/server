@@ -674,6 +674,12 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
     http_request_t *req = parser->request;
 
+    /* Dispatch failed at on_headers_complete and severed parser->request
+     * (see on_message_complete). Drop the chunk — the conn is going down. */
+    if (UNEXPECTED(req == NULL)) {
+        return 0;
+    }
+
     /* If multipart, feed to processor instead */
     if (req->use_multipart && req->multipart_proc) {
         ssize_t result = mp_processor_feed(req->multipart_proc, at, length);
@@ -771,6 +777,13 @@ static int on_message_complete(llhttp_t* llhttp_parser)
 {
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
     http_request_t *req = parser->request;
+
+    /* Dispatch failed at on_headers_complete (handler coroutine spawn
+     * failure): req was freed and the parser pointer severed. The
+     * connection is already flagged for teardown — stop parsing. */
+    if (UNEXPECTED(req == NULL)) {
+        return HPE_PAUSED;
+    }
 
     /* Finalize multipart processing */
     if (req->use_multipart && req->multipart_proc) {
@@ -911,6 +924,10 @@ http_request_t* http_parser_get_request(const http1_parser_t *parser)
     return parser->request;
 }
 
+void http_parser_clear_request(http1_parser_t *parser)
+{
+    parser->request = NULL;
+}
 
 void http_parser_attach(http1_parser_t *parser,
                         http_connection_t *conn,

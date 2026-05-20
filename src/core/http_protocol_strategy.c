@@ -193,7 +193,13 @@ static int http1_feed(http_protocol_strategy_t *strategy,
         http_parser_attach(conn->parser, conn, strategy->on_request_ready);
     }
 
+    /* Guard the parser against a re-entrant teardown: dispatch fires
+     * from inside llhttp_execute, and a synchronous http_connection_destroy
+     * (coroutine spawn failure) would free conn->parser mid-iteration.
+     * The destroy defers on this flag and is finalised by the caller. */
+    conn->in_parser_feed = true;
     int result = http_parser_execute(conn->parser, data, len, consumed_out);
+    conn->in_parser_feed = false;
 
     if (result != 0) {
         return -1;

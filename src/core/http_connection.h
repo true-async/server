@@ -256,6 +256,13 @@ struct _http_connection_t {
      * parse_errors_*_total. Cleared on connection reset only — once
      * a parse error is handled the connection is on its way down. */
     unsigned                 parse_error_handled : 1;
+    /* Set while http_parser_execute runs on conn->parser. A dispatch
+     * callback fires from deep inside llhttp_execute; if it tears the
+     * connection down synchronously (handler coroutine spawn failure)
+     * http_connection_destroy would free the parser llhttp is still
+     * iterating. The destroy defers on this flag instead — see the
+     * gate in http_connection_destroy and the drain in http1_feed. */
+    unsigned                 in_parser_feed : 1;
 
     /* Intrusive doubly-linked node. Dual role:
      *   - while the slot is ALIVE, (next_conn, prev_conn) link into
