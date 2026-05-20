@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 14156,
-      "hit": 10942
+      "total": 14196,
+      "hit": 10970
     },
     "functions": {
-      "total": 940,
-      "hit": 823
+      "total": 942,
+      "hit": 825
     }
   },
   "files": {
@@ -22,12 +22,12 @@
     },
     "src/compression/http_compression_brotli.c": {
       "lines": {
-        "total": 101,
-        "hit": 77
+        "total": 108,
+        "hit": 84
       },
       "functions": {
-        "total": 6,
-        "hit": 5
+        "total": 8,
+        "hit": 7
       }
     },
     "src/compression/http_compression_gzip.c": {
@@ -72,8 +72,8 @@
     },
     "src/compression/http_compression_response.c": {
       "lines": {
-        "total": 255,
-        "hit": 205
+        "total": 275,
+        "hit": 224
       },
       "functions": {
         "total": 16,
@@ -132,8 +132,8 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 983,
-        "hit": 687
+        "total": 985,
+        "hit": 689
       },
       "functions": {
         "total": 55,
@@ -532,7 +532,7 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1191,
+        "total": 1202,
         "hit": 899
       },
       "functions": {
