@@ -176,4 +176,23 @@ final class HttpRequest
      * @return static
      */
     public function awaitBody(): static {}
+
+    /**
+     * Read the next chunk of a streamed request body (issue #26).
+     *
+     * Pulls one chunk from the per-request queue produced by the H1/H2
+     * parsers when HttpServerConfig::setBodyStreamingEnabled(true) was
+     * set at server start. Suspends the current coroutine until a chunk
+     * is available, then returns a non-empty string. Returns null
+     * idempotently at end of stream.
+     *
+     * Each call returns exactly one parser-supplied chunk (an H2 DATA
+     * frame payload or one llhttp on_body slice). $maxLen is reserved
+     * for a future coalescing optimisation and is ignored today.
+     *
+     * @param int $maxLen Maximum bytes to return (default 65536).
+     * @return string|null Next chunk, or null at end of stream.
+     * @throws \Exception if the body stream errored (peer reset, size cap).
+     */
+    public function readBody(int $maxLen = 65536): ?string {}
 }
