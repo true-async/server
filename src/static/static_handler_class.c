@@ -233,6 +233,18 @@ static inline http_static_handler_shared_t *shared_from_mount(http_static_handle
 	return (http_static_handler_shared_t *)mount;
 }
 
+/* Destructor for persistent HashTable string values. ZVAL_PTR_DTOR goes
+ * through rc_dtor_func → zend_string_destroy, which asserts the string
+ * is non-persistent. Persistent string values must be released via
+ * zend_string_release_ex(s, 1) instead. Used by extra_headers and
+ * mime_overrides on the SHARED snapshot side. */
+static void persistent_str_zval_dtor(zval *zv)
+{
+	if (Z_TYPE_P(zv) == IS_STRING) {
+		zend_string_release_ex(Z_STR_P(zv), /*persistent*/ 1);
+	}
+}
+
 static zend_string *zstr_dup_persistent(const zend_string *src)
 {
 	if (src == NULL || ZSTR_LEN(src) == 0) {
@@ -275,7 +287,7 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 	if (draft->extra_headers != NULL && zend_hash_num_elements(draft->extra_headers) > 0) {
 		m->extra_headers = pemalloc(sizeof(HashTable), 1);
 		zend_hash_init(m->extra_headers, zend_hash_num_elements(draft->extra_headers), NULL,
-					   ZVAL_PTR_DTOR, /*persistent*/ 1);
+					   persistent_str_zval_dtor, /*persistent*/ 1);
 		zend_string *k;
 		zval *v;
 		ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(draft->extra_headers, k, v)
@@ -297,7 +309,7 @@ http_static_handler_t *http_static_handler_freeze(const http_static_handler_t *d
 	if (draft->mime_overrides != NULL && zend_hash_num_elements(draft->mime_overrides) > 0) {
 		m->mime_overrides = pemalloc(sizeof(HashTable), 1);
 		zend_hash_init(m->mime_overrides, zend_hash_num_elements(draft->mime_overrides), NULL,
-					   ZVAL_PTR_DTOR, /*persistent*/ 1);
+					   persistent_str_zval_dtor, /*persistent*/ 1);
 		zend_string *k;
 		zval *v;
 		ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(draft->mime_overrides, k, v)
