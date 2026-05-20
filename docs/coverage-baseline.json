@@ -1,11 +1,11 @@
 {
   "totals": {
     "lines": {
-      "total": 14196,
-      "hit": 10970
+      "total": 14232,
+      "hit": 10975
     },
     "functions": {
-      "total": 942,
+      "total": 944,
       "hit": 825
     }
   },
@@ -132,11 +132,11 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 985,
-        "hit": 689
+        "total": 1015,
+        "hit": 691
       },
       "functions": {
-        "total": 55,
+        "total": 56,
         "hit": 48
       }
     },
@@ -182,8 +182,8 @@
     },
     "src/core/http_protocol_strategy.c": {
       "lines": {
-        "total": 69,
-        "hit": 54
+        "total": 71,
+        "hit": 56
       },
       "functions": {
         "total": 7,
@@ -252,11 +252,11 @@
     },
     "src/http1/http_parser.c": {
       "lines": {
-        "total": 506,
-        "hit": 390
+        "total": 510,
+        "hit": 391
       },
       "functions": {
-        "total": 24,
+        "total": 25,
         "hit": 22
       }
     },
