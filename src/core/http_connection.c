@@ -2011,9 +2011,17 @@ static void h1_static_on_passthrough_to_php(void *user)
      * dispatch tail below, but as a continuation from the FSM. Counters
      * / handler_refcount were NOT pinned (on_hard_zero_armed never
      * fired), so we bump them here to match the normal path. */
-    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+    /* Per-request scope, child of the server scope (see
+     * http_request_scope_new). */
+    zend_async_scope_t *req_scope = http_request_scope_new(conn->scope);
+    zend_coroutine_t *coroutine =
+        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
 
     if (UNEXPECTED(coroutine == NULL)) {
+        if (req_scope != NULL) {
+            req_scope->try_to_dispose(req_scope);
+        }
+
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
         efree(ctx);
@@ -2099,6 +2107,28 @@ bool h1_sendfile_arm(http_connection_t *conn,
      * falls through to the regular format+send path. */
     efree(u);
     return false;
+}
+/* }}} */
+
+/* {{{ http_request_scope_new
+ *
+ * Mint a per-request scope as a child of the server scope. The handler
+ * coroutine — and every coroutine it spawns — lives under this scope,
+ * isolated from sibling requests. request_scope points at the scope
+ * itself, so Async\request_context() resolves to a context shared by
+ * the whole request subtree, while Async\current_context() stays the
+ * per-coroutine view. Plain scope (no zend_object): it auto-disposes
+ * once its last coroutine finishes, and detaches from server_scope.
+ */
+zend_async_scope_t *http_request_scope_new(zend_async_scope_t *server_scope)
+{
+    zend_async_scope_t *scope = ZEND_ASYNC_NEW_SCOPE(server_scope);
+
+    if (scope != NULL) {
+        scope->request_scope = scope;
+    }
+
+    return scope;
 }
 /* }}} */
 
@@ -2205,7 +2235,12 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
         ctx->skip_php_handler = true;
     }
 
-    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
+    /* Per-request scope, child of the server scope. See
+     * http_request_scope_new — gives the handler its own request_context()
+     * subtree and auto-disposes when the handler (and its spawns) finish. */
+    zend_async_scope_t *req_scope = http_request_scope_new(conn->scope);
+    zend_coroutine_t *coroutine =
+        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
 
     if (coroutine == NULL) {
         /* Spawn failed. The usual cause is a stale EG(exception) — a
@@ -2215,6 +2250,10 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
          * further; the IO-submit paths absorb their own now, so this
          * is a backstop for any other spawn-failure cause. */
         http_absorb_io_submission_exception(conn, __func__);
+
+        if (req_scope != NULL) {
+            req_scope->try_to_dispose(req_scope);
+        }
 
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);

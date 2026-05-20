@@ -39,8 +39,9 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine);
  *
  * Called from h3_end_stream_cb once the request is fully assembled.
  * Builds the per-stream PHP zvals (HttpRequest, HttpResponse), spawns
- * a TrueAsync coroutine in the server scope so the handler can suspend
- * (await), and hands off. The coroutine's dispose path serialises the
+ * a TrueAsync coroutine in a per-request scope (child of the server
+ * scope) so the handler can suspend (await), and hands off. The
+ * coroutine's dispose path serialises the
  * response back through nghttp3 and triggers a drain — that is what
  * makes the response actually leave the box.
  *
@@ -139,9 +140,18 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * STREAM (not the connection) — that's how N concurrent streams on
      * the same QUIC connection get N independent (request, response)
      * zval pairs. */
-    zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(scope);
+    /* Per-request (per-stream) scope, child of the server scope. See
+     * http_request_scope_new — each multiplexed stream gets its own
+     * request_context() subtree, isolated from sibling streams. */
+    zend_async_scope_t *req_scope = http_request_scope_new(scope);
+    zend_coroutine_t *co =
+        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
 
     if (co == NULL) {
+        if (req_scope != NULL) {
+            req_scope->try_to_dispose(req_scope);
+        }
+
         zval_ptr_dtor(&s->request_zv);  ZVAL_UNDEF(&s->request_zv);
         zval_ptr_dtor(&s->response_zv); ZVAL_UNDEF(&s->response_zv);
         s->dispatched = false;

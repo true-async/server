@@ -437,6 +437,13 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
  * reads itself for keep-alive. */
 bool http_connection_read(http_connection_t *conn);
 
+/* Mint a per-request scope as a child of server_scope. The request
+ * handler coroutine and everything it spawns run under this scope; it
+ * carries request_scope pointing at itself so Async\request_context()
+ * resolves to a per-request context. Plain scope — auto-disposes once
+ * its last coroutine finishes. Returns NULL on allocation failure. */
+zend_async_scope_t *http_request_scope_new(zend_async_scope_t *server_scope);
+
 /* Helper to spawn connection coroutine.
  * server may be NULL — the connection will run without backpressure
  * reporting (useful for tests).

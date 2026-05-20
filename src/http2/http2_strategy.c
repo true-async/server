@@ -295,9 +295,18 @@ static void http2_strategy_dispatch(struct http_request_t *request,
      * the connection — that's what makes multiplex safe: N
      * coroutines hold N distinct stream pointers, each pointing at
      * its own zvals. */
-    zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(self->conn->scope);
+    /* Per-request (per-stream) scope, child of the server scope. See
+     * http_request_scope_new — each multiplexed stream gets its own
+     * request_context() subtree, isolated from sibling streams. */
+    zend_async_scope_t *req_scope = http_request_scope_new(self->conn->scope);
+    zend_coroutine_t *co =
+        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
 
     if (co == NULL) {
+        if (req_scope != NULL) {
+            req_scope->try_to_dispose(req_scope);
+        }
+
         zval_ptr_dtor(&stream->request_zv);
         ZVAL_UNDEF(&stream->request_zv);
         zval_ptr_dtor(&stream->response_zv);
