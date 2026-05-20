@@ -42,10 +42,19 @@
 #define BACKPRESSURE_PAUSE_LOW_RATIO   80   /* percent */
 #define CODEL_INTERVAL_NS              (100ULL * 1000000ULL)  /* 100 ms */
 
-/* php_network.h supplies sys/socket.h / winsock. No POSIX-only headers
- * remain — the listen socket is owned by the reactor, and closesocket /
- * SOCK_ERR / php_socket_errno are cross-platform shims. */
+/* php_network.h supplies sys/socket.h / winsock. The listen socket is
+ * owned by the reactor, and closesocket / SOCK_ERR / php_socket_errno are
+ * cross-platform shims. */
 #include <stdint.h>
+
+/* AF_UNIX listener support needs filesystem headers for the stale-socket
+ * probe and teardown unlink. POSIX only — on Windows uv_pipe maps to a
+ * named pipe with no filesystem entry to clean up. */
+#ifndef PHP_WIN32
+# include <sys/un.h>
+# include <sys/stat.h>
+# include <unistd.h>
+#endif
 
 /* See http_connection.c for rationale. */
 #ifndef MSG_NOSIGNAL
@@ -65,8 +74,78 @@
 typedef struct {
     zend_async_listen_event_t   *listen_event;
     bool                         tls;
+    bool                         unlink_on_close;  /* AF_UNIX — unlink le->host on teardown */
     uint32_t                     protocol_mask;
 } http_listener_t;
+
+/* An AF_UNIX socket bound once by the pool parent (workers > 1) and shared
+ * with every worker thread — AF_UNIX has no SO_REUSEPORT, so N independent
+ * binds on one path is impossible; instead one fd is bound and each worker
+ * adopts a dup of it. POD: copied by value across thread transfer (the fd
+ * integer is valid in every worker thread — threads share one fd table).
+ * path is retained so the parent can unlink it once the pool drains. */
+typedef struct {
+    char path[108];   /* fits sockaddr_un.sun_path (Linux) */
+    int  fd;
+} http_pool_unix_fd_t;
+
+/* AF_UNIX bind() fails with EADDRINUSE on a socket file left behind by a
+ * crashed previous run. Probe it: a stale socket refuses connect() with
+ * ECONNREFUSED and is safe to unlink; a live one accepts the probe, so we
+ * leave it and let bind() report the genuine conflict. */
+#ifndef PHP_WIN32
+static void http_server_unix_unlink_if_stale(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISSOCK(st.st_mode)) {
+        return;
+    }
+
+    struct sockaddr_un addr;
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(addr.sun_path)) {
+        return;  /* over-long — let bind() surface the error */
+    }
+
+    int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (probe < 0) {
+        return;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, path_len + 1);
+
+    if (connect(probe, (struct sockaddr *)&addr, sizeof(addr)) != 0
+        && (errno == ECONNREFUSED || errno == ENOENT)) {
+        unlink(path);
+    }
+
+    closesocket(probe);
+}
+#endif
+
+/* Stop, dispose and (AF_UNIX) unlink one listener row. The socket-file
+ * unlink must run before dispose(): libuv never removes the path, and
+ * dispose() frees the listen_event that owns the path string. */
+static void http_server_listener_release(http_listener_t *listener)
+{
+    zend_async_listen_event_t *le = listener->listen_event;
+    if (le == NULL) {
+        return;
+    }
+
+    le->base.stop(&le->base);
+
+#ifndef PHP_WIN32
+    if (listener->unlink_on_close && le->host != NULL) {
+        unlink(le->host);
+    }
+#endif
+
+    le->base.dispose(&le->base);
+    listener->listen_event = NULL;
+}
 
 /* Server object structure.
  * Field order grouped by alignment to minimise padding. zend_object must
@@ -129,6 +208,13 @@ struct http_server_object {
     /* Inline listener array */
     http_listener_t          listeners[MAX_LISTENERS];
     size_t                   listener_count;
+
+    /* AF_UNIX sockets pre-bound by the pool parent (workers > 1), shared
+     * with every worker. Empty for single-worker servers and non-clone
+     * pool parents that have no unix listener. Copied verbatim to each
+     * worker by http_server_transfer_obj. */
+    http_pool_unix_fd_t      pool_unix_fds[MAX_LISTENERS];
+    size_t                   pool_unix_fd_count;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     /* HTTP/3 UDP listeners — parallel to TCP listeners[] because they have
@@ -1549,6 +1635,99 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     }
 }
 
+#ifndef PHP_WIN32
+/* Close every pre-bound AF_UNIX socket and unlink its path. Run by the pool
+ * parent after the pool has fully drained: each worker held its own dup, so
+ * this is the final close that releases the socket. Idempotent. */
+static void http_server_close_pool_unix_fds(http_server_object *server)
+{
+    for (size_t i = 0; i < server->pool_unix_fd_count; i++) {
+        closesocket(server->pool_unix_fds[i].fd);
+        unlink(server->pool_unix_fds[i].path);
+    }
+    server->pool_unix_fd_count = 0;
+}
+
+/* Bind every AF_UNIX listener once, before the worker pool is spawned, so all
+ * workers can share a single listening socket (AF_UNIX has no SO_REUSEPORT —
+ * N independent binds on one path is impossible). Each fd is recorded on the
+ * server and copied to every worker by thread transfer; a worker adopts a
+ * dup. Throws and returns FAILURE on the first bind error. */
+static int http_server_prebind_unix(http_server_object *server)
+{
+    http_server_config_t *cfg = http_server_get_config(server);
+    server->pool_unix_fd_count = 0;
+
+    if (cfg == NULL) {
+        return SUCCESS;
+    }
+
+    for (size_t i = 0; i < cfg->listener_count; i++) {
+        http_listener_config_t *lc = &cfg->listeners[i];
+
+        if (lc->type != LISTENER_TYPE_UNIX || lc->host == NULL) {
+            continue;
+        }
+
+        if (server->pool_unix_fd_count >= MAX_LISTENERS) {
+            break;
+        }
+
+        const char *path = ZSTR_VAL(lc->host);
+        size_t      path_len = ZSTR_LEN(lc->host);
+
+        struct sockaddr_un addr;
+        if (path_len >= sizeof(addr.sun_path)) {
+            http_server_close_pool_unix_fds(server);
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "Unix socket path too long: %s", path);
+            return FAILURE;
+        }
+
+        http_server_unix_unlink_if_stale(path);
+
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) {
+            http_server_close_pool_unix_fds(server);
+            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                "Failed to create AF_UNIX socket for %s", path);
+            return FAILURE;
+        }
+
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        memcpy(addr.sun_path, path, path_len + 1);
+
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0
+            || listen(fd, cfg->backlog) != 0) {
+            closesocket(fd);
+            http_server_close_pool_unix_fds(server);
+            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                "Failed to bind AF_UNIX socket %s", path);
+            return FAILURE;
+        }
+
+        http_pool_unix_fd_t *slot = &server->pool_unix_fds[server->pool_unix_fd_count++];
+        memcpy(slot->path, path, path_len + 1);
+        slot->fd = fd;
+    }
+
+    return SUCCESS;
+}
+
+/* Return the pre-bound listening fd for `path`, or -1 — i.e. this server is
+ * not a pooled worker, or `path` is not one of the pre-bound unix sockets. */
+static int http_server_pool_unix_fd_lookup(const http_server_object *server, const char *path)
+{
+    for (size_t i = 0; i < server->pool_unix_fd_count; i++) {
+        if (strcmp(server->pool_unix_fds[i].path, path) == 0) {
+            return server->pool_unix_fds[i].fd;
+        }
+    }
+    return -1;
+}
+#endif  /* !PHP_WIN32 */
+
 static int http_server_start_pool(http_server_object *server,
                                   zval *this_zv,
                                   const int workers)
@@ -1591,6 +1770,17 @@ static int http_server_start_pool(http_server_object *server,
         return FAILURE;
     }
 
+#ifndef PHP_WIN32
+    /* Bind AF_UNIX listeners once, here on the parent, before any worker is
+     * transferred — the bound fd rides along in the transfer and every
+     * worker adopts a dup. TCP listeners still bind per-worker (REUSEPORT)
+     * inside each worker's own start(). */
+    if (http_server_prebind_unix(server) != SUCCESS) {
+        ZEND_THREAD_POOL_DELREF(pool);
+        return FAILURE;
+    }
+#endif
+
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
     pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
@@ -1606,6 +1796,9 @@ static int http_server_start_pool(http_server_object *server,
 
             pefree(ctxs, 1);
             ZEND_THREAD_POOL_DELREF(pool);
+#ifndef PHP_WIN32
+            http_server_close_pool_unix_fds(server);
+#endif
             return FAILURE;
         }
     }
@@ -1674,6 +1867,12 @@ cleanup:
 
     efree(st);
     ZEND_THREAD_POOL_DELREF(pool);
+
+#ifndef PHP_WIN32
+    /* Every worker has drained and closed its own dup; this final close
+     * releases the shared sockets and removes their paths. */
+    http_server_close_pool_unix_fds(server);
+#endif
     return rc;
 }
 /* }}} */
@@ -2066,8 +2265,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (!listen_event) {
                 /* Cleanup already-created listen events */
                 for (size_t i = 0; i < server->listener_count; i++) {
-                    server->listeners[i].listen_event->base.stop(&server->listeners[i].listen_event->base);
-                    server->listeners[i].listen_event->base.dispose(&server->listeners[i].listen_event->base);
+                    http_server_listener_release(&server->listeners[i]);
                 }
 
                 server->listener_count = 0;
@@ -2120,8 +2318,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             if (!h3) {
                 /* Unwind both TCP and H3 listeners — start() is all-or-nothing. */
                 for (size_t i = 0; i < server->listener_count; i++) {
-                    server->listeners[i].listen_event->base.stop(&server->listeners[i].listen_event->base);
-                    server->listeners[i].listen_event->base.dispose(&server->listeners[i].listen_event->base);
+                    http_server_listener_release(&server->listeners[i]);
                 }
 
                 server->listener_count = 0;
@@ -2152,7 +2349,96 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             RETURN_FALSE;
         }
 #endif
-        /* TODO: Handle "unix" type */
+        else if (strcmp(Z_STRVAL_P(type_zv), "unix") == 0) {
+            if (server->listener_count >= MAX_LISTENERS) {
+                continue;
+            }
+
+            zval *path_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "path", 4);
+            zval *mask_zv = zend_hash_str_find(Z_ARRVAL_P(listener), "protocol_mask", sizeof("protocol_mask") - 1);
+
+            if (!path_zv || Z_TYPE_P(path_zv) != IS_STRING) continue;
+
+            uint32_t protocol_mask = (mask_zv && Z_TYPE_P(mask_zv) == IS_LONG)
+                ? (uint32_t)Z_LVAL_P(mask_zv)
+                : (HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
+
+            zend_async_listen_event_t *listen_event = NULL;
+            bool unlink_on_close = false;
+
+#ifndef PHP_WIN32
+            /* Pooled worker: the parent already bound this path. Adopt a
+             * private dup of the shared fd — the parent owns the path and
+             * the original fd, and unlinks once the pool drains. */
+            const int prebound_fd =
+                http_server_pool_unix_fd_lookup(server, Z_STRVAL_P(path_zv));
+
+            if (prebound_fd >= 0) {
+                const int dup_fd = dup(prebound_fd);
+
+                if (dup_fd < 0) {
+                    zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                        "Failed to dup AF_UNIX listen fd for %s", Z_STRVAL_P(path_zv));
+                } else {
+                    listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
+                        dup_fd, server->backlog, ZEND_ASYNC_LISTEN_F_UNIX, 0);
+                }
+            }
+#endif
+
+            if (listen_event == NULL && !EG(exception)) {
+                /* Single-worker server: bind the path directly and own it.
+                 * The reactor binds a uv_pipe_t; accepted connections flow
+                 * through http_server_accept_callback exactly like TCP. */
+#ifndef PHP_WIN32
+                /* Drop a leftover socket file from a crashed prior run so
+                 * bind() does not fail with EADDRINUSE on our own stale path. */
+                http_server_unix_unlink_if_stale(Z_STRVAL_P(path_zv));
+#endif
+                listen_event = ZEND_ASYNC_SOCKET_LISTEN_EX(
+                    Z_STRVAL_P(path_zv), 0, server->backlog, ZEND_ASYNC_LISTEN_F_UNIX, 0);
+                unlink_on_close = true;
+            }
+
+            if (!listen_event) {
+                /* Unwind every listener created so far — start() is
+                 * all-or-nothing. */
+                for (size_t i = 0; i < server->listener_count; i++) {
+                    http_server_listener_release(&server->listeners[i]);
+                }
+
+                server->listener_count = 0;
+#ifdef HAVE_HTTP_SERVER_HTTP3
+                for (size_t i = 0; i < server->http3_listener_count; i++) {
+                    http3_listener_destroy(server->http3_listeners[i]);
+                    server->http3_listeners[i] = NULL;
+                }
+
+                server->http3_listener_count = 0;
+#endif
+#ifdef HAVE_OPENSSL
+                if (server->tls_ctx != NULL) {
+                    tls_context_free(server->tls_ctx);
+                    server->tls_ctx = NULL;
+                }
+#endif
+                zval_ptr_dtor(&listeners_zval);
+                /* An exception is already pending — from the dup() failure
+                 * above, or thrown by the reactor with the uv_strerror. */
+                RETURN_FALSE;
+            }
+
+            server->listeners[server->listener_count].listen_event = listen_event;
+            server->listeners[server->listener_count].tls = false;
+            server->listeners[server->listener_count].unlink_on_close = unlink_on_close;
+            server->listeners[server->listener_count].protocol_mask = protocol_mask;
+            server->listener_count++;
+
+            listen_event->base.add_callback(&listen_event->base,
+                ZEND_ASYNC_EVENT_CALLBACK(http_server_accept_callback));
+
+            listen_event->base.start(&listen_event->base);
+        }
     } ZEND_HASH_FOREACH_END();
 
     zval_ptr_dtor(&listeners_zval);
@@ -2292,14 +2578,10 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
      * loop drains forever and stop() never lets the script exit. */
     http_server_deadline_tick_stop(server);
 
-    /* Stop all listen events. dispose() also closes the underlying uv_tcp_t
-     * and frees the fd — no separate closesocket call needed. */
+    /* Stop all listen events. dispose() closes the underlying uv handle
+     * and frees the fd; AF_UNIX rows also unlink the socket file. */
     for (size_t i = 0; i < server->listener_count; i++) {
-        if (server->listeners[i].listen_event) {
-            server->listeners[i].listen_event->base.stop(&server->listeners[i].listen_event->base);
-            server->listeners[i].listen_event->base.dispose(&server->listeners[i].listen_event->base);
-            server->listeners[i].listen_event = NULL;
-        }
+        http_server_listener_release(&server->listeners[i]);
     }
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
@@ -2742,11 +3024,7 @@ static void http_server_free(zend_object *obj)
         http_server_deadline_tick_stop(server);
 
         for (size_t i = 0; i < server->listener_count; i++) {
-            if (server->listeners[i].listen_event) {
-                server->listeners[i].listen_event->base.stop(&server->listeners[i].listen_event->base);
-                server->listeners[i].listen_event->base.dispose(&server->listeners[i].listen_event->base);
-                server->listeners[i].listen_event = NULL;
-            }
+            http_server_listener_release(&server->listeners[i]);
         }
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
@@ -3056,6 +3334,13 @@ static zend_object *http_server_transfer_obj(
             dst_shell->transit_static_mounts = st_transit;
         }
 
+        /* Pre-bound AF_UNIX listen fds (workers > 1). POD array copied by
+         * value — the fd integers stay valid in the worker thread because
+         * all worker threads share one process-wide fd table. */
+        memcpy(dst_shell->pool_unix_fds, src->pool_unix_fds,
+               sizeof(dst_shell->pool_unix_fds));
+        dst_shell->pool_unix_fd_count = src->pool_unix_fd_count;
+
         return dst;
     }
 
@@ -3178,6 +3463,12 @@ static zend_object *http_server_transfer_obj(
          * dispatcher actually routes H1 traffic on the worker. */
         dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
     }
+
+    /* Pre-bound AF_UNIX listen fds — see the TRANSFER side above. The worker
+     * looks these up in its start() to adopt the shared socket. */
+    memcpy(dst_obj->pool_unix_fds, src_shell->pool_unix_fds,
+           sizeof(dst_obj->pool_unix_fds));
+    dst_obj->pool_unix_fd_count = src_shell->pool_unix_fd_count;
 
     return dst;
 }
