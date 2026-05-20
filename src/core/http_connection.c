@@ -298,6 +298,15 @@ void http_connection_destroy(http_connection_t *conn)
         return;
     }
 
+    /* Deep inside http_parser_execute: a dispatch callback reached here
+     * synchronously (handler coroutine spawn failure). Freeing the parser
+     * now would leave llhttp iterating a dangling struct — defer until
+     * http1_feed unwinds; handle_read_completion finalises the destroy. */
+    if (conn->in_parser_feed) {
+        conn->destroy_pending = true;
+        return;
+    }
+
     /* Past defer gates — arm the re-entry guard before any callback removal. */
     conn->destroying = 1;
 
@@ -904,6 +913,14 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
     const int result = conn->strategy->feed(
         conn->strategy, conn, conn->read_buffer, conn->read_buffer_len, &consumed);
 
+    /* A dispatch callback requested teardown mid-feed (handler coroutine
+     * spawn failure). http_connection_destroy deferred on in_parser_feed;
+     * now that feed has unwound, hand the destroy back to the caller. */
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        *should_destroy_out = true;
+        return false;
+    }
+
     if (result < 0) {
         /* RFC 9112 §5.4 / 9110 §15.5: emit a 4xx before close so the
          * peer learns *why* its request was rejected (vs an opaque
@@ -1340,6 +1357,39 @@ extern void http2_conn_notify_emit(http_connection_t *conn);
 static inline void http2_conn_notify_emit(http_connection_t *conn) { (void)conn; }
 #endif
 
+/* Absorb the PHP exception left behind when a fire-and-forget IO submit
+ * (ZEND_ASYNC_IO_WRITE_EX / WRITEV) returns NULL. The reactor throws on
+ * submit failure — broken pipe, connection reset, write timeout — but a
+ * fire-and-forget write has no coroutine to receive it, so it stays in
+ * EG(exception) and surfaces later as a spurious failure on an unrelated
+ * path (async_new_coroutine refuses to spawn while EG(exception) is set,
+ * which is how a peer disconnect on response N crashed dispatch of the
+ * pipelined request N+1). A submit failure is always a transport error
+ * and the caller already treats the NULL return as "retire the
+ * connection" — log the text and clear it. Mirrors the TLS-side
+ * tls_absorb_io_submission_exception. */
+static void http_absorb_io_submission_exception(const http_connection_t *conn,
+                                                const char *op)
+{
+    if (EG(exception) == NULL) {
+        return;
+    }
+
+    zend_object *exc = EG(exception);
+    zval rv;
+    zval *msg_zv = zend_read_property_ex(
+        exc->ce, exc, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
+    const char *msg =
+        (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING && Z_STRLEN_P(msg_zv) > 0)
+            ? Z_STRVAL_P(msg_zv) : "(no message)";
+
+    http_logf_debug(conn->log_state,
+        "connection.io.submission_absorbed op=%s ex=%s msg=%s",
+        op, ZSTR_VAL(exc->ce->name), msg);
+
+    zend_clear_exception();
+}
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1361,6 +1411,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
+            http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
         }
 
@@ -1397,6 +1448,7 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
         conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
     if (UNEXPECTED(req == NULL)) {
+        http_absorb_io_submission_exception(conn, __func__);
         conn->out_in_flight = false;
         return false;
     }
@@ -1471,6 +1523,7 @@ bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *bod
         http_send_batched_zstr_completion_cb);
 
     if (UNEXPECTED(req == NULL)) {
+        http_absorb_io_submission_exception(conn, __func__);
         return false;
     }
 
@@ -1514,6 +1567,7 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
         conn->io, buf, len, http_send_batched_completion_cb);
 
     if (UNEXPECTED(req == NULL)) {
+        http_absorb_io_submission_exception(conn, __func__);
         return false;
     }
 
@@ -1549,6 +1603,7 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
+            http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
         }
 
@@ -1628,6 +1683,7 @@ bool http_connection_send_batched_writev(http_connection_t *conn,
     if (UNEXPECTED(req == NULL)) {
         /* Reactor invoked our completion already (user cb fired, state
          * cleared). out_in_flight was reset there. */
+        http_absorb_io_submission_exception(conn, __func__);
         return false;
     }
 
@@ -1658,6 +1714,7 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
     if (UNEXPECTED(req == NULL)) {
         /* libuv_io_req_dispose ran free_cb on the partially-built req
          * and the body was released there. Caller must not touch body. */
+        http_absorb_io_submission_exception(conn, __func__);
         return false;
     }
     /* Caller does not await, does not dispose. The completion callback
@@ -1695,6 +1752,7 @@ bool http_connection_send_strv_owned(http_connection_t *conn,
 
     if (UNEXPECTED(req == NULL)) {
         /* Reactor already released every slot on submit failure. */
+        http_absorb_io_submission_exception(conn, __func__);
         return false;
     }
 
@@ -2150,9 +2208,29 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(conn->scope);
 
     if (coroutine == NULL) {
+        /* Spawn failed. The usual cause is a stale EG(exception) — a
+         * broken-pipe write submit earlier on this conn left one
+         * pending and async_new_coroutine refuses to spawn while
+         * EG(exception) is set. Absorb it so it can't poison anything
+         * further; the IO-submit paths absorb their own now, so this
+         * is a backstop for any other spawn-failure cause. */
+        http_absorb_io_submission_exception(conn, __func__);
+
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
         efree(ctx);
+
+        /* req was just freed with ctx->request_zv. The parser still
+         * borrows it — on_message_complete re-reads parser->request
+         * after the streaming dispatch at on_headers_complete — so
+         * sever both dangling pointers before the parse continues.
+         * http_connection_destroy defers here (in_parser_feed) and is
+         * finalised once http1_feed unwinds. */
+        if (conn->parser != NULL) {
+            http_parser_clear_request(conn->parser);
+        }
+
+        conn->current_request = NULL;
         http_connection_destroy(conn);
         return;
     }

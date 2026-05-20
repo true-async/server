@@ -325,6 +325,13 @@ int http_parser_execute(http1_parser_t *parser, const char *data, size_t len, si
 /* Get parsed request (after complete) */
 http_request_t* http_parser_get_request(const http1_parser_t *parser);
 
+/* Sever the parser's borrowed pointer to the in-flight request. The
+ * dispatch path calls this when a handler coroutine fails to spawn and
+ * the request struct is freed while the parser still references it
+ * (on_message_complete re-reads parser->request after the streaming
+ * dispatch at on_headers_complete). */
+void http_parser_clear_request(http1_parser_t *parser);
+
 /* Check if request is complete */
 static inline bool http_parser_is_complete(const http1_parser_t *parser)
 {

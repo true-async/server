@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-05-20
+
+### Fixed
+
+- HTTP/1 pipelining crash under high connection count (HttpArena `pipelined/4096c`): a handler-coroutine spawn failure destroyed the connection — freeing its llhttp parser — synchronously from inside `llhttp_execute` (dispatch fires from `on_headers_complete`), causing a use-after-free SIGSEGV in `on_message_complete`. Connection teardown now defers (`in_parser_feed` guard) while a parser feed is on the stack and is finalised once the feed unwinds.
+- Fire-and-forget I/O write submit failures (broken pipe / connection reset) left an `Async\AsyncException` stranded in `EG(exception)` with no coroutine to receive it; it then aborted an unrelated `ZEND_ASYNC_NEW_COROUTINE` — the spawn failure above. The batched-send paths now log and clear the exception at the submission site.
+
 ## [0.6.3] - 2026-05-19
 
 ### Added
