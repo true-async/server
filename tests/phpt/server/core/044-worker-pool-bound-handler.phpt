@@ -1,11 +1,5 @@
 --TEST--
 HttpServer: an object-bound handler closure keeps its $this across the worker-pool fan-out
---XFAIL--
-Depends on the closure-transfer fix in true-async/php-async (PR #123:
-"preserve a closure's bound $this across thread transfer"). Until it
-lands, a $this-bound handler closure loses its binding when replicated
-to a worker thread and the first request NULL-dereferences $this.
-Remove this section once php-async#123 is in the CI PHP build.
 --EXTENSIONS--
 true_async_server
 true_async
