@@ -2254,10 +2254,11 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
              * + per-accept notifications. */
             /* Windows libuv does not implement UV_TCP_REUSEPORT (returns
              * ENOTSUP at bind). Only request it on platforms that support it. */
-#ifdef PHP_WIN32
+            
             unsigned int listen_flags = 0;
-#else
-            unsigned int listen_flags = ZEND_ASYNC_LISTEN_F_REUSEPORT;
+
+#ifdef __linux__
+            listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
 #endif
             zend_async_listen_event_t *listen_event = ZEND_ASYNC_SOCKET_LISTEN_EX(
                 host, port, server->backlog, listen_flags, 0);
