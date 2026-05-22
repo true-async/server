@@ -23,7 +23,6 @@
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
 
-#include <stdio.h>            /* snprintf for :status value */
 #include <string.h>
 
 /*
@@ -1591,6 +1590,23 @@ static void h2_buffered_on_window_open(zend_async_event_t *event,
     h2_session_schedule_emit(((h2_buffered_wcb_t *)callback)->session);
 }
 
+/* Fill nv[0] with the :status pseudo-header. status_buf must be >= 4 bytes
+ * and outlive the nghttp2 submit call. Branchless 3-digit write — status is
+ * already range-checked to 100..999 by every caller. */
+static void h2_nv_set_status(nghttp2_nv *nv, char *status_buf, const int status)
+{
+    status_buf[0] = (char)('0' + (status / 100));
+    status_buf[1] = (char)('0' + ((status / 10) % 10));
+    status_buf[2] = (char)('0' + (status % 10));
+    status_buf[3] = '\0';
+
+    nv->name     = (uint8_t *)":status";
+    nv->namelen  = 7;
+    nv->value    = (uint8_t *)status_buf;
+    nv->valuelen = 3;
+    nv->flags    = NGHTTP2_NV_FLAG_NONE;
+}
+
 int http2_session_submit_response(http2_session_t *session,
                                   const uint32_t stream_id,
                                   const int status,
@@ -1639,15 +1655,8 @@ int http2_session_submit_response(http2_session_t *session,
         nv = nv_heap;
     }
 
-    /* :status — three-digit numeric text, always exactly 3 bytes. */
     char status_buf[4];
-    snprintf(status_buf, sizeof(status_buf), "%d", status);
-
-    nv[0].name      = (uint8_t *)":status";
-    nv[0].namelen   = 7;
-    nv[0].value     = (uint8_t *)status_buf;
-    nv[0].valuelen  = 3;
-    nv[0].flags     = NGHTTP2_NV_FLAG_NONE;
+    h2_nv_set_status(&nv[0], status_buf, status);
 
     for (size_t i = 0; i < headers_len; i++) {
         nv[1 + i].name     = (uint8_t *)headers[i].name;
@@ -1738,13 +1747,7 @@ int http2_session_submit_response_streaming(http2_session_t *session,
     }
 
     char status_buf[4];
-    snprintf(status_buf, sizeof(status_buf), "%d", status);
-
-    nv[0].name     = (uint8_t *)":status";
-    nv[0].namelen  = 7;
-    nv[0].value    = (uint8_t *)status_buf;
-    nv[0].valuelen = 3;
-    nv[0].flags    = NGHTTP2_NV_FLAG_NONE;
+    h2_nv_set_status(&nv[0], status_buf, status);
 
     for (size_t i = 0; i < headers_len; i++) {
         nv[1 + i].name     = (uint8_t *)headers[i].name;
