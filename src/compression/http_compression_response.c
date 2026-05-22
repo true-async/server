@@ -328,6 +328,67 @@ void http_compression_mark_no_compression(zend_object *response_obj)
 
 /* ----- buffered apply ------------------------------------------------- */
 
+/* Drive enc->vt->write until all input is consumed, appending compressed
+ * output to `out` (must already be pre-allocated). Returns HTTP_ENC_OK,
+ * or HTTP_ENC_ERROR if the encoder faulted — the caller owns cleanup. */
+static http_encoder_status_t encoder_drain_write(http_encoder_t *enc,
+                                                 const unsigned char *in,
+                                                 size_t in_len, smart_str *out)
+{
+    size_t fed = 0;
+
+    while (fed < in_len) {
+        size_t avail = out->a - ZSTR_LEN(out->s);
+
+        if (UNEXPECTED(avail < 64)) {
+            smart_str_alloc(out, 4096, 0);
+            avail = out->a - ZSTR_LEN(out->s);
+        }
+
+        size_t consumed = 0, produced = 0;
+        const http_encoder_status_t s = enc->vt->write(enc,
+            in + fed, in_len - fed, &consumed,
+            ZSTR_VAL(out->s) + ZSTR_LEN(out->s), avail, &produced);
+        ZSTR_LEN(out->s) += produced;
+        fed             += consumed;
+
+        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
+            return HTTP_ENC_ERROR;
+        }
+    }
+
+    return HTTP_ENC_OK;
+}
+
+/* Drive enc->vt->finish until HTTP_ENC_DONE, appending the trailer (and
+ * any encoder-buffered bytes) to `out` (must already be pre-allocated).
+ * Returns HTTP_ENC_DONE on success or HTTP_ENC_ERROR — caller owns cleanup. */
+static http_encoder_status_t encoder_drain_finish(http_encoder_t *enc,
+                                                  smart_str *out)
+{
+    for (;;) {
+        size_t avail = out->a - ZSTR_LEN(out->s);
+
+        if (UNEXPECTED(avail < 32)) {
+            smart_str_alloc(out, 64, 0);
+            avail = out->a - ZSTR_LEN(out->s);
+        }
+
+        size_t produced = 0;
+        const http_encoder_status_t s = enc->vt->finish(enc,
+            ZSTR_VAL(out->s) + ZSTR_LEN(out->s), avail, &produced);
+        ZSTR_LEN(out->s) += produced;
+
+        if (EXPECTED(s == HTTP_ENC_DONE)) {
+            return HTTP_ENC_DONE;
+        }
+
+        if (s != HTTP_ENC_NEED_OUTPUT) {
+            return HTTP_ENC_ERROR;
+        }
+    }
+}
+
 void http_compression_apply_buffered(zend_object *response_obj)
 {
     http_compression_state_t *st = state_of(response_obj);
@@ -407,53 +468,12 @@ void http_compression_apply_buffered(zend_object *response_obj)
     smart_str_alloc(&out, body_len + (body_len >> 10) + 64, 0);
 
     const unsigned char *in = (const unsigned char *)ZSTR_VAL(body->s);
-    size_t fed = 0;
 
-    /* write() drain. smart_str_alloc on NEED_OUTPUT instead of every
-     * iteration so the common single-pass case is one alloc. */
-    while (fed < body_len) {
-        size_t avail = out.a - ZSTR_LEN(out.s);
-
-        if (UNEXPECTED(avail < 64)) {
-            smart_str_alloc(&out, 4096, 0);
-            avail = out.a - ZSTR_LEN(out.s);
-        }
-
-        size_t consumed = 0, produced = 0;
-        const http_encoder_status_t s = vt->write(enc,
-            in + fed, body_len - fed, &consumed,
-            ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
-        ZSTR_LEN(out.s) += produced;
-        fed             += consumed;
-
-        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
-            /* Encoder may be in an indeterminate state — drop it
-             * outright rather than risk poisoning the pool. */
-            vt->destroy(enc);
-            smart_str_free(&out);
-            return;  /* Leave body as-is; identity wins. */
-        }
-        /* HTTP_ENC_OK or NEED_OUTPUT: loop continues. */
-    }
-
-    /* finish() drain — emits gzip trailer (CRC32 + ISIZE). */
-    for (;;) {
-        size_t avail = out.a - ZSTR_LEN(out.s);
-
-        if (UNEXPECTED(avail < 32)) {
-            smart_str_alloc(&out, 64, 0);
-            avail = out.a - ZSTR_LEN(out.s);
-        }
-
-        size_t produced = 0;
-        const http_encoder_status_t s = vt->finish(enc,
-            ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
-        ZSTR_LEN(out.s) += produced;
-
-        if (EXPECTED(s == HTTP_ENC_DONE))   break;
-
-        if (s == HTTP_ENC_NEED_OUTPUT)      continue;
-        /* Error mid-finish — abort, keep original body. */
+    /* Encoder may be left in an indeterminate state on error — drop it
+     * outright rather than risk poisoning the pool, and keep the
+     * original body (identity wins). */
+    if (UNEXPECTED(encoder_drain_write(enc, in, body_len, &out) == HTTP_ENC_ERROR)
+        || UNEXPECTED(encoder_drain_finish(enc, &out) == HTTP_ENC_ERROR)) {
         vt->destroy(enc);
         smart_str_free(&out);
         return;
@@ -528,28 +548,10 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
      * here (mark_ended drains it) so 0-bytes-produced is also valid. */
     smart_str_alloc(&out, in_len + 32, 0);
 
-    size_t fed = 0;
-    while (fed < in_len) {
-        size_t avail = out.a - ZSTR_LEN(out.s);
-
-        if (UNEXPECTED(avail < 64)) {
-            smart_str_alloc(&out, 4096, 0);
-            avail = out.a - ZSTR_LEN(out.s);
-        }
-
-        size_t consumed = 0, produced = 0;
-        const http_encoder_status_t s = w->encoder->vt->write(w->encoder,
-            in + fed, in_len - fed, &consumed,
-            ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
-        ZSTR_LEN(out.s) += produced;
-        fed             += consumed;
-
-        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
-            smart_str_free(&out);
-            zend_string_release(chunk);
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-        /* HTTP_ENC_OK with all input consumed → loop exits. */
+    if (UNEXPECTED(encoder_drain_write(w->encoder, in, in_len, &out) == HTTP_ENC_ERROR)) {
+        smart_str_free(&out);
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
     zend_string_release(chunk);
@@ -582,24 +584,9 @@ static void ws_mark_ended(void *ctx_opaque)
      * and ship as a single underlying chunk. */
     smart_str out = {0};
     smart_str_alloc(&out, 64, 0);
-    for (;;) {
-        size_t avail = out.a - ZSTR_LEN(out.s);
-
-        if (UNEXPECTED(avail < 32)) {
-            smart_str_alloc(&out, 4096, 0);
-            avail = out.a - ZSTR_LEN(out.s);
-        }
-
-        size_t produced = 0;
-        const http_encoder_status_t s = w->encoder->vt->finish(
-            w->encoder, ZSTR_VAL(out.s) + ZSTR_LEN(out.s), avail, &produced);
-        ZSTR_LEN(out.s) += produced;
-
-        if (EXPECTED(s == HTTP_ENC_DONE))   break;
-
-        if (s == HTTP_ENC_NEED_OUTPUT)      continue;
-        break;  /* error — fall through, still close the underlying stream */
-    }
+    /* Error mid-finish: forward whatever was produced and still close
+     * the underlying stream below. */
+    (void)encoder_drain_finish(w->encoder, &out);
 
     if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
         smart_str_0(&out);
