@@ -1398,22 +1398,12 @@ static inline void h2_dp_mark_eof(const http2_stream_t *stream,
     }
 }
 
-/* Bytes ready in the streaming ring (queue len minus the current chunk's
- * already-consumed offset). */
+/* Bytes ready in the streaming ring. chunk_queue_bytes is the running
+ * sum of pushed chunk lengths minus drained bytes — by construction
+ * equal to (sum of queued chunk lengths) - chunk_read_offset. */
 static size_t h2_stream_pending_bytes(const http2_stream_t *stream)
 {
-    if (stream->chunk_queue_head >= stream->chunk_queue_tail) {
-        return 0;
-    }
-
-    size_t avail = 0;
-
-    for (unsigned i = stream->chunk_queue_head;
-         i < stream->chunk_queue_tail; i++) {
-        avail += ZSTR_LEN(stream->chunk_queue[i]);
-    }
-
-    return avail - stream->chunk_read_offset;
+    return stream->chunk_queue_bytes;
 }
 
 /* Streaming + emit context: announce bytes via NO_COPY (send_data_callback

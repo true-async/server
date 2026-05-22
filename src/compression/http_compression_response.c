@@ -398,13 +398,13 @@ void http_compression_apply_buffered(zend_object *response_obj)
     if (UNEXPECTED(enc == NULL)) return;
     const http_encoder_vtable_t *vt = enc->vt;
 
-    /* Pre-size for the worst-case output: gzip overhead on text is
-     * <0.1% + 18-byte header/trailer; on already-compressed input deflate
-     * may swell by up to 0.015% + 5 bytes per 32 KiB block. body_len + 64
-     * covers the common case in one allocation; NEED_OUTPUT tail-grows
-     * on the rare incompressible path. */
+    /* Pre-size for zlib's worst case: deflateBound is body_len plus
+     * ~body_len/4096 plus a small constant. body_len>>10 + 64 covers it
+     * — including the 18-byte gzip header/trailer — in a single
+     * allocation even for incompressible payloads, so the NEED_OUTPUT
+     * tail-grow below stays a genuine cold path. */
     smart_str out = {0};
-    smart_str_alloc(&out, body_len + 64, 0);
+    smart_str_alloc(&out, body_len + (body_len >> 10) + 64, 0);
 
     const unsigned char *in = (const unsigned char *)ZSTR_VAL(body->s);
     size_t fed = 0;
