@@ -124,6 +124,56 @@ static inline uint32_t mount_precomp_mask(const uint32_t mount_flags)
 	return mask;
 }
 
+/* Shared 200/304 header emit — both the cache-hit fast path and the
+ * sync fallback funnel through these so the two never drift. The
+ * cache-hit path passes cache_view fields; the sync path passes the
+ * freshly formatted etag / Last-Modified stack buffers. A NULL etag or
+ * last_modified slot is skipped. */
+static void static_emit_validators(zend_object *response_obj, const char *etag,
+								   const size_t etag_len, const char *last_modified,
+								   const size_t last_modified_len)
+{
+	if (etag != NULL) {
+		http_response_static_set_header(response_obj, "etag", 4, etag, etag_len);
+	}
+
+	if (last_modified != NULL) {
+		http_response_static_set_header(response_obj, "last-modified", 13, last_modified,
+										last_modified_len);
+	}
+}
+
+static void static_emit_not_modified(zend_object *response_obj,
+									 const http_static_handler_t *mount, const char *etag,
+									 const size_t etag_len, const char *last_modified,
+									 const size_t last_modified_len)
+{
+	http_response_static_set_status(response_obj, 304);
+	static_emit_validators(response_obj, etag, etag_len, last_modified, last_modified_len);
+	apply_mount_headers(response_obj, mount, false);
+}
+
+static void static_emit_ok_headers(zend_object *response_obj,
+								   const http_static_handler_t *mount, const char *content_type,
+								   const size_t content_type_len, const char *encoding,
+								   const size_t encoding_len, const char *etag,
+								   const size_t etag_len, const char *last_modified,
+								   const size_t last_modified_len)
+{
+	http_response_static_set_status(response_obj, 200);
+	http_response_static_set_header(response_obj, "content-type", 12, content_type,
+									content_type_len);
+
+	if (encoding != NULL && encoding_len > 0) {
+		http_response_static_set_header(response_obj, "content-encoding", 16, encoding,
+										encoding_len);
+		http_response_static_set_header(response_obj, "vary", 4, "Accept-Encoding", 15);
+	}
+
+	static_emit_validators(response_obj, etag, etag_len, last_modified, last_modified_len);
+	apply_mount_headers(response_obj, mount, true);
+}
+
 http_static_result_t http_static_try_serve(http_server_object *server,
 										   http_request_t *request,
 										   zend_object *response_obj,
@@ -370,23 +420,11 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 				if (not_modified) {
 					zend_string_release(cached_body);
-					http_response_static_set_status(response_obj, 304);
-
-					if (etag_enabled && cv.etag != NULL) {
-						http_response_static_set_header(response_obj, "etag", 4, cv.etag,
-														cv.etag_len);
-					}
-
-					if (cv.last_modified != NULL) {
-						http_response_static_set_header(response_obj, "last-modified", 13,
-														cv.last_modified, cv.last_modified_len);
-					}
-
-					apply_mount_headers(response_obj, mount, false);
+					static_emit_not_modified(response_obj, mount,
+											 etag_enabled ? cv.etag : NULL, cv.etag_len,
+											 cv.last_modified, cv.last_modified_len);
 					return HTTP_STATIC_HANDLED;
 				}
-
-				http_response_static_set_status(response_obj, 200);
 
 				const char *content_type = NULL;
 				size_t content_type_len = 0;
@@ -402,26 +440,10 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 					content_type_len = sizeof("application/octet-stream") - 1;
 				}
 
-				http_response_static_set_header(response_obj, "content-type", 12, content_type,
-												content_type_len);
-
-				if (picked_encoding != NULL && picked_encoding_len > 0) {
-					http_response_static_set_header(response_obj, "content-encoding", 16,
-													picked_encoding, picked_encoding_len);
-					http_response_static_set_header(response_obj, "vary", 4, "Accept-Encoding",
-													15);
-				}
-
-				if (etag_enabled && cv.etag != NULL) {
-					http_response_static_set_header(response_obj, "etag", 4, cv.etag, cv.etag_len);
-				}
-
-				if (cv.last_modified != NULL) {
-					http_response_static_set_header(response_obj, "last-modified", 13,
-													cv.last_modified, cv.last_modified_len);
-				}
-
-				apply_mount_headers(response_obj, mount, true);
+				static_emit_ok_headers(response_obj, mount, content_type, content_type_len,
+									   picked_encoding, picked_encoding_len,
+									   etag_enabled ? cv.etag : NULL, cv.etag_len,
+									   cv.last_modified, cv.last_modified_len);
 
 				http_response_static_set_body_view(response_obj, cached_body);
 				zend_string_release(cached_body);
@@ -546,16 +568,9 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		if (not_modified) {
 			close(fd);
-			http_response_static_set_status(response_obj, 304);
-
-			if (etag_enabled) {
-				http_response_static_set_header(response_obj, "etag", 4, etag_buf,
-												HTTP_ETAG_LEN);
-			}
-
-			http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
-											HTTP_DATE_LEN);
-			apply_mount_headers(response_obj, mount, false);
+			static_emit_not_modified(response_obj, mount,
+									 etag_enabled ? etag_buf : NULL, HTTP_ETAG_LEN,
+									 last_modified_buf, HTTP_DATE_LEN);
 			return HTTP_STATIC_HANDLED;
 		}
 
@@ -578,8 +593,6 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 
 		close(fd);
 
-		http_response_static_set_status(response_obj, 200);
-
 		const char *content_type = NULL;
 		size_t content_type_len = 0;
 
@@ -598,24 +611,10 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			content_type_len = sizeof("application/octet-stream") - 1;
 		}
 
-		http_response_static_set_header(response_obj, "content-type", 12, content_type,
-										content_type_len);
-
-		if (picked_encoding != NULL && picked_encoding_len > 0) {
-			http_response_static_set_header(response_obj, "content-encoding", 16,
-											picked_encoding, picked_encoding_len);
-			http_response_static_set_header(response_obj, "vary", 4,
-											"Accept-Encoding", 15);
-		}
-
-		if (etag_enabled) {
-			http_response_static_set_header(response_obj, "etag", 4, etag_buf,
-											HTTP_ETAG_LEN);
-		}
-
-		http_response_static_set_header(response_obj, "last-modified", 13, last_modified_buf,
-										HTTP_DATE_LEN);
-		apply_mount_headers(response_obj, mount, true);
+		static_emit_ok_headers(response_obj, mount, content_type, content_type_len,
+							   picked_encoding, picked_encoding_len,
+							   etag_enabled ? etag_buf : NULL, HTTP_ETAG_LEN,
+							   last_modified_buf, HTTP_DATE_LEN);
 
 		if (is_head) {
 			/* The format-time path computes Content-Length from the
