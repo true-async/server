@@ -284,7 +284,7 @@ typedef struct http1_parser_t {
     /* Last parser-level error. HTTP_PARSE_OK after a clean execute or
      * fresh reset; any other value means execute returned -1 and the
      * connection layer should call http_connection_emit_parse_error
-     * before disposing. Reset by http_parser_reset / reset_for_reuse. */
+     * before disposing. Reset by http_parser_reset_for_reuse. */
     http_parse_error_t parse_error;
 
     bool              owns_request;          /* True while `request` is still parser-owned.
@@ -337,9 +337,6 @@ static inline bool http_parser_is_complete(const http1_parser_t *parser)
 {
     return parser->request && parser->request->complete;
 }
-
-/* Reset for next request */
-void http_parser_reset(http1_parser_t *parser);
 
 /* Reset for reuse with buffer recycling (based on refcount) */
 void http_parser_reset_for_reuse(http1_parser_t *parser);
