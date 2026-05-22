@@ -1390,6 +1390,43 @@ static void http_absorb_io_submission_exception(const http_connection_t *conn,
     zend_clear_exception();
 }
 
+/* Shared tail for batched-send completion callbacks: clears the in-flight
+ * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. */
+static void http_send_batched_finish(http_connection_t *conn)
+{
+    conn->out_in_flight = false;
+
+    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        conn->destroy_pending = false;
+        http_connection_destroy(conn);
+        return;
+    }
+
+    http2_conn_notify_emit(conn);
+}
+
+/* Coalesce path: append `len` bytes into the pending buffer behind the
+ * single in-flight write. Geometric growth from a 16K floor. */
+static void out_pending_append(http_connection_t *conn,
+                               const void *src, const size_t len)
+{
+    const size_t need = conn->out_pending_len + len;
+
+    if (need > conn->out_pending_cap) {
+        size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
+
+        while (new_cap < need) {
+            new_cap *= 2;
+        }
+
+        conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
+        conn->out_pending_cap = new_cap;
+    }
+
+    memcpy(conn->out_pending_buf + conn->out_pending_len, src, len);
+    conn->out_pending_len += len;
+}
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1418,15 +1455,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
         return;
     }
 
-    conn->out_in_flight = false;
-
-    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
-        conn->destroy_pending = false;
-        http_connection_destroy(conn);
-        return;
-    }
-
-    http2_conn_notify_emit(conn);
+    http_send_batched_finish(conn);
 }
 
 /* Drain pending-buf tail via the regular efree completion chain. Shared by
@@ -1471,15 +1500,7 @@ static void http_send_batched_zstr_completion_cb(void *data, zend_async_io_t *io
         return;
     }
 
-    conn->out_in_flight = false;
-
-    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
-        conn->destroy_pending = false;
-        http_connection_destroy(conn);
-        return;
-    }
-
-    http2_conn_notify_emit(conn);
+    http_send_batched_finish(conn);
 }
 
 bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *body)
@@ -1499,20 +1520,7 @@ bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *bod
     }
 
     if (conn->out_in_flight) {
-        const size_t len  = ZSTR_LEN(body);
-        const size_t need = conn->out_pending_len + len;
-
-        if (need > conn->out_pending_cap) {
-            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
-
-            while (new_cap < need) { new_cap *= 2; }
-
-            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
-            conn->out_pending_cap = new_cap;
-        }
-
-        memcpy(conn->out_pending_buf + conn->out_pending_len, ZSTR_VAL(body), len);
-        conn->out_pending_len += len;
+        out_pending_append(conn, ZSTR_VAL(body), ZSTR_LEN(body));
         zend_string_release(body);
         return true;
     }
@@ -1543,20 +1551,7 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
     }
 
     if (conn->out_in_flight) {
-        const size_t need = conn->out_pending_len + len;
-
-        if (need > conn->out_pending_cap) {
-            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
-            while (new_cap < need) {
-                new_cap *= 2;
-            }
-
-            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
-            conn->out_pending_cap = new_cap;
-        }
-
-        memcpy(conn->out_pending_buf + conn->out_pending_len, buf, len);
-        conn->out_pending_len += len;
+        out_pending_append(conn, buf, len);
         efree(buf);
         return true;
     }
@@ -1610,15 +1605,7 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         return;
     }
 
-    conn->out_in_flight = false;
-
-    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
-        conn->destroy_pending = false;
-        http_connection_destroy(conn);
-        return;
-    }
-
-    http2_conn_notify_emit(conn);
+    http_send_batched_finish(conn);
 }
 
 bool http_connection_send_batched_writev(http_connection_t *conn,
@@ -1643,29 +1630,9 @@ bool http_connection_send_batched_writev(http_connection_t *conn,
     if (conn->out_in_flight) {
         /* Coalesce: copy iov bytes into out_pending_buf, fire user
          * free_cb immediately (data is no longer needed). */
-        size_t total = 0;
-
-        for (unsigned i = 0; i < niov; i++) { total += iov[i].len; }
-
-        const size_t need = conn->out_pending_len + total;
-
-        if (need > conn->out_pending_cap) {
-            size_t new_cap = conn->out_pending_cap ? conn->out_pending_cap : 16384;
-
-            while (new_cap < need) { new_cap *= 2; }
-
-            conn->out_pending_buf = erealloc(conn->out_pending_buf, new_cap);
-            conn->out_pending_cap = new_cap;
-        }
-
-        char *dst = conn->out_pending_buf + conn->out_pending_len;
-
         for (unsigned i = 0; i < niov; i++) {
-            memcpy(dst, iov[i].base, iov[i].len);
-            dst += iov[i].len;
+            out_pending_append(conn, iov[i].base, iov[i].len);
         }
-
-        conn->out_pending_len += total;
 
         if (free_cb != NULL) { free_cb(user_data, conn->io); }
 
