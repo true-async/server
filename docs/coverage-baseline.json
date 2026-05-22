@@ -1,8 +1,8 @@
 {
   "totals": {
     "lines": {
-      "total": 14370,
-      "hit": 11616
+      "total": 14371,
+      "hit": 11620
     },
     "functions": {
       "total": 951,
@@ -303,7 +303,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 505,
-        "hit": 397
+        "hit": 400
       },
       "functions": {
         "total": 31,
@@ -532,8 +532,8 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1315,
-        "hit": 949
+        "total": 1316,
+        "hit": 950
       },
       "functions": {
         "total": 68,
