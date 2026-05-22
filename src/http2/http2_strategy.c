@@ -582,21 +582,12 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     }
 }
 
-typedef struct {
-    http_connection_t *conn;
-    http2_stream_t    *stream;
-} h2_sendfile_user_t;
-
-static void h2_sendfile_on_done(void *user, int status)
+/* Shared dispose tail for h2 stream completion paths: dtor the request/
+ * response zvals, drop the stream ref, release the connection handler ref
+ * and finalise a deferred destroy. */
+static void h2_stream_dispose_tail(http_connection_t *conn,
+                                   http2_stream_t *stream)
 {
-    (void)status;
-    h2_sendfile_user_t *u = (h2_sendfile_user_t *)user;
-    http_connection_t *conn = u->conn;
-    http2_stream_t *stream = u->stream;
-    efree(u);
-
-    /* Mirror the original dispose tail: dtor zvals, release stream,
-     * release conn handler ref. Counters were retired in dispose. */
     if (!Z_ISUNDEF(stream->request_zv)) {
         zval_ptr_dtor(&stream->request_zv);
         ZVAL_UNDEF(&stream->request_zv);
@@ -618,6 +609,23 @@ static void h2_sendfile_on_done(void *user, int status)
     }
 }
 
+typedef struct {
+    http_connection_t *conn;
+    http2_stream_t    *stream;
+} h2_sendfile_user_t;
+
+static void h2_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h2_sendfile_user_t *u = (h2_sendfile_user_t *)user;
+    http_connection_t *conn = u->conn;
+    http2_stream_t *stream = u->stream;
+    efree(u);
+
+    /* Counters were retired in dispose; just run the shared tail. */
+    h2_stream_dispose_tail(conn, stream);
+}
+
 static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 {
     /* Counters paired with the original dispatch's on_request_dispatch.
@@ -633,15 +641,7 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
     if (sf_req == NULL) {
         /* Race / accounting bug — fall through to commit. */
         (void)http2_commit_stream_response(conn, stream);
-        zval_ptr_dtor(&stream->request_zv);
-        ZVAL_UNDEF(&stream->request_zv);
-        zval_ptr_dtor(&stream->response_zv);
-        ZVAL_UNDEF(&stream->response_zv);
-        http2_stream_release(stream);
-
-        if (conn->handler_refcount > 0) conn->handler_refcount--;
-
-        http_connection_destroy_if_idle_deferred(conn);
+        h2_stream_dispose_tail(conn, stream);
 
         return;
     }
@@ -656,15 +656,7 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
          * synthesized error response, then run the standard tail. */
         efree(u);
         (void)http2_commit_stream_response(conn, stream);
-        zval_ptr_dtor(&stream->request_zv);
-        ZVAL_UNDEF(&stream->request_zv);
-        zval_ptr_dtor(&stream->response_zv);
-        ZVAL_UNDEF(&stream->response_zv);
-        http2_stream_release(stream);
-
-        if (conn->handler_refcount > 0) conn->handler_refcount--;
-
-        http_connection_destroy_if_idle_deferred(conn);
+        h2_stream_dispose_tail(conn, stream);
     }
 }
 
