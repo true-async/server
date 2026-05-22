@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * zstd backend — streaming encode + decode via libzstd. Plugs into the
  * http_encoder vtable shipped in phase 1; same shape as the brotli TU
  * but a single library covers both directions.

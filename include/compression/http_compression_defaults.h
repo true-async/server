@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Default policy values for HTTP body compression. Lives in its own
  * header so the response pipeline and the config-setter code share one
  * source of truth — and policy tweaks (whitelist edits, level bump) are

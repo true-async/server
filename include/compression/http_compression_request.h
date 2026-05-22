@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Inbound request body decoding (Content-Encoding: gzip from clients).
  * Phase 1: gzip only. Unknown codings → 415. Bomb-cap exceeded → 413.
  *

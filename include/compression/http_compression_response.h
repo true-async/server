@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Response-side compression: state attached to HttpResponse, the
  * buffered-apply hook, the streaming-ops wrapper, and the per-response
  * opt-out flag. All decisions go through one decide() that combines

@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Inbound request body decoder. Phase 1: gzip via zlib(-ng).
  *
  * Anti-bomb cap is hard-required: the read loop checks decoded size

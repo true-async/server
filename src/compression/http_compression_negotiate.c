@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Accept-Encoding parser + codec selector + MIME normaliser.
  * Pure C — no Zend, no PHP. Exercised directly by unit tests.
  */

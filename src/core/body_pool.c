@@ -1,3 +1,11 @@
+/*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
 /* Thread-local pool of large body buffers. Allocations go through
  * zend_mm (emalloc → zend_mm_alloc_huge → single mmap), so memory_limit
  * and peak-usage tracking work the same way they do for any other

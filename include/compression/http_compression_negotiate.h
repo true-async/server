@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Accept-Encoding parsing and codec selection — pure C, no Zend deps,
  * so unit tests can exercise the state machine without a PHP runtime.
  *
