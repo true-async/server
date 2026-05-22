@@ -39,10 +39,10 @@ void http_accept_encoding_parse(const char *hdr, size_t len,
                                 http_accept_encoding_t *out);
 
 /* Pick the best codec given the parsed prefs and what we have built in.
- * Preference order: zstd > brotli > gzip > identity (server-side; q-value
- * weighting is a future extension — server preference covers ~99% of
- * real Accept-Encoding strings). Codecs absent from the build are
- * skipped via the registry lookup, not via the parser.
+ * Preference order: zstd > gzip > brotli > identity (server-side; gzip
+ * before brotli because our brotli backend has no encoder-state reuse.
+ * q-value weighting is a future extension). Codecs absent from the
+ * build are skipped via the registry lookup, not via the parser.
  *   HTTP_CODEC_ZSTD       — encode with zstd
  *   HTTP_CODEC_BROTLI     — encode with brotli
  *   HTTP_CODEC_GZIP       — encode with gzip

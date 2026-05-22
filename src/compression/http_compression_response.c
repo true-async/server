@@ -45,8 +45,6 @@ typedef struct {
 
     /* Streaming wrapper state. Populated by
      * maybe_install_stream_wrapper; NULL on the buffered path. */
-    const http_response_stream_ops_t *underlying_ops;
-    void                             *underlying_ctx;
     http_encoder_t                   *encoder;
     void                             *wrapper_ctx;        /* ws_ctx_t — owned, freed at teardown */
     bool                              wrapper_installed;
@@ -666,8 +664,6 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
 
     /* Stash on state for cleanup; encoder destroy on object teardown. */
     st->encoder           = enc;
-    st->underlying_ops    = under_ops;
-    st->underlying_ctx    = under_ctx;
     st->wrapper_ctx       = w;
     st->wrapper_installed = true;
 }

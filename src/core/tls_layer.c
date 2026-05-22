@@ -350,7 +350,6 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
     }
 
     OSSL_PARAM mac_params[3];
-    mac_params[1] = OSSL_PARAM_construct_end();
 
     if (enc == 1) {
         tls_maybe_rotate_ticket_keys(ctx);

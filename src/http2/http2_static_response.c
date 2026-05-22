@@ -294,7 +294,6 @@ static void h2_static_throttle_kick_all(void)
     h2_static_kick_in_progress = true;
 
     h2_static_state_t *state = h2_static_throttled_head;
-    int n = 0; for (h2_static_state_t *p=state; p; p=p->throttled_next) n++;
     h2_static_throttled_head = NULL;
 
     while (state != NULL) {

@@ -287,6 +287,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		size_t override_ct_len = 0;
 
 		const uint32_t precomp_mask = mount_precomp_mask(mount->flags);
+		http_static_cache_t *cache = http_static_cache_acquire(server);
 
 		if (precomp_mask != 0) {
 			const char *pre_ct = NULL;
@@ -297,17 +298,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				pre_ct_len = sizeof("application/octet-stream") - 1;
 			}
 
-			http_static_cache_t *const probe_cache = http_static_cache_acquire(server);
-
 			if (http_precompressed_select(request, precomp_mask, fs_path, sizeof(fs_path),
 										  &fs_path_len, &picked_encoding, &picked_encoding_len,
-										  probe_cache)) {
+										  cache)) {
 				override_ct = pre_ct;
 				override_ct_len = pre_ct_len;
 			}
 		}
 
-		http_static_cache_t *cache = http_static_cache_acquire(server);
 		bool gate_ok;
 		bool have_view = false;
 		http_static_cache_view_t cv;
@@ -349,8 +347,9 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		                           && (uint64_t)cv.st.st_size <= (uint64_t)SEND_FILE_SLURP_THRESHOLD
 		                           && http_request_find_header(request, "range", 5) == NULL;
 
-		/* Hot HIT: build response from cv + cached body, skip open/fstat/close. */
-		if (prefer_inline && cache != NULL) {
+		/* Hot HIT: build response from cv + cached body, skip open/fstat/close.
+		 * prefer_inline implies have_view, which is only set under cache != NULL. */
+		if (prefer_inline) {
 			zend_string *const cached_body =
 				http_static_cache_body_acquire(cache, fs_path, fs_path_len);
 
@@ -571,7 +570,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 				return HTTP_STATIC_HANDLED;
 			}
 
-			if (prefer_inline && cache != NULL) {
+			if (prefer_inline) {
 				http_static_cache_body_store(cache, fs_path, fs_path_len, ZSTR_VAL(body),
 											 ZSTR_LEN(body));
 			}
