@@ -944,34 +944,36 @@ static ssize_t h2_send_callback(nghttp2_session *ng,
     return (ssize_t)length;
 }
 
-/* Streaming branch: walk chunk_queue slicing into iov records (or
- * coalescing on TLS). Returns bytes appended to emit body (== length). */
-static void h2_emit_streaming_body(struct http2_emit_state *st,
-                                   http2_stream_t *stream,
-                                   const size_t length,
-                                   const bool tls_small_coalesce)
+/* Per-slice sink for h2_chunk_queue_walk: receives one contiguous slice of
+ * a queued chunk plus the chunk's refcounted backing (for body-ref addref). */
+typedef void (*h2_chunk_slice_fn)(void *ctx, const char *slice, size_t len,
+                                  zend_string *chunk);
+
+/* Walk chunk_queue from head, handing each slice (bounded to `length` bytes
+ * total) to `fn`. Advances the read offset, drops the stream's ref on every
+ * fully-consumed chunk, and fires the producer write_event if any slot was
+ * freed. Returns total bytes handed to `fn`. `fn` consumes the slice before
+ * its chunk is released, so a borrowed slice pointer stays valid. */
+static size_t h2_chunk_queue_walk(http2_stream_t *stream, const size_t length,
+                                  const h2_chunk_slice_fn fn, void *ctx)
 {
     const unsigned head_before = stream->chunk_queue_head;
-    size_t remaining = length;
+    size_t walked = 0;
 
-    while (remaining > 0
+    while (walked < length
            && stream->chunk_queue_head < stream->chunk_queue_tail) {
         zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
         const size_t chunk_len = ZSTR_LEN(chunk);
         const size_t avail     = chunk_len - stream->chunk_read_offset;
-        const size_t take      = avail < remaining ? avail : remaining;
-        const char *slice_ptr  = ZSTR_VAL(chunk) + stream->chunk_read_offset;
+        const size_t space     = length - walked;
+        const size_t take      = avail < space ? avail : space;
 
-        if (tls_small_coalesce && take < H2_TLS_RECORD_PAYLOAD_MAX) {
-            h2_emit_state_append_buf(st, (const uint8_t *)slice_ptr, take);
-        } else {
-            h2_emit_state_append_body(st, slice_ptr, take,
-                                      (zend_refcounted *)chunk);
+        if (take > 0) {
+            fn(ctx, ZSTR_VAL(chunk) + stream->chunk_read_offset, take, chunk);
+            stream->chunk_read_offset += take;
+            stream->chunk_queue_bytes -= take;
+            walked                    += take;
         }
-
-        stream->chunk_read_offset += take;
-        stream->chunk_queue_bytes -= take;
-        remaining                 -= take;
 
         if (stream->chunk_read_offset == chunk_len) {
             stream->chunk_queue[stream->chunk_queue_head] = NULL;
@@ -984,6 +986,37 @@ static void h2_emit_streaming_body(struct http2_emit_state *st,
     if (stream->chunk_queue_head > head_before) {
         async_plain_event_fire((zend_async_event_t *)stream->write_event);
     }
+
+    return walked;
+}
+
+/* h2_chunk_slice_fn for the emit path: iov record per slice, or coalesce
+ * into emit_buf when TLS wants small slices inside one record. */
+struct h2_emit_walk_ctx {
+    struct http2_emit_state *st;
+    bool tls_small_coalesce;
+};
+
+static void h2_emit_chunk_slice(void *ctx, const char *slice, const size_t len,
+                                zend_string *chunk)
+{
+    struct h2_emit_walk_ctx *c = (struct h2_emit_walk_ctx *)ctx;
+
+    if (c->tls_small_coalesce && len < H2_TLS_RECORD_PAYLOAD_MAX) {
+        h2_emit_state_append_buf(c->st, (const uint8_t *)slice, len);
+    } else {
+        h2_emit_state_append_body(c->st, slice, len, (zend_refcounted *)chunk);
+    }
+}
+
+/* Streaming branch: walk chunk_queue handing each slice to the emit sink. */
+static void h2_emit_streaming_body(struct http2_emit_state *st,
+                                   http2_stream_t *stream,
+                                   const size_t length,
+                                   const bool tls_small_coalesce)
+{
+    struct h2_emit_walk_ctx ctx = { st, tls_small_coalesce };
+    h2_chunk_queue_walk(stream, length, h2_emit_chunk_slice, &ctx);
 }
 
 /* Buffered branch: one body iov over stream->response_body slice. */
@@ -1432,43 +1465,30 @@ static ssize_t h2_dp_streaming_emit(http2_stream_t *stream,
     return (ssize_t)to_emit;
 }
 
+/* h2_chunk_slice_fn for the memcpy fallback: copy slice into the nghttp2
+ * provider buffer at the running offset. */
+struct h2_copy_walk_ctx {
+    uint8_t *buf;
+    size_t   written;
+};
+
+static void h2_copy_chunk_slice(void *ctx, const char *slice, const size_t len,
+                                zend_string *chunk)
+{
+    (void)chunk;
+    struct h2_copy_walk_ctx *c = (struct h2_copy_walk_ctx *)ctx;
+    memcpy(c->buf + c->written, slice, len);
+    c->written += len;
+}
+
 /* Streaming + memcpy fallback (non-emit drain, e.g. control-flush). */
 static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
                                     uint8_t *buf, const size_t length,
                                     uint32_t *data_flags)
 {
-    const unsigned head_before = stream->chunk_queue_head;
-    size_t written = 0;
-
-    while (written < length
-           && stream->chunk_queue_head < stream->chunk_queue_tail) {
-        zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
-        const size_t chunk_len = ZSTR_LEN(chunk);
-        const size_t avail     = chunk_len - stream->chunk_read_offset;
-        const size_t space     = length - written;
-        const size_t to_copy   = avail < space ? avail : space;
-
-        if (to_copy > 0) {
-            memcpy(buf + written,
-                   ZSTR_VAL(chunk) + stream->chunk_read_offset,
-                   to_copy);
-            stream->chunk_read_offset += to_copy;
-            stream->chunk_queue_bytes -= to_copy;
-            written += to_copy;
-        }
-
-        if (stream->chunk_read_offset == chunk_len) {
-            stream->chunk_queue[stream->chunk_queue_head] = NULL;
-            stream->chunk_queue_head++;
-            stream->chunk_read_offset = 0;
-            h2_static_account_release_chunk(stream, chunk);
-        }
-    }
-
-    /* Wake producer parked on full ring (no-op if none parked). */
-    if (stream->chunk_queue_head > head_before) {
-        async_plain_event_fire((zend_async_event_t *)stream->write_event);
-    }
+    struct h2_copy_walk_ctx ctx = { buf, 0 };
+    const size_t written =
+        h2_chunk_queue_walk(stream, length, h2_copy_chunk_slice, &ctx);
 
     if (stream->chunk_queue_head == stream->chunk_queue_tail) {
         if (stream->streaming_ended) {
