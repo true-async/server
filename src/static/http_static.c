@@ -440,6 +440,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			cfg.last_modified = true;
 			cfg.accept_ranges = true;
 			cfg.conditional = true;
+			cfg.reject_symlinks = (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) != 0;
 			cfg.cache_control = mount->cache_control;
 			cfg.extra_headers = mount->extra_headers;
 			cfg.mime_overrides = mount->mime_overrides;

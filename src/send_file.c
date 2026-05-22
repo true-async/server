@@ -713,7 +713,15 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 
 	/* === Synchronous open(2) ========================================= */
 
-	const int fd = open(state->fs_path, O_RDONLY | O_CLOEXEC);
+	int open_flags = O_RDONLY | O_CLOEXEC;
+#ifdef O_NOFOLLOW
+	/* REJECT mount: reject a final-component symlink atomically (ELOOP). */
+	if (state->cfg.reject_symlinks) {
+		open_flags |= O_NOFOLLOW;
+	}
+#endif
+
+	const int fd = open(state->fs_path, open_flags);
 
 	if (UNEXPECTED(fd < 0)) {
 		return engine_handle_open_failure(state);
