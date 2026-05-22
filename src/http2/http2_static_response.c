@@ -6,7 +6,7 @@
   +----------------------------------------------------------------------+
 */
 
-/* HTTP/2 static-file body delivery — producer into the stream chunk ring.
+/* HTTP/2 static-file body delivery — producer into the stream chunk queue.
  * h2c uses NO_COPY iov (one userspace copy: the pread). Read chunk size
  * comes from adaptive read-ahead (see below). */
 
@@ -370,7 +370,7 @@ static size_t h2_static_fit_to_arena(const size_t want)
     return avail < H2_STATIC_CHUNK_MIN ? 0 : avail;
 }
 
-/* Pull another chunk while outstanding < target AND a ring slot is free.
+/* Pull another chunk while outstanding < target AND a queue slot is free.
  *
  * NOTE: global hard cap is NOT checked here — it is handled inside
  * h2_static_submit_read, which also parks the stream on the throttled

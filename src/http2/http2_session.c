@@ -908,6 +908,9 @@ static void h2_emit_state_append_body(struct http2_emit_state *st,
     http2_emit_record_t *rec = &st->records[st->records_count++];
     rec->is_body   = true;
     rec->body.ptr  = ptr;
+    /* body.len is uint32_t; H2 DATA slices are frame-size bounded (<= 2^24)
+     * so this always holds — assert guards a future caller that forgets. */
+    ZEND_ASSERT(len <= UINT32_MAX);
     rec->body.len  = (uint32_t)len;
 
     /* Interned strings live in opcache SHM (read-only under ZTS) — addref
@@ -1430,7 +1433,7 @@ static inline void h2_dp_mark_eof(const http2_stream_t *stream,
     }
 }
 
-/* Bytes ready in the streaming ring. chunk_queue_bytes is the running
+/* Bytes ready in the streaming queue. chunk_queue_bytes is the running
  * sum of pushed chunk lengths minus drained bytes — by construction
  * equal to (sum of queued chunk lengths) - chunk_read_offset. */
 static size_t h2_stream_pending_bytes(const http2_stream_t *stream)
