@@ -22,8 +22,6 @@
 #include "php.h"
 #include "php_http_server.h"
 
-int                                  http_response_get_status_code(zend_object *obj);
-HashTable                           *http_response_get_headers_table(zend_object *obj);
 zend_string                         *http_response_get_body_string(zend_object *obj);
 
 const http_response_stream_ops_t    *http_response_get_stream_ops(zend_object *obj);
@@ -35,11 +33,6 @@ void                                 http_response_replace_stream_ops(zend_objec
 /* Compression-slot accessors. Used by the compression module. */
 void *http_response_get_compression_slot(zend_object *obj);
 void  http_response_set_compression_slot(zend_object *obj, void *p);
-
-/* Aliases used by the compression module pre-dating the get/set
- * naming above. Keep matching the existing extern names there. */
-HashTable *http_response_get_headers(zend_object *obj);
-int        http_response_get_status(zend_object *obj);
 
 /* Pending sendFile descriptor accessor (issue #13). After
  * HttpResponse::sendFile(), a snapshot of the path + options sits on

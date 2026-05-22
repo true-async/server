@@ -1388,16 +1388,6 @@ smart_str *http_response_get_body_smart_str(zend_object *obj)
  * Content-Length and runs the compression hook — neither is
  * appropriate when the static handler has already decided every
  * header on the wire). */
-int http_response_get_status_code(zend_object *obj)
-{
-    return http_response_from_obj(obj)->status_code;
-}
-
-HashTable *http_response_get_headers_table(zend_object *obj)
-{
-    return http_response_from_obj(obj)->headers;
-}
-
 zend_string *http_response_get_body_string(zend_object *obj)
 {
     smart_str *b = &http_response_from_obj(obj)->body;
@@ -1565,16 +1555,32 @@ static inline void append_header_line(smart_str *out,
     *p++ = '\r'; *p   = '\n';
 }
 
+/* True for the framing headers a chunked streaming response must drop:
+ * Content-Length and any handler-set Transfer-Encoding. Case-insensitive
+ * — handlers may set either casing. */
+static bool header_is_framing(const zend_string *name)
+{
+    return (ZSTR_LEN(name) == 14
+            && zend_binary_strcasecmp(ZSTR_VAL(name), 14, "content-length", 14) == 0)
+        || (ZSTR_LEN(name) == 17
+            && zend_binary_strcasecmp(ZSTR_VAL(name), 17, "transfer-encoding", 17) == 0);
+}
+
 /* Iterate the headers table emitting "name: value\r\n" for each entry.
- * Flat IS_STRING fast path (single-value, common case) + IS_ARRAY
- * multi-value fallback. Does NOT emit the trailing CRLF that ends the
- * header block — caller appends that. */
-static void emit_headers_only(smart_str *out, HashTable *headers)
+ * When skip_framing is set, Content-Length / Transfer-Encoding are dropped
+ * (a chunked streaming response supplies its own framing). Flat IS_STRING
+ * fast path (single-value, common case) + IS_ARRAY multi-value fallback.
+ * Does NOT emit the trailing CRLF that ends the header block — caller
+ * appends that. */
+static void emit_headers_only(smart_str *out, HashTable *headers,
+                              const bool skip_framing)
 {
     zend_string *name;
     zval *values;
     ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
         if (UNEXPECTED(name == NULL)) continue;
+
+        if (skip_framing && header_is_framing(name)) continue;
 
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
             const zend_string *v = Z_STR_P(values);
@@ -1612,7 +1618,7 @@ static void emit_headers_block(smart_str *result, http_response_object *response
         smart_str_appendl(result, "\r\n", 2);
     }
 
-    emit_headers_only(result, response->headers);
+    emit_headers_only(result, response->headers, false);
 
     /* End of headers */
     smart_str_appendl(result, "\r\n", 2);
@@ -1739,38 +1745,7 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
     smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
                       sizeof("Transfer-Encoding: chunked\r\n") - 1);
 
-    zend_string *name;
-    zval        *values;
-    ZEND_HASH_FOREACH_STR_KEY_VAL(response->headers, name, values) {
-        if (UNEXPECTED(name == NULL)) continue;
-        /* Skip Content-Length: incompatible with chunked. Case-
-         * insensitive match since handlers may set it either way. */
-        if (ZSTR_LEN(name) == 14 &&
-            zend_binary_strcasecmp(ZSTR_VAL(name), 14, "content-length", 14) == 0) {
-            continue;
-        }
-        /* Skip any Transfer-Encoding the handler pre-set (we always
-         * set chunked ourselves; a conflicting value would confuse
-         * intermediaries). */
-        if (ZSTR_LEN(name) == 17 &&
-            zend_binary_strcasecmp(ZSTR_VAL(name), 17, "transfer-encoding", 17) == 0) {
-            continue;
-        }
-
-        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            const zend_string *v = Z_STR_P(values);
-            append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
-                               ZSTR_VAL(v), ZSTR_LEN(v));
-        } else if (Z_TYPE_P(values) == IS_ARRAY) {
-            zval *val;
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                if (Z_TYPE_P(val) != IS_STRING) continue;
-                const zend_string *v = Z_STR_P(val);
-                append_header_line(&result, ZSTR_VAL(name), ZSTR_LEN(name),
-                                   ZSTR_VAL(v), ZSTR_LEN(v));
-            } ZEND_HASH_FOREACH_END();
-        }
-    } ZEND_HASH_FOREACH_END();
+    emit_headers_only(&result, response->headers, true);
 
     smart_str_appendl(&result, "\r\n", 2);
     smart_str_0(&result);
@@ -1794,7 +1769,7 @@ zend_string *http_response_format_static_head(zend_object *obj,
     smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
-    emit_headers_only(&result, response->headers);
+    emit_headers_only(&result, response->headers, false);
     smart_str_appendl(&result, "\r\n", 2);
 
     if (include_inline_body) {
@@ -2011,17 +1986,30 @@ void http_response_static_set_header(zend_object *obj,
     zend_string_release(lower_name);
 }
 
-void http_response_static_set_body_str(zend_object *obj, zend_string *body)
+/* Replace the buffered body with a copy of [data, data+len). Drops any
+ * prior body_view; empty input leaves an empty body. */
+static void response_set_body_bytes(http_response_object *r,
+                                    const char *data, const size_t len)
 {
-    http_response_object *r = http_response_from_obj(obj);
     response_clear_body_view(r);
     smart_str_free(&r->body);
 
-    if (body != NULL && ZSTR_LEN(body) > 0) {
-        smart_str_appendl(&r->body, ZSTR_VAL(body), ZSTR_LEN(body));
+    if (data != NULL && len > 0) {
+        smart_str_appendl(&r->body, data, len);
     }
 
     smart_str_0(&r->body);
+}
+
+void http_response_static_set_body_str(zend_object *obj, zend_string *body)
+{
+    http_response_object *r = http_response_from_obj(obj);
+
+    if (body != NULL) {
+        response_set_body_bytes(r, ZSTR_VAL(body), ZSTR_LEN(body));
+    } else {
+        response_set_body_bytes(r, NULL, 0);
+    }
 }
 
 /* Zero-copy variant: keep a refcount on the caller's zend_string and
@@ -2048,14 +2036,7 @@ void http_response_static_set_body_cstr(zend_object *obj,
                                         const char *body, size_t body_len)
 {
     http_response_object *r = http_response_from_obj(obj);
-    response_clear_body_view(r);
-    smart_str_free(&r->body);
-
-    if (body != NULL && body_len > 0) {
-        smart_str_appendl(&r->body, body, body_len);
-    }
-
-    smart_str_0(&r->body);
+    response_set_body_bytes(r, body, body_len);
 }
 
 void http_response_reset_to_error(zend_object *obj, int status_code, const char *message)
@@ -2066,10 +2047,8 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
     response->status_code = status_code;
 
     /* Reset body */
-    response_clear_body_view(response);
-    smart_str_free(&response->body);
-    smart_str_appends(&response->body, message);
-    smart_str_0(&response->body);
+    const size_t msg_len = strlen(message);
+    response_set_body_bytes(response, message, msg_len);
 
     /* Clear custom headers */
     if (response->headers) {
@@ -2081,7 +2060,7 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
         zend_string_release(response->reason_phrase);
     }
 
-    response->reason_phrase = zend_string_init(message, strlen(message), 0);
+    response->reason_phrase = zend_string_init(message, msg_len, 0);
 
     response->committed = true;
 }

@@ -714,7 +714,7 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
                                       size_t *out_count,
                                       nghttp2_nv **out_nv)
 {
-    HashTable *headers = http_response_get_headers_table(response_obj);
+    HashTable *headers = http_response_get_headers(response_obj);
 
     size_t total_values = 1;
 
@@ -824,7 +824,7 @@ int h2_stream_send_static_response(void *ctx,
 
     const bool head_only = head_only_in || file_io == NULL;
 
-    const int status_code = http_response_get_status_code(response_obj);
+    const int status_code = http_response_get_status(response_obj);
     nghttp2_nv scratch[64];
     nghttp2_nv *nv = NULL;
     size_t nv_count = 0;
