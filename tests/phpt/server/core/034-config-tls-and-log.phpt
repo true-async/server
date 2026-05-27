@@ -85,7 +85,8 @@ expectThrow('log-stream-array',  fn() => $c5->setLogStream([1, 2, 3]));
 if (function_exists('curl_init')) {
     $ch = curl_init();
     expectThrow('log-stream-curl', fn() => $c5->setLogStream($ch));
-    curl_close($ch);
+    /* curl_close() is a no-op since PHP 8.0 and Deprecated in 8.5+ —
+     * $ch goes out of scope at the end of the if-block. */
 } else {
     echo "log-stream-curl: TrueAsync\\HttpServerInvalidArgumentException\n";
 }

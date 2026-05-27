@@ -6,23 +6,97 @@
   +----------------------------------------------------------------------+
 */
 
-/* Cross-TU contract for http_response_object accessors that aren't
- * part of the public PHP-facing API. Used by protocol layers
- * (h1/h2/h3/static/compression) that need direct read access to the
- * response structure to serialize the wire bytes themselves —
- * bypassing http_response_format which would auto-add Content-Length
- * and run the compression hook.
- *
- * These are NOT part of php_http_server.h because they expose
- * internal storage; their stability is bounded to in-tree callers. */
+/* Cross-TU contract for http_response_object internals. The PHP class
+ * lives in src/http_response.c; the wire formatters live in
+ * src/http1/http1_format.c; the server-side C-API lives in
+ * src/http_response_server_api.c. All three need direct struct access,
+ * but the layout MUST stay out of php_http_server.h — those callers
+ * link against this header instead. */
 
 #ifndef HTTP_RESPONSE_INTERNAL_H
 #define HTTP_RESPONSE_INTERNAL_H
 
 #include "php.h"
+#include "zend_smart_str.h"
+#include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
 #include "php_http_server.h"
+#include "http_send_file.h"
+
+/* Response object structure.
+ * Ordered by alignment: pointers & smart_str first, then socket_fd
+ * (pointer-sized on Windows), then 32-bit status_code, then bool flags
+ * clustered. zend_object must stay last for PHP object layout. */
+typedef struct {
+    zend_string     *reason_phrase;     /* Custom reason phrase (NULL = auto) */
+    HashTable       *headers;           /* Response headers (name => array of values) */
+    HashTable       *trailers;          /* HTTP/2 trailers (name => value zend_string); NULL until first setTrailer */
+    zend_string     *protocol_version;  /* HTTP version (e.g., "1.1") */
+    smart_str        body;              /* Body buffer (pointer + size_t) */
+
+    /* Non-owning view onto someone else's body bytes. When non-NULL,
+     * holds an addref'd zend_string (typically from the persistent
+     * static body cache) and the send-path emits it as a separate
+     * iov entry — zero memcpy on the response side. Mutually
+     * exclusive with `body`: any path that mutates the smart_str
+     * must first drop this view via response_clear_body_view(). */
+    zend_string     *body_view;
+
+    /* Streaming ops + ctx. Installed by the protocol strategy at
+     * dispatch; NULL for buffered-mode responses. send() activates
+     * streaming by reading these; the ops interpret ctx (opaque
+     * pointer to the protocol-specific stream state). */
+    const http_response_stream_ops_t *stream_ops;
+    void                             *stream_ctx;
+
+    /* Connection info (for sending). SOCK_ERR if not connected. */
+    php_socket_t     socket_fd;
+
+    /* HTTP status code */
+    int              status_code;
+
+    /* State flags (clustered) */
+    bool             headers_sent;
+    bool             closed;
+    bool             committed;
+    bool             streaming;         /* send() has been called — setBody/setHeader now throw */
+
+    /* Compression module state (issue #8). Opaque ptr — owned by the
+     * compression TU; allocated by http_compression_attach at dispatch
+     * and freed by http_compression_state_free at object dtor. */
+    void            *compression_state;
+
+    /* JSON encode flags applied by ::json() when its $flags arg is 0. */
+    uint32_t         default_json_flags;
+
+    /* sendFile() handoff: when non-NULL, every mutating PHP method
+     * throws and the dispose path consumes it through the per-protocol
+     * sendfile FSM. Owned by the response until take_send_file pulls it. */
+    http_send_file_request_t *send_file_req;
+
+    zend_object      std;
+} http_response_object;
+
+static inline http_response_object *http_response_from_obj(zend_object *obj) {
+    return (http_response_object *)((char *)(obj) - XtOffsetOf(http_response_object, std));
+}
+
+#define Z_HTTP_RESPONSE_P(zv) http_response_from_obj(Z_OBJ_P(zv))
+
+/* Drop the borrowed-body ref if held. Call before any path that
+ * mutates the smart_str body — they assume body.s is the truth. */
+static inline void response_clear_body_view(http_response_object *r)
+{
+    if (r->body_view != NULL) {
+        zend_string_release(r->body_view);
+        r->body_view = NULL;
+    }
+}
+
+/* Internal cross-TU accessors. Stability bounded to in-tree callers
+ * — not in php_http_server.h because they expose response internals. */
 
 zend_string                         *http_response_get_body_string(zend_object *obj);
+smart_str                           *http_response_get_body_smart_str(zend_object *obj);
 
 const http_response_stream_ops_t    *http_response_get_stream_ops(zend_object *obj);
 void                                *http_response_get_stream_ctx(zend_object *obj);
@@ -30,16 +104,14 @@ void                                 http_response_replace_stream_ops(zend_objec
                                           const http_response_stream_ops_t *ops,
                                           void *ctx);
 
-/* Compression-slot accessors. Used by the compression module. */
 void *http_response_get_compression_slot(zend_object *obj);
 void  http_response_set_compression_slot(zend_object *obj, void *p);
 
-/* Pending sendFile descriptor accessor (issue #13). After
- * HttpResponse::sendFile(), a snapshot of the path + options sits on
- * the response object until the dispose path takes ownership and
- * dispatches it through the per-protocol FSM. */
-#include "http_send_file.h"
 http_send_file_request_t *http_response_take_send_file(zend_object *obj);
 bool                       http_response_has_send_file(zend_object *obj);
+
+/* HTTP status reason phrases. Defined in src/http1/http1_format.c
+ * alongside the pre-baked status-line table. */
+const char *http_status_reason(int code);
 
 #endif /* HTTP_RESPONSE_INTERNAL_H */
