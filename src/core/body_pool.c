@@ -150,9 +150,7 @@ void body_pool_shutdown(void)
 
 void body_pool_get_stats(body_pool_class_stats_t out[BODY_POOL_NUM_CLASSES])
 {
-    /* Walk the per-thread pool array even if pool_init_once never ran:
-     * the static TLS zero-initialises count + capacity, so reads are
-     * safe (everything reports 0). */
+    /* Safe pre-init: TLS zero-init means count/capacity read as 0. */
     size_t cap = BODY_POOL_MIN_SIZE;
 
     for (int i = 0; i < BODY_POOL_NUM_CLASSES; i++) {

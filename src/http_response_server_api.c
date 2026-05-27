@@ -6,21 +6,10 @@
   +----------------------------------------------------------------------+
 */
 
-/* Server-side C-API for http_response_object. These functions are
- * dialed by the server's own protocol / static / compression code
- * when it needs to populate or inspect a response from C — bypassing
- * the PHP-facing setStatus/setHeader/setBody methods (which guard
- * against post-commit mutation and aren't reachable from internal
- * paths anyway).
- *
- * Two clusters:
- *   1. read accessors           — status / headers / trailers / body / streaming
- *   2. internal-only setters    — http_response_static_set_*, apply_extra_headers,
- *                                 set_connection, emit_status_body, synth_error
- *
- * No `closed`/`streaming` guard like the PHP-facing setters: the
- * single writer here is the server itself, and the response object
- * is either freshly object_init_ex'd or known-not-yet-committed. */
+/* Server-side C-API for http_response_object — read accessors plus
+ * setters used by protocol/static/compression code to populate a
+ * response without going through the PHP setStatus/setHeader/setBody
+ * guards. No closed/streaming gate here: the caller is the server. */
 
 #ifdef HAVE_CONFIG_H
 # include <config.h>

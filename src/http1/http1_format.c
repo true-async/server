@@ -6,11 +6,8 @@
   +----------------------------------------------------------------------+
 */
 
-/* HTTP/1.x response wire-format encoder. Status line + headers
- * serialization, plus the public http_response_format* entry points
- * used by H1 (text framing) and shared helpers (TLS path, sendfile
- * head builder). HTTP/2 / HTTP/3 use these only for the textual
- * status-reason lookup; binary framing lives in src/http2/ /
+/* HTTP/1.x response wire-format encoder. H/2 + H/3 use only the
+ * status-reason lookup here; binary framing lives in src/http2/,
  * src/http3/. */
 
 #ifdef HAVE_CONFIG_H

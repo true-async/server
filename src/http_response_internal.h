@@ -6,12 +6,10 @@
   +----------------------------------------------------------------------+
 */
 
-/* Cross-TU contract for http_response_object internals. The PHP class
- * lives in src/http_response.c; the wire formatters live in
- * src/http1/http1_format.c; the server-side C-API lives in
- * src/http_response_server_api.c. All three need direct struct access,
- * but the layout MUST stay out of php_http_server.h — those callers
- * link against this header instead. */
+/* Cross-TU layout of http_response_object — shared by the PHP class
+ * TU, the H/1 wire formatters and the server-side C-API TU. Kept out
+ * of php_http_server.h because callers outside the tree must not see
+ * the struct shape. */
 
 #ifndef HTTP_RESPONSE_INTERNAL_H
 #define HTTP_RESPONSE_INTERNAL_H

@@ -80,8 +80,7 @@ http_connection_t *conn_arena_alloc(conn_arena_t *arena);
  * torn down dependent state (io, parser, TLS, ...). */
 void conn_arena_free(conn_arena_t *arena, http_connection_t *conn);
 
-/* Observability snapshot — counts live/total slots and committed
- * chunks. No locks. Cheap. Used by HttpServer::getRuntimeStats. */
+/* Snapshot of live/total/chunk counts. No locks. */
 typedef struct {
     size_t live;        /* alive_count */
     size_t slots;       /* total slots across all chunks */

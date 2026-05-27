@@ -31,10 +31,8 @@ void         body_pool_release(zend_string *zstr);
  * debug allocator's leak detector doesn't flag pool-retained slots. */
 void         body_pool_shutdown(void);
 
-/* Per-class snapshot — class[i].slot_bytes is the bucket's slot size
- * (1 MiB << i), .count is the number of slots cached *right now* in
- * this thread's pool, .bytes is count*slot_bytes. Output array must
- * hold BODY_POOL_NUM_CLASSES entries. */
+/* Per-class snapshot of this thread's pool. Output must hold
+ * BODY_POOL_NUM_CLASSES entries. */
 typedef struct {
     size_t slot_bytes;
     size_t count;
