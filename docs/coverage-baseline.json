@@ -1,8 +1,8 @@
 {
   "totals": {
     "lines": {
-      "total": 14264,
-      "hit": 11559
+      "total": 14258,
+      "hit": 11550
     },
     "functions": {
       "total": 966,
@@ -232,8 +232,8 @@
     },
     "src/http1/http1_format.c": {
       "lines": {
-        "total": 173,
-        "hit": 163
+        "total": 171,
+        "hit": 161
       },
       "functions": {
         "total": 12,
@@ -313,7 +313,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 505,
-        "hit": 400
+        "hit": 397
       },
       "functions": {
         "total": 31,
@@ -492,8 +492,8 @@
     },
     "src/http_response.c": {
       "lines": {
-        "total": 573,
-        "hit": 501
+        "total": 569,
+        "hit": 497
       },
       "functions": {
         "total": 49,
