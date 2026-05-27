@@ -280,12 +280,6 @@ PHP_MINFO_FUNCTION(http_server)
 
 extern void http_parser_reset_for_reuse(http1_parser_t *ctx);
 
-/* Helper: Check if string buffer can be reused */
-static inline bool can_reuse_string_buffer(zend_string *str)
-{
-    return str && !ZSTR_IS_INTERNED(str) && GC_REFCOUNT(str) == 1;
-}
-
 /* {{{ parser_pool_acquire - Get parser from pool or create new */
 http1_parser_t* parser_pool_acquire(void)
 {

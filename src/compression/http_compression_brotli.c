@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Brotli backend — streaming encode via libbrotlienc, request-side decode
  * via libbrotlidec. Plugs into the http_encoder vtable shipped in phase 1
  * (issue #8); the response pipeline picks brotli over gzip when the client

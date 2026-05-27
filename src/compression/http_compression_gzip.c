@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * gzip backend — streaming deflate via zlib-ng (preferred) or zlib.
  *
  * windowBits=15+16 (bit 16 in zlib(-ng) selects the gzip wrapper:

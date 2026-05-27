@@ -467,10 +467,12 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c
+    src/http1/http1_format.c
     src/formats/multipart_parser.c
     src/formats/multipart_processor.c
     src/http_request.c
     src/http_response.c
+    src/http_response_server_api.c
     src/http_body_stream.c
     src/http_mime.c
     src/http_date.c

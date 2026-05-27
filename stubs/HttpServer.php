@@ -124,4 +124,32 @@ final class HttpServer
      * @return array
      */
     public function getHttp3Stats(): array {}
+
+    /**
+     * Snapshot of server-side arena/pool counters.
+     *
+     * Reports memory committed by the server's own internal allocators
+     * (slab pools, per-thread caches) so a benchmark probe can attribute
+     * RSS growth to a concrete subsystem.
+     *
+     *  - `conn_arena_live`     — http_connection_t slots currently in
+     *                            use (one per live TCP connection).
+     *  - `conn_arena_slots`    — total slots across all chunks (live +
+     *                            free, never shrinks).
+     *  - `conn_arena_chunks`   — slab chunks committed. Each chunk
+     *                            holds CONN_ARENA_CHUNK_SLOTS (256)
+     *                            http_connection_t structs (~768 B each).
+     *  - `conn_arena_bytes`    — `chunks * CONN_ARENA_CHUNK_SLOTS *
+     *                            sizeof(http_connection_t)`, virtual
+     *                            commitment.
+     *  - `body_pool`           — per-size-class LIFO of large request
+     *                            bodies (1 MB to 128 MB). Each entry has
+     *                            `slot_bytes`, `count` (slots cached
+     *                            right now), `bytes` (`count *
+     *                            slot_bytes`).
+     *  - `body_pool_total_bytes` — sum of `bytes` across all classes.
+     *
+     * @return array
+     */
+    public function getRuntimeStats(): array {}
 }

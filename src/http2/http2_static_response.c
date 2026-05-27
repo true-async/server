@@ -6,7 +6,7 @@
   +----------------------------------------------------------------------+
 */
 
-/* HTTP/2 static-file body delivery — producer into the stream chunk ring.
+/* HTTP/2 static-file body delivery — producer into the stream chunk queue.
  * h2c uses NO_COPY iov (one userspace copy: the pread). Read chunk size
  * comes from adaptive read-ahead (see below). */
 
@@ -294,7 +294,6 @@ static void h2_static_throttle_kick_all(void)
     h2_static_kick_in_progress = true;
 
     h2_static_state_t *state = h2_static_throttled_head;
-    int n = 0; for (h2_static_state_t *p=state; p; p=p->throttled_next) n++;
     h2_static_throttled_head = NULL;
 
     while (state != NULL) {
@@ -371,7 +370,7 @@ static size_t h2_static_fit_to_arena(const size_t want)
     return avail < H2_STATIC_CHUNK_MIN ? 0 : avail;
 }
 
-/* Pull another chunk while outstanding < target AND a ring slot is free.
+/* Pull another chunk while outstanding < target AND a queue slot is free.
  *
  * NOTE: global hard cap is NOT checked here — it is handled inside
  * h2_static_submit_read, which also parks the stream on the throttled
@@ -715,7 +714,7 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
                                       size_t *out_count,
                                       nghttp2_nv **out_nv)
 {
-    HashTable *headers = http_response_get_headers_table(response_obj);
+    HashTable *headers = http_response_get_headers(response_obj);
 
     size_t total_values = 1;
 
@@ -825,7 +824,7 @@ int h2_stream_send_static_response(void *ctx,
 
     const bool head_only = head_only_in || file_io == NULL;
 
-    const int status_code = http_response_get_status_code(response_obj);
+    const int status_code = http_response_get_status(response_obj);
     nghttp2_nv scratch[64];
     nghttp2_nv *nv = NULL;
     size_t nv_count = 0;

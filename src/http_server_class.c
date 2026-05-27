@@ -2940,6 +2940,47 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
 }
 /* }}} */
 
+/* {{{ HttpServer::getRuntimeStats — snapshot of internal allocators. */
+ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    array_init(return_value);
+
+    conn_arena_stats_t cstat;
+    conn_arena_get_stats(&server->conn_arena, &cstat);
+
+    add_assoc_long(return_value, "conn_arena_live",   (zend_long)cstat.live);
+    add_assoc_long(return_value, "conn_arena_slots",  (zend_long)cstat.slots);
+    add_assoc_long(return_value, "conn_arena_chunks", (zend_long)cstat.chunks);
+    add_assoc_long(return_value, "conn_arena_bytes",
+                   (zend_long)(cstat.chunks * CONN_ARENA_CHUNK_SLOTS * cstat.slot_bytes));
+
+    body_pool_class_stats_t pstats[BODY_POOL_NUM_CLASSES];
+    body_pool_get_stats(pstats);
+
+    zval body_pool_zv;
+    array_init(&body_pool_zv);
+    size_t total_pool_bytes = 0;
+
+    for (int i = 0; i < BODY_POOL_NUM_CLASSES; i++) {
+        zval entry;
+        array_init(&entry);
+        add_assoc_long(&entry, "slot_bytes", (zend_long)pstats[i].slot_bytes);
+        add_assoc_long(&entry, "count",      (zend_long)pstats[i].count);
+        add_assoc_long(&entry, "bytes",      (zend_long)pstats[i].bytes);
+        add_next_index_zval(&body_pool_zv, &entry);
+        total_pool_bytes += pstats[i].bytes;
+    }
+
+    add_assoc_zval(return_value, "body_pool", &body_pool_zv);
+    add_assoc_long(return_value, "body_pool_total_bytes",
+                   (zend_long)total_pool_bytes);
+}
+/* }}} */
+
 /* Object handlers */
 
 static zend_object *http_server_create(zend_class_entry *ce)

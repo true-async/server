@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Codec registry and module-level helpers.
  *
  * Backends declare their vtable as `extern` and this TU plugs them into

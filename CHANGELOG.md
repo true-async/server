@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-05-27
+
+### Changed
+
+- Code audit (issue #37) — Phases 1–6 done. `src/http_response.c` (2173 lines) split into PHP-class TU + `src/http1/http1_format.c` (H/1 wire formatters) + `src/http_response_server_api.c` (server-side C-API for static/h2/compression paths). No behaviour change; phpt 211/211 PASS.
+
+### Added
+
+- `HttpServer::getRuntimeStats()` — snapshot of `conn_arena` (live slots, committed chunks, byte commitment) and `body_pool` (per-class LIFO of large request bodies). Pairs with `Async\runtime_stats()` and `zend_mm_dump_live_allocations()` to attribute RSS growth to a concrete subsystem.
+
+### Fixed
+
+- `034-config-tls-and-log.phpt`: drop the `curl_close()` call that emits a Deprecated notice on PHP 8.5+ (no-op since 8.0).
+- License headers added to compression / http3 / core files that were missing them.
+
 ## [0.6.5] - 2026-05-20
 
 ### Added

@@ -87,11 +87,7 @@ static char* extract_boundary(const char *content_type)
             return NULL;
         }
 
-        size_t len = boundary_end - boundary_start;
-        char *boundary = emalloc(len + 1);
-        memcpy(boundary, boundary_start, len);
-        boundary[len] = '\0';
-        return boundary;
+        return estrndup(boundary_start, boundary_end - boundary_start);
     }
 
     /* No quotes - find end (semicolon, space, or end of string) */
@@ -106,10 +102,7 @@ static char* extract_boundary(const char *content_type)
         return NULL;
     }
 
-    char *boundary = emalloc(len + 1);
-    memcpy(boundary, boundary_start, len);
-    boundary[len] = '\0';
-    return boundary;
+    return estrndup(boundary_start, len);
 }
 
 /* Helper: Finalize multipart processing and create PHP arrays */
@@ -937,7 +930,10 @@ void http_parser_attach(http1_parser_t *parser,
     parser->dispatch_cb = dispatch_cb;
 }
 
-void http_parser_reset(http1_parser_t *parser)
+/* Destroy the request the parser still owns — owns_request is set when a
+ * parse error fires before on_headers_complete hands the request off —
+ * and clear the slot. Shared by destroy and reset_for_reuse. */
+static void parser_release_request(http1_parser_t *parser)
 {
     if (parser->owns_request && parser->request) {
         http_request_destroy(parser->request);
@@ -945,43 +941,12 @@ void http_parser_reset(http1_parser_t *parser)
 
     parser->request = NULL;
     parser->owns_request = false;
-    parser->dispatched = false;
-
-    /* Free smart_str builders */
-    smart_str_free(&parser->uri_builder);
-    smart_str_free(&parser->body_builder);
-    smart_str_free(&parser->header_name_builder);
-    smart_str_free(&parser->header_value_builder);
-
-    /* Reset builders */
-    memset(&parser->uri_builder, 0, sizeof(smart_str));
-    memset(&parser->body_builder, 0, sizeof(smart_str));
-    memset(&parser->header_name_builder, 0, sizeof(smart_str));
-    memset(&parser->header_value_builder, 0, sizeof(smart_str));
-
-    /* Reset state */
-    parser->in_header_value = false;
-    parser->paused = false;
-    parser->body_offset = 0;
-    parser->total_headers_size = 0;
-    parser->parse_error = HTTP_PARSE_OK;
-
-#ifdef HAVE_LLHTTP
-    llhttp_init(&parser->parser, HTTP_REQUEST, &parser->settings);
-    parser->parser.data = parser;
-#endif
 }
 
 void http_parser_destroy(http1_parser_t *parser)
 {
-    if (parser->owns_request && parser->request) {
-        http_request_destroy(parser->request);
-    }
+    parser_release_request(parser);
 
-    parser->request = NULL;
-    parser->owns_request = false;
-
-    /* Free smart_str builders */
     smart_str_free(&parser->uri_builder);
     smart_str_free(&parser->body_builder);
     smart_str_free(&parser->header_name_builder);
@@ -1150,12 +1115,7 @@ const char *http_parse_error_reason(http_parse_error_t err)
 /* Reset parser for reuse with buffer recycling based on refcount */
 void http_parser_reset_for_reuse(http1_parser_t *parser)
 {
-    if (parser->owns_request && parser->request) {
-        http_request_destroy(parser->request);
-    }
-
-    parser->request = NULL;
-    parser->owns_request = false;
+    parser_release_request(parser);
     parser->dispatched = false;
 
     /* Clear dispatch wiring — new user must re-attach */
@@ -1170,6 +1130,7 @@ void http_parser_reset_for_reuse(http1_parser_t *parser)
 
     /* Reset state */
     parser->in_header_value = false;
+    parser->paused = false;
     parser->body_offset = 0;
     parser->total_headers_size = 0;
     parser->parse_error = HTTP_PARSE_OK;

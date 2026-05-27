@@ -72,6 +72,12 @@ typedef struct
 	/* unlink(abs_path) after a successful 2xx. */
 	bool delete_after_send : 1;
 
+	/* SymlinkPolicy::REJECT mount — open() with O_NOFOLLOW so a symlink
+	 * swapped onto the final path component after the caller's pre-flight
+	 * lstat fails atomically with ELOOP (closes the TOCTOU window).
+	 * sendFile() leaves this false: the PHP handler chose the path. */
+	bool reject_symlinks : 1;
+
 	/* Caller-resolved precompressed sidecar. When set, abs_path already
 	 * points at the sidecar; the engine emits Content-Encoding (token
 	 * literal owned by caller) + Vary: Accept-Encoding. NULL = identity. */

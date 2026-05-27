@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * HTTP body compression — codec-agnostic encoder/decoder vtable.
  *
  * Phase 1 ships a single backend (gzip via zlib-ng, with system zlib as

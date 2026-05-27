@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * Default MIME whitelist for HTTP body compression.
  *
  * Kept in a dedicated TU so that policy edits land as a focused diff

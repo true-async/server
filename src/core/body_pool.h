@@ -1,3 +1,11 @@
+/*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
 #ifndef HTTP_BODY_POOL_H
 #define HTTP_BODY_POOL_H
 
@@ -22,6 +30,16 @@ void         body_pool_release(zend_string *zstr);
 /* Drain all cached slots back to zend_mm. Call from RSHUTDOWN so the
  * debug allocator's leak detector doesn't flag pool-retained slots. */
 void         body_pool_shutdown(void);
+
+/* Per-class snapshot of this thread's pool. Output must hold
+ * BODY_POOL_NUM_CLASSES entries. */
+typedef struct {
+    size_t slot_bytes;
+    size_t count;
+    size_t bytes;
+} body_pool_class_stats_t;
+
+void body_pool_get_stats(body_pool_class_stats_t out[BODY_POOL_NUM_CLASSES]);
 
 /* Convenience: release whatever this string is — pool slot via the pool,
  * regular zend_string via zend_string_release. Use this anywhere you'd

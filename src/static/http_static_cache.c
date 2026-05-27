@@ -217,6 +217,13 @@ void http_static_cache_clear(http_static_cache_t *cache)
 	cache->count = 0;
 }
 
+/* Cache disabled by config, or an empty path — both mean "skip the cache".
+ * A runtime feature flag, not a contract violation: callers early-return. */
+static bool cache_disabled(const http_static_cache_t *cache, const size_t path_len)
+{
+	return cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0;
+}
+
 bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size_t path_len,
 							  http_static_cache_view_t *out_view)
 {
@@ -225,7 +232,7 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 	ZEND_ASSERT(out_view != NULL);
 	/* Cache disabled by config — runtime feature flag, not a contract
 	 * violation. Keep as a normal early-return. */
-	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+	if (cache_disabled(cache, path_len)) {
 		return false;
 	}
 
@@ -278,7 +285,7 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 	ZEND_ASSERT(path != NULL);
 	ZEND_ASSERT(st != NULL);
 
-	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+	if (cache_disabled(cache, path_len)) {
 		return;
 	}
 
@@ -332,7 +339,7 @@ void http_static_cache_insert(http_static_cache_t *cache, const char *path, size
 
 static entry_t *find_entry(http_static_cache_t *cache, const char *path, const size_t path_len)
 {
-	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+	if (cache_disabled(cache, path_len)) {
 		return NULL;
 	}
 
@@ -382,7 +389,7 @@ http_static_cache_probe_t http_static_cache_probe(http_static_cache_t *const cac
 	ZEND_ASSERT(cache != NULL);
 	ZEND_ASSERT(path != NULL);
 
-	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+	if (cache_disabled(cache, path_len)) {
 		return HTTP_STATIC_CACHE_PROBE_UNKNOWN;
 	}
 
@@ -409,7 +416,7 @@ void http_static_cache_negative_insert(http_static_cache_t *const cache,
 	ZEND_ASSERT(cache != NULL);
 	ZEND_ASSERT(path != NULL);
 
-	if (cache->max_entries == 0 || cache->ttl_seconds <= 0 || path_len == 0) {
+	if (cache_disabled(cache, path_len)) {
 		return;
 	}
 

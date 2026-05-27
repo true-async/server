@@ -1,3 +1,11 @@
+/*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
 /* Thread-local pool of large body buffers. Allocations go through
  * zend_mm (emalloc → zend_mm_alloc_huge → single mmap), so memory_limit
  * and peak-usage tracking work the same way they do for any other
@@ -138,4 +146,18 @@ void body_pool_shutdown(void)
     }
 
     pool_initialised = false;
+}
+
+void body_pool_get_stats(body_pool_class_stats_t out[BODY_POOL_NUM_CLASSES])
+{
+    /* Safe pre-init: TLS zero-init means count/capacity read as 0. */
+    size_t cap = BODY_POOL_MIN_SIZE;
+
+    for (int i = 0; i < BODY_POOL_NUM_CLASSES; i++) {
+        const body_pool_class_t *bucket = &pool_classes[i];
+        out[i].slot_bytes = pool_initialised ? bucket->capacity : cap;
+        out[i].count      = (size_t)(bucket->count > 0 ? bucket->count : 0);
+        out[i].bytes      = out[i].count * out[i].slot_bytes;
+        cap <<= 1;
+    }
 }

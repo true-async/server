@@ -336,6 +336,21 @@ static void tls_maybe_rotate_ticket_keys(tls_context_t *ctx)
     tls_ticket_keys_rotate(ctx);
 }
 
+/* Configure an HMAC-SHA256 MAC context with the ticket key's HMAC secret. */
+static bool tls_ticket_mac_set_key(EVP_MAC_CTX *mac_ctx,
+                                   const tls_ticket_key_t *k)
+{
+    OSSL_PARAM mac_params[3];
+
+    mac_params[0] = OSSL_PARAM_construct_octet_string(
+        OSSL_MAC_PARAM_KEY, (void *)k->hmac_key, sizeof(k->hmac_key));
+    mac_params[1] = OSSL_PARAM_construct_utf8_string(
+        OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
+    mac_params[2] = OSSL_PARAM_construct_end();
+
+    return EVP_MAC_CTX_set_params(mac_ctx, mac_params) == 1;
+}
+
 static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
                              unsigned char *iv,
                              EVP_CIPHER_CTX *cipher_ctx,
@@ -348,9 +363,6 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
     if (UNEXPECTED(ctx == NULL)) {
         return -1;
     }
-
-    OSSL_PARAM mac_params[3];
-    mac_params[1] = OSSL_PARAM_construct_end();
 
     if (enc == 1) {
         tls_maybe_rotate_ticket_keys(ctx);
@@ -369,13 +381,7 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
             return -1;
         }
 
-        mac_params[0] = OSSL_PARAM_construct_octet_string(
-            OSSL_MAC_PARAM_KEY, k->hmac_key, sizeof(k->hmac_key));
-        mac_params[1] = OSSL_PARAM_construct_utf8_string(
-            OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
-        mac_params[2] = OSSL_PARAM_construct_end();
-
-        if (EVP_MAC_CTX_set_params(mac_ctx, mac_params) != 1) {
+        if (!tls_ticket_mac_set_key(mac_ctx, k)) {
             return -1;
         }
 
@@ -405,13 +411,7 @@ static int tls_ticket_key_cb(SSL *s, unsigned char *key_name,
         return -1;
     }
 
-    mac_params[0] = OSSL_PARAM_construct_octet_string(
-        OSSL_MAC_PARAM_KEY, k->hmac_key, sizeof(k->hmac_key));
-    mac_params[1] = OSSL_PARAM_construct_utf8_string(
-        OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
-    mac_params[2] = OSSL_PARAM_construct_end();
-
-    if (EVP_MAC_CTX_set_params(mac_ctx, mac_params) != 1) {
+    if (!tls_ticket_mac_set_key(mac_ctx, k)) {
         return -1;
     }
     /* hit > 0 → ticket was issued under an older key; tell OpenSSL to

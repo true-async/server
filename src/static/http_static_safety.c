@@ -48,14 +48,13 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 	return open(path, flags);
 }
 
-/* REJECT pre-flight check. The sync fallback open() uses O_NOFOLLOW
- * (kernel rejects symlinks on the final component); the async hard-zero
- * path goes through ZEND_ASYNC_FS_OPEN which doesn't expose that flag.
- * resolved_under_root() catches symlinks pointing outside the mount but
- * NOT inside-mount-to-inside-mount links, leaving a hole in REJECT
- * semantics on the hot path. lstat the final component here to close
- * it. Cost: one syscall per request, only on cache miss; cache hits
- * skip this entirely (entry was already validated). */
+/* REJECT pre-flight check. Both open() paths — the sync fallback
+ * (open_for_policy) and the send_file engine — pass O_NOFOLLOW so the
+ * kernel rejects a final-component symlink atomically. This lstat
+ * rejects it earlier still, before the engine machinery spins up, and
+ * covers inside-mount-to-inside-mount links that resolved_under_root()
+ * (realpath prefix) cannot see. Cost: one syscall per request, only on
+ * cache miss; cache hits skip this entirely (entry already validated). */
 bool http_static_symlink_policy_admits(const http_static_handler_t *mount, const char *fs_path)
 {
 	if (mount->flags & HTTP_STATIC_FLAG_SYMLINKS_REJECT) {

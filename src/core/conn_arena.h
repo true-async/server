@@ -1,4 +1,12 @@
 /*
+  +----------------------------------------------------------------------+
+  | Copyright (c) TrueAsync                                              |
+  +----------------------------------------------------------------------+
+  | Licensed under the Apache License, Version 2.0                       |
+  +----------------------------------------------------------------------+
+*/
+
+/*
  * conn_arena — slab allocator for http_connection_t.
  *
  * Memory model
@@ -71,6 +79,16 @@ http_connection_t *conn_arena_alloc(conn_arena_t *arena);
 /* Unlink from alive list, push onto freelist. Caller has already
  * torn down dependent state (io, parser, TLS, ...). */
 void conn_arena_free(conn_arena_t *arena, http_connection_t *conn);
+
+/* Snapshot of live/total/chunk counts. No locks. */
+typedef struct {
+    size_t live;        /* alive_count */
+    size_t slots;       /* total slots across all chunks */
+    size_t chunks;      /* committed slab chunks */
+    size_t slot_bytes;  /* sizeof(http_connection_t) */
+} conn_arena_stats_t;
+
+void conn_arena_get_stats(const conn_arena_t *arena, conn_arena_stats_t *out);
 
 #ifdef __cplusplus
 }

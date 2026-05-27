@@ -582,21 +582,12 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     }
 }
 
-typedef struct {
-    http_connection_t *conn;
-    http2_stream_t    *stream;
-} h2_sendfile_user_t;
-
-static void h2_sendfile_on_done(void *user, int status)
+/* Shared dispose tail for h2 stream completion paths: dtor the request/
+ * response zvals, drop the stream ref, release the connection handler ref
+ * and finalise a deferred destroy. */
+static void h2_stream_dispose_tail(http_connection_t *conn,
+                                   http2_stream_t *stream)
 {
-    (void)status;
-    h2_sendfile_user_t *u = (h2_sendfile_user_t *)user;
-    http_connection_t *conn = u->conn;
-    http2_stream_t *stream = u->stream;
-    efree(u);
-
-    /* Mirror the original dispose tail: dtor zvals, release stream,
-     * release conn handler ref. Counters were retired in dispose. */
     if (!Z_ISUNDEF(stream->request_zv)) {
         zval_ptr_dtor(&stream->request_zv);
         ZVAL_UNDEF(&stream->request_zv);
@@ -618,6 +609,23 @@ static void h2_sendfile_on_done(void *user, int status)
     }
 }
 
+typedef struct {
+    http_connection_t *conn;
+    http2_stream_t    *stream;
+} h2_sendfile_user_t;
+
+static void h2_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h2_sendfile_user_t *u = (h2_sendfile_user_t *)user;
+    http_connection_t *conn = u->conn;
+    http2_stream_t *stream = u->stream;
+    efree(u);
+
+    /* Counters were retired in dispose; just run the shared tail. */
+    h2_stream_dispose_tail(conn, stream);
+}
+
 static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
 {
     /* Counters paired with the original dispatch's on_request_dispatch.
@@ -633,15 +641,7 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
     if (sf_req == NULL) {
         /* Race / accounting bug — fall through to commit. */
         (void)http2_commit_stream_response(conn, stream);
-        zval_ptr_dtor(&stream->request_zv);
-        ZVAL_UNDEF(&stream->request_zv);
-        zval_ptr_dtor(&stream->response_zv);
-        ZVAL_UNDEF(&stream->response_zv);
-        http2_stream_release(stream);
-
-        if (conn->handler_refcount > 0) conn->handler_refcount--;
-
-        http_connection_destroy_if_idle_deferred(conn);
+        h2_stream_dispose_tail(conn, stream);
 
         return;
     }
@@ -656,15 +656,7 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
          * synthesized error response, then run the standard tail. */
         efree(u);
         (void)http2_commit_stream_response(conn, stream);
-        zval_ptr_dtor(&stream->request_zv);
-        ZVAL_UNDEF(&stream->request_zv);
-        zval_ptr_dtor(&stream->response_zv);
-        ZVAL_UNDEF(&stream->response_zv);
-        http2_stream_release(stream);
-
-        if (conn->handler_refcount > 0) conn->handler_refcount--;
-
-        http_connection_destroy_if_idle_deferred(conn);
+        h2_stream_dispose_tail(conn, stream);
     }
 }
 
@@ -856,6 +848,81 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     return rc;
 }
 
+/* Flatten a PHP response-headers HashTable into http2_header_view_t[].
+ * Two-pass: count admissible (name, value) pairs, then fill — multi-value
+ * array headers contribute one entry per string value. Uses caller-provided
+ * scratch when it fits, else emallocs into *out_heap (caller efrees).
+ * Returns the number of entries written to *out_view. */
+static size_t h2_flatten_response_headers(HashTable *headers,
+                                          http2_header_view_t *scratch,
+                                          const size_t scratch_cap,
+                                          http2_header_view_t **out_view,
+                                          http2_header_view_t **out_heap)
+{
+    size_t total_values = 0;
+
+    if (headers != NULL) {
+        zend_string *name;
+        zval        *values;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
+            if (name == NULL)                                              continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
+                total_values++;
+            } else if (Z_TYPE_P(values) == IS_ARRAY) {
+                zval *val;
+                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
+                    if (Z_TYPE_P(val) == IS_STRING) { total_values++; }
+                } ZEND_HASH_FOREACH_END();
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    http2_header_view_t *nv_view = scratch;
+    http2_header_view_t *nv_heap = NULL;
+
+    if (total_values > scratch_cap) {
+        nv_heap = emalloc(total_values * sizeof(*nv_heap));
+        nv_view = nv_heap;
+    }
+
+    size_t nv_count = 0;
+
+    if (headers != NULL) {
+        zend_string *name;
+        zval        *values;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
+            if (name == NULL)                                              continue;
+
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+
+            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
+                nv_view[nv_count].name      = ZSTR_VAL(name);
+                nv_view[nv_count].name_len  = ZSTR_LEN(name);
+                nv_view[nv_count].value     = Z_STRVAL_P(values);
+                nv_view[nv_count].value_len = Z_STRLEN_P(values);
+                nv_count++;
+            } else if (Z_TYPE_P(values) == IS_ARRAY) {
+                zval *val;
+                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
+                    if (Z_TYPE_P(val) != IS_STRING) { continue; }
+                    nv_view[nv_count].name      = ZSTR_VAL(name);
+                    nv_view[nv_count].name_len  = ZSTR_LEN(name);
+                    nv_view[nv_count].value     = Z_STRVAL_P(val);
+                    nv_view[nv_count].value_len = Z_STRLEN_P(val);
+                    nv_count++;
+                } ZEND_HASH_FOREACH_END();
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    *out_view = nv_view;
+    *out_heap = nv_heap;
+    return nv_count;
+}
+
 /* Commit a response on a specific stream. Per-stream dispatch means
  * we already KNOW which stream, no scan needed.
  * Extracts status / headers / body / trailers from the PHP
@@ -902,73 +969,16 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         }
     }
 
-    /* Flatten response headers into http2_header_view_t[]. Two-pass:
-     * first count admissible (name, value) pairs, then allocate exactly
-     * that many — no arbitrary multiplier, no silent truncation for
-     * headers with many values (e.g. multiple Set-Cookie). nghttp2
-     * copies name/value into its HPACK dynamic table so the backing
-     * zend_string memory only needs to live through this call. */
+    /* Flatten response headers — nghttp2 copies name/value into its HPACK
+     * dynamic table, so the backing zend_string memory only needs to live
+     * through the submit call below. */
     HashTable *headers = http_response_get_headers(response_obj);
 
-    size_t total_values = 0;
-
-    if (headers != NULL) {
-        zend_string *name;
-        zval        *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (name == NULL)                                            continue;
-
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
-
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                total_values++;
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *val;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                    if (Z_TYPE_P(val) == IS_STRING) { total_values++; }
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
-
     http2_header_view_t scratch[HTTP2_NV_SCRATCH];
-    http2_header_view_t *nv_view = scratch;
-    http2_header_view_t *nv_heap = NULL;
-
-    if (total_values > HTTP2_NV_SCRATCH) {
-        nv_heap = emalloc(total_values * sizeof(*nv_heap));
-        nv_view = nv_heap;
-    }
-
-    size_t nv_count = 0;
-
-    if (headers != NULL) {
-        zend_string *name;
-        zval        *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (name == NULL)                                            continue;
-
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
-
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                nv_view[nv_count].name      = ZSTR_VAL(name);
-                nv_view[nv_count].name_len  = ZSTR_LEN(name);
-                nv_view[nv_count].value     = Z_STRVAL_P(values);
-                nv_view[nv_count].value_len = Z_STRLEN_P(values);
-                nv_count++;
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *val;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                    if (Z_TYPE_P(val) != IS_STRING) { continue; }
-                    nv_view[nv_count].name      = ZSTR_VAL(name);
-                    nv_view[nv_count].name_len  = ZSTR_LEN(name);
-                    nv_view[nv_count].value     = Z_STRVAL_P(val);
-                    nv_view[nv_count].value_len = Z_STRLEN_P(val);
-                    nv_count++;
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
+    http2_header_view_t *nv_view;
+    http2_header_view_t *nv_heap;
+    const size_t nv_count = h2_flatten_response_headers(
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap);
 
     const int status = http_response_get_status(response_obj);
     size_t body_len = 0;
@@ -1056,69 +1066,15 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
 
     if (self->session == NULL) { return false; }
 
-    /* Flatten headers — identical two-pass to commit_stream_response,
-     * just bundled with submit_response_streaming at the end. */
+    /* Flatten headers — same path as commit_stream_response, just bundled
+     * with submit_response_streaming at the end. */
     HashTable *headers = http_response_get_headers(response_obj);
 
-    size_t total_values = 0;
-
-    if (headers != NULL) {
-        zend_string *name;
-        zval        *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (name == NULL)                                            continue;
-
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
-
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                total_values++;
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *val;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                    if (Z_TYPE_P(val) == IS_STRING) { total_values++; }
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
-
     http2_header_view_t scratch[HTTP2_NV_SCRATCH];
-    http2_header_view_t *nv_view = scratch;
-    http2_header_view_t *nv_heap = NULL;
-
-    if (total_values > HTTP2_NV_SCRATCH) {
-        nv_heap = emalloc(total_values * sizeof(*nv_heap));
-        nv_view = nv_heap;
-    }
-
-    size_t nv_count = 0;
-
-    if (headers != NULL) {
-        zend_string *name;
-        zval        *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (name == NULL)                                            continue;
-
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
-
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                nv_view[nv_count].name      = ZSTR_VAL(name);
-                nv_view[nv_count].name_len  = ZSTR_LEN(name);
-                nv_view[nv_count].value     = Z_STRVAL_P(values);
-                nv_view[nv_count].value_len = Z_STRLEN_P(values);
-                nv_count++;
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *val;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), val) {
-                    if (Z_TYPE_P(val) != IS_STRING) { continue; }
-                    nv_view[nv_count].name      = ZSTR_VAL(name);
-                    nv_view[nv_count].name_len  = ZSTR_LEN(name);
-                    nv_view[nv_count].value     = Z_STRVAL_P(val);
-                    nv_view[nv_count].value_len = Z_STRLEN_P(val);
-                    nv_count++;
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
+    http2_header_view_t *nv_view;
+    http2_header_view_t *nv_heap;
+    const size_t nv_count = h2_flatten_response_headers(
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap);
 
     const int status = http_response_get_status(response_obj);
     const int rc = http2_session_submit_response_streaming(

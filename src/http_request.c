@@ -377,9 +377,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, getContentType)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
-    zend_string *name = zend_string_init("content-type", sizeof("content-type") - 1, 0);
-    zval *value = zend_hash_find(intern->request->headers, name);
-    zend_string_release(name);
+    zval *value = zend_hash_str_find(intern->request->headers,
+                                     "content-type", sizeof("content-type") - 1);
 
     if (value && Z_TYPE_P(value) == IS_STRING) {
         RETURN_STR_COPY(Z_STR_P(value));
@@ -393,9 +392,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, getContentLength)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
-    zend_string *name = zend_string_init("content-length", sizeof("content-length") - 1, 0);
-    zval *value = zend_hash_find(intern->request->headers, name);
-    zend_string_release(name);
+    zval *value = zend_hash_str_find(intern->request->headers,
+                                     "content-length", sizeof("content-length") - 1);
 
     if (value && Z_TYPE_P(value) == IS_STRING) {
         char *end = NULL;
