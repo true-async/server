@@ -20,6 +20,10 @@
 #include "http_response_internal.h"
 #include "smart_str_scalable.h"
 
+#ifdef HAVE_HTTP_COMPRESSION
+# include "compression/http_compression_response.h"
+#endif
+
 /* Include generated arginfo */
 #include "../stubs/HttpResponse.php_arginfo.h"
 
@@ -901,10 +905,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
          * response state allow gzip. Mutates Content-Encoding/Vary on
          * the response so the stream's underlying header-commit picks
          * them up on the next line. */
-        {
-            extern void http_compression_maybe_install_stream_wrapper(zend_object *);
-            http_compression_maybe_install_stream_wrapper(Z_OBJ_P(ZEND_THIS));
-        }
+        http_compression_maybe_install_stream_wrapper(Z_OBJ_P(ZEND_THIS));
 #endif
     }
 
@@ -1046,10 +1047,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
 
     /* Sendfile body bypasses the compression module — never wrap. */
 #ifdef HAVE_HTTP_COMPRESSION
-    {
-        extern void http_compression_mark_no_compression(zend_object *);
-        http_compression_mark_no_compression(Z_OBJ_P(ZEND_THIS));
-    }
+    http_compression_mark_no_compression(Z_OBJ_P(ZEND_THIS));
 #endif
 }
 /* }}} */
@@ -1118,7 +1116,6 @@ ZEND_METHOD(TrueAsync_HttpResponse, setNoCompression)
 {
     ZEND_PARSE_PARAMETERS_NONE();
 #ifdef HAVE_HTTP_COMPRESSION
-    extern void http_compression_mark_no_compression(zend_object *obj);
     http_compression_mark_no_compression(Z_OBJ_P(ZEND_THIS));
 #endif
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -1215,10 +1212,7 @@ static void http_response_free(zend_object *obj)
     /* Compression state is owned by the compression TU; reach in only
      * via the dedicated free helper — keeps the response struct opaque
      * to that side. NULL-safe. */
-    {
-        extern void http_compression_state_free(zend_object *obj);
-        http_compression_state_free(obj);
-    }
+    http_compression_state_free(obj);
 #endif
 
     zend_object_std_dtor(&response->std);

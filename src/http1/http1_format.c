@@ -19,6 +19,10 @@
 #include "php_http_server.h"
 #include "http_response_internal.h"
 
+#ifdef HAVE_HTTP_COMPRESSION
+# include "compression/http_compression_response.h"
+#endif
+
 /* HTTP status reason phrases. Internal cross-TU: http_response.c
  * needs it for getReasonPhrase() when no custom phrase was set. */
 const char *http_status_reason(int code)
@@ -267,10 +271,7 @@ void http_response_format_parts(zend_object *obj,
     smart_str_alloc(&result, 1024, 0);
 
 #ifdef HAVE_HTTP_COMPRESSION
-    {
-        extern void http_compression_apply_buffered(zend_object *);
-        http_compression_apply_buffered(obj);
-    }
+    http_compression_apply_buffered(obj);
 #endif
 
     zend_string *const view = response->body_view;
@@ -309,10 +310,7 @@ zend_string *http_response_format(zend_object *obj)
     smart_str_alloc(&result, 1024, 0);
 
 #ifdef HAVE_HTTP_COMPRESSION
-    {
-        extern void http_compression_apply_buffered(zend_object *);
-        http_compression_apply_buffered(obj);
-    }
+    http_compression_apply_buffered(obj);
 #endif
 
     zend_string *const view = response->body_view;
