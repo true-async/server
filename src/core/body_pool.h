@@ -31,6 +31,18 @@ void         body_pool_release(zend_string *zstr);
  * debug allocator's leak detector doesn't flag pool-retained slots. */
 void         body_pool_shutdown(void);
 
+/* Per-class snapshot — class[i].slot_bytes is the bucket's slot size
+ * (1 MiB << i), .count is the number of slots cached *right now* in
+ * this thread's pool, .bytes is count*slot_bytes. Output array must
+ * hold BODY_POOL_NUM_CLASSES entries. */
+typedef struct {
+    size_t slot_bytes;
+    size_t count;
+    size_t bytes;
+} body_pool_class_stats_t;
+
+void body_pool_get_stats(body_pool_class_stats_t out[BODY_POOL_NUM_CLASSES]);
+
 /* Convenience: release whatever this string is — pool slot via the pool,
  * regular zend_string via zend_string_release. Use this anywhere you'd
  * otherwise call zend_string_release on a request body. */

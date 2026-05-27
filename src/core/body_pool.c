@@ -147,3 +147,19 @@ void body_pool_shutdown(void)
 
     pool_initialised = false;
 }
+
+void body_pool_get_stats(body_pool_class_stats_t out[BODY_POOL_NUM_CLASSES])
+{
+    /* Walk the per-thread pool array even if pool_init_once never ran:
+     * the static TLS zero-initialises count + capacity, so reads are
+     * safe (everything reports 0). */
+    size_t cap = BODY_POOL_MIN_SIZE;
+
+    for (int i = 0; i < BODY_POOL_NUM_CLASSES; i++) {
+        const body_pool_class_t *bucket = &pool_classes[i];
+        out[i].slot_bytes = pool_initialised ? bucket->capacity : cap;
+        out[i].count      = (size_t)(bucket->count > 0 ? bucket->count : 0);
+        out[i].bytes      = out[i].count * out[i].slot_bytes;
+        cap <<= 1;
+    }
+}

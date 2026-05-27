@@ -119,3 +119,17 @@ void conn_arena_free(conn_arena_t *arena, http_connection_t *conn)
     conn->next_conn = arena->free_head;
     arena->free_head = conn;
 }
+
+void conn_arena_get_stats(const conn_arena_t *arena, conn_arena_stats_t *out)
+{
+    out->live       = arena->live_count;
+    out->slots      = arena->slot_count;
+    out->slot_bytes = sizeof(http_connection_t);
+
+    size_t n = 0;
+    for (const conn_chunk_t *c = arena->chunks; c != NULL; c = c->next_chunk) {
+        n++;
+    }
+
+    out->chunks = n;
+}
