@@ -77,7 +77,7 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 	} while (0)
 
 	{
-		zval v;
+		zval v = {0};
 
 		if (content_type != NULL) ZVAL_STR_COPY(&v, content_type);
 		else                      ZVAL_NULL(&v);
@@ -85,7 +85,7 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 	}
 
 	{
-		zval v;
+		zval v = {0};
 
 		if (disposition != NULL) {
 			ZVAL_OBJ_COPY(&v, Z_OBJ_P(disposition));
@@ -101,7 +101,7 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 	}
 
 	{
-		zval v;
+		zval v = {0};
 
 		if (download_name != NULL) ZVAL_STR_COPY(&v, download_name);
 		else                       ZVAL_NULL(&v);
@@ -109,21 +109,21 @@ ZEND_METHOD(TrueAsync_SendFileOptions, __construct)
 	}
 
 	{
-		zval v;
+		zval v = {0};
 
 		if (cache_control != NULL) ZVAL_STR_COPY(&v, cache_control);
 		else                       ZVAL_NULL(&v);
 		WRITE_SLOT(3, &v);
 	}
 
-	{ zval v; ZVAL_BOOL(&v, etag);          WRITE_SLOT(4, &v); }
-	{ zval v; ZVAL_BOOL(&v, last_modified); WRITE_SLOT(5, &v); }
-	{ zval v; ZVAL_BOOL(&v, accept_ranges); WRITE_SLOT(6, &v); }
-	{ zval v; ZVAL_BOOL(&v, precompressed); WRITE_SLOT(7, &v); }
-	{ zval v; ZVAL_BOOL(&v, conditional);   WRITE_SLOT(8, &v); }
-	{ zval v; ZVAL_BOOL(&v, delete_after);  WRITE_SLOT(9, &v); }
+	{ zval v = {0}; ZVAL_BOOL(&v, etag);          WRITE_SLOT(4, &v); }
+	{ zval v = {0}; ZVAL_BOOL(&v, last_modified); WRITE_SLOT(5, &v); }
+	{ zval v = {0}; ZVAL_BOOL(&v, accept_ranges); WRITE_SLOT(6, &v); }
+	{ zval v = {0}; ZVAL_BOOL(&v, precompressed); WRITE_SLOT(7, &v); }
+	{ zval v = {0}; ZVAL_BOOL(&v, conditional);   WRITE_SLOT(8, &v); }
+	{ zval v = {0}; ZVAL_BOOL(&v, delete_after);  WRITE_SLOT(9, &v); }
 	{
-		zval v;
+		zval v = {0};
 
 		if (status_is_null) ZVAL_NULL(&v);
 		else                ZVAL_LONG(&v, status);

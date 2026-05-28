@@ -46,7 +46,7 @@ typedef struct {
 /* Get HttpRequest object from zval */
 static inline http_request_object* http_request_from_obj(zend_object *obj)
 {
-    return (http_request_object*)((char*)(obj) - XtOffsetOf(http_request_object, std));
+    return (http_request_object*)((char*)(obj) - offsetof(http_request_object, std));
 }
 
 #define Z_HTTP_REQUEST_P(zv) http_request_from_obj(Z_OBJ_P(zv))
@@ -691,7 +691,7 @@ void http_request_class_register(void)
     http_request_ce->create_object = http_request_create_object;
 
     memcpy(&http_request_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-    http_request_object_handlers.offset = XtOffsetOf(http_request_object, std);
+    http_request_object_handlers.offset = offsetof(http_request_object, std);
     http_request_object_handlers.free_obj = http_request_free_object;
     http_request_object_handlers.clone_obj = NULL;  /* No cloning */
 }

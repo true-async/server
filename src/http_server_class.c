@@ -410,7 +410,7 @@ static __thread http_server_object *current_server = NULL;
 #endif
 
 static inline struct http_server_php *http_server_php_from_obj(zend_object *obj) {
-    return (struct http_server_php *)((char *)(obj) - XtOffsetOf(struct http_server_php, std));
+    return (struct http_server_php *)((char *)(obj) - offsetof(struct http_server_php, std));
 }
 
 static inline http_server_object *http_server_from_obj(zend_object *obj) {
@@ -1568,7 +1568,7 @@ typedef struct {
 typedef struct {
     int                          pending;     /* workers not yet done */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
-    zend_async_event_callback_t  cb;          /* embedded — recovered via XtOffsetOf */
+    zend_async_event_callback_t  cb;          /* embedded — recovered via offsetof */
 } pool_await_state_t;
 
 static void pool_worker_handler(zend_async_event_t *event, void *vctx)
@@ -1628,7 +1628,7 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     /* Callbacks fire on the parent thread (cross-thread wakeup is
      * already serialized by the reactor) — no atomicity needed. */
     pool_await_state_t *st = (pool_await_state_t *)
-        ((char *)cb - XtOffsetOf(pool_await_state_t, cb));
+        ((char *)cb - offsetof(pool_await_state_t, cb));
 
     if (--st->pending == 0 && st->all_done != NULL) {
         ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
@@ -3522,7 +3522,7 @@ void http_server_class_register(void)
     http_server_ce->create_object = http_server_create;
 
     memcpy(&http_server_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-    http_server_handlers.offset = XtOffsetOf(struct http_server_php, std);
+    http_server_handlers.offset = offsetof(struct http_server_php, std);
     http_server_handlers.free_obj = http_server_free;
     http_server_handlers.get_gc = http_server_get_gc;
     http_server_handlers.clone_obj = NULL;

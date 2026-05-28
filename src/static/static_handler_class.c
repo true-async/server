@@ -41,7 +41,7 @@ typedef struct
 
 static inline http_static_handler_php_t *http_static_handler_php_from_obj(zend_object *obj)
 {
-	return (http_static_handler_php_t *)((char *)obj - XtOffsetOf(http_static_handler_php_t, std));
+	return (http_static_handler_php_t *)((char *)obj - offsetof(http_static_handler_php_t, std));
 }
 
 http_static_handler_t *http_static_handler_from_obj(zend_object *obj)
@@ -1057,7 +1057,7 @@ void http_static_handler_class_register(void)
 
 	memcpy(&http_static_handler_object_handlers, &std_object_handlers,
 		   sizeof(zend_object_handlers));
-	http_static_handler_object_handlers.offset = XtOffsetOf(http_static_handler_php_t, std);
+	http_static_handler_object_handlers.offset = offsetof(http_static_handler_php_t, std);
 	http_static_handler_object_handlers.free_obj = http_static_handler_free;
 	http_static_handler_object_handlers.clone_obj = NULL;
 

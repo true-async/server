@@ -1302,7 +1302,7 @@ void http_response_class_register(void)
     http_response_ce->create_object = http_response_create;
 
     memcpy(&http_response_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-    http_response_handlers.offset = XtOffsetOf(http_response_object, std);
+    http_response_handlers.offset = offsetof(http_response_object, std);
     http_response_handlers.free_obj = http_response_free;
     http_response_handlers.clone_obj = NULL;
 }

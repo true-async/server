@@ -2768,7 +2768,7 @@ void http_server_config_class_register(void)
     http_server_config_ce->create_object = http_server_config_create;
 
     memcpy(&http_server_config_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-    http_server_config_handlers.offset = XtOffsetOf(http_server_config_t, std);
+    http_server_config_handlers.offset = offsetof(http_server_config_t, std);
     http_server_config_handlers.free_obj = http_server_config_free;
     http_server_config_handlers.clone_obj = NULL;  /* No cloning */
     http_server_config_handlers.transfer_obj = http_server_config_transfer_obj;

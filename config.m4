@@ -586,7 +586,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   CFLAGS="$SAVE_CFLAGS"
 
   dnl Create extension
-  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -std=c11 $HTTP_SERVER_HARDENING)
+  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING)
   PHP_SUBST(TRUE_ASYNC_SERVER_SHARED_LIBADD)
 
   dnl Add include paths

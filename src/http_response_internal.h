@@ -75,7 +75,7 @@ typedef struct {
 } http_response_object;
 
 static inline http_response_object *http_response_from_obj(zend_object *obj) {
-    return (http_response_object *)((char *)(obj) - XtOffsetOf(http_response_object, std));
+    return (http_response_object *)((char *)(obj) - offsetof(http_response_object, std));
 }
 
 #define Z_HTTP_RESPONSE_P(zv) http_response_from_obj(Z_OBJ_P(zv))

@@ -318,7 +318,7 @@ struct _http_server_config_t {
 static zend_always_inline http_server_config_t *
 http_server_config_from_obj(zend_object *obj) {
     return (http_server_config_t *)((char *)obj
-                                    - XtOffsetOf(http_server_config_t, std));
+                                    - offsetof(http_server_config_t, std));
 }
 
 /*

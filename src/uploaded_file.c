@@ -54,7 +54,7 @@ typedef struct {
 /* Get UploadedFile object from zend_object */
 static inline uploaded_file_object* uploaded_file_from_obj(zend_object *obj)
 {
-    return (uploaded_file_object*)((char*)(obj) - XtOffsetOf(uploaded_file_object, std));
+    return (uploaded_file_object*)((char*)(obj) - offsetof(uploaded_file_object, std));
 }
 
 #define Z_UPLOADED_FILE_P(zv) uploaded_file_from_obj(Z_OBJ_P(zv))
@@ -393,7 +393,7 @@ void uploaded_file_class_register(void)
     uploaded_file_ce->create_object = uploaded_file_create_object;
 
     memcpy(&uploaded_file_object_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
-    uploaded_file_object_handlers.offset = XtOffsetOf(uploaded_file_object, std);
+    uploaded_file_object_handlers.offset = offsetof(uploaded_file_object, std);
     uploaded_file_object_handlers.free_obj = uploaded_file_free_object;
     uploaded_file_object_handlers.clone_obj = NULL;  /* No cloning */
 }
