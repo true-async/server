@@ -45,8 +45,10 @@ if "%ASAN%" equ "1" set ADD_CONF=%ADD_CONF% --enable-sanitizer --enable-debug-pa
 rem Same /WX waiver set as ext/async (PHP-headers warnings).
 set CFLAGS=/W3 /WX /wd4018 /wd4146 /wd4244 /wd4267
 
+rem --enable-snapshot-build forces PHP_HTTP3=yes despite the ARG_ENABLE
+rem 'no' default, which then trips the ngtcp2/nghttp3 prereq check in
+rem our config.w32. Omit it — we are not producing a snapshot release.
 cmd /c configure.bat ^
-    --enable-snapshot-build ^
     --disable-debug-pack ^
     --without-analyzer ^
     --enable-object-out-dir=%PHP_BUILD_OBJ_DIR% ^
