@@ -54,6 +54,9 @@
 # include <sys/un.h>
 # include <sys/stat.h>
 # include <unistd.h>
+# include <netdb.h>
+# include <netinet/in.h>
+# include <arpa/inet.h>
 #endif
 
 /* See http_connection.c for rationale. */
@@ -63,6 +66,17 @@
 
 /* Include generated arginfo */
 #include "../stubs/HttpServer.php_arginfo.h"
+
+/* Feature-detect kernel-level load-balanced REUSEPORT (h2o-style):
+ * Linux has it since 3.9, FreeBSD 12+ as SO_REUSEPORT_LB. Plain
+ * SO_REUSEPORT on macOS/older BSD/OpenBSD/NetBSD/Solaris is
+ * NOT load-balanced — it has the BSD multicast meaning. On those
+ * the workers share a single fd via dup(). */
+#if defined(__linux__) || defined(SO_REUSEPORT_LB)
+# define HTTP_HAS_LB_REUSEPORT 1
+#else
+# define HTTP_HAS_LB_REUSEPORT 0
+#endif
 
 /* Max listeners */
 #define MAX_LISTENERS 16
@@ -88,6 +102,16 @@ typedef struct {
     char path[108];   /* fits sockaddr_un.sun_path (Linux) */
     int  fd;
 } http_pool_unix_fd_t;
+
+/* Pre-bound TCP listener fd for the workers-with-no-SO_REUSEPORT path
+ * (macOS, Windows). Same model as http_pool_unix_fd_t: parent binds
+ * once, each worker dups. host/port are remembered so the worker can
+ * match its config entry to the shared fd. */
+typedef struct {
+    char host[64];
+    int  port;
+    int  fd;
+} http_pool_tcp_fd_t;
 
 /* AF_UNIX bind() fails with EADDRINUSE on a socket file left behind by a
  * crashed previous run. Probe it: a stale socket refuses connect() with
@@ -215,6 +239,8 @@ struct http_server_object {
      * worker by http_server_transfer_obj. */
     http_pool_unix_fd_t      pool_unix_fds[MAX_LISTENERS];
     size_t                   pool_unix_fd_count;
+    http_pool_tcp_fd_t       pool_tcp_fds[MAX_LISTENERS];
+    size_t                   pool_tcp_fd_count;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     /* HTTP/3 UDP listeners — parallel to TCP listeners[] because they have
@@ -1728,6 +1754,105 @@ static int http_server_pool_unix_fd_lookup(const http_server_object *server, con
 }
 #endif  /* !PHP_WIN32 */
 
+/* The TCP shared-fd path mirrors AF_UNIX above for platforms that do not
+ * load-balance via SO_REUSEPORT (macOS, Windows). Linux + FreeBSD keep
+ * the per-worker independent-bind path. */
+#if !HTTP_HAS_LB_REUSEPORT
+
+static void http_server_close_pool_tcp_fds(http_server_object *server)
+{
+    for (size_t i = 0; i < server->pool_tcp_fd_count; i++) {
+        closesocket(server->pool_tcp_fds[i].fd);
+    }
+    server->pool_tcp_fd_count = 0;
+}
+
+static int http_server_prebind_tcp(http_server_object *server)
+{
+    http_server_config_t *cfg = http_server_get_config(server);
+    server->pool_tcp_fd_count = 0;
+
+    if (cfg == NULL) {
+        return SUCCESS;
+    }
+
+    for (size_t i = 0; i < cfg->listener_count; i++) {
+        http_listener_config_t *lc = &cfg->listeners[i];
+
+        if (lc->type != LISTENER_TYPE_TCP || lc->host == NULL) {
+            continue;
+        }
+
+        if (server->pool_tcp_fd_count >= MAX_LISTENERS) {
+            break;
+        }
+
+        const char *host = ZSTR_VAL(lc->host);
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%d", lc->port);
+
+        struct addrinfo hints = {0};
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags    = AI_PASSIVE;
+
+        struct addrinfo *res = NULL;
+        if (getaddrinfo(host, port_str, &hints, &res) != 0 || res == NULL) {
+            http_server_close_pool_tcp_fds(server);
+            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                "Failed to resolve %s:%d", host, lc->port);
+            return FAILURE;
+        }
+
+        int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (fd < 0) {
+            freeaddrinfo(res);
+            http_server_close_pool_tcp_fds(server);
+            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                "Failed to create TCP socket for %s:%d", host, lc->port);
+            return FAILURE;
+        }
+
+        int one = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+        if (bind(fd, res->ai_addr, res->ai_addrlen) != 0
+            || listen(fd, cfg->backlog) != 0) {
+            closesocket(fd);
+            freeaddrinfo(res);
+            http_server_close_pool_tcp_fds(server);
+            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                "Failed to bind TCP listener on %s:%d", host, lc->port);
+            return FAILURE;
+        }
+        freeaddrinfo(res);
+
+        http_pool_tcp_fd_t *slot = &server->pool_tcp_fds[server->pool_tcp_fd_count++];
+        size_t host_len = strlen(host);
+        if (host_len >= sizeof(slot->host)) host_len = sizeof(slot->host) - 1;
+        memcpy(slot->host, host, host_len);
+        slot->host[host_len] = '\0';
+        slot->port = lc->port;
+        slot->fd   = fd;
+    }
+
+    return SUCCESS;
+}
+
+static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
+                                          const char *host, int port)
+{
+    for (size_t i = 0; i < server->pool_tcp_fd_count; i++) {
+        if (server->pool_tcp_fds[i].port == port
+            && strcmp(server->pool_tcp_fds[i].host, host) == 0) {
+            return server->pool_tcp_fds[i].fd;
+        }
+    }
+    return -1;
+}
+
+#endif  /* !HTTP_HAS_LB_REUSEPORT */
+
 static int http_server_start_pool(http_server_object *server,
                                   zval *this_zv,
                                   const int workers)
@@ -1771,11 +1896,18 @@ static int http_server_start_pool(http_server_object *server,
     }
 
 #ifndef PHP_WIN32
-    /* Bind AF_UNIX listeners once, here on the parent, before any worker is
-     * transferred — the bound fd rides along in the transfer and every
-     * worker adopts a dup. TCP listeners still bind per-worker (REUSEPORT)
-     * inside each worker's own start(). */
     if (http_server_prebind_unix(server) != SUCCESS) {
+        ZEND_THREAD_POOL_DELREF(pool);
+        return FAILURE;
+    }
+#endif
+
+#if !HTTP_HAS_LB_REUSEPORT
+    /* TCP shared-fd path for platforms without SO_REUSEPORT load balancing. */
+    if (http_server_prebind_tcp(server) != SUCCESS) {
+#ifndef PHP_WIN32
+        http_server_close_pool_unix_fds(server);
+#endif
         ZEND_THREAD_POOL_DELREF(pool);
         return FAILURE;
     }
@@ -1798,6 +1930,9 @@ static int http_server_start_pool(http_server_object *server,
             ZEND_THREAD_POOL_DELREF(pool);
 #ifndef PHP_WIN32
             http_server_close_pool_unix_fds(server);
+#endif
+#if !HTTP_HAS_LB_REUSEPORT
+            http_server_close_pool_tcp_fds(server);
 #endif
             return FAILURE;
         }
@@ -1872,6 +2007,9 @@ cleanup:
     /* Every worker has drained and closed its own dup; this final close
      * releases the shared sockets and removes their paths. */
     http_server_close_pool_unix_fds(server);
+#endif
+#if !HTTP_HAS_LB_REUSEPORT
+    http_server_close_pool_tcp_fds(server);
 #endif
     return rc;
 }
@@ -2256,12 +2394,31 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
              * ENOTSUP at bind). Only request it on platforms that support it. */
             
             unsigned int listen_flags = 0;
+            zend_async_listen_event_t *listen_event = NULL;
 
-#ifdef __linux__
+#if HTTP_HAS_LB_REUSEPORT
             listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
+#else
+            const int prebound_fd =
+                http_server_pool_tcp_fd_lookup(server, host, port);
+
+            if (prebound_fd >= 0) {
+                const int dup_fd = dup(prebound_fd);
+
+                if (dup_fd < 0) {
+                    zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                        "Failed to dup TCP listen fd for %s:%d", host, port);
+                } else {
+                    listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
+                        dup_fd, server->backlog, listen_flags, 0);
+                }
+            }
 #endif
-            zend_async_listen_event_t *listen_event = ZEND_ASYNC_SOCKET_LISTEN_EX(
-                host, port, server->backlog, listen_flags, 0);
+
+            if (listen_event == NULL && !EG(exception)) {
+                listen_event = ZEND_ASYNC_SOCKET_LISTEN_EX(
+                    host, port, server->backlog, listen_flags, 0);
+            }
 
             if (!listen_event) {
                 /* Cleanup already-created listen events */
@@ -3408,6 +3565,11 @@ static zend_object *http_server_transfer_obj(
         memcpy(dst_shell->pool_unix_fds, src->pool_unix_fds,
                sizeof(dst_shell->pool_unix_fds));
         dst_shell->pool_unix_fd_count = src->pool_unix_fd_count;
+
+        /* Same model for TCP on platforms without SO_REUSEPORT load balancing. */
+        memcpy(dst_shell->pool_tcp_fds, src->pool_tcp_fds,
+               sizeof(dst_shell->pool_tcp_fds));
+        dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
 
         return dst;
     }
