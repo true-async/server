@@ -2279,11 +2279,6 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                 }
 #endif
                 zval_ptr_dtor(&listeners_zval);
-                /* ZEND_ASYNC_SOCKET_LISTEN_EX may or may not have set an async
-                 * exception depending on the underlying reactor's error path
-                 * (libuv on Linux does, macOS path observed silent). Ensure
-                 * a loud failure either way — silent worker bind failure had
-                 * masked half the pool's capacity in setWorkers > 1 setups. */
                 if (!EG(exception)) {
                     zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
                         "Failed to bind listener on %s:%d", host, port);
