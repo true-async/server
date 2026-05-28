@@ -20,6 +20,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "src\\http_server_class.c " +
         "src\\http_request.c " +
         "src\\http_response.c " +
+        "src\\http_response_server_api.c " +
         "src\\uploaded_file.c " +
         // HTTP utilities (mirrors config.m4 base source list)
         "src\\http_mime.c " +
@@ -50,7 +51,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     var http_server_http1 =
         "http_parser.c " +
         "http1_stream.c " +
-        "http1_sendfile.c ";
+        "http1_sendfile.c " +
+        "http1_format.c ";
 
     var http_server_http3 =
         "http3_listener.c " +

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-05-27
+
+### Fixed
+
+- Windows build (`config.w32`): add missing sources `src/http_response_server_api.c` and `src/http1/http1_format.c` so the MSVC build links after the `http_response.c` split landed in 0.6.6.
+
 ## [0.6.6] - 2026-05-27
 
 ### Changed
