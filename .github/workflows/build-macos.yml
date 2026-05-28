@@ -99,7 +99,6 @@ jobs:
             --enable-sockets \
             --enable-posix \
             --enable-pcntl \
-            --enable-opcache \
             --enable-mbstring \
             --with-openssl \
             --with-curl \
