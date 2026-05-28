@@ -2640,6 +2640,30 @@ ZEND_METHOD(TrueAsync_HttpServer, isRunning)
 }
 /* }}} */
 
+/* {{{ proto HttpServer::isHttp2(): bool — compile-time --enable-http2 probe */
+ZEND_METHOD(TrueAsync_HttpServer, isHttp2)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+#ifdef HAVE_HTTP2
+    RETURN_TRUE;
+#else
+    RETURN_FALSE;
+#endif
+}
+/* }}} */
+
+/* {{{ proto HttpServer::isHttp3(): bool — compile-time --enable-http3 probe */
+ZEND_METHOD(TrueAsync_HttpServer, isHttp3)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    RETURN_TRUE;
+#else
+    RETURN_FALSE;
+#endif
+}
+/* }}} */
+
 /* {{{ proto HttpServer::getTelemetry(): array */
 ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
 {
