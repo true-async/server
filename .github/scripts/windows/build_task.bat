@@ -54,7 +54,6 @@ cmd /c configure.bat ^
     --enable-async ^
     --enable-true-async-server ^
     --enable-http2 ^
-    --disable-http3 ^
     %ADD_CONF% ^
     --disable-test-ini
 if %errorlevel% neq 0 exit /b 3
