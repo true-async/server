@@ -46,7 +46,8 @@ jobs:
           sudo apt-get install -y \
             autoconf bison build-essential re2c pkg-config \
             libxml2-dev libssl-dev libsqlite3-dev libonig-dev \
-            libcurl4-openssl-dev libuv1-dev libnghttp2-dev
+            libcurl4-openssl-dev libuv1-dev libnghttp2-dev \
+            nghttp2-client
 
       - name: Install h2spec
         run: |
@@ -177,6 +178,28 @@ jobs:
           print("No HIGH/CRITICAL TLS findings (cert-trust excluded).")
           PY
 
+      # --- h2load robustness smoke (not a perf gate) ---------------------
+      - name: h2load smoke (0 errored under concurrency)
+        working-directory: http-server
+        run: |
+          set -uo pipefail
+          /usr/local/bin/php -d extension_dir="$PWD/modules" \
+            -d extension=true_async_server \
+            tests/bench/h2spec_server.php 18082 \
+            >/dev/null 2>tests/bench/.h2load-server.log &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          sleep 1
+          out=$(h2load -n 2000 -c 20 -m 10 http://127.0.0.1:18082/ 2>&1)
+          echo "$out" | tee tests/bench/h2load-results.txt
+          # Gate: every request must complete; any errored/failed is a bug.
+          errored=$(echo "$out" | sed -n 's/.* \([0-9]\+\) failed, \([0-9]\+\) errored.*/\2/p')
+          failed=$(echo "$out"  | sed -n 's/.* \([0-9]\+\) failed, .*/\1/p')
+          echo "failed=${failed:-?} errored=${errored:-?}"
+          if [ "${errored:-0}" != "0" ] || [ "${failed:-0}" != "0" ]; then
+            echo "h2load reported failed/errored requests"; exit 1
+          fi
+
       - name: Upload conformance results
         if: always()
         uses: actions/upload-artifact@v6
@@ -188,5 +211,7 @@ jobs:
             http-server/tests/bench/testssl-results.json
             http-server/tests/bench/testssl-results.txt
             http-server/tests/bench/.tls-server.log
+            http-server/tests/bench/h2load-results.txt
+            http-server/tests/bench/.h2load-server.log
           if-no-files-found: ignore
           retention-days: 14
