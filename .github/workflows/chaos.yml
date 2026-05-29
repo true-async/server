@@ -117,9 +117,11 @@ jobs:
           fi
           score_line=$(grep -iE 'Score:' "$txt" | tail -1)
           echo "=== $score_line ==="
-          # Baseline 2026-05-29: Score 143/161 (18 failed). Gate against
-          # regressions — the passed count must not drop below baseline.
-          BASELINE=143
+          # Baseline 2026-05-29: Score 155/161 (6 failed) after the #47
+          # RFC fixes (Host validation, Date, HEAD, CONNECT, empty TE,
+          # asterisk-form). Gate against regressions — the passed count
+          # must not drop below baseline.
+          BASELINE=155
           passed=$(sed -nE 's/.*Score:[[:space:]]*([0-9]+)\/[0-9]+.*/\1/p' <<<"$score_line")
           echo "passed=$passed baseline=$BASELINE"
           if [ -z "$passed" ]; then
@@ -163,7 +165,15 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/http11probe-report.md docs/http11probe-results.json
           git commit -m "ci: refresh Http11Probe conformance report [skip ci]"
-          git push origin HEAD:main
+          # main may have advanced while this long job ran — rebase the
+          # report commit onto the latest tip and retry rather than fail
+          # on a non-fast-forward push.
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              break
+            fi
+            echo "push attempt $attempt failed — retrying"; sleep 5
+          done
 
   # --------------------------------------------------------------------
   # Scheduler chaos: run the whole phpt suite under a randomised
