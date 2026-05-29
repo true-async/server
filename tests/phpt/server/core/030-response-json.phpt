@@ -61,7 +61,16 @@ $server->addHttpHandler(function ($req, $resp) {
 });
 
 function fetch(int $port, string $path): array {
-    $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 2);
+    /* Retry the connect a few times: under parallel run-tests load the
+     * first attempt can transiently fail before the accept loop picks it
+     * up, otherwise showing up as a flaky status=0. The JSON response
+     * semantics under test are unaffected. */
+    $fp = false;
+    for ($try = 0; $try < 20 && $fp === false; $try++) {
+        $fp = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 2);
+        if ($fp === false) { usleep(10000); }
+    }
+    if ($fp === false) { return [0, [], '']; }
     stream_set_timeout($fp, 2);
     fwrite($fp, "GET $path HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     $raw = '';
