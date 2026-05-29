@@ -1,0 +1,133 @@
+name: Chaos / attack (nightly)
+
+# Security-focused suites run against a live server. Nightly + manual.
+# Slice of #43.
+#
+# Stage 1 (this file): Http11Probe — RFC 9110/9112 compliance + request
+# smuggling + malformed-input + header-normalization + caching/cookie
+# probes (https://github.com/MDA2AV/Http11Probe). Target-agnostic: we
+# start a plain h1 server and point the probe's .NET CLI at it.
+# A TRUE_ASYNC_SCHED scheduler-chaos matrix is added in a follow-up.
+
+on:
+  schedule:
+    # 05:17 UTC daily.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  # TEMP: validate on this branch before merge; remove before PR review.
+  push:
+    branches:
+      - 43-test-infra-chaosfuzz-harness-extasync-fuzzy-tests-model
+
+env:
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+
+jobs:
+  http11probe:
+    name: Http11Probe (HTTP/1.1 compliance + smuggling)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c pkg-config \
+            libxml2-dev libssl-dev libsqlite3-dev libonig-dev \
+            libcurl4-openssl-dev libuv1-dev libnghttp2-dev
+
+      - name: Setup .NET (Http11Probe CLI)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch="$PHP_SRC_BRANCH" \
+            https://github.com/true-async/php-src php-src
+          git clone --depth=1 --branch="$PHP_ASYNC_BRANCH" \
+            https://github.com/true-async/php-async php-src/ext/async
+
+      - name: Build & install PHP base
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all --without-pear \
+            --enable-async --enable-sockets --enable-posix \
+            --enable-pcntl --enable-opcache --with-openssl \
+            --disable-debug --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+
+      - name: Build & install http_server
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server --enable-http2 --disable-http3 --with-openssl
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Clone + build Http11Probe
+        run: |
+          set -eux
+          git clone --depth=1 https://github.com/MDA2AV/Http11Probe /opt/http11probe
+          cd /opt/http11probe
+          dotnet build Http11Probe.slnx -c Release --nologo
+
+      - name: Run Http11Probe against the server
+        working-directory: http-server
+        run: |
+          set -uo pipefail
+          /usr/local/bin/php -d extension_dir="$PWD/modules" \
+            -d extension=true_async_server \
+            tests/bench/probe_server.php 8080 \
+            >/dev/null 2>tests/bench/.probe-server.log &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          sleep 1
+          if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "probe server failed to start"; cat tests/bench/.probe-server.log; exit 1
+          fi
+          cd /opt/http11probe
+          # First runs are informational — capture our score + JSON; we
+          # do not yet gate on it (no baseline). `|| true` so a non-zero
+          # CLI exit (undocumented) doesn't fail the build prematurely.
+          dotnet run --project src/Http11Probe.Cli -c Release -- \
+            --host 127.0.0.1 --port 8080 \
+            --output "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.txt" || true
+          # Server must still be alive after the probe (no crash/wedge).
+          if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "::error::probe server died during the run"
+            cat "$GITHUB_WORKSPACE/http-server/tests/bench/.probe-server.log"
+            exit 1
+          fi
+          echo "=== score line ==="
+          grep -iE 'Score:' "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.txt" | tail -1 || true
+
+      - name: Upload Http11Probe results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: http11probe-results-${{ github.run_id }}
+          path: |
+            http-server/tests/bench/http11probe-results.json
+            http-server/tests/bench/http11probe-results.txt
+            http-server/tests/bench/.probe-server.log
+          if-no-files-found: ignore
+          retention-days: 14
