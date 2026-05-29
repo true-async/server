@@ -14,10 +14,6 @@ on:
     # 05:17 UTC daily.
     - cron: '17 5 * * *'
   workflow_dispatch:
-  # TEMP: validate on this branch before merge; remove before PR review.
-  push:
-    branches:
-      - 43-test-infra-chaosfuzz-harness-extasync-fuzzy-tests-model
 
 env:
   PHP_SRC_BRANCH: true-async
