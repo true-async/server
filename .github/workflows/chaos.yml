@@ -1,0 +1,245 @@
+name: Chaos / attack (nightly)
+
+# Security-focused suites run against a live server. Nightly + manual.
+# Slice of #43.
+#
+# Stage 1 (this file): Http11Probe — RFC 9110/9112 compliance + request
+# smuggling + malformed-input + header-normalization + caching/cookie
+# probes (https://github.com/MDA2AV/Http11Probe). Target-agnostic: we
+# start a plain h1 server and point the probe's .NET CLI at it.
+# A TRUE_ASYNC_SCHED scheduler-chaos matrix is added in a follow-up.
+
+on:
+  schedule:
+    # 05:17 UTC daily.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+env:
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+
+jobs:
+  http11probe:
+    name: Http11Probe (HTTP/1.1 compliance + smuggling)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c pkg-config \
+            libxml2-dev libssl-dev libsqlite3-dev libonig-dev \
+            libcurl4-openssl-dev libuv1-dev libnghttp2-dev
+
+      - name: Setup .NET (Http11Probe CLI)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch="$PHP_SRC_BRANCH" \
+            https://github.com/true-async/php-src php-src
+          git clone --depth=1 --branch="$PHP_ASYNC_BRANCH" \
+            https://github.com/true-async/php-async php-src/ext/async
+
+      - name: Build & install PHP base
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all --without-pear \
+            --enable-async --enable-sockets --enable-posix \
+            --enable-pcntl --enable-opcache --with-openssl \
+            --disable-debug --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+
+      - name: Build & install http_server
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server --enable-http2 --disable-http3 --with-openssl
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Clone + build Http11Probe
+        run: |
+          set -eux
+          git clone --depth=1 https://github.com/MDA2AV/Http11Probe /opt/http11probe
+          cd /opt/http11probe
+          dotnet build Http11Probe.slnx -c Release --nologo
+
+      - name: Run Http11Probe against the server
+        working-directory: http-server
+        run: |
+          set -uo pipefail
+          /usr/local/bin/php -d extension_dir="$PWD/modules" \
+            -d extension=true_async_server \
+            tests/bench/probe_server.php 8080 \
+            >/dev/null 2>tests/bench/.probe-server.log &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          sleep 1
+          if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "probe server failed to start"; cat tests/bench/.probe-server.log; exit 1
+          fi
+          cd /opt/http11probe
+          txt="$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.txt"
+          # `|| true`: the CLI's exit code is undocumented; we gate on the
+          # parsed score below, not on its exit status.
+          dotnet run --project src/Http11Probe.Cli -c Release -- \
+            --host 127.0.0.1 --port 8080 \
+            --output "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.json" \
+            2>&1 | tee "$txt" || true
+          # Server must still be alive after the probe (no crash/wedge).
+          if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "::error::probe server died during the run"
+            cat "$GITHUB_WORKSPACE/http-server/tests/bench/.probe-server.log"
+            exit 1
+          fi
+          score_line=$(grep -iE 'Score:' "$txt" | tail -1)
+          echo "=== $score_line ==="
+          # Baseline 2026-05-29: Score 143/161 (18 failed). Gate against
+          # regressions — the passed count must not drop below baseline.
+          BASELINE=143
+          passed=$(sed -nE 's/.*Score:[[:space:]]*([0-9]+)\/[0-9]+.*/\1/p' <<<"$score_line")
+          echo "passed=$passed baseline=$BASELINE"
+          if [ -z "$passed" ]; then
+            echo "::error::could not parse Http11Probe score"; exit 1
+          fi
+          if [ "$passed" -lt "$BASELINE" ]; then
+            echo "::error::Http11Probe score $passed dropped below baseline $BASELINE"
+            exit 1
+          fi
+
+      - name: Upload Http11Probe results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: http11probe-results-${{ github.run_id }}
+          path: |
+            http-server/tests/bench/http11probe-results.json
+            http-server/tests/bench/http11probe-results.txt
+            http-server/tests/bench/.probe-server.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # --------------------------------------------------------------------
+  # Scheduler chaos: run the whole phpt suite under a randomised
+  # coroutine scheduler (--enable-async-fuzz + TRUE_ASYNC_SCHED=random:N).
+  # Zero new test code — it reorders coroutine wakeups to surface
+  # interleaving-dependent races the deterministic FIFO run hides.
+  # --------------------------------------------------------------------
+  scheduler-chaos:
+    name: Scheduler chaos (TRUE_ASYNC_SCHED seed matrix)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c pkg-config \
+            libxml2-dev libssl-dev libsqlite3-dev libonig-dev \
+            libcurl4-openssl-dev libuv1-dev libnghttp2-dev \
+            nghttp2-client gdb
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch="$PHP_SRC_BRANCH" \
+            https://github.com/true-async/php-src php-src
+          git clone --depth=1 --branch="$PHP_ASYNC_BRANCH" \
+            https://github.com/true-async/php-async php-src/ext/async
+
+      - name: Build & install PHP base (debug + async-fuzz)
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          # --enable-async-fuzz compiles the randomised-scheduler hook so
+          # TRUE_ASYNC_SCHED=random:N actually reorders coroutines.
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all --without-pear \
+            --enable-async --enable-async-fuzz \
+            --enable-sockets --enable-posix --enable-pcntl \
+            --enable-opcache --with-openssl \
+            --enable-debug --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+
+      - name: Build & install http_server
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server --enable-http2 --disable-http3 --with-openssl
+          make -j"$(nproc)"
+          sudo make install
+          echo "extension=true_async_server.so" | sudo tee /etc/php.d/true_async_server.ini >/dev/null || true
+
+      - name: Run phpt suite under randomised schedulers
+        working-directory: http-server
+        run: |
+          # INFORMATIONAL (does not gate yet). The randomised scheduler
+          # legitimately perturbs output ordering, so a handful of phpt
+          # with order-sensitive --EXPECT-- blocks fail under it — these
+          # are test-brittleness findings to triage, not necessarily
+          # server races. Gating flips on once the suite is
+          # scheduler-order-independent (tracked in #43). Failures are
+          # uploaded as an artifact for inspection.
+          any_fail=0
+          for sched in random:1 random:7 random:42 random:1337; do
+            echo "::group::TRUE_ASYNC_SCHED=$sched"
+            if ! TRUE_ASYNC_SCHED="$sched" /usr/local/bin/php \
+                 "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+                 -P -q -j"$(nproc)" \
+                 -g FAIL,BORK,LEAK,XLEAK \
+                 --no-progress --offline --show-diff --set-timeout 120 \
+                 tests/phpt/server; then
+              echo "::warning::scheduler chaos surfaced failures at TRUE_ASYNC_SCHED=$sched (informational)"
+              any_fail=1
+            fi
+            echo "::endgroup::"
+          done
+          [ "$any_fail" = 0 ] && echo "no scheduler-chaos failures" || \
+            echo "scheduler-chaos failures present — see uploaded artifact"
+          exit 0
+
+      - name: Upload scheduler-chaos failures
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: scheduler-chaos-failures-${{ github.run_id }}
+          path: |
+            http-server/tests/phpt/server/**/*.diff
+            http-server/tests/phpt/server/**/*.out
+            http-server/tests/phpt/server/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14

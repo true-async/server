@@ -225,6 +225,68 @@ class H2TestClient
                           pack('N', $error_code));
     }
 
+    /* ----- Chaos / attack frame senders ----- */
+
+    /** Send an arbitrary frame — malformed-frame and ordering chaos. */
+    public function sendRawFrame(int $type, int $flags, int $stream_id,
+                                 string $payload = ''): void
+    {
+        $this->writeFrame($type, $flags, $stream_id, $payload);
+    }
+
+    /** PING (connection-level). Payload is padded/truncated to 8 bytes. */
+    public function sendPing(string $data = '', bool $ack = false): void
+    {
+        $data = substr(str_pad($data, 8, "\0"), 0, 8);
+        $this->writeFrame(H2_FRAME_PING, $ack ? H2_FLAG_ACK : 0, 0, $data);
+    }
+
+    /** The next client stream id without consuming it. */
+    public function peekStreamId(): int { return $this->next_stream_id; }
+
+    /** Build the HPACK block for a request (pseudo-headers + extras). */
+    public static function encodeRequestHeaders(
+        string $method, string $path, string $authority, array $headers = []): string
+    {
+        $h  = self::hpackLiteralNeverIndexed(':method',    $method);
+        $h .= self::hpackLiteralNeverIndexed(':path',      $path);
+        $h .= self::hpackLiteralNeverIndexed(':scheme',    'http');
+        $h .= self::hpackLiteralNeverIndexed(':authority', $authority);
+        foreach ($headers as $n => $v) {
+            $h .= self::hpackLiteralNeverIndexed($n, (string)$v);
+        }
+        return $h;
+    }
+
+    /**
+     * Open a stream with a HEADERS frame WITHOUT END_HEADERS, then send
+     * $count CONTINUATION frames of $pad_bytes filler each. With
+     * $final_end_headers=false the header block never terminates — the
+     * CVE-2024-27316 CONTINUATION-flood shape. Returns the stream id.
+     */
+    public function sendHeadersThenContinuations(
+        string $method, string $path, string $authority,
+        int $count, int $pad_bytes = 64,
+        bool $final_end_headers = false, bool $end_stream = false): int
+    {
+        $sid = $this->next_stream_id;
+        $this->next_stream_id += 2;
+
+        $block = self::encodeRequestHeaders($method, $path, $authority);
+        /* HEADERS with neither END_HEADERS nor (usually) END_STREAM. */
+        $this->writeFrame(H2_FRAME_HEADERS,
+            $end_stream ? H2_FLAG_END_STREAM : 0, $sid, $block);
+
+        for ($i = 0; $i < $count; $i++) {
+            $last  = ($i === $count - 1);
+            $flags = ($last && $final_end_headers) ? H2_FLAG_END_HEADERS : 0;
+            $frag  = self::hpackLiteralNeverIndexed(
+                'x-pad-' . $i, str_repeat('a', $pad_bytes));
+            $this->writeFrame(H2_FRAME_CONTINUATION, $flags, $sid, $frag);
+        }
+        return $sid;
+    }
+
     /* ----- High-level response collector ----- */
 
     /**
