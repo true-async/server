@@ -16,7 +16,7 @@ $cases = [
     // (method, expected length)
     ['GET',      3],  // interned
     ['POST',     4],  // interned
-    ['CONNECT',  7],  // interned
+    ['OPTIONS',  7],  // interned (CONNECT is rejected on an origin server, #47)
     ['PROPFIND', 8],  // fallback (WebDAV)
     ['MKCOL',    5],  // fallback (WebDAV)
     ['REPORT',   6],  // fallback
@@ -35,7 +35,7 @@ foreach ($cases as [$method, $len]) {
 --EXPECT--
 GET ok
 POST ok
-CONNECT ok
+OPTIONS ok
 PROPFIND ok
 MKCOL ok
 REPORT ok
