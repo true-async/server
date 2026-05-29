@@ -14,6 +14,10 @@ on:
     # 04:23 UTC daily — off the hour to dodge the cron rush.
     - cron: '23 4 * * *'
   workflow_dispatch:
+  # TEMP: validate on this branch before merge; remove before PR review.
+  push:
+    branches:
+      - 41-test-infra-external-conformance-suites-chaosfuzz-harness
 
 env:
   PHP_SRC_BRANCH: true-async
