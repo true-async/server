@@ -153,11 +153,15 @@ jobs:
           if [ ! -f "$script" ]; then
             echo "no generated .php (test may have passed) — skipping"; exit 0
           fi
+          # -k runs on crash (signal stop). Capture all-thread backtrace
+          # to its own file so the artifact-upload log can't truncate it.
           lldb -b \
             -o "run" \
-            -o "bt all" \
-            -o "quit" \
-            -- "$php_bin" -d "extension=$ext" "$script" 2>&1 | tail -120
+            -k "thread backtrace all" \
+            -k "quit" \
+            -- "$php_bin" -d "extension=$ext" "$script" > /tmp/lldb-007.txt 2>&1 || true
+          echo "================= lldb backtrace ================="
+          cat /tmp/lldb-007.txt
 
       - name: Upload test artifacts
         if: always()
