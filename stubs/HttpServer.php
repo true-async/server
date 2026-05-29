@@ -21,6 +21,22 @@ final class HttpServer
     public function __construct(HttpServerConfig $config) {}
 
     /**
+     * Whether the extension was built with HTTP/2 support (--enable-http2).
+     *
+     * Compile-time flag. Lets phpt SKIPIF blocks tell HTTP/2-only tests
+     * to bail when the build omitted nghttp2.
+     */
+    public static function isHttp2(): bool {}
+
+    /**
+     * Whether the extension was built with HTTP/3 support (--enable-http3).
+     *
+     * Compile-time flag. Lets phpt SKIPIF blocks tell HTTP/3-only tests
+     * to bail when the build omitted ngtcp2/nghttp3.
+     */
+    public static function isHttp3(): bool {}
+
+    /**
      * Add HTTP/1.1 request handler
      *
      * Handler signature: function(HttpRequest $request, HttpResponse $response): void

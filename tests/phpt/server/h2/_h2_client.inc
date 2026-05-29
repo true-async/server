@@ -177,7 +177,8 @@ class H2TestClient
      */
     public function sendRequest(
         string $method, string $path, string $authority,
-        array $headers = [], ?string $body = null): int
+        array $headers = [], ?string $body = null,
+        bool $end_stream = true): int
     {
         $sid = $this->next_stream_id;
         $this->next_stream_id += 2;
@@ -191,11 +192,14 @@ class H2TestClient
         }
 
         $flags = H2_FLAG_END_HEADERS;
-        if ($body === null) { $flags |= H2_FLAG_END_STREAM; }
+        /* $end_stream=false keeps the stream open with no END_STREAM —
+         * used to leave a handler parked in awaitBody(). */
+        if ($body === null && $end_stream) { $flags |= H2_FLAG_END_STREAM; }
         $this->writeFrame(H2_FRAME_HEADERS, $flags, $sid, $hpack);
 
         if ($body !== null) {
-            $this->writeFrame(H2_FRAME_DATA, H2_FLAG_END_STREAM, $sid, $body);
+            $df = $end_stream ? H2_FLAG_END_STREAM : 0;
+            $this->writeFrame(H2_FRAME_DATA, $df, $sid, $body);
         }
         return $sid;
     }

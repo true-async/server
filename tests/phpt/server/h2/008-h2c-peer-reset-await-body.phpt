@@ -6,14 +6,19 @@ true_async
 --SKIPIF--
 <?php
 require __DIR__ . '/_h2_skipif.inc';
-h2_skipif(['curl_h2' => true]);
+h2_skipif();
 ?>
 --FILE--
 <?php
 /* Step 7.2a — suspended-on-awaitBody variant of 076. When a client
  * aborts mid-upload, the handler coroutine is parked in the
  * body_event wait; cancel must wake it with HttpException(499)
- * instead of leaving it suspended forever. */
+ * instead of leaving it suspended forever.
+ *
+ * The abort is a real HTTP/2 RST_STREAM over a raw socket: a POST whose
+ * HEADERS carry no END_STREAM leaves the handler parked in awaitBody(),
+ * then RST_STREAM resets it. curl's --max-time abort is not portable
+ * (FIN on macOS vs RST on Linux), so hand-built frames are used. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -21,6 +26,8 @@ use TrueAsync\HttpException;
 use function Async\spawn;
 use function Async\await;
 use function Async\delay;
+
+require __DIR__ . '/_h2_client.inc';
 
 $port = 19831 + getmypid() % 100;
 
@@ -50,34 +57,24 @@ $server->addHttpHandler(function ($req, $res)
 $client = spawn(function () use ($port, $server) {
     usleep(30000);
 
-    /* 10 MB body + 0.3 s deadline + --limit-rate 500K — throttles
-     * curl's upload to ~500 KB/s, so a 10 MB body would take ~20 s.
-     * curl hits --max-time at 0.3 s and aborts mid-upload. The
-     * server is suspended in awaitBody when the abort propagates as
-     * RST_STREAM / FIN. --limit-rate makes the race independent of
-     * localhost bandwidth (otherwise Step 9's eager-SETTINGS
-     * handshake + ~500 MB/s localhost lets even 100 MB complete
-     * before --max-time). */
-    /* 10 MiB of zeroes via tempfile + curl --data-binary @file —
-     * `head -c N /dev/zero | curl --data-binary @-` is bash-only and
-     * neither `head` nor `/dev/zero` exists on Windows. Tempfile is
-     * cross-platform and mirrors what curl does internally anyway. */
-    $payload_tmp = tempnam(sys_get_temp_dir(), 'p77');
-    $fh = fopen($payload_tmp, 'wb');
-    $chunk = str_repeat("\0", 65536);
-    for ($i = 0; $i < 160; $i++) { fwrite($fh, $chunk); }  /* 160 * 64K = 10 MiB */
-    fclose($fh);
-    $devnull = PHP_OS_FAMILY === 'Windows' ? 'nul' : '/dev/null';
-    $cmd = sprintf(
-        'curl --http2-prior-knowledge -s -o %s --max-time 0.3 '
-        . '--limit-rate 500K '
-        . '-X POST --data-binary @%s -H "Expect:" http://127.0.0.1:%d/upload',
-        $devnull, escapeshellarg($payload_tmp), $port
-    );
-    $out = [];
-    exec($cmd, $out, $rc);
-    @unlink($payload_tmp);
-    echo "curl_rc_is_timeout=", (int)($rc === 28), "\n";
+    /* POST /upload with HEADERS but NO END_STREAM — the body never
+     * completes, so the handler parks in awaitBody(). Pump one read to
+     * ack the server SETTINGS (yields to the scheduler so the handler
+     * dispatches), then RST_STREAM the parked stream. */
+    $cli = new H2TestClient('127.0.0.1', $port);
+    $sid = $cli->sendRequest('POST', '/upload', 'x', [], null, /*end_stream=*/false);
+    while (true) {
+        $fr = $cli->readFrame();
+        if ($fr === null) { break; }
+        [$type, $flags, , ] = $fr;
+        if ($type === H2_FRAME_SETTINGS && ($flags & H2_FLAG_ACK) === 0) {
+            $cli->sendSettingsAck();
+            break;
+        }
+    }
+    delay(100);                          /* handler reaches awaitBody() */
+    $cli->sendRstStream($sid, 0x8 /* CANCEL */);
+    $cli->close();
 
     /* Let the cancel + dispose unwind. */
     delay(200);
@@ -93,7 +90,6 @@ echo "caught_code=$caught_code\n";
 echo "caught_msg=$caught_msg\n";
 echo "done\n";
 --EXPECT--
-curl_rc_is_timeout=1
 handler_finished=0
 caught_code=499
 caught_msg=stream reset by peer

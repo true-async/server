@@ -1,0 +1,153 @@
+name: Debug — macOS worker pool (fast)
+
+# Focused, fast-iteration workflow for the shared-fd worker-pool path
+# that only runs on macOS (HTTP_HAS_LB_REUSEPORT == 0). The PHP base
+# build is the slow part (~5 min) and is identical run-to-run for a
+# fixed php-src + ext/async, so it is cached on those two commit SHAs.
+# A cache hit skips straight to building http_server and running just
+# the worker-pool tests with full diff output.
+
+on:
+  workflow_dispatch:
+
+env:
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+  PHP_PREFIX: /Users/runner/php-install
+
+jobs:
+  workers:
+    name: MACOS_ARM64_WORKERS_DEBUG
+    runs-on: macos-14
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Resolve php-src + ext/async commit SHAs
+        id: sha
+        run: |
+          set -x
+          src_sha=$(git ls-remote https://github.com/true-async/php-src "$PHP_SRC_BRANCH" | cut -f1)
+          async_sha=$(git ls-remote https://github.com/true-async/php-async "$PHP_ASYNC_BRANCH" | cut -f1)
+          echo "src=$src_sha"     >> "$GITHUB_OUTPUT"
+          echo "async=$async_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies (Homebrew)
+        run: |
+          set -x
+          brew update >/dev/null
+          formula_installer="$(brew --repo)"/Library/Homebrew/formula_installer.rb
+          code=" keg.link\(verbose: verbose\?"
+          sudo sed -Ei '' "s/$code.*/$code, overwrite: true\)/" "$formula_installer"
+          brew reinstall autoconf libsodium icu4c curl openssl@3
+          brew install bison re2c nghttp2 libuv libxml2 libiconv
+
+      - name: Restore cached PHP install
+        id: php-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.PHP_PREFIX }}
+          key: php-macos14-debug-zts-${{ steps.sha.outputs.src }}-${{ steps.sha.outputs.async }}
+
+      - name: Build PHP base (cache miss only)
+        if: steps.php-cache.outputs.cache-hit != 'true'
+        run: |
+          set -x
+          git clone --depth=1 --branch="$PHP_SRC_BRANCH" \
+            https://github.com/true-async/php-src php-src
+          git clone --depth=1 --branch="$PHP_ASYNC_BRANCH" \
+            https://github.com/true-async/php-async php-src/ext/async
+
+          BREW_OPT="$(brew --prefix)/opt"
+          export PATH="$BREW_OPT/bison/bin:$PATH"
+          export PKG_CONFIG_PATH="$BREW_OPT/openssl@3/lib/pkgconfig:$BREW_OPT/curl/lib/pkgconfig:$BREW_OPT/libxml2/lib/pkgconfig:$BREW_OPT/icu4c/lib/pkgconfig:$BREW_OPT/libuv/lib/pkgconfig:$BREW_OPT/nghttp2/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          sed -i -e 's/Requires.private:.*//g' "$BREW_OPT/curl/lib/pkgconfig/libcurl.pc"
+
+          cd php-src
+          ./buildconf --force
+          ./configure \
+            --prefix="$PHP_PREFIX" \
+            --disable-all \
+            --without-pear \
+            --enable-async \
+            --enable-pdo \
+            --with-pdo-sqlite \
+            --enable-sockets \
+            --enable-posix \
+            --enable-pcntl \
+            --enable-opcache \
+            --with-openssl \
+            --enable-debug \
+            --enable-zts
+          make -j"$(sysctl -n hw.logicalcpu)" >/dev/null
+          make install
+          # run-tests.php is not installed by `make install`; stash it in
+          # the cached prefix so cache-hit runs still have it.
+          cp run-tests.php "$PHP_PREFIX/bin/run-tests.php"
+
+      - name: Save cached PHP install
+        if: steps.php-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.PHP_PREFIX }}
+          key: php-macos14-debug-zts-${{ steps.sha.outputs.src }}-${{ steps.sha.outputs.async }}
+
+      - name: Show PHP info
+        run: |
+          "$PHP_PREFIX/bin/php" -v
+          "$PHP_PREFIX/bin/php" -m | grep -iE 'async' || true
+
+      - name: Build http_server extension
+        working-directory: http-server
+        run: |
+          set -x
+          BREW_OPT="$(brew --prefix)/opt"
+          "$PHP_PREFIX/bin/phpize"
+          export PKG_CONFIG_PATH="$BREW_OPT/openssl@3/lib/pkgconfig:$BREW_OPT/nghttp2/lib/pkgconfig:$BREW_OPT/libuv/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          ./configure \
+            --with-php-config="$PHP_PREFIX/bin/php-config" \
+            --enable-http-server \
+            --enable-http2 \
+            --disable-http3 \
+            --with-openssl \
+            --with-nghttp2="$BREW_OPT/nghttp2"
+          make -j"$(sysctl -n hw.logicalcpu)"
+          make install
+          mkdir -p "$PHP_PREFIX/etc/conf.d"
+          echo "extension=true_async_server.so" > "$PHP_PREFIX/etc/conf.d/http_server.ini"
+
+      - name: Run worker-pool tests (verbose)
+        working-directory: http-server
+        run: |
+          set +e
+          "$PHP_PREFIX/bin/php" "$PHP_PREFIX/bin/run-tests.php" \
+            -P -q -p "$PHP_PREFIX/bin/php" \
+            --show-diff --show-out \
+            --set-timeout 60 \
+            tests/phpt/server/core/020-builtin-worker-pool.phpt \
+            tests/phpt/server/core/021-bootloader.phpt \
+            tests/phpt/server/core/007-server-transfer-handler-dispatch.phpt \
+            tests/phpt/server/core/044-worker-pool-bound-handler.phpt \
+            tests/phpt/server/static/004-static-workers.phpt
+          echo "=== diffs ==="
+          for d in tests/phpt/server/core/*.diff tests/phpt/server/static/*.diff; do
+            [ -f "$d" ] || continue
+            echo "----- $d -----"; cat "$d"
+          done
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-workers-${{ github.run_id }}
+          path: |
+            http-server/tests/phpt/server/**/*.out
+            http-server/tests/phpt/server/**/*.diff
+            http-server/tests/phpt/server/**/*.log
+            http-server/tests/phpt/server/**/*.php
+          if-no-files-found: ignore
+          retention-days: 7

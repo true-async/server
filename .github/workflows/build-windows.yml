@@ -1,0 +1,109 @@
+name: Windows x64 Build & Test
+
+# Modeled after ext/async/.github/workflows/build-windows.yml.
+# Same approach: clone php-src + ext/async, copy this repo into
+# ext/http_server/, build the whole PHP statically with the
+# extension enabled. Avoids the phpize/shared-extension dance.
+#
+# Skipped vs. Linux CI:
+#   - HTTP/3 (no prebuilt ngtcp2/nghttp3 on the PHP SDK).
+#   - io_uring (Linux-only).
+#
+# libuv and nghttp2 come from vcpkg, get copied into the SDK
+# deps tree before configure runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+
+jobs:
+  windows:
+    name: WINDOWS_X64_ZTS_RELEASE
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      PHP_BUILD_CACHE_BASE_DIR: C:\build-cache
+      PHP_BUILD_OBJ_DIR: C:\obj
+      PHP_BUILD_CACHE_SDK_DIR: C:\build-cache\sdk
+      PHP_BUILD_SDK_BRANCH: php-sdk-2.3.0
+      PHP_BUILD_CRT: vs17
+      PLATFORM: x64
+      THREAD_SAFE: "1"
+      INTRINSICS: AVX2
+      PARALLEL: -j2
+      OPCACHE: "1"
+
+    steps:
+      - name: git config (keep LF, do not autocrlf)
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout php-src (true-async-stable) to root
+        uses: actions/checkout@v5
+        with:
+          repository: true-async/php-src
+          ref: ${{ env.PHP_SRC_BRANCH }}
+
+      - name: Checkout ext/async
+        uses: actions/checkout@v5
+        with:
+          repository: true-async/php-async
+          ref: ${{ env.PHP_ASYNC_BRANCH }}
+          path: async-src
+
+      - name: Copy ext/async into ext/async
+        shell: cmd
+        run: |
+          if not exist ext\async mkdir ext\async
+          xcopy /E /I /H /Y async-src ext\async
+
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server-src
+
+      - name: Copy http_server into ext/http_server
+        shell: cmd
+        run: |
+          if not exist ext\http_server mkdir ext\http_server
+          xcopy /E /I /H /Y http-server-src ext\http_server
+
+      - name: Replace .github with http_server's
+        shell: cmd
+        run: |
+          xcopy /E /I /H /Y http-server-src\.github .github
+
+      - name: Setup libuv + nghttp2 (vcpkg)
+        shell: powershell
+        run: |
+          if (!(Test-Path "C:\vcpkg")) {
+            git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat
+          }
+          C:\vcpkg\vcpkg.exe install libuv:x64-windows nghttp2:x64-windows
+
+      - name: Build PHP + http_server
+        run: .github/scripts/windows/build.bat
+
+      - name: Test http_server (phpt)
+        run: .github/scripts/windows/test.bat
+
+      - name: Upload failing test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phpt-failures-windows-${{ github.run_id }}
+          path: |
+            ext/http_server/tests/phpt/**/*.out
+            ext/http_server/tests/phpt/**/*.diff
+            ext/http_server/tests/phpt/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7

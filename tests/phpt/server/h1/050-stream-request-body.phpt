@@ -42,12 +42,18 @@ $server->addHttpHandler(function ($req, $res) {
 $client = spawn(function () use ($port, $server) {
     usleep(50000);
     // 64 KiB body — large enough to require multiple on_body callbacks.
+    // Feed it via a temp file, not `echo -n | curl`: `echo -n` is not
+    // portable (macOS /bin/sh emits extra bytes) and a 64 KiB shell
+    // argument is fragile besides.
     $body = str_repeat('A', 64 * 1024);
+    $tmp  = tempnam(sys_get_temp_dir(), 'body');
+    file_put_contents($tmp, $body);
     $cmd  = sprintf(
-        'curl --http1.1 -s --max-time 5 --data-binary @- -H "Expect:" http://127.0.0.1:%d/upload',
-        $port
+        'curl --http1.1 -s --max-time 5 --data-binary @%s -H "Expect:" http://127.0.0.1:%d/upload',
+        escapeshellarg($tmp), $port
     );
-    $resp = shell_exec("echo -n '$body' | $cmd");
+    $resp = shell_exec($cmd);
+    unlink($tmp);
     echo $resp, "\n";
     $server->stop();
 });

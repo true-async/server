@@ -26,6 +26,10 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServer_isRunning arginfo_class_TrueAsync_HttpServer_start
 
+#define arginfo_class_TrueAsync_HttpServer_isHttp2 arginfo_class_TrueAsync_HttpServer_start
+
+#define arginfo_class_TrueAsync_HttpServer_isHttp3 arginfo_class_TrueAsync_HttpServer_start
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_getTelemetry, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
@@ -47,6 +51,8 @@ ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler);
 ZEND_METHOD(TrueAsync_HttpServer, start);
 ZEND_METHOD(TrueAsync_HttpServer, stop);
 ZEND_METHOD(TrueAsync_HttpServer, isRunning);
+ZEND_METHOD(TrueAsync_HttpServer, isHttp2);
+ZEND_METHOD(TrueAsync_HttpServer, isHttp3);
 ZEND_METHOD(TrueAsync_HttpServer, getTelemetry);
 ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry);
 ZEND_METHOD(TrueAsync_HttpServer, getConfig);
@@ -63,6 +69,8 @@ static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, start, arginfo_class_TrueAsync_HttpServer_start, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, stop, arginfo_class_TrueAsync_HttpServer_stop, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, isRunning, arginfo_class_TrueAsync_HttpServer_isRunning, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, isHttp2, arginfo_class_TrueAsync_HttpServer_isHttp2, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_ME(TrueAsync_HttpServer, isHttp3, arginfo_class_TrueAsync_HttpServer_isHttp3, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(TrueAsync_HttpServer, getTelemetry, arginfo_class_TrueAsync_HttpServer_getTelemetry, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, resetTelemetry, arginfo_class_TrueAsync_HttpServer_resetTelemetry, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, getConfig, arginfo_class_TrueAsync_HttpServer_getConfig, ZEND_ACC_PUBLIC)

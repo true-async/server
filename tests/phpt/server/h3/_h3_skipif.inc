@@ -24,6 +24,13 @@ function h3_skipif(array $req = []): void {
         die('skip http_server not loaded');
     }
 
+    /* And the build must include compile-time HTTP/3 support. The class
+     * exists either way, but the H3 ifdefs collapse to no-ops on builds
+     * without ngtcp2/nghttp3 (e.g. macOS / Windows CI). */
+    if (!\TrueAsync\HttpServer::isHttp3()) {
+        die('skip http_server built without HTTP/3 support');
+    }
+
     $req += [
         'sockets'     => false,
         'openssl_cli' => false,
