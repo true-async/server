@@ -278,6 +278,7 @@ typedef struct http1_parser_t {
     uint16_t          cl_seen_count;         /* Number of Content-Length headers seen */
     uint16_t          header_count;          /* Number of header fields parsed (DoS cap) */
     uint16_t          host_seen_count;       /* Number of Host headers seen (RFC 9112 §3.2 — exactly one) */
+    uint16_t          ct_seen_count;          /* Number of Content-Type headers seen (RFC 9110 §8.3 — singleton) */
     bool              te_chunked_seen;       /* Transfer-Encoding: chunked seen */
 
     /* Boolean flags (clustered to avoid interior padding) */
