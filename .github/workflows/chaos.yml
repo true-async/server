@@ -117,11 +117,11 @@ jobs:
           fi
           score_line=$(grep -iE 'Score:' "$txt" | tail -1)
           echo "=== $score_line ==="
-          # Baseline 2026-05-29: Score 155/161 (6 failed) after the #47
-          # RFC fixes (Host validation, Date, HEAD, CONNECT, empty TE,
-          # asterisk-form). Gate against regressions — the passed count
-          # must not drop below baseline.
-          BASELINE=155
+          # Baseline 2026-05-29: Score 161/161 (0 failed) — full conformance
+          # after the #47 RFC fixes (Host validation, Date, HEAD, CONNECT,
+          # empty TE, asterisk-form) + probe_server echo/304/OPTIONS/405.
+          # Gate against regressions — must not drop below baseline.
+          BASELINE=161
           passed=$(sed -nE 's/.*Score:[[:space:]]*([0-9]+)\/[0-9]+.*/\1/p' <<<"$score_line")
           echo "passed=$passed baseline=$BASELINE"
           if [ -z "$passed" ]; then
