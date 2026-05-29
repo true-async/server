@@ -9,9 +9,6 @@ name: Debug — macOS worker pool (fast)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 39-test-infra-windowsmacos-ci-external-conformance-suites-chaosfuzz-harness
 
 env:
   PHP_SRC_BRANCH: true-async
@@ -141,27 +138,6 @@ jobs:
             [ -f "$d" ] || continue
             echo "----- $d -----"; cat "$d"
           done
-
-      - name: lldb backtrace for core/007 crash
-        working-directory: http-server
-        run: |
-          set -x
-          php_bin="$PHP_PREFIX/bin/php"
-          ext="$PHP_PREFIX/lib/php/extensions/debug-zts-20250926/true_async_server.so"
-          # run-tests leaves the generated .php next to the .phpt on failure.
-          script="tests/phpt/server/core/007-server-transfer-handler-dispatch.php"
-          if [ ! -f "$script" ]; then
-            echo "no generated .php (test may have passed) — skipping"; exit 0
-          fi
-          # -k runs on crash (signal stop). Capture all-thread backtrace
-          # to its own file so the artifact-upload log can't truncate it.
-          lldb -b \
-            -o "run" \
-            -k "thread backtrace all" \
-            -k "quit" \
-            -- "$php_bin" -d "extension=$ext" "$script" > /tmp/lldb-007.txt 2>&1 || true
-          echo "================= lldb backtrace ================="
-          cat /tmp/lldb-007.txt
 
       - name: Upload test artifacts
         if: always()
