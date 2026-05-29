@@ -224,6 +224,7 @@ static int on_message_begin(llhttp_t* llhttp_parser)
     parser->cl_seen_count = 0;
     parser->header_count = 0;
     parser->host_seen_count = 0;
+    parser->ct_seen_count = 0;
     parser->te_chunked_seen = false;
 
     return 0;
@@ -433,6 +434,15 @@ static void save_current_header(http1_parser_t *parser)
             parser->parse_error = HTTP_PARSE_ERR_INVALID_HOST;
             return;
         }
+    } else if (zend_string_equals_literal(name, "content-type")) {
+        /* RFC 9110 §8.3: Content-Type is a singleton. Two of them is
+         * ambiguous (which one frames the body?) — reject rather than
+         * comma-combine into a malformed media type. */
+        parser->ct_seen_count++;
+        if (UNEXPECTED(parser->ct_seen_count > 1)) {
+            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
+            return;
+        }
     } else if (zend_string_equals_literal(name, "connection")) {
         if (strncasecmp(ZSTR_VAL(value), "keep-alive", 10) == 0) {
             req->keep_alive = true;
@@ -570,6 +580,21 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         smart_str_0(&parser->uri_builder);
         req->uri = parser->uri_builder.s;
         parser->uri_builder.s = NULL;  /* Transfer ownership */
+    }
+
+    /* Reject a request-target carrying a raw fragment ('#', RFC 9112 §3.2 —
+     * fragments are never sent on the wire) or a backslash (not valid in a
+     * URI per RFC 3986; '\' vs '/' is parsed inconsistently and enables
+     * path-confusion). Percent-encoded forms (%23 / %5C) are untouched. */
+    if (req->uri != NULL) {
+        const char *u = ZSTR_VAL(req->uri);
+        const size_t ulen = ZSTR_LEN(req->uri);
+        for (size_t i = 0; i < ulen; i++) {
+            if (UNEXPECTED(u[i] == '#' || u[i] == '\\')) {
+                parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
+                return -1;
+            }
+        }
     }
 
     /* Get HTTP version */
