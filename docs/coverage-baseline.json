@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 14338,
-      "hit": 11575
+      "total": 14356,
+      "hit": 11573
     },
     "functions": {
-      "total": 972,
-      "hit": 876
+      "total": 973,
+      "hit": 875
     }
   },
   "files": {
@@ -133,11 +133,11 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1003,
-        "hit": 696
+        "hit": 676
       },
       "functions": {
         "total": 59,
-        "hit": 51
+        "hit": 49
       }
     },
     "src/core/http_connection_internal.h": {
@@ -262,12 +262,12 @@
     },
     "src/http1/http_parser.c": {
       "lines": {
-        "total": 482,
-        "hit": 392
+        "total": 500,
+        "hit": 410
       },
       "functions": {
-        "total": 25,
-        "hit": 23
+        "total": 26,
+        "hit": 24
       }
     },
     "src/http2/http2_session.c": {
