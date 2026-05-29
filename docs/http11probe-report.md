@@ -2,24 +2,21 @@
 
 HTTP/1.1 RFC 9110/9112 compliance + request-smuggling + malformed-input + header-normalization + caching/cookie probe ([MDA2AV/Http11Probe](https://github.com/MDA2AV/Http11Probe)).
 
-_Generated: 2026-05-29 17:12 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
+_Generated: 2026-05-29 17:30 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
 
 ## Summary
 
 | Total | Scored | Passed | Warnings | Failed | Errors |
 |------:|-------:|-------:|---------:|-------:|-------:|
-| 215 | 161 | 141 | 16 | 4 | 0 |
+| 215 | 161 | 145 | 16 | 0 | 0 |
 
-## Failures (4)
+## Failures (1)
 
 | Category | Check | RFC level | Expected | Got |
 |----------|-------|-----------|----------|-----|
-| Compliance | `COMP-VERSION-LEADING-ZEROS` | Must | 400, close, or timeout = warn | status=505 conn=ClosedByServer |
-| Compliance | `COMP-VERSION-MISSING-MINOR` | Must | 400, close, or timeout = warn | status=505 conn=ClosedByServer |
-| Compliance | `COMP-VERSION-WHITESPACE` | Must | 400, close, or timeout = warn | status=505 conn=ClosedByServer |
-| Compliance | `RFC9112-2.2-BARE-LF-REQUEST-LINE` | May | 400 or close (pass), 2xx (warn) | status=505 conn=ClosedByServer |
+| Compliance | `COMP-HTTP12-VERSION` | May | 200 or 505 | status=400 conn=ClosedByServer |
 
-## Warnings (30)
+## Warnings (29)
 
 | Category | Check | RFC level | Expected | Got |
 |----------|-------|-----------|----------|-----|
@@ -29,7 +26,6 @@ _Generated: 2026-05-29 17:12 UTC — refreshed weekly by `.github/workflows/chao
 | Compliance | `COMP-EXPECT-UNKNOWN` | May | 417 or 2xx | status=200 conn=Open |
 | Compliance | `COMP-GET-WITH-CL-BODY` | May | 400 or 2xx | status=200 conn=Open |
 | Compliance | `COMP-HTTP10-NO-HOST` | May | 200 or 400 | status=200 conn=ClosedByServer |
-| Compliance | `COMP-HTTP12-VERSION` | May | 200 or 505 | status=505 conn=ClosedByServer |
 | Compliance | `COMP-LEADING-CRLF` | Should | 400 or 2xx; close/timeout = warn | status=200 conn=Open |
 | Compliance | `COMP-NO-CL-IN-204` | Must | 204 without CL, or 405 | status=200 conn=Open |
 | Compliance | `RFC9112-3-MULTI-SP-REQUEST-LINE` | Should | 400 or 2xx; close/timeout = warn | status=200 conn=Open |
