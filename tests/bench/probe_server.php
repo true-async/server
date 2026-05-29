@@ -24,12 +24,23 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) {
+    /* Echo the request body and the Cookie header back. Several probe
+     * checks (POST-CL-BODY, CHUNKED-*, COOK-ECHO/PARSED-*) assert the
+     * server accepts the request AND reflects what it received — a fixed
+     * "ok" body fails them even though the server parsed correctly. The
+     * echo turns those harness-limited checks into real pass/fail signals. */
+    $req->awaitBody();
+    $echo = $req->getBody();
+    $cookie = $req->getHeader('cookie');
+    if ($cookie !== null) {
+        $echo .= "\ncookie: " . $cookie;
+    }
+
     /* A stable ETag lets the probe exercise conditional-request caching. */
-    $body = "ok\n";
     $res->setStatusCode(200)
         ->setHeader('Content-Type', 'text/plain')
         ->setHeader('ETag', '"probe-static"')
-        ->setBody($body);
+        ->setBody($echo !== '' ? $echo : "ok\n");
 });
 
 $server->start();
