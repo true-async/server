@@ -52,7 +52,7 @@ $cli = spawn(function () use ($port) {
     $buf = '';
     while (!feof($fp)) $buf .= fread($fp, 8192);
     fclose($fp);
-    echo "=== wire ===\n$buf\n";
+    echo "=== wire ===\n" . preg_replace("/^Date: [^\r\n]*\r?\n/mi", "", $buf) . "\n";
 });
 
 $server->start();

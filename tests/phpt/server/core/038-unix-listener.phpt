@@ -62,7 +62,7 @@ $clientCoroutine = spawn(function() use ($path) {
     fclose($fp);
 
     echo "=== Client received ===\n";
-    echo $response;
+    echo preg_replace("/^Date: [^\r\n]*\r?\n/mi", "", $response);
 });
 
 $server->start();

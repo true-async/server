@@ -67,7 +67,7 @@ $clientCoroutine = spawn(function() use ($port) {
     fclose($fp);
 
     echo "=== Client received ===\n";
-    echo $response;
+    echo preg_replace("/^Date: [^\r\n]*\r?\n/mi", "", $response);
 });
 
 // Start server (will run until stop() is called)

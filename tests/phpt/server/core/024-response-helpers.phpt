@@ -43,7 +43,7 @@ $cli = spawn(function () use ($port) {
         $buf = '';
         while (!feof($fp)) $buf .= fread($fp, 8192);
         fclose($fp);
-        echo "=== $path ===\n$buf\n";
+        echo "=== $path ===\n" . preg_replace("/^Date: [^\r\n]*\r?\n/mi", "", $buf) . "\n";
     }
 });
 

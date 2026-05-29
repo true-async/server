@@ -588,6 +588,23 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         req->method = zend_string_init(method_name, method_len, 0);
     }
 
+    /* RFC 9110 §9.3.6: CONNECT targets a proxy tunnel — an origin server
+     * has no tunnel to establish, so reject it rather than treat "/" as a
+     * normal GET-like request. */
+    if (UNEXPECTED(llhttp_parser->method == HTTP_CONNECT)) {
+        parser->parse_error = HTTP_PARSE_ERR_BAD_METHOD;
+        return -1;
+    }
+
+    /* RFC 9112 §3.2.4: asterisk-form ("*") is only valid for OPTIONS
+     * (server-wide). Any other method with "*" as the target is malformed. */
+    if (UNEXPECTED(req->uri != NULL
+                   && ZSTR_LEN(req->uri) == 1 && ZSTR_VAL(req->uri)[0] == '*'
+                   && llhttp_parser->method != HTTP_OPTIONS)) {
+        parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
+        return -1;
+    }
+
     /* Default keep-alive behavior based on HTTP version */
     /* Check if Connection header was explicitly set */
     zval *connection_header = zend_hash_str_find(req->headers, "connection", sizeof("connection") - 1);
@@ -1132,6 +1149,7 @@ int http_parse_error_to_status(http_parse_error_t err)
         case HTTP_PARSE_ERR_CONFLICTING_HEADERS:     return 400;
         case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return 400;
         case HTTP_PARSE_ERR_INVALID_HOST:            return 400;
+        case HTTP_PARSE_ERR_BAD_METHOD:              return 405;
         case HTTP_PARSE_ERR_OUT_OF_MEMORY:           return 503;
         case HTTP_PARSE_ERR_SERVICE_UNAVAILABLE:     return 503;
         case HTTP_PARSE_OK:
@@ -1154,6 +1172,7 @@ const char *http_parse_error_reason(http_parse_error_t err)
         case HTTP_PARSE_ERR_CONFLICTING_HEADERS:     return "Bad Request";
         case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return "Bad Request";
         case HTTP_PARSE_ERR_INVALID_HOST:            return "Bad Request";
+        case HTTP_PARSE_ERR_BAD_METHOD:              return "Method Not Allowed";
         case HTTP_PARSE_ERR_OUT_OF_MEMORY:           return "Service Unavailable";
         case HTTP_PARSE_ERR_SERVICE_UNAVAILABLE:     return "Service Unavailable";
         case HTTP_PARSE_OK:
