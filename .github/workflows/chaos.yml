@@ -104,21 +104,33 @@ jobs:
             echo "probe server failed to start"; cat tests/bench/.probe-server.log; exit 1
           fi
           cd /opt/http11probe
-          # First runs are informational — capture our score + JSON; we
-          # do not yet gate on it (no baseline). `|| true` so a non-zero
-          # CLI exit (undocumented) doesn't fail the build prematurely.
+          txt="$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.txt"
+          # `|| true`: the CLI's exit code is undocumented; we gate on the
+          # parsed score below, not on its exit status.
           dotnet run --project src/Http11Probe.Cli -c Release -- \
             --host 127.0.0.1 --port 8080 \
             --output "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.json" \
-            2>&1 | tee "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.txt" || true
+            2>&1 | tee "$txt" || true
           # Server must still be alive after the probe (no crash/wedge).
           if ! kill -0 "$server_pid" 2>/dev/null; then
             echo "::error::probe server died during the run"
             cat "$GITHUB_WORKSPACE/http-server/tests/bench/.probe-server.log"
             exit 1
           fi
-          echo "=== score line ==="
-          grep -iE 'Score:' "$GITHUB_WORKSPACE/http-server/tests/bench/http11probe-results.txt" | tail -1 || true
+          score_line=$(grep -iE 'Score:' "$txt" | tail -1)
+          echo "=== $score_line ==="
+          # Baseline 2026-05-29: Score 143/161 (18 failed). Gate against
+          # regressions — the passed count must not drop below baseline.
+          BASELINE=143
+          passed=$(sed -nE 's/.*Score:[[:space:]]*([0-9]+)\/[0-9]+.*/\1/p' <<<"$score_line")
+          echo "passed=$passed baseline=$BASELINE"
+          if [ -z "$passed" ]; then
+            echo "::error::could not parse Http11Probe score"; exit 1
+          fi
+          if [ "$passed" -lt "$BASELINE" ]; then
+            echo "::error::Http11Probe score $passed dropped below baseline $BASELINE"
+            exit 1
+          fi
 
       - name: Upload Http11Probe results
         if: always()
