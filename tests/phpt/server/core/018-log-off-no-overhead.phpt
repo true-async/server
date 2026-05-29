@@ -3,6 +3,18 @@ HttpServer: log-disabled hot path is free vs DEBUG (PLAN_LOG.md gate cost)
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+/* Timing-sensitive perf gate: it compares wall-clock of a logging-off vs
+ * a DEBUG-logging run, and the difference (the logging cost) is small
+ * relative to the noisy total (1000 socket connects + scheduler), so on
+ * shared CI runners jitter flips the comparison. Skip in CI (GitHub sets
+ * GITHUB_ACTIONS automatically; SKIP_PERF_TESTS for other CI); still runs
+ * locally where the machine is quiet. See #48. */
+if (getenv('GITHUB_ACTIONS') !== false || getenv('SKIP_PERF_TESTS') !== false) {
+    die('skip timing-sensitive perf gate — flaky under shared-CI jitter (#48)');
+}
+?>
 --FILE--
 <?php
 use TrueAsync\HttpServer;
