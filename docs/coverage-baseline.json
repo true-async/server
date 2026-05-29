@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 14338,
-      "hit": 11543
+      "hit": 11558
     },
     "functions": {
       "total": 972,
@@ -273,7 +273,7 @@
     "src/http2/http2_session.c": {
       "lines": {
         "total": 730,
-        "hit": 635
+        "hit": 637
       },
       "functions": {
         "total": 53,
@@ -293,7 +293,7 @@
     "src/http2/http2_strategy.c": {
       "lines": {
         "total": 645,
-        "hit": 479
+        "hit": 492
       },
       "functions": {
         "total": 37,
