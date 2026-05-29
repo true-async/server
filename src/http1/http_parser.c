@@ -242,6 +242,19 @@ static int on_url(llhttp_t* llhttp_parser, const char* at, size_t length)
         return -1;  /* URI too long (414 URI Too Long) */
     }
 
+    /* Reject a raw fragment ('#', never sent in a request-target per
+     * RFC 9112 §3.2) or backslash (not a URI char, RFC 3986; '\' vs '/'
+     * is parsed inconsistently → path confusion). Scanned here, on the
+     * pass llhttp already makes over these bytes — single byte values, so
+     * a chunk boundary can't hide them. Percent-encoded %23 / %5C are
+     * untouched. */
+    for (size_t i = 0; i < length; i++) {
+        if (UNEXPECTED(at[i] == '#' || at[i] == '\\')) {
+            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
+            return -1;
+        }
+    }
+
     /* Accumulate URI chunks using smart_str */
     smart_str_appendl(&parser->uri_builder, at, length);
 
@@ -580,21 +593,6 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         smart_str_0(&parser->uri_builder);
         req->uri = parser->uri_builder.s;
         parser->uri_builder.s = NULL;  /* Transfer ownership */
-    }
-
-    /* Reject a request-target carrying a raw fragment ('#', RFC 9112 §3.2 —
-     * fragments are never sent on the wire) or a backslash (not valid in a
-     * URI per RFC 3986; '\' vs '/' is parsed inconsistently and enables
-     * path-confusion). Percent-encoded forms (%23 / %5C) are untouched. */
-    if (req->uri != NULL) {
-        const char *u = ZSTR_VAL(req->uri);
-        const size_t ulen = ZSTR_LEN(req->uri);
-        for (size_t i = 0; i < ulen; i++) {
-            if (UNEXPECTED(u[i] == '#' || u[i] == '\\')) {
-                parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
-                return -1;
-            }
-        }
     }
 
     /* Get HTTP version */
