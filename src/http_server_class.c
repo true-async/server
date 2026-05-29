@@ -1776,8 +1776,15 @@ static int http_server_prebind_tcp(http_server_object *server)
         return SUCCESS;
     }
 
+    fprintf(stderr, "[dbg] prebind_tcp: listener_count=%zu\n", cfg->listener_count);
+    fflush(stderr);
+
     for (size_t i = 0; i < cfg->listener_count; i++) {
         http_listener_config_t *lc = &cfg->listeners[i];
+
+        fprintf(stderr, "[dbg] prebind_tcp: listener[%zu] type=%d host=%s port=%d\n",
+            i, (int)lc->type, lc->host ? ZSTR_VAL(lc->host) : "(null)", lc->port);
+        fflush(stderr);
 
         if (lc->type != LISTENER_TYPE_TCP || lc->host == NULL) {
             continue;
@@ -1834,8 +1841,14 @@ static int http_server_prebind_tcp(http_server_object *server)
         slot->host[host_len] = '\0';
         slot->port = lc->port;
         slot->fd   = fd;
+        fprintf(stderr, "[dbg] prebind_tcp: bound %s:%d fd=%d slot=%zu\n",
+            slot->host, slot->port, slot->fd, server->pool_tcp_fd_count - 1);
+        fflush(stderr);
     }
 
+    fprintf(stderr, "[dbg] prebind_tcp: done, pool_tcp_fd_count=%zu\n",
+        server->pool_tcp_fd_count);
+    fflush(stderr);
     return SUCCESS;
 }
 
@@ -2402,6 +2415,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             const int prebound_fd =
                 http_server_pool_tcp_fd_lookup(server, host, port);
 
+            fprintf(stderr, "[dbg] worker listen: host=%s port=%d is_clone=%d "
+                "pool_tcp_fd_count=%zu lookup=%d\n",
+                host, port, (int)server->is_worker_clone,
+                server->pool_tcp_fd_count, prebound_fd);
+            fflush(stderr);
+
             if (prebound_fd >= 0) {
                 const int dup_fd = dup(prebound_fd);
 
@@ -2411,6 +2430,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                 } else {
                     listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
                         dup_fd, server->backlog, listen_flags, 0);
+                    fprintf(stderr, "[dbg] worker listen: dup_fd=%d listen_event=%p\n",
+                        dup_fd, (void *)listen_event);
+                    fflush(stderr);
                 }
             }
 #endif
