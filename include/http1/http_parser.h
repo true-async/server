@@ -43,7 +43,7 @@ typedef enum {
     HTTP_PARSE_ERR_MALFORMED,                /* 400 — llhttp generic */
     HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH,   /* 400 — non-numeric/overflow/sign in CL */
     HTTP_PARSE_ERR_CONFLICTING_HEADERS,      /* 400 — CL+TE coexist or duplicate CL with differing values (RFC 9112 §6.3) */
-    HTTP_PARSE_ERR_INVALID_HTTP_VERSION,     /* 505 — version other than HTTP/1.0 or HTTP/1.1 */
+    HTTP_PARSE_ERR_INVALID_HTTP_VERSION,     /* 400 — version other than HTTP/1.0 or HTTP/1.1 */
     HTTP_PARSE_ERR_INVALID_HOST,             /* 400 — missing/duplicate/malformed Host (RFC 9112 §3.2, 9110 §7.2) */
     HTTP_PARSE_ERR_BAD_METHOD,               /* 405 — method not allowed on an origin server (e.g. CONNECT) */
     HTTP_PARSE_ERR_OUT_OF_MEMORY,            /* 503 — emalloc bailout in parser callback */

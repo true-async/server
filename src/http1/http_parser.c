@@ -960,14 +960,15 @@ int http_parser_execute(http1_parser_t *parser, const char *data, size_t len, si
     } else {
         /* Parse error. If a callback already set parse_error (oversized
          * URI/header/body, bad header) we keep that classification —
-         * llhttp surfaces those as HPE_USER. An unsupported HTTP version
-         * (e.g. HTTP/1.2) is rejected by llhttp before our headers-complete
-         * check runs, so map it to 505 here rather than a generic 400.
-         * Anything else is a framing/syntax error → 400. */
+         * llhttp surfaces those as HPE_USER. Anything else is an
+         * llhttp-detected framing/syntax error → 400 Bad Request.
+         * Note: llhttp reports HPE_INVALID_VERSION for BOTH a valid-but-
+         * unsupported version (HTTP/1.2) and a malformed version string
+         * (missing minor, leading zeros, whitespace) — they are
+         * indistinguishable here, and Http11Probe wants 400 for the
+         * malformed majority, so we keep the generic 400. */
         if (parser->parse_error == HTTP_PARSE_OK) {
-            parser->parse_error = (err == HPE_INVALID_VERSION)
-                ? HTTP_PARSE_ERR_INVALID_HTTP_VERSION
-                : HTTP_PARSE_ERR_MALFORMED;
+            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
         }
 
         return -1;
@@ -1151,7 +1152,7 @@ int http_parse_error_to_status(http_parse_error_t err)
         case HTTP_PARSE_ERR_MALFORMED:               return 400;
         case HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH:  return 400;
         case HTTP_PARSE_ERR_CONFLICTING_HEADERS:     return 400;
-        case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return 505;
+        case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return 400;
         case HTTP_PARSE_ERR_INVALID_HOST:            return 400;
         case HTTP_PARSE_ERR_BAD_METHOD:              return 405;
         case HTTP_PARSE_ERR_OUT_OF_MEMORY:           return 503;
@@ -1174,7 +1175,7 @@ const char *http_parse_error_reason(http_parse_error_t err)
         case HTTP_PARSE_ERR_MALFORMED:               return "Bad Request";
         case HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH:  return "Bad Request";
         case HTTP_PARSE_ERR_CONFLICTING_HEADERS:     return "Bad Request";
-        case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return "HTTP Version Not Supported";
+        case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return "Bad Request";
         case HTTP_PARSE_ERR_INVALID_HOST:            return "Bad Request";
         case HTTP_PARSE_ERR_BAD_METHOD:              return "Method Not Allowed";
         case HTTP_PARSE_ERR_OUT_OF_MEMORY:           return "Service Unavailable";
