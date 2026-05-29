@@ -154,12 +154,10 @@ jobs:
             echo "no generated .php (test may have passed) — skipping"; exit 0
           fi
           lldb -b \
-            -o "settings set target.run-args -d extension=$ext $script" \
             -o "run" \
             -o "bt all" \
-            -o "thread backtrace all" \
             -o "quit" \
-            -- "$php_bin" 2>&1 | tail -120
+            -- "$php_bin" -d "extension=$ext" "$script" 2>&1 | tail -120
 
       - name: Upload test artifacts
         if: always()

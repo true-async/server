@@ -72,18 +72,20 @@
  * SO_REUSEPORT on macOS/older BSD/OpenBSD/NetBSD/Solaris is
  * NOT load-balanced — it has the BSD multicast meaning. On those
  * the workers share a single fd via dup(). */
+/* The worker pool shares one pre-bound listen fd (parent binds, each
+ * worker dups) wherever the kernel has no load-balanced SO_REUSEPORT to
+ * let every worker bind the same port itself. Linux (3.9+) and FreeBSD
+ * (SO_REUSEPORT_LB, 12+) have it; everyone else (macOS, other BSD,
+ * Solaris) takes the shared-fd default. */
 #if defined(__linux__) || defined(SO_REUSEPORT_LB)
-# define HTTP_HAS_LB_REUSEPORT 1
+# define HTTP_SHARED_FD_DEFAULT false
 #else
-# define HTTP_HAS_LB_REUSEPORT 0
+# define HTTP_SHARED_FD_DEFAULT true
 #endif
 
-/* Should the worker pool share one pre-bound listen fd (dup per worker)
- * instead of each worker binding the same port with SO_REUSEPORT? Default
- * follows the platform: shared fd where there is no load-balanced
- * REUSEPORT. TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1/0 overrides it so the
+/* TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1/0 overrides the default so the
  * shared-fd path can be exercised on Linux CI without a macOS runner.
- * Windows never shares (no socket dup), so it is always false there. */
+ * Windows never shares (no POSIX socket dup), so it is always false. */
 static bool http_server_use_shared_listen_fd(void)
 {
 #ifdef PHP_WIN32
@@ -94,7 +96,7 @@ static bool http_server_use_shared_listen_fd(void)
         return env[0] == '1';
     }
 
-    return !HTTP_HAS_LB_REUSEPORT;
+    return HTTP_SHARED_FD_DEFAULT;
 #endif
 }
 
