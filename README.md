@@ -108,6 +108,7 @@ Security is a first-class concern in TrueAsync Server.
 - **Memory safety** — all hot paths are tested with AddressSanitizer and Valgrind; zero memory leaks policy enforced in CI
 - **TLS hardened** — TLS 1.2/1.3 only, weak cipher suites disabled, stateless session tickets, safe renegotiation disabled
 - **HTTP/3 security** — QUIC amplification limits and connection ID rotation implemented per RFC 9000 recommendations
+- **Conformance probing** — HTTP/1.1 RFC 9110/9112 compliance, request smuggling, and malformed-input behaviour are probed weekly with [Http11Probe](https://github.com/MDA2AV/Http11Probe); the latest snapshot is committed to [`docs/http11probe-report.md`](docs/http11probe-report.md). HTTP/2 is gated against [h2spec](https://github.com/summerwind/h2spec) and TLS against [testssl.sh](https://github.com/testssl/testssl.sh).
 
 If you discover a security vulnerability, please report it privately via GitHub Security Advisories.
 
