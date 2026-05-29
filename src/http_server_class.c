@@ -78,6 +78,26 @@
 # define HTTP_HAS_LB_REUSEPORT 0
 #endif
 
+/* Should the worker pool share one pre-bound listen fd (dup per worker)
+ * instead of each worker binding the same port with SO_REUSEPORT? Default
+ * follows the platform: shared fd where there is no load-balanced
+ * REUSEPORT. TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1/0 overrides it so the
+ * shared-fd path can be exercised on Linux CI without a macOS runner.
+ * Windows never shares (no socket dup), so it is always false there. */
+static bool http_server_use_shared_listen_fd(void)
+{
+#ifdef PHP_WIN32
+    return false;
+#else
+    const char *env = getenv("TRUE_ASYNC_SERVER_SHARED_LISTEN_FD");
+    if (env != NULL && (env[0] == '0' || env[0] == '1')) {
+        return env[0] == '1';
+    }
+
+    return !HTTP_HAS_LB_REUSEPORT;
+#endif
+}
+
 /* Max listeners */
 #define MAX_LISTENERS 16
 
@@ -1754,10 +1774,10 @@ static int http_server_pool_unix_fd_lookup(const http_server_object *server, con
 }
 #endif  /* !PHP_WIN32 */
 
-/* The TCP shared-fd path mirrors AF_UNIX above for platforms that do not
- * load-balance via SO_REUSEPORT (macOS, Windows). Linux + FreeBSD keep
- * the per-worker independent-bind path. */
-#if !HTTP_HAS_LB_REUSEPORT
+/* The TCP shared-fd path mirrors AF_UNIX above. Compiled on all POSIX
+ * targets (not just non-REUSEPORT ones) so the path is reachable on Linux
+ * when TRUE_ASYNC_SERVER_SHARED_LISTEN_FD forces it on for testing. */
+#ifndef PHP_WIN32
 
 static void http_server_close_pool_tcp_fds(http_server_object *server)
 {
@@ -1851,7 +1871,7 @@ static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
     return -1;
 }
 
-#endif  /* !HTTP_HAS_LB_REUSEPORT */
+#endif  /* !PHP_WIN32 */
 
 static int http_server_start_pool(http_server_object *server,
                                   zval *this_zv,
@@ -1902,12 +1922,11 @@ static int http_server_start_pool(http_server_object *server,
     }
 #endif
 
-#if !HTTP_HAS_LB_REUSEPORT
-    /* TCP shared-fd path for platforms without SO_REUSEPORT load balancing. */
-    if (http_server_prebind_tcp(server) != SUCCESS) {
 #ifndef PHP_WIN32
+    /* Shared-fd path: bind each TCP listener once, workers dup it. */
+    if (http_server_use_shared_listen_fd()
+        && http_server_prebind_tcp(server) != SUCCESS) {
         http_server_close_pool_unix_fds(server);
-#endif
         ZEND_THREAD_POOL_DELREF(pool);
         return FAILURE;
     }
@@ -1931,7 +1950,7 @@ static int http_server_start_pool(http_server_object *server,
 #ifndef PHP_WIN32
             http_server_close_pool_unix_fds(server);
 #endif
-#if !HTTP_HAS_LB_REUSEPORT
+#ifndef PHP_WIN32
             http_server_close_pool_tcp_fds(server);
 #endif
             return FAILURE;
@@ -2008,7 +2027,7 @@ cleanup:
      * releases the shared sockets and removes their paths. */
     http_server_close_pool_unix_fds(server);
 #endif
-#if !HTTP_HAS_LB_REUSEPORT
+#ifndef PHP_WIN32
     http_server_close_pool_tcp_fds(server);
 #endif
     return rc;
@@ -2386,31 +2405,31 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                 ? (uint32_t)Z_LVAL_P(mask_zv)
                 : (HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2);
 
-            /* REUSEPORT enables kernel-level load balancing across worker
-             * processes / threads sharing host:port. The reactor creates
-             * the socket, binds with UV_TCP_REUSEPORT, and sets up uv_listen
-             * + per-accept notifications. */
-            /* Windows libuv does not implement UV_TCP_REUSEPORT (returns
-             * ENOTSUP at bind). Only request it on platforms that support it. */
-            
             unsigned int listen_flags = 0;
             zend_async_listen_event_t *listen_event = NULL;
 
-#if HTTP_HAS_LB_REUSEPORT
-            listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
-#else
-            const int prebound_fd =
-                http_server_pool_tcp_fd_lookup(server, host, port);
+            /* Two strategies for a worker pool sharing host:port. REUSEPORT:
+             * each worker binds independently, the kernel load-balances
+             * (Linux/FreeBSD). Shared fd: the parent bound once and each
+             * worker adopts a dup (macOS/Windows, no LB REUSEPORT). */
+            if (!http_server_use_shared_listen_fd()) {
+                listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
+            }
+#ifndef PHP_WIN32
+            else {
+                const int prebound_fd =
+                    http_server_pool_tcp_fd_lookup(server, host, port);
 
-            if (prebound_fd >= 0) {
-                const int dup_fd = dup(prebound_fd);
+                if (prebound_fd >= 0) {
+                    const int dup_fd = dup(prebound_fd);
 
-                if (dup_fd < 0) {
-                    zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                        "Failed to dup TCP listen fd for %s:%d", host, port);
-                } else {
-                    listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
-                        dup_fd, server->backlog, listen_flags, 0);
+                    if (dup_fd < 0) {
+                        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                            "Failed to dup TCP listen fd for %s:%d", host, port);
+                    } else {
+                        listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
+                            dup_fd, server->backlog, listen_flags, 0);
+                    }
                 }
             }
 #endif
