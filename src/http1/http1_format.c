@@ -18,6 +18,8 @@
 #include "zend_smart_str.h"
 #include "php_http_server.h"
 #include "http_response_internal.h"
+#include "http_date.h"
+#include <time.h>
 
 #ifdef HAVE_HTTP_COMPRESSION
 # include "compression/http_compression_response.h"
@@ -213,6 +215,22 @@ static void emit_headers_only(smart_str *out, HashTable *headers,
     } ZEND_HASH_FOREACH_END();
 }
 
+/* RFC 9110 §6.6.1: an origin server MUST send a Date header. Emit one
+ * (IMF-fixdate, generated now) unless the handler already set it. */
+static void emit_date_header(smart_str *out, HashTable *headers)
+{
+    if (headers != NULL
+        && zend_hash_str_exists(headers, "date", sizeof("date") - 1)) {
+        return;
+    }
+
+    char datebuf[HTTP_DATE_BUF_LEN];
+    http_date_format_imf(time(NULL), datebuf);
+    smart_str_appendl(out, "Date: ", sizeof("Date: ") - 1);
+    smart_str_appendl(out, datebuf, HTTP_DATE_LEN);
+    smart_str_appendl(out, "\r\n", 2);
+}
+
 /* Internal: append status line + Content-Length + headers + CRLF terminator
  * into @p result. Body is NOT appended — callers either append it themselves
  * (legacy http_response_format) or send it as a separate iov entry
@@ -222,6 +240,8 @@ static void emit_headers_block(smart_str *result, http_response_object *response
                                size_t body_len)
 {
     emit_status_line(result, response);
+
+    emit_date_header(result, response->headers);
 
     /* Add Content-Length if body exists and not already set. Use
      * zend_hash_str_exists to skip the zend_string alloc/release
@@ -351,6 +371,7 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
     smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
+    emit_date_header(&result, response->headers);
     smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
                       sizeof("Transfer-Encoding: chunked\r\n") - 1);
 

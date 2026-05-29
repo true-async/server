@@ -2640,6 +2640,38 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         }
 
         should_continue = conn->keep_alive != 0;
+    } else if (ctx->request != NULL && ctx->request->method != NULL
+               && zend_string_equals_literal(ctx->request->method, "HEAD")) {
+        /* RFC 9110 §9.3.2: a HEAD response carries the same headers as the
+         * GET would — including Content-Length of the would-be body — but
+         * no message body. emit_headers_block already computes that
+         * Content-Length, so send the headers block alone and drop body. */
+        bool sent;
+        zend_string *headers_str = NULL, *body_str = NULL;
+        http_response_format_parts(Z_OBJ(ctx->response_zv), &headers_str, &body_str);
+
+        if (body_str != NULL) {
+            zend_string_release(body_str);
+        }
+
+        if (headers_str == NULL || ZSTR_LEN(headers_str) == 0) {
+            if (headers_str != NULL) {
+                zend_string_release(headers_str);
+            }
+
+            sent = false;
+        }
+#ifdef HAVE_OPENSSL
+        else if (conn->tls != NULL) {
+            sent = tls_push(conn, ZSTR_VAL(headers_str), ZSTR_LEN(headers_str));
+            zend_string_release(headers_str);
+        }
+#endif
+        else {
+            sent = http_connection_send_zstr_batched(conn, headers_str);
+        }
+
+        should_continue = sent && conn->keep_alive != 0;
     } else {
         bool sent;
 #ifdef HAVE_OPENSSL
