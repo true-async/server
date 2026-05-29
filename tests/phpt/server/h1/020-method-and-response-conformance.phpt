@@ -53,6 +53,7 @@ $client = spawn(function () use ($port, $server) {
     echo "connect=",      status(probe($port, "CONNECT a.com:443 HTTP/1.1\r\n$h")), "\n";
     echo "asterisk_get=",  status(probe($port, "GET * HTTP/1.1\r\n$h")), "\n";
     echo "asterisk_opts=", status(probe($port, "OPTIONS * HTTP/1.1\r\n$h")), "\n";
+    echo "http12=",        status(probe($port, "GET / HTTP/1.2\r\n$h")), "\n";
 
     $get  = probe($port, "GET / HTTP/1.1\r\n$h");
     echo "get_has_date=", (stripos($get, "\r\ndate:") !== false ? 1 : 0), "\n";
@@ -74,6 +75,7 @@ echo "done\n";
 connect=405
 asterisk_get=400
 asterisk_opts=200
+http12=505
 get_has_date=1
 head_status=200
 head_has_cl10=1
