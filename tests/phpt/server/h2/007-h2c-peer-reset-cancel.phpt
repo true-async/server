@@ -6,7 +6,7 @@ true_async
 --SKIPIF--
 <?php
 require __DIR__ . '/_h2_skipif.inc';
-h2_skipif(['curl_h2' => true]);
+h2_skipif();
 ?>
 --FILE--
 <?php
@@ -15,7 +15,12 @@ h2_skipif(['curl_h2' => true]);
  * silent teardown. Verifies that (a) cancel fires with a live coroutine,
  * (b) try/catch{} blocks run, (c) refcount keeps the stream alive long
  * enough for dispose to unwind safely, (d) the server survives and the
- * next connection still works. */
+ * next connection still works.
+ *
+ * The reset is sent as a real HTTP/2 RST_STREAM frame over a raw socket
+ * rather than relying on `curl --max-time`: curl's abort closes the TCP
+ * connection with a FIN on macOS (graceful) vs RST on Linux, so it does
+ * not reliably produce a stream-level reset. Hand-built frames do. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -23,6 +28,8 @@ use TrueAsync\HttpException;
 use function Async\spawn;
 use function Async\await;
 use function Async\delay;
+
+require __DIR__ . '/_h2_client.inc';
 
 $port = 19830 + getmypid() % 100;
 
@@ -45,8 +52,8 @@ $server->addHttpHandler(function ($req, $res)
         return;
     }
     try {
-        /* curl below aborts after ~250 ms; delay is long enough that
-         * cancel always races in before natural completion. */
+        /* Long enough that the RST_STREAM below always races in before
+         * natural completion. */
         delay(3000);
         $handler_finished = true;
         $res->setStatusCode(200)->setBody('unexpected');
@@ -58,28 +65,37 @@ $server->addHttpHandler(function ($req, $res)
 
 $client = spawn(function () use ($port, $server) {
     usleep(30000);
-    $cmd = sprintf(
-        'curl --http2-prior-knowledge -s -o /dev/null --max-time 0.25 '
-        . 'http://127.0.0.1:%d/slow',
-        $port
-    );
-    exec($cmd, $out, $rc);
-    /* curl --max-time returns rc=28 on timeout. */
-    echo "curl_rc_is_timeout=", (int)($rc === 28), "\n";
 
-    /* Give the server a tick to process RST / connection close and
-     * drive the cancel + dispose through the scheduler. */
+    /* Open an h2c connection and start the /slow request (END_STREAM so
+     * the handler dispatches and parks in delay()). Pump one read to ack
+     * the server SETTINGS — readFrame yields to the scheduler, so the
+     * server processes our HEADERS and the handler reaches delay(). Then
+     * RST_STREAM the live stream. */
+    $cli = new H2TestClient('127.0.0.1', $port);
+    $sid = $cli->sendRequest('GET', '/slow', 'x');
+    while (true) {
+        $fr = $cli->readFrame();
+        if ($fr === null) { break; }
+        [$type, $flags, , ] = $fr;
+        if ($type === H2_FRAME_SETTINGS && ($flags & H2_FLAG_ACK) === 0) {
+            $cli->sendSettingsAck();
+            break;
+        }
+    }
+    delay(100);                          /* handler reaches delay(3000) */
+    $cli->sendRstStream($sid, 0x8 /* CANCEL */);
+    $cli->close();
+
+    /* Give the server a tick to process RST and drive cancel + dispose. */
     delay(200);
 
     /* Next request on a fresh connection must still work — proves the
      * cancel path didn't damage server state. */
-    $cmd2 = sprintf(
-        'curl --http2-prior-knowledge -s --max-time 2 http://127.0.0.1:%d/ok',
-        $port
-    );
-    $out2 = [];
-    exec($cmd2, $out2, $rc2);
-    echo "next_req_rc=$rc2\n";
+    $probe = new H2TestClient('127.0.0.1', $port);
+    $sid2  = $probe->sendRequest('GET', '/ok', 'x');
+    [$status, $body, , ] = $probe->collectResponse($sid2);
+    $probe->close();
+    echo "next_req_ok=", ($status === 200 && $body === 'ok' ? 1 : 0), "\n";
 
     $server->stop();
 });
@@ -92,8 +108,7 @@ echo "caught_code=$caught_code\n";
 echo "caught_msg=$caught_msg\n";
 echo "done\n";
 --EXPECT--
-curl_rc_is_timeout=1
-next_req_rc=0
+next_req_ok=1
 handler_finished=0
 caught_code=499
 caught_msg=stream reset by peer
