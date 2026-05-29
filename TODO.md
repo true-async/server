@@ -111,3 +111,27 @@ Notes for implementation:
 - `Async\runtime_stats()` — coroutine/fiber/queue/microtask counters [php-async@main].
 - `HttpServer::getRuntimeStats()` — `conn_arena` + `body_pool` counters.
 - `zend_mm_dump_live_allocations()` (debug build) — live emallocs grouped by `(c_file, c_line, orig, php_file, php_line)`. `php_file:php_line` populated when configured with `--enable-mm-php-source-track` [php-src@true-async-stable].
+
+## Step 6 — HTTP/2 TLS emit path: verified findings
+
+Audit of the H2-over-TLS emit path (`http2_strategy.c` / `http_connection_tls.c`), each confirmed by reading the code. Listed by real severity, not by how bad they sound.
+
+### 6a — TLS write deadlock when body > cipher ring (CORRECTNESS — fix first)
+
+Tracked as **issue #29**. When the response body exceeds the CT-out BIO ring (`TLS_BIO_RING_SIZE = 64 KiB`), the drain-wake can fail to reach the writer and the connection hangs. Progress depends entirely on `tls_cipher_completion` re-entering `tls_drain`; in the overflow path that wake does not arrive. The 64 KiB ring is deliberately kept large to avoid triggering this — **do not shrink it until fixed**. This is the only real bug in this list.
+
+### 6b — `tls_space_event` is a broadcast trigger, not per-waiter (perf, low severity)
+
+`tls_space_event` is a `zend_async_trigger_event_t` (`http_connection.h:128`). When ring space frees, `trigger()` wakes **every** coroutine parked in `tls_wait_space` (`http_connection_tls.c:87`); each then re-checks `BIO_ctrl_get_write_guarantee`. With N streams blocked on a full ring this is O(N) wakeups where only 1–2 can proceed — thundering herd. Only bites under high multiplexing + slow network + large bodies. Fix = redesign the emit pump onto a microtask / per-waiter wake (already flagged informally as "emit pump needs a microtask").
+
+### 6c — GATHER stages small records through `stage[16 KiB]` with memcpy (perf, minor)
+
+`h2_emit_flush_tls_records` (`http2_strategy.c:1228`) memcpy's records `< H2_TLS_RECORD_PAYLOAD_MAX (16384)` into a stack `stage[]` before one `SSL_write` (`:1259`). This copies exactly the small bodies the path should be cheap for (measured regression, commit 597a474). Mostly mitigated: hybrid mode (default) only enters GATHER when `large_streams_pending > 0`; small responses with no large stream in flight go through DRAIN (no staging). Touch only if profiling flags it.
+
+### 6d — emit mode selected via env var, not a setter (style / consistency)
+
+`h2_tls_emit_mode()` reads `getenv("TRUE_ASYNC_H2_TLS_EMIT_MODE")` (`http2_strategy.c:1144`), cached process-wide, cannot be set per-server. Violates the "tunables go on `HttpServerConfig` setters, not env/INI" convention. Not a perf or correctness issue — a debug knob to migrate onto a setter during cleanup.
+
+### Explicitly NOT a problem (do not re-flag)
+
+- **Single in-flight cipher write per connection** (`tls_cipher_inflight` gate, `http_connection_tls.c:141`). A TCP socket is a single ordered byte stream — concurrent writes are impossible regardless, and encryption is synchronous inside drain. Depth-1 socket write with completion-driven re-drain is the correct design; freshly produced bytes accumulate in the 64 KiB ring and ship on the next drain. Not a bottleneck.
