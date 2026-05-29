@@ -223,6 +223,7 @@ static int on_message_begin(llhttp_t* llhttp_parser)
     parser->cl_value_first = 0;
     parser->cl_seen_count = 0;
     parser->header_count = 0;
+    parser->host_seen_count = 0;
     parser->te_chunked_seen = false;
 
     return 0;
@@ -312,6 +313,28 @@ static int on_header_value(llhttp_t* llhttp_parser, const char* at, size_t lengt
     return 0;
 }
 
+/* RFC 9110 §7.2 / RFC 3986 §3.2.2: a Host value is host[":" port] in
+ * reg-name/IP-literal form — no userinfo ("@"), no path/query/fragment
+ * ("/", "?", "#"), no comma-joined list, and non-empty. Rejecting the
+ * rest closes routing-confusion / smuggling vectors. Lenient on the
+ * host characters themselves (llhttp already screened control bytes). */
+static bool http1_host_value_valid(const char *v, size_t len)
+{
+    if (len == 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        switch (v[i]) {
+            case '@': case '/': case '?': case '#': case ',': case ' ': case '\t':
+                return false;
+            default:
+                break;
+        }
+    }
+    return true;
+}
+
 /* Helper: Save accumulated header to HashTable */
 static void save_current_header(http1_parser_t *parser)
 {
@@ -389,9 +412,26 @@ static void save_current_header(http1_parser_t *parser)
         parser->cl_seen_count++;
         req->content_length = (size_t)cl;
     } else if (zend_string_equals_literal(name, "transfer-encoding")) {
+        /* RFC 9112 §6.1: an empty Transfer-Encoding value is malformed —
+         * intermediaries disagree on whether the field is present, a
+         * smuggling vector. Reject (the report's SMUG-TE-EMPTY-VALUE). */
+        if (UNEXPECTED(ZSTR_LEN(value) == 0)) {
+            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
+            return;
+        }
         if (strncasecmp(ZSTR_VAL(value), "chunked", 7) == 0) {
             req->chunked = true;
             parser->te_chunked_seen = true;
+        }
+    } else if (zend_string_equals_literal(name, "host")) {
+        /* RFC 9112 §3.2 / RFC 9110 §7.2: exactly one Host, and its value
+         * is host[:port] with no userinfo, path, or comma-joined list.
+         * Each is a request-smuggling / routing-confusion vector. */
+        parser->host_seen_count++;
+        if (UNEXPECTED(parser->host_seen_count > 1
+                       || !http1_host_value_valid(ZSTR_VAL(value), ZSTR_LEN(value)))) {
+            parser->parse_error = HTTP_PARSE_ERR_INVALID_HOST;
+            return;
         }
     } else if (zend_string_equals_literal(name, "connection")) {
         if (strncasecmp(ZSTR_VAL(value), "keep-alive", 10) == 0) {
@@ -514,6 +554,14 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     if (UNEXPECTED(llhttp_parser->http_major != 1 ||
                    (llhttp_parser->http_minor != 0 && llhttp_parser->http_minor != 1))) {
         parser->parse_error = HTTP_PARSE_ERR_INVALID_HTTP_VERSION;
+        return -1;
+    }
+
+    /* RFC 9112 §3.2: HTTP/1.1 requests MUST carry exactly one Host header.
+     * Duplicate/malformed Host is caught in save_current_header; a missing
+     * one is only detectable here. HTTP/1.0 may omit it. */
+    if (UNEXPECTED(llhttp_parser->http_minor == 1 && parser->host_seen_count == 0)) {
+        parser->parse_error = HTTP_PARSE_ERR_INVALID_HOST;
         return -1;
     }
 
@@ -1083,6 +1131,7 @@ int http_parse_error_to_status(http_parse_error_t err)
         case HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH:  return 400;
         case HTTP_PARSE_ERR_CONFLICTING_HEADERS:     return 400;
         case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return 400;
+        case HTTP_PARSE_ERR_INVALID_HOST:            return 400;
         case HTTP_PARSE_ERR_OUT_OF_MEMORY:           return 503;
         case HTTP_PARSE_ERR_SERVICE_UNAVAILABLE:     return 503;
         case HTTP_PARSE_OK:
@@ -1104,6 +1153,7 @@ const char *http_parse_error_reason(http_parse_error_t err)
         case HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH:  return "Bad Request";
         case HTTP_PARSE_ERR_CONFLICTING_HEADERS:     return "Bad Request";
         case HTTP_PARSE_ERR_INVALID_HTTP_VERSION:    return "Bad Request";
+        case HTTP_PARSE_ERR_INVALID_HOST:            return "Bad Request";
         case HTTP_PARSE_ERR_OUT_OF_MEMORY:           return "Service Unavailable";
         case HTTP_PARSE_ERR_SERVICE_UNAVAILABLE:     return "Service Unavailable";
         case HTTP_PARSE_OK:

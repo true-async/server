@@ -44,6 +44,7 @@ typedef enum {
     HTTP_PARSE_ERR_INVALID_CONTENT_LENGTH,   /* 400 — non-numeric/overflow/sign in CL */
     HTTP_PARSE_ERR_CONFLICTING_HEADERS,      /* 400 — CL+TE coexist or duplicate CL with differing values (RFC 9112 §6.3) */
     HTTP_PARSE_ERR_INVALID_HTTP_VERSION,     /* 400 — version other than HTTP/1.0 or HTTP/1.1 */
+    HTTP_PARSE_ERR_INVALID_HOST,             /* 400 — missing/duplicate/malformed Host (RFC 9112 §3.2, 9110 §7.2) */
     HTTP_PARSE_ERR_OUT_OF_MEMORY,            /* 503 — emalloc bailout in parser callback */
     HTTP_PARSE_ERR_SERVICE_UNAVAILABLE       /* 503 — admission reject (overload shedding) */
 } http_parse_error_t;
@@ -275,6 +276,7 @@ typedef struct http1_parser_t {
     uint64_t          cl_value_first;        /* First parsed Content-Length value (only valid when cl_seen_count > 0) */
     uint16_t          cl_seen_count;         /* Number of Content-Length headers seen */
     uint16_t          header_count;          /* Number of header fields parsed (DoS cap) */
+    uint16_t          host_seen_count;       /* Number of Host headers seen (RFC 9112 §3.2 — exactly one) */
     bool              te_chunked_seen;       /* Transfer-Encoding: chunked seen */
 
     /* Boolean flags (clustered to avoid interior padding) */
