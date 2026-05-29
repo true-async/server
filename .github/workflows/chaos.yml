@@ -143,3 +143,99 @@ jobs:
             http-server/tests/bench/.probe-server.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # --------------------------------------------------------------------
+  # Scheduler chaos: run the whole phpt suite under a randomised
+  # coroutine scheduler (--enable-async-fuzz + TRUE_ASYNC_SCHED=random:N).
+  # Zero new test code — it reorders coroutine wakeups to surface
+  # interleaving-dependent races the deterministic FIFO run hides.
+  # --------------------------------------------------------------------
+  scheduler-chaos:
+    name: Scheduler chaos (TRUE_ASYNC_SCHED seed matrix)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c pkg-config \
+            libxml2-dev libssl-dev libsqlite3-dev libonig-dev \
+            libcurl4-openssl-dev libuv1-dev libnghttp2-dev \
+            nghttp2-client gdb
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch="$PHP_SRC_BRANCH" \
+            https://github.com/true-async/php-src php-src
+          git clone --depth=1 --branch="$PHP_ASYNC_BRANCH" \
+            https://github.com/true-async/php-async php-src/ext/async
+
+      - name: Build & install PHP base (debug + async-fuzz)
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          # --enable-async-fuzz compiles the randomised-scheduler hook so
+          # TRUE_ASYNC_SCHED=random:N actually reorders coroutines.
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all --without-pear \
+            --enable-async --enable-async-fuzz \
+            --enable-sockets --enable-posix --enable-pcntl \
+            --enable-opcache --with-openssl \
+            --enable-debug --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+
+      - name: Build & install http_server
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server --enable-http2 --disable-http3 --with-openssl
+          make -j"$(nproc)"
+          sudo make install
+          echo "extension=true_async_server.so" | sudo tee /etc/php.d/true_async_server.ini >/dev/null || true
+
+      - name: Run phpt suite under randomised schedulers
+        working-directory: http-server
+        run: |
+          set -e
+          rc=0
+          for sched in random:1 random:7 random:42 random:1337; do
+            echo "::group::TRUE_ASYNC_SCHED=$sched"
+            if ! TRUE_ASYNC_SCHED="$sched" /usr/local/bin/php \
+                 "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+                 -P -q -j"$(nproc)" \
+                 -g FAIL,BORK,LEAK,XLEAK \
+                 --no-progress --offline --show-diff --set-timeout 120 \
+                 tests/phpt/server; then
+              echo "::error::scheduler chaos failed at TRUE_ASYNC_SCHED=$sched"
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $rc
+
+      - name: Upload scheduler-chaos failures
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: scheduler-chaos-failures-${{ github.run_id }}
+          path: |
+            http-server/tests/phpt/server/**/*.diff
+            http-server/tests/phpt/server/**/*.out
+            http-server/tests/phpt/server/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14
