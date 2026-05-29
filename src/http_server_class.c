@@ -2707,6 +2707,11 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     volatile bool bailout = false;
     zend_try {
         ZEND_ASYNC_SUSPEND();
+        /* The waker owns the wait_event (resume_when took ownership) and
+         * waker_clean disposes it below — drop our pointer first so a late
+         * stop() on a coroutine torn down by cancellation (not by stop())
+         * does not notify a freed event. */
+        server->wait_event = NULL;
         zend_async_waker_clean(coroutine);
 
         if (EG(exception)) {
