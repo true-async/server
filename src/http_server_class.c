@@ -3722,6 +3722,10 @@ static zend_object *http_server_transfer_obj(
            sizeof(dst_obj->pool_unix_fds));
     dst_obj->pool_unix_fd_count = src_shell->pool_unix_fd_count;
 
+    memcpy(dst_obj->pool_tcp_fds, src_shell->pool_tcp_fds,
+           sizeof(dst_obj->pool_tcp_fds));
+    dst_obj->pool_tcp_fd_count = src_shell->pool_tcp_fd_count;
+
     return dst;
 }
 
