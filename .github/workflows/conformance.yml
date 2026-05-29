@@ -1,0 +1,133 @@
+name: Conformance (nightly)
+
+# External protocol-conformance suites run against a live server. Nightly
+# + manual only — these pull third-party tools and take longer than a PR
+# gate should. Slice 2 of #41.
+#
+# Stage 1 (this file): h2spec (summerwind) HTTP/2 RFC 7540 + HPACK 7541.
+# The harness already exists (tests/bench/run_h2spec.sh + h2spec_server.php);
+# CI just provides h2spec and a built extension. testssl.sh / tlsfuzzer
+# are added in follow-up commits.
+
+on:
+  schedule:
+    # 04:23 UTC daily — off the hour to dodge the cron rush.
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+env:
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
+  H2SPEC_VERSION: 2.0.0
+
+jobs:
+  h2spec:
+    name: h2spec (HTTP/2 RFC 7540 + HPACK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout http_server
+        uses: actions/checkout@v5
+        with:
+          path: http-server
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -y
+          # ubuntu-24.04 ships libuv 1.48, nghttp2 1.59, OpenSSL 3.0 —
+          # all new enough for an h2c (--disable-http3) build, so no
+          # from-source dep stack is needed here.
+          sudo apt-get install -y \
+            autoconf bison build-essential re2c pkg-config \
+            libxml2-dev libssl-dev libsqlite3-dev libonig-dev \
+            libcurl4-openssl-dev libuv1-dev libnghttp2-dev
+
+      - name: Install h2spec
+        run: |
+          set -eux
+          curl -sSL -o /tmp/h2spec.tar.gz \
+            "https://github.com/summerwind/h2spec/releases/download/v${H2SPEC_VERSION}/h2spec_linux_amd64.tar.gz"
+          sudo tar -C /usr/local/bin -xzf /tmp/h2spec.tar.gz h2spec
+          h2spec --version || true
+
+      - name: Clone php-src + ext/async
+        run: |
+          set -eux
+          git clone --depth=1 --branch="$PHP_SRC_BRANCH" \
+            https://github.com/true-async/php-src php-src
+          git clone --depth=1 --branch="$PHP_ASYNC_BRANCH" \
+            https://github.com/true-async/php-async php-src/ext/async
+
+      - name: Build & install PHP base
+        working-directory: php-src
+        run: |
+          set -eux
+          ./buildconf --force
+          ./configure \
+            --prefix=/usr/local \
+            --disable-all \
+            --without-pear \
+            --enable-async \
+            --enable-sockets \
+            --enable-posix \
+            --enable-pcntl \
+            --enable-opcache \
+            --with-openssl \
+            --disable-debug \
+            --enable-zts
+          make -j"$(nproc)" >/dev/null
+          sudo make install
+
+      - name: Build & install http_server (h2c, no H3)
+        working-directory: http-server
+        run: |
+          set -eux
+          /usr/local/bin/phpize
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server \
+            --enable-http2 \
+            --disable-http3 \
+            --with-openssl
+          make -j"$(nproc)"
+          sudo make install
+          echo "extension=true_async_server.so" | sudo tee /etc/php.d/true_async_server.ini >/dev/null || true
+
+      - name: Show extension info
+        run: /usr/local/bin/php -m | grep -iE 'async|true_async_server'
+
+      - name: Run h2spec harness
+        working-directory: http-server
+        env:
+          H2SPEC: /usr/local/bin/h2spec
+        run: |
+          set -uo pipefail
+          # run_h2spec.sh invokes `php` from PATH with extension_dir set
+          # to ./modules — that is where phpize built the .so.
+          PATH="/usr/local/bin:$PATH" bash tests/bench/run_h2spec.sh 18081
+          rc=$?
+          echo "h2spec exit=$rc"
+          exit $rc
+
+      - name: Summarize result
+        if: always()
+        working-directory: http-server
+        run: |
+          set -eu
+          res=tests/bench/h2spec-results.txt
+          [ -f "$res" ] || { echo "no results file"; exit 0; }
+          echo "=== h2spec summary ==="
+          grep -iE '[0-9]+ tests?,|passed|failed|skipped' "$res" | tail -5 || true
+
+      - name: Upload h2spec results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: h2spec-results-${{ github.run_id }}
+          path: |
+            http-server/tests/bench/h2spec-results.txt
+            http-server/tests/bench/.h2spec-server.log
+          if-no-files-found: ignore
+          retention-days: 14
