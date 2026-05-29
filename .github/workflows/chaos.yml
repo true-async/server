@@ -1,6 +1,6 @@
-name: Chaos / attack (nightly)
+name: Chaos / attack (weekly)
 
-# Security-focused suites run against a live server. Nightly + manual.
+# Security-focused suites run against a live server. Weekly + manual.
 # Slice of #43.
 #
 # Stage 1 (this file): Http11Probe — RFC 9110/9112 compliance + request
@@ -11,8 +11,8 @@ name: Chaos / attack (nightly)
 
 on:
   schedule:
-    # 05:17 UTC daily.
-    - cron: '17 5 * * *'
+    # 05:17 UTC every Sunday (weekly).
+    - cron: '17 5 * * 0'
   workflow_dispatch:
 
 env:
