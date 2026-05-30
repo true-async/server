@@ -191,6 +191,45 @@ bool http3_packet_send_retry(
         listener, buf, (size_t)n, 0, peer, peer_len);
 }
 
+bool http3_packet_send_connection_refused(
+    http3_listener_t *listener,
+    uint32_t version,
+    const uint8_t *client_dcid, size_t client_dcid_len,
+    const uint8_t *client_scid, size_t client_scid_len,
+    const struct sockaddr *peer, socklen_t peer_len)
+{
+    if (listener == NULL || peer == NULL || client_dcid == NULL
+        || client_dcid_len == 0) {
+        return false;
+    }
+
+    /* Per the ngtcp2 contract: dest CID = the client's SCID (echoed so it
+     * recognises the packet); source CID = the client's DCID, from which
+     * the Initial keys are derived so the client can decrypt. */
+    ngtcp2_cid dcid;
+    dcid.datalen = client_scid_len;
+
+    if (client_scid_len > 0) {
+        memcpy(dcid.data, client_scid, client_scid_len);
+    }
+
+    ngtcp2_cid scid;
+    scid.datalen = client_dcid_len;
+    memcpy(scid.data, client_dcid, client_dcid_len);
+
+    uint8_t buf[1200];
+    ngtcp2_ssize n = ngtcp2_crypto_write_connection_close(
+        buf, sizeof(buf), version, &dcid, &scid,
+        NGTCP2_CONNECTION_REFUSED, NULL, 0);
+
+    if (n < 0) {
+        return false;
+    }
+
+    return http3_listener_send_packet(
+        listener, buf, (size_t)n, 0, peer, peer_len);
+}
+
 int http3_packet_verify_retry_token(
     const uint8_t retry_token_key[32],
     uint32_t version,

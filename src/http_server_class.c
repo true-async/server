@@ -928,6 +928,11 @@ uint64_t http_server_get_max_connection_age_ns(const http_server_object *server)
     return server != NULL ? server->max_connection_age_ns : 0;
 }
 
+int http_server_get_max_connections(const http_server_object *server)
+{
+    return server != NULL ? server->max_connections : 0;
+}
+
 /* Process-wide fallback counters / view. Used for unsupervised
  * connections (server == NULL) and after http_server_free clears
  * conn->server back-pointers. The dummy counters is write-mostly garbage
@@ -3126,6 +3131,8 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
         add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
         add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
         add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
+        add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
+        add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
         /* Audit hardening counters. */
         add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
         add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);

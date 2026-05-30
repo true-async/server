@@ -66,7 +66,7 @@ echo "ok\n";
 default idle=30000
 default window=262144
 default streams=100
-default peer=16
+default peer=0
 set idle=120000
 set window=4194304
 set streams=500

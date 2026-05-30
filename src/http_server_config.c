@@ -164,7 +164,13 @@ static void http_server_config_populate_from_shared(
 #define HTTP3_STREAM_WINDOW_MAX_BYTES         (1024u * 1024u * 1024u)  /* 1 GiB */
 #define DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS  100u
 #define HTTP3_MAX_CONCURRENT_STREAMS_MAX      1000000u
-#define DEFAULT_HTTP3_PEER_BUDGET             16u
+/* 0 = opt-in / disabled by default. Neither nginx nor h2o ships a
+ * default per-source-IP connection cap; a low one collapses legitimate
+ * shared-IP fan-out (CGNAT, proxies, a loopback load generator). Source-
+ * address validation (Retry) is the amplification defence and the global
+ * max_connections gate is the resource backstop. Operators who want a
+ * per-IP throttle set it explicitly via setHttp3PeerConnectionBudget(). */
+#define DEFAULT_HTTP3_PEER_BUDGET             0u
 #define HTTP3_PEER_BUDGET_MAX                 4096u
 
 #ifdef HAVE_HTTP_COMPRESSION

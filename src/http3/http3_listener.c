@@ -148,6 +148,15 @@ struct _http3_listener_s {
     HashTable                 *peer_count_map;
     uint32_t                   peer_budget;
 
+    /* Per-listener (per-worker) live connection count and hard cap — the
+     * QUIC analogue of the TCP active_connections / max_connections
+     * gate, and of nginx's per-worker worker_connections. This is the
+     * resource backstop now that peer_budget is opt-in. max_conns == 0
+     * means unlimited; it is seeded from the server max_connections at
+     * spawn. */
+    uint32_t                   conn_count;
+    uint32_t                   max_conns;
+
     /* Cache for last_peer formatting — inet_ntop + snprintf cost ~100 ns
      * per datagram, but back-to-back packets from the same peer are the
      * common case (handshake + 0-RTT + early app data, or any flooded
@@ -811,6 +820,7 @@ void http3_listener_track_connection(http3_listener_t *l,
 
     conn->next = l->conn_list;
     l->conn_list = conn;
+    l->conn_count++;
 }
 
 /* Mark a connection as having pending output for this tick. Idempotent:
@@ -876,6 +886,7 @@ bool http3_listener_peer_inc(http3_listener_t *l,
                              const struct sockaddr *peer)
 {
     if (l == NULL || peer == NULL) return true;       /* fail-open */
+    if (l->peer_budget == 0) return true;             /* disabled → no map work */
     uint8_t key[16]; size_t klen = 0;
 
     if (!peer_key_from_sockaddr(peer, key, &klen)) {
@@ -904,7 +915,8 @@ bool http3_listener_peer_inc(http3_listener_t *l,
 void http3_listener_peer_dec(http3_listener_t *l,
                              const struct sockaddr *peer)
 {
-    if (l == NULL || peer == NULL || l->peer_count_map == NULL) return;
+    if (l == NULL || peer == NULL || l->peer_budget == 0
+        || l->peer_count_map == NULL) return;
     uint8_t key[16]; size_t klen = 0;
 
     if (!peer_key_from_sockaddr(peer, key, &klen)) return;
@@ -923,6 +935,15 @@ void http3_listener_peer_dec(http3_listener_t *l,
     }
 }
 
+/* Global per-listener admission gate. Returns true while there is room
+ * for one more connection under max_conns (0 = unlimited). Cheap O(1)
+ * counter check — no map, runs on every accepted Initial. */
+bool http3_listener_admit(const http3_listener_t *l)
+{
+    if (l == NULL || l->max_conns == 0) return true;
+    return l->conn_count < l->max_conns;
+}
+
 /* Unhook a connection from the listener's intrusive list and
  * remove every key it occupies in conn_map. The map is non-owning so
  * removing the keys does NOT free the connection; the caller does that.
@@ -938,18 +959,26 @@ void http3_listener_remove_connection(http3_listener_t *l,
     /* Singly-linked unhook. Conn count is bounded by max_connections
      * (low thousands) and reap is rare relative to packet flow, so the
      * O(N) walk is fine. */
+    bool found = false;
+
     if (l->conn_list == conn) {
         l->conn_list = conn->next;
+        found = true;
     } else {
         for (http3_connection_t *p = l->conn_list; p != NULL; p = p->next) {
             if (p->next == conn) {
                 p->next = conn->next;
+                found = true;
                 break;
             }
         }
     }
 
     conn->next = NULL;
+
+    if (found && l->conn_count > 0) {
+        l->conn_count--;
+    }
 
     if (l->conn_map != NULL) {
         if (conn->scidlen > 0) {
@@ -962,6 +991,18 @@ void http3_listener_remove_connection(http3_listener_t *l,
                 || memcmp(conn->original_dcid, conn->scid, conn->scidlen) != 0)) {
             zend_hash_str_del(l->conn_map,
                 (const char *)conn->original_dcid, conn->original_dcidlen);
+        }
+
+        /* Post-Retry routing key (see http3_connection_accept). Mirror the
+         * dedup used at registration so we only remove a key we added. */
+        if (conn->routing_dcidlen > 0
+            && (conn->routing_dcidlen != conn->scidlen
+                || memcmp(conn->routing_dcid, conn->scid, conn->scidlen) != 0)
+            && (conn->routing_dcidlen != conn->original_dcidlen
+                || memcmp(conn->routing_dcid, conn->original_dcid,
+                          conn->original_dcidlen) != 0)) {
+            zend_hash_str_del(l->conn_map,
+                (const char *)conn->routing_dcid, conn->routing_dcidlen);
         }
     }
 }
@@ -1165,14 +1206,19 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
         return NULL;
     }
 
-    /* Per-peer budget. Resolution order:
+    /* Per-peer-IP budget. OPT-IN, default off (0 = unlimited) — neither
+     * nginx nor h2o keep a default per-source-IP connection cap, and a low
+     * one collapses legitimate shared-IP fan-out (CGNAT, proxies, a
+     * loopback load generator) onto a few slots while validated clients
+     * pile up behind PTO backoff. Source-address validation (Retry) is the
+     * amplification defence; the global max_conns gate below is the
+     * resource backstop. Resolution order:
      *   1. HttpServerConfig::setHttp3PeerConnectionBudget() at start().
      *      Reads via http_server_get_http3_peer_connection_budget;
      *      0 means "config left unset" → fall through.
-     *   2. PHP_HTTP3_PEER_BUDGET env (legacy ops escape hatch).
-     *   3. Built-in default 16 (covers polite browser fan-out for a
-     *      single user behind NAT). */
-    listener->peer_budget = 16;
+     *   2. PHP_HTTP3_PEER_BUDGET env (ops escape hatch, [1, 4096]).
+     *   3. Built-in default 0 = disabled. */
+    listener->peer_budget = 0;
     uint32_t cfg_budget = http_server_get_http3_peer_connection_budget(
         (const http_server_object *)server_obj);
 
@@ -1203,6 +1249,16 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
                     env);
             }
         }
+    }
+
+    /* Global per-listener admission cap = the configured server
+     * max_connections (0 = unlimited). Per-worker, like nginx
+     * worker_connections — the resource backstop now that peer_budget is
+     * opt-in. */
+    {
+        const int mc = http_server_get_max_connections(
+            (const http_server_object *)server_obj);
+        listener->max_conns = mc > 0 ? (uint32_t)mc : 0;
     }
 
 #ifdef __linux__

@@ -47,6 +47,14 @@ struct _http3_connection_s {
     uint8_t  original_dcid[20];
     size_t   original_dcidlen;
 
+    /* The DCID the client actually used in the INITIAL that created this
+     * connection (== original_dcid without a Retry; == the Retry's SCID
+     * after one). conn_map is keyed on this so a retransmitted INITIAL
+     * routes back here instead of re-entering the accept path. 0 length
+     * means "same as scid/original_dcid, no extra key registered". */
+    uint8_t  routing_dcid[20];
+    size_t   routing_dcidlen;
+
     /* Peer address (latest observed). Updated each time we successfully
      * read a packet from a new path — but we don't implement migration
      * yet, so this is effectively the initial peer. */

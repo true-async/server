@@ -62,6 +62,7 @@ extern bool http3_listener_peer_inc(http3_listener_t *l,
                                     const struct sockaddr *peer);
 extern void http3_listener_peer_dec(http3_listener_t *l,
                                     const struct sockaddr *peer);
+extern bool http3_listener_admit(const http3_listener_t *l);
 extern void *http3_listener_ssl_ctx(http3_listener_t *l);
 extern const char *http3_listener_host(const http3_listener_t *l);
 extern int http3_listener_port(const http3_listener_t *l);
@@ -261,17 +262,12 @@ static http3_connection_t *http3_connection_accept(
     const struct sockaddr *peer, socklen_t peer_len,
     const uint8_t *retry_odcid, size_t retry_odcid_len)
 {
-    /* Per-peer budget gate. Apply BEFORE we allocate any
-     * ngtcp2/SSL state so a flooding peer can't burn server memory
-     * waiting for the cap to bite. Inc on success → matching dec lives
-     * in http3_connection_free. */
-    if (!http3_listener_peer_inc(listener, peer)) {
-        http3_packet_stats_t *stats = http3_listener_packet_stats(listener);
-
-        if (stats != NULL) stats->quic_conn_per_peer_rejected++;
-        return NULL;
-    }
-
+    /* Admission (global cap + per-peer budget) is decided by the caller
+     * in http3_connection_packet_recv BEFORE this point, where the
+     * address-validation state is known and a refusal can be answered
+     * with CONNECTION_REFUSED. By the time we get here a slot is ours;
+     * a NULL return below therefore means a genuine resource/internal
+     * failure, which the caller undoes (peer_dec) and drops silently. */
     http3_connection_t *c = ecalloc(1, sizeof(http3_connection_t));
     c->listener = listener;
     /* Cache hot-path slices. http3_listener_server_obj() returns NULL
@@ -301,7 +297,6 @@ static http3_connection_t *http3_connection_accept(
      * a zero SCID (would collide in conn_map with any other conn whose
      * SCID generation also failed) — fail the accept cleanly instead. */
     if (!http3_fill_random(c->scid, HTTP3_SCID_LEN)) {
-        http3_listener_peer_dec(listener, peer);
         OPENSSL_cleanse(c, sizeof(*c));
         efree(c);
         return NULL;
@@ -443,7 +438,6 @@ static http3_connection_t *http3_connection_accept(
         NULL, c);
 
     if (rv != 0) {
-        http3_listener_peer_dec(listener, peer);
         OPENSSL_cleanse(c, sizeof(*c));
         efree(c);
         return NULL;
@@ -456,7 +450,6 @@ static http3_connection_t *http3_connection_accept(
      * listener — same cert/key, same ALPN callback that now also
      * accepts "h3". */
     if (!http3_connection_attach_tls(c, (SSL_CTX *)http3_listener_ssl_ctx(listener))) {
-        http3_listener_peer_dec(listener, peer);
         ngtcp2_conn_del(qc);
         OPENSSL_cleanse(c, sizeof(*c));
         efree(c);
@@ -475,6 +468,15 @@ static http3_connection_t *http3_connection_accept(
      *
      * Both lookups point to the same http3_connection_t; the hashtable
      * is non-owning so the double-key does not double-free on teardown. */
+    /* The DCID the client used in THIS Initial. Without a Retry it equals
+     * original_dcid; after a Retry it is the Retry's SCID, which differs
+     * from both keys below — register it so a retransmitted post-Retry
+     * Initial routes back to this conn instead of re-entering accept
+     * (which would re-run admission and, under a per-peer budget, refuse
+     * the client its own already-held slot — or accrue a duplicate conn). */
+    c->routing_dcidlen = hd->dcid.datalen;
+    memcpy(c->routing_dcid, hd->dcid.data, hd->dcid.datalen);
+
     HashTable *map = http3_listener_conn_map(listener);
 
     if (map != NULL) {
@@ -485,6 +487,20 @@ static http3_connection_t *http3_connection_accept(
             || memcmp(c->original_dcid, c->scid, c->scidlen) != 0) {
             zend_hash_str_add_ptr(map,
                 (const char *)c->original_dcid, c->original_dcidlen, c);
+        }
+
+        /* Extra routing key for the post-Retry case. Dedup against the two
+         * keys above (without a Retry it equals original_dcid). */
+        const bool route_is_scid =
+            c->routing_dcidlen == c->scidlen
+            && memcmp(c->routing_dcid, c->scid, c->scidlen) == 0;
+        const bool route_is_odcid =
+            c->routing_dcidlen == c->original_dcidlen
+            && memcmp(c->routing_dcid, c->original_dcid, c->original_dcidlen) == 0;
+
+        if (c->routing_dcidlen > 0 && !route_is_scid && !route_is_odcid) {
+            zend_hash_str_add_ptr(map,
+                (const char *)c->routing_dcid, c->routing_dcidlen, c);
         }
     }
 
@@ -651,12 +667,48 @@ bool http3_connection_dispatch(
             have_odcid = true;
         }
 
+        /* Resource admission gates — address validation (Retry, above) is
+         * the amplification gate; these bound resource use. A validated
+         * client that is refused gets an explicit CONNECTION_REFUSED so it
+         * fails fast instead of hanging on PTO backoff; an unvalidated one
+         * is dropped silently (answering a spoofable Initial is free
+         * amplification). Global cap first (cheap O(1)), then the opt-in
+         * per-peer budget. */
+        if (!http3_listener_admit(listener)) {
+            stats->quic_initial++;
+            stats->quic_conn_global_rejected++;
+
+            if (have_odcid && http3_packet_send_connection_refused(
+                    listener, hd.version, vc.dcid, vc.dcidlen,
+                    vc.scid, vc.scidlen, peer, peer_len)) {
+                stats->quic_conn_refused_sent++;
+            }
+
+            return true;
+        }
+
+        if (!http3_listener_peer_inc(listener, peer)) {
+            stats->quic_initial++;
+            stats->quic_conn_per_peer_rejected++;
+
+            if (have_odcid && http3_packet_send_connection_refused(
+                    listener, hd.version, vc.dcid, vc.dcidlen,
+                    vc.scid, vc.scidlen, peer, peer_len)) {
+                stats->quic_conn_refused_sent++;
+            }
+
+            return true;
+        }
+
         conn = http3_connection_accept(
             listener, &hd, peer, peer_len,
             have_odcid ? odcid_buf      : NULL,
             have_odcid ? odcid_buf_len  : 0);
 
         if (conn == NULL) {
+            /* Genuine resource/internal failure after admission — undo the
+             * per-peer reservation and drop silently. */
+            http3_listener_peer_dec(listener, peer);
             stats->quic_initial++;
             stats->quic_conn_rejected++;
             return true;

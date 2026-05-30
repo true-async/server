@@ -584,6 +584,11 @@ void http_server_trigger_drain(http_server_object *server);
  * when proactive age-drain is disabled or server is NULL. */
 uint64_t http_server_get_max_connection_age_ns(const http_server_object *server);
 
+/* Configured max concurrent connections (0 = unlimited). The HTTP/3
+ * listener uses it as a per-listener admission cap, the QUIC analogue of
+ * the TCP active_connections hard-cap. */
+int http_server_get_max_connections(const http_server_object *server);
+
 /* Pre-rendered Alt-Svc header value (RFC 7838). NULL when no
  * H3 listener is configured or PHP_HTTP3_DISABLE_ALT_SVC is set.
  * Returned string is owned by the server, not refcount-borrowed. */
