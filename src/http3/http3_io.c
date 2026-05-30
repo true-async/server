@@ -122,7 +122,7 @@ void http3_connection_detach_timer(http3_connection_t *c)
 
 void http3_connection_arm_timer(http3_connection_t *c)
 {
-    if (c == NULL || c->closed) {
+    if (c == NULL || c->closed || c->ngtcp2_conn == NULL) {
         return;
     }
 
