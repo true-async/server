@@ -92,6 +92,14 @@ struct _http3_listener_s {
      * twice as we would if we iterated conn_map. */
     http3_connection_t        *conn_list;
 
+    /* Phase-1 deferred-output dirty-list head, linked through
+     * conn->dirty_next. The read path marks conns here instead of
+     * draining per datagram; http3_listener_flush_dirty drains the list
+     * once per recvmmsg tick. Always empty between ticks — populated and
+     * fully drained within a single poll-cb wakeup, so no conn freed by a
+     * coroutine/timer between ticks can dangle on it. */
+    http3_connection_t        *dirty_head;
+
     /* SSL_CTX* shared with the TCP/TLS path. Non-owning — the server
      * constructs and tears it down. Stored as void* to keep openssl.h
      * out of the public listener header. */
@@ -476,9 +484,16 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
         /* Short read = queue empty. Avoid the next syscall when we already
          * know there is nothing pending. */
         if (n < HTTP3_LISTENER_RECV_BATCH) {
-            return;
+            break;
         }
     }
+
+    /* Flush all connections touched this tick exactly once. Coalesces the
+     * output of a multi-datagram burst into one drain (one GSO sendmsg)
+     * per conn instead of one per inbound datagram. The listener-closed
+     * bail-out above returns early and skips this — that path is teardown,
+     * where conns are reaped by listener destroy, not flushed. */
+    http3_listener_flush_dirty(listener);
 }
 #endif /* __linux__ */
 
@@ -760,6 +775,40 @@ void http3_listener_track_connection(http3_listener_t *l,
 
     conn->next = l->conn_list;
     l->conn_list = conn;
+}
+
+/* Mark a connection as having pending output for this tick. Idempotent:
+ * a conn touched by several datagrams in one tick is linked once. */
+void http3_listener_mark_flush(http3_listener_t *l, http3_connection_t *conn)
+{
+    if (conn->in_dirty) {
+        return;
+    }
+
+    conn->in_dirty   = true;
+    conn->dirty_next = l->dirty_head;
+    l->dirty_head    = conn;
+}
+
+/* Drain every connection marked this tick, exactly once, and clear the
+ * list. Runs at the end of the poll-cb after the recvmmsg batch. */
+void http3_listener_flush_dirty(http3_listener_t *l)
+{
+    http3_connection_t *conn = l->dirty_head;
+    l->dirty_head = NULL;
+
+    while (conn != NULL) {
+        /* Capture the link and clear the marker before flushing —
+         * http3_connection_flush may reap the conn on a terminal state,
+         * after which it must not be touched. */
+        http3_connection_t *next = conn->dirty_next;
+        conn->dirty_next = NULL;
+        conn->in_dirty   = false;
+
+        http3_connection_flush(conn);
+
+        conn = next;
+    }
 }
 
 /* Per-peer budget helpers.

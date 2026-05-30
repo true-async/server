@@ -720,22 +720,14 @@ bool http3_connection_dispatch(
         stats->quic_read_fatal++;
     }
 
-    /* Flush any outgoing handshake/control packets ngtcp2 has
-     * produced as a consequence of processing this read, then re-arm the
-     * retransmission/PTO timer so missing ACKs still trigger retries. We
-     * drain even on read errors because ngtcp2 may want to emit a
-     * CONNECTION_CLOSE frame explaining the failure to the peer. */
-    http3_connection_drain_out(conn);
-    /* read_pkt may have moved the connection into closing or
-     * draining (peer-initiated close, or transport/crypto error). Reap
-     * before arming the timer — the retransmission timer is meaningless
-     * in those states. check_terminal returns true after freeing conn,
-     * so we MUST NOT touch it on the true branch. */
-    if (http3_connection_check_terminal(conn)) {
-        return true;
-    }
-
-    http3_connection_arm_timer(conn);
+    /* Defer output. Instead of draining (and possibly issuing a sendmsg)
+     * per datagram, mark the conn so the listener flushes it once after
+     * the whole recvmmsg tick — a burst of datagrams for this conn then
+     * coalesces into a single drain. The drain + terminal-reap + timer-arm
+     * tail runs in http3_connection_flush from http3_listener_flush_dirty.
+     * We even mark on read errors: ngtcp2 may want to emit a
+     * CONNECTION_CLOSE, which the deferred drain still ships. */
+    http3_listener_mark_flush(listener, conn);
 
     return true;
 }

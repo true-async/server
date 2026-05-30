@@ -87,6 +87,14 @@ struct _http3_connection_s {
      * The hashtable stays non-owning; this list is the ownership edge. */
     http3_connection_t          *next;
 
+    /* Phase-1 deferred-output dirty-list link. The read path marks the
+     * conn via http3_listener_mark_flush instead of draining per datagram;
+     * the listener flushes the whole list once per recvmmsg tick, so a
+     * burst of N datagrams for one conn coalesces into one drain (one GSO
+     * sendmsg) instead of N. in_dirty guards against double-linking. */
+    http3_connection_t          *dirty_next;
+    bool                         in_dirty;
+
     /* Back-pointer to the owning listener. Used by ngtcp2 callbacks that
      * need to emit packets or update listener-level counters. Non-owning
      * reference — the listener outlives the connection. */
@@ -152,5 +160,11 @@ void http3_connection_free(http3_connection_t *conn);
  * still walks conn_list directly with http3_connection_free since the
  * listener itself is going away. Safe to call exactly once per conn. */
 void http3_connection_reap(http3_connection_t *conn);
+
+/* Flush one connection's pending ngtcp2 output and settle its lifecycle:
+ * drain_out, then reap-or-arm-timer via check_terminal. Defined in
+ * http3_io.c next to drain_out. The caller MUST NOT touch `conn` after
+ * this returns — it may have been reaped. */
+void http3_connection_flush(http3_connection_t *conn);
 
 #endif /* HTTP3_CONNECTION_H */
