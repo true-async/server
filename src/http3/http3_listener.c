@@ -50,6 +50,19 @@
  * eliciting packets). See h2o lib/http3/common.c:819-822. */
 #define HTTP3_LISTENER_RECV_BATCH 10
 
+/* Per-recv-slot buffer + control sizes. With UDP_GRO the kernel coalesces
+ * same-4-tuple inbound datagrams into one slot, so the slot must hold a
+ * burst (capped at 16 MTUs — a full 64 KiB × batch would blow the
+ * reactor-callback stack) and the control buffer must hold the UDP_GRO
+ * cmsg alongside the ECN one. Without GRO a slot is one MTU + one cmsg. */
+#if defined(UDP_GRO)
+# define HTTP3_LISTENER_RECV_SLOT 24576
+# define HTTP3_LISTENER_RECV_CTRL (2 * CMSG_SPACE(sizeof(int)))
+#else
+# define HTTP3_LISTENER_RECV_SLOT HTTP3_LISTENER_DGRAM_SIZE
+# define HTTP3_LISTENER_RECV_CTRL CMSG_SPACE(sizeof(int))
+#endif
+
 struct _http3_listener_s {
     /* Linux raw-fd path. fd >= 0 iff this listener is using the
      * recvmmsg/sendmsg fast path; otherwise the legacy udp_io path
@@ -381,17 +394,17 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
 
     struct mmsghdr mess[HTTP3_LISTENER_RECV_BATCH];
     struct iovec   iovs[HTTP3_LISTENER_RECV_BATCH];
-    uint8_t        bufs[HTTP3_LISTENER_RECV_BATCH][HTTP3_LISTENER_DGRAM_SIZE];
+    uint8_t        bufs[HTTP3_LISTENER_RECV_BATCH][HTTP3_LISTENER_RECV_SLOT];
     struct sockaddr_storage src_addrs[HTTP3_LISTENER_RECV_BATCH];
-    /* cmsg ctrl buffer per mmsghdr — sized for IP_TOS (int via
-     * IPV6_TCLASS) which is the largest single cmsg we need on
-     * recv. CMSG_SPACE(sizeof(int)) typically ≈ 24 bytes. */
-    uint8_t        ctrls[HTTP3_LISTENER_RECV_BATCH][CMSG_SPACE(sizeof(int))];
+    /* cmsg ctrl buffer per mmsghdr — holds the ECN cmsg (IP_TOS /
+     * IPV6_TCLASS) plus, when UDP_GRO is on, the segment-size cmsg.
+     * See HTTP3_LISTENER_RECV_CTRL. */
+    uint8_t        ctrls[HTTP3_LISTENER_RECV_BATCH][HTTP3_LISTENER_RECV_CTRL];
 
     for (unsigned outer = 0; outer < H3_DRAIN_BATCH_CAP; ++outer) {
         for (int i = 0; i < HTTP3_LISTENER_RECV_BATCH; ++i) {
             iovs[i].iov_base = bufs[i];
-            iovs[i].iov_len  = HTTP3_LISTENER_DGRAM_SIZE;
+            iovs[i].iov_len  = HTTP3_LISTENER_RECV_SLOT;
             mess[i].msg_hdr  = (struct msghdr){
                 .msg_name    = &src_addrs[i],
                 .msg_namelen = sizeof(src_addrs[i]),
@@ -438,6 +451,10 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
              * those bits. We pass the byte through unchanged; pi.ecn
              * downstream will mask. */
             uint8_t ecn = 0;
+            /* UDP_GRO segment size, written by the kernel when several
+             * datagrams were coalesced into this slot. 0 = no cmsg = the
+             * whole slot is a single datagram. */
+            int gso = 0;
             for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mess[i].msg_hdr);
                  cm != NULL;
                  cm = CMSG_NXTHDR(&mess[i].msg_hdr, cm)) {
@@ -462,22 +479,41 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                     ecn = (uint8_t)(tclass & 0xff);
                 }
 #endif
+#if defined(UDP_GRO)
+                else if (cm->cmsg_level == SOL_UDP
+                         && cm->cmsg_type == UDP_GRO) {
+                    /* Kernel writes a 16-bit size into an int-sized slot;
+                     * read it as int via memcpy (alignment-safe). */
+                    memcpy(&gso, CMSG_DATA(cm), sizeof(gso));
+                }
+#endif
             }
 
-            listener->stats.datagrams_received++;
-            listener->stats.bytes_received += (uint64_t)dlen;
-            listener->stats.last_datagram_size = dlen;
+            /* UDP_GRO: the slot may carry several coalesced datagrams of
+             * `gso` bytes each (the last possibly shorter). All share one
+             * peer (the kernel only coalesces a single 4-tuple), so update
+             * the peer cache once, then feed each segment to dispatch as
+             * its own datagram. gso == 0 (no cmsg) → one segment of dlen,
+             * byte-identical to the non-GRO path. */
+            const size_t seg = (gso > 0) ? (size_t)gso : dlen;
 
             update_peer_cache(listener, src, src_len);
 
-            http3_connection_dispatch(listener,
-                                      bufs[i], dlen, ecn,
-                                      src, src_len);
+            for (size_t off = 0; off < dlen; off += seg) {
+                const size_t plen = (dlen - off < seg) ? (dlen - off) : seg;
 
-            /* Dispatch may have closed the listener via reap-on-close.
-             * Bail out of both loops in that case. */
-            if (listener->closed) {
-                return;
+                listener->stats.datagrams_received++;
+                listener->stats.bytes_received    += (uint64_t)plen;
+                listener->stats.last_datagram_size = plen;
+
+                http3_connection_dispatch(listener, bufs[i] + off, plen,
+                                          ecn, src, src_len);
+
+                /* Any segment's dispatch may reap-on-close the listener;
+                 * re-check before touching it again. */
+                if (listener->closed) {
+                    return;
+                }
             }
         }
 
@@ -1028,6 +1064,13 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 #ifdef SO_REUSEPORT
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+#endif
+#if defined(UDP_GRO)
+    /* Coalesce same-4-tuple inbound datagrams into one recv slot; the
+     * kernel attaches a UDP_GRO cmsg with the per-segment size, which the
+     * poll loop splits back into individual datagrams. Socket-level, so
+     * set once regardless of address family. */
+    (void)setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(one));
 #endif
     if (family == AF_INET6) {
         (void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));

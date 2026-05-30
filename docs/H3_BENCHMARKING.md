@@ -122,6 +122,24 @@ all succeed). They fail only with h3client (its flow-control limit) or under
 `-m 32 × 1 MB` (320 MB in flight at once). Single-connection scales cleanly
 `-m 1..32` → 7.7k → 51k RPS.
 
+### Phase 4 — UDP_GRO on receive: correct, but not measurable on loopback
+
+`setsockopt(SOL_UDP, UDP_GRO)` + parse the per-slot `UDP_GRO` cmsg (segment
+size) + split the coalesced recv buffer into individual datagrams fed to
+`read_pkt`. Recv slot grown 1600 → 24 KiB (16 MTUs, stack), control buffer
+24 → 48 B (ECN + GRO cmsgs). Fallback: cmsg absent → segment size 0 → one
+datagram per slot, byte-identical to the non-GRO path.
+
+Status: implemented, **25/25 phpt green, no RPS regression** (c=1 m=32 16K:
+~52k vs ~51k Phase-1). **But the win is not measurable on this box: WSL2
+loopback barely coalesces** — under a download flood, `strace` saw 1 slot
+> MTU (a 2400 B = 2-datagram coalesce) out of 376 `recvmmsg`. That single
+coalesced slot was split and dispatched correctly (transfer completed,
+tests pass), proving the split path, but loopback delivers UDP largely
+un-coalesced, so `recvmsg`-per-datagram barely drops here. UDP_GRO's benefit
+lands on real NICs / paths with driver GRO — exactly where it is "our edge"
+(neither nginx nor h2o enable it). Measure there, not on `lo`.
+
 ## Reproduce
 
 ```
