@@ -951,6 +951,7 @@ const http_server_view_t http_server_view_default = {
     .http3_socket_buffer_bytes = 0,
     .tls_buffer_bytes = 0,
     .http3_alt_svc_enabled = true,
+    .http3_pacing = false,
 };
 
 /* Counters / view accessors. Always return a non-NULL pointer; callers
@@ -2231,6 +2232,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isHttp3AltSvcEnabled", &retval);
     server->view.http3_alt_svc_enabled = (Z_TYPE(retval) == IS_TRUE);
+
+    zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isHttp3Pacing", &retval);
+    server->view.http3_pacing = (Z_TYPE(retval) == IS_TRUE);
 
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isTelemetryEnabled", &retval);
     server->view.telemetry_enabled = (Z_TYPE(retval) == IS_TRUE);

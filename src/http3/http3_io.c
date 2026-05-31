@@ -263,6 +263,19 @@ void http3_connection_drain_out(http3_connection_t *c)
         }                                                                      \
     } while (0)
 
+    /* Phase 2 — opt-in pacing (#59, HttpServerConfig::setHttp3Pacing). OFF
+     * by default: the block below is inert and the drain runs exactly as
+     * before. ON: cap each burst at the congestion controller's
+     * send_quantum and yield to the timer only for a real inter-burst gap
+     * (> H3_PACING_MIN_DELAY_NS) so a lossless path still drains inline. */
+    const bool pacing = (c->view != NULL && c->view->http3_pacing);
+    enum { H3_PACING_MIN_DELAY_NS = 1000000 };   /* 1 ms */
+    size_t   send_quantum  = pacing
+        ? ngtcp2_conn_get_send_quantum((ngtcp2_conn *)c->ngtcp2_conn) : 0;
+    size_t   quantum_sent  = 0;
+    uint64_t drained_bytes = 0;
+    bool     paced_yield   = false;
+
     for (;;) {
         if (++drain_iter > H3_DRAIN_ITER_CAP) {
             if (stats != NULL) stats->quic_drain_iter_cap_hit++;
@@ -418,10 +431,51 @@ void http3_connection_drain_out(http3_connection_t *c)
             batch_count = 1;
             batch_ecn = pkt_ecn;
         }
+
+        if (pacing) {
+            drained_bytes += pkt_len;
+            quantum_sent  += pkt_len;
+
+            if (send_quantum > 0 && quantum_sent >= send_quantum) {
+                /* Quantum spent. Set the next pacing tx-time (ngtcp2 counts
+                 * the bytes it handed us via writev, regardless of our GSO
+                 * buffering), then read whether it wants a real gap. */
+                ngtcp2_conn_update_pkt_tx_time((ngtcp2_conn *)c->ngtcp2_conn,
+                                               http3_ts_now());
+                const ngtcp2_tstamp now_ts = http3_ts_now();
+                const ngtcp2_tstamp expiry =
+                    ngtcp2_conn_get_expiry((ngtcp2_conn *)c->ngtcp2_conn);
+
+                if (expiry != UINT64_MAX
+                    && expiry > now_ts + (ngtcp2_tstamp)H3_PACING_MIN_DELAY_NS) {
+                    /* Real inter-burst gap — ship what's batched, yield. */
+                    H3_FLUSH_BATCH();
+                    paced_yield = true;
+                    break;
+                }
+
+                /* Sub-threshold gap (loopback / fast path) — keep draining
+                 * inline; no flush, so GSO aggregation is preserved. */
+                quantum_sent = 0;
+                send_quantum = ngtcp2_conn_get_send_quantum((ngtcp2_conn *)c->ngtcp2_conn);
+            }
+        }
     }
-    /* Drain-loop exit (cap, error, or no more packets) — flush whatever
-     * is left in the batch. */
+    /* Drain-loop exit (cap, error, paced yield, or no more packets) — flush
+     * whatever is left in the batch. */
     H3_FLUSH_BATCH();
+
+    /* Pacing tail: keep ngtcp2's pacing state current; on a paced yield arm
+     * the timer ourselves so the remainder reschedules regardless of caller.
+     * Both no-op when pacing is off. */
+    if (pacing && drained_bytes > 0) {
+        ngtcp2_conn_update_pkt_tx_time((ngtcp2_conn *)c->ngtcp2_conn,
+                                       http3_ts_now());
+    }
+
+    if (paced_yield) {
+        http3_connection_arm_timer(c);
+    }
 #undef H3_FLUSH_BATCH
 }
 
