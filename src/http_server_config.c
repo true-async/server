@@ -82,6 +82,7 @@ struct _http_server_shared_config_t {
     uint32_t                http3_max_concurrent_streams;
     uint32_t                http3_peer_connection_budget;
     uint32_t                http3_socket_buffer_bytes;
+    uint32_t                tls_buffer_bytes;
 
     /* Compression — see http_server_config_t for semantics. The MIME
      * whitelist is deep-copied to a persistent zend_string array so
@@ -175,6 +176,17 @@ static void http_server_config_populate_from_shared(
 #define HTTP3_PEER_BUDGET_MAX                 4096u
 #define DEFAULT_HTTP3_SOCKET_BUFFER_BYTES     (8u * 1024u * 1024u)   /* 8 MiB */
 #define HTTP3_SOCKET_BUFFER_MAX               (256u * 1024u * 1024u) /* 256 MiB */
+
+/* TLS CT-out BIO ring (#29). One TLS record's ciphertext is ~17 KiB
+ * (16 KiB payload + AEAD/header overhead) — TLS_BIO_RING_SIZE_SMALL in
+ * tls_layer.h. The setter rounds the requested bytes UP to a whole number
+ * of records so the ring never holds a partial record (which would park
+ * needlessly), floored at one record (below that the handshake breaks).
+ * Default matches TLS_BIO_RING_SIZE (64 KiB). 0 => default. */
+#define TLS_BUFFER_RECORD_BYTES               (17u * 1024u)          /* 1 record ciphertext */
+#define DEFAULT_TLS_BUFFER_BYTES              (64u * 1024u)          /* = TLS_BIO_RING_SIZE */
+#define TLS_BUFFER_MAX_RECORDS                16u
+#define TLS_BUFFER_MAX                        (TLS_BUFFER_RECORD_BYTES * TLS_BUFFER_MAX_RECORDS)
 
 #ifdef HAVE_HTTP_COMPRESSION
 /* Compression knob defaults are sourced from
@@ -386,6 +398,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->http3_max_concurrent_streams = DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS;
     config->http3_peer_connection_budget = DEFAULT_HTTP3_PEER_BUDGET;
     config->http3_socket_buffer_bytes = DEFAULT_HTTP3_SOCKET_BUFFER_BYTES;
+    config->tls_buffer_bytes = DEFAULT_TLS_BUFFER_BYTES;
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
     config->auto_await_body = true;  /* Default: wait for body on non-multipart */
@@ -1479,6 +1492,60 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3SocketBufferBytes)
     RETURN_LONG((zend_long)config->http3_socket_buffer_bytes);
 }
 
+/* proto HttpServerConfig::setTlsBufferBytes(int $bytes): static
+ *
+ * CT-out BIO ring — how much ciphertext OpenSSL can stage per SSL_write
+ * before the emit path parks the tail (issue #29). Bigger = fewer
+ * syscalls / higher throughput on bodies larger than one TLS record, at
+ * ~$bytes more memory per TLS connection; smaller saves memory for
+ * mostly-small-response deployments at no RPS cost.
+ *
+ * The value is rounded UP to a whole number of TLS records (~17 KiB
+ * each: 16 KiB payload + AEAD/header overhead) so the ring always holds
+ * whole records — e.g. 16384 becomes 17408. Floored at one record,
+ * capped at 16. 0 resets to the default (64 KiB). getTlsBufferBytes()
+ * returns the effective (rounded) size. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setTlsBufferBytes)
+{
+    zend_long n;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(n)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) { return; }
+
+    if (n < 0 || (zend_ulong)n > TLS_BUFFER_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "TlsBufferBytes must be between 0 and 278528 (16 TLS records)", 0);
+        return;
+    }
+
+    if (n == 0) {
+        config->tls_buffer_bytes = DEFAULT_TLS_BUFFER_BYTES;
+    } else {
+        uint32_t records = ((uint32_t)n + TLS_BUFFER_RECORD_BYTES - 1u)
+                           / TLS_BUFFER_RECORD_BYTES;
+
+        if (records < 1u) { records = 1u; }
+
+        if (records > TLS_BUFFER_MAX_RECORDS) { records = TLS_BUFFER_MAX_RECORDS; }
+
+        config->tls_buffer_bytes = records * TLS_BUFFER_RECORD_BYTES;
+    }
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getTlsBufferBytes(): int — effective (rounded) size. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getTlsBufferBytes)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->tls_buffer_bytes);
+}
+
 /* {{{ proto HttpServerConfig::setHttp3AltSvcEnabled(bool $enable): static
  *
  * Toggle the RFC 7838 Alt-Svc header advertisement. Default true.
@@ -2394,6 +2461,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->http3_max_concurrent_streams = 0;
     config->http3_peer_connection_budget = 0;
     config->http3_socket_buffer_bytes = 0;
+    config->tls_buffer_bytes = 0;
     config->http3_alt_svc_enabled = true;
     config->write_buffer_size = 0;
     config->http2_enabled = false;
@@ -2529,6 +2597,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
     shared->http3_peer_connection_budget = src->http3_peer_connection_budget;
     shared->http3_socket_buffer_bytes = src->http3_socket_buffer_bytes;
+    shared->tls_buffer_bytes = src->tls_buffer_bytes;
     shared->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     shared->write_buffer_size  = src->write_buffer_size;
 
@@ -2679,6 +2748,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
     dst->http3_peer_connection_budget = src->http3_peer_connection_budget;
     dst->http3_socket_buffer_bytes = src->http3_socket_buffer_bytes;
+    dst->tls_buffer_bytes = src->tls_buffer_bytes;
     dst->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     dst->write_buffer_size  = src->write_buffer_size;
 

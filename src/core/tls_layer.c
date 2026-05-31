@@ -690,7 +690,7 @@ static tls_alpn_t tls_lookup_alpn(SSL *ssl)
     return TLS_ALPN_NONE;
 }
 
-tls_session_t *tls_session_new(tls_context_t *ctx)
+tls_session_t *tls_session_new(tls_context_t *ctx, size_t ct_out_ring_bytes)
 {
     if (ctx == NULL || ctx->ctx == NULL) {
         return NULL;
@@ -706,10 +706,16 @@ tls_session_t *tls_session_new(tls_context_t *ctx)
     BIO *internal_bio = NULL;
     BIO *network_bio  = NULL;
 
-    /* internal_bio writebuf = CT-out (OpenSSL writes ciphertext for us to send) — 64K for
-     * multi-record batching on static / h2. network_bio writebuf = CT-in (we feed bytes
-     * from socket for OpenSSL to decrypt) — capped by one TLS record = 17K. */
-    if (BIO_new_bio_pair(&internal_bio, TLS_BIO_RING_SIZE,
+    /* 0 (unconfigured / fallback view) => compiled default. */
+    if (ct_out_ring_bytes == 0) {
+        ct_out_ring_bytes = TLS_BIO_RING_SIZE;
+    }
+
+    /* internal_bio writebuf = CT-out (OpenSSL writes ciphertext for us to send) — default 64K
+     * for multi-record batching on static / h2, tunable via HttpServerConfig::setTlsBufferBytes.
+     * network_bio writebuf = CT-in (we feed bytes from socket for OpenSSL to decrypt) —
+     * capped by one TLS record = 17K. */
+    if (BIO_new_bio_pair(&internal_bio, ct_out_ring_bytes,
                          &network_bio,  TLS_BIO_RING_SIZE_SMALL) != 1) {
         SSL_free(ssl);
         ERR_clear_error();
