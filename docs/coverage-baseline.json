@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 14683,
-      "hit": 11896
+      "total": 14712,
+      "hit": 11955
     },
     "functions": {
       "total": 995,
-      "hit": 897
+      "hit": 899
     }
   },
   "files": {
@@ -312,18 +312,18 @@
     },
     "src/http3/http3_callbacks.c": {
       "lines": {
-        "total": 505,
-        "hit": 387
+        "total": 509,
+        "hit": 403
       },
       "functions": {
         "total": 31,
-        "hit": 24
+        "hit": 25
       }
     },
     "src/http3/http3_connection.c": {
       "lines": {
-        "total": 335,
-        "hit": 274
+        "total": 344,
+        "hit": 283
       },
       "functions": {
         "total": 10,
@@ -342,8 +342,8 @@
     },
     "src/http3/http3_io.c": {
       "lines": {
-        "total": 218,
-        "hit": 185
+        "total": 233,
+        "hit": 208
       },
       "functions": {
         "total": 8,
@@ -352,22 +352,22 @@
     },
     "src/http3/http3_listener.c": {
       "lines": {
-        "total": 506,
-        "hit": 375
+        "total": 495,
+        "hit": 368
       },
       "functions": {
-        "total": 30,
-        "hit": 29
+        "total": 29,
+        "hit": 28
       }
     },
     "src/http3/http3_packet.c": {
       "lines": {
-        "total": 80,
-        "hit": 78
+        "total": 91,
+        "hit": 83
       },
       "functions": {
-        "total": 6,
-        "hit": 6
+        "total": 7,
+        "hit": 7
       }
     },
     "src/http3/http3_static_response.c": {
@@ -562,8 +562,8 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1439,
-        "hit": 981
+        "total": 1440,
+        "hit": 982
       },
       "functions": {
         "total": 76,
@@ -573,11 +573,11 @@
     "src/http_server_config.c": {
       "lines": {
         "total": 1258,
-        "hit": 1186
+        "hit": 1198
       },
       "functions": {
         "total": 117,
-        "hit": 111
+        "hit": 112
       }
     },
     "src/http_server_exceptions.c": {
