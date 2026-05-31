@@ -509,8 +509,8 @@ int main(int argc, char **argv) {
      * waiting for MAX_DATA. The single-shot phpt path never gets close
      * to these. */
     tp.initial_max_data         = 256 * 1024 * 1024;
-    tp.initial_max_stream_data_bidi_local  = 1 * 1024 * 1024;
-    tp.initial_max_stream_data_bidi_remote = 1 * 1024 * 1024;
+    tp.initial_max_stream_data_bidi_local  = 16 * 1024 * 1024;
+    tp.initial_max_stream_data_bidi_remote = 16 * 1024 * 1024;
     tp.initial_max_stream_data_uni         = 256 * 1024;
     tp.max_idle_timeout         = 5 * NGTCP2_SECONDS;
     tp.active_connection_id_limit = 7;
