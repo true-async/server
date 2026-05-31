@@ -459,6 +459,17 @@ int main(int argc, char **argv) {
     if (bind(c.fd, (struct sockaddr *)&zero, sizeof(zero)) < 0) {
         perror("bind"); return 2;
     }
+    /* Large receive buffer + non-blocking so the recv loop drains a whole
+     * server burst per wakeup. Without this, reading one datagram per poll
+     * lets a large GSO burst overflow the default ~208 KiB kernel buffer;
+     * the dropped packets gap the stream and stall flow-control progress
+     * on responses larger than the stream window. */
+    {
+        const int rcvbuf = 8 * 1024 * 1024;
+        (void)setsockopt(c.fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        const int fl = fcntl(c.fd, F_GETFL, 0);
+        if (fl >= 0) (void)fcntl(c.fd, F_SETFL, fl | O_NONBLOCK);
+    }
     c.local_len = sizeof(c.local);
     if (getsockname(c.fd, (struct sockaddr *)&c.local, &c.local_len) < 0) {
         perror("getsockname"); return 2;
@@ -509,8 +520,8 @@ int main(int argc, char **argv) {
      * waiting for MAX_DATA. The single-shot phpt path never gets close
      * to these. */
     tp.initial_max_data         = 256 * 1024 * 1024;
-    tp.initial_max_stream_data_bidi_local  = 1 * 1024 * 1024;
-    tp.initial_max_stream_data_bidi_remote = 1 * 1024 * 1024;
+    tp.initial_max_stream_data_bidi_local  = 16 * 1024 * 1024;
+    tp.initial_max_stream_data_bidi_remote = 16 * 1024 * 1024;
     tp.initial_max_stream_data_uni         = 256 * 1024;
     tp.max_idle_timeout         = 5 * NGTCP2_SECONDS;
     tp.active_connection_id_limit = 7;
@@ -648,25 +659,37 @@ int main(int argc, char **argv) {
             ngtcp2_conn_handle_expiry(c.qc, now_ns());
             continue;
         }
-        uint8_t rbuf[2048];
-        struct sockaddr_storage src; socklen_t srclen = sizeof(src);
-        ssize_t r = recvfrom(c.fd, rbuf, sizeof(rbuf), 0,
-                             (struct sockaddr *)&src, &srclen);
-        if (r < 0) { if (errno == EINTR) continue; perror("recvfrom"); return 1; }
-
-        ngtcp2_path_storage ps = {0};
-        ngtcp2_path_storage_init(&ps,
-            (struct sockaddr *)&c.local,  c.local_len,
-            (struct sockaddr *)&src,      srclen, NULL);
-        ngtcp2_pkt_info pi = {0};
-        int rv = ngtcp2_conn_read_pkt(c.qc, &ps.path, &pi, rbuf, (size_t)r, now_ns());
-        if (rv != 0) {
-            if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) {
-                break;
+        /* Drain every datagram queued on the socket this wakeup. A large
+         * GSO burst arrives as many datagrams; one read per poll would
+         * overflow the kernel buffer and drop the rest. */
+        bool conn_done = false;
+        for (;;) {
+            uint8_t rbuf[2048];
+            struct sockaddr_storage src; socklen_t srclen = sizeof(src);
+            ssize_t r = recvfrom(c.fd, rbuf, sizeof(rbuf), 0,
+                                 (struct sockaddr *)&src, &srclen);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                perror("recvfrom"); return 1;
             }
-            fprintf(stderr, "h3client: read_pkt rv=%d\n", rv);
-            return 1;
+
+            ngtcp2_path_storage ps = {0};
+            ngtcp2_path_storage_init(&ps,
+                (struct sockaddr *)&c.local,  c.local_len,
+                (struct sockaddr *)&src,      srclen, NULL);
+            ngtcp2_pkt_info pi = {0};
+            int rv = ngtcp2_conn_read_pkt(c.qc, &ps.path, &pi, rbuf, (size_t)r, now_ns());
+            if (rv != 0) {
+                if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) {
+                    conn_done = true;
+                    break;
+                }
+                fprintf(stderr, "h3client: read_pkt rv=%d\n", rv);
+                return 1;
+            }
         }
+        if (conn_done) break;
     }
 
     if (completed < request_count) {
