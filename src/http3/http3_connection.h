@@ -55,11 +55,14 @@ struct _http3_connection_s {
     uint8_t  routing_dcid[20];
     size_t   routing_dcidlen;
 
-    /* Peer address (latest observed). Updated each time we successfully
-     * read a packet from a new path — but we don't implement migration
-     * yet, so this is effectively the initial peer. */
+    /* Peer address — the live send path. Re-pointed to a new client path on
+     * migration / NAT rebind (RFC 9000 §9), so drain_out follows it. */
     struct sockaddr_storage peer;
     socklen_t               peer_len;
+
+    /* The address that paid the per-peer admission slot at accept (IP-keyed,
+     * no length needed), so teardown frees the right bucket post-migration. */
+    struct sockaddr_storage admit_peer;
 
     /* Opaque ngtcp2_conn pointer. void* to keep ngtcp2 types out of this
      * header — the concrete type is ngtcp2_conn *. Accessed via

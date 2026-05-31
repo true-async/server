@@ -9,10 +9,10 @@
  *
  * Built only by the tests' SKIPIF block — host curl is not linked
  * against ngtcp2/nghttp3 in the project's pinned stack, so we ship a
- * ~300 LoC client of our own. Missing on purpose: 0-RTT, connection
- * migration, retransmit-bookkeeping niceties, multiple in-flight
- * streams. Single GET / single POST / one shot is enough to validate
- * Step 4 end-to-end.
+ * ~300 LoC client of our own. Missing on purpose: 0-RTT,
+ * retransmit-bookkeeping niceties, multiple in-flight streams. A NAT
+ * rebind can be simulated with H3CLIENT_MIGRATE_AFTER=N (pairs with
+ * H3CLIENT_REQUEST_COUNT>N) to exercise the server's migration path.
  */
 
 #define _GNU_SOURCE
@@ -45,6 +45,7 @@ static const uint8_t ALPN_H3[] = { 2, 'h', '3' };
 
 typedef struct {
     int                          fd;
+    int                          retired_fd;  /* old socket kept open across a NAT rebind */
     struct sockaddr_storage      remote;
     socklen_t                    remote_len;
     struct sockaddr_storage      local;
@@ -411,6 +412,30 @@ static int drain_out(h3c_t *c) {
     }
 }
 
+/* Simulate a NAT rebind: send subsequent datagrams from a fresh UDP socket on
+ * a new source port (ngtcp2's path local stays unchanged, like a real NAT).
+ * The old socket is kept open (retired) until exit — closing it would make the
+ * kernel answer the server's in-flight old-path packets with ICMP
+ * port-unreachable, which a real NAT never does. Returns 0 on success. */
+static int rebind_socket(h3c_t *c) {
+    int nfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (nfd < 0) { perror("rebind socket"); return -1; }
+
+    struct sockaddr_in zero = { .sin_family = AF_INET };
+    if (bind(nfd, (struct sockaddr *)&zero, sizeof(zero)) < 0) {
+        perror("rebind bind"); close(nfd); return -1;
+    }
+
+    const int rcvbuf = 8 * 1024 * 1024;
+    (void)setsockopt(nfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    const int fl = fcntl(nfd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(nfd, F_SETFL, fl | O_NONBLOCK);
+
+    c->retired_fd = c->fd;
+    c->fd = nfd;
+    return 0;
+}
+
 /* ----- main ----- */
 
 int main(int argc, char **argv) {
@@ -426,6 +451,7 @@ int main(int argc, char **argv) {
 
     h3c_t c = {0};
     c.stream_id = -1;
+    c.retired_fd = -1;
 
     /* Optional body file. */
     if (body_path) {
@@ -589,6 +615,22 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* H3CLIENT_MIGRATE_AFTER=N — after the N-th completed request, rebind
+     * the UDP socket to a new source port (NAT-rebind) before issuing the
+     * next one. Drives the server's connection-migration path (RFC 9000
+     * §9). 0/unset = off; pair with H3CLIENT_REQUEST_COUNT > N. */
+    unsigned long migrate_after = 0;
+    {
+        const char *env = getenv("H3CLIENT_MIGRATE_AFTER");
+        if (env != NULL && *env != '\0') {
+            char *end = NULL;
+            unsigned long n = strtoul(env, &end, 10);
+            if (end != env && *end == '\0' && n <= 10000000ul) {
+                migrate_after = n;
+            }
+        }
+    }
+
     unsigned long completed = 0;
     bool sent = false;
     uint64_t deadline_ns = now_ns() + deadline_ms * 1000000ull;
@@ -627,6 +669,15 @@ int main(int argc, char **argv) {
             }
             completed++;
             if (completed >= request_count) break;
+
+            /* NAT-rebind point — continue the same connection from a new
+             * source port so the server exercises its migration path. */
+            if (migrate_after != 0 && completed == migrate_after) {
+                if (rebind_socket(&c) < 0) {
+                    fprintf(stderr, "h3client: rebind failed\n"); return 1;
+                }
+                if (!quiet) { fprintf(stderr, "MIGRATED\n"); }
+            }
 
             /* Reset per-request state — keep the connection + h3 conn. */
             c.response_status = 0;
@@ -725,5 +776,8 @@ int main(int argc, char **argv) {
                          (struct sockaddr *)&c.remote, c.remote_len);
         }
     }
+
+    if (c.retired_fd >= 0) { close(c.retired_fd); }
+
     return 0;
 }

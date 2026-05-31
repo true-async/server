@@ -36,6 +36,11 @@ typedef struct _http3_packet_stats_s {
     uint64_t quic_read_error;         /* returned a non-fatal error */
     uint64_t quic_read_fatal;         /* returned a fatal error (conn dead) */
 
+    /* Connection migration / NAT rebinding (RFC 9000 §9): ngtcp2 switched to
+     * a new client path and we re-pointed conn->peer (path-switch count, not
+     * necessarily validated). */
+    uint64_t quic_path_migrations;
+
     /* Write-loop / timer counters. */
     uint64_t quic_packets_sent;       /* datagrams emitted by writev_stream */
     uint64_t quic_bytes_sent;         /* cumulative bytes over those datagrams */
@@ -136,6 +141,9 @@ bool http3_packet_send_version_negotiation(
 void http3_packet_compute_sr_token(const uint8_t key[32],
                                    const uint8_t *dcid, size_t dcidlen,
                                    uint8_t out[16]);
+
+/* Categorise a sendmsg/sendto errno into the send-error stat buckets. */
+void http3_packet_account_send_error(http3_packet_stats_t *st, int err);
 
 /* Emit a stateless-reset datagram as response to a 1-RTT
  * packet whose DCID does not match any live connection. The wire

@@ -556,33 +556,6 @@ zend_async_io_t *http3_listener_io(http3_listener_t *l)
     return l != NULL ? l->udp_io : NULL;
 }
 
-#ifndef PHP_WIN32
-/* Map a sendmsg errno to the matching counter so callers can drop the
- * `(void)` and we still get observability. Counts on `stats` only when
- * non-NULL; safe to call on every send. Linux/POSIX-only — Windows
- * goes through libuv (zend_async_udp_*) which already carries its own
- * error path; we don't have a raw errno on that path. */
-static void account_send_error(http3_packet_stats_t *st, int err)
-{
-    if (st == NULL) return;
-    switch (err) {
-        case EAGAIN:
-#if EAGAIN != EWOULDBLOCK
-        case EWOULDBLOCK:
-#endif
-            st->quic_send_eagain++;     break;
-        case EMSGSIZE:
-            st->quic_send_emsgsize++;   break;
-        case EHOSTUNREACH:
-        case ENETUNREACH:
-        case EHOSTDOWN:
-        case ENETDOWN:
-            st->quic_send_unreach++;    break;
-        default:
-            st->quic_send_other_error++;
-    }
-}
-#endif
 
 ssize_t http3_listener_send_packet(http3_listener_t *l,
                                    const void *buf, size_t len, uint8_t ecn,
@@ -638,7 +611,7 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
             return rv;
         }
 
-        account_send_error(&l->stats.packet, errno);
+        http3_packet_account_send_error(&l->stats.packet, errno);
         l->errq_pending = true;
         return -errno;
     }

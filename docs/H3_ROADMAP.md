@@ -37,6 +37,7 @@ _Last updated: 2026-05-31._
 | Throttle fix installed into canonical `php-release` | ✅ done | out-of-tree release rebuild |
 | Tunable CT-out TLS BIO ring (`setTlsBufferBytes`) | ✅ merged | #67 |
 | Pacing aligned to GSO burst (`setHttp3Pacing`, opt-in) | ✅ merged | #70 |
+| Connection migration / NAT rebind (single-worker) | ✅ done | #59 / `27f073c` |
 
 ## Landed — Phase 2 pacing (opt-in)
 
@@ -71,11 +72,17 @@ Relying on ngtcp2 defaults — no ACK tuning. **Blocked:** the bundled ngtcp2
 first. **Reference:** h2o ACK-frequency + delayed ACK + packet-tolerance;
 nginx `NGX_QUIC_MAX_ACK_GAP = 2`, immediate on reorder.
 
-### Later phases — connection migration / multi-worker
-- **CID steering** — without it, client migration or `SO_REUSEPORT` rehash
-  routes a packet to the wrong worker → stateless reset → disconnect.
-  References: nginx eBPF `SK_REUSEPORT`; h2o encodes `thread_id` in the CID
-  and forwards.
+### Connection migration / multi-worker
+- **Single-worker migration — ✅ shipped** (#59, `27f073c`). The read path feeds
+  the datagram's real source into ngtcp2, and the drain follows ngtcp2's
+  per-packet path (`ps.path`) instead of the stored peer, so a NAT-rebound /
+  migrated client keeps its connection (RFC 9000 §9; counter
+  `quic_path_migrations`, test 032).
+- **Cross-worker steering — remaining.** With `setWorkers > 1` the
+  `SO_REUSEPORT` rehash routes a migrated 4-tuple to a worker that does not own
+  the connection → stateless reset. Needs a worker-id encoded in the CID (8
+  random bytes today) + eBPF `SK_REUSEPORT` (nginx) or thread-id-in-CID
+  forwarding (h2o).
 - **H3-1 fabricated local sockaddr** (`http3_build_listener_local`) — the
   real local address is only needed for migration path-validation. **Not an
   upstream blocker:** the listener already owns a raw fd with `recvmsg` /
@@ -104,6 +111,19 @@ nginx `NGX_QUIC_MAX_ACK_GAP = 2`, immediate on reorder.
   raised to 16 MiB + a per-wakeup socket drain + a larger `SO_RCVBUF` (#69),
   the **server delivers an 8 MiB body correctly** — the server side was fine.
   Regression-guarded by test **028**.
+
+## Deployment notes
+
+- **UDP socket buffer needs a kernel ceiling.** `setHttp3SocketBufferBytes()`
+  (default 8 MiB) applies `SO_*BUFFORCE` first, falling back to `SO_*BUF` which
+  the kernel silently clamps to `net.core.rmem_max` / `wmem_max` (≈208 KiB by
+  default). Under a QUIC burst the clamp causes `RcvbufErrors` (silent loss →
+  peer PTO). For real H3 throughput raise the sysctl, e.g.
+  `sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216` (persist in
+  `/etc/sysctl.d/`); the `BUFFORCE` path only bypasses it under `CAP_NET_ADMIN`.
+- **Reactor throttle fix** must be in the running PHP (`ext/async` 1 ms
+  fine-clock, php-async `1162c4b`) — without it H3 collapses at high
+  concurrency. Canonical `php-release` was rebuilt with it.
 
 ## Per-phase exit gate (from #59 — run after EVERY phase)
 

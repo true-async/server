@@ -551,5 +551,59 @@ elseif(UNIX AND NOT APPLE)
     )
 endif()
 
+# HTTP/3 packet helpers — pure-logic unit tests (stateless-reset token +
+# size clamp, sendmsg-errno bucketing). No server/socket. Built only when the
+# QUIC stack is present, mirroring the auto-detect of the main --enable-http3.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(NGTCP2 QUIET libngtcp2>=1.6)
+    pkg_check_modules(NGTCP2_OSSL QUIET libngtcp2_crypto_ossl)
+    pkg_check_modules(NGHTTP3 QUIET libnghttp3>=1.4)
+endif()
+find_package(OpenSSL 3.0 QUIET)
+if(NGTCP2_FOUND AND NGTCP2_OSSL_FOUND AND NGHTTP3_FOUND AND OpenSSL_FOUND)
+    add_executable(test_http3_packet
+        http3/test_http3_packet.c
+        http3/http3_stubs.c
+        ${CMAKE_SOURCE_DIR}/../src/http3/http3_packet.c
+    )
+
+    target_compile_definitions(test_http3_packet PRIVATE HAVE_HTTP3=1 HAVE_OPENSSL=1)
+
+    target_include_directories(test_http3_packet PRIVATE
+        ${CMAKE_SOURCE_DIR}/../include
+        ${CMAKE_SOURCE_DIR}/../include/http3
+        ${CMAKE_SOURCE_DIR}/../src
+        ${CMAKE_SOURCE_DIR}/../src/http3
+        ${CMAKE_SOURCE_DIR}/../src/core
+        ${NGTCP2_INCLUDE_DIRS}
+        ${NGTCP2_OSSL_INCLUDE_DIRS}
+        ${NGHTTP3_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_http3_packet
+        test_common
+        ${NGTCP2_LIBRARIES}
+        ${NGTCP2_OSSL_LIBRARIES}
+        ${NGHTTP3_LIBRARIES}
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        ${CMOCKA_LIBRARIES}
+        ${CMAKE_DL_LIBS}
+    )
+
+    if(UNIX)
+        target_link_libraries(test_http3_packet m pthread rt)
+    endif()
+
+    add_test(NAME HTTP3Packet COMMAND test_http3_packet)
+
+    if(UNIX AND NOT APPLE)
+        set_tests_properties(HTTP3Packet PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+        )
+    endif()
+endif()
+
 # Install test binaries (optional)
 # install(TARGETS test_http1_parser test_http1_parser_edge_cases test_multipart_parser DESTINATION bin/tests)

@@ -21,6 +21,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <string.h>
+#include <errno.h>
 
 /* Retry token validity window. Long enough that a normal RTT + handshake
  * round-trip never expires it; short enough that captured tokens age
@@ -81,6 +82,35 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
     }
 
     memcpy(out, mac, 16);
+}
+
+/* Categorise a sendmsg/sendto errno into the send-error stat buckets. Pure
+ * errno→counter mapping (no listener internals), so it lives here where a
+ * unit test can drive it without the listener TU. */
+void http3_packet_account_send_error(http3_packet_stats_t *st, int err)
+{
+    if (st == NULL) { return; }
+
+    switch (err) {
+        case EAGAIN:
+#if defined(EWOULDBLOCK) && EAGAIN != EWOULDBLOCK
+        case EWOULDBLOCK:
+#endif
+            st->quic_send_eagain++;     break;
+        case EMSGSIZE:
+            st->quic_send_emsgsize++;   break;
+        case EHOSTUNREACH:
+        case ENETUNREACH:
+#ifdef EHOSTDOWN
+        case EHOSTDOWN:
+#endif
+#ifdef ENETDOWN
+        case ENETDOWN:
+#endif
+            st->quic_send_unreach++;    break;
+        default:
+            st->quic_send_other_error++;
+    }
 }
 
 bool http3_packet_send_stateless_reset(
