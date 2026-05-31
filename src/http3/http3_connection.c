@@ -63,6 +63,8 @@ extern bool http3_listener_peer_inc(http3_listener_t *l,
 extern void http3_listener_peer_dec(http3_listener_t *l,
                                     const struct sockaddr *peer);
 extern bool http3_listener_admit(const http3_listener_t *l);
+extern void http3_listener_unmark_flush(http3_listener_t *l,
+                                        http3_connection_t *conn);
 extern void *http3_listener_ssl_ctx(http3_listener_t *l);
 extern const char *http3_listener_host(const http3_listener_t *l);
 extern int http3_listener_port(const http3_listener_t *l);
@@ -808,6 +810,11 @@ void http3_connection_free(http3_connection_t *conn)
                             (const struct sockaddr *)&conn->peer);
 
     conn->closed = true;
+
+    /* Unlink from the listener dirty list before teardown — a conn freed
+     * while still marked dirty would otherwise dangle there and the next
+     * flush_dirty would walk into freed memory. */
+    http3_listener_unmark_flush(conn->listener, conn);
 
     /* Tear down the retransmission timer first — its callback references
      * this connection, and firing after closed=true would be a UAF on

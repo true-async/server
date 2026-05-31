@@ -857,6 +857,33 @@ void http3_listener_flush_dirty(http3_listener_t *l)
     }
 }
 
+/* Unlink a connection from the dirty list, if it is on it. MUST run before
+ * the conn is freed: otherwise a conn freed while still marked dirty (e.g.
+ * reaped mid-tick before flush_dirty reaches it) dangles on the list, and
+ * the next flush_dirty walks into freed memory. The arm_timer NULL guard
+ * only catches the post-OPENSSL_cleanse manifestation (ngtcp2_conn == NULL);
+ * it does not help if the slot is reallocated to a live conn first. */
+void http3_listener_unmark_flush(http3_listener_t *l, http3_connection_t *conn)
+{
+    if (l == NULL || conn == NULL || !conn->in_dirty) {
+        return;
+    }
+
+    if (l->dirty_head == conn) {
+        l->dirty_head = conn->dirty_next;
+    } else {
+        for (http3_connection_t *p = l->dirty_head; p != NULL; p = p->dirty_next) {
+            if (p->dirty_next == conn) {
+                p->dirty_next = conn->dirty_next;
+                break;
+            }
+        }
+    }
+
+    conn->in_dirty   = false;
+    conn->dirty_next = NULL;
+}
+
 /* Per-peer budget helpers.
  *
  * Key is the raw IP bytes (4 for v4, 16 for v6); the source port is
