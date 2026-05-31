@@ -142,6 +142,9 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
                                    const uint8_t *dcid, size_t dcidlen,
                                    uint8_t out[16]);
 
+/* Categorise a sendmsg/sendto errno into the send-error stat buckets. */
+void http3_packet_account_send_error(http3_packet_stats_t *st, int err);
+
 /* Emit a stateless-reset datagram as response to a 1-RTT
  * packet whose DCID does not match any live connection. The wire
  * looks like a random 1-RTT packet but the trailing 16 bytes carry
