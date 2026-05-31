@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 14613,
-      "hit": 11772
+      "total": 14642,
+      "hit": 11831
     },
     "functions": {
-      "total": 991,
-      "hit": 892
+      "total": 993,
+      "hit": 894
     }
   },
   "files": {
@@ -192,8 +192,8 @@
     },
     "src/core/tls_layer.c": {
       "lines": {
-        "total": 379,
-        "hit": 288
+        "total": 381,
+        "hit": 292
       },
       "functions": {
         "total": 33,
@@ -273,7 +273,7 @@
     "src/http2/http2_session.c": {
       "lines": {
         "total": 730,
-        "hit": 637
+        "hit": 638
       },
       "functions": {
         "total": 53,
@@ -293,11 +293,11 @@
     "src/http2/http2_strategy.c": {
       "lines": {
         "total": 661,
-        "hit": 495
+        "hit": 510
       },
       "functions": {
         "total": 38,
-        "hit": 30
+        "hit": 31
       }
     },
     "src/http2/http2_stream.c": {
@@ -313,11 +313,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 505,
-        "hit": 397
+        "hit": 387
       },
       "functions": {
         "total": 31,
-        "hit": 26
+        "hit": 24
       }
     },
     "src/http3/http3_connection.c": {
@@ -353,11 +353,11 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 506,
-        "hit": 328
+        "hit": 350
       },
       "functions": {
         "total": 30,
-        "hit": 27
+        "hit": 28
       }
     },
     "src/http3/http3_packet.c": {
@@ -562,8 +562,8 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1435,
-        "hit": 977
+        "total": 1437,
+        "hit": 979
       },
       "functions": {
         "total": 76,
@@ -572,12 +572,12 @@
     },
     "src/http_server_config.c": {
       "lines": {
-        "total": 1216,
-        "hit": 1144
+        "total": 1241,
+        "hit": 1169
       },
       "functions": {
-        "total": 113,
-        "hit": 107
+        "total": 115,
+        "hit": 109
       }
     },
     "src/http_server_exceptions.c": {
