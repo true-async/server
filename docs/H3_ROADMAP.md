@@ -13,8 +13,8 @@ _Last updated: 2026-05-31._
 |-------|------|--------|-------|
 | 0 | Baseline + measurement harness | ✅ done | `2221508` |
 | 1 | Deferred / coalesced output (once-per-tick flush) | ✅ done | `68812fe` |
-| 2 | **Pacing aligned to GSO burst** (`ngtcp2_conn_get_send_quantum`) | 🚧 blocked on validation | — |
-| 3 | **ACK-frequency / delayed-ACK tuning** | 🚧 same blocker expected | — |
+| 2 | **Pacing aligned to GSO burst** (`ngtcp2_conn_get_send_quantum`) | ✅ opt-in (`setHttp3Pacing`, default off) | #70 / `2eb2203` |
+| 3 | **ACK-frequency / delayed-ACK tuning** | ❌ blocked (ngtcp2 1.22.1 lacks the extension) | — |
 | 4 | UDP_GRO on receive (split coalesced datagrams) | ✅ done | `615ccd4` |
 
 > **Validation constraint (this box).** Phases 2–3 are *real-path* optimizations
@@ -22,7 +22,9 @@ _Last updated: 2026-05-31._
 > **loopback (lossless)** and its kernel has **no `sch_netem`**, so a constrained
 > path cannot be simulated. The #59 exit gate requires "no RPS regression" —
 > which these phases cannot satisfy on loopback by construction (see Phase 2
-> result below). They need a real network (or a netem-capable kernel) to land.
+> result below). Phase 2 therefore shipped **opt-in, default off** — the setter
+> wires the pacer without touching the default drain path; Phase 3 still needs a
+> real network (or a netem-capable kernel) to land.
 
 ## Done beyond the staged phases
 
@@ -33,59 +35,75 @@ _Last updated: 2026-05-31._
 | Static delivery — `$res->sendFile()` over H3 | ✅ merged | #60 / PR #64 |
 | Static delivery — `addStaticHandler` mount-routing over H3 | ✅ merged | #60 / PR #65 |
 | Throttle fix installed into canonical `php-release` | ✅ done | out-of-tree release rebuild |
-| Tunable CT-out TLS BIO ring (`setTlsBufferBytes`) | 🔄 PR | #67 |
+| Tunable CT-out TLS BIO ring (`setTlsBufferBytes`) | ✅ merged | #67 |
+| Pacing aligned to GSO burst (`setHttp3Pacing`, opt-in) | ✅ merged | #70 |
+
+## Landed — Phase 2 pacing (opt-in)
+
+### Phase 2 — Pacing aligned to GSO burst `[MED / MED]` — ✅ shipped opt-in (`setHttp3Pacing`, default off)
+By default `http3_connection_drain_out` (`src/http3/http3_io.c`) ships the
+full burst (GSO batch up to 64 × 1500) without consulting the pacer.
+`HttpServerConfig::setHttp3Pacing(true)` (default **off**) opts into pacing:
+cap each drain at `ngtcp2_conn_get_send_quantum()`, call
+`ngtcp2_conn_update_pkt_tx_time()` after the writev sequence, and yield to
+the timer only when the inter-burst gap exceeds ~1 ms (so loopback still
+drains inline). With pacing off the drain path is byte-for-byte the prior
+behaviour — **zero** effect on the default path. Plumbed
+config → shared → view → accessor (mirrors `isHttp3AltSvcEnabled`); the
+drain reads `c->view->http3_pacing`. Test **029**.
+
+**Why off by default:** on lossless loopback pacing **regresses 512 K
+throughput ~29 %** (7 → 9 ms median) — it adds cost where there is no loss
+to mitigate, and the benefit can't be shown without a constrained path (no
+`sch_netem` here). Flip it on and re-measure on a real network: confirm
+pacing reduces retransmits / improves goodput under loss. **Reference:**
+quicly co-designs pacing + GSO (`deps/quicly/include/quicly/pacer.h`,
+burst 8–10 MTU = one `sendmsg`); nginx is window-only.
 
 ## Remaining
 
-### Phase 2 — Pacing aligned to GSO burst `[MED / MED]` — 🚧 implemented, not merged
-`http3_connection_drain_out` (`src/http3/http3_io.c:194`) ships the full
-burst (GSO batch up to 64 × 1500) without consulting the pacer. **Approach
-(prototyped, then reverted):** cap each drain at
-`ngtcp2_conn_get_send_quantum()`, call `ngtcp2_conn_update_pkt_tx_time()`
-after the writev sequence, yield to the timer only when the inter-burst gap
-exceeds a threshold (so loopback drains inline), and arm the timer from
-`drain_out` itself so the remainder reschedules regardless of caller.
-
-**Result:** correct — no stall (h3 suite 27/27, 64 K–512 K bodies complete).
-But on lossless loopback it **regresses 512 K throughput ~29 %** (7 → 9 ms
-median) because pacing adds cost where there is no loss to mitigate, and the
-benefit can't be shown without a constrained path (no `sch_netem` here). So
-it is **not merged**. Revisit on a real network: confirm pacing reduces
-retransmits / improves goodput under loss, then land with that evidence.
-**Reference:** quicly co-designs pacing + GSO (`deps/quicly/include/quicly/pacer.h`,
-burst 8–10 MTU = one `sendmsg`); nginx is window-only.
-
-### Phase 3 — ACK-frequency / delayed-ACK tuning `[LOW / LOW]`
-Relying on ngtcp2 defaults — no ACK tuning. **Fix:** advertise
-`min_ack_delay` / ack-frequency transport params (subject to ngtcp2
-version support; document the floor). **Reference:** h2o ACK-frequency +
-delayed ACK + packet-tolerance; nginx `NGX_QUIC_MAX_ACK_GAP = 2`,
-immediate on reorder.
+### Phase 3 — ACK-frequency / delayed-ACK tuning `[LOW / LOW]` — ❌ blocked on ngtcp2
+Relying on ngtcp2 defaults — no ACK tuning. **Blocked:** the bundled ngtcp2
+1.22.1 does not implement the ACK-frequency extension — its `ngtcp2.h` has
+**no** `ack_frequency` / `min_ack_delay`, only `max_ack_delay` (which tunes
+*our* ACK delay, of marginal value for download-heavy H3). Advertising
+`min_ack_delay` / ack-frequency transport params needs an ngtcp2 upgrade
+first. **Reference:** h2o ACK-frequency + delayed ACK + packet-tolerance;
+nginx `NGX_QUIC_MAX_ACK_GAP = 2`, immediate on reorder.
 
 ### Later phases — connection migration / multi-worker
 - **CID steering** — without it, client migration or `SO_REUSEPORT` rehash
   routes a packet to the wrong worker → stateless reset → disconnect.
   References: nginx eBPF `SK_REUSEPORT`; h2o encodes `thread_id` in the CID
   and forwards.
-- **H3-1 fabricated local sockaddr** (`http3_build_listener_local`, no
-  `zend_async_udp_sockname`) breaks migration path-validation — upstream
-  blocker for the migration phase.
+- **H3-1 fabricated local sockaddr** (`http3_build_listener_local`) — the
+  real local address is only needed for migration path-validation. **Not an
+  upstream blocker:** the listener already owns a raw fd with `recvmsg` /
+  `sendmsg` + cmsg (recvmmsg/GRO/ECN, errqueue, GSO send), so the real
+  destination can be recovered via `IP_PKTINFO` here — no
+  `zend_async_udp_sockname` required. Wire it up when migration lands.
 
 ### Memory
-- **Per-conn inflation** ~0.7–1 MB/conn (≈23 GB worst-case on the arena).
-  Start with `SSL_MODE_RELEASE_BUFFERS`, then audit per-conn allocations.
-  _Validatable on this box (RSS), no network needed._
+- **Per-conn inflation — not yet measured for H3.** An earlier draft cited
+  ~0.7–1 MB/conn (≈23 GB worst-case); that figure was unfounded and is
+  removed. The only measured number we have is **H2-TLS ~250–350 KB/conn**
+  (worst ~11 GB) — a different protocol path (see the H2 memory notes), not
+  H3. Measuring H3 needs a client that holds N concurrent connections, but
+  `h3client` is single-shot, so H3 per-conn RSS is currently **unknown**.
+  Next: build a multi-conn client, measure RSS, then start with
+  `SSL_MODE_RELEASE_BUFFERS` and audit per-conn allocations.
+  _Validatable on this box (RSS) once a multi-conn client lands; no network needed._
 
 ## Bugs found during roadmap work
 
-- **Large response body over H3 stalls above ~512 KiB–1 MiB.** A buffered
-  (`setBody`) response of 128 K / 256 K / 512 K completes; **1 MiB / 2 MiB /
-  4 MiB stall** (client receives `200` then hangs, 0 body bytes, until
-  timeout) — on clean `main`, independent of pacing. Reproducible on
-  loopback. Likely the H3 stream flow-control window not extending for a
-  large buffered body (or the buffered `data_reader` parking). **This is
-  validatable here and worth fixing** — arguably higher value than the
-  loss-path perf phases, which this box can't validate at all.
+- **Large response body over H3 "stall" was the test client, not the server
+  (fixed #69).** A buffered (`setBody`) response above ~512 KiB–1 MiB appeared
+  to hang (client got `200`, then 0 body bytes until timeout). Root cause was
+  the single-shot `h3client` harness: its stream/connection flow-control
+  window was 1 MiB and it didn't drain the socket per wakeup. With the window
+  raised to 16 MiB + a per-wakeup socket drain + a larger `SO_RCVBUF` (#69),
+  the **server delivers an 8 MiB body correctly** — the server side was fine.
+  Regression-guarded by test **028**.
 
 ## Per-phase exit gate (from #59 — run after EVERY phase)
 
