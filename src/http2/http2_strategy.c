@@ -1191,25 +1191,81 @@ static void h2_emit_flush_tls_drain(http_connection_t *conn,
     (void)tls_drain(conn);
 }
 
+/* Park an undelivered plaintext tail in the 32 KiB PT BIO queue. The
+ * scheduler-side tls_drain (called by the emit flush) plus the
+ * cipher-completion chain re-encrypt and ship it once the CT-out ring
+ * drains — the same contract the DRAIN emit path uses. byte_cap
+ * (H2_EMIT_TLS_BYTE_CAP) equals the PT ring and GATHER starts with the
+ * ring empty, so the tail always fits; a full ring is unreachable in any
+ * supported CT-out size and surfaces as a hard write error rather than a
+ * silent stall. */
+static bool h2_tls_park_plaintext(http_connection_t *conn,
+                                  const char *ptr, const size_t len)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        const int guarantee =
+            BIO_ctrl_get_write_guarantee(conn->tls_plaintext_bio);
+
+        if (UNEXPECTED(guarantee <= 0)) {
+            return false;
+        }
+
+        const size_t room = (size_t)guarantee;
+        const size_t need = (len - off) < room ? (len - off) : room;
+        const int    w    = BIO_write(conn->tls_plaintext_bio, ptr + off, (int)need);
+
+        if (UNEXPECTED(w != (int)need)) {
+            return false;
+        }
+
+        off += need;
+    }
+
+    return true;
+}
+
+/* Encrypt a plaintext chunk for the TLS emit path. The fast path writes
+ * straight into the CT-out ring via SSL_write; when that ring fills
+ * (WANT_WRITE) the undelivered tail is parked in the PT queue (issue #29)
+ * instead of being discarded — otherwise the connection hangs with the
+ * body truncated. Once any bytes are parked, the rest of the pass must
+ * follow them through the queue or a direct SSL_write would encrypt ahead
+ * of the parked tail and reorder the stream. */
 static bool h2_tls_write_chunk(http_connection_t *conn,
                                const char *ptr, const size_t len)
 {
     size_t off = 0;
 
-    while (off < len) {
-        size_t written = 0;
-        const tls_io_result_t wrc = tls_write_plaintext(
-            conn->tls, ptr + off, len - off, &written);
+    if (BIO_ctrl_pending(conn->tls_plaintext_bio_app) == 0) {
+        while (off < len) {
+            size_t written = 0;
+            const tls_io_result_t wrc = tls_write_plaintext(
+                conn->tls, ptr + off, len - off, &written);
 
-        off += written;
+            off += written;
 
-        if (written > 0) {
-            http_server_on_tls_io(conn->counters, 0, written, 0, 0);
-        }
+            if (written > 0) {
+                http_server_on_tls_io(conn->counters, 0, written, 0, 0);
+            }
 
-        if (wrc != TLS_IO_OK) {
+            if (wrc == TLS_IO_OK) {
+                continue;
+            }
+
+            /* CT-out ring full (or a renegotiation read) — stop the direct
+             * encrypt and park whatever is left below. */
+            if (wrc == TLS_IO_WANT_WRITE || wrc == TLS_IO_WANT_READ) {
+                break;
+            }
+
             return false;
         }
+    }
+
+    if (off < len) {
+        return h2_tls_park_plaintext(conn, ptr + off, len - off);
     }
 
     return true;
