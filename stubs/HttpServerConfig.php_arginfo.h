@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: 40375bbee0d2c4dc47b40ce24fdd1dc6188c6a70 */
+ * Stub hash: 5e06258fb3426d3a0088e298517aef1a146f1a81 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -129,6 +129,10 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests
 
 #define arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3SocketBufferBytes arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3SocketBufferBytes arginfo_class_TrueAsync_HttpServerConfig_getWorkers
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, enable, _IS_BOOL, 0)
@@ -287,6 +291,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3MaxConcurrentStreams);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3MaxConcurrentStreams);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3SocketBufferBytes);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3SocketBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled);
@@ -382,6 +388,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3MaxConcurrentStreams, arginfo_class_TrueAsync_HttpServerConfig_getHttp3MaxConcurrentStreams, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3SocketBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_setHttp3SocketBufferBytes, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3SocketBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_getHttp3SocketBufferBytes, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled, arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled, arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled, ZEND_ACC_PUBLIC)

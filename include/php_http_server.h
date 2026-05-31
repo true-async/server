@@ -236,6 +236,7 @@ struct _http_server_config_t {
     uint32_t http3_stream_window_bytes;
     uint32_t http3_max_concurrent_streams;
     uint32_t http3_peer_connection_budget;
+    uint32_t http3_socket_buffer_bytes;
     bool     http3_alt_svc_enabled;
 
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
@@ -773,6 +774,7 @@ typedef struct {
     uint32_t http3_stream_window_bytes;
     uint32_t http3_max_concurrent_streams;
     uint32_t http3_peer_connection_budget;
+    uint32_t http3_socket_buffer_bytes;
     bool     http3_alt_svc_enabled;
     bool     telemetry_enabled;          /* W3C trace context ingestion */
     bool     body_streaming_enabled;     /* Issue #26 */
@@ -830,6 +832,10 @@ static inline uint32_t http_server_get_http3_max_concurrent_streams(const http_s
 
 static inline uint32_t http_server_get_http3_peer_connection_budget(const http_server_object *server) {
     return http_server_view(server)->http3_peer_connection_budget;
+}
+
+static inline uint32_t http_server_get_http3_socket_buffer_bytes(const http_server_object *server) {
+    return http_server_view(server)->http3_socket_buffer_bytes;
 }
 
 static inline bool http_server_get_http3_alt_svc_enabled(const http_server_object *server) {

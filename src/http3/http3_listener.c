@@ -1114,16 +1114,24 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
      * net.core.{r,w}mem_max under CAP_NET_ADMIN; unprivileged we fall back
      * to SO_*BUF (the kernel clamps to the sysctl max — operators raise
      * net.core.rmem_max for QUIC just as they do for nginx). Best-effort;
-     * a clamp or EPERM is harmless. */
+     * a clamp or EPERM is harmless. Size from
+     * HttpServerConfig::setHttp3SocketBufferBytes (default 8 MiB,
+     * 0 = leave the OS default; NULL server_obj in a unit test resolves
+     * to the 0 fallback). */
     {
-        const int sockbuf = 8 * 1024 * 1024;
+        const uint32_t want =
+            http_server_get_http3_socket_buffer_bytes((const http_server_object *)server_obj);
 
-        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
-            (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
-        }
+        if (want > 0) {
+            const int sockbuf = (int)want;
 
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
-            (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
+            if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
+                (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
+            }
+
+            if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
+                (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
+            }
         }
     }
 #if defined(UDP_GRO)

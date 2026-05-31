@@ -948,6 +948,7 @@ const http_server_view_t http_server_view_default = {
     .http3_stream_window_bytes = 0,
     .http3_max_concurrent_streams = 0,
     .http3_peer_connection_budget = 0,
+    .http3_socket_buffer_bytes = 0,
     .http3_alt_svc_enabled = true,
 };
 
@@ -2220,6 +2221,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "getHttp3PeerConnectionBudget", &retval);
     server->view.http3_peer_connection_budget = (uint32_t)Z_LVAL(retval);
+
+    zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "getHttp3SocketBufferBytes", &retval);
+    server->view.http3_socket_buffer_bytes = (uint32_t)Z_LVAL(retval);
 
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isHttp3AltSvcEnabled", &retval);
     server->view.http3_alt_svc_enabled = (Z_TYPE(retval) == IS_TRUE);
