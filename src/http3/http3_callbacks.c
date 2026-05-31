@@ -589,8 +589,13 @@ headers_done:
      * data_reader walks it directly. */
     if (!streaming) {
         zend_string *body_str = http_response_get_body_str(resp_obj);
+        /* RFC 9110 §9.3.2: a HEAD response carries the GET headers but no
+         * body. Suppress the body bytes (the headers, incl. content-length,
+         * still went out above), mirroring the H1 path. */
+        const bool is_head = s->request != NULL
+            && http_request_method_is_head(s->request);
 
-        if (body_str != NULL && ZSTR_LEN(body_str) > 0) {
+        if (!is_head && body_str != NULL && ZSTR_LEN(body_str) > 0) {
             /* Zero-copy: addref the response's underlying zend_string
              * instead of memcpy'ing it. The reader walks it asynchronously,
              * so we must outlive the response object dispose that follows
