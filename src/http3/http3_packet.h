@@ -36,6 +36,11 @@ typedef struct _http3_packet_stats_s {
     uint64_t quic_read_error;         /* returned a non-fatal error */
     uint64_t quic_read_fatal;         /* returned a fatal error (conn dead) */
 
+    /* Connection migration / NAT rebinding (RFC 9000 §9): ngtcp2 switched to
+     * a new client path and we re-pointed conn->peer (path-switch count, not
+     * necessarily validated). */
+    uint64_t quic_path_migrations;
+
     /* Write-loop / timer counters. */
     uint64_t quic_packets_sent;       /* datagrams emitted by writev_stream */
     uint64_t quic_bytes_sent;         /* cumulative bytes over those datagrams */

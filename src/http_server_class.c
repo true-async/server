@@ -3111,6 +3111,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
         add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
         add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
         add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
+        add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
         /* Write-loop + timer counters. */
         add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
         add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);

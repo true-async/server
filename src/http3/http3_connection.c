@@ -315,6 +315,10 @@ static http3_connection_t *http3_connection_accept(
     memcpy(&c->peer, peer, (size_t)clamped);
     c->peer_len = clamped;
 
+    /* Remember the admission address so teardown frees the right per-peer
+     * bucket even if the connection later migrates (RFC 9000 §9). */
+    memcpy(&c->admit_peer, peer, (size_t)clamped);
+
     ngtcp2_cid dcid;
     memcpy(dcid.data, hd->scid.data, hd->scid.datalen);
     dcid.datalen = hd->scid.datalen;
@@ -731,16 +735,18 @@ bool http3_connection_dispatch(
      * subsequent packets advance the handshake or carry 1-RTT data.
      *
      * Same fabricated local addr as accept / drain — see
-     * http3_build_listener_local() for the rationale. */
+     * http3_build_listener_local() for the rationale. The path remote is the
+     * datagram's actual source (not conn->peer) so ngtcp2 sees a migrated /
+     * NAT-rebound client (RFC 9000 §9); identical to conn->peer otherwise. */
     struct sockaddr_storage local_addr;
     socklen_t local_addr_len = 0;
-    http3_build_listener_local(listener, conn->peer.ss_family,
+    http3_build_listener_local(listener, peer->sa_family,
                                &local_addr, &local_addr_len);
 
     ngtcp2_path_storage ps = {0};
     ngtcp2_path_storage_init(&ps,
         (const struct sockaddr *)&local_addr, local_addr_len,
-        (const struct sockaddr *)&conn->peer, conn->peer_len,
+        peer, peer_len,
         NULL);
 
     /* Forward ECN bits from cmsg into ngtcp2 — the only field of
@@ -765,6 +771,23 @@ bool http3_connection_dispatch(
 
     if (pkt_rv == 0) {
         stats->quic_read_ok++;
+
+        /* Follow client migration: re-point conn->peer (the drain_out send
+         * destination) at ngtcp2's current path. ngtcp2 switches on the first
+         * non-probing packet from a new source, so validation may still be
+         * pending — its 3x anti-amplification cap bounds sends meanwhile. */
+        const ngtcp2_path *cur =
+            ngtcp2_conn_get_path((ngtcp2_conn *)conn->ngtcp2_conn);
+
+        if (cur != NULL && cur->remote.addrlen > 0
+            && (size_t)cur->remote.addrlen <= sizeof(conn->peer)
+            && (conn->peer_len != (socklen_t)cur->remote.addrlen
+                || memcmp(&conn->peer, cur->remote.addr,
+                          (size_t)cur->remote.addrlen) != 0)) {
+            memcpy(&conn->peer, cur->remote.addr, (size_t)cur->remote.addrlen);
+            conn->peer_len = (socklen_t)cur->remote.addrlen;
+            stats->quic_path_migrations++;
+        }
     } else if (pkt_rv == NGTCP2_ERR_DRAINING ||
                pkt_rv == NGTCP2_ERR_CLOSING ||
                pkt_rv == NGTCP2_ERR_CRYPTO ||
@@ -803,11 +826,12 @@ void http3_connection_free(http3_connection_t *conn)
      * proceed to release ngtcp2/SSL state. */
     http3_connection_emit_close(conn);
 
-    /* Release the per-peer-IP slot we claimed at accept. The
-     * peer sockaddr is still intact at this point (efree happens at
-     * the very end). */
+    /* Release the per-peer-IP slot we claimed at accept — keyed on the
+     * admission address, not the (possibly migrated) live peer. The
+     * sockaddr is still intact at this point (efree happens at the very
+     * end). */
     http3_listener_peer_dec(conn->listener,
-                            (const struct sockaddr *)&conn->peer);
+                            (const struct sockaddr *)&conn->admit_peer);
 
     conn->closed = true;
 

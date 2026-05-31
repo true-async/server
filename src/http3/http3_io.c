@@ -218,12 +218,15 @@ void http3_connection_drain_out(http3_connection_t *c)
      * is per-sendmsg, not per-segment). Track ECN for the current batch
      * and flush eagerly when ngtcp2 changes it. */
     uint8_t batch_ecn   = 0;
+    /* Per-batch send destination: ngtcp2 fills ps.path per packet (usually
+     * c->peer; a migration probe can target a fresh path), so GSO must only
+     * coalesce same-destination packets. */
+    struct sockaddr_storage batch_peer;
+    socklen_t batch_peer_len = 0;
 
     /* Stable local sockaddr from listener bind config — must match what we
      * passed to ngtcp2_conn_server_new at accept time, or ngtcp2 rejects
-     * the path. Peer address is pinned for the connection lifetime, so
-     * both ends of the path are loop-invariant; build once, reuse for
-     * every emitted packet. */
+     * the path. */
     struct sockaddr_storage local_addr;
     socklen_t local_addr_len = 0;
     http3_build_listener_local(c->listener, c->peer.ss_family,
@@ -249,11 +252,11 @@ void http3_connection_drain_out(http3_connection_t *c)
             if (batch_count > 1) {                                             \
                 (void)http3_listener_send_gso(c->listener,                     \
                     batch_buf, batch_off, seg_size, batch_ecn,                 \
-                    (const struct sockaddr *)&c->peer, c->peer_len);           \
+                    (const struct sockaddr *)&batch_peer, batch_peer_len);     \
             } else {                                                           \
                 (void)http3_listener_send_packet(c->listener,                  \
                     batch_buf, batch_off, batch_ecn,                           \
-                    (const struct sockaddr *)&c->peer, c->peer_len);           \
+                    (const struct sockaddr *)&batch_peer, batch_peer_len);     \
             }                                                                  \
             if (stats != NULL) {                                               \
                 stats->quic_packets_sent += batch_count;                       \
@@ -401,16 +404,26 @@ void http3_connection_drain_out(http3_connection_t *c)
          * (cmsg(IP_TOS) is per-sendmsg) — flush eagerly if it changes. */
         size_t pkt_len = (size_t)n;
         uint8_t pkt_ecn = pi.ecn;
+        /* ngtcp2 reported the destination for this packet in ps.path — copy
+         * it out before the next writev overwrites the storage. Usually ==
+         * c->peer; differs for a migration probe on a fresh path. */
+        const struct sockaddr *pkt_peer = ps.path.remote.addr;
+        const socklen_t pkt_peer_len = (socklen_t)ps.path.remote.addrlen;
+        const bool same_peer = batch_count > 0
+            && batch_peer_len == pkt_peer_len
+            && memcmp(&batch_peer, pkt_peer, (size_t)pkt_peer_len) == 0;
 
         if (batch_count == 0) {
             seg_size  = pkt_len;
             batch_off = pkt_len;
             batch_count = 1;
             batch_ecn = pkt_ecn;
-        } else if (pkt_len == seg_size && pkt_ecn == batch_ecn) {
+            memcpy(&batch_peer, pkt_peer, (size_t)pkt_peer_len);
+            batch_peer_len = pkt_peer_len;
+        } else if (pkt_len == seg_size && pkt_ecn == batch_ecn && same_peer) {
             batch_off += pkt_len;
             batch_count++;
-        } else if (pkt_len < seg_size && pkt_ecn == batch_ecn) {
+        } else if (pkt_len < seg_size && pkt_ecn == batch_ecn && same_peer) {
             /* Natural last packet of a flight (typically a short
              * trailer). Append + flush so the kernel sees all earlier
              * segments at full seg_size and this one as the final
@@ -419,9 +432,10 @@ void http3_connection_drain_out(http3_connection_t *c)
             batch_count++;
             H3_FLUSH_BATCH();
         } else {
-            /* Mismatch (longer packet, or ECN changed). Flush the previous
+            /* Mismatch (longer packet, ECN changed, or a different
+             * destination path — e.g. a migration probe). Flush the previous
              * batch (without this packet) then memmove the just-written
-             * packet to the start and seed a new batch. */
+             * packet to the start and seed a new batch on its own dest. */
             uint8_t tmp[H3_PKT_SLOT];
             memcpy(tmp, batch_buf + batch_off, pkt_len);
             H3_FLUSH_BATCH();
@@ -430,6 +444,8 @@ void http3_connection_drain_out(http3_connection_t *c)
             seg_size  = pkt_len;
             batch_count = 1;
             batch_ecn = pkt_ecn;
+            memcpy(&batch_peer, pkt_peer, (size_t)pkt_peer_len);
+            batch_peer_len = pkt_peer_len;
         }
 
         if (pacing) {
