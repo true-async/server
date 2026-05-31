@@ -2865,7 +2865,7 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
 
 #ifdef HAVE_OPENSSL
     if (tls_ctx != NULL) {
-        conn->tls = tls_session_new(tls_ctx);
+        conn->tls = tls_session_new(tls_ctx, http_server_get_tls_buffer_bytes(server));
 
         if (conn->tls == NULL) {
             http_connection_destroy(conn);

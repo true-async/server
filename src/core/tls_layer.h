@@ -212,7 +212,7 @@ int  tls_layer_quic_ex_index(void);
 void tls_context_free(tls_context_t *ctx);
 
 /* --- Session lifecycle (per connection). --- */
-tls_session_t *tls_session_new(tls_context_t *ctx);
+tls_session_t *tls_session_new(tls_context_t *ctx, size_t ct_out_ring_bytes);
 void           tls_session_free(tls_session_t *s);
 
 /* --- State-machine primitives. --- */

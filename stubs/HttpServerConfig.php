@@ -480,6 +480,25 @@ final class HttpServerConfig
     public function getHttp3SocketBufferBytes(): int {}
 
     /**
+     * CT-out TLS BIO ring — how much ciphertext OpenSSL stages per
+     * SSL_write before the emit path parks the tail (issue #29). Larger =
+     * fewer syscalls / higher throughput on bodies above one TLS record,
+     * at ~$bytes more memory per TLS connection; smaller saves memory for
+     * mostly-small-response deployments with no RPS cost.
+     *
+     * The value is rounded UP to a whole number of TLS records (~17 KiB
+     * each), floored at one record and capped at 16. 0 resets to the
+     * default (64 KiB). getTlsBufferBytes() returns the effective size.
+     *
+     * @param int $bytes
+     * @return static
+     */
+    public function setTlsBufferBytes(int $bytes): static {}
+
+    /** @return int Effective (record-rounded) CT-out ring size. */
+    public function getTlsBufferBytes(): int {}
+
+    /**
      * Toggle the RFC 7838 `Alt-Svc: h3=":<port>"; ma=86400` header
      * advertisement on H1/H2 responses when an H3 listener is up.
      * Default true. Disable during phased H3 rollout.
