@@ -142,7 +142,12 @@ typedef enum {
  *
  * Memory cost: +47 KiB per TLS connection vs the old 17 KiB.
  */
+/* Overridable at build time (-DTLS_BIO_RING_SIZE=…) so the #29 regression
+ * test can shrink the CT-out ring below one record and exercise the
+ * WANT_WRITE park/resume path. */
+#ifndef TLS_BIO_RING_SIZE
 #define TLS_BIO_RING_SIZE       (64 * 1024)
+#endif
 /* CT-in (network → OpenSSL): bounded by one TLS record = 16 KiB max. */
 #define TLS_BIO_RING_SIZE_SMALL (17 * 1024)
 
