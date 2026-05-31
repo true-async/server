@@ -22,6 +22,8 @@
 #include "http3/http3_stream.h"            /* http3_stream_t */
 #include "log/trace_context.h"
 #include "http_connection.h"               /* http_handler_log_bailout */
+#include "http_send_file.h"                /* http_send_file_dispatch */
+#include "http_response_internal.h"        /* http_response_has/take_send_file */
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -302,6 +304,105 @@ static void h3_handler_coroutine_entry(void)
     zval_ptr_dtor(&retval);
 }
 
+/* Shared dispose tail: drop the per-stream zvals, run the graceful-drain
+ * (GOAWAY) check, push queued output, and release the coroutine's stream
+ * ref. Runs at the end of the normal dispose, and — deferred — from the
+ * sendFile pump's on_done once the file has finished streaming. */
+static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
+{
+    if (!Z_ISUNDEF(s->request_zv)) {
+        zval_ptr_dtor(&s->request_zv);
+        ZVAL_UNDEF(&s->request_zv);
+    }
+
+    if (!Z_ISUNDEF(s->response_zv)) {
+        zval_ptr_dtor(&s->response_zv);
+        ZVAL_UNDEF(&s->response_zv);
+    }
+
+    /* Graceful drain check at the response-commit point — matches H1/H2.
+     * Proactive age / reactive epoch → HTTP/3 GOAWAY via nghttp3_conn_shutdown
+     * so new streams are refused while the in-flight one finishes. */
+    if (c != NULL && !c->closed && !c->drain_submitted
+        && c->nghttp3_conn != NULL) {
+        http_server_object *srv =
+            (http_server_object *)http3_listener_server_obj(c->listener);
+        const http_server_drain_eval_t r = http_server_drain_evaluate(srv,
+            c->drain_pending,
+            c->drain_not_before_ns,
+            c->drain_epoch_seen,
+            zend_hrtime());
+        c->drain_pending       = r.drain_pending;
+        c->drain_not_before_ns = r.drain_not_before_ns;
+        c->drain_epoch_seen    = r.drain_epoch_seen;
+
+        if (r.should_drain) {
+            (void)nghttp3_conn_shutdown((nghttp3_conn *)c->nghttp3_conn);
+            c->drain_submitted = true;
+            http_server_on_h3_goaway_sent(c->counters);
+        }
+    }
+
+    /* Push the queued response out on this reactor tick instead of waiting
+     * for the next inbound datagram. */
+    if (c != NULL && !c->closed) {
+        http3_connection_drain_out(c);
+        http3_connection_arm_timer(c);
+    }
+
+    H3T(s->stream_id, "6.drain_done");
+
+    /* Coroutine's reference. After this, only nghttp3's stream_user_data
+     * may be holding the stream alive. */
+    http3_stream_release(s);
+}
+
+/* sendFile hand-off. The static pump (http3_static_response.c) runs as a
+ * separate coroutine and submits the response asynchronously, reading
+ * s->response_zv live — so the dispose must NOT drop the response zval or
+ * release the stream when it hands off; the deferred tail does that from
+ * on_done once the pump finishes. Mirrors H2 h2_sendfile_arm/on_done. */
+typedef struct {
+    http3_connection_t *conn;
+    http3_stream_t     *stream;
+} h3_sendfile_user_t;
+
+static void h3_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h3_sendfile_user_t *u = (h3_sendfile_user_t *)user;
+    http3_connection_t *c = u->conn;
+    http3_stream_t     *s = u->stream;
+    efree(u);
+
+    h3_dispose_tail(c, s);
+}
+
+/* Returns true iff the pump took ownership (tail deferred to on_done).
+ * On false the response carries a synthesized 500 (or an accounting race);
+ * the caller falls through to the regular buffered submit. */
+static bool h3_arm_sendfile(http3_connection_t *c, http3_stream_t *s)
+{
+    http_send_file_request_t *sf_req =
+        http_response_take_send_file(Z_OBJ(s->response_zv));
+
+    if (sf_req == NULL) {
+        return false;
+    }
+
+    h3_sendfile_user_t *u = ecalloc(1, sizeof(*u));
+    u->conn   = c;
+    u->stream = s;
+
+    if (!http_send_file_dispatch(s->request, Z_OBJ(s->response_zv),
+                                 sf_req, h3_sendfile_on_done, u)) {
+        efree(u);
+        return false;
+    }
+
+    return true;
+}
+
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http3_stream_t *s = (http3_stream_t *)coroutine->extended_data;
@@ -363,6 +464,19 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                 (void)nghttp3_conn_resume_stream(
                     (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
             }
+        } else if (http_response_has_send_file(Z_OBJ(s->response_zv))) {
+            /* sendFile: hand off to the static pump. On success it owns the
+             * stream + response until on_done runs the tail — the pump
+             * submits asynchronously and reads response_zv live, so we must
+             * NOT fall through to the tail (which would drop it). */
+            if (h3_arm_sendfile(c, s)) {
+                H3T(s->stream_id, "5.sendfile_armed");
+                return;
+            }
+
+            /* arm failed → response now carries a synthesized 500; submit it. */
+            H3T(s->stream_id, "5.sendfile_failed");
+            (void)http3_stream_submit_response(c, s, false);
         } else {
             H3T(s->stream_id, "5.buffered_submit");
             (void)http3_stream_submit_response(c, s, false);
@@ -371,60 +485,6 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         H3T(s->stream_id, "5.SKIP_no_submit");
     }
 
-    /* Drop per-stream zvals — we no longer need them. The data_reader
-     * pulls from s->response_body (buffered REST) or from chunk_queue
-     * (streaming) — both have lifetimes independent of the response
-     * zval, so releasing it here is safe. */
-    if (!Z_ISUNDEF(s->request_zv)) {
-        zval_ptr_dtor(&s->request_zv);
-        ZVAL_UNDEF(&s->request_zv);
-    }
-
-    if (!Z_ISUNDEF(s->response_zv)) {
-        zval_ptr_dtor(&s->response_zv);
-        ZVAL_UNDEF(&s->response_zv);
-    }
-
-    /* Graceful drain check at the response-commit point — matches H1/H2
-     * drain. If proactive age has elapsed or a reactive drain epoch fired,
-     * submit an HTTP/3 GOAWAY via nghttp3_conn_shutdown so new streams
-     * are refused while the in-flight one finishes. drain_submitted
-     * guards against re-emitting on subsequent commits over the same
-     * connection. */
-    if (c != NULL && !c->closed && !c->drain_submitted
-        && c->nghttp3_conn != NULL) {
-        http_server_object *srv =
-            (http_server_object *)http3_listener_server_obj(c->listener);
-        const http_server_drain_eval_t r = http_server_drain_evaluate(srv,
-            c->drain_pending,
-            c->drain_not_before_ns,
-            c->drain_epoch_seen,
-            zend_hrtime());
-        c->drain_pending       = r.drain_pending;
-        c->drain_not_before_ns = r.drain_not_before_ns;
-        c->drain_epoch_seen    = r.drain_epoch_seen;
-
-        if (r.should_drain) {
-            (void)nghttp3_conn_shutdown((nghttp3_conn *)c->nghttp3_conn);
-            c->drain_submitted = true;
-            http_server_on_h3_goaway_sent(c->counters);
-        }
-    }
-
-    /* Push the queued response out to the wire. Submit_response only
-     * queues into nghttp3; the next read_pkt → drain cycle would
-     * otherwise be the soonest opportunity. Triggering drain here
-     * means the response leaves on the same reactor tick the handler
-     * completed, instead of waiting for the next inbound datagram. */
-    if (c != NULL && !c->closed) {
-        http3_connection_drain_out(c);
-        http3_connection_arm_timer(c);
-    }
-
-    H3T(s->stream_id, "6.drain_done");
-
-    /* Coroutine's reference. After this, only nghttp3's
-     * stream_user_data may be holding the stream alive. */
-    http3_stream_release(s);
+    h3_dispose_tail(c, s);
 }
 
