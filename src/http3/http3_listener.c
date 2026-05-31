@@ -1106,6 +1106,26 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
 #ifdef SO_REUSEPORT
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
+    /* Enlarge the UDP socket buffers. A QUIC burst (many connections, or a
+     * handler that briefly holds the single reactor thread) can pile
+     * datagrams faster than we drain them; the stock ~208 KiB default
+     * overflows into RcvbufErrors — silent loss that costs the peer a PTO.
+     * nginx and h2o bump these too. SO_*BUFFORCE bypasses
+     * net.core.{r,w}mem_max under CAP_NET_ADMIN; unprivileged we fall back
+     * to SO_*BUF (the kernel clamps to the sysctl max — operators raise
+     * net.core.rmem_max for QUIC just as they do for nginx). Best-effort;
+     * a clamp or EPERM is harmless. */
+    {
+        const int sockbuf = 8 * 1024 * 1024;
+
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
+            (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
+        }
+
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
+            (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
+        }
+    }
 #if defined(UDP_GRO)
     /* Coalesce same-4-tuple inbound datagrams into one recv slot; the
      * kernel attaches a UDP_GRO cmsg with the per-segment size, which the
