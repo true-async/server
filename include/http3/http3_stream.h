@@ -71,6 +71,13 @@ struct _http3_stream_s {
      * Until then the stream owns the request and must free it. */
     bool              dispatched;
 
+    /* Set when the static-handler FSM produced the response synchronously
+     * (HTTP_STATIC_HANDLED: inline small-file body or a 4xx). The handler
+     * coroutine entry short-circuits the user handler; dispose still runs
+     * the buffered commit so the wire frames go out. Mirrors H2's
+     * http2_stream_t.skip_handler. */
+    bool              skip_handler;
+
     /* Buffered response body (REST/setBody path). The data_reader
      * callback feeds nghttp3 from this buffer at offset
      * `response_body_offset` until EOF. Owned by the stream; released

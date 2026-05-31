@@ -24,6 +24,7 @@
 #include "http_connection.h"               /* http_handler_log_bailout */
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
+#include "static/static_handler.h"         /* http_static_try_serve / count */
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -36,6 +37,7 @@ extern zval *http_request_create_from_parsed(http_request_t *req);
  * through the coroutine vtable. */
 static void h3_handler_coroutine_entry(void);
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine);
+static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s);
 
 /* Lifecycle trace (temporary, gated by H3_TRACE). Microsecond timestamp +
  * stream id at each stage, to see where a request's time goes under load. */
@@ -49,6 +51,54 @@ static inline int h3_trace_on(void)
     fprintf(stderr, "[h3t] %llu sid=%lld %s\n", \
         (unsigned long long)(zend_hrtime() / 1000ULL), (long long)(sid), (ev)); \
     } while (0)
+
+/* === Static-handler dispatch callbacks ============================
+ *
+ * The protocol-agnostic static FSM (src/static/http_static.c) calls
+ * back through these on the hard-zero async path. `user` is the
+ * http3_stream_t. Mirrors h2_static_dispatch_cbs in http2_strategy.c —
+ * H3 has no conn-level handler_refcount, so on_armed pins only the
+ * stream (so the deferred on_done still finds a live stream +
+ * response_zv to tail-dispose) plus the in-flight counter. */
+static void h3_static_on_hard_zero_armed(void *user)
+{
+    http3_stream_t *const s = (http3_stream_t *)user;
+    http3_connection_t *const c = s->conn;
+
+    if (c != NULL) {
+        http_server_on_request_dispatch(c->counters);
+    }
+
+    s->refcount++;
+}
+
+static void h3_static_on_static_done(void *user, const int status)
+{
+    (void)status;
+    http3_stream_t *const s = (http3_stream_t *)user;
+    http3_connection_t *const c = s->conn;
+
+    if (c != NULL) {
+        http_server_on_request_dispose(c->counters);
+    }
+
+    h3_dispose_tail(c, s);
+}
+
+/* H3 multiplexes on one QUIC connection; Connection/Keep-Alive are
+ * filtered out of every response. Always keep-alive. */
+static bool h3_static_keep_alive(void *user)
+{
+    (void)user;
+    return true;
+}
+
+static const http_static_dispatch_cbs_t h3_static_dispatch_cbs = {
+    .on_armed       = h3_static_on_hard_zero_armed,
+    .on_done        = h3_static_on_static_done,
+    .on_passthrough = NULL,
+    .keep_alive     = h3_static_keep_alive,
+};
 
 /* Full user-handler dispatch.
  *
@@ -89,7 +139,12 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
     }
 
-    if (fcall == NULL || scope == NULL) {
+    /* Static-only deployments register a mount but no PHP handler — the
+     * static gate below claims the request before any handler is needed.
+     * Mirrors http2_strategy.c. */
+    const bool has_static_mount = http_static_handler_count(server) > 0;
+
+    if ((fcall == NULL && !has_static_mount) || scope == NULL) {
         return;
     }
 
@@ -151,6 +206,43 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     }
 #endif
 
+    /* Static-handler dispatch (issue #60). Same policy as the H1/H2
+     * sites:
+     *   HARD_ZERO   — FSM owns the request; on_armed pinned the stream.
+     *                 Return without spawning a coroutine; on_static_done
+     *                 runs the dispose tail when the pump finishes.
+     *   HANDLED     — response populated synchronously (inline small file
+     *                 or 4xx). Set skip_handler so the coroutine entry
+     *                 skips the user handler; dispose still commits.
+     *   PASSTHROUGH — no mount matched; fall through to the handler. */
+    if (UNEXPECTED(has_static_mount)) {
+        const http_static_result_t static_rc =
+            http_static_try_serve(server, s->request, Z_OBJ(s->response_zv),
+                                  c->counters, &h3_static_dispatch_cbs, s);
+
+        if (static_rc == HTTP_STATIC_HARD_ZERO) {
+            return;
+        }
+
+        if (static_rc == HTTP_STATIC_HANDLED) {
+            s->skip_handler = true;
+        }
+    }
+
+    /* No PHP handler and the static path didn't claim the request:
+     * synthesise a 404 so the dispose-side commit sends one. Otherwise a
+     * static-only deployment would spawn a coroutine whose handler==NULL
+     * guard returns silently and the stream would hang. Mirrors H1/H2. */
+    if (fcall == NULL && !s->skip_handler) {
+        http_response_static_set_status(Z_OBJ(s->response_zv), 404);
+        http_response_static_set_header(Z_OBJ(s->response_zv),
+            "content-type", 12, "text/plain; charset=utf-8", 25);
+        zend_string *msg = zend_string_init("Not Found", 9, 0);
+        http_response_static_set_body_str(Z_OBJ(s->response_zv), msg);
+        zend_string_release(msg);
+        s->skip_handler = true;
+    }
+
     /* Spawn the per-stream handler coroutine. extended_data is the
      * STREAM (not the connection) — that's how N concurrent streams on
      * the same QUIC connection get N independent (request, response)
@@ -201,6 +293,14 @@ static void h3_handler_coroutine_entry(void)
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
 
     if (s == NULL || s->conn == NULL) return;
+
+    /* Static-handler HANDLED path: response_zv already carries the
+     * synchronous body (inline small file or 4xx). Skip the user handler;
+     * dispose runs the buffered commit. Mirrors http2_handler_coroutine_entry. */
+    if (s->skip_handler) {
+        http_server_count_request(s->conn->counters);
+        return;
+    }
 
     H3T(s->stream_id, "2.coro_entry");
 
