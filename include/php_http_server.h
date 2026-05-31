@@ -239,6 +239,7 @@ struct _http_server_config_t {
     uint32_t http3_socket_buffer_bytes;
     uint32_t tls_buffer_bytes;        /* CT-out BIO ring size, record-aligned (#29) */
     bool     http3_alt_svc_enabled;
+    bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
 
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
      * phase 2 adds Brotli + zstd through the same vtable.
@@ -778,6 +779,7 @@ typedef struct {
     uint32_t http3_socket_buffer_bytes;
     uint32_t tls_buffer_bytes;           /* CT-out BIO ring size (#29) */
     bool     http3_alt_svc_enabled;
+    bool     http3_pacing;               /* QUIC send pacing — opt-in (#59) */
     bool     telemetry_enabled;          /* W3C trace context ingestion */
     bool     body_streaming_enabled;     /* Issue #26 */
     /* Hot-path gate: true iff per-request hrtime stamps (enqueue_ns /
@@ -846,6 +848,10 @@ static inline uint32_t http_server_get_tls_buffer_bytes(const http_server_object
 
 static inline bool http_server_get_http3_alt_svc_enabled(const http_server_object *server) {
     return http_server_view(server)->http3_alt_svc_enabled;
+}
+
+static inline bool http_server_get_http3_pacing(const http_server_object *server) {
+    return http_server_view(server)->http3_pacing;
 }
 
 /* Hot-path increments, inlined at the call site. The pointer is never

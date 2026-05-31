@@ -514,6 +514,21 @@ final class HttpServerConfig
     /** @return bool */
     public function isHttp3AltSvcEnabled(): bool {}
 
+    /**
+     * Opt-in QUIC send pacing (#59 Phase 2). When on, the H3 send path
+     * caps each burst at the congestion controller's send_quantum and
+     * spaces packets via ngtcp2's pacing timer — smooths bulk sends on
+     * lossy / rate-limited paths. Default OFF: on a lossless path it only
+     * adds cost, so enable it only for constrained-path deployments.
+     *
+     * @param bool $enable
+     * @return static
+     */
+    public function setHttp3Pacing(bool $enable): static {}
+
+    /** @return bool */
+    public function isHttp3Pacing(): bool {}
+
     // === HTTP body compression (issue #8) ===
 
     /**

@@ -149,6 +149,10 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
 
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3Pacing arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isHttp3Pacing arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, level, IS_LONG, 0)
 ZEND_END_ARG_INFO()
@@ -301,6 +305,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setTlsBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getTlsBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3Pacing);
+ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3Pacing);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel);
@@ -400,6 +406,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getTlsBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_getTlsBufferBytes, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3AltSvcEnabled, arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3AltSvcEnabled, arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3Pacing, arginfo_class_TrueAsync_HttpServerConfig_setHttp3Pacing, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3Pacing, arginfo_class_TrueAsync_HttpServerConfig_isHttp3Pacing, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel, arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, ZEND_ACC_PUBLIC)
