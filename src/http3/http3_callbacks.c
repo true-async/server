@@ -141,6 +141,8 @@ static void h3_store_header_value(http_request_t *req,
  * recv_header/recv_data callbacks short-circuit on s->rejected; the
  * STOP_SENDING + RESET_STREAM frames carry NGHTTP3_H3_REQUEST_REJECTED
  * so the peer learns this specific stream was the problem. */
+static void http3_finalize_request_body(http3_stream_t *s);
+
 static void h3_reject_request_stream(http3_connection_t *c,
                                      http3_stream_t *s, int64_t stream_id)
 {
@@ -164,6 +166,16 @@ static void h3_reject_request_stream(http3_connection_t *c,
         (void)ngtcp2_conn_shutdown_stream_write(
             (ngtcp2_conn *)c->ngtcp2_conn, 0, stream_id,
             NGHTTP3_H3_REQUEST_REJECTED);
+    }
+
+    /* If a handler was already dispatched (reject after END_HEADERS — e.g.
+     * a body-size overflow), it may be suspended in $request->awaitBody().
+     * h3_end_stream_cb skips finalize on a rejected stream, so wake the
+     * waiter here: otherwise the coroutine never resumes, never disposes,
+     * and leaks its stream slot + HttpRequest wrapper. No-op when no handler
+     * was dispatched (header-overflow reject) or the body already finalized. */
+    if (s->dispatched && !s->fin_received) {
+        http3_finalize_request_body(s);
     }
 }
 
