@@ -81,6 +81,7 @@ struct _http_server_shared_config_t {
     uint32_t                http3_stream_window_bytes;
     uint32_t                http3_max_concurrent_streams;
     uint32_t                http3_peer_connection_budget;
+    uint32_t                http3_socket_buffer_bytes;
 
     /* Compression — see http_server_config_t for semantics. The MIME
      * whitelist is deep-copied to a persistent zend_string array so
@@ -164,8 +165,16 @@ static void http_server_config_populate_from_shared(
 #define HTTP3_STREAM_WINDOW_MAX_BYTES         (1024u * 1024u * 1024u)  /* 1 GiB */
 #define DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS  100u
 #define HTTP3_MAX_CONCURRENT_STREAMS_MAX      1000000u
-#define DEFAULT_HTTP3_PEER_BUDGET             16u
+/* 0 = opt-in / disabled by default. Neither nginx nor h2o ships a
+ * default per-source-IP connection cap; a low one collapses legitimate
+ * shared-IP fan-out (CGNAT, proxies, a loopback load generator). Source-
+ * address validation (Retry) is the amplification defence and the global
+ * max_connections gate is the resource backstop. Operators who want a
+ * per-IP throttle set it explicitly via setHttp3PeerConnectionBudget(). */
+#define DEFAULT_HTTP3_PEER_BUDGET             0u
 #define HTTP3_PEER_BUDGET_MAX                 4096u
+#define DEFAULT_HTTP3_SOCKET_BUFFER_BYTES     (8u * 1024u * 1024u)   /* 8 MiB */
+#define HTTP3_SOCKET_BUFFER_MAX               (256u * 1024u * 1024u) /* 256 MiB */
 
 #ifdef HAVE_HTTP_COMPRESSION
 /* Compression knob defaults are sourced from
@@ -376,6 +385,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->http3_stream_window_bytes    = DEFAULT_HTTP3_STREAM_WINDOW_BYTES;
     config->http3_max_concurrent_streams = DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS;
     config->http3_peer_connection_budget = DEFAULT_HTTP3_PEER_BUDGET;
+    config->http3_socket_buffer_bytes = DEFAULT_HTTP3_SOCKET_BUFFER_BYTES;
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
     config->auto_await_body = true;  /* Default: wait for body on non-multipart */
@@ -1431,6 +1441,44 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget)
     RETURN_LONG((zend_long)config->http3_peer_connection_budget);
 }
 
+/* proto HttpServerConfig::setHttp3SocketBufferBytes(int $bytes): static
+ *
+ * UDP socket receive/send buffer for HTTP/3 listeners. Absorbs inbound
+ * bursts so they don't overflow into RcvbufErrors (silent loss → peer
+ * PTO). Applied via SO_*BUFFORCE (bypasses net.core.{r,w}mem_max under
+ * CAP_NET_ADMIN) with a SO_*BUF fallback the kernel clamps to the sysctl
+ * max. 0 = leave the OS default untouched.
+ *
+ * Default: 8 MiB. Valid: 0 .. 256 MiB. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3SocketBufferBytes)
+{
+    zend_long n;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(n)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) { return; }
+
+    if (n < 0 || (zend_ulong)n > HTTP3_SOCKET_BUFFER_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Http3SocketBufferBytes must be between 0 and 268435456", 0);
+        return;
+    }
+
+    config->http3_socket_buffer_bytes = (uint32_t)n;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getHttp3SocketBufferBytes(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3SocketBufferBytes)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->http3_socket_buffer_bytes);
+}
+
 /* {{{ proto HttpServerConfig::setHttp3AltSvcEnabled(bool $enable): static
  *
  * Toggle the RFC 7838 Alt-Svc header advertisement. Default true.
@@ -2345,6 +2393,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->http3_stream_window_bytes    = 0;
     config->http3_max_concurrent_streams = 0;
     config->http3_peer_connection_budget = 0;
+    config->http3_socket_buffer_bytes = 0;
     config->http3_alt_svc_enabled = true;
     config->write_buffer_size = 0;
     config->http2_enabled = false;
@@ -2479,6 +2528,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_stream_window_bytes    = src->http3_stream_window_bytes;
     shared->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
     shared->http3_peer_connection_budget = src->http3_peer_connection_budget;
+    shared->http3_socket_buffer_bytes = src->http3_socket_buffer_bytes;
     shared->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     shared->write_buffer_size  = src->write_buffer_size;
 
@@ -2628,6 +2678,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_stream_window_bytes    = src->http3_stream_window_bytes;
     dst->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
     dst->http3_peer_connection_budget = src->http3_peer_connection_budget;
+    dst->http3_socket_buffer_bytes = src->http3_socket_buffer_bytes;
     dst->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     dst->write_buffer_size  = src->write_buffer_size;
 

@@ -1,0 +1,7 @@
+{
+  "schema": "h3-baseline/1",
+  "note": "Phase-0 baseline (issue #59). sendmsg_per_req is THE Phase-1 metric (server syscalls, client-independent) and must drop with no rps regression.",
+  "client": "tests/h3client (ngtcp2, 1 in-flight stream/conn, concurrency via xargs -P)",
+  "caveats": ["rps_median at high conc is client-bound (h3client = process+handshake per conn), use as a same-tooling regression guard, not server capacity", "no p50/p99: h3client cannot report percentiles", "bodies >=~1MB are NOT measurable: h3client stalls (no stream flow-control updates) -> excluded; both percentiles and large-body need a QUIC-enabled h2load (Phase-0 follow-up)"],
+  "cells": [{"server":"ours","body":3,"conc":10,"rps_median":1460.3,"runs":3,"per_conn":150,"strace_per_conn":20,"req_sampled":200,"sendmsg_per_req":1.815,"sendmmsg_per_req":0.000,"recvmsg_per_req":0.000,"recvmmsg_per_req":0.415},{"server":"ours","body":3,"conc":100,"rps_median":95.9,"runs":3,"per_conn":150,"strace_per_conn":20,"req_sampled":480,"sendmsg_per_req":2.185,"sendmmsg_per_req":0.000,"recvmsg_per_req":0.010,"recvmmsg_per_req":0.762},{"server":"ours","body":16384,"conc":10,"rps_median":1451.9,"runs":3,"per_conn":150,"strace_per_conn":20,"req_sampled":200,"sendmsg_per_req":1.915,"sendmmsg_per_req":0.000,"recvmsg_per_req":0.000,"recvmmsg_per_req":0.930},{"server":"ours","body":16384,"conc":100,"rps_median":76.8,"runs":3,"per_conn":150,"strace_per_conn":20,"req_sampled":340,"sendmsg_per_req":2.444,"sendmmsg_per_req":0.000,"recvmsg_per_req":0.015,"recvmmsg_per_req":1.235}]
+}

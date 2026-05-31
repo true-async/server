@@ -464,6 +464,22 @@ final class HttpServerConfig
     public function getHttp3PeerConnectionBudget(): int {}
 
     /**
+     * UDP socket receive/send buffer size (bytes) for HTTP/3 listeners.
+     * Absorbs inbound bursts so they don't overflow into RcvbufErrors.
+     * 0 = leave the OS default. The kernel clamps to net.core.{r,w}mem_max
+     * unless privileged (SO_*BUFFORCE).
+     *
+     * Default: 8 MiB. Valid: 0 .. 268435456 (256 MiB).
+     *
+     * @param int $bytes
+     * @return static
+     */
+    public function setHttp3SocketBufferBytes(int $bytes): static {}
+
+    /** @return int */
+    public function getHttp3SocketBufferBytes(): int {}
+
+    /**
      * Toggle the RFC 7838 `Alt-Svc: h3=":<port>"; ma=86400` header
      * advertisement on H1/H2 responses when an H3 listener is up.
      * Default true. Disable during phased H3 rollout.

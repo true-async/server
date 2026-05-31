@@ -50,6 +50,19 @@
  * eliciting packets). See h2o lib/http3/common.c:819-822. */
 #define HTTP3_LISTENER_RECV_BATCH 10
 
+/* Per-recv-slot buffer + control sizes. With UDP_GRO the kernel coalesces
+ * same-4-tuple inbound datagrams into one slot, so the slot must hold a
+ * burst (capped at 16 MTUs — a full 64 KiB × batch would blow the
+ * reactor-callback stack) and the control buffer must hold the UDP_GRO
+ * cmsg alongside the ECN one. Without GRO a slot is one MTU + one cmsg. */
+#if defined(UDP_GRO)
+# define HTTP3_LISTENER_RECV_SLOT 24576
+# define HTTP3_LISTENER_RECV_CTRL (2 * CMSG_SPACE(sizeof(int)))
+#else
+# define HTTP3_LISTENER_RECV_SLOT HTTP3_LISTENER_DGRAM_SIZE
+# define HTTP3_LISTENER_RECV_CTRL CMSG_SPACE(sizeof(int))
+#endif
+
 struct _http3_listener_s {
     /* Linux raw-fd path. fd >= 0 iff this listener is using the
      * recvmmsg/sendmsg fast path; otherwise the legacy udp_io path
@@ -92,6 +105,14 @@ struct _http3_listener_s {
      * twice as we would if we iterated conn_map. */
     http3_connection_t        *conn_list;
 
+    /* Phase-1 deferred-output dirty-list head, linked through
+     * conn->dirty_next. The read path marks conns here instead of
+     * draining per datagram; http3_listener_flush_dirty drains the list
+     * once per recvmmsg tick. Always empty between ticks — populated and
+     * fully drained within a single poll-cb wakeup, so no conn freed by a
+     * coroutine/timer between ticks can dangle on it. */
+    http3_connection_t        *dirty_head;
+
     /* SSL_CTX* shared with the TCP/TLS path. Non-owning — the server
      * constructs and tears it down. Stored as void* to keep openssl.h
      * out of the public listener header. */
@@ -126,6 +147,15 @@ struct _http3_listener_s {
      * fan-out a single source can pin on the server. */
     HashTable                 *peer_count_map;
     uint32_t                   peer_budget;
+
+    /* Per-listener (per-worker) live connection count and hard cap — the
+     * QUIC analogue of the TCP active_connections / max_connections
+     * gate, and of nginx's per-worker worker_connections. This is the
+     * resource backstop now that peer_budget is opt-in. max_conns == 0
+     * means unlimited; it is seeded from the server max_connections at
+     * spawn. */
+    uint32_t                   conn_count;
+    uint32_t                   max_conns;
 
     /* Cache for last_peer formatting — inet_ntop + snprintf cost ~100 ns
      * per datagram, but back-to-back packets from the same peer are the
@@ -373,17 +403,17 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
 
     struct mmsghdr mess[HTTP3_LISTENER_RECV_BATCH];
     struct iovec   iovs[HTTP3_LISTENER_RECV_BATCH];
-    uint8_t        bufs[HTTP3_LISTENER_RECV_BATCH][HTTP3_LISTENER_DGRAM_SIZE];
+    uint8_t        bufs[HTTP3_LISTENER_RECV_BATCH][HTTP3_LISTENER_RECV_SLOT];
     struct sockaddr_storage src_addrs[HTTP3_LISTENER_RECV_BATCH];
-    /* cmsg ctrl buffer per mmsghdr — sized for IP_TOS (int via
-     * IPV6_TCLASS) which is the largest single cmsg we need on
-     * recv. CMSG_SPACE(sizeof(int)) typically ≈ 24 bytes. */
-    uint8_t        ctrls[HTTP3_LISTENER_RECV_BATCH][CMSG_SPACE(sizeof(int))];
+    /* cmsg ctrl buffer per mmsghdr — holds the ECN cmsg (IP_TOS /
+     * IPV6_TCLASS) plus, when UDP_GRO is on, the segment-size cmsg.
+     * See HTTP3_LISTENER_RECV_CTRL. */
+    uint8_t        ctrls[HTTP3_LISTENER_RECV_BATCH][HTTP3_LISTENER_RECV_CTRL];
 
     for (unsigned outer = 0; outer < H3_DRAIN_BATCH_CAP; ++outer) {
         for (int i = 0; i < HTTP3_LISTENER_RECV_BATCH; ++i) {
             iovs[i].iov_base = bufs[i];
-            iovs[i].iov_len  = HTTP3_LISTENER_DGRAM_SIZE;
+            iovs[i].iov_len  = HTTP3_LISTENER_RECV_SLOT;
             mess[i].msg_hdr  = (struct msghdr){
                 .msg_name    = &src_addrs[i],
                 .msg_namelen = sizeof(src_addrs[i]),
@@ -430,6 +460,10 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
              * those bits. We pass the byte through unchanged; pi.ecn
              * downstream will mask. */
             uint8_t ecn = 0;
+            /* UDP_GRO segment size, written by the kernel when several
+             * datagrams were coalesced into this slot. 0 = no cmsg = the
+             * whole slot is a single datagram. */
+            int gso = 0;
             for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mess[i].msg_hdr);
                  cm != NULL;
                  cm = CMSG_NXTHDR(&mess[i].msg_hdr, cm)) {
@@ -454,31 +488,57 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                     ecn = (uint8_t)(tclass & 0xff);
                 }
 #endif
+#if defined(UDP_GRO)
+                else if (cm->cmsg_level == SOL_UDP
+                         && cm->cmsg_type == UDP_GRO) {
+                    /* Kernel writes a 16-bit size into an int-sized slot;
+                     * read it as int via memcpy (alignment-safe). */
+                    memcpy(&gso, CMSG_DATA(cm), sizeof(gso));
+                }
+#endif
             }
 
-            listener->stats.datagrams_received++;
-            listener->stats.bytes_received += (uint64_t)dlen;
-            listener->stats.last_datagram_size = dlen;
+            /* UDP_GRO: the slot may carry several coalesced datagrams of
+             * `gso` bytes each (the last possibly shorter). All share one
+             * peer (the kernel only coalesces a single 4-tuple), so update
+             * the peer cache once, then feed each segment to dispatch as
+             * its own datagram. gso == 0 (no cmsg) → one segment of dlen,
+             * byte-identical to the non-GRO path. */
+            const size_t seg = (gso > 0) ? (size_t)gso : dlen;
 
             update_peer_cache(listener, src, src_len);
 
-            http3_connection_dispatch(listener,
-                                      bufs[i], dlen, ecn,
-                                      src, src_len);
+            for (size_t off = 0; off < dlen; off += seg) {
+                const size_t plen = (dlen - off < seg) ? (dlen - off) : seg;
 
-            /* Dispatch may have closed the listener via reap-on-close.
-             * Bail out of both loops in that case. */
-            if (listener->closed) {
-                return;
+                listener->stats.datagrams_received++;
+                listener->stats.bytes_received    += (uint64_t)plen;
+                listener->stats.last_datagram_size = plen;
+
+                http3_connection_dispatch(listener, bufs[i] + off, plen,
+                                          ecn, src, src_len);
+
+                /* Any segment's dispatch may reap-on-close the listener;
+                 * re-check before touching it again. */
+                if (listener->closed) {
+                    return;
+                }
             }
         }
 
         /* Short read = queue empty. Avoid the next syscall when we already
          * know there is nothing pending. */
         if (n < HTTP3_LISTENER_RECV_BATCH) {
-            return;
+            break;
         }
     }
+
+    /* Flush all connections touched this tick exactly once. Coalesces the
+     * output of a multi-datagram burst into one drain (one GSO sendmsg)
+     * per conn instead of one per inbound datagram. The listener-closed
+     * bail-out above returns early and skips this — that path is teardown,
+     * where conns are reaped by listener destroy, not flushed. */
+    http3_listener_flush_dirty(listener);
 }
 #endif /* __linux__ */
 
@@ -760,6 +820,41 @@ void http3_listener_track_connection(http3_listener_t *l,
 
     conn->next = l->conn_list;
     l->conn_list = conn;
+    l->conn_count++;
+}
+
+/* Mark a connection as having pending output for this tick. Idempotent:
+ * a conn touched by several datagrams in one tick is linked once. */
+void http3_listener_mark_flush(http3_listener_t *l, http3_connection_t *conn)
+{
+    if (conn->in_dirty) {
+        return;
+    }
+
+    conn->in_dirty   = true;
+    conn->dirty_next = l->dirty_head;
+    l->dirty_head    = conn;
+}
+
+/* Drain every connection marked this tick, exactly once, and clear the
+ * list. Runs at the end of the poll-cb after the recvmmsg batch. */
+void http3_listener_flush_dirty(http3_listener_t *l)
+{
+    http3_connection_t *conn = l->dirty_head;
+    l->dirty_head = NULL;
+
+    while (conn != NULL) {
+        /* Capture the link and clear the marker before flushing —
+         * http3_connection_flush may reap the conn on a terminal state,
+         * after which it must not be touched. */
+        http3_connection_t *next = conn->dirty_next;
+        conn->dirty_next = NULL;
+        conn->in_dirty   = false;
+
+        http3_connection_flush(conn);
+
+        conn = next;
+    }
 }
 
 /* Per-peer budget helpers.
@@ -791,6 +886,7 @@ bool http3_listener_peer_inc(http3_listener_t *l,
                              const struct sockaddr *peer)
 {
     if (l == NULL || peer == NULL) return true;       /* fail-open */
+    if (l->peer_budget == 0) return true;             /* disabled → no map work */
     uint8_t key[16]; size_t klen = 0;
 
     if (!peer_key_from_sockaddr(peer, key, &klen)) {
@@ -819,7 +915,8 @@ bool http3_listener_peer_inc(http3_listener_t *l,
 void http3_listener_peer_dec(http3_listener_t *l,
                              const struct sockaddr *peer)
 {
-    if (l == NULL || peer == NULL || l->peer_count_map == NULL) return;
+    if (l == NULL || peer == NULL || l->peer_budget == 0
+        || l->peer_count_map == NULL) return;
     uint8_t key[16]; size_t klen = 0;
 
     if (!peer_key_from_sockaddr(peer, key, &klen)) return;
@@ -838,6 +935,15 @@ void http3_listener_peer_dec(http3_listener_t *l,
     }
 }
 
+/* Global per-listener admission gate. Returns true while there is room
+ * for one more connection under max_conns (0 = unlimited). Cheap O(1)
+ * counter check — no map, runs on every accepted Initial. */
+bool http3_listener_admit(const http3_listener_t *l)
+{
+    if (l == NULL || l->max_conns == 0) return true;
+    return l->conn_count < l->max_conns;
+}
+
 /* Unhook a connection from the listener's intrusive list and
  * remove every key it occupies in conn_map. The map is non-owning so
  * removing the keys does NOT free the connection; the caller does that.
@@ -853,18 +959,26 @@ void http3_listener_remove_connection(http3_listener_t *l,
     /* Singly-linked unhook. Conn count is bounded by max_connections
      * (low thousands) and reap is rare relative to packet flow, so the
      * O(N) walk is fine. */
+    bool found = false;
+
     if (l->conn_list == conn) {
         l->conn_list = conn->next;
+        found = true;
     } else {
         for (http3_connection_t *p = l->conn_list; p != NULL; p = p->next) {
             if (p->next == conn) {
                 p->next = conn->next;
+                found = true;
                 break;
             }
         }
     }
 
     conn->next = NULL;
+
+    if (found && l->conn_count > 0) {
+        l->conn_count--;
+    }
 
     if (l->conn_map != NULL) {
         if (conn->scidlen > 0) {
@@ -877,6 +991,18 @@ void http3_listener_remove_connection(http3_listener_t *l,
                 || memcmp(conn->original_dcid, conn->scid, conn->scidlen) != 0)) {
             zend_hash_str_del(l->conn_map,
                 (const char *)conn->original_dcid, conn->original_dcidlen);
+        }
+
+        /* Post-Retry routing key (see http3_connection_accept). Mirror the
+         * dedup used at registration so we only remove a key we added. */
+        if (conn->routing_dcidlen > 0
+            && (conn->routing_dcidlen != conn->scidlen
+                || memcmp(conn->routing_dcid, conn->scid, conn->scidlen) != 0)
+            && (conn->routing_dcidlen != conn->original_dcidlen
+                || memcmp(conn->routing_dcid, conn->original_dcid,
+                          conn->original_dcidlen) != 0)) {
+            zend_hash_str_del(l->conn_map,
+                (const char *)conn->routing_dcid, conn->routing_dcidlen);
         }
     }
 }
@@ -980,6 +1106,41 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
 #ifdef SO_REUSEPORT
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
+    /* Enlarge the UDP socket buffers. A QUIC burst (many connections, or a
+     * handler that briefly holds the single reactor thread) can pile
+     * datagrams faster than we drain them; the stock ~208 KiB default
+     * overflows into RcvbufErrors — silent loss that costs the peer a PTO.
+     * nginx and h2o bump these too. SO_*BUFFORCE bypasses
+     * net.core.{r,w}mem_max under CAP_NET_ADMIN; unprivileged we fall back
+     * to SO_*BUF (the kernel clamps to the sysctl max — operators raise
+     * net.core.rmem_max for QUIC just as they do for nginx). Best-effort;
+     * a clamp or EPERM is harmless. Size from
+     * HttpServerConfig::setHttp3SocketBufferBytes (default 8 MiB,
+     * 0 = leave the OS default; NULL server_obj in a unit test resolves
+     * to the 0 fallback). */
+    {
+        const uint32_t want =
+            http_server_get_http3_socket_buffer_bytes((const http_server_object *)server_obj);
+
+        if (want > 0) {
+            const int sockbuf = (int)want;
+
+            if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
+                (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
+            }
+
+            if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &sockbuf, sizeof(sockbuf)) != 0) {
+                (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
+            }
+        }
+    }
+#if defined(UDP_GRO)
+    /* Coalesce same-4-tuple inbound datagrams into one recv slot; the
+     * kernel attaches a UDP_GRO cmsg with the per-segment size, which the
+     * poll loop splits back into individual datagrams. Socket-level, so
+     * set once regardless of address family. */
+    (void)setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(one));
+#endif
     if (family == AF_INET6) {
         (void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
 #ifdef IPV6_RECVTCLASS
@@ -1073,14 +1234,19 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
         return NULL;
     }
 
-    /* Per-peer budget. Resolution order:
+    /* Per-peer-IP budget. OPT-IN, default off (0 = unlimited) — neither
+     * nginx nor h2o keep a default per-source-IP connection cap, and a low
+     * one collapses legitimate shared-IP fan-out (CGNAT, proxies, a
+     * loopback load generator) onto a few slots while validated clients
+     * pile up behind PTO backoff. Source-address validation (Retry) is the
+     * amplification defence; the global max_conns gate below is the
+     * resource backstop. Resolution order:
      *   1. HttpServerConfig::setHttp3PeerConnectionBudget() at start().
      *      Reads via http_server_get_http3_peer_connection_budget;
      *      0 means "config left unset" → fall through.
-     *   2. PHP_HTTP3_PEER_BUDGET env (legacy ops escape hatch).
-     *   3. Built-in default 16 (covers polite browser fan-out for a
-     *      single user behind NAT). */
-    listener->peer_budget = 16;
+     *   2. PHP_HTTP3_PEER_BUDGET env (ops escape hatch, [1, 4096]).
+     *   3. Built-in default 0 = disabled. */
+    listener->peer_budget = 0;
     uint32_t cfg_budget = http_server_get_http3_peer_connection_budget(
         (const http_server_object *)server_obj);
 
@@ -1111,6 +1277,16 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
                     env);
             }
         }
+    }
+
+    /* Global per-listener admission cap = the configured server
+     * max_connections (0 = unlimited). Per-worker, like nginx
+     * worker_connections — the resource backstop now that peer_budget is
+     * opt-in. */
+    {
+        const int mc = http_server_get_max_connections(
+            (const http_server_object *)server_obj);
+        listener->max_conns = mc > 0 ? (uint32_t)mc : 0;
     }
 
 #ifdef __linux__

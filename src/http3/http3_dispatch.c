@@ -35,6 +35,19 @@ extern zval *http_request_create_from_parsed(http_request_t *req);
 static void h3_handler_coroutine_entry(void);
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 
+/* Lifecycle trace (temporary, gated by H3_TRACE). Microsecond timestamp +
+ * stream id at each stage, to see where a request's time goes under load. */
+static inline int h3_trace_on(void)
+{
+    static int v = -1;
+    if (v < 0) { v = getenv("H3_TRACE") != NULL ? 1 : 0; }
+    return v;
+}
+#define H3T(sid, ev) do { if (h3_trace_on()) \
+    fprintf(stderr, "[h3t] %llu sid=%lld %s\n", \
+        (unsigned long long)(zend_hrtime() / 1000ULL), (long long)(sid), (ev)); \
+    } while (0)
+
 /* Full user-handler dispatch.
  *
  * Called from h3_end_stream_cb once the request is fully assembled.
@@ -176,6 +189,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
         s->request->enqueue_ns  = zend_hrtime();
     }
 
+    H3T(s->stream_id, "1.dispatch_enqueue");
     ZEND_ASYNC_ENQUEUE_COROUTINE(co);
 }
 
@@ -185,6 +199,8 @@ static void h3_handler_coroutine_entry(void)
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
 
     if (s == NULL || s->conn == NULL) return;
+
+    H3T(s->stream_id, "2.coro_entry");
 
     http_server_object *server =
         (http_server_object *)http3_listener_server_obj(s->conn->listener);
@@ -256,6 +272,7 @@ static void h3_handler_coroutine_entry(void)
     zend_end_try();
 
     if (UNEXPECTED(bailout)) {
+        H3T(s->stream_id, "3b.handler_BAILOUT");
         const char *m = (s->request && s->request->method)
                             ? ZSTR_VAL(s->request->method) : "?";
         const char *u = (s->request && s->request->uri)
@@ -263,6 +280,8 @@ static void h3_handler_coroutine_entry(void)
         http_handler_log_bailout("h3", co, m, u);
         return;
     }
+
+    H3T(s->stream_id, "3.handler_returned");
 
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't get counted as
@@ -288,6 +307,8 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     http3_stream_t *s = (http3_stream_t *)coroutine->extended_data;
 
     if (s == NULL) return;
+
+    H3T(s->stream_id, "4.dispose_enter");
 
     /* Break back-pointers BEFORE doing anything else — a peer
      * RST_STREAM arriving while we're tearing down would otherwise
@@ -335,14 +356,19 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     if (c != NULL && !c->closed && c->nghttp3_conn != NULL
         && !Z_ISUNDEF(s->response_zv)) {
         if (is_streaming) {
+            H3T(s->stream_id, s->streaming_ended ? "5.streaming_already_ended"
+                                                 : "5.streaming_resume");
             if (!s->streaming_ended) {
                 s->streaming_ended = true;
                 (void)nghttp3_conn_resume_stream(
                     (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
             }
         } else {
+            H3T(s->stream_id, "5.buffered_submit");
             (void)http3_stream_submit_response(c, s, false);
         }
+    } else {
+        H3T(s->stream_id, "5.SKIP_no_submit");
     }
 
     /* Drop per-stream zvals — we no longer need them. The data_reader
@@ -394,6 +420,8 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http3_connection_drain_out(c);
         http3_connection_arm_timer(c);
     }
+
+    H3T(s->stream_id, "6.drain_done");
 
     /* Coroutine's reference. After this, only nghttp3's
      * stream_user_data may be holding the stream alive. */

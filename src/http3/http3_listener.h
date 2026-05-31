@@ -26,6 +26,7 @@
  * A listener is created at HttpServer::start() time, torn down at stop()
  * or HttpServer destruction. Lifetime is bound to the owning server. */
 typedef struct _http3_listener_s http3_listener_t;
+typedef struct _http3_connection_s http3_connection_t;  /* defined in http3_connection.h */
 
 /* ssl_ctx is the OpenSSL SSL_CTX* shared with the TCP+TLS path (from
  * tls_context_t::ctx). Passed as void* to keep openssl/ssl.h out of this
@@ -105,5 +106,13 @@ ssize_t http3_listener_send_gso(http3_listener_t *listener,
  * listener share the same pool — H3 listener is single-thread per
  * worker, so no locking. Returns non-NULL once the listener is up. */
 http3_stream_pool_t *http3_listener_stream_pool(http3_listener_t *listener);
+
+/* Phase-1 deferred output. mark_flush records that `conn` produced
+ * ngtcp2 output this tick (idempotent — guarded by conn->in_dirty);
+ * flush_dirty drains every marked conn once and clears the list. The
+ * read path marks instead of draining, so a multi-datagram burst to one
+ * conn collapses to a single drain (one GSO sendmsg) per tick. */
+void http3_listener_mark_flush(http3_listener_t *listener, http3_connection_t *conn);
+void http3_listener_flush_dirty(http3_listener_t *listener);
 
 #endif /* HTTP3_LISTENER_H */

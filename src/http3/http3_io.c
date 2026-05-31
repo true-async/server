@@ -122,7 +122,7 @@ void http3_connection_detach_timer(http3_connection_t *c)
 
 void http3_connection_arm_timer(http3_connection_t *c)
 {
-    if (c == NULL || c->closed) {
+    if (c == NULL || c->closed || c->ngtcp2_conn == NULL) {
         return;
     }
 
@@ -423,6 +423,20 @@ void http3_connection_drain_out(http3_connection_t *c)
      * is left in the batch. */
     H3_FLUSH_BATCH();
 #undef H3_FLUSH_BATCH
+}
+
+/* Flush one connection and settle its lifecycle. This is the read path's
+ * post-drain tail, lifted out so the deferred dirty-list flush and the
+ * per-datagram path run identical logic: drain, then reap-or-arm. On a
+ * terminal transition check_terminal frees the conn and returns true, so
+ * the timer is armed only on the live branch and `c` is dead afterward. */
+void http3_connection_flush(http3_connection_t *c)
+{
+    http3_connection_drain_out(c);
+
+    if (!http3_connection_check_terminal(c)) {
+        http3_connection_arm_timer(c);
+    }
 }
 
 /* ------------------------------------------------------------------------

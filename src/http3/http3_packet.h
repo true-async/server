@@ -77,8 +77,17 @@ typedef struct _http3_packet_stats_s {
     uint64_t quic_retry_token_ok;        /* Initials accepted after token verify */
     uint64_t quic_retry_token_invalid;   /* Initials dropped: bad/expired/forged token */
 
-    /* Per-peer connection budget. */
+    /* Per-peer connection budget (opt-in, default off). */
     uint64_t quic_conn_per_peer_rejected;
+
+    /* Global per-listener connection cap (server max_connections). */
+    uint64_t quic_conn_global_rejected;
+
+    /* CONNECTION_REFUSED Initials emitted to address-validated clients
+     * that hit a connection cap, instead of silently dropping (which
+     * would hang them on PTO backoff). Unvalidated peers are still
+     * dropped silently — we owe a spoofable source nothing. */
+    uint64_t quic_conn_refused_sent;
 
     /* Audit hardening counters. */
     uint64_t h3_framing_error;        /* nghttp3_conn_writev_stream returned <0 */
@@ -151,6 +160,21 @@ bool http3_packet_send_stateless_reset(
 bool http3_packet_send_retry(
     http3_listener_t *listener,
     const uint8_t retry_token_key[32],
+    uint32_t version,
+    const uint8_t *client_dcid, size_t client_dcid_len,
+    const uint8_t *client_scid, size_t client_scid_len,
+    const struct sockaddr *peer, socklen_t peer_len);
+
+/* Emit an Initial-level CONNECTION_CLOSE carrying CONNECTION_REFUSED
+ * (RFC 9000 transport error 0x02), without committing any ngtcp2/SSL
+ * state — the moral equivalent of nginx's ngx_quic_send_early_cc. Used
+ * to refuse an address-validated client that hits a connection cap so it
+ * fails fast instead of hanging on PTO backoff. `client_dcid` /
+ * `client_scid` are the DCID / SCID from the client's Initial; the DCID
+ * derives the Initial keys the client can decrypt with. Returns true iff
+ * the packet was generated and submitted. */
+bool http3_packet_send_connection_refused(
+    http3_listener_t *listener,
     uint32_t version,
     const uint8_t *client_dcid, size_t client_dcid_len,
     const uint8_t *client_scid, size_t client_scid_len,
