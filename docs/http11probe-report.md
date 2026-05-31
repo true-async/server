@@ -2,13 +2,13 @@
 
 HTTP/1.1 RFC 9110/9112 compliance + request-smuggling + malformed-input + header-normalization + caching/cookie probe ([MDA2AV/Http11Probe](https://github.com/MDA2AV/Http11Probe)).
 
-_Generated: 2026-05-29 17:30 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
+_Generated: 2026-05-31 08:26 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
 
 ## Summary
 
 | Total | Scored | Passed | Warnings | Failed | Errors |
 |------:|-------:|-------:|---------:|-------:|-------:|
-| 215 | 161 | 145 | 16 | 0 | 0 |
+| 215 | 161 | 148 | 13 | 0 | 0 |
 
 ## Failures (1)
 
@@ -16,24 +16,21 @@ _Generated: 2026-05-29 17:30 UTC — refreshed weekly by `.github/workflows/chao
 |----------|-------|-----------|----------|-----|
 | Compliance | `COMP-HTTP12-VERSION` | May | 200 or 505 | status=400 conn=ClosedByServer |
 
-## Warnings (29)
+## Warnings (26)
 
 | Category | Check | RFC level | Expected | Got |
 |----------|-------|-----------|----------|-----|
 | Capabilities | `CAP-IMS-FUTURE` | Should | 200 | status=304 conn=Open |
 | Compliance | `COMP-ACCEPT-NONSENSE` | Should | 406 or 2xx | status=200 conn=Open |
-| Compliance | `COMP-DUPLICATE-CT` | Should | 400 or 2xx | status=200 conn=Open |
 | Compliance | `COMP-EXPECT-UNKNOWN` | May | 417 or 2xx | status=200 conn=Open |
 | Compliance | `COMP-GET-WITH-CL-BODY` | May | 400 or 2xx | status=200 conn=Open |
 | Compliance | `COMP-HTTP10-NO-HOST` | May | 200 or 400 | status=200 conn=ClosedByServer |
 | Compliance | `COMP-LEADING-CRLF` | Should | 400 or 2xx; close/timeout = warn | status=200 conn=Open |
 | Compliance | `COMP-NO-CL-IN-204` | Must | 204 without CL, or 405 | status=200 conn=Open |
 | Compliance | `RFC9112-3-MULTI-SP-REQUEST-LINE` | Should | 400 or 2xx; close/timeout = warn | status=200 conn=Open |
-| Compliance | `RFC9112-3.2-FRAGMENT-IN-TARGET` | Should | 400 or 2xx; 404 = warn | status=200 conn=Open |
 | MalformedInput | `MAL-CHUNK-EXT-64K` | NotApplicable | 400 or 2xx | status=200 conn=Open |
 | MalformedInput | `MAL-CL-TAB-BEFORE-VALUE` | May | 400 or 2xx | status=200 conn=Open |
 | MalformedInput | `MAL-RANGE-OVERLAPPING` | NotApplicable | 200/206/400/416 | status=200 conn=Open |
-| MalformedInput | `MAL-URL-BACKSLASH` | Should | 400 or 2xx/404 | status=200 conn=Open |
 | MalformedInput | `MAL-URL-PERCENT-CRLF` | NotApplicable | 400 or 2xx/404 | status=200 conn=Open |
 | MalformedInput | `MAL-URL-PERCENT-NULL` | NotApplicable | 400 or 2xx/404 | status=200 conn=Open |
 | Smuggling | `SMUG-ABSOLUTE-URI-HOST-MISMATCH` | Must | 400 or 2xx | status=200 conn=Open |
