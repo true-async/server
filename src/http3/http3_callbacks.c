@@ -1290,7 +1290,7 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
                            int64_t stream_id, uint64_t app_error_code,
                            void *user_data, void *stream_user_data)
 {
-    (void)conn; (void)stream_user_data;
+    (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)user_data;
 
     if (c == NULL || c->nghttp3_conn == NULL) {
@@ -1307,6 +1307,12 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
 
     if (stats != NULL) stats->h3_stream_close++;
+
+    /* ngtcp2 never auto-extends MAX_STREAMS on close, so without this each
+     * connection caps at initial_max_streams_bidi. id&3==0 = client bidi. */
+    if ((stream_id & 0x03) == 0) {
+        ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+    }
 
     if (rv != 0 && rv != NGHTTP3_ERR_STREAM_NOT_FOUND) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
