@@ -247,27 +247,18 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * STREAM (not the connection) — that's how N concurrent streams on
      * the same QUIC connection get N independent (request, response)
      * zval pairs. */
-    /* Per-request (per-stream) scope, child of the server scope. See
-     * http_request_scope_new — each multiplexed stream gets its own
-     * request_context() subtree, isolated from sibling streams. */
-    zend_async_scope_t *req_scope = http_request_scope_new(scope);
-    zend_coroutine_t *co =
-        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
+    /* Per-request (per-stream) scope + handler coroutine. See
+     * http_request_handler_coroutine_new — each multiplexed stream gets
+     * its own request_context() subtree, isolated from sibling streams. */
+    zend_coroutine_t *co = http_request_handler_coroutine_new(
+        scope, h3_handler_coroutine_entry, s, h3_handler_coroutine_dispose);
 
     if (co == NULL) {
-        if (req_scope != NULL) {
-            req_scope->try_to_dispose(req_scope);
-        }
-
         zval_ptr_dtor(&s->request_zv);  ZVAL_UNDEF(&s->request_zv);
         zval_ptr_dtor(&s->response_zv); ZVAL_UNDEF(&s->response_zv);
         s->dispatched = false;
         return;
     }
-
-    co->internal_entry   = h3_handler_coroutine_entry;
-    co->extended_data    = s;
-    co->extended_dispose = h3_handler_coroutine_dispose;
 
     s->coroutine = co;
     s->refcount++;

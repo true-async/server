@@ -444,6 +444,34 @@ bool http_connection_read(http_connection_t *conn);
  * its last coroutine finishes. Returns NULL on allocation failure. */
 zend_async_scope_t *http_request_scope_new(zend_async_scope_t *server_scope);
 
+/* Mint a per-request scope (http_request_scope_new) plus its handler
+ * coroutine, wiring entry/extended_data/dispose. Returns the coroutine
+ * (not yet enqueued) on success; on failure disposes the scope and
+ * returns NULL, leaving protocol-specific zval/conn cleanup to the
+ * caller. Shared by the H1/H2/H3 dispatch paths — static inline as it
+ * sits on the per-request hot path. */
+static zend_always_inline zend_coroutine_t *http_request_handler_coroutine_new(
+        zend_async_scope_t *server_scope,
+        zend_coroutine_entry_t entry, void *extended_data,
+        zend_async_coroutine_dispose dispose)
+{
+    zend_async_scope_t *req_scope = http_request_scope_new(server_scope);
+    if (req_scope == NULL) {
+        return NULL;
+    }
+
+    zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(req_scope);
+    if (coroutine == NULL) {
+        req_scope->try_to_dispose(req_scope);
+        return NULL;
+    }
+
+    coroutine->internal_entry   = entry;
+    coroutine->extended_data    = extended_data;
+    coroutine->extended_dispose = dispose;
+    return coroutine;
+}
+
 /* Helper to spawn connection coroutine.
  * server may be NULL — the connection will run without backpressure
  * reporting (useful for tests).
