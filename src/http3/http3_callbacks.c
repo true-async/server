@@ -132,6 +132,8 @@ static void h3_store_header_value(http_request_t *req,
     zend_string_release(name_str);
 }
 
+static void http3_finalize_request_body(http3_stream_t *s);
+
 /* RFC 9114 §4.1.2 — stream-level rejection. Trips when the peer
  * exceeds our HTTP3_MAX_HEADERS_BYTES / HTTP3_MAX_BODY_BYTES caps.
  * Earlier code returned NGHTTP3_ERR_CALLBACK_FAILURE which closes the
@@ -141,8 +143,6 @@ static void h3_store_header_value(http_request_t *req,
  * recv_header/recv_data callbacks short-circuit on s->rejected; the
  * STOP_SENDING + RESET_STREAM frames carry NGHTTP3_H3_REQUEST_REJECTED
  * so the peer learns this specific stream was the problem. */
-static void http3_finalize_request_body(http3_stream_t *s);
-
 static void h3_reject_request_stream(http3_connection_t *c,
                                      http3_stream_t *s, int64_t stream_id)
 {
