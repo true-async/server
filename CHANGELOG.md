@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-01
+
+Headline release: **HTTP/3 over QUIC**. Folds in everything tagged but not yet
+documented since 0.6.7 (the 0.6.8 tag carried no changelog entry).
+
+### Added
+
+- **HTTP/3 / QUIC server** (`HttpServerConfig::addHttp3Listener`) — full request
+  lifecycle over QUIC: end-to-end GET/POST with `awaitBody`, streaming `send()`,
+  HEAD, `sendFile()` delivery, and `addStaticHandler` mount routing. Built on
+  ngtcp2 + nghttp3 + OpenSSL ≥ 3.5; auto-detected (`--enable-http3` /
+  `--disable-http3`).
+- HTTP/3 production controls: connection migration / NAT rebinding (RFC 9000 §9),
+  opt-in send pacing (`setHttp3Pacing`), per-peer connection budget with global
+  cap and explicit refusal, configurable UDP socket buffer
+  (`setHttp3SocketBufferBytes`), idle timeout, Alt-Svc advertisement, Retry token
+  source-address validation, version negotiation, and stateless reset.
+- `HttpServer::getHttp3Stats()` — handshake / ALPN / nghttp3 / send-error counters.
+- `HttpServer::isHttp2()` / `isHttp3()` compile-time capability probes.
+- `HttpServerConfig::setTlsBufferBytes` — tunable TLS clear-text-out BIO ring (#29).
+- Shared-fd TCP listener path for workers on kernels without load-balancing
+  `SO_REUSEPORT`, selectable at runtime.
+
+### Changed
+
+- HTTP/3 send path coalesces outbound datagrams to once-per-tick and splits
+  coalesced inbound datagrams via `UDP_GRO`; UDP socket buffers enlarged.
+- HTTP/1 conformance hardening: `Date` header, HEAD sends no body, reject
+  `CONNECT` and asterisk-form targets, validate `Host`, reject empty
+  `Transfer-Encoding`, reject fragment/backslash in request-target, reject
+  duplicate `Content-Type`.
+- HTTP/2 over TLS parks the emit remainder when the clear-text-out BIO ring fills
+  (backpressure instead of a write deadlock) (#29).
+- `HttpServer::start()` now throws on listener bind failure instead of failing
+  silently.
+
+### Fixed
+
+- Drain in-flight per-request coroutines on server shutdown so `server_scope` is
+  not disposed while handlers are still running (#74).
+- HTTP/3: dirty-list use-after-free on connection free, dispatched-stream slot
+  leak when a stream is rejected mid-`awaitBody`, and `arm_timer` NULL-`ngtcp2_conn`
+  guard.
+- `http_server`: use-after-free of the wait event on non-stop teardown.
+
 ## [0.6.7] - 2026-05-27
 
 ### Fixed
