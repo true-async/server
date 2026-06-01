@@ -68,8 +68,14 @@ function h3_skipif(array $req = []): void {
             die('skip h3client harness is POSIX-only');
         }
         $client = __DIR__ . '/../../../h3client/h3client';
-        if (!is_executable($client)) {
-            $src = __DIR__ . '/../../../h3client/h3client.c';
+        $src = __DIR__ . '/../../../h3client/h3client.c';
+        /* Rebuild when the binary is missing OR the source is newer than
+         * it: a stale binary from before a harness fix silently fails the
+         * E2E tests (e.g. #48 unstalled bodies > 1 MiB — an old binary
+         * still returns len=0 on 028/032 and looks like a server bug). */
+        $stale = is_file($src) && is_file($client)
+              && @filemtime($src) > @filemtime($client);
+        if (!is_executable($client) || $stale) {
             if (!is_file($src)) {
                 die('skip h3client source missing');
             }
