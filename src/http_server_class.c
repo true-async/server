@@ -387,6 +387,10 @@ struct http_server_object {
     bool                     running;
     bool                     stopping;
     bool                     listeners_paused;
+    /* Set once start()'s post-wakeup drain has emptied server_scope, so the
+     * http_server_free fallback drain is skipped on the normal stop() path
+     * (issue #74). */
+    bool                     scope_drained;
     /* Set in transfer_obj LOAD when this object was constructed by the
      * built-in worker pool (issue #11) — start() skips re-spawning the
      * pool and runs the standalone event loop. */
@@ -1486,6 +1490,112 @@ static zend_async_event_t *create_server_wait_event(void)
     return event;
 }
 
+/* Build an Async\Timeout awaitable for `ms` — the cancellation token
+ * Scope::awaitCompletion() expects. Returns false (out left UNDEF) on failure. */
+static bool http_server_make_timeout(const zend_ulong ms, zval *out)
+{
+    zval fname, arg;
+    ZVAL_STRINGL(&fname, "Async\\timeout", sizeof("Async\\timeout") - 1);
+    ZVAL_LONG(&arg, (zend_long) ms);
+    ZVAL_UNDEF(out);
+
+    const bool ok = call_user_function(NULL, NULL, &fname, out, 1, &arg) == SUCCESS
+                 && EG(exception) == NULL
+                 && Z_TYPE_P(out) == IS_OBJECT;
+
+    zval_ptr_dtor(&fname);
+
+    if (false == ok) {
+        zval_ptr_dtor(out);
+        ZVAL_UNDEF(out);
+
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+    }
+
+    return ok;
+}
+
+/* Async\Scope::isFinished() on the live scope object. */
+static bool http_server_scope_is_finished(zend_object *scope_object)
+{
+    zval retval;
+    ZVAL_UNDEF(&retval);
+    zend_call_method_with_0_params(scope_object, scope_object->ce, NULL, "isFinished", &retval);
+
+    const bool finished = (Z_TYPE(retval) == IS_TRUE);
+    zval_ptr_dtor(&retval);
+    return finished;
+}
+
+/* Call a no-arg, void Scope method, swallowing any exception — a cancellation
+ * thrown during shutdown is expected, not an error. */
+static void http_server_scope_call(zend_object *scope_object, const char *method)
+{
+    zval retval;
+    ZVAL_UNDEF(&retval);
+    zend_call_method_with_0_params(scope_object, scope_object->ce, NULL, method, &retval);
+    zval_ptr_dtor(&retval);
+
+    if (EG(exception)) {
+        zend_clear_exception();
+    }
+}
+
+/* Graceful-shutdown drain (issue #74): empty server_scope before it is
+ * disposed. Runs on the start() coroutine after stop() wakes it — not inside
+ * stop(), which may be called from a handler that lives in server_scope. Uses
+ * the Scope's own API (awaitCompletion within the grace window, then cancel +
+ * awaitAfterCancellation); these own the scope lifetime, so nothing dangles. */
+static void http_server_drain_scope(http_server_object *server)
+{
+    if (server->scope_object == NULL || server->server_scope == NULL || server->scope_drained) {
+        return;
+    }
+
+    /* Need a real coroutine to suspend on. In scheduler/teardown context we
+     * cannot await — leave scope_drained unset so a later call may retry. */
+    if (ZEND_ASYNC_CURRENT_COROUTINE == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT
+        || false == ZEND_ASYNC_ON) {
+        return;
+    }
+
+    zend_object *scope_object = server->scope_object;
+    GC_ADDREF(scope_object); /* hold the Scope object across the method calls */
+
+    /* Phase 1: let handlers finish on their own, bounded by the grace window. */
+    const zend_ulong grace_ms = (zend_ulong) server->shutdown_timeout_s * 1000u;
+
+    if (grace_ms > 0 && false == http_server_scope_is_finished(scope_object)) {
+        zval timeout;
+
+        if (http_server_make_timeout(grace_ms, &timeout)) {
+            zval retval;
+            ZVAL_UNDEF(&retval);
+            zend_call_method_with_1_params(scope_object, scope_object->ce, NULL,
+                                           "awaitCompletion", &retval, &timeout);
+            zval_ptr_dtor(&retval);
+            zval_ptr_dtor(&timeout);
+
+            if (EG(exception)) {
+                zend_clear_exception(); /* grace expired, or completed during the wait */
+            }
+        }
+    }
+
+    /* Phase 2: cancel whatever is still parked, then await the cancellation.
+     * server_scope is non-dispose-safely (see start()), so cancel() hard-
+     * terminates the handlers rather than zombifying them. */
+    if (false == http_server_scope_is_finished(scope_object)) {
+        http_server_scope_call(scope_object, "cancel");
+        http_server_scope_call(scope_object, "awaitAfterCancellation");
+    }
+
+    server->scope_drained = true;
+    OBJ_RELEASE(scope_object);
+}
+
 /* Accept callback — fired once per accepted connection by the reactor.
  * `result` points to the accepted client socket fd (zend_socket_t) the
  * reactor extracted from libuv; `exception` is set on accept failures.
@@ -2304,6 +2414,13 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             "Failed to create server scope", 0);
         RETURN_FALSE;
     }
+
+    /* Hard-terminate handler coroutines at shutdown instead of zombifying them:
+     * clear DISPOSE_SAFELY (inherited from the main scope), else cancel() leaves
+     * zombies and the shutdown drain's awaitAfterCancellation waits forever
+     * (issue #74). Child request scopes inherit this non-safe mode. */
+    ZEND_ASYNC_SCOPE_CLR_DISPOSE_SAFELY(server->server_scope);
+
     /* Keep our own pointer to the scope's zend_object. scope_destroy (the
      * dtor_obj handler) runs during request shutdown's dtor phase BEFORE
      * our http_server_free (the free_obj handler) runs — and it nulls
@@ -2747,6 +2864,11 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     if (UNEXPECTED(bailout)) {
         zend_bailout();
     }
+
+    /* Drain in-flight per-request handler coroutines now, while we are still
+     * on the start() coroutine and can suspend, so server_scope is empty when
+     * the object is freed (issue #74). On bailout we already longjmp'd above. */
+    http_server_drain_scope(server);
 
     RETURN_TRUE;
 }
@@ -3346,6 +3468,11 @@ static void http_server_free(zend_object *obj)
             c = next;
         }
     }
+
+    /* Fallback drain (issue #74): if start()'s drain never ran (freed mid-flight,
+     * or stop() never called) and we can still suspend, empty the scope here.
+     * No-op in teardown/scheduler context — the OBJ_RELEASE below cancels the rest. */
+    http_server_drain_scope(server);
 
     /* Release the scope_object we took at scope creation in start().
      *
