@@ -42,6 +42,14 @@
 #include <string.h>
 
 bool tls_drain(http_connection_t *conn);   /* exported for h2 emit pump */
+
+/* h2 emit re-drive — defined in src/http2/http2_strategy.c when HAVE_HTTP2
+ * is set; falls back to a static no-op so no-HTTP/2 builds still link. */
+#ifdef HAVE_HTTP2
+extern void http2_conn_notify_emit(http_connection_t *conn);
+#else
+static inline void http2_conn_notify_emit(http_connection_t *conn) { (void)conn; }
+#endif
 static void tls_signal_space(http_connection_t *conn);
 
 static bool tls_decrypt_into_buffer(http_connection_t *conn);
@@ -464,10 +472,7 @@ static void tls_cipher_completion(void *data, zend_async_io_t *io)
     }
 
     /* Wake h2 emit — plaintext BIO has room now (no-op on non-h2). */
-    {
-        extern void http2_conn_notify_emit(http_connection_t *);
-        http2_conn_notify_emit(conn);
-    }
+    http2_conn_notify_emit(conn);
 
     /* Static FSM observer: signals wbio drained so the next file chunk
      * can encrypt without SSL_ERROR_WANT_WRITE. */

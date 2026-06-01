@@ -13,8 +13,10 @@
 #include "Zend/zend_alloc.h"
 #include "core/async_plain_event.h"
 
+#ifdef HAVE_HTTP2
 #include <nghttp2/nghttp2.h>
 #include "http2/http2_session.h"
+#endif
 
 static void fire_data_event(const http_request_t *req)
 {
@@ -96,12 +98,14 @@ zend_string *http_body_stream_pop(http_request_t *req)
     /* Flow-control credit: grant peer permission to send another len bytes
      * now that PHP has actually drained them. h_session_schedule_emit pushes
      * the resulting WINDOW_UPDATE on the wire. */
+#ifdef HAVE_HTTP2
     if (req->body_h2_session != NULL) {
         http2_session_t *s = req->body_h2_session;
         (void)nghttp2_session_consume(s->ng, req->body_h2_stream_id,
                                       ZSTR_LEN(data));
         h2_session_schedule_emit(s);
     }
+#endif
 
     return data;
 }

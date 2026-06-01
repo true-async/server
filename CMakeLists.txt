@@ -52,6 +52,7 @@ set(CORE_SOURCES
     src/http_send_file.c
     src/http_send_file_options.c
     src/http_body_stream.c
+    src/http_response_server_api.c
     src/compression/http_compression_negotiate.c
 )
 
@@ -63,6 +64,7 @@ set(CORE_SUBSYSTEM_SOURCES
     src/core/http_protocol_handlers.c
     src/core/http_protocol_strategy.c
     src/core/http_known_strings.c
+    src/core/async_plain_event.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files
@@ -309,6 +311,7 @@ set(HTTP1_SOURCES
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c
+    src/http1/http1_format.c
 )
 
 # Source files - Multipart format handling
