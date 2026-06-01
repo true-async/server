@@ -1978,17 +1978,13 @@ static void h1_static_on_passthrough_to_php(void *user)
      * dispatch tail below, but as a continuation from the FSM. Counters
      * / handler_refcount were NOT pinned (on_hard_zero_armed never
      * fired), so we bump them here to match the normal path. */
-    /* Per-request scope, child of the server scope (see
-     * http_request_scope_new). */
-    zend_async_scope_t *req_scope = http_request_scope_new(conn->scope);
-    zend_coroutine_t *coroutine =
-        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
+    /* Per-request scope + handler coroutine (see
+     * http_request_handler_coroutine_new). */
+    zend_coroutine_t *coroutine = http_request_handler_coroutine_new(
+        conn->scope, http_handler_coroutine_entry, ctx,
+        http_handler_coroutine_dispose);
 
     if (UNEXPECTED(coroutine == NULL)) {
-        if (req_scope != NULL) {
-            req_scope->try_to_dispose(req_scope);
-        }
-
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
         efree(ctx);
@@ -2003,10 +1999,6 @@ static void h1_static_on_passthrough_to_php(void *user)
         http_response_static_set_body_cstr(Z_OBJ(ctx->response_zv), "Not Found", 9);
         ctx->skip_php_handler = true;
     }
-
-    coroutine->internal_entry = http_handler_coroutine_entry;
-    coroutine->extended_data = ctx;
-    coroutine->extended_dispose = http_handler_coroutine_dispose;
 
     if (ctx->request != NULL) {
         ctx->request->coroutine = coroutine;
@@ -2202,12 +2194,13 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
         ctx->skip_php_handler = true;
     }
 
-    /* Per-request scope, child of the server scope. See
-     * http_request_scope_new — gives the handler its own request_context()
-     * subtree and auto-disposes when the handler (and its spawns) finish. */
-    zend_async_scope_t *req_scope = http_request_scope_new(conn->scope);
-    zend_coroutine_t *coroutine =
-        req_scope != NULL ? ZEND_ASYNC_NEW_COROUTINE(req_scope) : NULL;
+    /* Per-request scope + handler coroutine. See
+     * http_request_handler_coroutine_new — gives the handler its own
+     * request_context() subtree; the scope auto-disposes when the handler
+     * (and its spawns) finish, or on spawn failure inside the helper. */
+    zend_coroutine_t *coroutine = http_request_handler_coroutine_new(
+        conn->scope, http_handler_coroutine_entry, ctx,
+        http_handler_coroutine_dispose);
 
     if (coroutine == NULL) {
         /* Spawn failed. The usual cause is a stale EG(exception) — a
@@ -2217,10 +2210,6 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
          * further; the IO-submit paths absorb their own now, so this
          * is a backstop for any other spawn-failure cause. */
         http_absorb_io_submission_exception(conn, __func__);
-
-        if (req_scope != NULL) {
-            req_scope->try_to_dispose(req_scope);
-        }
 
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
@@ -2240,10 +2229,6 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
         http_connection_destroy(conn);
         return;
     }
-
-    coroutine->internal_entry = http_handler_coroutine_entry;
-    coroutine->extended_data = ctx;
-    coroutine->extended_dispose = http_handler_coroutine_dispose;
 
     /* Remember the in-flight handler ON THE REQUEST (not the conn) so
      * a parse-error path (mid-stream body limit hit) can cancel it
