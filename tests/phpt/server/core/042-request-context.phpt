@@ -31,8 +31,8 @@ $n = 0;
 $server->addHttpHandler(function($request, $response) use (&$results, &$n, $server) {
     $n++;
 
-    // current_context() first — it materialises the context on the
-    // request scope; request_context() does not create one lazily.
+    // Either accessor materialises the context on the request scope;
+    // here current_context() happens to be called first.
     $cur    = Async\current_context();
     $reqctx = Async\request_context();
     $reqctx->set('request_id', "R-$n");
