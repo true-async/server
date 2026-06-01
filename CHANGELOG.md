@@ -51,6 +51,7 @@ documented since 0.6.7 (the 0.6.8 tag carried no changelog entry).
   leak when a stream is rejected mid-`awaitBody`, and `arm_timer` NULL-`ngtcp2_conn`
   guard.
 - `http_server`: use-after-free of the wait event on non-stop teardown.
+- Windows MSVC build.
 
 ## [0.6.7] - 2026-05-27
 
