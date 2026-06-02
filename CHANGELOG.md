@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-02
+
+### Added
+
+- `HttpServerConfig::setRequestScope(bool)` / `isRequestScope()` — opt out of the
+  per-request child async scope (default on). Off reuses the connection scope,
+  saving two allocations per request; `Async\request_context()` then returns null
+  (use `?->`). Propagates across `setWorkers(N>1)`.
+
+## [0.7.1] - 2026-06-01
+
+### Fixed
+
+- HTTP/3: replenish the connection's bidi stream credit on stream close
+  (`extend_max_streams_bidi`), so long-lived connections no longer stall at the
+  `initial_max_streams_bidi` cap (#79).
+
 ## [0.7.0] - 2026-06-01
 
 Headline release: **HTTP/3 over QUIC**. Folds in everything tagged but not yet

@@ -449,20 +449,28 @@ zend_async_scope_t *http_request_scope_new(zend_async_scope_t *server_scope);
  * (not yet enqueued) on success; on failure disposes the scope and
  * returns NULL, leaving protocol-specific zval/conn cleanup to the
  * caller. Shared by the H1/H2/H3 dispatch paths — static inline as it
- * sits on the per-request hot path. */
+ * sits on the per-request hot path.
+ *
+ * own_scope (HttpServerConfig::setRequestScope): true mints a per-request
+ * child scope (isolated request_context()); false reuses server_scope —
+ * two fewer allocations, but request_context() is then null. */
 static zend_always_inline zend_coroutine_t *http_request_handler_coroutine_new(
         zend_async_scope_t *server_scope,
         zend_coroutine_entry_t entry, void *extended_data,
-        zend_async_coroutine_dispose dispose)
+        zend_async_coroutine_dispose dispose,
+        const bool own_scope)
 {
-    zend_async_scope_t *req_scope = http_request_scope_new(server_scope);
+    zend_async_scope_t *req_scope = own_scope ? http_request_scope_new(server_scope) : server_scope;
     if (req_scope == NULL) {
         return NULL;
     }
 
     zend_coroutine_t *coroutine = ZEND_ASYNC_NEW_COROUTINE(req_scope);
     if (coroutine == NULL) {
-        req_scope->try_to_dispose(req_scope);
+        if (own_scope) {
+            req_scope->try_to_dispose(req_scope);
+        }
+
         return NULL;
     }
 

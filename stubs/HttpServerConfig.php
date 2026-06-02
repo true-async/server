@@ -529,6 +529,19 @@ final class HttpServerConfig
     /** @return bool */
     public function isHttp3Pacing(): bool {}
 
+    /**
+     * Per-request child scope (on by default). Off reuses the connection
+     * scope directly — saves two allocations per request, but
+     * Async\request_context() then returns null (use ?->).
+     *
+     * @param bool $enable
+     * @return static
+     */
+    public function setRequestScope(bool $enable): static {}
+
+    /** @return bool */
+    public function isRequestScope(): bool {}
+
     // === HTTP body compression (issue #8) ===
 
     /**

@@ -112,6 +112,7 @@ struct _http_server_shared_config_t {
      * honoured at start() time as an escape hatch. */
     bool                    http3_alt_svc_enabled;
     bool                    http3_pacing;
+    bool                    request_scope;
 };
 
 /* Forward declarations for shared-config lifecycle helpers */
@@ -402,6 +403,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->tls_buffer_bytes = DEFAULT_TLS_BUFFER_BYTES;
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->http3_pacing = false;          /* QUIC send pacing — opt-in (#59) */
+    config->request_scope = true;          /* Per-request child scope on by default */
     config->write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
     config->auto_await_body = true;  /* Default: wait for body on non-multipart */
     ZVAL_UNDEF(&config->bootloader);
@@ -1617,6 +1619,40 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3Pacing)
     RETURN_BOOL(config->http3_pacing);
 }
 
+/* {{{ proto HttpServerConfig::setRequestScope(bool $enable): static
+ *
+ * Per-request child scope (on by default). When on, every request (and
+ * every multiplexed H2/H3 stream) runs in its own async scope, giving it
+ * an isolated request_context() subtree and a clean drain boundary.
+ *
+ * Turning it off reuses the connection scope directly, saving two
+ * allocations per request — but Async\request_context() then returns
+ * null (use the ?-> operator), so only disable it for handlers that
+ * never rely on per-request context. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setRequestScope)
+{
+    bool enable;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enable)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    config->request_scope = enable;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, isRequestScope)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_BOOL(config->request_scope);
+}
+
 /* ==========================================================================
  * HTTP body compression knobs (issue #8). Editable until the config is
  * locked — see HttpServer::__construct. The MIME whitelist setter
@@ -2500,6 +2536,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->tls_buffer_bytes = 0;
     config->http3_alt_svc_enabled = true;
     config->http3_pacing = false;
+    config->request_scope = true;
     config->write_buffer_size = 0;
     config->http2_enabled = false;
     config->websocket_enabled = false;
@@ -2637,6 +2674,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->tls_buffer_bytes = src->tls_buffer_bytes;
     shared->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     shared->http3_pacing                 = src->http3_pacing;
+    shared->request_scope                = src->request_scope;
     shared->write_buffer_size  = src->write_buffer_size;
 
     shared->http2_enabled              = src->http2_enabled;
@@ -2789,6 +2827,7 @@ static void http_server_config_populate_from_shared(
     dst->tls_buffer_bytes = src->tls_buffer_bytes;
     dst->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     dst->http3_pacing                 = src->http3_pacing;
+    dst->request_scope                = src->request_scope;
     dst->write_buffer_size  = src->write_buffer_size;
 
     dst->http2_enabled              = src->http2_enabled;

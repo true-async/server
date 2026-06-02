@@ -300,7 +300,8 @@ static void http2_strategy_dispatch(struct http_request_t *request,
      * its own request_context() subtree, isolated from sibling streams. */
     zend_coroutine_t *co = http_request_handler_coroutine_new(
         self->conn->scope, http2_handler_coroutine_entry, stream,
-        http2_handler_coroutine_dispose);
+        http2_handler_coroutine_dispose,
+        self->conn->view != NULL ? self->conn->view->request_scope : true);
 
     if (co == NULL) {
         zval_ptr_dtor(&stream->request_zv);

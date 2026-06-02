@@ -1982,7 +1982,8 @@ static void h1_static_on_passthrough_to_php(void *user)
      * http_request_handler_coroutine_new). */
     zend_coroutine_t *coroutine = http_request_handler_coroutine_new(
         conn->scope, http_handler_coroutine_entry, ctx,
-        http_handler_coroutine_dispose);
+        http_handler_coroutine_dispose,
+        conn->view != NULL ? conn->view->request_scope : true);
 
     if (UNEXPECTED(coroutine == NULL)) {
         zval_ptr_dtor(&ctx->request_zv);
@@ -2200,7 +2201,8 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
      * (and its spawns) finish, or on spawn failure inside the helper. */
     zend_coroutine_t *coroutine = http_request_handler_coroutine_new(
         conn->scope, http_handler_coroutine_entry, ctx,
-        http_handler_coroutine_dispose);
+        http_handler_coroutine_dispose,
+        conn->view != NULL ? conn->view->request_scope : true);
 
     if (coroutine == NULL) {
         /* Spawn failed. The usual cause is a stale EG(exception) — a

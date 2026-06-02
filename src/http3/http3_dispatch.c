@@ -251,7 +251,8 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * http_request_handler_coroutine_new — each multiplexed stream gets
      * its own request_context() subtree, isolated from sibling streams. */
     zend_coroutine_t *co = http_request_handler_coroutine_new(
-        scope, h3_handler_coroutine_entry, s, h3_handler_coroutine_dispose);
+        scope, h3_handler_coroutine_entry, s, h3_handler_coroutine_dispose,
+        s->conn->view != NULL ? s->conn->view->request_scope : true);
 
     if (co == NULL) {
         zval_ptr_dtor(&s->request_zv);  ZVAL_UNDEF(&s->request_zv);

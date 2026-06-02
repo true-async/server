@@ -40,7 +40,7 @@
 extern zend_module_entry http_server_module_entry;
 #define phpext_http_server_ptr &http_server_module_entry
 
-#define PHP_HTTP_SERVER_VERSION "0.6.7"
+#define PHP_HTTP_SERVER_VERSION "0.7.2"
 
 /*
  * ==========================================================================
@@ -240,6 +240,7 @@ struct _http_server_config_t {
     uint32_t tls_buffer_bytes;        /* CT-out BIO ring size, record-aligned (#29) */
     bool     http3_alt_svc_enabled;
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
+    bool     request_scope;           /* Per-request child scope (default on) */
 
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
      * phase 2 adds Brotli + zstd through the same vtable.
@@ -780,6 +781,7 @@ typedef struct {
     uint32_t tls_buffer_bytes;           /* CT-out BIO ring size (#29) */
     bool     http3_alt_svc_enabled;
     bool     http3_pacing;               /* QUIC send pacing — opt-in (#59) */
+    bool     request_scope;              /* Per-request child scope (default on) */
     bool     telemetry_enabled;          /* W3C trace context ingestion */
     bool     body_streaming_enabled;     /* Issue #26 */
     /* Hot-path gate: true iff per-request hrtime stamps (enqueue_ns /
