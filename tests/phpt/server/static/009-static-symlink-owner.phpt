@@ -3,6 +3,15 @@ StaticHandler: SymlinkPolicy::OwnerMatch follows owner-equal links (issue #13 §
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+/* Windows: skipped as a KNOWN LIMITATION, not a flaky/outdated test.
+ * SymlinkPolicy::OwnerMatch walks the path and compares lstat()/stat() uids
+ * — POSIX ownership semantics that do not map to Windows. symlink() also
+ * requires privilege on Windows, so the fixture can't be built. Tracked
+ * alongside the REJECT/O_NOFOLLOW Windows gap (see 021). */
+if (substr(PHP_OS, 0, 3) === 'WIN') die('skip OwnerMatch is POSIX uid-based; symlink policy not validated on Windows (tracked gap)');
+?>
 --FILE--
 <?php
 /* OwnerMatch was aliased to Reject in the MVP. The real implementation

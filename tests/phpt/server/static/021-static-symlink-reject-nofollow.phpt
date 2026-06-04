@@ -3,6 +3,17 @@ StaticHandler: SymlinkPolicy::REJECT — engine open(2) uses O_NOFOLLOW so a sym
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+/* Windows: skipped as a KNOWN LIMITATION, not a flaky/outdated test.
+ * SymlinkPolicy::REJECT is enforced atomically by open(O_NOFOLLOW) in
+ * send_file.c / http_static_safety.c. O_NOFOLLOW does not exist on Windows,
+ * so those `#ifdef O_NOFOLLOW` backstops compile out and the TOCTOU
+ * symlink-escape guard this test exercises cannot be validated until a
+ * Windows reparse-point reject (FILE_FLAG_OPEN_REPARSE_POINT) is added.
+ * symlink() also requires privilege on Windows, so the fixture can't build. */
+if (substr(PHP_OS, 0, 3) === 'WIN') die('skip REJECT relies on open(O_NOFOLLOW), POSIX-only; Windows enforcement is a tracked gap');
+?>
 --FILE--
 <?php
 /* The open-file cache skips the per-request lstat pre-flight on a hit

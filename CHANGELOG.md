@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: TCP listeners now bind.** The server failed to start on Windows
+  with `Async\AsyncException: Failed to bind to <host>:<port>: operation not
+  supported on socket`. The listener requested `SO_REUSEPORT`, which libuv's
+  `uv_tcp_bind()` rejects with `UV_ENOTSUP` on Windows (Winsock has no
+  `SO_REUSEPORT`). REUSEPORT is now treated as a platform capability and never
+  requested on Windows; the default single-listener server binds directly. No
+  change on Linux/BSD/macOS (#82).
+- **Windows: `StaticHandler` accepts native absolute paths.** Root-directory
+  validation only accepted a leading `/`, rejecting every Windows path
+  (`C:\...`) and making `StaticHandler` unusable there. It now uses
+  `IS_ABSOLUTE_PATH` (drive-letter / UNC on Windows, leading `/` on POSIX).
+- **Windows: static file bodies are served binary-clean.** The `send_file`
+  engine opened files without `O_BINARY`, so Windows text-mode translation
+  could corrupt or truncate binary bodies (precompressed `.br`/`.gz`, byte
+  ranges, images). It now opens with `O_BINARY`, matching the policy open path.
+
 ## [0.7.2] - 2026-06-02
 
 ### Added
