@@ -41,6 +41,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "conn_arena.c " +
         "body_pool.c " +
         "async_plain_event.c " +
+        "thread_queue.cc " +
+        "thread_mailbox.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +
@@ -99,6 +101,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/src");
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/src/core");
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/deps/llhttp/include");
+    // moodycamel inter-thread queue headers (issue #81), consumed by thread_queue.cc.
+    ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/deps/concurrentqueue");
     // static/ files include each other by short name (e.g. "static/http_static_safety.h")
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/include/static");
 
@@ -118,6 +122,10 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     // macros are correct (every slot is assigned before the END marker) so
     // this is a tooling limitation, not a real bug.
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/W4 /GS /sdl /guard:cf /wd4701 /wd4703 /std:c11");
+
+    // /EHsc enables C++ exception unwinding for the one C++ TU (thread_queue.cc,
+    // issue #81); moodycamel and operator new can throw and the wrapper catches.
+    ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/EHsc");
 
     // OpenSSL (required for TLS layer inside the extension — matches config.m4
     // default of --with-openssl=yes).

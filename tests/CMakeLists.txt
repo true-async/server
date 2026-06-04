@@ -2,11 +2,15 @@
 # Copyright (c) TrueAsync
 
 cmake_minimum_required(VERSION 3.22)
-project(http_server_tests C)
+# CXX is needed for the thread_queue test, which links the moodycamel-backed
+# C++ TU (issue #81); every other test is pure C.
+project(http_server_tests C CXX)
 
 # C standard
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build type
 if(NOT CMAKE_BUILD_TYPE)

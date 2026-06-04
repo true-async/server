@@ -34,6 +34,38 @@ target_include_directories(llhttp_vendor PUBLIC
     ${CMAKE_SOURCE_DIR}/../deps/llhttp
 )
 
+# Inter-thread queue tests (issue #81). Standalone: links the moodycamel-backed
+# C++ wrapper directly, no PHP/Zend runtime. Exercises the C-ABI MPSC/SPSC layer
+# including a multi-producer stress run.
+add_executable(test_thread_queue
+    core/test_thread_queue.c
+    ${CMAKE_SOURCE_DIR}/../src/core/thread_queue.cc
+)
+
+target_include_directories(test_thread_queue PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+    ${CMAKE_SOURCE_DIR}/../src/core
+    ${CMAKE_SOURCE_DIR}/../deps/concurrentqueue
+)
+
+target_link_libraries(test_thread_queue
+    test_common
+    ${CMOCKA_LIBRARIES}
+)
+
+if(UNIX)
+    target_link_libraries(test_thread_queue m pthread)
+endif()
+
+add_test(NAME ThreadQueue COMMAND test_thread_queue)
+
+if(WIN32)
+    set_tests_properties(ThreadQueue PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+endif()
+
 # HTTP/1.1 Parser Tests
 add_executable(test_http1_parser
     http1/test_parser.c

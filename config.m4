@@ -449,6 +449,11 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     AC_DEFINE(HAVE_COVERAGE, 1, [Whether code coverage is enabled])
   fi
 
+  dnl Inter-thread message queue (issue #81) wraps the moodycamel C++ headers
+  dnl (deps/concurrentqueue), so the extension needs a C++ toolchain and links
+  dnl libstdc++. The single C++ TU is src/core/thread_queue.cc.
+  PHP_REQUIRE_CXX()
+
   dnl Define source files
   dnl Phase 1: HTTP/1.1 Parser
   dnl Phase 2: Server classes
@@ -464,6 +469,8 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/conn_arena.c
     src/core/body_pool.c
     src/core/async_plain_event.c
+    src/core/thread_queue.cc
+    src/core/thread_mailbox.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c
@@ -585,14 +592,16 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   done
   CFLAGS="$SAVE_CFLAGS"
 
-  dnl Create extension
-  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING)
+  dnl Create extension. The trailing "cxx" arg makes the shared module link
+  dnl through $(CXX) so the C++ TU's runtime (libstdc++) is pulled in.
+  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING, cxx)
   PHP_SUBST(TRUE_ASYNC_SERVER_SHARED_LIBADD)
 
   dnl Add include paths
   PHP_ADD_INCLUDE([$ext_srcdir/include])
   PHP_ADD_INCLUDE([$ext_srcdir/src])
   PHP_ADD_INCLUDE([$ext_srcdir/src/core])
+  PHP_ADD_INCLUDE([$ext_srcdir/deps/concurrentqueue])
   PHP_ADD_BUILD_DIR([$ext_builddir/src])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/core])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/http1])
