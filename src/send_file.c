@@ -714,6 +714,12 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	/* === Synchronous open(2) ========================================= */
 
 	int open_flags = O_RDONLY | O_CLOEXEC;
+#ifdef O_BINARY
+	/* Windows opens in text mode by default: CRLF translation and a 0x1A
+	 * byte treated as EOF would corrupt/truncate binary bodies (precompressed
+	 * .br/.gz, ranges, images). Mirrors open_for_policy in http_static_safety.c. */
+	open_flags |= O_BINARY;
+#endif
 #ifdef O_NOFOLLOW
 	/* REJECT mount: reject a final-component symlink atomically (ELOOP). */
 	if (state->cfg.reject_symlinks) {
