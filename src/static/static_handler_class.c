@@ -117,7 +117,10 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 		return NULL;
 	}
 
-	if (ZSTR_VAL(path)[0] != '/') {
+	/* Cross-platform absolute-path check: leading '/' on POSIX, drive-letter
+	 * (C:\) or UNC (\\) on Windows. The old `[0] != '/'` test rejected every
+	 * valid Windows path, making StaticHandler unusable there. */
+	if (!IS_ABSOLUTE_PATH(ZSTR_VAL(path), ZSTR_LEN(path))) {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler root directory must be an absolute path", 0);
 		return NULL;
