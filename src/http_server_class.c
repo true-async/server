@@ -100,6 +100,26 @@ static bool http_server_use_shared_listen_fd(void)
 #endif
 }
 
+/* Whether to ask the reactor for SO_REUSEPORT on each listener. This is a
+ * kernel capability, NOT the logical inverse of the shared-fd strategy —
+ * conflating the two is what broke Windows (issue #82). Three platform camps:
+ *   - Linux/FreeBSD: load-balanced REUSEPORT, each worker binds itself.
+ *   - macOS/other BSD: no LB REUSEPORT, so the shared-fd dup model instead.
+ *   - Windows: NEITHER. Winsock has no SO_REUSEPORT; libuv's uv_tcp_bind()
+ *     returns UV_ENOTSUP ("operation not supported on socket") if
+ *     UV_TCP_REUSEPORT is set, so it must never be requested. A single
+ *     listener (workers=1, the default) then just binds directly.
+ * On POSIX the answer is still !use_shared_listen_fd(); Windows is the third
+ * case a lone boolean cannot express, hence its own carve-out here. */
+static bool http_server_use_reuseport(void)
+{
+#ifdef PHP_WIN32
+    return false;
+#else
+    return !http_server_use_shared_listen_fd();
+#endif
+}
+
 /* Max listeners */
 #define MAX_LISTENERS 16
 
@@ -2548,11 +2568,14 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             unsigned int listen_flags = 0;
             zend_async_listen_event_t *listen_event = NULL;
 
-            /* Two strategies for a worker pool sharing host:port. REUSEPORT:
+            /* Strategies for a worker pool sharing host:port. REUSEPORT:
              * each worker binds independently, the kernel load-balances
              * (Linux/FreeBSD). Shared fd: the parent bound once and each
-             * worker adopts a dup (macOS/Windows, no LB REUSEPORT). */
-            if (!http_server_use_shared_listen_fd()) {
+             * worker adopts a dup (macOS/other BSD, no LB REUSEPORT).
+             * Windows has neither — uv_tcp_bind() rejects UV_TCP_REUSEPORT
+             * with ENOTSUP and there is no POSIX dup to share — so it takes
+             * the plain-bind fall-through below (single listener only). */
+            if (http_server_use_reuseport()) {
                 listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
             }
 #ifndef PHP_WIN32
