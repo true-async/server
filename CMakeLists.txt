@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
-project(php_http_server C)
+# C++ is needed for the moodycamel-backed inter-thread queue (issue #81,
+# src/core/thread_queue.cc); everything else is C.
+project(php_http_server C CXX)
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # PHP source root (used for include dirs and, on Windows, the import lib).
 set(PHP_INCLUDE_DIR "E:/php/php-src" CACHE PATH "PHP source directory")
@@ -65,6 +69,9 @@ set(CORE_SUBSYSTEM_SOURCES
     src/core/http_protocol_strategy.c
     src/core/http_known_strings.c
     src/core/async_plain_event.c
+    # Inter-thread message queue (issue #81): C++ moodycamel wrapper + C reactor glue.
+    src/core/thread_queue.cc
+    src/core/thread_mailbox.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files
@@ -365,6 +372,7 @@ target_include_directories(php_true_async_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/llhttp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/concurrentqueue
 )
 
 # PHP headers — added as SYSTEM so the compiler suppresses their warnings.

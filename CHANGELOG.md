@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Lock-free inter-thread message queue primitive (#81): bounded MPSC/SPSC C-ABI
+  wrappers over moodycamel (`thread_queue`) plus a reactor-integrated MPSC mailbox
+  (`thread_mailbox`) that wakes the consumer's loop via a trigger event with
+  lost-wakeup-safe batch drain. Foundation for cross-worker HTTP/3 (#72) and
+  WebSocket (#2). Adds a C++ build dependency (libstdc++).
+
 ### Fixed
 
 - **Windows: TCP listeners now bind.** The server failed to start on Windows
