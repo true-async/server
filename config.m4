@@ -454,6 +454,27 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   dnl libstdc++. The single C++ TU is src/core/thread_queue.cc.
   PHP_REQUIRE_CXX()
 
+  dnl Pin a modern C++ standard. The PHP/autoconf build does not set one, so
+  dnl the compiler's default is used — fine for recent g++ (>= C++14) but
+  dnl AppleClang and older toolchains can default to C++98, which moodycamel
+  dnl rejects. CXXFLAGS only reaches the C++ TU (the C sources use CFLAGS), so
+  dnl this never touches the C build. Probed newest-first so an unusual
+  dnl compiler degrades to whatever it supports instead of failing outright.
+  _http_server_saved_cxxflags="$CXXFLAGS"
+  _http_server_cxxstd=""
+  AC_LANG_PUSH([C++])
+  for _http_server_std in -std=gnu++17 -std=c++17 -std=gnu++14 -std=c++14 -std=gnu++11 -std=c++11; do
+    CXXFLAGS="$_http_server_saved_cxxflags $_http_server_std"
+    AC_MSG_CHECKING([whether $CXX accepts $_http_server_std])
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([], [])],
+      [AC_MSG_RESULT([yes])
+       _http_server_cxxstd="$_http_server_std"
+       break],
+      [AC_MSG_RESULT([no])])
+  done
+  AC_LANG_POP([C++])
+  CXXFLAGS="$_http_server_saved_cxxflags $_http_server_cxxstd"
+
   dnl Define source files
   dnl Phase 1: HTTP/1.1 Parser
   dnl Phase 2: Server classes
