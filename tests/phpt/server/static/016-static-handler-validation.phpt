@@ -45,15 +45,23 @@ check('ctor:prefix-double-slash', fn() => new StaticHandler('/a//b/',  $root));
 check('ctor:prefix-too-short',   fn() => new StaticHandler('/',        $root)); // len < 2
 
 /* ---- Constructor: root-directory validation -------------------- */
+/* Cross-platform: feed an absolute-but-missing path under the system
+ * temp dir so it clears the absolute-path gate and hits the not-found
+ * branch on every OS (a bare "/..." path is NOT absolute on Windows).
+ * The POSIX-only root cases ("/" itself) live in 016-...-posix. */
+$absent_root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'sh-absent-' . bin2hex(random_bytes(8));
 check('ctor:root-empty',         fn() => new StaticHandler('/x/', ''));
 check('ctor:root-relative',      fn() => new StaticHandler('/x/', 'relative'));
-check('ctor:root-missing',       fn() => new StaticHandler('/x/', '/nonexistent-' . bin2hex(random_bytes(8))));
+check('ctor:root-missing',       fn() => new StaticHandler('/x/', $absent_root));
 check('ctor:root-not-a-dir',     fn() => new StaticHandler('/x/', __FILE__));
-check('ctor:root-slash',         fn() => new StaticHandler('/x/', '/'));
 
 /* ---- Happy path ------------------------------------------------ */
 $sh = new StaticHandler('/static/', $root);
-echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", str_starts_with($sh->getRootDirectory(), '/') ? 'yes' : 'no', "\n";
+$gr = $sh->getRootDirectory();
+/* "absolute for this OS": leading slash on *nix, drive-letter / UNC on Windows. */
+$root_abs = $gr !== '' && (str_starts_with($gr, '/') || str_starts_with($gr, '\\')
+    || (strlen($gr) >= 2 && ctype_alpha($gr[0]) && $gr[1] === ':'));
+echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", $root_abs ? 'yes' : 'no', "\n";
 echo "isLocked: ", $sh->isLocked() ? 'yes' : 'no', "\n";
 
 /* ---- setIndexFiles: validation arms --------------------------- */
@@ -136,7 +144,6 @@ ctor:root-empty: TrueAsync\HttpServerInvalidArgumentException: StaticHandler roo
 ctor:root-relative: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must be an absolute path
 ctor:root-missing: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory not found: %s
 ctor:root-not-a-dir: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory is not a directory: %s
-ctor:root-slash: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must not be '/'
 happy-path: prefix=/static/ root-ok=yes
 isLocked: no
 idx:non-string: TrueAsync\HttpServerInvalidArgumentException: StaticHandler index files must be strings
