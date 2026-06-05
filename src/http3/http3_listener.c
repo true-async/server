@@ -1449,10 +1449,24 @@ void http3_listener_destroy(http3_listener_t *listener)
 #endif
     if (listener->udp_io != NULL) {
         zend_async_io_t *io = listener->udp_io;
+        zend_async_udp_req_t *recv_req = listener->recv_req;
         listener->udp_io = NULL;
         listener->recv_cb = NULL;
         listener->recv_req = NULL;
         ZEND_ASYNC_IO_CLOSE(io);
+
+        /* Dispose the multishot recv req we submitted. ZEND_ASYNC_IO_CLOSE
+         * only detaches io->active_req (its await-handoff path assumes a
+         * parked coroutine frees it), and our recv callback merely counts
+         * datagrams — neither frees the req. Without this the req struct +
+         * 2 KiB recv buffer (plus any error exception) leak on every listener
+         * teardown. Dispose AFTER close: close clears the reactor's reference
+         * so there is no use-after-free, and the typed recv_req pointer frees
+         * through the correct zend_async_udp_req_t layout. */
+        if (recv_req != NULL && recv_req->dispose != NULL) {
+            recv_req->dispose(recv_req);
+        }
+
         io->event.dispose(&io->event);
     }
 
