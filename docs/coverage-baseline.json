@@ -2,11 +2,11 @@
   "totals": {
     "lines": {
       "total": 14831,
-      "hit": 12034
+      "hit": 12020
     },
     "functions": {
       "total": 1006,
-      "hit": 907
+      "hit": 905
     }
   },
   "files": {
@@ -133,11 +133,11 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1006,
-        "hit": 705
+        "hit": 685
       },
       "functions": {
         "total": 59,
-        "hit": 51
+        "hit": 49
       }
     },
     "src/core/http_connection.h": {
@@ -333,7 +333,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 511,
-        "hit": 414
+        "hit": 411
       },
       "functions": {
         "total": 31,
@@ -373,7 +373,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 498,
-        "hit": 368
+        "hit": 377
       },
       "functions": {
         "total": 29,
