@@ -57,6 +57,19 @@ extern void http_response_set_default_json_flags(zend_object *, uint32_t);
 # define MSG_NOSIGNAL 0
 #endif
 
+/* Half-close the send direction: SD_SEND on Winsock, SHUT_WR on POSIX. */
+#ifdef _WIN32
+# define HTTP_SHUT_WR SD_SEND
+#else
+# define HTTP_SHUT_WR SHUT_WR
+#endif
+
+/* Lingering-close budget (ms). After an error response is sent mid-upload
+ * we keep draining the peer's body for at most this long (refreshed on
+ * activity) before a forced close, so a peer that never sends FIN can't
+ * pin the connection open. */
+#define HTTP_LINGER_CLOSE_MS 5000
+
 #define DEFAULT_READ_BUFFER_SIZE 8192
 
 extern zval* http_request_create_from_parsed(http_request_t *req);
@@ -895,6 +908,16 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
 {
     *should_destroy_out = false;
 
+    /* Lingering close: a 4xx was already sent + FIN'd; we are only draining
+     * the peer's leftover upload now. Discard every chunk (don't feed the
+     * parser), refresh the linger deadline, and stay armed. Peer FIN (EOF)
+     * is handled in the read callback (→ destroy). */
+    if (UNEXPECTED(conn->lingering)) {
+        conn->read_buffer_len = 0;
+        conn->deadline_ms     = ZEND_ASYNC_NOW() + HTTP_LINGER_CLOSE_MS;
+        return true;
+    }
+
     if (UNEXPECTED(!conn->protocol_detected) && !detect_and_assign_protocol(conn)) {
         return true;  /* Need more data for detection — caller re-arms */
     }
@@ -968,8 +991,18 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
             return false;
         }
 
-        if (conn->parser != NULL) {
-            (void)http_connection_emit_parse_error(conn, conn->parser);
+        if (conn->parser != NULL && http_connection_emit_parse_error(conn, conn->parser)
+            && conn->io != NULL) {
+            /* 4xx sent + FIN'd (shutdown in emit). Enter lingering close:
+             * keep reading and discarding the peer's remaining upload so the
+             * final close is a clean FIN, not an RST that would wipe the
+             * response on Windows. Peer FIN (EOF) → destroy in the read cb;
+             * the deadline_tick force-closes a peer that never sends FIN. */
+            conn->lingering       = 1;
+            conn->read_buffer_len = 0;
+            conn->deadline_ms     = ZEND_ASYNC_NOW() + HTTP_LINGER_CLOSE_MS;
+            *should_destroy_out    = false;
+            return false;
         }
         *should_destroy_out = true;
         return false;
@@ -1085,7 +1118,7 @@ static void http_connection_read_callback_fn(
          * tear the conn down once it (and any pipelined chain) has finished
          * responding. Without this, an EOF from a peer that sent its last
          * request and shut down the write half kills mid-flight responses. */
-        if (conn->request_in_flight || conn->read_buffer_len > 0) {
+        if (!conn->lingering && (conn->request_in_flight || conn->read_buffer_len > 0)) {
             conn->keep_alive = false;
             return;
         }
@@ -1102,7 +1135,7 @@ static void http_connection_read_callback_fn(
      * could on_message_complete and dispatch a *second* handler on the same
      * conn while the first one's response slot is still live. Just buffer the
      * tail; handler dispose will pull it out via handle_read_completion. */
-    if (!terminal && conn->request_in_flight) {
+    if (!terminal && conn->request_in_flight && !conn->lingering) {
         return;
     }
 
@@ -1913,6 +1946,16 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
     }
 
     const ssize_t sent = send(fd, response, (size_t)n, MSG_NOSIGNAL);
+
+    /* Half-close our send side: flushes the response + FIN while keeping
+     * the recv side open so handle_read_completion can drain the peer's
+     * in-flight upload (lingering close) before the final closesocket.
+     * Without the drain, closing with unread recv data forces an RST that
+     * discards the just-sent response on Windows. Best-effort. */
+    if (sent == (ssize_t)n) {
+        (void)shutdown(fd, HTTP_SHUT_WR);
+    }
+
     return sent == (ssize_t)n;
 }
 /* }}} */
