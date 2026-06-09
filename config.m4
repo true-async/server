@@ -492,6 +492,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/async_plain_event.c
     src/core/thread_queue.cc
     src/core/thread_mailbox.c
+    src/core/reactor_pool.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c

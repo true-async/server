@@ -72,6 +72,8 @@ set(CORE_SUBSYSTEM_SOURCES
     # Inter-thread message queue (issue #81): C++ moodycamel wrapper + C reactor glue.
     src/core/thread_queue.cc
     src/core/thread_mailbox.c
+    # Reactor thread pool (issue #80): pure-C transport reactors on the ThreadPool.
+    src/core/reactor_pool.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files
