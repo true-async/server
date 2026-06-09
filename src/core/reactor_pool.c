@@ -16,6 +16,7 @@
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_atomic.h"
 #include "core/reactor_pool.h"
+#include "core/thread_mailbox.h"
 
 #ifdef PHP_WIN32
 # include <windows.h>
@@ -23,21 +24,39 @@
 # include <time.h>
 #endif
 
-/* Per-reactor state. Lives in the parent-owned ctx array; the reactor thread
- * reads `stop` and writes `ticks`, the parent reads `ticks` and writes `stop`.
- * `pool` back-points so the loop handler can reach tick_ms and the live count. */
+/* Inbound mailbox sizing. Bounded so a stalled reactor backpressures producers
+ * rather than growing unbounded. */
+#define REACTOR_MAILBOX_CAPACITY 1024
+#define REACTOR_MAILBOX_BATCH      64
+
+/* Distinguished pointer posted to a reactor's mailbox to make it leave its
+ * loop. Its address can never collide with a real heap item. */
+static const char reactor_stop_token;
+#define REACTOR_STOP_SENTINEL ((void *)&reactor_stop_token)
+
+/* ctx lifecycle, published from the reactor thread to the parent. */
+#define REACTOR_PHASE_SPAWN 0   /* submitted, not yet in its loop          */
+#define REACTOR_PHASE_RUN   1   /* mailbox created and published; looping  */
+#define REACTOR_PHASE_DONE  2   /* loop left, mailbox freed                */
+
+/* Per-reactor state, shared parent <-> one reactor thread — the legitimate
+ * cross-thread handshake (Zend atomics), not single-threaded-core state.
+ * `mailbox` is written by the reactor before it stores phase=RUN, and read by
+ * the parent only after it observes phase>=RUN — the atomic phase store/load
+ * orders the plain write. `stopping` is touched only on the reactor thread
+ * (loop + drain callback). */
 typedef struct {
     reactor_pool_t   *pool;
-    zend_atomic_int   stop;    /* parent sets 1 -> loop exits                 */
-    zend_atomic_int64 ticks;   /* reactor bumps once per loop wakeup          */
+    zend_atomic_int   phase;
+    thread_mailbox_t *mailbox;
+    zend_atomic_int64 processed;
+    bool              stopping;
 } reactor_ctx_t;
 
 struct reactor_pool_s {
-    zend_async_thread_pool_t *tp;       /* underlying ThreadPool               */
-    reactor_ctx_t            *ctx;      /* [count]                             */
-    int                       count;    /* reactors successfully submitted     */
-    unsigned                  tick_ms;  /* reactor self-wakeup period          */
-    zend_atomic_int           live;     /* loop handlers submitted-but-running */
+    zend_async_thread_pool_t *tp;
+    reactor_ctx_t            *ctx;     /* [count] */
+    int                       count;
 };
 
 static void reactor_pool_msleep(void)
@@ -50,58 +69,67 @@ static void reactor_pool_msleep(void)
 #endif
 }
 
-/* Fires on the reactor's own thread every tick_ms. Pure liveness bump — the
- * wakeup also gives the loop its chance to re-check `stop`. */
-static void reactor_tick_cb(zend_async_event_t *event, zend_async_event_callback_t *callback,
-                            void *result, zend_object *exception)
+/* Runs on the reactor thread when its inbound mailbox has items. The stop
+ * sentinel asks the loop to leave; everything else is real work, counted here
+ * (response dispatch lands on top of this later). */
+static void reactor_drain(void **items, const size_t count, void *arg)
 {
-    (void)callback;
-    (void)result;
-    (void)exception;
+    reactor_ctx_t *const rc = (reactor_ctx_t *)arg;
+    int64_t              drained = 0;
 
-    reactor_ctx_t *rc = *(reactor_ctx_t **)((char *)event + event->extra_offset);
-    zend_atomic_int64_store_ex(&rc->ticks, zend_atomic_int64_load_ex(&rc->ticks) + 1);
+    for (size_t i = 0; i < count; i++) {
+        if (UNEXPECTED(items[i] == REACTOR_STOP_SENTINEL)) {
+            rc->stopping = true;
+            continue;
+        }
+
+        drained++;
+    }
+
+    if (drained != 0) {
+        zend_atomic_int64_store_ex(&rc->processed,
+                                   zend_atomic_int64_load_ex(&rc->processed) + drained);
+    }
 }
 
-/* Runs on a ThreadPool worker thread for the reactor's whole life. Owns a
- * pure-C libuv reactor loop and never executes PHP. Exits when the parent
- * sets `stop`; the periodic timer guarantees the loop wakes to observe it. */
+/* The reactor loop. Owns a pure-C libuv loop, kept alive by its inbound mailbox
+ * (the trigger is ref'd via keepalive); blocks in the kernel until woken, then
+ * drains. Leaves when a stop sentinel arrives. No PHP executes here. */
 static void reactor_loop_handler(zend_async_event_t *event, void *vctx)
 {
     (void)event;
-    reactor_ctx_t  *rc = (reactor_ctx_t *)vctx;
-    reactor_pool_t *rp = rc->pool;
+    reactor_ctx_t *const rc = (reactor_ctx_t *)vctx;
 
-    zend_async_timer_event_t *timer = (zend_async_timer_event_t *)
-        ZEND_ASYNC_NEW_TIMER_EVENT_EX((zend_ulong)rp->tick_ms, /*is_periodic=*/true,
-                                      sizeof(reactor_ctx_t *));
+    thread_mailbox_t *const mb = thread_mailbox_create(REACTOR_MAILBOX_CAPACITY,
+                                                       REACTOR_MAILBOX_BATCH,
+                                                       reactor_drain, rc);
 
-    if (timer == NULL) {
-        /* Could not arm; nothing ran, but the parent counted this submit in
-         * `live`, so balance it before returning. */
-        zend_atomic_int_dec(&rp->live);
+    if (mb == NULL) {
+        zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_DONE);
         return;
     }
 
-    *(reactor_ctx_t **)((char *)&timer->base + timer->base.extra_offset) = rc;
-    timer->base.add_callback(&timer->base, ZEND_ASYNC_EVENT_CALLBACK(reactor_tick_cb));
-    timer->base.start(&timer->base);
+    /* Open inbound keeps the loop alive (no listener yet) — so uv_run blocks
+     * instead of spinning. */
+    thread_mailbox_keepalive(mb, true);
 
-    while (zend_atomic_int_load_ex(&rc->stop) == 0) {
+    rc->mailbox = mb;                                       /* publish (plain) */
+    zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_RUN); /* release        */
+
+    while (!rc->stopping) {
         ZEND_ASYNC_REACTOR_EXECUTE(/*no_wait=*/false);
     }
 
-    /* Dispose the libuv handle on the thread that created it. */
-    ZEND_ASYNC_EVENT_SET_CLOSED(&timer->base);
-    timer->base.dispose(&timer->base);
+    thread_mailbox_keepalive(mb, false);
+    thread_mailbox_free(mb);                                /* consumer-thread */
+    rc->mailbox = NULL;
 
-    /* Last touch of `rp`/`rc` — after this the parent may free them. */
-    zend_atomic_int_dec(&rp->live);
+    zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_DONE);
 }
 
-reactor_pool_t *reactor_pool_create(const int reactors, const unsigned tick_ms)
+reactor_pool_t *reactor_pool_create(const int reactors)
 {
-    if (reactors <= 0 || tick_ms == 0) {
+    if (reactors <= 0) {
         return NULL;
     }
 
@@ -110,7 +138,7 @@ reactor_pool_t *reactor_pool_create(const int reactors, const unsigned tick_ms)
         return NULL;
     }
 
-    zend_async_thread_pool_t *tp =
+    zend_async_thread_pool_t *const tp =
         ZEND_ASYNC_NEW_THREAD_POOL((int32_t)reactors, (int32_t)reactors);
 
     if (tp == NULL || tp->submit_internal == NULL) {
@@ -122,27 +150,22 @@ reactor_pool_t *reactor_pool_create(const int reactors, const unsigned tick_ms)
         return NULL;
     }
 
-    reactor_pool_t *rp = pecalloc(1, sizeof(*rp), 0);
-    rp->tp      = tp;
-    rp->ctx     = pecalloc((size_t)reactors, sizeof(reactor_ctx_t), 0);
-    rp->count   = 0;
-    rp->tick_ms = tick_ms;
-    ZEND_ATOMIC_INT_INIT(&rp->live, 0);
+    reactor_pool_t *const rp = pecalloc(1, sizeof(*rp), 0);
+    rp->tp    = tp;
+    rp->ctx   = pecalloc((size_t)reactors, sizeof(reactor_ctx_t), 0);
+    rp->count = 0;
 
     for (int i = 0; i < reactors; i++) {
-        rp->ctx[i].pool = rp;
-        ZEND_ATOMIC_INT_INIT(&rp->ctx[i].stop, 0);
-        ZEND_ATOMIC_INT64_INIT(&rp->ctx[i].ticks, 0);
+        rp->ctx[i].pool     = rp;
+        rp->ctx[i].mailbox  = NULL;
+        rp->ctx[i].stopping = false;
+        ZEND_ATOMIC_INT_INIT(&rp->ctx[i].phase, REACTOR_PHASE_SPAWN);
+        ZEND_ATOMIC_INT64_INIT(&rp->ctx[i].processed, 0);
 
-        /* Count the submit in `live` before dispatch: the handler always
-         * decrements exactly once, even if it fails to arm its timer. */
-        zend_atomic_int_inc(&rp->live);
-
-        zend_async_event_t *evt =
+        const zend_async_event_t *const evt =
             tp->submit_internal(tp, reactor_loop_handler, &rp->ctx[i]);
 
         if (evt == NULL) {
-            zend_atomic_int_dec(&rp->live);
             break;
         }
 
@@ -150,12 +173,18 @@ reactor_pool_t *reactor_pool_create(const int reactors, const unsigned tick_ms)
     }
 
     if (rp->count == 0) {
-        /* Nothing started — unwind. Any in-flight exception is left for the
-         * caller. */
         ZEND_THREAD_POOL_DELREF(tp);
         pefree(rp->ctx, 0);
         pefree(rp, 0);
         return NULL;
+    }
+
+    /* Block until every submitted reactor has reached its loop (or failed) so
+     * the pool is ready to accept posts the moment we return. */
+    for (int i = 0; i < rp->count; i++) {
+        while (zend_atomic_int_load_ex(&rp->ctx[i].phase) == REACTOR_PHASE_SPAWN) {
+            reactor_pool_msleep();
+        }
     }
 
     return rp;
@@ -166,13 +195,28 @@ int reactor_pool_count(const reactor_pool_t *rp)
     return rp != NULL ? rp->count : 0;
 }
 
-uint64_t reactor_pool_ticks(const reactor_pool_t *rp, const int idx)
+bool reactor_pool_post(reactor_pool_t *rp, const int idx, void *item)
 {
-    if (rp == NULL || idx < 0 || idx >= rp->count) {
+    if (UNEXPECTED(rp == NULL || idx < 0 || idx >= rp->count)) {
+        return false;
+    }
+
+    reactor_ctx_t *const rc = &rp->ctx[idx];
+
+    if (UNEXPECTED(zend_atomic_int_load_ex(&rc->phase) != REACTOR_PHASE_RUN)) {
+        return false;
+    }
+
+    return thread_mailbox_post(rc->mailbox, item);
+}
+
+uint64_t reactor_pool_processed(const reactor_pool_t *rp, const int idx)
+{
+    if (UNEXPECTED(rp == NULL || idx < 0 || idx >= rp->count)) {
         return 0;
     }
 
-    return (uint64_t)zend_atomic_int64_load_ex(&rp->ctx[idx].ticks);
+    return (uint64_t)zend_atomic_int64_load_ex(&rp->ctx[idx].processed);
 }
 
 void reactor_pool_destroy(reactor_pool_t *rp)
@@ -181,18 +225,27 @@ void reactor_pool_destroy(reactor_pool_t *rp)
         return;
     }
 
+    /* Ask each running reactor to leave by posting the stop sentinel into its
+     * mailbox — same path as real work, so no cross-thread handle touch. */
     for (int i = 0; i < rp->count; i++) {
-        zend_atomic_int_store_ex(&rp->ctx[i].stop, 1);
+        reactor_ctx_t *const rc = &rp->ctx[i];
+
+        if (zend_atomic_int_load_ex(&rc->phase) != REACTOR_PHASE_RUN) {
+            continue;
+        }
+
+        while (!thread_mailbox_post(rc->mailbox, REACTOR_STOP_SENTINEL)) {
+            reactor_pool_msleep();
+        }
     }
 
-    /* Wait for every loop to leave its handler — only then is the ctx array
-     * no longer touched by any reactor thread. Bounded by tick_ms. */
-    while (zend_atomic_int_load_ex(&rp->live) > 0) {
-        reactor_pool_msleep();
+    /* Wait for every loop to leave — only then is the ctx no longer touched. */
+    for (int i = 0; i < rp->count; i++) {
+        while (zend_atomic_int_load_ex(&rp->ctx[i].phase) != REACTOR_PHASE_DONE) {
+            reactor_pool_msleep();
+        }
     }
 
-    /* Reactor loops are gone; close the channel so the worker threads leave
-     * their receive loop, then drop our ref (dispose fires on the last). */
     rp->tp->close(rp->tp);
     ZEND_THREAD_POOL_DELREF(rp->tp);
 

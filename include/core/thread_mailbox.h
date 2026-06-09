@@ -54,6 +54,14 @@ void thread_mailbox_free(thread_mailbox_t *mb);
  * full (the caller decides whether to drop, retry, or close). */
 bool thread_mailbox_post(thread_mailbox_t *mb, void *item);
 
+/* Opt-in: make the wakeup handle keep the consumer's reactor loop alive (uv_ref
+ * via the trigger's start()). Mailboxes default to NOT keeping the loop alive —
+ * they are a wake source for a loop already kept running by other handles (a
+ * listener, coroutines). A dedicated reactor thread whose only handle is its
+ * inbound mailbox enables this so its loop blocks on the kernel instead of
+ * spinning. Consumer-thread only. */
+void thread_mailbox_keepalive(thread_mailbox_t *mb, bool enable);
+
 /* Approximate number of queued items. */
 size_t thread_mailbox_count(const thread_mailbox_t *mb);
 

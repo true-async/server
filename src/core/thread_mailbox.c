@@ -133,3 +133,12 @@ size_t thread_mailbox_count(const thread_mailbox_t *mb)
 {
     return thread_mpsc_count(mb->queue);
 }
+
+void thread_mailbox_keepalive(thread_mailbox_t *mb, const bool enable)
+{
+    if (enable) {
+        mb->trigger->base.start(&mb->trigger->base);
+    } else {
+        mb->trigger->base.stop(&mb->trigger->base);
+    }
+}
