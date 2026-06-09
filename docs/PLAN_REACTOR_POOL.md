@@ -1,6 +1,6 @@
 # Reactor Thread Pool — Design Plan (#80 / #72 / #81)
 
-Status: **design accepted, not yet implemented.** Master checklist for the pure-C
+Status: **design accepted, not yet implemented.** Design plan for the pure-C
 reactor-thread pool that decouples transport I/O from PHP business logic.
 
 ## Problem & framing
@@ -168,41 +168,30 @@ Today the SCID is 8 random bytes (`src/http3/http3_connection.c:301`,
   reuseport reshuffle — but needs CAP_BPF, no WSL/Windows). **TTL** on forwards bounds
   ping-pong. Fixes migration/NAT-rebind for free (CID constant).
 
-## Phased roadmap
+## Build order
 
-- **Phase 0 — instrument #80 (cheap, self-contained, tells us if/where offload is needed). DONE.**
-  - [x] Reactor-iteration latency histogram + "time since last ACK per connection";
-        watchdog logs when an iteration exceeds the budget. — `reactor_*` counters in
-        `http3_packet_stats_t`, timed in `http3_listener_poll_cb` (tick latency) and
-        `timer_fire_cb` (per-conn timer-fire lateness = ACK/PTO service delay), surfaced
-        via `HttpServer::getStats()`, rate-limited `WARN h3.reactor.slow_tick`. Budget
-        `PHP_HTTP3_REACTOR_BUDGET_MS` (default 10 ms).
-  - [x] Audit the H3 request path for synchronous CPU bursts without a yield (heavy
-        render/serialize, sync DB, large gzip, big `smart_str`). — `docs/PHASE0_H3_REACTOR_AUDIT.md`.
-        Headline: buffered-response compression in `http3_stream_submit_response` is the
-        one unbounded synchronous span (runs in dispose context) → primary Phase 1 offload target.
-  - [x] CODING_STANDARDS rule: the transport reactor stays strictly non-blocking. —
-        `docs/CODING_STANDARDS.md` §1.5.
-- **Phase 1 — validate the marshalling boundary on a narrow surface (nginx model).**
-  - [ ] Wire #81 to offload only heavy ops (large gzip/brotli, sync-CPU) to a small pool.
-        Validates MPSC + the C↔bytes serialization on 1–2 ops before the full pipeline.
-- **Phase 2 — full transport/worker split for H3.**
-  - [ ] Reactor pool via ThreadPool + `submit_internal` C loop (D1/B).
-  - [ ] `request_wire` flat type + worker-side zval materialization (D2).
-  - [ ] Persistent response buffer + ownership transfer + reactor encode/TLS (D3).
-  - [ ] Sticky-default + threshold + P2C dispatch (D5).
-  - [ ] CID-in-SCID steering + userspace fan-out (D6); closes #72.
-  - [ ] Worker shutdown-hook + reactor liveness-timeout (D4).
-- **Phase 3 — H1/H2 into the pool — ONLY if Phase 0/2 measurements justify it.**
-  No transport-stall there; the win is unified architecture / blocking-handler offload, not
-  ACK timing. Default: leave H1/H2 on the current share-nothing same-thread model.
+Reactor-tick + ACK/PTO-late watchdog instrumentation is already in place (`5884e2a`) —
+the empirical check that the transport reactor stays inside the ACK budget.
+
+The split itself, per the Decisions above (each maps to a D-item):
+
+- [ ] Reactor pool via ThreadPool + `submit_internal` C loop (D1/B).
+- [ ] `request_wire` flat type + worker-side zval materialization (D2).
+- [ ] Persistent response buffer + ownership transfer + reactor encode/TLS (D3).
+- [ ] Sticky-default + threshold + P2C dispatch (D5).
+- [ ] CID-in-SCID steering + userspace fan-out (D6); closes #72.
+- [ ] Worker shutdown-hook + reactor liveness-timeout (D4).
+
+H1/H2 into the pool is future and optional: the kernel ACKs TCP independently, so there
+is no transport-stall to fix there. Leave H1/H2 on the current share-nothing same-thread
+model unless measurements say otherwise.
 
 ## Open items / deferred decisions
 
 - `HIGH` threshold value for D5 (tune; ~2–4× steady-state per-worker depth).
 - Reactor count vs worker count topology (R:W ratio; pinning policy).
 - Option C spike (lightweight reactor-only thread mode in php-async).
-- eBPF CID steering (Phase 2+ opt-in).
+- eBPF CID steering (opt-in optimization, later).
 - Idle-fast-path (JIQ-Pod) — only if the load profile turns out bursty rather than steadily
   hot; degrades cleanly to D5's P2C, so additive later.
 

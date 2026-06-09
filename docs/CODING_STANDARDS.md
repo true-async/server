@@ -138,8 +138,10 @@ not perform an unbounded synchronous span:
 - **No unbounded CPU without a yield.** Large gzip/brotli/zstd, large
   serialize, a big `smart_str` build, a wide hash/sort over
   attacker-sized input — none of these belong inline on a callback or in
-  the dispose commit. Cap it, or move it (a handler coroutine that
-  `await`s, a future offload pool — `docs/PLAN_REACTOR_POOL.md` Phase 1).
+  the dispose commit. Cap it, or move it onto the PHP worker (a handler
+  coroutine that `await`s; the reactor/worker split keeps response
+  rendering — including compression — off the transport reactor, see
+  `docs/PLAN_REACTOR_POOL.md`).
 - **Every loop over peer-controlled counts has a cap.** Follow the
   existing precedents: `H3_DRAIN_ITER_CAP` (drain), `HTTP3_MAX_BODY_BYTES`
   (body assembly), the `recvmmsg` batch cap (poll-cb).
@@ -151,16 +153,16 @@ a coroutine" is not a yield. When a handler must do heavy CPU, it has to
 reach an await (chunk + yield), not run it in one synchronous span.
 
 The buffered-response compression in `http3_stream_submit_response`
-(`src/http3/http3_callbacks.c`) is the current known violation of the
-spirit of this rule — it runs synchronously in dispose context. It is the
-first Phase 1 offload target, not a pattern to copy.
+(`src/http3/http3_callbacks.c`) runs synchronously in dispose context — a
+current example of inline CPU on the reactor. The reactor/worker split
+moves response rendering onto the PHP worker; until then, keep buffered
+bodies modest and prefer the streaming path for large ones.
 
 **Watchdog.** The reactor self-times each tick and each timer fire and
 exports `reactor_*` counters via `HttpServer::getStats()` (budget
 `PHP_HTTP3_REACTOR_BUDGET_MS`, default 10 ms < `max_ack_delay` 25 ms); a
 budget overrun logs `WARN h3.reactor.slow_tick`. If a change makes
 `reactor_slow_ticks` / `reactor_max_tick_ns` climb, it violated this rule.
-See `docs/PHASE0_H3_REACTOR_AUDIT.md` for the full site-by-site audit.
 
 ---
 
