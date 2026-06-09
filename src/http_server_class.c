@@ -3299,6 +3299,26 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
         add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
         add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
 
+        /* Reactor-iteration watchdog (#80 Phase 0). Tick = one poll-cb
+         * wakeup; on the single reactor thread its latency is the ACK/PTO
+         * delay imposed on every live connection. */
+        add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
+        add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
+        add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
+        add_assoc_long(&entry, "reactor_slow_ticks",       (zend_long)s.packet.reactor_slow_ticks);
+        add_assoc_long(&entry, "reactor_timer_late",       (zend_long)s.packet.reactor_timer_late);
+        add_assoc_long(&entry, "reactor_max_timer_late_ns",(zend_long)s.packet.reactor_max_timer_late_ns);
+        {
+            zval hist;
+            array_init(&hist);
+
+            for (unsigned i = 0; i < 12; ++i) {
+                add_next_index_long(&hist, (zend_long)s.packet.reactor_lat_bucket[i]);
+            }
+
+            add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
+        }
+
         /* Send-path error categorisation. */
         add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
         add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);

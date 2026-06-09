@@ -91,6 +91,12 @@ struct _http3_connection_s {
     zend_async_event_t          *timer;
     zend_async_event_callback_t *timer_cb;
 
+    /* Deadline (ngtcp2 expiry, hrtime ns) the timer was last armed for.
+     * timer_fire_cb subtracts it from the actual fire time to measure how
+     * late the reactor serviced this connection's ACK/PTO — the per-conn
+     * view of reactor stall (#80 Phase 0). 0 = no timer armed. */
+    uint64_t                     timer_expiry_ns;
+
     /* Intrusive list link. The listener tracks connections through this
      * chain instead of the DCID hashtable because the latter may carry
      * the same connection under multiple keys (server SCID + client

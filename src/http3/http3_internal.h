@@ -64,6 +64,12 @@
  * consistent — zend_hrtime fits. */
 ngtcp2_tstamp http3_ts_now(void);
 
+/* Reactor-iteration watchdog budget in nanoseconds (#80 Phase 0). A poll-cb
+ * tick or a timer fire that takes longer than this is "slow" — on the single
+ * reactor thread that delay is imposed on every connection's ACK/PTO. Read
+ * once from PHP_HTTP3_REACTOR_BUDGET_MS (default 10 ms); cached thereafter. */
+uint64_t http3_reactor_budget_ns(void);
+
 /* Secure random bytes via OpenSSL. Returns true on success. Callers MUST
  * propagate false: a silent zero-fill fallback would produce all-zero
  * SCIDs and all-zero stateless-reset tokens, both of which are

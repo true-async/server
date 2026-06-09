@@ -11,9 +11,11 @@
 #endif
 
 #include <php.h>
+#include "Zend/zend_hrtime.h"
 #include "http3_listener.h"
 #include "http3_packet.h"
 #include "http3_connection.h"
+#include "http3_internal.h"   /* http3_reactor_budget_ns */
 #include "php_http_server.h"
 #include "log/http_log.h"
 
@@ -168,6 +170,11 @@ struct _http3_listener_s {
     bool                       last_peer_valid;
 
     http3_listener_stats_t     stats;
+
+    /* Reactor watchdog (#80 Phase 0) rate-limit gate: hrtime of the last
+     * slow-tick WARN we emitted. Kept off the stats snapshot — it is
+     * internal throttle state, not a counter. */
+    uint64_t                   wd_last_warn_ns;
 
     /* Slab pool for http3_stream_t. Shared across all conns on this
      * listener. Initialised in http3_listener_spawn, cleaned up in
@@ -359,6 +366,75 @@ static void drain_err_queue(http3_listener_t *listener)
     }
 }
 
+/* Classify a tick latency into one of 12 histogram buckets, edges aligned
+ * to the QUIC ACK budget rather than a plain log2 so the buckets read
+ * directly: bucket 8 is the first one past max_ack_delay (25 ms). */
+static unsigned h3_reactor_lat_bucket(uint64_t ns)
+{
+    const uint64_t us = ns / 1000ULL;
+
+    if (us <    50) return 0;
+    if (us <   100) return 1;
+    if (us <   250) return 2;
+    if (us <   500) return 3;
+    if (us <  1000) return 4;   /* 1 ms */
+    if (us <  2500) return 5;
+    if (us <  5000) return 6;
+    if (us < 10000) return 7;   /* 10 ms — default budget edge */
+    if (us < 25000) return 8;   /* 25 ms — max_ack_delay */
+    if (us < 50000) return 9;
+    if (us < 100000) return 10;
+
+    return 11;                  /* >= 100 ms */
+}
+
+/* Record one reactor tick (#80 Phase 0). dt_ns is the poll-cb wall time;
+ * datagrams is how many were processed this wakeup (for the WARN line). On
+ * a budget overrun, emit at most one WARN per second so a sustained stall
+ * does not flood the log. Cheap enough to run unconditionally — two
+ * hrtime reads per wakeup, not per datagram. */
+static void h3_reactor_tick_record(http3_listener_t *l, uint64_t dt_ns,
+                                   unsigned datagrams)
+{
+    http3_packet_stats_t *st = &l->stats.packet;
+
+    st->reactor_ticks++;
+    st->reactor_busy_ns += dt_ns;
+    st->reactor_lat_bucket[h3_reactor_lat_bucket(dt_ns)]++;
+
+    if (dt_ns > st->reactor_max_tick_ns) {
+        st->reactor_max_tick_ns = dt_ns;
+    }
+
+    const uint64_t budget = http3_reactor_budget_ns();
+
+    if (dt_ns <= budget) {
+        return;
+    }
+
+    st->reactor_slow_ticks++;
+
+    /* Budget overrun — the reactor was heads-down for dt_ns, delaying
+     * ACK/PTO for every live connection by that much. Throttle the WARN to
+     * one per second. */
+    const uint64_t now = (uint64_t)zend_hrtime();
+
+    if (now - l->wd_last_warn_ns < 1000000000ULL) {
+        return;
+    }
+
+    l->wd_last_warn_ns = now;
+
+    if (l->server_obj != NULL) {
+        http_logf_warn(
+            http_server_get_log_state((http_server_object *)l->server_obj),
+            "h3.reactor.slow_tick budget_ms=%llu tick_ms=%.3f datagrams=%u "
+            "conns=%u",
+            (unsigned long long)(budget / 1000000ULL),
+            (double)dt_ns / 1000000.0, datagrams, l->conn_count);
+    }
+}
+
 /* Raw-fd recvmmsg path. Drains up to HTTP3_LISTENER_RECV_BATCH
  * datagrams per recvmmsg syscall, capped at 16 batches per poll wakeup.
  * h2o picks the same 10-batch limit (lib/http3/common.c:819) — a larger
@@ -385,6 +461,12 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
     if (listener->fd < 0) {
         return;
     }
+
+    /* Reactor watchdog (#80 Phase 0): time this whole tick. Capture before
+     * the errq drain so the measurement covers every bit of reactor work,
+     * and route all exits through the tick_done tail. */
+    const uint64_t wd_t0 = (uint64_t)zend_hrtime();
+    unsigned wd_datagrams = 0;
 
     /* Drain the kernel error queue — but only when there is reason to
      * believe something is pending. Most sockets never see ICMP errors,
@@ -442,7 +524,7 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                 listener->stats.datagrams_errored++;
             }
 
-            return;
+            goto tick_done;
         }
 
         for (int i = 0; i < n; ++i) {
@@ -514,12 +596,14 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                 listener->stats.datagrams_received++;
                 listener->stats.bytes_received    += (uint64_t)plen;
                 listener->stats.last_datagram_size = plen;
+                wd_datagrams++;
 
                 http3_connection_dispatch(listener, bufs[i] + off, plen,
                                           ecn, src, src_len);
 
                 /* Any segment's dispatch may reap-on-close the listener;
-                 * re-check before touching it again. */
+                 * re-check before touching it again. Teardown tick — bail
+                 * without recording a (meaningless) latency sample. */
                 if (listener->closed) {
                     return;
                 }
@@ -539,6 +623,14 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
      * bail-out above returns early and skips this — that path is teardown,
      * where conns are reaped by listener destroy, not flushed. */
     http3_listener_flush_dirty(listener);
+
+    /* Watchdog tail. The EAGAIN/error early-exit jumps here PAST the flush,
+     * preserving the pre-existing behaviour where a tick that ends on an
+     * empty recvmmsg skips flush_dirty (any conns dirtied this tick drain on
+     * the next wakeup). Only the latency sample is taken here. */
+tick_done:
+    h3_reactor_tick_record(listener, (uint64_t)zend_hrtime() - wd_t0,
+                           wd_datagrams);
 }
 #endif /* __linux__ */
 

@@ -67,7 +67,29 @@ static void timer_fire_cb(zend_async_event_t *event,
 
     if (stats != NULL) {
         stats->quic_timer_fired++;
+
+        /* Per-connection ACK/PTO service delay (#80 Phase 0): how far past
+         * its armed deadline this timer actually fired. Anything beyond the
+         * reactor budget means the reactor was busy when this connection's
+         * ACK/loss timer was due. */
+        if (c->timer_expiry_ns != 0) {
+            const uint64_t now_ns = (uint64_t)http3_ts_now();
+
+            if (now_ns > c->timer_expiry_ns) {
+                const uint64_t late = now_ns - c->timer_expiry_ns;
+
+                if (late > stats->reactor_max_timer_late_ns) {
+                    stats->reactor_max_timer_late_ns = late;
+                }
+
+                if (late > http3_reactor_budget_ns()) {
+                    stats->reactor_timer_late++;
+                }
+            }
+        }
     }
+
+    c->timer_expiry_ns = 0;
 
     int rv = ngtcp2_conn_handle_expiry((ngtcp2_conn *)c->ngtcp2_conn, http3_ts_now());
     /* Idle-timeout: peer is gone, RFC 9000 §10.1 says do NOT emit
@@ -130,9 +152,14 @@ void http3_connection_arm_timer(http3_connection_t *c)
 
     if (expiry == UINT64_MAX) {
         /* ngtcp2 has nothing scheduled — drop any stale timer. */
+        c->timer_expiry_ns = 0;
         http3_connection_detach_timer(c);
         return;
     }
+
+    /* Stamp the deadline we're arming for so timer_fire_cb can measure how
+     * late the fire actually was (reactor service delay, #80 Phase 0). */
+    c->timer_expiry_ns = (uint64_t)expiry;
 
     ngtcp2_tstamp now = http3_ts_now();
     uint64_t delay_ns = (expiry > now) ? (expiry - now) : 1; /* fire ASAP */
