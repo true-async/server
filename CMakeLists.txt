@@ -74,6 +74,7 @@ set(CORE_SUBSYSTEM_SOURCES
     src/core/thread_mailbox.c
     # Reactor thread pool (issue #80): pure-C transport reactors on the ThreadPool.
     src/core/reactor_pool.c
+    src/core/reactor_pool_test.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files

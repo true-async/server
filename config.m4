@@ -20,6 +20,13 @@ PHP_ARG_ENABLE([http3],
   [yes],
   [no])
 
+PHP_ARG_ENABLE([http-server-test-hooks],
+  [whether to compile internal test hooks],
+  [AS_HELP_STRING([--enable-http-server-test-hooks],
+    [Compile internal C test hooks (e.g. reactor-pool self-test). For test/CI builds only; never enable for release.])],
+  [no],
+  [no])
+
 PHP_ARG_WITH([openssl],
   [for OpenSSL TLS support],
   [AS_HELP_STRING([--with-openssl@<:@=DIR@:>@],
@@ -493,6 +500,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/thread_queue.cc
     src/core/thread_mailbox.c
     src/core/reactor_pool.c
+    src/core/reactor_pool_test.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c
@@ -614,9 +622,17 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   done
   CFLAGS="$SAVE_CFLAGS"
 
+  dnl Test-only C hooks (reactor-pool self-test, ...). Gated behind a define so
+  dnl the hook is absent from a release build. Test/CI builds opt in.
+  HTTP_SERVER_TEST_HOOKS_FLAG=""
+  if test "$PHP_HTTP_SERVER_TEST_HOOKS" = "yes"; then
+    AC_MSG_NOTICE([http_server: internal test hooks ENABLED — do not ship this build])
+    HTTP_SERVER_TEST_HOOKS_FLAG="-DHTTP_SERVER_TEST_HOOKS=1"
+  fi
+
   dnl Create extension. The trailing "cxx" arg makes the shared module link
   dnl through $(CXX) so the C++ TU's runtime (libstdc++) is pulled in.
-  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING, cxx)
+  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING $HTTP_SERVER_TEST_HOOKS_FLAG, cxx)
   PHP_SUBST(TRUE_ASYNC_SERVER_SHARED_LIBADD)
 
   dnl Add include paths

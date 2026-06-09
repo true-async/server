@@ -44,6 +44,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "thread_queue.cc " +
         "thread_mailbox.c " +
         "reactor_pool.c " +
+        "reactor_pool_test.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +
