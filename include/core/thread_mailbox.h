@@ -23,10 +23,11 @@
  * blocks (full => clean backpressure), and the consumer never touches the queue
  * off its reactor thread.
  *
- * Lost-wakeup safety: the producer signals only on the empty->non-empty edge,
- * the enqueue (release) happens-before that signal, and the consumer drains to
- * empty before returning. uv_async coalescing plus drain-to-empty means no item
- * is ever stranded.
+ * Lost-wakeup safety: the producer signals on every post. The enqueue (release)
+ * happens-before the signal, and uv_async_send coalesces (it writes the eventfd
+ * only on the 0->1 pending transition), so unconditional signalling is cheap and
+ * leaves no item stranded. An earlier empty->non-empty edge optimisation raced
+ * drain-to-empty (the length counter lags the dequeue) and was removed.
  *
  * Threading contract:
  *   - thread_mailbox_create()/free() run on the consumer's reactor thread (they

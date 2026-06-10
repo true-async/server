@@ -162,7 +162,7 @@ reactor_pool_t *reactor_pool_create(const int reactors)
         ZEND_ATOMIC_INT_INIT(&rp->ctx[i].phase, REACTOR_PHASE_SPAWN);
         ZEND_ATOMIC_INT64_INIT(&rp->ctx[i].processed, 0);
 
-        const zend_async_event_t *const evt =
+        zend_async_event_t *const evt =
             tp->submit_internal(tp, reactor_loop_handler, &rp->ctx[i]);
 
         if (evt == NULL) {
@@ -170,6 +170,10 @@ reactor_pool_t *reactor_pool_create(const int reactors)
         }
 
         rp->count++;
+
+        /* We track completion via the per-reactor phase, not this future —
+         * release our reference so the unawaited future does not leak. */
+        ZEND_ASYNC_EVENT_RELEASE(evt);
     }
 
     if (rp->count == 0) {
