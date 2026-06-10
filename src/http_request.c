@@ -13,6 +13,7 @@
 #include "php.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "core/request_wire.h"
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
 #include "log/trace_context.h"
@@ -708,6 +709,60 @@ zval* http_request_create_from_parsed(http_request_t *req)
     intern->request = req;
 
     return obj;
+}
+
+/* Materialize an http_request_t (ZMM: zend_string / HashTable) from a flat,
+ * malloc-domain request_wire (issue #80, D2). WORKER-SIDE ONLY: allocates ZMM,
+ * so it must run on a thread with a live request (the PHP worker), never on the
+ * transport reactor. The wire is read-only — bytes are copied into fresh
+ * zend_strings — so the caller may free it the moment this returns. Header
+ * names are stored verbatim; the reactor is expected to supply them lowercased
+ * (HTTP/3 QPACK names already are, and header lookup keys on lowercase).
+ * Returns a refcount=1 request the caller owns and releases via
+ * http_request_destroy (release == NULL -> efree at refcount 0). */
+http_request_t *http_request_from_wire(const request_wire_t *rw)
+{
+    http_request_t *const req = ecalloc(1, sizeof(http_request_t));
+    req->refcount = 1;
+
+    size_t len;
+
+    const char *method = request_wire_method(rw, &len);
+    if (method != NULL) {
+        req->method = zend_string_init(method, len, 0);
+    }
+
+    const char *path = request_wire_path(rw, &len);
+    if (path != NULL) {
+        req->uri = zend_string_init(path, len, 0);
+    }
+
+    ALLOC_HASHTABLE(req->headers);
+    zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
+
+    const size_t header_count = request_wire_header_count(rw);
+    for (size_t i = 0; i < header_count; i++) {
+        const char *name_ptr, *value_ptr;
+        size_t      name_len, value_len;
+
+        if (!request_wire_header_at(rw, i, &name_ptr, &name_len, &value_ptr, &value_len)) {
+            continue;
+        }
+
+        zend_string *const name_str = zend_string_init(name_ptr, name_len, 0);
+        zval value_zv;
+        ZVAL_STR(&value_zv, zend_string_init(value_ptr, value_len, 0));
+        zend_hash_update(req->headers, name_str, &value_zv);
+        zend_string_release(name_str);
+    }
+
+    const char *body = request_wire_body(rw, &len);
+    if (body != NULL && len > 0) {
+        req->body = zend_string_init(body, len, 0);
+        req->content_length = len;
+    }
+
+    return req;
 }
 
 /* Method tokens are case-sensitive per RFC 7230 §3.1.1. */

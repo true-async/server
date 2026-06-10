@@ -21,8 +21,13 @@
 #include "php.h"
 #include "Zend/zend_API.h"
 #include "core/reactor_pool.h"
+#include "core/request_wire.h"
+#include "http1/http_parser.h"
 
 #include <stdint.h>
+
+/* Defined in src/http_request.c; wraps an http_request_t in an HttpRequest zval. */
+extern zval *http_request_create_from_parsed(http_request_t *req);
 
 #ifdef PHP_WIN32
 # include <windows.h>
@@ -112,8 +117,69 @@ PHP_FUNCTION(_http_server_reactor_pool_selftest)
     reactor_pool_destroy(rp);
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_request_wire_roundtrip, 0, 4,
+                                        MAY_BE_OBJECT | MAY_BE_FALSE)
+    ZEND_ARG_TYPE_INFO(0, method, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, body, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+/* Build a request_wire from the args, materialize it into an HttpRequest via
+ * http_request_from_wire + create_from_parsed, free the wire, return the object.
+ * Exercises the full reactor->worker request marshalling round-trip (produced
+ * and consumed on one thread here — the point is byte-accurate materialization,
+ * not the threading). */
+PHP_FUNCTION(_http_server_request_wire_roundtrip)
+{
+    zend_string *method;
+    zend_string *path;
+    HashTable   *headers;
+    zend_string *body;
+
+    ZEND_PARSE_PARAMETERS_START(4, 4)
+        Z_PARAM_STR(method)
+        Z_PARAM_STR(path)
+        Z_PARAM_ARRAY_HT(headers)
+        Z_PARAM_STR(body)
+    ZEND_PARSE_PARAMETERS_END();
+
+    request_wire_t *const rw = request_wire_create(0, 0, NULL);
+
+    if (rw == NULL) {
+        RETURN_FALSE;
+    }
+
+    if (!request_wire_set_method(rw, ZSTR_VAL(method), ZSTR_LEN(method))
+        || !request_wire_set_path(rw, ZSTR_VAL(path), ZSTR_LEN(path))) {
+        request_wire_free(rw);
+        RETURN_FALSE;
+    }
+
+    zend_string *header_name;
+    zval        *header_value;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(headers, header_name, header_value) {
+        if (header_name == NULL || Z_TYPE_P(header_value) != IS_STRING) {
+            continue;
+        }
+
+        request_wire_add_header(rw, ZSTR_VAL(header_name), ZSTR_LEN(header_name),
+                                Z_STRVAL_P(header_value), Z_STRLEN_P(header_value));
+    } ZEND_HASH_FOREACH_END();
+
+    request_wire_set_body(rw, ZSTR_VAL(body), ZSTR_LEN(body), true);
+
+    http_request_t *const req = http_request_from_wire(rw);
+    request_wire_free(rw); /* bytes copied into req; wire no longer needed */
+
+    zval *const obj = http_request_create_from_parsed(req);
+    ZVAL_COPY_VALUE(return_value, obj); /* move object into return_value */
+    efree(obj);                         /* free the heap zval wrapper */
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
+    ZEND_FE(_http_server_request_wire_roundtrip, arginfo_request_wire_roundtrip)
     PHP_FE_END
 };
 

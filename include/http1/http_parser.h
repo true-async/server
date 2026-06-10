@@ -367,4 +367,12 @@ void http_request_addref(http_request_t *req);
  * the canonical single-owner case where release == destroy. NULL-safe. */
 void http_request_destroy(http_request_t *req);
 
+/* Materialize an http_request_t from a flat, malloc-domain request_wire
+ * (issue #80, D2). WORKER-SIDE ONLY (allocates ZMM) — never call on the
+ * transport reactor. The wire is read-only and may be freed by the caller as
+ * soon as this returns. Returns a refcount=1 request owned by the caller
+ * (release via http_request_destroy). */
+struct request_wire_s;
+http_request_t *http_request_from_wire(const struct request_wire_s *rw);
+
 #endif /* HTTP_PARSER_H */
