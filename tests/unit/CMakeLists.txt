@@ -60,6 +60,30 @@ endif()
 
 add_test(NAME ThreadQueue COMMAND test_thread_queue)
 
+# Flat request_wire marshalling type (issue #80, D2). Pure malloc-domain C, no
+# PHP/Zend runtime — links the one source directly.
+add_executable(test_request_wire
+    core/test_request_wire.c
+    ${CMAKE_SOURCE_DIR}/../src/core/request_wire.c
+)
+
+target_include_directories(test_request_wire PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+    ${CMAKE_SOURCE_DIR}/../src/core
+)
+
+target_link_libraries(test_request_wire
+    test_common
+    ${CMOCKA_LIBRARIES}
+)
+
+if(UNIX)
+    target_link_libraries(test_request_wire m pthread)
+endif()
+
+add_test(NAME RequestWire COMMAND test_request_wire)
+
 if(WIN32)
     set_tests_properties(ThreadQueue PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"

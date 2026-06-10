@@ -501,6 +501,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/thread_mailbox.c
     src/core/reactor_pool.c
     src/core/reactor_pool_test.c
+    src/core/request_wire.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c

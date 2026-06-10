@@ -75,6 +75,8 @@ set(CORE_SUBSYSTEM_SOURCES
     # Reactor thread pool (issue #80): pure-C transport reactors on the ThreadPool.
     src/core/reactor_pool.c
     src/core/reactor_pool_test.c
+    # Flat request marshalling type (issue #80, D2): reactor -> worker request.
+    src/core/request_wire.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files
