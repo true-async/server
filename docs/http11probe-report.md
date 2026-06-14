@@ -2,7 +2,7 @@
 
 HTTP/1.1 RFC 9110/9112 compliance + request-smuggling + malformed-input + header-normalization + caching/cookie probe ([MDA2AV/Http11Probe](https://github.com/MDA2AV/Http11Probe)).
 
-_Generated: 2026-06-07 08:33 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
+_Generated: 2026-06-14 08:52 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
 
 ## Summary
 
