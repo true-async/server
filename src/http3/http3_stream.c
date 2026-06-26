@@ -11,7 +11,9 @@
 #endif
 
 #include <php.h>
-#include <sys/mman.h>              /* munmap — hq-interop mmap'd file bodies */
+#ifndef PHP_WIN32
+# include <sys/mman.h>             /* munmap — hq-interop mmap'd file bodies (POSIX) */
+#endif
 #include "Zend/zend_async_API.h"   /* zend_async_trigger_event_t dispose */
 #include "http3/http3_stream.h"
 #include "http3/http3_stream_pool.h"
@@ -134,10 +136,12 @@ void http3_stream_release(http3_stream_t *s)
         s->hq_line = NULL;
     }
 
+#ifndef PHP_WIN32
     if (s->hq_map != NULL) {
         munmap(s->hq_map, s->hq_map_len);
         s->hq_map = NULL;
     }
+#endif
 
     /* Drain the streaming chunk queue — chunks still owned by us
      * because nghttp3 may have already taken iov pointers but not yet

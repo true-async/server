@@ -41,10 +41,7 @@ static void worker_inbox_drain(void **items, const size_t count, void *arg)
 
     for (size_t i = 0; i < count; i++) {
         http_request_t *const req = (http_request_t *)items[i];
-
-        if (UNEXPECTED(req == NULL)) {
-            continue;
-        }
+        ZEND_ASSERT(req != NULL);
 
         worker_dispatch_request(inbox->server, inbox->scope, req,
                                 inbox->own_scope, inbox->sink, inbox->sink_arg);

@@ -100,12 +100,12 @@ ZEND_METHOD(TrueAsync_HttpRequest, __construct)
  * The domain is read off the string itself (self-describing), so mixed-domain
  * requests (persistent method/uri/headers + ZMM path/query) are handled per
  * field. */
-static void http_request_retval_str(zval *out, zend_string *s)
+static void http_request_retval_str(zval *out, zend_string *str)
 {
-    if (UNEXPECTED(GC_FLAGS(s) & IS_STR_PERSISTENT)) {
-        ZVAL_STRINGL(out, ZSTR_VAL(s), ZSTR_LEN(s));
+    if (UNEXPECTED(GC_FLAGS(str) & IS_STR_PERSISTENT)) {
+        ZVAL_STRINGL(out, ZSTR_VAL(str), ZSTR_LEN(str));
     } else {
-        ZVAL_STR_COPY(out, s);
+        ZVAL_STR_COPY(out, str);
     }
 }
 
@@ -138,9 +138,9 @@ static void http_request_retval_ht(zval *out, HashTable *ht)
         }
 
         if (key != NULL) {
-            zend_string *const kc = zend_string_init(ZSTR_VAL(key), ZSTR_LEN(key), 0);
-            zend_hash_update(dst, kc, &copy);
-            zend_string_release(kc);
+            zend_string *const key_copy = zend_string_init(ZSTR_VAL(key), ZSTR_LEN(key), 0);
+            zend_hash_update(dst, key_copy, &copy);
+            zend_string_release(key_copy);
         } else {
             zend_hash_index_update(dst, idx, &copy);
         }

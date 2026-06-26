@@ -116,7 +116,7 @@ void thread_mailbox_free(thread_mailbox_t *mb)
 
 bool thread_mailbox_post(thread_mailbox_t *mb, void *item)
 {
-    if (!thread_mpsc_enqueue(mb->queue, item, NULL)) {
+    if (UNEXPECTED(!thread_mpsc_enqueue(mb->queue, item, NULL))) {
         return false;
     }
 

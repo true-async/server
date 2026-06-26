@@ -111,7 +111,7 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
  * unit test can drive it without the listener TU. */
 void http3_packet_account_send_error(http3_packet_stats_t *st, int err)
 {
-    if (st == NULL) { return; }
+    ZEND_ASSERT(st != NULL);
 
     switch (err) {
         case EAGAIN:
@@ -212,8 +212,8 @@ bool http3_packet_send_retry(
     memcpy(odcid.data, client_dcid, client_dcid_len);
 
     uint8_t token[NGTCP2_CRYPTO_MAX_RETRY_TOKENLEN];
-    ngtcp2_tstamp ts = (ngtcp2_tstamp)zend_hrtime();
-    ngtcp2_ssize tokenlen = ngtcp2_crypto_generate_retry_token(
+    const ngtcp2_tstamp ts = (ngtcp2_tstamp)zend_hrtime();
+    const ngtcp2_ssize tokenlen = ngtcp2_crypto_generate_retry_token(
         token, retry_token_key, 32, version,
         (const ngtcp2_sockaddr *)peer, (ngtcp2_socklen)peer_len,
         &retry_scid, &odcid, ts);
@@ -304,8 +304,8 @@ int http3_packet_verify_retry_token(
     }
 
     ngtcp2_cid odcid;
-    ngtcp2_tstamp ts = (ngtcp2_tstamp)zend_hrtime();
-    int rv = ngtcp2_crypto_verify_retry_token(
+    const ngtcp2_tstamp ts = (ngtcp2_tstamp)zend_hrtime();
+    const int rv = ngtcp2_crypto_verify_retry_token(
         &odcid, token, tokenlen,
         retry_token_key, 32, version,
         (const ngtcp2_sockaddr *)peer, (ngtcp2_socklen)peer_len,

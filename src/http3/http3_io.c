@@ -57,14 +57,14 @@ static void timer_fire_cb(zend_async_event_t *event,
                           void *result, zend_object *exception)
 {
     (void)event; (void)result; (void)exception;
-    http3_timer_cb_t *tcb = (http3_timer_cb_t *)cb;
-    http3_connection_t *c = tcb->conn;
+    http3_timer_cb_t *const tcb = (http3_timer_cb_t *)cb;
+    http3_connection_t *const c = tcb->conn;
 
     if (c == NULL || c->closed) {
         return;
     }
 
-    http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     if (stats != NULL) {
         stats->quic_timer_fired++;
@@ -92,7 +92,7 @@ static void timer_fire_cb(zend_async_event_t *event,
 
     c->timer_expiry_ns = 0;
 
-    int rv = ngtcp2_conn_handle_expiry((ngtcp2_conn *)c->ngtcp2_conn, http3_ts_now());
+    const int rv = ngtcp2_conn_handle_expiry((ngtcp2_conn *)c->ngtcp2_conn, http3_ts_now());
     /* Idle-timeout: peer is gone, RFC 9000 §10.1 says do NOT emit
      * CONNECTION_CLOSE. Mark sent_connection_close so the teardown also
      * skips the emit, and reap immediately. */
@@ -225,7 +225,7 @@ void http3_connection_drain_out(http3_connection_t *c)
         return;
     }
 
-    http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     /* Loop until ngtcp2 has nothing to emit. writev_stream returns the
      * number of bytes written into our buffer, 0 when congestion-
@@ -395,7 +395,7 @@ void http3_connection_drain_out(http3_connection_t *c)
                 flags |= NGTCP2_WRITE_STREAM_FLAG_MORE;
             }
         }
-        ngtcp2_ssize n = ngtcp2_conn_writev_stream(
+        const ngtcp2_ssize written = ngtcp2_conn_writev_stream(
             (ngtcp2_conn *)c->ngtcp2_conn,
             &ps.path, &pi,
             batch_buf + batch_off, H3_PKT_SLOT,
@@ -405,7 +405,7 @@ void http3_connection_drain_out(http3_connection_t *c)
             (const ngtcp2_vec *)h3_vec, (size_t)h3_veccnt,
             http3_ts_now());
 
-        if (n == NGTCP2_ERR_WRITE_MORE) {
+        if (written == NGTCP2_ERR_WRITE_MORE) {
             /* WRITE_MORE means ngtcp2 accepted pdatalen bytes from
              * nghttp3 into the next packet but has room for more. Tell
              * nghttp3 the bytes are committed and keep going — without
@@ -422,7 +422,7 @@ void http3_connection_drain_out(http3_connection_t *c)
             continue;
         }
 
-        if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED || n == NGTCP2_ERR_STREAM_SHUT_WR) {
+        if (written == NGTCP2_ERR_STREAM_DATA_BLOCKED || written == NGTCP2_ERR_STREAM_SHUT_WR) {
             /* Flow-control or half-closed write side. Pause the stream
              * so nghttp3 stops handing us data on it until ngtcp2
              * extends the window via extend_max_stream_data callback. */
@@ -439,7 +439,7 @@ void http3_connection_drain_out(http3_connection_t *c)
             break;
         }
 
-        if (n == 0) {
+        if (written == 0) {
             /* No outgoing datagram produced. If nghttp3 had data ready
              * and ngtcp2 still produced nothing, ack the bytes anyway
              * (avoids a spin loop). Otherwise we're truly idle. */
@@ -457,7 +457,7 @@ void http3_connection_drain_out(http3_connection_t *c)
             break;
         }
 
-        if (n < 0) {
+        if (UNEXPECTED(written < 0)) {
             if (stats != NULL) stats->quic_write_error++;
             H3_FLUSH_BATCH();
             break;
@@ -489,7 +489,7 @@ void http3_connection_drain_out(http3_connection_t *c)
          * bytes; we enforce that here by flushing eagerly when the
          * size pattern breaks. ECN must also match across the batch
          * (cmsg(IP_TOS) is per-sendmsg) — flush eagerly if it changes. */
-        size_t pkt_len = (size_t)n;
+        size_t pkt_len = (size_t)written;
         uint8_t pkt_ecn = pi.ecn;
         /* ngtcp2 reported the destination for this packet in ps.path — copy
          * it out before the next writev overwrites the storage. Usually ==

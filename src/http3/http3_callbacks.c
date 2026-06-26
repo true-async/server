@@ -44,11 +44,25 @@
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
 
 #include <string.h>
-#include <fcntl.h>                         /* hq file serving: open */
-#include <unistd.h>                        /* close */
-#include <sys/stat.h>                      /* fstat */
-#include <sys/mman.h>                      /* mmap — zero-copy hq file body */
-#include <limits.h>                        /* PATH_MAX */
+
+/* hq-interop file serving (open/fstat/mmap/realpath) is POSIX-only. The whole
+ * feature is gated behind a docroot setter that the Linux interop runner sets;
+ * on Windows http3_hq_map_file compiles to a stub that returns false. */
+#ifndef PHP_WIN32
+# include <fcntl.h>                        /* hq file serving: open */
+# include <unistd.h>                       /* close */
+# include <sys/stat.h>                     /* fstat */
+# include <sys/mman.h>                     /* mmap — zero-copy hq file body */
+# include <limits.h>                       /* PATH_MAX */
+# include <errno.h>
+# if defined(__linux__) && defined(__has_include)
+#  if __has_include(<linux/openat2.h>)
+#   include <linux/openat2.h>              /* struct open_how, RESOLVE_BENEATH */
+#   include <sys/syscall.h>                /* SYS_openat2 */
+#   define HTTP3_HAVE_OPENAT2 1
+#  endif
+# endif
+#endif
 
 /* Listener accessors not exposed via http3_listener.h. */
 extern http3_packet_stats_t *http3_listener_packet_stats(http3_listener_t *l);
@@ -82,7 +96,7 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
                                     void *user_data)
 {
     (void)conn;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
     /* CID is random per RFC 9000 §5.1 — collision-resistant via DRBG.
      * Stateless-reset token is derived deterministically via
      * HMAC-SHA256(listener_sr_key, cid)[0:16]. The deterministic
@@ -134,7 +148,7 @@ static int remove_connection_id_cb(ngtcp2_conn *conn, const ngtcp2_cid *cid,
                                    void *user_data)
 {
     (void)conn;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c != NULL) {
         http3_connection_unregister_issued_cid(c, cid->data, cid->datalen);
@@ -183,7 +197,9 @@ static void http3_finalize_request_body(http3_stream_t *s);
 static void h3_reject_request_stream(http3_connection_t *c,
                                      http3_stream_t *s, int64_t stream_id)
 {
-    if (s == NULL || s->rejected) return;
+    ZEND_ASSERT(s != NULL);
+
+    if (s->rejected) return;
     s->rejected = true;
 
     if (c == NULL) return;
@@ -229,17 +245,17 @@ static int h3_begin_headers_cb(nghttp3_conn *conn, int64_t stream_id,
                                void *conn_user_data, void *stream_user_data)
 {
     (void)stream_user_data;
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
-    http3_packet_stats_t *stats = c != NULL
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
+    http3_packet_stats_t *const stats = c != NULL
         ? http3_listener_packet_stats(c->listener) : NULL;
 
-    http3_stream_t *s = http3_stream_new(c, stream_id);
+    http3_stream_t *const s = http3_stream_new(c, stream_id);
 
-    if (s == NULL) {
+    if (UNEXPECTED(s == NULL)) {
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
 
-    if (nghttp3_conn_set_stream_user_data(conn, stream_id, s) != 0) {
+    if (UNEXPECTED(nghttp3_conn_set_stream_user_data(conn, stream_id, s) != 0)) {
         http3_stream_release(s);
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
@@ -270,10 +286,10 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
                              void *conn_user_data, void *stream_user_data)
 {
     (void)conn; (void)stream_id; (void)flags;
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
-    http3_stream_t *s = (http3_stream_t *)stream_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
+    http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
-    if (s == NULL || s->rejected) {
+    if (UNEXPECTED(s == NULL || s->rejected)) {
         return 0;
     }
 
@@ -283,9 +299,9 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
     /* Same RFC 7541 §4.1 32-byte overhead accounting H2 uses. */
     const size_t entry_cost = name_v.len + value_v.len + 32;
 
-    if (SIZE_MAX - s->headers_total_bytes < entry_cost
-     || s->headers_total_bytes + entry_cost > HTTP3_MAX_HEADERS_BYTES) {
-        http3_packet_stats_t *stats = c != NULL
+    if (UNEXPECTED(SIZE_MAX - s->headers_total_bytes < entry_cost
+     || s->headers_total_bytes + entry_cost > HTTP3_MAX_HEADERS_BYTES)) {
+        http3_packet_stats_t *const stats = c != NULL
             ? http3_listener_packet_stats(c->listener) : NULL;
 
         if (stats != NULL) stats->h3_request_oversized++;
@@ -296,16 +312,16 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
 
     s->headers_total_bytes += entry_cost;
 
-    http_request_t *req = s->request;
-    const char *n = (const char *)name_v.base;
-    const char *v = (const char *)value_v.base;
+    http_request_t *const req = s->request;
+    const char *const name_ptr  = (const char *)name_v.base;
+    const char *const value_ptr = (const char *)value_v.base;
 
     /* Pseudo-headers — token enum lets us skip the strcmp ladder for
      * the four RFC 9114 pseudo names. nghttp3 already validates
      * uniqueness + ordering so we map unconditionally. */
     if (token == NGHTTP3_QPACK_TOKEN__METHOD) {
         if (req->method == NULL) {
-            req->method = zend_string_init(v, value_v.len, req->persistent);
+            req->method = zend_string_init(value_ptr, value_v.len, req->persistent);
         }
 
         return 0;
@@ -313,30 +329,30 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
 
     if (token == NGHTTP3_QPACK_TOKEN__PATH) {
         if (req->uri == NULL) {
-            req->uri = zend_string_init(v, value_v.len, req->persistent);
+            req->uri = zend_string_init(value_ptr, value_v.len, req->persistent);
         }
 
         return 0;
     }
 
     if (token == NGHTTP3_QPACK_TOKEN__AUTHORITY) {
-        h3_store_header_value(req, "host", 4, v, value_v.len);
+        h3_store_header_value(req, "host", 4, value_ptr, value_v.len);
         return 0;
     }
 
     if (token == NGHTTP3_QPACK_TOKEN__SCHEME) {
-        h3_store_header_value(req, "scheme", 6, v, value_v.len);
+        h3_store_header_value(req, "scheme", 6, value_ptr, value_v.len);
         return 0;
     }
 
-    h3_store_header_value(req, n, name_v.len, v, value_v.len);
+    h3_store_header_value(req, name_ptr, name_v.len, value_ptr, value_v.len);
 
     /* Pre-size the body builder when Content-Length lands so we don't
      * geometric-grow under multi-MiB POSTs. Same trick H2 uses. */
-    if (name_v.len == 14 && strncasecmp(n, "content-length", 14) == 0
+    if (name_v.len == 14 && strncasecmp(name_ptr, "content-length", 14) == 0
         && value_v.len < 32) {
         char buf[32];
-        memcpy(buf, v, value_v.len);
+        memcpy(buf, value_ptr, value_v.len);
         buf[value_v.len] = '\0';
         char *end = NULL;
         unsigned long long cl = strtoull(buf, &end, 10);
@@ -354,7 +370,7 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
                              void *stream_user_data)
 {
     (void)conn; (void)stream_id; (void)fin;
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
     http3_stream_t *s     = (http3_stream_t *)stream_user_data;
 
     if (s == NULL || s->dispatched || s->rejected) {
@@ -382,19 +398,19 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
                            void *conn_user_data, void *stream_user_data)
 {
     (void)conn; (void)stream_id;
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
-    http3_stream_t *s = (http3_stream_t *)stream_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
+    http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
-    if (s == NULL || s->rejected) {
+    if (UNEXPECTED(s == NULL || s->rejected)) {
         return 0;
     }
 
     const size_t current = s->body_buf.s != NULL
         ? ZSTR_LEN(s->body_buf.s) : 0;
 
-    if (SIZE_MAX - current < datalen
-     || current + datalen > HTTP3_MAX_BODY_BYTES) {
-        http3_packet_stats_t *stats = c != NULL
+    if (UNEXPECTED(SIZE_MAX - current < datalen
+     || current + datalen > HTTP3_MAX_BODY_BYTES)) {
+        http3_packet_stats_t *const stats = c != NULL
             ? http3_listener_packet_stats(c->listener) : NULL;
 
         if (stats != NULL) stats->h3_request_oversized++;
@@ -433,7 +449,7 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
                                      void *stream_user_data)
 {
     (void)conn; (void)stream_id; (void)conn_user_data;
-    http3_stream_t *s = (http3_stream_t *)stream_user_data;
+    http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
     if (s == NULL || veccnt == 0) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
@@ -565,7 +581,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
         return false;
     }
 
-    zend_object *resp_obj = Z_OBJ(s->response_zv);
+    zend_object *const resp_obj = Z_OBJ(s->response_zv);
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* H3 reads body via http_response_get_body_str() directly rather
@@ -669,7 +685,7 @@ headers_done:
 
     if (buf.heap != NULL) efree(buf.heap);
 
-    http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     if (rv == 0) {
         if (stats != NULL) stats->h3_response_submitted++;
@@ -791,14 +807,14 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
  * ------------------------------------------------------------------- */
 int h3_stream_append_chunk(void *ctx, zend_string *chunk)
 {
-    http3_stream_t *s = (http3_stream_t *)ctx;
+    http3_stream_t *const s = (http3_stream_t *)ctx;
 
     if (s == NULL || s->conn == NULL || s->peer_closed) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    http3_connection_t *c = s->conn;
+    http3_connection_t *const c = s->conn;
 
     if (c->closed || c->nghttp3_conn == NULL) {
         zend_string_release(chunk);
@@ -952,7 +968,7 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
 
 void h3_stream_mark_ended(void *ctx)
 {
-    http3_stream_t *s = (http3_stream_t *)ctx;
+    http3_stream_t *const s = (http3_stream_t *)ctx;
 
     if (s == NULL || s->conn == NULL || s->streaming_ended) {
         return;
@@ -974,7 +990,7 @@ void h3_stream_mark_ended(void *ctx)
 
 static zend_async_event_t *h3_stream_get_wait_event(void *ctx)
 {
-    http3_stream_t *s = (http3_stream_t *)ctx;
+    http3_stream_t *const s = (http3_stream_t *)ctx;
 
     if (s == NULL) return NULL;
 
@@ -1011,11 +1027,8 @@ const http_response_stream_ops_t h3_stream_ops = {
  * frees on http3_stream_release. */
 static void http3_finalize_request_body(http3_stream_t *s)
 {
-    http_request_t *req = s->request;
-
-    if (req == NULL) {
-        return;
-    }
+    http_request_t *const req = s->request;
+    ZEND_ASSERT(req != NULL);
 
     /* Move the assembled body bytes into the request. smart_str leaves
      * a NUL-terminated zend_string with refcount 1; we transfer that
@@ -1056,8 +1069,8 @@ static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,
                             void *conn_user_data, void *stream_user_data)
 {
     (void)conn; (void)stream_id;
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
-    http3_stream_t *s = (http3_stream_t *)stream_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
+    http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
     if (s == NULL || s->rejected) {
         return 0;
@@ -1065,7 +1078,7 @@ static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,
 
     http3_finalize_request_body(s);
 
-    http3_packet_stats_t *stats = c != NULL
+    http3_packet_stats_t *const stats = c != NULL
         ? http3_listener_packet_stats(c->listener) : NULL;
 
     if (stats != NULL) stats->h3_request_received++;
@@ -1112,14 +1125,14 @@ static int h3_stream_close_cb(nghttp3_conn *conn, int64_t stream_id,
                               void *conn_user_data, void *stream_user_data)
 {
     (void)conn; (void)app_error_code;
-    http3_stream_t *s = (http3_stream_t *)stream_user_data;
+    http3_stream_t *const s = (http3_stream_t *)stream_user_data;
     /* Defensive: clear ngtcp2's stream_user_data so any straggler ngtcp2
      * stream callback (e.g. extend_max_stream_data, ack_stream_data) that
      * fires after nghttp3 has already closed the stream cannot deref the
      * about-to-be-freed http3_stream_t. ngtcp2 and nghttp3 maintain their
      * own per-stream state machines; nothing forces them to fire close in
      * lockstep. */
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
 
     if (c != NULL && c->ngtcp2_conn != NULL) {
         ngtcp2_conn_set_stream_user_data(
@@ -1139,7 +1152,7 @@ static int h3_stop_sending_cb(nghttp3_conn *conn, int64_t stream_id,
     /* Mirror the request via QUIC STOP_SENDING so the peer knows we
      * gave up on its data. ngtcp2 has the function exposed on the
      * connection-level handle. */
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
 
     if (c != NULL && c->ngtcp2_conn != NULL) {
         ngtcp2_conn_shutdown_stream_read(
@@ -1154,7 +1167,7 @@ static int h3_reset_stream_cb(nghttp3_conn *conn, int64_t stream_id,
                               void *conn_user_data, void *stream_user_data)
 {
     (void)conn; (void)stream_user_data;
-    http3_connection_t *c = (http3_connection_t *)conn_user_data;
+    http3_connection_t *const c = (http3_connection_t *)conn_user_data;
 
     if (c != NULL && c->ngtcp2_conn != NULL) {
         ngtcp2_conn_shutdown_stream_write(
@@ -1173,10 +1186,10 @@ static int h3_reset_stream_cb(nghttp3_conn *conn, int64_t stream_id,
  * so freeing on hand-off would corrupt retransmits whenever a packet
  * got lost. */
 static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
-                                   uint64_t datalen, void *cu, void *su)
+                                   uint64_t datalen, void *user_data, void *stream_user_data)
 {
-    (void)conn; (void)stream_id; (void)cu;
-    http3_stream_t *s = (http3_stream_t *)su;
+    (void)conn; (void)stream_id; (void)user_data;
+    http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
     if (s == NULL || s->chunk_queue == NULL) {
         return 0;
@@ -1292,13 +1305,13 @@ bool http3_connection_init_h3(http3_connection_t *c)
 static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
 {
     (void)conn;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c == NULL) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
 
-    http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     const unsigned char *proto = NULL;
     unsigned int proto_len = 0;
@@ -1338,44 +1351,105 @@ static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
  * HTTP/3, so an hq connection has no nghttp3. Ingress accumulates the
  * "GET <path>\r\n" request line; egress (http3_io.c drain) writes
  * s->response_body raw + FIN. */
-/* Map a docroot-relative file into s->hq_body for zero-copy raw egress, or
- * return false on any failure. Rejects traversal by canonicalising both
- * docroot and target with realpath and requiring the target to stay under
- * the docroot. mmap (not read-into-buffer) keeps arbitrarily large files off
- * the heap and out of a blocking bulk read; ngtcp2 references the pages until
- * acked, so the mapping lives until http3_stream_release munmaps it. A
- * zero-byte regular file is a valid empty body (served FIN-only). */
-static bool http3_hq_map_file(http3_stream_t *s, const char *docroot,
-                              const char *path, const size_t path_len)
+#ifndef PHP_WIN32
+/* Open `path` (a leading-'/' request path) for reading, confined to `docroot`.
+ *
+ * On Linux with openat2 this resolves with RESOLVE_BENEATH: the kernel refuses
+ * any component that escapes the docroot subtree (".." , an absolute path, or a
+ * symlink swapped in after the check), so there is no realpath()->open() TOCTOU
+ * window. Where openat2 is unavailable (older kernel / seccomp) it falls back
+ * to realpath() canonicalisation + an explicit containment check — the prior
+ * behaviour. Returns an O_RDONLY fd, or -1. */
+static int http3_hq_open_beneath(const char *docroot,
+                                 const char *path, const size_t path_len)
 {
-    if (docroot == NULL || path_len == 0 || path[0] != '/'
-        || memchr(path, '\0', path_len) != NULL) {
-        return false;
+    /* openat2 / realpath want a docroot-relative path: drop the leading '/'. */
+    const char  *const rel     = path + 1;
+    const size_t       rel_len = path_len - 1;
+
+    if (rel_len == 0) {
+        return -1;
     }
 
+#ifdef HTTP3_HAVE_OPENAT2
+    char relz[PATH_MAX];
+
+    if (rel_len >= sizeof relz) {
+        return -1;
+    }
+
+    memcpy(relz, rel, rel_len);
+    relz[rel_len] = '\0';
+
+    const int dirfd = open(docroot, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+    if (dirfd >= 0) {
+        struct open_how how = {
+            .flags   = (uint64_t)(O_RDONLY | O_CLOEXEC),
+            .resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+        };
+        const long rv    = syscall(SYS_openat2, dirfd, relz, &how, sizeof how);
+        const int  saved = errno;
+        close(dirfd);
+
+        if (rv >= 0) {
+            return (int)rv;
+        }
+
+        /* A RESOLVE_BENEATH rejection is a real traversal attempt — do not
+         * retry it. Only fall through when openat2 itself is unavailable. */
+        if (saved != ENOSYS && saved != EPERM) {
+            return -1;
+        }
+    }
+#endif /* HTTP3_HAVE_OPENAT2 */
+
     char full[PATH_MAX];
-    const int n = snprintf(full, sizeof full, "%s%.*s",
-                           docroot, (int)path_len, path);
+    const int n = snprintf(full, sizeof full, "%s/%.*s",
+                           docroot, (int)rel_len, rel);
 
     if (n <= 0 || (size_t)n >= sizeof full) {
-        return false;
+        return -1;
     }
 
     char resolved[PATH_MAX];
     char droot[PATH_MAX];
 
     if (realpath(full, resolved) == NULL || realpath(docroot, droot) == NULL) {
-        return false;
+        return -1;
     }
 
     const size_t dl = strlen(droot);
 
     if (strncmp(resolved, droot, dl) != 0
         || (resolved[dl] != '/' && resolved[dl] != '\0')) {
-        return false;   /* escaped the docroot */
+        return -1;   /* escaped the docroot */
     }
 
-    const int fd = open(resolved, O_RDONLY);
+    return open(resolved, O_RDONLY | O_CLOEXEC);
+}
+#endif /* !PHP_WIN32 */
+
+/* Map a docroot-relative file into s->hq_body for zero-copy raw egress, or
+ * return false on any failure. Path resolution is confined to the docroot by
+ * http3_hq_open_beneath (TOCTOU-safe). mmap (not read-into-buffer) keeps
+ * arbitrarily large files off the heap and out of a blocking bulk read; ngtcp2
+ * references the pages until acked, so the mapping lives until
+ * http3_stream_release munmaps it. A zero-byte regular file is a valid empty
+ * body (served FIN-only). POSIX-only — a Windows stub returns false. */
+static bool http3_hq_map_file(http3_stream_t *s, const char *docroot,
+                              const char *path, const size_t path_len)
+{
+#ifdef PHP_WIN32
+    (void)s; (void)docroot; (void)path; (void)path_len;
+    return false;
+#else
+    if (docroot == NULL || path_len == 0 || path[0] != '/'
+        || memchr(path, '\0', path_len) != NULL) {
+        return false;
+    }
+
+    const int fd = http3_hq_open_beneath(docroot, path, path_len);
 
     if (fd < 0) {
         return false;
@@ -1407,6 +1481,7 @@ static bool http3_hq_map_file(http3_stream_t *s, const char *docroot,
     s->hq_body     = (const char *)map;
     s->hq_body_len = (size_t)st.st_size;
     return true;
+#endif /* PHP_WIN32 */
 }
 
 static void http3_hq_serve(http3_connection_t *c, http3_stream_t *s)
@@ -1522,7 +1597,7 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
                                void *user_data, void *stream_user_data)
 {
     (void)offset;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c == NULL) {
         return 0;
@@ -1544,11 +1619,11 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
             return 0;  /* Pre-handshake stream data is not expected; drop. */
         }
 
-        nghttp3_ssize n = nghttp3_conn_read_stream(
+        const nghttp3_ssize n = nghttp3_conn_read_stream(
             (nghttp3_conn *)c->nghttp3_conn, stream_id, data, datalen, fin);
 
-        if (n < 0) {
-            http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+        if (UNEXPECTED(n < 0)) {
+            http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
             if (stats != NULL) stats->h3_stream_read_error++;
             return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1574,7 +1649,7 @@ static int extend_max_stream_data_cb(ngtcp2_conn *conn, int64_t stream_id,
                                      void *user_data, void *stream_user_data)
 {
     (void)conn; (void)max_data;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
     http3_stream_t     *s = (http3_stream_t *)stream_user_data;
 
     /* Pair with drain_out's nghttp3_conn_block_stream call: we blocked
@@ -1606,7 +1681,7 @@ static int acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
                                        void *user_data, void *stream_user_data)
 {
     (void)conn; (void)offset;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
     http3_stream_t     *s = (http3_stream_t *)stream_user_data;
 
     if (c == NULL) {
@@ -1658,7 +1733,7 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
                            int64_t stream_id, uint64_t app_error_code,
                            void *user_data, void *stream_user_data)
 {
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c == NULL) {
         return 0;
@@ -1692,7 +1767,7 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
 
     int rv = nghttp3_conn_close_stream(
         (nghttp3_conn *)c->nghttp3_conn, stream_id, app_error_code);
-    http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     if (stats != NULL) stats->h3_stream_close++;
 
@@ -1708,7 +1783,7 @@ static int stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
                            void *user_data, void *stream_user_data)
 {
     (void)conn; (void)final_size; (void)app_error_code; (void)stream_user_data;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
@@ -1727,7 +1802,7 @@ static int stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                                   void *user_data, void *stream_user_data)
 {
     (void)conn; (void)app_error_code; (void)stream_user_data;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
@@ -1746,7 +1821,7 @@ static int extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn,
                                              void *user_data)
 {
     (void)conn;
-    http3_connection_t *c = (http3_connection_t *)user_data;
+    http3_connection_t *const c = (http3_connection_t *)user_data;
 
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;

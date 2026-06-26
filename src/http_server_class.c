@@ -2099,7 +2099,7 @@ static int http_server_online_cpus(void)
  * the reactor pool's only client today (the kernel ACKs TCP independently). */
 static bool http_server_config_has_h3(http_server_object *server)
 {
-    http_server_config_t *cfg = http_server_get_config(server);
+    http_server_config_t *const cfg = http_server_get_config(server);
 
     if (cfg == NULL) {
         return false;
@@ -2130,18 +2130,18 @@ typedef struct {
 
 static void reactor_h3_spawn_fn(void *arg)
 {
-    reactor_h3_spawn_arg_t *const a = (reactor_h3_spawn_arg_t *)arg;
-    a->out = http3_listener_spawn(a->host, a->port, a->ssl_ctx, NULL, a->ctx);
+    reactor_h3_spawn_arg_t *const spawn = (reactor_h3_spawn_arg_t *)arg;
+    spawn->out = http3_listener_spawn(spawn->host, spawn->port, spawn->ssl_ctx, NULL, spawn->ctx);
 
-    if (a->out == NULL && EG(exception)) {
+    if (spawn->out == NULL && EG(exception)) {
         zend_clear_exception();   /* don't dangle on the reactor's EG */
     }
 
     /* Arm steering on the reactor's own thread before it processes traffic —
      * the listener already polls here, so this store happens-before any read in
      * try_steer on the same thread. */
-    if (a->out != NULL && a->steer != NULL) {
-        http3_listener_set_steer(a->out, a->steer);
+    if (spawn->out != NULL && spawn->steer != NULL) {
+        http3_listener_set_steer(spawn->out, spawn->steer);
     }
 }
 
@@ -2182,9 +2182,9 @@ static size_t http_server_reactor_h3_spawn(http_server_object *server, const int
     server->reactor_h3_ctx =
         pecalloc((size_t)reactors, sizeof(http3_reactor_ctx_t), 1);
 
-    const uint32_t sockbuf = http_server_get_http3_socket_buffer_bytes(server);
-    const uint32_t peerbud = http_server_get_http3_peer_connection_budget(server);
-    const int      maxc    = http_server_get_max_connections(server);
+    const uint32_t socket_buffer_bytes = http_server_get_http3_socket_buffer_bytes(server);
+    const uint32_t peer_budget         = http_server_get_http3_peer_connection_budget(server);
+    const int      max_conns           = http_server_get_max_connections(server);
     const http_static_handler_t *const *const mounts = http_static_handler_mounts(server);
     const size_t   mount_count   = http_static_handler_count(server);
 
@@ -2214,9 +2214,9 @@ static size_t http_server_reactor_h3_spawn(http_server_object *server, const int
         server->reactor_h3_ctx[r].pool                = server->reactor_pool;
         server->reactor_h3_ctx[r].reactor_id          = r;
         server->reactor_h3_ctx[r].n_reactors          = reactors;
-        server->reactor_h3_ctx[r].socket_buffer_bytes = sockbuf;
-        server->reactor_h3_ctx[r].peer_budget         = peerbud;
-        server->reactor_h3_ctx[r].max_conns           = maxc > 0 ? (uint32_t)maxc : 0;
+        server->reactor_h3_ctx[r].socket_buffer_bytes = socket_buffer_bytes;
+        server->reactor_h3_ctx[r].peer_budget         = peer_budget;
+        server->reactor_h3_ctx[r].max_conns           = max_conns > 0 ? (uint32_t)max_conns : 0;
         server->reactor_h3_ctx[r].static_mounts       = (const void *)mounts;
         server->reactor_h3_ctx[r].static_mount_count  = mount_count;
         server->reactor_h3_ctx[r].static_cache        =
@@ -2643,8 +2643,9 @@ cleanup:
     server->stopping = false;
     server->in_pool_mode = false;
 
-    /* Workers have quiesced (the suspend returned); the reactors carry no
-     * transport yet, so this just stops the idle loops and frees the pool. */
+    /* Workers have quiesced (the suspend returned). Tear down the transport
+     * reactor pool: this releases the H3 listeners the gated reactors own,
+     * frees the worker registry, and stops the reactor loops. */
     http_server_reactor_pool_down(server);
 
     if (st->all_done != NULL) {
@@ -3725,116 +3726,117 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
  * owned listeners (server->reactor_h3_listeners) report identically.
  * The reactor-owned read is cross-thread (the reactor writes these counters on
  * its own thread); they are advisory uint64s, so a torn read is benign. */
-static void http3_emit_listener_stats(zval *return_value, http3_listener_t *l)
+static void http3_emit_listener_stats(zval *return_value, http3_listener_t *listener)
 {
+    http3_listener_stats_t s;
+    http3_listener_get_stats(listener, &s);
+
+    zval entry;
+    array_init(&entry);
+    add_assoc_string(&entry, "host", (char *)http3_listener_host(listener));
+    add_assoc_long  (&entry, "port", http3_listener_port(listener));
+    add_assoc_long  (&entry, "datagrams_received", (zend_long)s.datagrams_received);
+    add_assoc_long  (&entry, "bytes_received",     (zend_long)s.bytes_received);
+    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)s.datagrams_errored);
+    add_assoc_long  (&entry, "last_datagram_size", (zend_long)s.last_datagram_size);
+    add_assoc_string(&entry, "last_peer",          s.last_peer);
+
+    /* QUIC packet classification counters. */
+    add_assoc_long(&entry, "quic_initial",            (zend_long)s.packet.quic_initial);
+    add_assoc_long(&entry, "quic_short_header",       (zend_long)s.packet.quic_short_header);
+    add_assoc_long(&entry, "quic_version_negotiated", (zend_long)s.packet.quic_version_negotiated);
+    add_assoc_long(&entry, "quic_parse_errors",       (zend_long)s.packet.quic_parse_errors);
+    /* ngtcp2_conn lifecycle counters. */
+    add_assoc_long(&entry, "quic_conn_accepted",      (zend_long)s.packet.quic_conn_accepted);
+    add_assoc_long(&entry, "quic_conn_rejected",      (zend_long)s.packet.quic_conn_rejected);
+    /* Read-path counters. */
+    add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
+    add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
+    add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
+    add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
+    add_assoc_long(&entry, "quic_migration_storm_shed", (zend_long)s.packet.quic_migration_storm_shed);
+    /* CID steering. */
+    add_assoc_long(&entry, "quic_steered_out",        (zend_long)s.packet.quic_steered_out);
+    add_assoc_long(&entry, "quic_steered_in",         (zend_long)s.packet.quic_steered_in);
+    add_assoc_long(&entry, "quic_steered_drop",       (zend_long)s.packet.quic_steered_drop);
+    /* Issued / retired alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1). */
+    add_assoc_long(&entry, "quic_new_cid_issued",     (zend_long)s.packet.quic_new_cid_issued);
+    add_assoc_long(&entry, "quic_cid_retired",        (zend_long)s.packet.quic_cid_retired);
+    /* Write-loop + timer counters. */
+    add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
+    add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);
+    add_assoc_long(&entry, "quic_timer_fired",        (zend_long)s.packet.quic_timer_fired);
+    add_assoc_long(&entry, "quic_write_error",        (zend_long)s.packet.quic_write_error);
+    /* Handshake / ALPN counters. */
+    add_assoc_long(&entry, "quic_handshake_completed", (zend_long)s.packet.quic_handshake_completed);
+    add_assoc_long(&entry, "quic_alpn_mismatch",       (zend_long)s.packet.quic_alpn_mismatch);
+    /* nghttp3 lifecycle counters. */
+    add_assoc_long(&entry, "h3_init_ok",            (zend_long)s.packet.h3_init_ok);
+    add_assoc_long(&entry, "h3_init_failed",        (zend_long)s.packet.h3_init_failed);
+    add_assoc_long(&entry, "h3_stream_close",       (zend_long)s.packet.h3_stream_close);
+    add_assoc_long(&entry, "h3_stream_read_error",  (zend_long)s.packet.h3_stream_read_error);
+    /* Request-assembly counters. */
+    add_assoc_long(&entry, "h3_request_received",   (zend_long)s.packet.h3_request_received);
+    add_assoc_long(&entry, "h3_request_oversized",  (zend_long)s.packet.h3_request_oversized);
+    add_assoc_long(&entry, "h3_streams_opened",     (zend_long)s.packet.h3_streams_opened);
+    /* Response counters. */
+    add_assoc_long(&entry, "h3_response_submitted",   (zend_long)s.packet.h3_response_submitted);
+    add_assoc_long(&entry, "h3_response_submit_error",(zend_long)s.packet.h3_response_submit_error);
+    /* Connection lifecycle counters. */
+    add_assoc_long(&entry, "quic_connection_close_sent", (zend_long)s.packet.quic_connection_close_sent);
+    add_assoc_long(&entry, "quic_conn_in_closing",       (zend_long)s.packet.quic_conn_in_closing);
+    add_assoc_long(&entry, "quic_conn_in_draining",      (zend_long)s.packet.quic_conn_in_draining);
+    add_assoc_long(&entry, "quic_conn_idle_closed",      (zend_long)s.packet.quic_conn_idle_closed);
+    add_assoc_long(&entry, "quic_conn_handshake_timeout",(zend_long)s.packet.quic_conn_handshake_timeout);
+    add_assoc_long(&entry, "quic_conn_reaped",           (zend_long)s.packet.quic_conn_reaped);
+    add_assoc_long(&entry, "quic_stateless_reset_sent",  (zend_long)s.packet.quic_stateless_reset_sent);
+    add_assoc_long(&entry, "quic_retry_sent",            (zend_long)s.packet.quic_retry_sent);
+    add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
+    add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
+    add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
+    add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
+    add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
+    /* Audit hardening counters. */
+    add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
+    add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
+
+    /* Reactor-iteration watchdog. Tick = one poll-cb wakeup; on the single
+     * reactor thread its latency is the ACK/PTO delay imposed on every live
+     * connection. */
+    add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
+    add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
+    add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
+    add_assoc_long(&entry, "reactor_slow_ticks",       (zend_long)s.packet.reactor_slow_ticks);
+    add_assoc_long(&entry, "reactor_timer_late",       (zend_long)s.packet.reactor_timer_late);
+    add_assoc_long(&entry, "reactor_max_timer_late_ns",(zend_long)s.packet.reactor_max_timer_late_ns);
     {
-        http3_listener_stats_t s;
-        http3_listener_get_stats(l, &s);
+        zval hist;
+        array_init(&hist);
 
-        zval entry;
-        array_init(&entry);
-        add_assoc_string(&entry, "host", (char *)http3_listener_host(l));
-        add_assoc_long  (&entry, "port", http3_listener_port(l));
-        add_assoc_long  (&entry, "datagrams_received", (zend_long)s.datagrams_received);
-        add_assoc_long  (&entry, "bytes_received",     (zend_long)s.bytes_received);
-        add_assoc_long  (&entry, "datagrams_errored",  (zend_long)s.datagrams_errored);
-        add_assoc_long  (&entry, "last_datagram_size", (zend_long)s.last_datagram_size);
-        add_assoc_string(&entry, "last_peer",          s.last_peer);
+        const size_t nbuckets = sizeof(s.packet.reactor_lat_bucket)
+                              / sizeof(s.packet.reactor_lat_bucket[0]);
 
-        /* QUIC packet classification counters. */
-        add_assoc_long(&entry, "quic_initial",            (zend_long)s.packet.quic_initial);
-        add_assoc_long(&entry, "quic_short_header",       (zend_long)s.packet.quic_short_header);
-        add_assoc_long(&entry, "quic_version_negotiated", (zend_long)s.packet.quic_version_negotiated);
-        add_assoc_long(&entry, "quic_parse_errors",       (zend_long)s.packet.quic_parse_errors);
-        /* ngtcp2_conn lifecycle counters. */
-        add_assoc_long(&entry, "quic_conn_accepted",      (zend_long)s.packet.quic_conn_accepted);
-        add_assoc_long(&entry, "quic_conn_rejected",      (zend_long)s.packet.quic_conn_rejected);
-        /* Read-path counters. */
-        add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
-        add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
-        add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
-        add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
-        add_assoc_long(&entry, "quic_migration_storm_shed", (zend_long)s.packet.quic_migration_storm_shed);
-        /* CID steering. */
-        add_assoc_long(&entry, "quic_steered_out",        (zend_long)s.packet.quic_steered_out);
-        add_assoc_long(&entry, "quic_steered_in",         (zend_long)s.packet.quic_steered_in);
-        add_assoc_long(&entry, "quic_steered_drop",       (zend_long)s.packet.quic_steered_drop);
-        /* Issued / retired alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1). */
-        add_assoc_long(&entry, "quic_new_cid_issued",     (zend_long)s.packet.quic_new_cid_issued);
-        add_assoc_long(&entry, "quic_cid_retired",        (zend_long)s.packet.quic_cid_retired);
-        /* Write-loop + timer counters. */
-        add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
-        add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);
-        add_assoc_long(&entry, "quic_timer_fired",        (zend_long)s.packet.quic_timer_fired);
-        add_assoc_long(&entry, "quic_write_error",        (zend_long)s.packet.quic_write_error);
-        /* Handshake / ALPN counters. */
-        add_assoc_long(&entry, "quic_handshake_completed", (zend_long)s.packet.quic_handshake_completed);
-        add_assoc_long(&entry, "quic_alpn_mismatch",       (zend_long)s.packet.quic_alpn_mismatch);
-        /* nghttp3 lifecycle counters. */
-        add_assoc_long(&entry, "h3_init_ok",            (zend_long)s.packet.h3_init_ok);
-        add_assoc_long(&entry, "h3_init_failed",        (zend_long)s.packet.h3_init_failed);
-        add_assoc_long(&entry, "h3_stream_close",       (zend_long)s.packet.h3_stream_close);
-        add_assoc_long(&entry, "h3_stream_read_error",  (zend_long)s.packet.h3_stream_read_error);
-        /* Request-assembly counters. */
-        add_assoc_long(&entry, "h3_request_received",   (zend_long)s.packet.h3_request_received);
-        add_assoc_long(&entry, "h3_request_oversized",  (zend_long)s.packet.h3_request_oversized);
-        add_assoc_long(&entry, "h3_streams_opened",     (zend_long)s.packet.h3_streams_opened);
-        /* Response counters. */
-        add_assoc_long(&entry, "h3_response_submitted",   (zend_long)s.packet.h3_response_submitted);
-        add_assoc_long(&entry, "h3_response_submit_error",(zend_long)s.packet.h3_response_submit_error);
-        /* Connection lifecycle counters. */
-        add_assoc_long(&entry, "quic_connection_close_sent", (zend_long)s.packet.quic_connection_close_sent);
-        add_assoc_long(&entry, "quic_conn_in_closing",       (zend_long)s.packet.quic_conn_in_closing);
-        add_assoc_long(&entry, "quic_conn_in_draining",      (zend_long)s.packet.quic_conn_in_draining);
-        add_assoc_long(&entry, "quic_conn_idle_closed",      (zend_long)s.packet.quic_conn_idle_closed);
-        add_assoc_long(&entry, "quic_conn_handshake_timeout",(zend_long)s.packet.quic_conn_handshake_timeout);
-        add_assoc_long(&entry, "quic_conn_reaped",           (zend_long)s.packet.quic_conn_reaped);
-        add_assoc_long(&entry, "quic_stateless_reset_sent",  (zend_long)s.packet.quic_stateless_reset_sent);
-        add_assoc_long(&entry, "quic_retry_sent",            (zend_long)s.packet.quic_retry_sent);
-        add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
-        add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
-        add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
-        add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
-        add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
-        /* Audit hardening counters. */
-        add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
-        add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
-
-        /* Reactor-iteration watchdog. Tick = one poll-cb wakeup; on the single
-         * reactor thread its latency is the ACK/PTO delay imposed on every live
-         * connection. */
-        add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
-        add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
-        add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
-        add_assoc_long(&entry, "reactor_slow_ticks",       (zend_long)s.packet.reactor_slow_ticks);
-        add_assoc_long(&entry, "reactor_timer_late",       (zend_long)s.packet.reactor_timer_late);
-        add_assoc_long(&entry, "reactor_max_timer_late_ns",(zend_long)s.packet.reactor_max_timer_late_ns);
-        {
-            zval hist;
-            array_init(&hist);
-
-            for (unsigned i = 0; i < 12; ++i) {
-                add_next_index_long(&hist, (zend_long)s.packet.reactor_lat_bucket[i]);
-            }
-
-            add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
+        for (size_t i = 0; i < nbuckets; ++i) {
+            add_next_index_long(&hist, (zend_long)s.packet.reactor_lat_bucket[i]);
         }
 
-        /* Send-path error categorisation. */
-        add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
-        add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);
-        add_assoc_long(&entry, "quic_send_emsgsize",         (zend_long)s.packet.quic_send_emsgsize);
-        add_assoc_long(&entry, "quic_send_unreach",          (zend_long)s.packet.quic_send_unreach);
-        add_assoc_long(&entry, "quic_send_other_error",      (zend_long)s.packet.quic_send_other_error);
-        add_assoc_long(&entry, "quic_gso_disabled",          (zend_long)s.packet.quic_gso_disabled);
-
-        /* Async errors observed via MSG_ERRQUEUE. */
-        add_assoc_long(&entry, "quic_errqueue_emsgsize",     (zend_long)s.packet.quic_errqueue_emsgsize);
-        add_assoc_long(&entry, "quic_errqueue_unreach",      (zend_long)s.packet.quic_errqueue_unreach);
-        add_assoc_long(&entry, "quic_errqueue_other",        (zend_long)s.packet.quic_errqueue_other);
-
-        add_next_index_zval(return_value, &entry);
+        add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
     }
+
+    /* Send-path error categorisation. */
+    add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
+    add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);
+    add_assoc_long(&entry, "quic_send_emsgsize",         (zend_long)s.packet.quic_send_emsgsize);
+    add_assoc_long(&entry, "quic_send_unreach",          (zend_long)s.packet.quic_send_unreach);
+    add_assoc_long(&entry, "quic_send_other_error",      (zend_long)s.packet.quic_send_other_error);
+    add_assoc_long(&entry, "quic_gso_disabled",          (zend_long)s.packet.quic_gso_disabled);
+
+    /* Async errors observed via MSG_ERRQUEUE. */
+    add_assoc_long(&entry, "quic_errqueue_emsgsize",     (zend_long)s.packet.quic_errqueue_emsgsize);
+    add_assoc_long(&entry, "quic_errqueue_unreach",      (zend_long)s.packet.quic_errqueue_unreach);
+    add_assoc_long(&entry, "quic_errqueue_other",        (zend_long)s.packet.quic_errqueue_other);
+
+    add_next_index_zval(return_value, &entry);
 }
 #endif
 
@@ -3853,7 +3855,6 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
-
 
     for (size_t i = 0; i < server->http3_listener_count; i++) {
         if (server->http3_listeners[i] != NULL) {

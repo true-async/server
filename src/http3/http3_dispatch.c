@@ -281,9 +281,11 @@ static bool http3_reactor_try_static(http3_connection_t *c, http3_stream_t *s,
 
 void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
 {
-    if (c == NULL || s == NULL || s->dispatched || s->request == NULL) {
+    if (c == NULL || s == NULL || s->dispatched) {
         return;
     }
+
+    ZEND_ASSERT(s->request != NULL);
 
     /* Reactor mode: serve static here on the transport thread; otherwise route
      * the request to a PHP worker instead of dispatching locally. */
@@ -462,8 +464,9 @@ static void h3_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
+    ZEND_ASSERT(s != NULL);
 
-    if (s == NULL || s->conn == NULL) return;
+    if (s->conn == NULL) return;
 
     /* Static-handler HANDLED path: response_zv already carries the
      * synchronous body (inline small file or 4xx). Skip the user handler;
@@ -677,8 +680,7 @@ static bool h3_arm_sendfile(http3_connection_t *c, http3_stream_t *s)
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http3_stream_t *s = (http3_stream_t *)coroutine->extended_data;
-
-    if (s == NULL) return;
+    ZEND_ASSERT(s != NULL);
 
     H3T(s->stream_id, "4.dispose_enter");
 

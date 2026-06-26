@@ -59,10 +59,7 @@ static void worker_dispatch_entry(void)
 {
     const zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)co->extended_data;
-
-    if (ctx == NULL) {
-        return;
-    }
+    ZEND_ASSERT(ctx != NULL);
 
     /* Synthetic 404 (no handler) still counts as a served request. */
     if (ctx->skip_handler) {
@@ -128,7 +125,7 @@ static void worker_dispatch_entry(void)
 
 /* Flatten the committed HttpResponse into a response_wire. Buffered only.
  * Returns NULL on allocation failure. */
-static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
+static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
 {
     zend_object *const resp = Z_OBJ(ctx->response_zv);
 
@@ -141,7 +138,7 @@ static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
 
     int status = http_response_get_status(resp);
 
-    if (status <= 0) {
+    if (UNEXPECTED(status <= 0)) {
         status = 200;
     }
 
@@ -153,7 +150,7 @@ static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
         zend_string *name;
         zval        *values;
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (name == NULL) {
+            if (UNEXPECTED(name == NULL)) {
                 continue;
             }
 
@@ -202,10 +199,7 @@ static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
 static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)coroutine->extended_data;
-
-    if (ctx == NULL) {
-        return;
-    }
+    ZEND_ASSERT(ctx != NULL);
 
     coroutine->extended_data = NULL;
 

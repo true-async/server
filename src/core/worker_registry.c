@@ -76,7 +76,7 @@ int worker_registry_capacity(const worker_registry_t *reg)
     return reg != NULL ? reg->capacity : 0;
 }
 
-int worker_registry_count(worker_registry_t *reg)
+int worker_registry_count(const worker_registry_t *reg)
 {
     if (reg == NULL) {
         return 0;
@@ -93,7 +93,7 @@ int worker_registry_count(worker_registry_t *reg)
     return n;
 }
 
-worker_inbox_t *worker_registry_at(worker_registry_t *reg, const int idx)
+worker_inbox_t *worker_registry_at(const worker_registry_t *reg, const int idx)
 {
     if (UNEXPECTED(reg == NULL || idx < 0 || idx >= reg->capacity)) {
         return NULL;
@@ -116,7 +116,7 @@ worker_inbox_t *worker_registry_pick(worker_registry_t *reg)
         worker_inbox_t *const inbox =
             (worker_inbox_t *)zend_atomic_ptr_load_ex(&reg->slots[i]);
 
-        if (inbox != NULL) {
+        if (EXPECTED(inbox != NULL)) {
             return inbox;
         }
     }
@@ -160,7 +160,7 @@ worker_inbox_t *worker_registry_least_busy(worker_registry_t *reg,
         worker_inbox_t *const inbox =
             (worker_inbox_t *)zend_atomic_ptr_load_ex(&reg->slots[slot]);
 
-        if (inbox == NULL) {
+        if (UNEXPECTED(inbox == NULL)) {
             continue;
         }
 

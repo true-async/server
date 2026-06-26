@@ -316,7 +316,7 @@ static void engine_handle_stat(engine_state_t *state)
 	/* === Cache insert (only on miss path) =========================== */
 
 	if (view == NULL && (cfg->cache != NULL || cfg->server != NULL)) {
-		http_static_cache_t *cache =
+		http_static_cache_t *const cache =
 			cfg->cache != NULL ? cfg->cache : http_static_cache_acquire(cfg->server);
 
 		if (cache != NULL) {

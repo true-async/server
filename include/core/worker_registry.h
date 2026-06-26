@@ -51,11 +51,11 @@ int worker_registry_add(worker_registry_t *reg, worker_inbox_t *inbox);
 
 /* Number of slots, and number currently published. */
 int worker_registry_capacity(const worker_registry_t *reg);
-int worker_registry_count(worker_registry_t *reg);
+int worker_registry_count(const worker_registry_t *reg);
 
 /* Inbox published at slot `idx` (sticky lookup), or NULL if unpublished /
  * out of range. */
-worker_inbox_t *worker_registry_at(worker_registry_t *reg, int idx);
+worker_inbox_t *worker_registry_at(const worker_registry_t *reg, int idx);
 
 /* Next published inbox, round-robin across slots (atomic counter). NULL when no
  * slot is published yet. Any thread. */

@@ -554,8 +554,8 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
         for (int i = 0; i < n; ++i) {
             const struct sockaddr *src =
                 (const struct sockaddr *)&src_addrs[i];
-            socklen_t src_len = (socklen_t)mess[i].msg_hdr.msg_namelen;
-            size_t dlen = (size_t)mess[i].msg_len;
+            const socklen_t src_len = (socklen_t)mess[i].msg_hdr.msg_namelen;
+            const size_t dlen = (size_t)mess[i].msg_len;
 
             if (dlen == 0 || src_len == 0) {
                 continue;
@@ -1143,7 +1143,9 @@ void http3_listener_flush_dirty(http3_listener_t *l)
  * it does not help if the slot is reallocated to a live conn first. */
 void http3_listener_unmark_flush(http3_listener_t *l, http3_connection_t *conn)
 {
-    if (l == NULL || conn == NULL || !conn->in_dirty) {
+    ZEND_ASSERT(l != NULL && conn != NULL);
+
+    if (!conn->in_dirty) {
         return;
     }
 
@@ -1170,7 +1172,7 @@ void http3_listener_unmark_flush(http3_listener_t *l, http3_connection_t *conn)
 static bool peer_key_from_sockaddr(const struct sockaddr *peer,
                                    uint8_t out[16], size_t *out_len)
 {
-    if (peer == NULL) return false;
+    ZEND_ASSERT(peer != NULL);
 
     if (peer->sa_family == AF_INET) {
         memcpy(out, &((const struct sockaddr_in *)peer)->sin_addr, 4);

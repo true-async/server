@@ -149,7 +149,7 @@ int http3_build_listener_local(const http3_listener_t *l,
 {
     memset(out, 0, sizeof(*out));
     const char *host = http3_listener_host(l);
-    int port = http3_listener_port(l);
+    const int port = http3_listener_port(l);
 
     if (host == NULL) host = (peer_family == AF_INET6) ? "::" : "0.0.0.0";
 
@@ -363,7 +363,7 @@ static http3_connection_t *http3_connection_accept(
      * accept path uses for read-header timeouts in this server. */
     settings.handshake_timeout = 10 * NGTCP2_SECONDS;
 
-    if (c != NULL && c->log_state != NULL
+    if (c->log_state != NULL
         && c->log_state->severity != HTTP_LOG_OFF
         && (int)HTTP_LOG_DEBUG >= (int)c->log_state->severity) {
         settings.log_printf = http3_debug_logger;
@@ -384,9 +384,9 @@ static http3_connection_t *http3_connection_accept(
     const http_server_object *srv_obj =
         (const http_server_object *)http3_listener_server_obj(listener);
 
-    uint32_t cfg_window  = http_server_get_http3_stream_window_bytes(srv_obj);
-    uint32_t cfg_streams = http_server_get_http3_max_concurrent_streams(srv_obj);
-    uint32_t cfg_idle_ms = http_server_get_http3_idle_timeout_ms(srv_obj);
+    const uint32_t cfg_window  = http_server_get_http3_stream_window_bytes(srv_obj);
+    const uint32_t cfg_streams = http_server_get_http3_max_concurrent_streams(srv_obj);
+    const uint32_t cfg_idle_ms = http_server_get_http3_idle_timeout_ms(srv_obj);
 
     uint64_t window_bytes = cfg_window != 0 ? (uint64_t)cfg_window : (256ull * 1024);
     uint64_t streams_bidi = cfg_streams != 0 ? (uint64_t)cfg_streams : 100;
@@ -570,9 +570,7 @@ bool http3_connection_dispatch(
     const uint8_t *data, size_t datalen, uint8_t ecn,
     const struct sockaddr *peer, socklen_t peer_len)
 {
-    if (listener == NULL || data == NULL || datalen == 0) {
-        return false;
-    }
+    ZEND_ASSERT(listener != NULL && data != NULL && datalen > 0);
 
     http3_packet_stats_t *stats = http3_listener_packet_stats(listener);
 
