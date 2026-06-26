@@ -45,7 +45,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **HTTP/3 / QUIC** | UDP transport via ngtcp2 + nghttp3; OpenSSL 3.5 QUIC API |
 | ✅ Ready | **Compression** | gzip (zlib-ng / zlib), Brotli, zstd — response encoding + inbound decode across H1/H2/H3. Server-side preference `zstd > br > gzip`; per-codec level setters. See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
 | 📋 Planned | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2, full duplex |
-| 📋 Planned | **SSE (Server-Sent Events)** | RFC 8895, server-to-client event streaming |
+| ✅ Ready | **SSE (Server-Sent Events)** | `text/event-stream` framing (WHATWG §9.2) over H1/H2/H3 via `HttpResponse::sseStart/sseEvent/sseComment/sseRetry` |
 | 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |
 
 ### Development Progress
@@ -56,7 +56,7 @@ TLS        ████████████████████  100%
 HTTP/2     ████████████████████  100%
 HTTP/3     ████████████████████  100%
 WebSocket  ░░░░░░░░░░░░░░░░░░░░    0%
-SSE        ░░░░░░░░░░░░░░░░░░░░    0%
+SSE        ████████████████████  100%
 gRPC       ░░░░░░░░░░░░░░░░░░░░    0%
 ```
 
@@ -258,9 +258,37 @@ behaviour. See **[docs/USAGE.md](docs/USAGE.md)** for protocol-restricted
 listeners (`addHttp1Listener`/`addHttp2Listener`/`addHttp3Listener`),
 TLS, compression, timeouts, backpressure and caveats.
 
+### Server-Sent Events
+
+`text/event-stream` is a first-class response mode — the same handler streams
+over HTTP/1.1, HTTP/2 and HTTP/3 (the client picks the protocol):
+
+```php
+$server->addHttpHandler(function ($request, $response) {
+    $response->sseStart();            // commits Content-Type: text/event-stream
+    $response->sseRetry(3000);        // reconnect hint (ms)
+
+    foreach (fetchUpdates() as $i => $update) {
+        $response->sseEvent(
+            data:  json_encode($update),
+            event: 'tick',            // addEventListener('tick', …) on the client
+            id:    (string) $i,       // echoed back as Last-Event-ID on reconnect
+        );
+        if (!$response->sendable()) break;   // peer gone — stop early
+    }
+
+    $response->end();
+});
+```
+
+`sseEvent()` formats WHATWG §9.2 records (multiline `data` is split, single-line
+fields are CR/LF-validated); `sseComment('')` emits a `:` heartbeat to hold the
+connection open through proxy idle timeouts. The stream is never compressed.
+
 Working examples live under [`examples/`](examples/):
 [`minimal-server.php`](examples/minimal-server.php),
 [`demo-server.php`](examples/demo-server.php),
+[`sse-server.php`](examples/sse-server.php),
 [`multi-worker.php`](examples/multi-worker.php),
 [`multi-worker-manual.php`](examples/multi-worker-manual.php).
 

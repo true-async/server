@@ -314,6 +314,93 @@ final class HttpResponse
      */
     public function sendFile(string $path, ?SendFileOptions $options = null): void {}
 
+    // === Server-Sent Events (text/event-stream) ===
+
+    /**
+     * Switch the response into Server-Sent Events mode and commit headers.
+     *
+     * Sets the three canonical SSE headers — `Content-Type:
+     * text/event-stream`, `Cache-Control: no-cache, no-transform` and
+     * `X-Accel-Buffering: no` (the last tells nginx not to buffer the
+     * response; without it events stall behind the proxy buffer until it
+     * fills) — and marks the response as not-compressible (a buffering
+     * gzip stream would defeat real-time delivery). The response then
+     * enters streaming mode exactly as the first {@see self::send()} would:
+     * status + headers are committed and may no longer change, but no event
+     * data is emitted until the first sseEvent()/sseComment().
+     *
+     * Calling sseStart() is optional — the first sseEvent()/sseComment()
+     * starts the stream implicitly. Use it when you want headers on the
+     * wire immediately (e.g. to unblock the browser's `onopen`) before any
+     * event is ready.
+     *
+     * Throws {@see HttpServerInvalidArgumentException} if the handler has
+     * already set a Content-Type other than `text/event-stream`, and
+     * {@see HttpServerRuntimeException} if the response is already
+     * streaming, closed, or has no connection to stream over.
+     *
+     * @return static
+     */
+    public function sseStart(): static {}
+
+    /**
+     * Format and send one Server-Sent Event, starting the stream if needed.
+     *
+     * Multiline `$data` is split on `\n` / `\r\n` / `\r` and emitted as one
+     * `data:` field per line (WHATWG §9.2 event-stream framing). `$event`,
+     * `$id` and `$retry` are emitted only when non-null. The record is
+     * terminated by a blank line so the browser dispatches it immediately.
+     *
+     * `$event` and `$id` must not contain `\r` or `\n` (the parser would
+     * read them as field/record separators) and `$id` must not contain NUL
+     * (WHATWG: a NUL makes the parser ignore the whole id) — violations
+     * throw {@see HttpServerInvalidArgumentException}. `$retry` must be
+     * non-negative.
+     *
+     * Empty `$data === ""` is valid and dispatches an empty MessageEvent.
+     * All four arguments null is a no-op. Note the EventSource parser drops
+     * an event carrying neither `data` nor `retry`.
+     *
+     * @param string|null $data  Message payload. Multiline strings are split.
+     * @param string|null $event Event name (matched by addEventListener()).
+     * @param string|null $id    Event id — echoed as Last-Event-ID on reconnect.
+     * @param int|null    $retry Reconnect delay hint in milliseconds.
+     * @return static
+     */
+    public function sseEvent(
+        ?string $data = null,
+        ?string $event = null,
+        ?string $id = null,
+        ?int $retry = null
+    ): static {}
+
+    /**
+     * Send an SSE comment line (a record beginning with `:`).
+     *
+     * Browsers ignore comments, but they keep the connection alive past
+     * intermediary idle timeouts (nginx `proxy_read_timeout`, default 60s).
+     * Call periodically as a heartbeat — the canonical payload is the empty
+     * string, which becomes `:\n\n` on the wire. Starts the stream if it is
+     * not already running.
+     *
+     * `$text` must not contain `\r` or `\n`.
+     *
+     * @param string $text Optional comment payload (informational only).
+     * @return static
+     */
+    public function sseComment(string $text = ""): static {}
+
+    /**
+     * Send a bare `retry:` directive telling the browser how long to wait
+     * before reconnecting after the stream drops, in milliseconds. Sugar
+     * for sseEvent(retry: $milliseconds) with no message payload. Starts
+     * the stream if it is not already running.
+     *
+     * @param int $milliseconds Non-negative reconnect delay hint.
+     * @return static
+     */
+    public function sseRetry(int $milliseconds): static {}
+
     // === State methods ===
 
     /**
