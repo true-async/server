@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 16141,
-      "hit": 12220
+      "total": 16325,
+      "hit": 12418
     },
     "functions": {
-      "total": 1103,
-      "hit": 924
+      "total": 1114,
+      "hit": 938
     }
   },
   "files": {
@@ -133,11 +133,11 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1006,
-        "hit": 685
+        "hit": 705
       },
       "functions": {
         "total": 59,
-        "hit": 49
+        "hit": 51
       }
     },
     "src/core/http_connection.h": {
@@ -313,7 +313,7 @@
     "src/http1/http1_format.c": {
       "lines": {
         "total": 182,
-        "hit": 172
+        "hit": 173
       },
       "functions": {
         "total": 13,
@@ -393,11 +393,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 693,
-        "hit": 423
+        "hit": 431
       },
       "functions": {
         "total": 36,
-        "hit": 25
+        "hit": 26
       }
     },
     "src/http3/http3_connection.c": {
@@ -433,7 +433,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 624,
-        "hit": 404
+        "hit": 414
       },
       "functions": {
         "total": 41,
@@ -583,7 +583,7 @@
     "src/http_response.c": {
       "lines": {
         "total": 569,
-        "hit": 497
+        "hit": 499
       },
       "functions": {
         "total": 49,
@@ -603,7 +603,7 @@
     "src/http_response_server_api.c": {
       "lines": {
         "total": 189,
-        "hit": 165
+        "hit": 167
       },
       "functions": {
         "total": 30,
@@ -678,6 +678,16 @@
       "functions": {
         "total": 1,
         "hit": 1
+      }
+    },
+    "src/http_sse.c": {
+      "lines": {
+        "total": 184,
+        "hit": 155
+      },
+      "functions": {
+        "total": 11,
+        "hit": 11
       }
     },
     "src/log/http_log.c": {
