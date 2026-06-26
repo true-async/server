@@ -2,7 +2,7 @@
 
 HTTP/1.1 RFC 9110/9112 compliance + request-smuggling + malformed-input + header-normalization + caching/cookie probe ([MDA2AV/Http11Probe](https://github.com/MDA2AV/Http11Probe)).
 
-_Generated: 2026-06-07 08:33 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
+_Generated: 2026-05-31 08:26 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
 
 ## Summary
 
@@ -16,7 +16,7 @@ _Generated: 2026-06-07 08:33 UTC — refreshed weekly by `.github/workflows/chao
 |----------|-------|-----------|----------|-----|
 | Compliance | `COMP-HTTP12-VERSION` | May | 200 or 505 | status=400 conn=ClosedByServer |
 
-## Warnings (27)
+## Warnings (26)
 
 | Category | Check | RFC level | Expected | Got |
 |----------|-------|-----------|----------|-----|
@@ -38,7 +38,6 @@ _Generated: 2026-06-07 08:33 UTC — refreshed weekly by `.github/workflows/chao
 | Smuggling | `SMUG-CL-EXTRA-LEADING-SP` | Should | 400 or 2xx | status=200 conn=Open |
 | Smuggling | `SMUG-CL-LEADING-ZEROS` | Should | 400 or 2xx | status=200 conn=Open |
 | Smuggling | `SMUG-CL-LEADING-ZEROS-OCTAL` | Should | 400 or 2xx | status=200 conn=Open |
-| Smuggling | `SMUG-CL0-BODY-POISON` | NotApplicable | 400/close preferred; poisoned follow-up = warn | status=200 conn=TimedOut |
 | Smuggling | `SMUG-EXPECT-100-CL` | Must | 100, 400 or 2xx | status=200 conn=Open |
 | Smuggling | `SMUG-HEAD-CL-BODY` | Must | 400 or 2xx | status=200 conn=Open |
 | Smuggling | `SMUG-OPTIONS-CL-BODY` | Must | 400/405 or 2xx | status=200 conn=Open |

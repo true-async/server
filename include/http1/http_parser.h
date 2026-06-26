@@ -201,6 +201,14 @@ struct http_request_t {
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 
+    /* #80 reactor split: reverse-path routing. Set by the reactor that built
+     * the request; echoed onto the response so the reactor resolves which QUIC
+     * stream to emit on. All zero on the single-thread path. The conn handle is
+     * refined to a generationed id in D8. */
+    void        *reactor_conn;
+    int64_t      reactor_stream_id;
+    uint32_t     reactor_id;
+
     /* 1-byte fields clustered */
     uint8_t      http_major;
     uint8_t      http_minor;
@@ -215,6 +223,13 @@ struct http_request_t {
      * llhttp_pause; readBody clears it via llhttp_resume below the
      * low-water mark. Unused by the MVP — see TODO in on_body. */
     bool         body_paused;
+
+    /* #80 reactor split: allocation domain of reactor-produced fields
+     * (method/uri/headers + the headers HashTable + the struct block).
+     * false = ZMM (worker-built, default), true = persistent malloc
+     * (reactor-built) → those frees go through pefree, flag-aware. Body
+     * and worker-derived fields (path/query/post/files) stay ZMM. */
+    bool         persistent;
 };
 
 /* Single chunk node in the streaming body queue (linked list).
@@ -354,6 +369,13 @@ void http_parser_destroy(http1_parser_t *parser);
 int         http_parse_error_to_status(http_parse_error_t err);
 const char *http_parse_error_reason(http_parse_error_t err);
 
+/* Allocate req->headers in the request's allocation domain: ZMM
+ * (ZVAL_PTR_DTOR) for a worker-built request, persistent malloc +
+ * flag-aware value dtor for a reactor-built one (req->persistent). Idempotent
+ * — no-op if the table already exists. Single source of truth so H1/H2/H3 do
+ * not each duplicate the domain branch. */
+void http_request_init_headers(http_request_t *req);
+
 /* Bump request refcount. Used by H2/H3 stream layers right at dispatch
  * time so the stream can keep writing body bytes / fire body_event
  * post-dispatch while the PHP HttpRequest object independently owns
@@ -366,5 +388,14 @@ void http_request_addref(http_request_t *req);
  * intent is still "I'm done with this; let it go" and refcount=1 is
  * the canonical single-owner case where release == destroy. NULL-safe. */
 void http_request_destroy(http_request_t *req);
+
+/* Free every owned field of `req` (method / uri / headers / body / multipart /
+ * post / files / query / trace), in each field's own allocation domain, and
+ * NULL the pointers — WITHOUT touching the refcount, the release callback, or
+ * the struct itself. Used by reactor-mode H3 teardown to reclaim the fields of
+ * a slab-embedded request that was never handed to a worker (early RST /
+ * backpressure), where the worker's http_request_destroy never ran. NULL-safe;
+ * idempotent (NULLs as it goes). */
+void http_request_free_fields(http_request_t *req);
 
 #endif /* HTTP_PARSER_H */

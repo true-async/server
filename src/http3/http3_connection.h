@@ -30,6 +30,19 @@ typedef struct _http3_listener_s   http3_listener_t;    /* defined in http3_list
 typedef struct _http3_connection_s http3_connection_t;
 typedef struct _http3_stream_s     http3_stream_t;      /* defined in http3_stream.h */
 
+/* One server-issued alternate CID (NEW_CONNECTION_ID, RFC 9000 §5.1). */
+typedef struct {
+    uint8_t data[20];   /* NGTCP2_MAX_CIDLEN */
+    size_t  len;
+} http3_issued_cid_t;
+
+/* Negotiated QUIC application protocol. h3 (zero default) drives nghttp3;
+ * hq-interop is the raw HTTP/0.9-over-QUIC interop shim (no nghttp3). */
+typedef enum {
+    HTTP3_PROTO_H3 = 0,
+    HTTP3_PROTO_HQ
+} http3_proto_t;
+
 /* Per-connection state.
  *
  * One http3_connection_t per QUIC connection, identified by the server-
@@ -55,6 +68,20 @@ struct _http3_connection_s {
     uint8_t  routing_dcid[20];
     size_t   routing_dcidlen;
 
+    /* Server-issued alternate CIDs handed to the client via
+     * NEW_CONNECTION_ID (RFC 9000 §5.1). The client may rotate its DCID to
+     * any of them, so each is registered in the listener conn_map and MUST be
+     * unregistered before this conn is freed. Tracked explicitly here — NOT
+     * derived from ngtcp2_conn_get_scid — because ngtcp2 keeps a retired CID
+     * in its pool for ~3*PTO after RETIRE_CONNECTION_ID before it fires
+     * remove_connection_id, a window in which get_scid omits a CID still live
+     * in conn_map. Membership is mutated only at our own register/unregister
+     * points, so teardown is timing-independent. Dynamic; bounded in practice
+     * by ngtcp2's SCID pool. */
+    http3_issued_cid_t *issued_cids;
+    size_t              issued_cid_count;
+    size_t              issued_cid_cap;
+
     /* Peer address — the live send path. Re-pointed to a new client path on
      * migration / NAT rebind (RFC 9000 §9), so drain_out follows it. */
     struct sockaddr_storage peer;
@@ -71,8 +98,12 @@ struct _http3_connection_s {
 
     /* Opaque nghttp3_conn (HTTP/3 framing layer). NULL until
      * the TLS handshake completes; created in handshake_completed_cb so
-     * that it is only ever attached to a verified-h3 peer. */
+     * that it is only ever attached to a verified-h3 peer. Stays NULL for
+     * an hq-interop peer (raw HTTP/0.9, no framing layer). */
     void *nghttp3_conn;
+
+    /* ALPN settled by handshake_completed_cb. Zero (H3) is the default. */
+    http3_proto_t proto;
 
     /* Per-connection TLS state. All three owned here; teardown order:
      *  1. ngtcp2_conn_set_tls_native_handle(conn, NULL)
@@ -90,6 +121,12 @@ struct _http3_connection_s {
      * teardown can pull the callback before dispose. */
     zend_async_event_t          *timer;
     zend_async_event_callback_t *timer_cb;
+
+    /* Deadline (ngtcp2 expiry, hrtime ns) the timer was last armed for.
+     * timer_fire_cb subtracts it from the actual fire time to measure how
+     * late the reactor serviced this connection's ACK/PTO — the per-conn
+     * view of reactor stall (#80 Phase 0). 0 = no timer armed. */
+    uint64_t                     timer_expiry_ns;
 
     /* Intrusive list link. The listener tracks connections through this
      * chain instead of the DCID hashtable because the latter may carry
@@ -128,6 +165,24 @@ struct _http3_connection_s {
     /* Set once http3_connection_emit_close has been called so teardown
      * does not emit a second CONNECTION_CLOSE on the same conn. */
     bool sent_connection_close;
+
+    /* Migration-storm guard (#80 D6). A client that NAT-rebinds faster than
+     * its path can validate (RFC 9000 §9.3 lets the server decline migration)
+     * wedges ngtcp2 path validation — responses chase a stale path while the
+     * live path only gets PTO probes. Count migrations in a sliding window;
+     * past the cap we set migration_storm and shed the conn (graceful close to
+     * the live peer) on the next flush instead of spinning probes for seconds.
+     * Also hardens against a deliberate migration-flood DoS. */
+    uint64_t migrate_window_start_ns;
+    uint32_t migrate_count;
+    bool     migration_storm;
+
+    /* Reactor/worker dispatch home (#80 D5). The worker slot this connection's
+     * requests stick to — one of this reactor's owned workers (reactor-paired pool).
+     * -1 until the first dispatch homes it; re-homed if that worker dies. A busy
+     * home spills individual requests elsewhere without changing this. Reactor-thread
+     * only (the owning reactor dispatches every stream), so no atomics. */
+    int worker_slot;
 
     /* Graceful drain state (mirror of the H1/H2 http_connection_t
      * fields). Pre-stamped at accept; consumed by the H3 commit path
@@ -171,6 +226,23 @@ void http3_connection_free(http3_connection_t *conn);
  * still walks conn_list directly with http3_connection_free since the
  * listener itself is going away. Safe to call exactly once per conn. */
 void http3_connection_reap(http3_connection_t *conn);
+
+/* Register a server-issued alternate CID (from get_new_connection_id_cb) in
+ * the listener conn_map AND record it on the connection so it can be
+ * unregistered at teardown. No-op on the (astronomically rare) byte-for-byte
+ * collision with an existing key: the CID is then NOT recorded, so reap never
+ * evicts a key it does not own. */
+void http3_connection_register_issued_cid(
+    http3_connection_t *c, const uint8_t *cid, size_t cidlen);
+
+/* Unregister one issued CID (from remove_connection_id_cb on RETIRE). Deletes
+ * the conn_map key only if this connection actually owns it. */
+void http3_connection_unregister_issued_cid(
+    http3_connection_t *c, const uint8_t *cid, size_t cidlen);
+
+/* Delete every still-registered issued CID from the conn_map at teardown.
+ * Called from http3_listener_remove_connection before the conn is freed. */
+void http3_connection_unregister_all_issued_cids(http3_connection_t *c);
 
 /* Flush one connection's pending ngtcp2 output and settle its lifecycle:
  * drain_out, then reap-or-arm-timer via check_terminal. Defined in

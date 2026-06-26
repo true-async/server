@@ -37,11 +37,18 @@
 #include "core/http_protocol_handlers.h"   /* http_protocol_get_handler */
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
+#include "http3_steer.h"                   /* CID steering encode (#80 D6 / #72) */
+#include "core/response_wire.h"            /* response_wire_* (reverse path B4) */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
 
 #include <string.h>
+#include <fcntl.h>                         /* hq file serving: open */
+#include <unistd.h>                        /* close */
+#include <sys/stat.h>                      /* fstat */
+#include <sys/mman.h>                      /* mmap — zero-copy hq file body */
+#include <limits.h>                        /* PATH_MAX */
 
 /* Listener accessors not exposed via http3_listener.h. */
 extern http3_packet_stats_t *http3_listener_packet_stats(http3_listener_t *l);
@@ -85,8 +92,24 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
      * HMAC-SHA256(listener_sr_key, cid)[0:16]. The deterministic
      * token is what makes peer-side stateless-reset verification work
      * (peer caches the token from NEW_CONNECTION_ID; when a forged-or-
-     * legitimate reset arrives we recompute the same value here). */
-    if (!http3_fill_random(cid->data, cidlen)) {
+     * legitimate reset arrives we recompute the same value here).
+     *
+     * With CID steering active (#80 D6 / #72) every CID we hand out must encode
+     * this reactor's id too — a client may rotate to one of these as its DCID on
+     * migration, and it must still route back here. */
+    const int reactor_id = c != NULL ? http3_listener_reactor_id(c->listener) : -1;
+
+    if (http3_steer_active() && reactor_id >= 0 && cidlen >= HTTP3_STEER_CID_LEN) {
+        if (!http3_steer_encode(cid->data, reactor_id)) {
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
+
+        if (cidlen > HTTP3_STEER_CID_LEN
+            && !http3_fill_random(cid->data + HTTP3_STEER_CID_LEN,
+                                  cidlen - HTTP3_STEER_CID_LEN)) {
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
+    } else if (!http3_fill_random(cid->data, cidlen)) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
 
@@ -101,6 +124,25 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
     _Static_assert(NGTCP2_STATELESS_RESET_TOKENLEN == 16,
                    "stateless reset token width must match HMAC truncation");
     http3_packet_compute_sr_token(sr_key, cid->data, cidlen, token);
+
+    /* Register the CID we just handed out so a client that rotates its DCID
+     * to it (RFC 9000 §5.1) still routes back to this conn. c is non-NULL
+     * here — the sr_key == NULL guard above already returned otherwise. */
+    http3_connection_register_issued_cid(c, cid->data, cidlen);
+    return 0;
+}
+
+/* The peer retired a CID we offered (RETIRE_CONNECTION_ID). Drop it from the
+ * conn_map so no stale key survives this connection's teardown. */
+static int remove_connection_id_cb(ngtcp2_conn *conn, const ngtcp2_cid *cid,
+                                   void *user_data)
+{
+    (void)conn;
+    http3_connection_t *c = (http3_connection_t *)user_data;
+
+    if (c != NULL) {
+        http3_connection_unregister_issued_cid(c, cid->data, cid->datalen);
+    }
     return 0;
 }
 
@@ -111,8 +153,7 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
 static void h3_ensure_headers_table(http_request_t *req)
 {
     if (req->headers == NULL) {
-        ALLOC_HASHTABLE(req->headers);
-        zend_hash_init(req->headers, 16, NULL, ZVAL_PTR_DTOR, 0);
+        http_request_init_headers(req);
     }
 }
 
@@ -122,8 +163,8 @@ static void h3_store_header_value(http_request_t *req,
 {
     h3_ensure_headers_table(req);
 
-    zend_string *name_str = zend_string_init(name, namelen, 0);
-    zend_string *val_str  = zend_string_init(value, valuelen, 0);
+    zend_string *name_str = zend_string_init(name, namelen, req->persistent);
+    zend_string *val_str  = zend_string_init(value, valuelen, req->persistent);
 
     zval tmp;
     ZVAL_STR(&tmp, val_str);
@@ -268,7 +309,7 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
      * uniqueness + ordering so we map unconditionally. */
     if (token == NGHTTP3_QPACK_TOKEN__METHOD) {
         if (req->method == NULL) {
-            req->method = zend_string_init(v, value_v.len, 0);
+            req->method = zend_string_init(v, value_v.len, req->persistent);
         }
 
         return 0;
@@ -276,7 +317,7 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
 
     if (token == NGHTTP3_QPACK_TOKEN__PATH) {
         if (req->uri == NULL) {
-            req->uri = zend_string_init(v, value_v.len, 0);
+            req->uri = zend_string_init(v, value_v.len, req->persistent);
         }
 
         return 0;
@@ -323,6 +364,14 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
     if (s == NULL || s->dispatched || s->rejected) {
         return 0;
     }
+
+    /* Reactor mode (#80): defer dispatch to h3_end_stream_cb. The reactor must
+     * not write into the request after hand-off (D7), so the body is assembled
+     * (persistent) before the worker gets the pointer — buffered, not streamed. */
+    if (c != NULL && http3_listener_reactor_ctx(c->listener) != NULL) {
+        return 0;
+    }
+
     /* Dispatch the handler the moment headers are complete,
      * regardless of fin (mirror H2 cb_on_frame_recv on HEADERS+END_HEADERS).
      * Body chunks that arrive after this point feed s->body_buf via
@@ -641,6 +690,98 @@ headers_done:
     return false;
 }
 
+/* Reverse path (#80, B4): submit a buffered response from a flat response_wire
+ * (rendered by a worker, handed back over the reverse channel) instead of from
+ * the per-stream HttpResponse zval. Runs ON THE REACTOR thread. The wire's
+ * headers were already filtered to the H2/H3-allowed set on the worker, so no
+ * re-filter here. The body is copied into a stream-owned zend_string because the
+ * data_reader walks it asynchronously, outliving the wire (freed by the caller
+ * right after this returns). nghttp3 copies the nv bytes at submit time, so the
+ * wire's header spans only need to live across this call. */
+bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
+                                       const response_wire_t *rw)
+{
+    if (c == NULL || s == NULL || rw == NULL || c->nghttp3_conn == NULL) {
+        return false;
+    }
+
+    char status_buf[8];
+    int  status = response_wire_status(rw);
+
+    if (status <= 0) status = 200;
+    int status_len = snprintf(status_buf, sizeof(status_buf), "%d", status);
+
+    if (status_len < 0 || status_len >= (int)sizeof(status_buf)) {
+        status_len = 3;
+        memcpy(status_buf, "500", 3);
+    }
+
+    const size_t hcount = response_wire_header_count(rw);
+    const size_t nvcap  = hcount + 1;
+
+    nghttp3_nv  scratch[32];
+    nghttp3_nv *const nv =
+        (nvcap <= sizeof(scratch) / sizeof(scratch[0]))
+            ? scratch
+            : (nghttp3_nv *)emalloc(nvcap * sizeof(nghttp3_nv));
+    size_t nvi = 0;
+
+    nv[nvi].name     = (uint8_t *)":status";
+    nv[nvi].namelen  = 7;
+    nv[nvi].value    = (uint8_t *)status_buf;
+    nv[nvi].valuelen = (size_t)status_len;
+    nv[nvi].flags    = NGHTTP3_NV_FLAG_NONE;
+    nvi++;
+
+    for (size_t i = 0; i < hcount; i++) {
+        const char *nm, *val;
+        size_t      nl, vl;
+
+        if (!response_wire_header_at(rw, i, &nm, &nl, &val, &vl)) {
+            continue;
+        }
+
+        nv[nvi].name     = (uint8_t *)nm;
+        nv[nvi].namelen  = nl;
+        nv[nvi].value    = (uint8_t *)val;
+        nv[nvi].valuelen = vl;
+        nv[nvi].flags    = NGHTTP3_NV_FLAG_NONE;
+        nvi++;
+    }
+
+    size_t      blen = 0;
+    const char *body = response_wire_body(rw, &blen);
+
+    if (body != NULL && blen > 0) {
+        s->response_body        = zend_string_init(body, blen, 0);
+        s->response_body_offset = 0;
+    }
+
+    const nghttp3_data_reader dr = { .read_data = h3_read_data_cb };
+    const int rv = nghttp3_conn_submit_response(
+        (nghttp3_conn *)c->nghttp3_conn, s->stream_id, nv, nvi, &dr);
+
+    if (nv != scratch) {
+        efree(nv);
+    }
+
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
+
+    if (rv == 0) {
+        if (stats != NULL) stats->h3_response_submitted++;
+        return true;
+    }
+
+    if (stats != NULL) stats->h3_response_submit_error++;
+
+    if (s->response_body != NULL) {
+        zend_string_release(s->response_body);
+        s->response_body = NULL;
+    }
+
+    return false;
+}
+
 /* ---------------------------------------------------------------------
  * Streaming response vtable
  *
@@ -885,8 +1026,18 @@ static void http3_finalize_request_body(http3_stream_t *s)
      * ownership to req->body and clear our handle. */
     if (s->body_buf.s != NULL) {
         smart_str_0(&s->body_buf);
-        req->body = s->body_buf.s;
-        s->body_buf.s = NULL;        /* request now owns the storage */
+
+        if (req->persistent) {
+            /* Reactor mode (#80): the worker reads req->body on its own thread,
+             * so copy the ZMM smart_str into a persistent (malloc) zend_string
+             * and drop the builder. getBody() deep-copies it back into ZMM. */
+            req->body = zend_string_init(ZSTR_VAL(s->body_buf.s),
+                                         ZSTR_LEN(s->body_buf.s), 1);
+            smart_str_free(&s->body_buf);
+        } else {
+            req->body = s->body_buf.s;
+            s->body_buf.s = NULL;        /* request now owns the storage */
+        }
     }
 
     req->complete = true;
@@ -1157,7 +1308,12 @@ static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
     unsigned int proto_len = 0;
     SSL_get0_alpn_selected((SSL *)c->ssl, &proto, &proto_len);
 
-    if (proto_len != 2 || proto == NULL || memcmp(proto, "h3", 2) != 0) {
+    if (proto != NULL && proto_len == 2 && memcmp(proto, "h3", 2) == 0) {
+        c->proto = HTTP3_PROTO_H3;
+    } else if (proto != NULL && proto_len == 10
+            && memcmp(proto, "hq-interop", 10) == 0) {
+        c->proto = HTTP3_PROTO_HQ;
+    } else {
         if (stats != NULL) stats->quic_alpn_mismatch++;
         /* Returning CALLBACK_FAILURE asks ngtcp2 to close the connection;
          * the subsequent drain will emit a CONNECTION_CLOSE frame. */
@@ -1166,15 +1322,203 @@ static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
 
     if (stats != NULL) stats->quic_handshake_completed++;
 
-    /* Wire nghttp3 only after ALPN passes. A failure here is fatal for
-     * this connection — without nghttp3 we cannot speak HTTP/3 to the
-     * peer, so close. */
-    if (!http3_connection_init_h3(c)) {
-        if (stats != NULL) stats->h3_init_failed++;
-        return NGTCP2_ERR_CALLBACK_FAILURE;
+    /* Only h3 wires nghttp3 (and the control/QPACK streams). hq-interop
+     * speaks raw HTTP/0.9 on bidi streams, so it keeps nghttp3_conn NULL. */
+    if (c->proto == HTTP3_PROTO_H3) {
+        if (!http3_connection_init_h3(c)) {
+            if (stats != NULL) stats->h3_init_failed++;
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
+
+        if (stats != NULL) stats->h3_init_ok++;
     }
 
-    if (stats != NULL) stats->h3_init_ok++;
+    return 0;
+}
+
+/* === hq-interop (HTTP/0.9-over-QUIC) ingress =====================
+ *
+ * The interop test matrix speaks raw HTTP/0.9 on QUIC bidi streams, not
+ * HTTP/3, so an hq connection has no nghttp3. Ingress accumulates the
+ * "GET <path>\r\n" request line; egress (http3_io.c drain) writes
+ * s->response_body raw + FIN. Step 2 answers with a synthetic body to
+ * prove the raw path end-to-end; serving real files from a docroot is a
+ * follow-up. */
+/* Map a docroot-relative file into s->hq_body for zero-copy raw egress, or
+ * return false on any failure. Rejects traversal by canonicalising both
+ * docroot and target with realpath and requiring the target to stay under
+ * the docroot. mmap (not read-into-buffer) keeps arbitrarily large files off
+ * the heap and out of a blocking bulk read; ngtcp2 references the pages until
+ * acked, so the mapping lives until http3_stream_release munmaps it. A
+ * zero-byte regular file is a valid empty body (served FIN-only). */
+static bool http3_hq_map_file(http3_stream_t *s, const char *docroot,
+                              const char *path, const size_t path_len)
+{
+    if (docroot == NULL || path_len == 0 || path[0] != '/'
+        || memchr(path, '\0', path_len) != NULL) {
+        return false;
+    }
+
+    char full[PATH_MAX];
+    const int n = snprintf(full, sizeof full, "%s%.*s",
+                           docroot, (int)path_len, path);
+
+    if (n <= 0 || (size_t)n >= sizeof full) {
+        return false;
+    }
+
+    char resolved[PATH_MAX];
+    char droot[PATH_MAX];
+
+    if (realpath(full, resolved) == NULL || realpath(docroot, droot) == NULL) {
+        return false;
+    }
+
+    const size_t dl = strlen(droot);
+
+    if (strncmp(resolved, droot, dl) != 0
+        || (resolved[dl] != '/' && resolved[dl] != '\0')) {
+        return false;   /* escaped the docroot */
+    }
+
+    const int fd = open(resolved, O_RDONLY);
+
+    if (fd < 0) {
+        return false;
+    }
+
+    struct stat st;
+
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return false;
+    }
+
+    if (st.st_size == 0) {
+        close(fd);
+        s->hq_body     = NULL;   /* empty body — FIN only */
+        s->hq_body_len = 0;
+        return true;
+    }
+
+    void *const map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+
+    if (map == MAP_FAILED) {
+        return false;
+    }
+
+    s->hq_map      = map;
+    s->hq_map_len  = (size_t)st.st_size;
+    s->hq_body     = (const char *)map;
+    s->hq_body_len = (size_t)st.st_size;
+    return true;
+}
+
+static void http3_hq_serve(http3_connection_t *c, http3_stream_t *s)
+{
+    const char *path     = NULL;
+    size_t      path_len = 0;
+
+    if (s->hq_line != NULL && s->hq_line_len >= 4
+        && memcmp(s->hq_line, "GET ", 4) == 0) {
+        path     = s->hq_line + 4;
+        path_len = s->hq_line_len - 4;
+
+        /* Tolerate a lenient client appending " HTTP/x.x" — HTTP/0.9 has no
+         * version token, but trim it to the bare path if present. */
+        const char *const sp = memchr(path, ' ', path_len);
+
+        if (sp != NULL) {
+            path_len = (size_t)(sp - path);
+        }
+    }
+
+    const http_server_object *const server =
+        (const http_server_object *)http3_listener_server_obj(c->listener);
+    const http_server_config_t *const cfg =
+        http_server_get_config((http_server_object *)server);
+
+    bool served = false;
+
+    if (cfg != NULL && cfg->http3_hq_docroot != NULL && path != NULL) {
+        served = http3_hq_map_file(s, ZSTR_VAL(cfg->http3_hq_docroot),
+                                   path, path_len);
+    }
+
+    if (!served) {
+        /* No docroot / not found / traversal: a static literal body (not a
+         * heap string) — the egress loop streams it raw and the FIN closes
+         * the stream cleanly. */
+        static const char not_found[] = "hq: not found\n";
+        s->hq_body     = not_found;
+        s->hq_body_len = sizeof(not_found) - 1;
+    }
+
+    s->hq_body_off = 0;
+    s->hq_served   = true;
+
+    http3_listener_mark_flush(c->listener, c);
+}
+
+/* Feed inbound bytes of an hq bidi stream. Allocates the stream on first
+ * sight (mirrors h3_begin_headers_cb minus nghttp3). Returns 0 on success,
+ * -1 on allocation failure (caller closes the connection). */
+static int http3_hq_recv_stream_data(http3_connection_t *c, ngtcp2_conn *qconn,
+                                     const int64_t stream_id, http3_stream_t *s,
+                                     const uint8_t *data, const size_t datalen)
+{
+    /* hq answers client-initiated bidi only (low 2 bits == 0). Other stream
+     * ids are consumed for flow control but otherwise ignored. */
+    if ((stream_id & 0x03) != 0) {
+        return 0;
+    }
+
+    if (s == NULL) {
+        s = http3_stream_new(c, stream_id);
+
+        if (s == NULL) {
+            return -1;
+        }
+
+        (void)ngtcp2_conn_set_stream_user_data(qconn, stream_id, s);
+        s->conn         = c;
+        s->list_next    = c->streams_head;
+        c->streams_head = s;
+    }
+
+    if (s->hq_served) {
+        return 0;
+    }
+
+    if (s->hq_line == NULL) {
+        s->hq_line = emalloc(HTTP3_HQ_LINE_MAX);
+    }
+
+    for (size_t i = 0; i < datalen; i++) {
+        const char ch = (char)data[i];
+
+        if (ch == '\n') {
+            size_t len = s->hq_line_len;
+
+            if (len > 0 && s->hq_line[len - 1] == '\r') {
+                len--;
+            }
+
+            s->hq_line_len = (uint16_t)len;
+            http3_hq_serve(c, s);
+            return 0;
+        }
+
+        if (s->hq_line_len < HTTP3_HQ_LINE_MAX - 1) {
+            s->hq_line[s->hq_line_len++] = ch;
+        } else {
+            /* Over-long request line: answer with what we have and stop. */
+            http3_hq_serve(c, s);
+            return 0;
+        }
+    }
+
     return 0;
 }
 
@@ -1183,28 +1527,47 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
                                const uint8_t *data, size_t datalen,
                                void *user_data, void *stream_user_data)
 {
-    (void)conn; (void)offset; (void)stream_user_data;
+    (void)offset;
     http3_connection_t *c = (http3_connection_t *)user_data;
 
-    if (c == NULL || c->nghttp3_conn == NULL) {
-        return 0;  /* Pre-handshake stream data is not expected; drop. */
+    if (c == NULL) {
+        return 0;
     }
 
-    int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ? 1 : 0;
-    nghttp3_ssize n = nghttp3_conn_read_stream(
-        (nghttp3_conn *)c->nghttp3_conn, stream_id, data, datalen, fin);
+    const int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ? 1 : 0;
+    uint64_t   consumed = 0;
 
-    if (n < 0) {
-        http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+    if (c->proto == HTTP3_PROTO_HQ) {
+        if (http3_hq_recv_stream_data(c, conn, stream_id,
+                                      (http3_stream_t *)stream_user_data,
+                                      data, datalen) < 0) {
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
 
-        if (stats != NULL) stats->h3_stream_read_error++;
-        return NGTCP2_ERR_CALLBACK_FAILURE;
+        consumed = datalen;   /* hq consumes the whole datagram */
+    } else {
+        if (c->nghttp3_conn == NULL) {
+            return 0;  /* Pre-handshake stream data is not expected; drop. */
+        }
+
+        nghttp3_ssize n = nghttp3_conn_read_stream(
+            (nghttp3_conn *)c->nghttp3_conn, stream_id, data, datalen, fin);
+
+        if (n < 0) {
+            http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
+            if (stats != NULL) stats->h3_stream_read_error++;
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
+
+        consumed = (uint64_t)n;
     }
-    /* Tell ngtcp2 how many bytes nghttp3 actually consumed so it can
-     * advance the QUIC flow-control window. */
-    ngtcp2_conn_extend_max_stream_offset((ngtcp2_conn *)c->ngtcp2_conn,
-                                         stream_id, (uint64_t)n);
-    ngtcp2_conn_extend_max_offset((ngtcp2_conn *)c->ngtcp2_conn, (uint64_t)n);
+
+    /* Advance the QUIC flow-control window by the consumed-byte count. Hoisted
+     * out of the nghttp3 branch so it runs for hq too — otherwise an hq peer's
+     * stream or connection window never reopens and the transfer stalls. */
+    ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed);
+    ngtcp2_conn_extend_max_offset(conn, consumed);
     return 0;
 }
 
@@ -1252,7 +1615,18 @@ static int acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
     http3_connection_t *c = (http3_connection_t *)user_data;
     http3_stream_t     *s = (http3_stream_t *)stream_user_data;
 
-    if (c == NULL || c->nghttp3_conn == NULL) {
+    if (c == NULL) {
+        return 0;
+    }
+
+    if (c->proto == HTTP3_PROTO_HQ) {
+        /* A fresh ACK means more cwnd. Resume the raw drain so an hq body that
+         * paused on STREAM_DATA_BLOCKED keeps flowing until fully sent. */
+        http3_listener_mark_flush(c->listener, c);
+        return 0;
+    }
+
+    if (c->nghttp3_conn == NULL) {
         return 0;
     }
 
@@ -1290,10 +1664,30 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
                            int64_t stream_id, uint64_t app_error_code,
                            void *user_data, void *stream_user_data)
 {
-    (void)stream_user_data;
     http3_connection_t *c = (http3_connection_t *)user_data;
 
-    if (c == NULL || c->nghttp3_conn == NULL) {
+    if (c == NULL) {
+        return 0;
+    }
+
+    /* ngtcp2 never auto-extends MAX_STREAMS on close, so without this each
+     * connection caps at initial_max_streams_bidi. id&3==0 = client bidi.
+     * Hoisted above the nghttp3 guard so hq (no nghttp3) re-credits too. */
+    if ((stream_id & 0x03) == 0) {
+        ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+    }
+
+    if (c->proto == HTTP3_PROTO_HQ) {
+        /* hq tracks the stream on the ngtcp2 side only; release the slab here
+         * (the h3 path releases via nghttp3's own stream_close). */
+        if (stream_user_data != NULL) {
+            http3_stream_release((http3_stream_t *)stream_user_data);
+        }
+
+        return 0;
+    }
+
+    if (c->nghttp3_conn == NULL) {
         return 0;
     }
     /* If the stream closed due to a non-app reason (transport-level),
@@ -1307,12 +1701,6 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
     http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
 
     if (stats != NULL) stats->h3_stream_close++;
-
-    /* ngtcp2 never auto-extends MAX_STREAMS on close, so without this each
-     * connection caps at initial_max_streams_bidi. id&3==0 = client bidi. */
-    if ((stream_id & 0x03) == 0) {
-        ngtcp2_conn_extend_max_streams_bidi(conn, 1);
-    }
 
     if (rv != 0 && rv != NGHTTP3_ERR_STREAM_NOT_FOUND) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1375,6 +1763,8 @@ static int extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn,
     return 0;
 }
 
+
+
 const ngtcp2_callbacks HTTP3_NGTCP2_CALLBACKS = {
     .recv_client_initial = ngtcp2_crypto_recv_client_initial_cb,
     .recv_crypto_data    = ngtcp2_crypto_recv_crypto_data_cb,
@@ -1383,6 +1773,7 @@ const ngtcp2_callbacks HTTP3_NGTCP2_CALLBACKS = {
     .hp_mask             = ngtcp2_crypto_hp_mask_cb,
     .rand                = rand_cb,
     .get_new_connection_id = get_new_connection_id_cb,
+    .remove_connection_id  = remove_connection_id_cb,
     .update_key          = ngtcp2_crypto_update_key_cb,
     .delete_crypto_aead_ctx   = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
     .delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,

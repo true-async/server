@@ -11,11 +11,16 @@
 #endif
 
 #include <php.h>
+#include "Zend/zend_hrtime.h"
 #include "http3_listener.h"
 #include "http3_packet.h"
 #include "http3_connection.h"
+#include "http3_internal.h"   /* http3_reactor_budget_ns */
+#include "http3_steer.h"      /* CID steering (#80 D6 / #72) */
 #include "php_http_server.h"
 #include "log/http_log.h"
+#include "Zend/zend_atomic.h"
+#include <stddef.h>           /* offsetof */
 
 
 #include <zend_async_API.h>
@@ -122,8 +127,29 @@ struct _http3_listener_s {
      * us. Stored as void* to keep php_http_server.h out of public
      * headers; H3 dispatch reaches handler fcall + server_scope by
      * casting and calling http_protocol_get_handler. NULL when the
-     * listener is driven directly by a unit test. */
+     * listener is driven directly by a unit test, or in reactor mode
+     * (the server object lives on the parent thread). */
     void                      *server_obj;
+
+    /* Reactor mode (#80, B3p3-b). Non-NULL => this listener runs on a transport
+     * reactor and routes parsed requests to PHP workers via the registry
+     * instead of dispatching locally. Non-owning (the parent owns it). NULL is
+     * the unchanged single-thread path. */
+    const http3_reactor_ctx_t *reactor_ctx;
+
+    /* CID steering group (#80 D6 / #72). Non-NULL => this listener forwards
+     * stray datagrams (DCID decodes to another reactor) to their owner. Shared
+     * across the endpoint's per-reactor listeners; owned by the parent, outlives
+     * the listener. NULL = no steering (single reactor / single-thread). */
+    http3_steer_group_t *steer;
+
+    /* Drain-batch deferred-flush link (#80 D6). A forwarded datagram marks its
+     * owner listener here instead of flushing per packet; the reactor drain
+     * epilogue flushes the whole batch once, mirroring the recvmmsg tick's
+     * single deferred flush. in_steer_flush guards double-linking. Touched only
+     * on this listener's own reactor thread (feed_fn / epilogue / destroy). */
+    http3_listener_t          *steer_flush_next;
+    bool                       in_steer_flush;
 
     /* 32-byte HMAC-SHA256 key used to derive stateless-reset
      * tokens (RFC 9000 §10.3). Generated once at spawn from OpenSSL's
@@ -168,6 +194,11 @@ struct _http3_listener_s {
     bool                       last_peer_valid;
 
     http3_listener_stats_t     stats;
+
+    /* Reactor watchdog (#80 Phase 0) rate-limit gate: hrtime of the last
+     * slow-tick WARN we emitted. Kept off the stats snapshot — it is
+     * internal throttle state, not a counter. */
+    uint64_t                   wd_last_warn_ns;
 
     /* Slab pool for http3_stream_t. Shared across all conns on this
      * listener. Initialised in http3_listener_spawn, cleaned up in
@@ -359,6 +390,75 @@ static void drain_err_queue(http3_listener_t *listener)
     }
 }
 
+/* Classify a tick latency into one of 12 histogram buckets, edges aligned
+ * to the QUIC ACK budget rather than a plain log2 so the buckets read
+ * directly: bucket 8 is the first one past max_ack_delay (25 ms). */
+static unsigned h3_reactor_lat_bucket(uint64_t ns)
+{
+    const uint64_t us = ns / 1000ULL;
+
+    if (us <    50) return 0;
+    if (us <   100) return 1;
+    if (us <   250) return 2;
+    if (us <   500) return 3;
+    if (us <  1000) return 4;   /* 1 ms */
+    if (us <  2500) return 5;
+    if (us <  5000) return 6;
+    if (us < 10000) return 7;   /* 10 ms — default budget edge */
+    if (us < 25000) return 8;   /* 25 ms — max_ack_delay */
+    if (us < 50000) return 9;
+    if (us < 100000) return 10;
+
+    return 11;                  /* >= 100 ms */
+}
+
+/* Record one reactor tick (#80 Phase 0). dt_ns is the poll-cb wall time;
+ * datagrams is how many were processed this wakeup (for the WARN line). On
+ * a budget overrun, emit at most one WARN per second so a sustained stall
+ * does not flood the log. Cheap enough to run unconditionally — two
+ * hrtime reads per wakeup, not per datagram. */
+static void h3_reactor_tick_record(http3_listener_t *l, uint64_t dt_ns,
+                                   unsigned datagrams)
+{
+    http3_packet_stats_t *st = &l->stats.packet;
+
+    st->reactor_ticks++;
+    st->reactor_busy_ns += dt_ns;
+    st->reactor_lat_bucket[h3_reactor_lat_bucket(dt_ns)]++;
+
+    if (dt_ns > st->reactor_max_tick_ns) {
+        st->reactor_max_tick_ns = dt_ns;
+    }
+
+    const uint64_t budget = http3_reactor_budget_ns();
+
+    if (dt_ns <= budget) {
+        return;
+    }
+
+    st->reactor_slow_ticks++;
+
+    /* Budget overrun — the reactor was heads-down for dt_ns, delaying
+     * ACK/PTO for every live connection by that much. Throttle the WARN to
+     * one per second. */
+    const uint64_t now = (uint64_t)zend_hrtime();
+
+    if (now - l->wd_last_warn_ns < 1000000000ULL) {
+        return;
+    }
+
+    l->wd_last_warn_ns = now;
+
+    if (l->server_obj != NULL) {
+        http_logf_warn(
+            http_server_get_log_state((http_server_object *)l->server_obj),
+            "h3.reactor.slow_tick budget_ms=%llu tick_ms=%.3f datagrams=%u "
+            "conns=%u",
+            (unsigned long long)(budget / 1000000ULL),
+            (double)dt_ns / 1000000.0, datagrams, l->conn_count);
+    }
+}
+
 /* Raw-fd recvmmsg path. Drains up to HTTP3_LISTENER_RECV_BATCH
  * datagrams per recvmmsg syscall, capped at 16 batches per poll wakeup.
  * h2o picks the same 10-batch limit (lib/http3/common.c:819) — a larger
@@ -385,6 +485,12 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
     if (listener->fd < 0) {
         return;
     }
+
+    /* Reactor watchdog (#80 Phase 0): time this whole tick. Capture before
+     * the errq drain so the measurement covers every bit of reactor work,
+     * and route all exits through the tick_done tail. */
+    const uint64_t wd_t0 = (uint64_t)zend_hrtime();
+    unsigned wd_datagrams = 0;
 
     /* Drain the kernel error queue — but only when there is reason to
      * believe something is pending. Most sockets never see ICMP errors,
@@ -442,7 +548,7 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                 listener->stats.datagrams_errored++;
             }
 
-            return;
+            goto tick_done;
         }
 
         for (int i = 0; i < n; ++i) {
@@ -514,12 +620,14 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                 listener->stats.datagrams_received++;
                 listener->stats.bytes_received    += (uint64_t)plen;
                 listener->stats.last_datagram_size = plen;
+                wd_datagrams++;
 
                 http3_connection_dispatch(listener, bufs[i] + off, plen,
                                           ecn, src, src_len);
 
                 /* Any segment's dispatch may reap-on-close the listener;
-                 * re-check before touching it again. */
+                 * re-check before touching it again. Teardown tick — bail
+                 * without recording a (meaningless) latency sample. */
                 if (listener->closed) {
                     return;
                 }
@@ -539,6 +647,14 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
      * bail-out above returns early and skips this — that path is teardown,
      * where conns are reaped by listener destroy, not flushed. */
     http3_listener_flush_dirty(listener);
+
+    /* Watchdog tail. The EAGAIN/error early-exit jumps here PAST the flush,
+     * preserving the pre-existing behaviour where a tick that ends on an
+     * empty recvmmsg skips flush_dirty (any conns dirtied this tick drain on
+     * the next wakeup). Only the latency sample is taken here. */
+tick_done:
+    h3_reactor_tick_record(listener, (uint64_t)zend_hrtime() - wd_t0,
+                           wd_datagrams);
 }
 #endif /* __linux__ */
 
@@ -768,6 +884,195 @@ void *http3_listener_ssl_ctx(http3_listener_t *l)
 void *http3_listener_server_obj(const http3_listener_t *l)
 {
     return l != NULL ? l->server_obj : NULL;
+}
+
+const http3_reactor_ctx_t *http3_listener_reactor_ctx(const http3_listener_t *l)
+{
+    return l != NULL ? l->reactor_ctx : NULL;
+}
+
+int http3_listener_reactor_id(const http3_listener_t *l)
+{
+    return (l != NULL && l->reactor_ctx != NULL) ? l->reactor_ctx->reactor_id : -1;
+}
+
+/* ------------------------------------------------------------------------
+ * CID steering (#80 D6 / #72)
+ * ------------------------------------------------------------------------ */
+
+/* The per-endpoint table of reactor-owned listeners, indexed by reactor id.
+ * Slots are atomic so a reactor can publish/retire its own slot while siblings
+ * read it on the forward path without locking. */
+struct http3_steer_group_s {
+    reactor_pool_t  *pool;
+    int              count;
+    zend_atomic_ptr  listeners[1];   /* [count] — over-allocated */
+};
+
+/* A forwarded datagram. Carries the OWNER REACTOR ID, not a listener pointer:
+ * the owner re-resolves its listener from the group slot at apply time, so a
+ * listener torn down between forward and apply is a clean drop, never a UAF. */
+typedef struct {
+    http3_steer_group_t    *group;
+    int                     owner_id;
+    uint8_t                 ecn;
+    socklen_t               peer_len;
+    struct sockaddr_storage peer;
+    size_t                  datalen;
+    uint8_t                 data[1];   /* [datalen] — over-allocated */
+} http3_steer_msg_t;
+
+http3_steer_group_t *http3_steer_group_create(reactor_pool_t *pool, const int count)
+{
+    if (pool == NULL || count <= 0) {
+        return NULL;
+    }
+
+    http3_steer_group_t *const g =
+        pemalloc(offsetof(http3_steer_group_t, listeners)
+                     + (size_t)count * sizeof(zend_atomic_ptr), 1);
+    g->pool  = pool;
+    g->count = count;
+
+    for (int i = 0; i < count; i++) {
+        ZEND_ATOMIC_PTR_INIT(&g->listeners[i], NULL);
+    }
+
+    return g;
+}
+
+void http3_steer_group_publish(http3_steer_group_t *g, const int reactor_id,
+                               http3_listener_t *listener)
+{
+    if (g == NULL || reactor_id < 0 || reactor_id >= g->count) {
+        return;
+    }
+
+    zend_atomic_ptr_store_ex(&g->listeners[reactor_id], listener);
+}
+
+void http3_steer_group_free(http3_steer_group_t *g)
+{
+    if (g != NULL) {
+        pefree(g, 1);
+    }
+}
+
+void http3_listener_set_steer(http3_listener_t *l, http3_steer_group_t *g)
+{
+    if (l != NULL) {
+        l->steer = g;
+    }
+}
+
+/* Per-reactor-thread list of listeners that took a forwarded datagram in the
+ * current mailbox drain batch. Built by http3_steer_feed_fn, drained once by
+ * http3_reactor_steer_flush_epilogue at batch end. __thread: each reactor has
+ * its own, no locking, and a listener only ever appears on its owner reactor. */
+static __thread http3_listener_t *tls_steer_flush_head = NULL;
+
+/* Reactor drain epilogue (registered via reactor_pool_set_drain_epilogue):
+ * flush every listener that took a forwarded datagram this batch, exactly once.
+ * This coalesces a burst of steered datagrams into one flush_dirty per listener
+ * — the same single deferred flush the recvmmsg tick does — instead of flushing
+ * per forwarded packet, which split a connection's output across separate sends
+ * and perturbed ACK / path-validation timing under rapid migration. */
+void http3_reactor_steer_flush_epilogue(void)
+{
+    http3_listener_t *l = tls_steer_flush_head;
+    tls_steer_flush_head = NULL;
+
+    while (l != NULL) {
+        http3_listener_t *const next = l->steer_flush_next;
+        l->steer_flush_next = NULL;
+        l->in_steer_flush   = false;
+
+        http3_listener_flush_dirty(l);
+
+        l = next;
+    }
+}
+
+/* Runs ON THE OWNER reactor (via reactor_pool_post_exec): re-resolve the
+ * owner's listener from the group and feed the forwarded datagram into it as if
+ * it had arrived on the owner's own socket. Marks the conn dirty (in dispatch)
+ * and queues the listener for the drain-batch epilogue, so a burst of forwarded
+ * datagrams flushes once — like a recvmmsg tick — not once per packet. */
+static void http3_steer_feed_fn(void *arg)
+{
+    http3_steer_msg_t *const m = (http3_steer_msg_t *)arg;
+    http3_listener_t  *const target =
+        (http3_listener_t *)zend_atomic_ptr_load_ex(&m->group->listeners[m->owner_id]);
+
+    if (target != NULL) {
+        target->stats.packet.quic_steered_in++;
+        http3_connection_dispatch(target, m->data, m->datalen, m->ecn,
+                                  (struct sockaddr *)&m->peer, m->peer_len);
+
+        if (!target->in_steer_flush) {
+            target->in_steer_flush   = true;
+            target->steer_flush_next = tls_steer_flush_head;
+            tls_steer_flush_head     = target;
+        }
+    }
+
+    pefree(m, 1);
+}
+
+/* KNOWN LIMITATION (see docs/PLAN_REACTOR_POOL.md, D6): forwarding works
+ * correctly, but pathological back-to-back migrations (7+ NAT rebinds on one
+ * connection in milliseconds) can deadlock ngtcp2 path validation — investigated
+ * to a circular validation/cwnd stall, ~5% at 15 rebinds, 0% at a realistic
+ * single rebind. The deliberate fix is eBPF reuseport steering (no forward hop). */
+bool http3_listener_try_steer(http3_listener_t *l,
+                              const uint32_t version,
+                              const uint8_t *dcid, const size_t dcidlen,
+                              const uint8_t *data, const size_t datalen,
+                              const uint8_t ecn,
+                              const struct sockaddr *peer, const socklen_t peer_len)
+{
+    http3_steer_group_t *const g = l != NULL ? l->steer : NULL;
+
+    if (g == NULL || version != 0) {
+        /* Not steering, or a long-header packet (Initial/Handshake): an Initial
+         * carries a client-chosen DCID with no id, and pre-handshake migration
+         * is disallowed, so only short-header (1-RTT) packets are steerable. */
+        return false;
+    }
+
+    const int owner = http3_steer_decode(dcid, dcidlen);
+
+    if (owner < 0 || owner >= g->count || owner == http3_listener_reactor_id(l)) {
+        /* Undecodable, out of range, or already ours — handle locally. */
+        return false;
+    }
+
+    const socklen_t plen = peer_len <= (socklen_t)sizeof(((http3_steer_msg_t *)0)->peer)
+                           ? peer_len
+                           : (socklen_t)sizeof(((http3_steer_msg_t *)0)->peer);
+
+    http3_steer_msg_t *const m =
+        pemalloc(offsetof(http3_steer_msg_t, data) + datalen, 1);
+    m->group    = g;
+    m->owner_id = owner;
+    m->ecn      = ecn;
+    m->peer_len = plen;
+    memcpy(&m->peer, peer, (size_t)plen);
+    m->datalen  = datalen;
+    memcpy(m->data, data, datalen);
+
+    if (!reactor_pool_post_exec(g->pool, owner, http3_steer_feed_fn, m)) {
+        /* Owner mailbox full — drop the datagram (QUIC retransmits). Do not fall
+         * through to the local miss path: that would stateless-reset a live
+         * connection we know lives elsewhere. */
+        pefree(m, 1);
+        l->stats.packet.quic_steered_drop++;
+        return true;
+    }
+
+    l->stats.packet.quic_steered_out++;
+
+    return true;
 }
 
 const uint8_t *http3_listener_sr_key(const http3_listener_t *l)
@@ -1004,6 +1309,12 @@ void http3_listener_remove_connection(http3_listener_t *l,
             zend_hash_str_del(l->conn_map,
                 (const char *)conn->routing_dcid, conn->routing_dcidlen);
         }
+
+        /* Server-issued alternate CIDs (NEW_CONNECTION_ID). ngtcp2 keeps a
+         * retired CID in its pool for ~3*PTO before firing remove_connection_id,
+         * so a get_scid sweep here would miss retired-but-present keys — we
+         * track them ourselves and remove exactly what we registered. */
+        http3_connection_unregister_all_issued_cids(conn);
     }
 }
 
@@ -1033,7 +1344,8 @@ HashTable *http3_listener_conn_map(http3_listener_t *l)
 extern int ngtcp2_crypto_ossl_init(void);
 
 http3_listener_t *http3_listener_spawn(const char *host, int port,
-                                       void *ssl_ctx, void *server_obj)
+                                       void *ssl_ctx, void *server_obj,
+                                       const http3_reactor_ctx_t *reactor_ctx)
 {
     /* Belt-and-braces: even if connection_attach_tls also calls this,
      * doing it once at listener-spawn time guarantees the provider is
@@ -1041,11 +1353,12 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     (void)ngtcp2_crypto_ossl_init();
 
     http3_listener_t *listener = ecalloc(1, sizeof(http3_listener_t));
-    listener->fd         = -1;
-    listener->host       = estrdup(host);
-    listener->port       = port;
-    listener->ssl_ctx    = ssl_ctx;
-    listener->server_obj = server_obj;
+    listener->fd          = -1;
+    listener->host        = estrdup(host);
+    listener->port        = port;
+    listener->ssl_ctx     = ssl_ctx;
+    listener->server_obj  = server_obj;
+    listener->reactor_ctx = reactor_ctx;
     http3_stream_pool_init(&listener->stream_pool);
 
 #ifdef __linux__
@@ -1119,8 +1432,9 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
      * 0 = leave the OS default; NULL server_obj in a unit test resolves
      * to the 0 fallback). */
     {
-        const uint32_t want =
-            http_server_get_http3_socket_buffer_bytes((const http_server_object *)server_obj);
+        const uint32_t want = reactor_ctx != NULL
+            ? reactor_ctx->socket_buffer_bytes
+            : http_server_get_http3_socket_buffer_bytes((const http_server_object *)server_obj);
 
         if (want > 0) {
             const int sockbuf = (int)want;
@@ -1247,8 +1561,10 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
      *   2. PHP_HTTP3_PEER_BUDGET env (ops escape hatch, [1, 4096]).
      *   3. Built-in default 0 = disabled. */
     listener->peer_budget = 0;
-    uint32_t cfg_budget = http_server_get_http3_peer_connection_budget(
-        (const http_server_object *)server_obj);
+    uint32_t cfg_budget = reactor_ctx != NULL
+        ? reactor_ctx->peer_budget
+        : http_server_get_http3_peer_connection_budget(
+              (const http_server_object *)server_obj);
 
     if (cfg_budget != 0) {
         listener->peer_budget = cfg_budget;
@@ -1284,9 +1600,13 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
      * worker_connections — the resource backstop now that peer_budget is
      * opt-in. */
     {
-        const int mc = http_server_get_max_connections(
-            (const http_server_object *)server_obj);
-        listener->max_conns = mc > 0 ? (uint32_t)mc : 0;
+        if (reactor_ctx != NULL) {
+            listener->max_conns = reactor_ctx->max_conns;
+        } else {
+            const int mc = http_server_get_max_connections(
+                (const http_server_object *)server_obj);
+            listener->max_conns = mc > 0 ? (uint32_t)mc : 0;
+        }
     }
 
 #ifdef __linux__
@@ -1382,6 +1702,30 @@ int http3_listener_port(const http3_listener_t *listener)
     return listener ? listener->port : 0;
 }
 
+int http3_listener_local_port(const http3_listener_t *listener)
+{
+    if (listener == NULL) {
+        return -1;
+    }
+
+#ifdef __linux__
+    if (listener->fd >= 0) {
+        struct sockaddr_storage ss;
+        socklen_t len = (socklen_t)sizeof(ss);
+
+        if (getsockname(listener->fd, (struct sockaddr *)&ss, &len) == 0) {
+            if (ss.ss_family == AF_INET6) {
+                return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
+            }
+
+            return ntohs(((struct sockaddr_in *)&ss)->sin_port);
+        }
+    }
+#endif
+
+    return listener->port;
+}
+
 void http3_listener_destroy(http3_listener_t *listener)
 {
     if (listener == NULL || listener->closed) {
@@ -1389,6 +1733,35 @@ void http3_listener_destroy(http3_listener_t *listener)
     }
 
     listener->closed = true;
+
+    /* 0. Retire our steering slot so a sibling reactor stops forwarding stray
+     *    datagrams to us. Runs on our own reactor thread (same thread that
+     *    drains any already-queued forward), so a forward in flight either ran
+     *    before this or finds the slot NULL after — never a freed listener. */
+    if (listener->steer != NULL) {
+        http3_steer_group_publish(listener->steer,
+                                  http3_listener_reactor_id(listener), NULL);
+        listener->steer = NULL;
+    }
+
+    /* Drop ourselves from this reactor's pending steer-flush list (same thread)
+     * so the drain epilogue never flushes a listener we are freeing — covers a
+     * teardown command landing in the same batch as a forward to us. */
+    if (listener->in_steer_flush) {
+        http3_listener_t **pp = &tls_steer_flush_head;
+
+        while (*pp != NULL) {
+            if (*pp == listener) {
+                *pp = listener->steer_flush_next;
+                break;
+            }
+
+            pp = &(*pp)->steer_flush_next;
+        }
+
+        listener->in_steer_flush   = false;
+        listener->steer_flush_next = NULL;
+    }
 
     /* 1. Sever the callback's back-pointer to our listener data BEFORE
      *    touching the io. Any recv_cb invocation that the reactor has
@@ -1449,24 +1822,10 @@ void http3_listener_destroy(http3_listener_t *listener)
 #endif
     if (listener->udp_io != NULL) {
         zend_async_io_t *io = listener->udp_io;
-        zend_async_udp_req_t *recv_req = listener->recv_req;
         listener->udp_io = NULL;
         listener->recv_cb = NULL;
         listener->recv_req = NULL;
         ZEND_ASYNC_IO_CLOSE(io);
-
-        /* Dispose the multishot recv req we submitted. ZEND_ASYNC_IO_CLOSE
-         * only detaches io->active_req (its await-handoff path assumes a
-         * parked coroutine frees it), and our recv callback merely counts
-         * datagrams — neither frees the req. Without this the req struct +
-         * 2 KiB recv buffer (plus any error exception) leak on every listener
-         * teardown. Dispose AFTER close: close clears the reactor's reference
-         * so there is no use-after-free, and the typed recv_req pointer frees
-         * through the correct zend_async_udp_req_t layout. */
-        if (recv_req != NULL && recv_req->dispose != NULL) {
-            recv_req->dispose(recv_req);
-        }
-
         io->event.dispose(&io->event);
     }
 

@@ -33,6 +33,28 @@
  * client's version-negotiation logic, not to randomise our wire bytes. */
 #define HTTP3_GREASE_VERSION 0x1a2a3a4aU
 
+/* Reactor watchdog budget (#80 Phase 0). Default 10 ms keeps a tick well
+ * under QUIC max_ack_delay (25 ms); PHP_HTTP3_REACTOR_BUDGET_MS overrides at
+ * process start. Cached on first read — same one-shot getenv pattern as the
+ * H3_TRACE / peer-budget knobs. */
+uint64_t http3_reactor_budget_ns(void)
+{
+    static uint64_t cached = 0;
+
+    if (cached == 0) {
+        const char *env = getenv("PHP_HTTP3_REACTOR_BUDGET_MS");
+        unsigned long ms = (env != NULL) ? strtoul(env, NULL, 10) : 0;
+
+        if (ms == 0) {
+            ms = 10;   /* default budget */
+        }
+
+        cached = (uint64_t)ms * 1000000ULL;
+    }
+
+    return cached;
+}
+
 bool http3_packet_send_version_negotiation(
     http3_listener_t *listener,
     const uint8_t *dcid, size_t dcidlen,

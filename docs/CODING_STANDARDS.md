@@ -113,6 +113,57 @@ eventfd indirection actually serves. Do not use it as a defer mechanism
 for in-thread work; microtasks are cheaper (no syscall) and clearer
 about intent.
 
+### 1.5 The transport reactor stays strictly non-blocking (HTTP/3)
+
+In HTTP/3 the entire QUIC transport — ACK generation, loss detection,
+RTT/PTO, pacing, idle timers — runs in userspace **on the reactor thread**
+(ngtcp2 has no internal threads). The reactor *is* the ACK clock. A
+synchronous CPU burst or any blocking call on that thread delays ACKs for
+**every** live connection by its full duration, which inflates the peers'
+RTT/PTO, stalls cwnd, and reintroduces head-of-line blocking at the
+transport layer. (On TCP the kernel ACKs independently, so this rule is
+QUIC-specific — but the H3 path shares code with H1/H2, so apply it
+wherever code can run on the H3 reactor.)
+
+**Rule.** Code reachable on the H3 reactor thread — the `recvmmsg`
+poll-cb (`src/http3/http3_listener.c` `http3_listener_poll_cb`), every
+ngtcp2/nghttp3 callback (they run inside `ngtcp2_conn_read_pkt`), the
+`drain_out` send loop (`src/http3/http3_io.c`), timer fires, and the
+coroutine **dispose**/commit tail (`src/http3/http3_dispatch.c`) — must
+not perform an unbounded synchronous span:
+
+- **No blocking syscalls.** No sync DB, sync file read, blocking
+  `connect`/`getaddrinfo`, or `sleep`. I/O goes through the async API so
+  it yields.
+- **No unbounded CPU without a yield.** Large gzip/brotli/zstd, large
+  serialize, a big `smart_str` build, a wide hash/sort over
+  attacker-sized input — none of these belong inline on a callback or in
+  the dispose commit. Cap it, or move it onto the PHP worker (a handler
+  coroutine that `await`s; the reactor/worker split keeps response
+  rendering — including compression — off the transport reactor, see
+  `docs/PLAN_REACTOR_POOL.md`).
+- **Every loop over peer-controlled counts has a cap.** Follow the
+  existing precedents: `H3_DRAIN_ITER_CAP` (drain), `HTTP3_MAX_BODY_BYTES`
+  (body assembly), the `recvmmsg` batch cap (poll-cb).
+
+The PHP **handler** runs in its own coroutine and *may* `await` — that is
+the sanctioned place for real work. But a CPU-bound handler that never
+awaits monopolises the reactor exactly like inline reactor code; "it's in
+a coroutine" is not a yield. When a handler must do heavy CPU, it has to
+reach an await (chunk + yield), not run it in one synchronous span.
+
+The buffered-response compression in `http3_stream_submit_response`
+(`src/http3/http3_callbacks.c`) runs synchronously in dispose context — a
+current example of inline CPU on the reactor. The reactor/worker split
+moves response rendering onto the PHP worker; until then, keep buffered
+bodies modest and prefer the streaming path for large ones.
+
+**Watchdog.** The reactor self-times each tick and each timer fire and
+exports `reactor_*` counters via `HttpServer::getStats()` (budget
+`PHP_HTTP3_REACTOR_BUDGET_MS`, default 10 ms < `max_ack_delay` 25 ms); a
+budget overrun logs `WARN h3.reactor.slow_tick`. If a change makes
+`reactor_slow_ticks` / `reactor_max_tick_ns` climb, it violated this rule.
+
 ---
 
 ## 2. Branch prediction: `EXPECTED` / `UNEXPECTED`

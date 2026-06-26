@@ -1,0 +1,58 @@
+# QUIC interop endpoint built from the LOCAL working tree (unreleased branch).
+#
+# Unlike Dockerfile (which layers a published release image), this compiles the
+# server extension from the current source against the PHP + OpenSSL/ngtcp2/
+# nghttp3 already inside a TrueAsync base image — guaranteed header/ABI match,
+# and far cheaper than a full from-scratch stack build. Use it to interop-test a
+# branch before release.
+#
+#   docker build -t trueasync/quic-interop-endpoint:branch \
+#     --build-arg TAS_IMAGE=trueasync/php-true-async:0.7.0-rc.6-php8.6 \
+#     -f tests/interop/quic/Dockerfile.source .          # context = repo root
+
+ARG TAS_IMAGE=trueasync/php-true-async:0.7.0-rc.6-php8.6
+
+FROM ${TAS_IMAGE} AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        autoconf automake libtool gcc g++ make pkg-config re2c bison \
+    && rm -rf /var/lib/apt/lists/*
+COPY . /usr/src/server
+WORKDIR /usr/src/server
+# Strip host-generated autotools/build artifacts (the COPY brought a Makefile with
+# host absolute paths) so phpize + configure regenerate cleanly for the container.
+RUN rm -rf Makefile Makefile.global Makefile.objects Makefile.fragments \
+        configure config.h config.h.in config.status config.cache config.nice \
+        config.log autom4te.cache build modules libtool \
+    && find . \( -name '*.lo' -o -name '*.la' -o -name '*.o' -o -name '*.dep' \) -delete 2>/dev/null \
+    && find . -type d -name .libs -exec rm -rf {} + 2>/dev/null; true
+RUN phpize \
+    && PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure \
+        --with-php-config=/usr/local/bin/php-config \
+        --enable-http-server --enable-http2 --enable-http3 \
+        --with-openssl --with-nghttp2=/usr/local \
+        --with-nghttp3=/usr/local --with-ngtcp2=/usr/local \
+    && make -j"$(nproc)" \
+    && make install
+
+FROM martenseemann/quic-network-simulator-endpoint:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libxml2 libargon2-1 libedit2 libreadline8 \
+        libsodium23 libsqlite3-0 libonig5 libzip4 \
+        libpng16-16 libjpeg8 libwebp7 libfreetype6 \
+        libgmp10 libldap2 libsasl2-2 libpq5 \
+        libmysqlclient21 libbz2-1.0 libenchant-2-2 \
+        libffi8 libgdbm6 liblmdb0 libsnmp40 \
+        libtidy5deb1 libxslt1.1 libicu74 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/local /usr/local
+COPY --from=build /etc/php.d  /etc/php.d
+
+RUN ldconfig && php -v && php -m | grep -i true_async_server
+
+COPY tests/interop/quic/entry.php       /interop/entry.php
+COPY tests/interop/quic/run_endpoint.sh /run_endpoint.sh
+RUN chmod +x /run_endpoint.sh

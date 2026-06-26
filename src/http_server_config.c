@@ -55,6 +55,7 @@ struct _http_server_shared_config_t {
 
     zend_string            *tls_cert_path;       /* persistent zend_string or NULL */
     zend_string            *tls_key_path;
+    zend_string            *http3_hq_docroot;    /* persistent; hq-interop docroot */
 
     size_t                  write_buffer_size;
     int                     backlog;
@@ -2287,6 +2288,45 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getPrivateKey)
 }
 /* }}} */
 
+/* {{{ proto HttpServerConfig::setHttp3HqDocroot(string $path): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3HqDocroot)
+{
+    zend_string *path;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(path)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (config->http3_hq_docroot) {
+        zend_string_release(config->http3_hq_docroot);
+    }
+
+    config->http3_hq_docroot = zend_string_copy(path);
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::getHttp3HqDocroot(): ?string */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3HqDocroot)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config->http3_hq_docroot) {
+        RETURN_STR_COPY(config->http3_hq_docroot);
+    }
+
+    RETURN_NULL();
+}
+/* }}} */
+
 /* {{{ proto HttpServerConfig::setAutoAwaitBody(bool $enable): static */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setAutoAwaitBody)
 {
@@ -2544,6 +2584,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->tls_enabled = false;
     config->tls_cert_path = NULL;
     config->tls_key_path = NULL;
+    config->http3_hq_docroot = NULL;
     config->auto_await_body = false;
     config->is_locked = false;
     config->log_severity = 0;          /* HTTP_LOG_OFF */
@@ -2605,6 +2646,10 @@ static void http_server_config_free(zend_object *obj)
 
     if (config->tls_key_path) {
         zend_string_release(config->tls_key_path);
+    }
+
+    if (config->http3_hq_docroot) {
+        zend_string_release(config->http3_hq_docroot);
     }
 
     if (Z_TYPE(config->log_stream) != IS_UNDEF) {
@@ -2721,6 +2766,12 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
         GC_MAKE_PERSISTENT_LOCAL(shared->tls_key_path);
     }
 
+    if (src->http3_hq_docroot) {
+        shared->http3_hq_docroot = zend_string_init(
+            ZSTR_VAL(src->http3_hq_docroot), ZSTR_LEN(src->http3_hq_docroot), 1);
+        GC_MAKE_PERSISTENT_LOCAL(shared->http3_hq_docroot);
+    }
+
     if (src->listener_count > 0) {
         shared->listeners = pecalloc(src->listener_count, sizeof(http_listener_shared_t), 1);
         shared->listener_count = src->listener_count;
@@ -2781,6 +2832,10 @@ static void http_server_shared_config_release(http_server_shared_config_t *share
 
     if (shared->tls_key_path) {
         zend_string_release_ex(shared->tls_key_path, 1);
+    }
+
+    if (shared->http3_hq_docroot) {
+        zend_string_release_ex(shared->http3_hq_docroot, 1);
     }
 
     if (shared->compression_mime_types) {
@@ -2867,6 +2922,11 @@ static void http_server_config_populate_from_shared(
     if (src->tls_key_path) {
         dst->tls_key_path = zend_string_init(
             ZSTR_VAL(src->tls_key_path), ZSTR_LEN(src->tls_key_path), 0);
+    }
+
+    if (src->http3_hq_docroot) {
+        dst->http3_hq_docroot = zend_string_init(
+            ZSTR_VAL(src->http3_hq_docroot), ZSTR_LEN(src->http3_hq_docroot), 0);
     }
 
     if (src->listener_count > 0) {

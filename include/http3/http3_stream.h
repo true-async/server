@@ -24,6 +24,12 @@
 typedef struct _http3_stream_s     http3_stream_t;
 typedef struct _http3_connection_s http3_connection_t;  /* defined in http3_connection.h */
 
+/* hq-interop (HTTP/0.9-over-QUIC) request line is "GET <path>\r\n"; cap the
+ * accumulator generously and reject (close stream) past it. */
+#ifndef HTTP3_HQ_LINE_MAX
+#define HTTP3_HQ_LINE_MAX 8192
+#endif
+
 /* One per inbound HTTP/3 request stream (bidi, client-initiated).
  * Mirrors http2_stream_t in spirit but carries less state — nghttp3
  * already keeps the framing/header decoder state.
@@ -163,6 +169,24 @@ struct _http3_stream_s {
      * down — without the walk, each such stream leaks its request +
      * headers + zend_strings). */
     http3_stream_t   *list_next;
+
+    /* hq-interop only (HTTP/0.9-over-QUIC). Request-line accumulator,
+     * lazily allocated on the first stream byte; freed in release. h3
+     * streams leave these NULL/zero. hq_served latches once the response
+     * has been produced; hq_fin_sent latches once its FIN has been emitted. */
+    char             *hq_line;
+    uint16_t          hq_line_len;
+    bool              hq_served;
+    bool              hq_fin_sent;
+
+    /* hq response payload. hq_body points into the mmap'd file (hq_map) or a
+     * static literal (error); NULL + zero len = empty body served FIN-only.
+     * The egress loop streams [hq_body_off, hq_body_len) raw + FIN. */
+    const char       *hq_body;
+    size_t            hq_body_len;
+    size_t            hq_body_off;
+    void             *hq_map;        /* munmap(hq_map, hq_map_len) on release */
+    size_t            hq_map_len;
 };
 
 /* Allocate a stream + its http_request_t from the listener's slab pool.

@@ -23,6 +23,7 @@
                                 * nghttp3 + openssl/ssl.h + http3_connection.h */
 #include "http3_listener.h"
 #include "http3_packet.h"
+#include "http3/http3_stream.h"   /* hq egress sources from http3_stream_t */
 
 #include <string.h>
 
@@ -67,7 +68,29 @@ static void timer_fire_cb(zend_async_event_t *event,
 
     if (stats != NULL) {
         stats->quic_timer_fired++;
+
+        /* Per-connection ACK/PTO service delay (#80 Phase 0): how far past
+         * its armed deadline this timer actually fired. Anything beyond the
+         * reactor budget means the reactor was busy when this connection's
+         * ACK/loss timer was due. */
+        if (c->timer_expiry_ns != 0) {
+            const uint64_t now_ns = (uint64_t)http3_ts_now();
+
+            if (now_ns > c->timer_expiry_ns) {
+                const uint64_t late = now_ns - c->timer_expiry_ns;
+
+                if (late > stats->reactor_max_timer_late_ns) {
+                    stats->reactor_max_timer_late_ns = late;
+                }
+
+                if (late > http3_reactor_budget_ns()) {
+                    stats->reactor_timer_late++;
+                }
+            }
+        }
     }
+
+    c->timer_expiry_ns = 0;
 
     int rv = ngtcp2_conn_handle_expiry((ngtcp2_conn *)c->ngtcp2_conn, http3_ts_now());
     /* Idle-timeout: peer is gone, RFC 9000 §10.1 says do NOT emit
@@ -130,9 +153,14 @@ void http3_connection_arm_timer(http3_connection_t *c)
 
     if (expiry == UINT64_MAX) {
         /* ngtcp2 has nothing scheduled — drop any stale timer. */
+        c->timer_expiry_ns = 0;
         http3_connection_detach_timer(c);
         return;
     }
+
+    /* Stamp the deadline we're arming for so timer_fire_cb can measure how
+     * late the fire actually was (reactor service delay, #80 Phase 0). */
+    c->timer_expiry_ns = (uint64_t)expiry;
 
     ngtcp2_tstamp now = http3_ts_now();
     uint64_t delay_ns = (expiry > now) ? (expiry - now) : 1; /* fire ASAP */
@@ -297,12 +325,39 @@ void http3_connection_drain_out(http3_connection_t *c)
          * nothing pending; we still call writev_stream below with
          * stream_id = -1 so ngtcp2 can emit ACK / control frames of its
          * own. */
-        int64_t       h3_stream_id = -1;
-        int           h3_fin       = 0;
-        nghttp3_vec   h3_vec[16];
-        nghttp3_ssize h3_veccnt = 0;
+        int64_t        h3_stream_id = -1;
+        int            h3_fin       = 0;
+        nghttp3_vec    h3_vec[16];
+        nghttp3_ssize  h3_veccnt = 0;
+        http3_stream_t *hq_cur   = NULL;
 
-        if (c->nghttp3_conn != NULL && !h3_framing_dead) {
+        if (c->proto == HTTP3_PROTO_HQ) {
+            /* hq-interop: source raw response bytes from a served stream's
+             * hq_body (mmap'd file or a literal) — no nghttp3 framing. Pick the
+             * first stream whose response is ready and whose FIN has not gone
+             * out yet; the FIN rides the tail of the body (or a bare FIN when
+             * the body is empty). */
+            for (http3_stream_t *s = c->streams_head; s != NULL; s = s->list_next) {
+                if (s->hq_served && !s->hq_fin_sent) {
+                    hq_cur = s;
+                    break;
+                }
+            }
+
+            if (hq_cur != NULL) {
+                const size_t remain = hq_cur->hq_body_len - hq_cur->hq_body_off;
+
+                h3_stream_id = hq_cur->stream_id;
+                if (remain > 0) {
+                    h3_vec[0].base = (uint8_t *)hq_cur->hq_body + hq_cur->hq_body_off;
+                    h3_vec[0].len  = remain;
+                    h3_veccnt      = 1;
+                } else {
+                    h3_veccnt      = 0;   /* empty body / fully drained: bare FIN */
+                }
+                h3_fin = 1;
+            }
+        } else if (c->nghttp3_conn != NULL && !h3_framing_dead) {
             h3_veccnt = nghttp3_conn_writev_stream(
                 (nghttp3_conn *)c->nghttp3_conn,
                 &h3_stream_id, &h3_fin,
@@ -328,11 +383,18 @@ void http3_connection_drain_out(http3_connection_t *c)
         ngtcp2_ssize pdatalen = 0;
         /* WRITE_MORE only meaningful when we actually have stream data;
          * passing it on a bare-handshake / ACK-only call asks ngtcp2 to
-         * spin waiting for stream input that will never come. */
-        uint32_t flags = (h3_stream_id >= 0)
-            ? (NGTCP2_WRITE_STREAM_FLAG_MORE
-               | (h3_fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0))
-            : 0;
+         * spin waiting for stream input that will never come. hq omits
+         * WRITE_MORE: with no nghttp3 coalescing there is no remainder to
+         * resume, and MORE on a bare FIN would loop forever. */
+        uint32_t flags = 0;
+
+        if (h3_stream_id >= 0) {
+            flags = h3_fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0;
+
+            if (c->proto != HTTP3_PROTO_HQ) {
+                flags |= NGTCP2_WRITE_STREAM_FLAG_MORE;
+            }
+        }
         ngtcp2_ssize n = ngtcp2_conn_writev_stream(
             (ngtcp2_conn *)c->ngtcp2_conn,
             &ps.path, &pi,
@@ -353,6 +415,8 @@ void http3_connection_drain_out(http3_connection_t *c)
                 nghttp3_conn_add_write_offset(
                     (nghttp3_conn *)c->nghttp3_conn,
                     h3_stream_id, (size_t)pdatalen);
+            } else if (hq_cur != NULL && pdatalen > 0) {
+                hq_cur->hq_body_off += (size_t)pdatalen;
             }
 
             continue;
@@ -365,9 +429,14 @@ void http3_connection_drain_out(http3_connection_t *c)
             if (c->nghttp3_conn != NULL) {
                 nghttp3_conn_block_stream(
                     (nghttp3_conn *)c->nghttp3_conn, h3_stream_id);
+                continue;
             }
 
-            continue;
+            /* hq has no per-stream block list; end this drain and let a later
+             * tick resume once the window opens (proper cwnd-wake arrives with
+             * the large-file hq path). */
+            H3_FLUSH_BATCH();
+            break;
         }
 
         if (n == 0) {
@@ -378,6 +447,9 @@ void http3_connection_drain_out(http3_connection_t *c)
                 nghttp3_conn_add_write_offset(
                     (nghttp3_conn *)c->nghttp3_conn,
                     h3_stream_id, (size_t)pdatalen);
+                continue;
+            } else if (hq_cur != NULL && pdatalen > 0) {
+                hq_cur->hq_body_off += (size_t)pdatalen;
                 continue;
             }
 
@@ -395,6 +467,21 @@ void http3_connection_drain_out(http3_connection_t *c)
             nghttp3_conn_add_write_offset(
                 (nghttp3_conn *)c->nghttp3_conn,
                 h3_stream_id, (size_t)pdatalen);
+        } else if (hq_cur != NULL) {
+            /* pdatalen is -1 when the packet carried no stream data (ACK/control
+             * only) — must NOT advance then, or (size_t)(-1) wraps the offset
+             * backward and the next pick re-sends bytes. Mirrors the h3 guard. */
+            if (pdatalen > 0) {
+                hq_cur->hq_body_off += (size_t)pdatalen;
+            }
+
+            /* FLAG_FIN rode the final data packet; once the body is fully
+             * drained the FIN is out, so stop re-picking the stream (it stays
+             * alive until stream_close releases the slab). Covers the empty
+             * body bare-FIN (off == len == 0). */
+            if (hq_cur->hq_body_off >= hq_cur->hq_body_len) {
+                hq_cur->hq_fin_sent = true;
+            }
         }
 
         /* Append the freshly-written packet to the batch. GSO requires
@@ -502,6 +589,21 @@ void http3_connection_drain_out(http3_connection_t *c)
  * the timer is armed only on the live branch and `c` is dead afterward. */
 void http3_connection_flush(http3_connection_t *c)
 {
+    /* Migration storm flagged on read: shed the connection now. emit_close
+     * targets c->peer — the live (migrated) address — so the close reaches the
+     * client, which reconnects cleanly instead of stalling on a wedged path. */
+    if (c->migration_storm) {
+        http3_packet_stats_t *stats = http3_listener_packet_stats(c->listener);
+
+        if (stats != NULL) {
+            stats->quic_migration_storm_shed++;
+        }
+
+        http3_connection_emit_close(c);
+        http3_connection_reap(c);
+        return;
+    }
+
     http3_connection_drain_out(c);
 
     if (!http3_connection_check_terminal(c)) {

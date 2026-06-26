@@ -267,8 +267,7 @@ static int on_header_field(llhttp_t* llhttp_parser, const char* at, size_t lengt
 
     /* Lazy initialization of headers HashTable */
     if (!parser->request->headers) {
-        ALLOC_HASHTABLE(parser->request->headers);
-        zend_hash_init(parser->request->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
+        http_request_init_headers(parser->request);
     }
 
     /* If we were parsing value, this is a new header - save previous one first */
@@ -544,8 +543,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     /* Ensure headers HashTable exists (even if no headers were parsed) */
     if (!req->headers) {
-        ALLOC_HASHTABLE(req->headers);
-        zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
+        http_request_init_headers(req);
     }
 
     /* Save last header if any */
@@ -608,7 +606,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     req->method = http_known_method_lookup(method_name, method_len);
 
     if (req->method == NULL) {
-        req->method = zend_string_init(method_name, method_len, 0);
+        req->method = zend_string_init(method_name, method_len, req->persistent);
     }
 
     /* RFC 9110 §9.3.6: CONNECT targets a proxy tunnel — an origin server
@@ -1055,30 +1053,30 @@ void http_request_addref(http_request_t *req)
     }
 }
 
-void http_request_destroy(http_request_t *req)
+void http_request_free_fields(http_request_t *req)
 {
-    if (!req) {
-        return;
-    }
-    /* Refcount-based release. Each holder calls destroy when done; the
-     * last call (refcount → 0) actually frees. Allocators init refcount
-     * to 1 so a single-owner caller's destroy still frees immediately —
-     * preserves the pre-refcount behavior at every existing call site. */
-    if (--req->refcount > 0) {
+    if (req == NULL) {
         return;
     }
 
     if (req->method) {
         zend_string_release(req->method);
+        req->method = NULL;
     }
 
     if (req->uri) {
         zend_string_release(req->uri);
+        req->uri = NULL;
     }
 
     if (req->headers) {
+        /* zend_hash_destroy frees arData + releases keys/values in the
+         * table's own domain (flag-aware); only the HashTable struct block
+         * needs the matching free. pefree(_, false) == efree == the old
+         * FREE_HASHTABLE, so ZMM requests are byte-for-byte unchanged. */
         zend_hash_destroy(req->headers);
-        FREE_HASHTABLE(req->headers);
+        pefree(req->headers, req->persistent);
+        req->headers = NULL;
     }
 
     body_release(req->body);
@@ -1097,34 +1095,57 @@ void http_request_destroy(http_request_t *req)
     if (req->multipart_proc) {
         mp_processor_cleanup_temp_files(req->multipart_proc);
         mp_processor_destroy(req->multipart_proc);
+        req->multipart_proc = NULL;
     }
 
     if (req->post_data) {
         zend_hash_destroy(req->post_data);
         FREE_HASHTABLE(req->post_data);
+        req->post_data = NULL;
     }
 
     if (req->files) {
         zend_hash_destroy(req->files);
         FREE_HASHTABLE(req->files);
+        req->files = NULL;
     }
 
     if (req->path) {
         zend_string_release(req->path);
+        req->path = NULL;
     }
 
     if (req->query_params) {
         zend_hash_destroy(req->query_params);
         FREE_HASHTABLE(req->query_params);
+        req->query_params = NULL;
     }
 
     if (req->traceparent_raw) {
         zend_string_release(req->traceparent_raw);
+        req->traceparent_raw = NULL;
     }
 
     if (req->tracestate_raw) {
         zend_string_release(req->tracestate_raw);
+        req->tracestate_raw = NULL;
     }
+}
+
+void http_request_destroy(http_request_t *req)
+{
+    if (!req) {
+        return;
+    }
+    /* Refcount-based release. Each holder calls destroy when done; the
+     * last call (refcount → 0) actually frees. Allocators init refcount
+     * to 1 so a single-owner caller's destroy still frees immediately —
+     * preserves the pre-refcount behavior at every existing call site. */
+    if (--req->refcount > 0) {
+        return;
+    }
+
+    http_request_free_fields(req);
 
     /* Custom release path — embedder pools the slot itself and finishes
      * any embedder-specific teardown. NULL = legacy ecalloc owner, free
@@ -1138,7 +1159,9 @@ void http_request_destroy(http_request_t *req)
         return;
     }
 
-    efree(req);
+    /* Standalone owner (H1 ecalloc / reactor pecalloc). pefree(_, false)
+     * == efree, so ZMM requests free exactly as before. */
+    pefree(req, req->persistent);
 }
 
 /* Helper: Reset smart_str with buffer reuse if possible */

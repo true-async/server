@@ -136,6 +136,11 @@ struct _http_server_config_t {
     zend_string *tls_cert_path;
     zend_string *tls_key_path;
 
+    /* hq-interop (HTTP/0.9-over-QUIC) document root. Set via
+     * setHttp3HqDocroot; the interop hq shim serves files from here.
+     * NULL = hq serves no files. No effect on h3. */
+    zend_string *http3_hq_docroot;
+
     /* Buffer sizes */
     size_t write_buffer_size;   /* Write buffer size (default: 65536) */
 
@@ -511,6 +516,11 @@ void http_server_on_parse_error(http_server_object *server, int status_code);
  * getters are clearer than exposing the whole struct. */
 HashTable          *http_server_get_protocol_handlers(http_server_object *server);
 zend_async_scope_t *http_server_get_scope            (http_server_object *server);
+
+/* Resolve the core server object from its PHP wrapper (the create_object stash).
+ * The wrapper layout is private to http_server_class.c, so this is the public
+ * way to reach the core from another TU (used by the worker-dispatch test hook). */
+http_server_object *http_server_object_from_zend(zend_object *obj);
 
 /* Live HttpServerConfig the server was constructed with. The returned
  * pointer is non-owning and stays valid for the server's lifetime —

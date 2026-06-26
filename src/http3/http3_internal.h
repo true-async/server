@@ -64,6 +64,12 @@
  * consistent — zend_hrtime fits. */
 ngtcp2_tstamp http3_ts_now(void);
 
+/* Reactor-iteration watchdog budget in nanoseconds (#80 Phase 0). A poll-cb
+ * tick or a timer fire that takes longer than this is "slow" — on the single
+ * reactor thread that delay is imposed on every connection's ACK/PTO. Read
+ * once from PHP_HTTP3_REACTOR_BUDGET_MS (default 10 ms); cached thereafter. */
+uint64_t http3_reactor_budget_ns(void);
+
 /* Secure random bytes via OpenSSL. Returns true on success. Callers MUST
  * propagate false: a silent zero-fill fallback would produce all-zero
  * SCIDs and all-zero stateless-reset tokens, both of which are
@@ -152,6 +158,12 @@ extern const http_response_stream_ops_t h3_stream_ops;
 bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming);
+
+/* Reverse path (#80, B4): submit a buffered response from a worker-rendered
+ * response_wire instead of the per-stream HttpResponse zval. Reactor thread. */
+typedef struct response_wire_s response_wire_t;
+bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
+                                       const response_wire_t *rw);
 
 /* Streaming-vtable hooks reused by the static-file delivery TU
  * (http3_static_response.c). Pumping a file through chunk_queue is

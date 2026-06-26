@@ -60,6 +60,30 @@ endif()
 
 add_test(NAME ThreadQueue COMMAND test_thread_queue)
 
+# Flat response_wire marshalling type (issue #80, D3). Worker -> reactor
+# response; pure malloc-domain C, no PHP/Zend runtime.
+add_executable(test_response_wire
+    core/test_response_wire.c
+    ${CMAKE_SOURCE_DIR}/../src/core/response_wire.c
+)
+
+target_include_directories(test_response_wire PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+    ${CMAKE_SOURCE_DIR}/../src/core
+)
+
+target_link_libraries(test_response_wire
+    test_common
+    ${CMOCKA_LIBRARIES}
+)
+
+if(UNIX)
+    target_link_libraries(test_response_wire m pthread)
+endif()
+
+add_test(NAME ResponseWire COMMAND test_response_wire)
+
 if(WIN32)
     set_tests_properties(ThreadQueue PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
@@ -632,6 +656,43 @@ if(NGTCP2_FOUND AND NGTCP2_OSSL_FOUND AND NGHTTP3_FOUND AND OpenSSL_FOUND)
 
     if(UNIX AND NOT APPLE)
         set_tests_properties(HTTP3Packet PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+        )
+    endif()
+endif()
+
+# HTTP/3 CID steering core (#80 D6 / #72) — pure crypto addressing layer
+# (AES-masked reactor id in the CID). No ngtcp2/server; only OpenSSL for the
+# EVP block + DRBG. http3_steer.c is decoupled from the heavy H3 headers so it
+# links standalone with a small http3_fill_random stub in the test.
+find_package(OpenSSL 3.0 QUIET)
+if(OpenSSL_FOUND)
+    add_executable(test_http3_steer
+        http3/test_http3_steer.c
+        ${CMAKE_SOURCE_DIR}/../src/http3/http3_steer.c
+    )
+
+    target_include_directories(test_http3_steer PRIVATE
+        ${CMAKE_SOURCE_DIR}/../include
+        ${CMAKE_SOURCE_DIR}/../src
+        ${CMAKE_SOURCE_DIR}/../src/http3
+    )
+
+    target_link_libraries(test_http3_steer
+        test_common
+        OpenSSL::Crypto
+        ${CMOCKA_LIBRARIES}
+        ${CMAKE_DL_LIBS}
+    )
+
+    if(UNIX)
+        target_link_libraries(test_http3_steer m pthread rt)
+    endif()
+
+    add_test(NAME HTTP3Steer COMMAND test_http3_steer)
+
+    if(UNIX AND NOT APPLE)
+        set_tests_properties(HTTP3Steer PROPERTIES
             ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
         )
     endif()

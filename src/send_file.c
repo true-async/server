@@ -315,8 +315,9 @@ static void engine_handle_stat(engine_state_t *state)
 
 	/* === Cache insert (only on miss path) =========================== */
 
-	if (view == NULL && cfg->server != NULL) {
-		http_static_cache_t *cache = http_static_cache_acquire(cfg->server);
+	if (view == NULL && (cfg->cache != NULL || cfg->server != NULL)) {
+		http_static_cache_t *cache =
+			cfg->cache != NULL ? cfg->cache : http_static_cache_acquire(cfg->server);
 
 		if (cache != NULL) {
 			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
@@ -479,27 +480,18 @@ static void engine_handle_stat(engine_state_t *state)
 	}
 
 	/* === Small-file fast path (slurp + inline body) ================== */
-	/* uv_fs_sendfile slurps to user space then writes; on Linux it falls
-	 * through copy_file_range (EINVAL on socket) into a pread+write loop in a
-	 * worker thread (no zero-copy, a futex round-trip per request). On
-	 * Windows it CANNOT target a socket at all — a Winsock SOCKET is not a
-	 * CRT fd, so the sendfile path below delivers an EMPTY body there. For
-	 * files within the slurp threshold — including byte-range requests, whose
-	 * slice we cut from the in-memory buffer — read the bytes and let the
-	 * protocol op writev(headers+body) through the normal per-socket queue
-	 * instead. (A range/file larger than the threshold still uses sendfile
-	 * and stays broken on Windows — separate follow-up.) */
-	if ((size_t)state->st.st_size <= SEND_FILE_SLURP_THRESHOLD && file_io != NULL) {
+	/* uv_fs_sendfile on Linux falls through copy_file_range (EINVAL on
+	 * socket) into a userspace pread+write loop inside a worker thread
+	 * — no kernel zero-copy + a futex round-trip per request. For small
+	 * files the round-trip dominates. Slurp inline and let the protocol
+	 * op writev(headers+body) through the same per-socket queue that
+	 * headers normally use; ordering is then libuv's problem. */
+	if (!state->is_range && (size_t)state->st.st_size <= SEND_FILE_SLURP_THRESHOLD &&
+		file_io != NULL) {
 		zend_string *body = fs_slurp_fd((int)file_io->descriptor.fd, (size_t)state->st.st_size);
 
 		if (body != NULL) {
-			if (state->is_range) {
-				/* Slice [range_first, range_first + body_len) from the buffer. */
-				http_response_static_set_body_cstr(response_obj,
-					ZSTR_VAL(body) + state->range_first, (size_t)body_len);
-			} else {
-				http_response_static_set_body_str(response_obj, body);
-			}
+			http_response_static_set_body_str(response_obj, body);
 			zend_string_release(body);
 
 			if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }

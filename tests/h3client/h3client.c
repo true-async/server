@@ -431,12 +431,72 @@ static int rebind_socket(h3c_t *c) {
     const int fl = fcntl(nfd, F_GETFL, 0);
     if (fl >= 0) (void)fcntl(nfd, F_SETFL, fl | O_NONBLOCK);
 
+    /* Keep every retired socket OPEN until exit (leaking a bounded handful of
+     * fds across the test's migrations). Closing one makes the kernel answer the
+     * server's in-flight packets on that old path with ICMP port-unreachable —
+     * which a real NAT never does, and which can disturb the server's path
+     * validation. Track the most recent here; main() closes it at exit. */
     c->retired_fd = c->fd;
     c->fd = nfd;
+
+    /* Deliberately DO NOT refresh c.local: this simulates a NAT rebind, where
+     * the source port changes on the wire *below* the client's QUIC stack. The
+     * client keeps describing its original local path to ngtcp2 (no client-
+     * initiated migration); only the server observes the new peer address. */
+    return 0;
+}
+
+/* Force a real client-initiated migration to a *new* local address. Unlike
+ * rebind_socket() (a NAT rebind that keeps the same DCID), ngtcp2 rotates its
+ * DCID to one of the server-issued NEW_CONNECTION_ID values (RFC 9000 §5.1) as
+ * part of migrating. This exercises the server's conn_map lookup on an *issued*
+ * CID — the path that hangs when the server never registers the CIDs it hands
+ * out. Returns 0 on success, 1 if no unused server CID is available yet, -1 on
+ * error. */
+static int rotate_dcid(h3c_t *c) {
+    int nfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (nfd < 0) { perror("rotate socket"); return -1; }
+
+    struct sockaddr_in zero = { .sin_family = AF_INET };
+    if (bind(nfd, (struct sockaddr *)&zero, sizeof(zero)) < 0) {
+        perror("rotate bind"); close(nfd); return -1;
+    }
+
+    const int rcvbuf = 8 * 1024 * 1024;
+    (void)setsockopt(nfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    const int fl = fcntl(nfd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(nfd, F_SETFL, fl | O_NONBLOCK);
+
+    /* Retire the old socket (kept open until exit, like rebind_socket, so the
+     * kernel does not ICMP the server's in-flight old-path packets). */
+    c->retired_fd = c->fd;
+    c->fd = nfd;
+
+    /* REFRESH c->local — this is what distinguishes a migration from a NAT
+     * rebind: ngtcp2 must see a new local path to migrate (and reject a path
+     * whose local equals the current one). */
+    c->local_len = sizeof(c->local);
+    if (getsockname(c->fd, (struct sockaddr *)&c->local, &c->local_len) < 0) {
+        perror("rotate getsockname"); return -1;
+    }
+
+    ngtcp2_path_storage ps = {0};
+    ngtcp2_path_storage_init(&ps,
+        (struct sockaddr *)&c->local,  c->local_len,
+        (struct sockaddr *)&c->remote, c->remote_len, NULL);
+    int rv = ngtcp2_conn_initiate_immediate_migration(c->qc, &ps.path, now_ns());
+    if (rv == NGTCP2_ERR_CONN_ID_BLOCKED) {
+        return 1;
+    }
+    if (rv != 0) {
+        fprintf(stderr, "h3client: initiate_immediate_migration rv=%d\n", rv);
+        return -1;
+    }
     return 0;
 }
 
 /* ----- main ----- */
+
 
 int main(int argc, char **argv) {
     if (argc < 4) {
@@ -615,10 +675,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* H3CLIENT_MIGRATE_AFTER=N — after the N-th completed request, rebind
-     * the UDP socket to a new source port (NAT-rebind) before issuing the
-     * next one. Drives the server's connection-migration path (RFC 9000
-     * §9). 0/unset = off; pair with H3CLIENT_REQUEST_COUNT > N. */
+    /* H3CLIENT_MIGRATE_AFTER=N — once N requests have completed, rebind the UDP
+     * socket to a new source port (NAT-rebind) before EACH subsequent request,
+     * so REQUEST_COUNT-N migrations happen back to back. Drives the server's
+     * connection-migration path (RFC 9000 §9); with a multi-reactor server it
+     * also forces SO_REUSEPORT to rehash the connection onto another reactor,
+     * exercising CID steering (#80 D6 / #72). 0/unset = off; pair with
+     * H3CLIENT_REQUEST_COUNT > N. */
     unsigned long migrate_after = 0;
     {
         const char *env = getenv("H3CLIENT_MIGRATE_AFTER");
@@ -627,6 +690,25 @@ int main(int argc, char **argv) {
             unsigned long n = strtoul(env, &end, 10);
             if (end != env && *end == '\0' && n <= 10000000ul) {
                 migrate_after = n;
+            }
+        }
+    }
+
+    /* H3CLIENT_ROTATE_DCID_AFTER=N — once N requests have completed, perform a
+     * real client-initiated migration (new local addr) so ngtcp2 rotates its
+     * DCID to a server-issued NEW_CONNECTION_ID. Drives the server's conn_map
+     * lookup on an *issued* CID (RFC 9000 §5.1). Repeats before each subsequent
+     * request, so REQUEST_COUNT-N rotations happen in sequence. Distinct from
+     * MIGRATE_AFTER (NAT rebind, same DCID). 0/unset = off; pair with
+     * H3CLIENT_REQUEST_COUNT > N. */
+    unsigned long rotate_dcid_after = 0;
+    {
+        const char *env = getenv("H3CLIENT_ROTATE_DCID_AFTER");
+        if (env != NULL && *env != '\0') {
+            char *end = NULL;
+            unsigned long n = strtoul(env, &end, 10);
+            if (end != env && *end == '\0' && n <= 10000000ul) {
+                rotate_dcid_after = n;
             }
         }
     }
@@ -670,13 +752,28 @@ int main(int argc, char **argv) {
             completed++;
             if (completed >= request_count) break;
 
-            /* NAT-rebind point — continue the same connection from a new
-             * source port so the server exercises its migration path. */
-            if (migrate_after != 0 && completed == migrate_after) {
+            /* NAT-rebind point — continue the same connection from a new source
+             * port so the server exercises its migration path. Rebinds before
+             * every request once `migrate_after` is reached, so a multi-reactor
+             * server is repeatedly rehashed across reactors. */
+            if (migrate_after != 0 && completed >= migrate_after) {
                 if (rebind_socket(&c) < 0) {
                     fprintf(stderr, "h3client: rebind failed\n"); return 1;
                 }
                 if (!quiet) { fprintf(stderr, "MIGRATED\n"); }
+            }
+
+            /* DCID-rotation point — migrate to a new local path so ngtcp2
+             * switches its DCID to a server-issued CID. Repeats before each
+             * subsequent request once the threshold is reached. */
+            if (rotate_dcid_after != 0 && completed >= rotate_dcid_after) {
+                int rr = rotate_dcid(&c);
+                if (rr < 0) {
+                    fprintf(stderr, "h3client: rotate_dcid failed\n"); return 1;
+                }
+                if (!quiet) {
+                    fprintf(stderr, rr == 0 ? "ROTATED_DCID\n" : "ROTATE_BLOCKED\n");
+                }
             }
 
             /* Reset per-request state — keep the connection + h3 conn. */
