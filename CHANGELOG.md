@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server-Sent Events API (#3).** First-class `text/event-stream` helpers on
+  `HttpResponse` — `sseStart()`, `sseEvent($data, $event, $id, $retry)`,
+  `sseComment()` and `sseRetry()` — layered on the existing streaming pipeline,
+  so the same handler works over HTTP/1.1, HTTP/2 and HTTP/3. `sseStart()` sets
+  the canonical headers (`Content-Type: text/event-stream`, `Cache-Control:
+  no-cache, no-transform`, `X-Accel-Buffering: no`) and marks the response
+  non-compressible. Framing follows WHATWG §9.2: multiline `data` is split per
+  line, single-line fields reject CR/LF and `id` rejects NUL. phpt coverage for
+  H1/H2/H3 plus the validation surface.
+
 - **hq-interop (HTTP/0.9-over-QUIC) for the interop matrix (#80).** A second QUIC
   ALPN, `hq-interop`, served straight off the transport (no nghttp3): a raw bidi
   stream `GET <path>` returns the file bytes + FIN from `setHttp3HqDocroot()`.

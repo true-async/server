@@ -513,6 +513,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/formats/multipart_processor.c
     src/http_request.c
     src/http_response.c
+    src/http_sse.c
     src/http_response_server_api.c
     src/http_body_stream.c
     src/http_mime.c
