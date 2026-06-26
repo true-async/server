@@ -74,7 +74,7 @@ set(CORE_SUBSYSTEM_SOURCES
     src/core/thread_mailbox.c
     # Reactor thread pool (issue #80): pure-C transport reactors on the ThreadPool.
     src/core/reactor_pool.c
-    src/core/reactor_pool_test.c
+    src/core/reactor_pool_test_hooks.c
     # Flat response marshalling type (issue #80, D3): worker -> reactor response.
     src/core/response_wire.c
     # Worker-side request dispatch (issue #80, B1b/D7): request ptr -> handler -> response.
