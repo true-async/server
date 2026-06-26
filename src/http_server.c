@@ -21,6 +21,7 @@
 # include "compression/http_compression_pool.h"
 #endif
 #include "http_known_strings.h"
+#include "core/reactor_pool_test.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
 #include "http_send_file.h"
@@ -155,7 +156,7 @@ ZEND_GET_MODULE(http_server)
 /* {{{ PHP_MINIT_FUNCTION */
 PHP_MINIT_FUNCTION(http_server)
 {
-	(void)type; (void)module_number;
+	(void)module_number;
 	/* Initialize module globals */
 	ZEND_INIT_MODULE_GLOBALS(http_server, php_http_server_init_globals, NULL);
 
@@ -180,6 +181,9 @@ PHP_MINIT_FUNCTION(http_server)
 	http_send_file_options_class_register();
 	http_static_handler_class_register();
 	http_server_class_register();
+
+	/* Test-only C hooks; a no-op unless built with HTTP_SERVER_TEST_HOOKS. */
+	reactor_pool_test_register(type);
 
 	return SUCCESS;
 }

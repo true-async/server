@@ -263,13 +263,6 @@ struct _http_connection_t {
      * iterating. The destroy defers on this flag instead — see the
      * gate in http_connection_destroy and the drain in http1_feed. */
     unsigned                 in_parser_feed : 1;
-    /* Lingering close (graceful). Set after an error response (e.g. 413)
-     * is sent while the peer is still uploading: we keep reading and
-     * DISCARDING the peer's remaining body so the eventual close emits a
-     * clean FIN instead of an RST. Closing a socket with unread recv data
-     * forces an abortive RST on Windows, which wipes the just-sent
-     * response. Bounded by deadline_ms / the periodic deadline_tick. */
-    unsigned                 lingering : 1;
 
     /* Intrusive doubly-linked node. Dual role:
      *   - while the slot is ALIVE, (next_conn, prev_conn) link into

@@ -74,10 +74,12 @@ static const uint8_t tls_alpn_tcp_list[] = {
 };
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
-/* QUIC ALPN identifier per RFC 9114. HTTP/3 only — no downgrade to h2
- * over QUIC (there is no such protocol) or http/1.1 over QUIC. */
+/* QUIC ALPN set. h3 (RFC 9114) is the real protocol; hq-interop is the raw
+ * HTTP/0.9-over-QUIC shim the interop test matrix speaks. h3 stays first so
+ * server-preference keeps it winning when a peer offers both. */
 static const uint8_t tls_alpn_quic_list[] = {
-    2, 'h', '3'
+    2, 'h', '3',
+    10, 'h', 'q', '-', 'i', 'n', 't', 'e', 'r', 'o', 'p'
 };
 #endif
 

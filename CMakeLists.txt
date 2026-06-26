@@ -72,6 +72,17 @@ set(CORE_SUBSYSTEM_SOURCES
     # Inter-thread message queue (issue #81): C++ moodycamel wrapper + C reactor glue.
     src/core/thread_queue.cc
     src/core/thread_mailbox.c
+    # Reactor thread pool (issue #80): pure-C transport reactors on the ThreadPool.
+    src/core/reactor_pool.c
+    src/core/reactor_pool_test_hooks.c
+    # Flat response marshalling type (issue #80, D3): worker -> reactor response.
+    src/core/response_wire.c
+    # Worker-side request dispatch (issue #80, B1b/D7): request ptr -> handler -> response.
+    src/core/worker_dispatch.c
+    # Worker inbox (issue #80, B2): per-worker request mailbox + dispatch drain.
+    src/core/worker_inbox.c
+    # Worker registry (issue #80, B3): atomic table of per-worker inboxes.
+    src/core/worker_registry.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files
@@ -231,6 +242,7 @@ if(ENABLE_HTTP3)
             src/http3/http3_callbacks.c
             src/http3/http3_io.c
             src/http3/http3_packet.c
+            src/http3/http3_steer.c
             src/http3/http3_stream.c
             src/http3/http3_stream_pool.c
             src/http3/http3_static_response.c

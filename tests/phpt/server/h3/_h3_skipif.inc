@@ -36,7 +36,26 @@ function h3_skipif(array $req = []): void {
         'openssl_cli' => false,
         'h3client'    => false,
         'objdump'     => false,
+        'aioquic'     => false,
     ];
+
+    if ($req['aioquic']) {
+        /* hq-interop tests drive the server with the aioquic Python client
+         * (the same QUIC stack the interop runner uses): no nghttp3, raw
+         * HTTP/0.9. Skip where python3 / the module is unavailable rather
+         * than fail — mirrors the openssl_cli / h3client gating. */
+        if (PHP_OS_FAMILY === 'Windows') {
+            die('skip aioquic hq harness is POSIX-only here');
+        }
+        if (!h3_have_cli('python3')) {
+            die('skip python3 not available');
+        }
+        $rc = 0; $out = [];
+        @exec('python3 -c "import aioquic" 2>&1', $out, $rc);
+        if ($rc !== 0) {
+            die('skip python3 aioquic module not installed');
+        }
+    }
 
     if ($req['sockets'] && !extension_loaded('sockets')) {
         die('skip ext/sockets required');

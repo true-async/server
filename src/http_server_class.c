@@ -28,11 +28,16 @@
 #include "core/http_protocol_handlers.h"
 #include "core/http_protocol_strategy.h"
 #include "core/tls_layer.h"
+#include "core/reactor_pool.h"
+#include "core/worker_inbox.h"
+#include "core/worker_registry.h"
+#include "core/response_wire.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
 #include "static/http_static_cache.h"
 #ifdef HAVE_HTTP_SERVER_HTTP3
 # include "http3/http3_listener.h"
+# include "http3/http3_steer.h"
 #endif
 
 /* Backpressure tunables. Hard-cap hysteresis ratio: pause_low = ratio *
@@ -284,12 +289,41 @@ struct http_server_object {
     http_pool_tcp_fd_t       pool_tcp_fds[MAX_LISTENERS];
     size_t                   pool_tcp_fd_count;
 
+    /* Pure-C transport reactor pool. Parent-only, brought up when an H3
+     * listener is configured and the opt-in env gate is set; NULL otherwise.
+     * Owns no PHP state. */
+    reactor_pool_t          *reactor_pool;
+
+    /* This worker clone's request inbox. Non-NULL only on a worker clone
+     * running under the reactor-pool gate; the reactor posts parsed requests
+     * here and the drain dispatches them on this thread. */
+    worker_inbox_t          *worker_inbox;
+
 #ifdef HAVE_HTTP_SERVER_HTTP3
     /* HTTP/3 UDP listeners — parallel to TCP listeners[] because they have
      * different transport semantics (no accept(), no per-connection fd) and
      * are teardown-driven by http3_listener_destroy(). */
     http3_listener_t        *http3_listeners[MAX_LISTENERS];
     size_t                   http3_listener_count;
+
+    /* Reactor-owned H3 listeners. Parent-only, under the gate: one per
+     * (reactor x configured udp_h3 listener), spawned ON the reactor thread so
+     * its uv socket lives on the right loop. The parent owns these + their
+     * thread-clean contexts + a shared SSL_CTX; all torn down with the reactor
+     * pool. Each entry remembers which reactor it runs on so teardown can run
+     * on that thread. */
+    struct { http3_listener_t *listener; int reactor_id; }
+                             reactor_h3_listeners[MAX_LISTENERS];
+    size_t                   reactor_h3_listener_count;
+    http3_reactor_ctx_t     *reactor_h3_ctx;          /* [reactor count] */
+    tls_context_t           *reactor_tls_ctx;         /* parent-built shared SSL_CTX */
+
+    /* CID steering groups, one per H3 endpoint. Each groups that endpoint's
+     * per-reactor listeners by reactor id so any reactor can forward a stray
+     * (migrated) datagram to the owner. Built after the listeners spawn, freed
+     * after they tear down. */
+    http3_steer_group_t     *reactor_h3_steer[MAX_LISTENERS];
+    size_t                   reactor_h3_steer_count;
 
     /* Pre-rendered "h3=\":<port>\"; ma=86400" string, refreshed
      * at start() when an H3 listener is configured. NULL when H3 is
@@ -489,6 +523,10 @@ static inline http_server_object *http_server_from_obj(zend_object *obj) {
     return http_server_php_from_obj(obj)->server;
 }
 #define Z_HTTP_SERVER_P(zv) http_server_from_obj(Z_OBJ_P(zv))
+
+http_server_object *http_server_object_from_zend(zend_object *obj) {
+    return http_server_from_obj(obj);
+}
 
 /* Single-thread per worker — no atomics needed. */
 static void http_server_state_finalize(http_server_object *server);
@@ -1004,6 +1042,16 @@ http_static_handler_get(const http_server_object *server, size_t index)
     }
 
     return server->static_handler_mounts[index];
+}
+
+const http_static_handler_t *const *
+http_static_handler_mounts(const http_server_object *server)
+{
+    if (server == NULL || server->static_handler_count == 0) {
+        return NULL;
+    }
+
+    return (const http_static_handler_t *const *)server->static_handler_mounts;
 }
 
 /* Open-file cache accessor. The cache instance is per-server (per-worker
@@ -2014,6 +2062,440 @@ static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
 
 #endif  /* !PHP_WIN32 */
 
+/* Process-wide registry of worker inboxes. The pool parent creates it; worker
+ * clones publish their inbox into it; reactor threads read it to pick a worker.
+ * One per process, shared across all threads. */
+static worker_registry_t *g_worker_registry = NULL;
+
+/* Process-wide reactor pool handle. The pool itself is owned by the parent's
+ * http_server_object; this global lets a worker thread reach it to post
+ * responses back over the reverse channel (reactor_pool_post_exec), addressed by
+ * the reactor_id carried on each request/response. One pool per process. */
+static reactor_pool_t *g_reactor_pool = NULL;
+
+/* Reactor pool opt-in gate. While the H3-listener-on-reactor wiring is
+ * incomplete the pool is brought up only when TRUE_ASYNC_SERVER_REACTOR_POOL=1
+ * so the default server behaves exactly as before. */
+static bool http_server_reactor_pool_enabled(void)
+{
+    const char *env = getenv("TRUE_ASYNC_SERVER_REACTOR_POOL");
+    return env != NULL && env[0] == '1';
+}
+
+/* Online CPU count, floor 1 — caps the reactor pool at the core count. */
+static int http_server_online_cpus(void)
+{
+#ifdef PHP_WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+#else
+    const long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
+}
+
+/* True when the server config declares at least one HTTP/3 (QUIC) listener —
+ * the reactor pool's only client today (the kernel ACKs TCP independently). */
+static bool http_server_config_has_h3(http_server_object *server)
+{
+    http_server_config_t *const cfg = http_server_get_config(server);
+
+    if (cfg == NULL) {
+        return false;
+    }
+
+    for (size_t i = 0; i < cfg->listener_count; i++) {
+        if (cfg->listeners[i].type == LISTENER_TYPE_UDP_H3) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+/* Exec payload: spawn one reactor-mode H3 listener ON the reactor thread — its
+ * uv socket must be created on the loop that owns it (run via reactor_pool_exec).
+ * server_obj is NULL (the reactor must not touch the parent's PHP object); the
+ * thread-clean ctx drives config + worker routing. */
+typedef struct {
+    const char                *host;
+    int                        port;
+    void                      *ssl_ctx;
+    const http3_reactor_ctx_t *ctx;
+    http3_steer_group_t       *steer; /* endpoint's steering group, or NULL */
+    http3_listener_t          *out;   /* result, NULL on failure */
+} reactor_h3_spawn_arg_t;
+
+static void reactor_h3_spawn_fn(void *arg)
+{
+    reactor_h3_spawn_arg_t *const spawn = (reactor_h3_spawn_arg_t *)arg;
+    spawn->out = http3_listener_spawn(spawn->host, spawn->port, spawn->ssl_ctx, NULL, spawn->ctx);
+
+    if (spawn->out == NULL && EG(exception)) {
+        zend_clear_exception();   /* don't dangle on the reactor's EG */
+    }
+
+    /* Arm steering on the reactor's own thread before it processes traffic —
+     * the listener already polls here, so this store happens-before any read in
+     * try_steer on the same thread. */
+    if (spawn->out != NULL && spawn->steer != NULL) {
+        http3_listener_set_steer(spawn->out, spawn->steer);
+    }
+}
+
+static void reactor_h3_destroy_fn(void *arg)
+{
+    http3_listener_destroy((http3_listener_t *)arg);
+}
+
+/* Spawn one reactor-mode H3 listener per (reactor x configured udp_h3 listener),
+ * each on its reactor's own thread. Builds the parent-shared SSL_CTX + the
+ * per-reactor thread-clean contexts (config scalars resolved here on the parent
+ * where the server object is valid). Non-fatal: on failure the gated server just
+ * doesn't serve H3. Returns the number spawned. */
+static size_t http_server_reactor_h3_spawn(http_server_object *server, const int reactors)
+{
+    http_server_config_t *const cfg = http_server_get_config(server);
+
+    if (cfg == NULL) {
+        return 0;
+    }
+
+    /* QUIC mandates TLS — build the SSL_CTX on the parent (shared across reactor
+     * threads; OpenSSL SSL_CTX is safe for concurrent per-connection SSL use). */
+    char tls_err[TLS_ERR_BUF_SIZE];
+    tls_err[0] = '\0';
+    server->reactor_tls_ctx = tls_context_new(
+        cfg->tls_cert_path ? ZSTR_VAL(cfg->tls_cert_path) : NULL,
+        cfg->tls_key_path  ? ZSTR_VAL(cfg->tls_key_path)  : NULL,
+        tls_err, sizeof(tls_err));
+
+    if (server->reactor_tls_ctx == NULL) {
+        fprintf(stderr, "[true-async-server] reactor H3 TLS context failed: %s\n",
+                tls_err[0] != '\0' ? tls_err : "(no detail)");
+        fflush(stderr);
+        return 0;
+    }
+
+    server->reactor_h3_ctx =
+        pecalloc((size_t)reactors, sizeof(http3_reactor_ctx_t), 1);
+
+    const uint32_t socket_buffer_bytes = http_server_get_http3_socket_buffer_bytes(server);
+    const uint32_t peer_budget         = http_server_get_http3_peer_connection_budget(server);
+    const int      max_conns           = http_server_get_max_connections(server);
+    const http_static_handler_t *const *const mounts = http_static_handler_mounts(server);
+    const size_t   mount_count   = http_static_handler_count(server);
+
+    /* Merge the open-file cache settings across mounts (max of max_entries,
+     * min of non-zero ttl), same policy as http_static_cache_acquire. Each
+     * reactor gets its own cache instance below. */
+    int32_t cache_max = 0;
+    int32_t cache_ttl = 0;
+    for (size_t mi = 0; mi < mount_count; mi++) {
+        const http_static_handler_t *const m = mounts[mi];
+
+        if (m == NULL || m->cache_max_entries <= 0 || m->cache_ttl_seconds <= 0) {
+            continue;
+        }
+
+        if (m->cache_max_entries > cache_max) {
+            cache_max = m->cache_max_entries;
+        }
+
+        if (cache_ttl == 0 || m->cache_ttl_seconds < cache_ttl) {
+            cache_ttl = m->cache_ttl_seconds;
+        }
+    }
+
+    for (int r = 0; r < reactors; r++) {
+        server->reactor_h3_ctx[r].registry            = g_worker_registry;
+        server->reactor_h3_ctx[r].pool                = server->reactor_pool;
+        server->reactor_h3_ctx[r].reactor_id          = r;
+        server->reactor_h3_ctx[r].n_reactors          = reactors;
+        server->reactor_h3_ctx[r].socket_buffer_bytes = socket_buffer_bytes;
+        server->reactor_h3_ctx[r].peer_budget         = peer_budget;
+        server->reactor_h3_ctx[r].max_conns           = max_conns > 0 ? (uint32_t)max_conns : 0;
+        server->reactor_h3_ctx[r].static_mounts       = (const void *)mounts;
+        server->reactor_h3_ctx[r].static_mount_count  = mount_count;
+        server->reactor_h3_ctx[r].static_cache        =
+            (cache_max > 0 && cache_ttl > 0)
+                ? http_static_cache_create((size_t)cache_max, (time_t)cache_ttl)
+                : NULL;
+    }
+
+    void *const ssl_ctx = server->reactor_tls_ctx->ctx;
+    size_t spawned = 0;
+
+    /* Steering engages only with >1 reactor (a single reactor owns every
+     * connection — nothing to forward). Set process-wide before any listener
+     * starts minting CIDs. */
+    const bool steer_active = http3_steer_active();
+
+    for (size_t i = 0; i < cfg->listener_count; i++) {
+        if (cfg->listeners[i].type != LISTENER_TYPE_UDP_H3
+            || cfg->listeners[i].host == NULL) {
+            continue;
+        }
+
+        /* One steering group per endpoint, grouping its per-reactor listeners
+         * by reactor id. Created up front so each listener can be armed with it
+         * on its own reactor thread at spawn. */
+        http3_steer_group_t *group =
+            steer_active ? http3_steer_group_create(server->reactor_pool, reactors)
+                         : NULL;
+        size_t group_listeners = 0;
+
+        for (int r = 0; r < reactors; r++) {
+            if (server->reactor_h3_listener_count >= MAX_LISTENERS) {
+                break;
+            }
+
+            reactor_h3_spawn_arg_t arg = {
+                .host    = ZSTR_VAL(cfg->listeners[i].host),
+                .port    = cfg->listeners[i].port,
+                .ssl_ctx = ssl_ctx,
+                .ctx     = &server->reactor_h3_ctx[r],
+                .steer   = group,
+                .out     = NULL,
+            };
+
+            if (!reactor_pool_exec(server->reactor_pool, r, reactor_h3_spawn_fn, &arg)
+                || arg.out == NULL) {
+                fprintf(stderr,
+                    "[true-async-server] reactor H3 listener spawn failed "
+                    "(reactor %d, %s:%d)\n", r, arg.host, arg.port);
+                fflush(stderr);
+                continue;
+            }
+
+            /* Publish the listener into its endpoint's steering table so sibling
+             * reactors can forward to it (atomic — read lock-free on the
+             * forward path). */
+            http3_steer_group_publish(group, r, arg.out);
+            group_listeners++;
+
+            const size_t n = server->reactor_h3_listener_count++;
+            server->reactor_h3_listeners[n].listener   = arg.out;
+            server->reactor_h3_listeners[n].reactor_id = r;
+            spawned++;
+        }
+
+        if (group != NULL && group_listeners > 0
+            && server->reactor_h3_steer_count < MAX_LISTENERS) {
+            server->reactor_h3_steer[server->reactor_h3_steer_count++] = group;
+        } else {
+            http3_steer_group_free(group);   /* no listeners, or no slot — drop it */
+        }
+    }
+
+    return spawned;
+}
+
+/* Tear down every reactor-owned H3 listener on its own reactor thread (libuv
+ * handles + ZMM allocated there), then free the contexts + shared SSL_CTX. Runs
+ * before reactor_pool_destroy stops the reactors. */
+static void http_server_reactor_h3_teardown(http_server_object *server)
+{
+    for (size_t i = 0; i < server->reactor_h3_listener_count; i++) {
+        if (server->reactor_pool != NULL
+            && server->reactor_h3_listeners[i].listener != NULL) {
+            reactor_pool_exec(server->reactor_pool,
+                              server->reactor_h3_listeners[i].reactor_id,
+                              reactor_h3_destroy_fn,
+                              server->reactor_h3_listeners[i].listener);
+        }
+
+        server->reactor_h3_listeners[i].listener = NULL;
+    }
+
+    server->reactor_h3_listener_count = 0;
+
+    if (server->reactor_h3_ctx != NULL) {
+        /* Destroy the per-reactor open-file caches. Listeners are already torn
+         * down above (synchronously, on their reactors), so no reactor is still
+         * serving; the caches are persistent (malloc), freed here on the parent. */
+        const int rc = server->reactor_pool != NULL
+            ? reactor_pool_count(server->reactor_pool) : 0;
+
+        for (int r = 0; r < rc; r++) {
+            if (server->reactor_h3_ctx[r].static_cache != NULL) {
+                http_static_cache_destroy(server->reactor_h3_ctx[r].static_cache);
+                server->reactor_h3_ctx[r].static_cache = NULL;
+            }
+        }
+
+        pefree(server->reactor_h3_ctx, 1);
+        server->reactor_h3_ctx = NULL;
+    }
+
+    if (server->reactor_tls_ctx != NULL) {
+        tls_context_free(server->reactor_tls_ctx);
+        server->reactor_tls_ctx = NULL;
+    }
+}
+#endif /* HAVE_HTTP_SERVER_HTTP3 */
+
+/* Bring up the transport reactor pool on the parent before workers run.
+ * reactors = min(workers, cores) per the accepted R:W topology. No-op (and
+ * leaves reactor_pool NULL) when the gate is off or no H3 listener is
+ * configured. Non-fatal: a failed bring-up logs and the server runs without
+ * it. */
+static void http_server_reactor_pool_up(http_server_object *server, const int workers)
+{
+    server->reactor_pool = NULL;
+
+    if (!http_server_reactor_pool_enabled() || !http_server_config_has_h3(server)) {
+        return;
+    }
+
+    const int cores    = http_server_online_cpus();
+    const int reactors = workers < cores ? workers : cores;
+
+    server->reactor_pool = reactor_pool_create(reactors);
+
+    if (server->reactor_pool == NULL) {
+        /* reactor_pool_create may set a PHP error on hard failures; clear it
+         * so the (non-fatal) gate does not poison the parent coroutine. */
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+
+        fprintf(stderr,
+            "[true-async-server] reactor pool bring-up failed (reactors=%d) — "
+            "continuing without it\n", reactors);
+        fflush(stderr);
+        return;
+    }
+
+    /* One inbox slot per worker — workers publish into it as they come up. */
+    g_worker_registry = worker_registry_create(workers);
+    g_reactor_pool    = server->reactor_pool;
+
+    size_t h3_spawned = 0;
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* Arm CID steering before any reactor mints a CID: encode the owner
+     * reactor's id into every server CID so a migrated client rehashed by
+     * SO_REUSEPORT onto another reactor routes back to its owner. Active only
+     * with >1 reactor (the id is one byte, so cap at 256). */
+    const int real_reactors = reactor_pool_count(server->reactor_pool);
+
+    if (http3_steer_init()) {
+        http3_steer_set_active(real_reactors > 1 && real_reactors <= 256);
+        /* Flush forwarded datagrams once per reactor drain batch (not per
+         * packet), so a burst of steered datagrams under rapid migration sends
+         * like a recvmmsg tick instead of fragmenting a connection's output. */
+        reactor_pool_set_drain_epilogue(http3_reactor_steer_flush_epilogue);
+    }
+
+    /* Spawn the H3 listeners ON the reactor threads now. From here the workers
+     * stop spawning their own H3 listener (gated, in start()); the reactor owns
+     * the transport and routes parsed requests to workers via the registry. */
+    h3_spawned = http_server_reactor_h3_spawn(server, reactors);
+#endif
+
+    fprintf(stderr,
+        "[true-async-server] reactor pool up: %d reactor(s), worker registry: %d slot(s), "
+        "%zu H3 listener(s) on reactors\n",
+        reactor_pool_count(server->reactor_pool),
+        worker_registry_capacity(g_worker_registry),
+        h3_spawned);
+    fflush(stderr);
+}
+
+/* Tear the reactor pool down on the parent after workers have quiesced.
+ * Idempotent; safe when the pool was never brought up. */
+static void http_server_reactor_pool_down(http_server_object *server)
+{
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* Reactor-owned H3 listeners first, on their own threads, while the reactors
+     * still run — then stop the pool. */
+    http_server_reactor_h3_teardown(server);
+#endif
+
+    g_reactor_pool = NULL;
+
+    if (g_worker_registry != NULL) {
+        worker_registry_free(g_worker_registry);
+        g_worker_registry = NULL;
+    }
+
+    if (server->reactor_pool != NULL) {
+        reactor_pool_destroy(server->reactor_pool);
+        server->reactor_pool = NULL;
+    }
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* Steering groups last: only safe once every reactor has stopped, since a
+     * forward still queued on a reactor's mailbox reads the group's slots. */
+    for (size_t i = 0; i < server->reactor_h3_steer_count; i++) {
+        http3_steer_group_free(server->reactor_h3_steer[i]);
+        server->reactor_h3_steer[i] = NULL;
+    }
+
+    server->reactor_h3_steer_count = 0;
+#endif
+}
+
+/* Worker response sink: post the rendered response back to the originating
+ * reactor for nghttp3 encode + send. Runs on the worker thread (from
+ * the handler coroutine's dispose). reactor_id (echoed on the wire) selects the
+ * reverse channel; ownership of `rw` transfers to the reactor apply on success.
+ * On failure (no pool / full mailbox) drop it — the client times out and the
+ * slab is still reclaimed by the consumed that follows. */
+static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
+{
+    (void)arg;
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    if (g_reactor_pool != NULL
+        && reactor_pool_post_exec(g_reactor_pool,
+                                  (int)response_wire_reactor_id(rw),
+                                  http3_reactor_apply_response, rw)) {
+        return;   /* the reactor owns rw now */
+    }
+#endif
+
+    response_wire_free(rw);
+}
+
+/* Stand up this worker clone's request inbox and publish it to the shared
+ * registry so a reactor can route requests to it. Gated + H3-only + clone-only;
+ * a no-op otherwise. Runs on the worker thread after its server scope exists. */
+static void http_server_worker_inbox_up(http_server_object *server)
+{
+    if (server->worker_inbox != NULL
+        || g_worker_registry == NULL
+        || !server->is_worker_clone
+        || !http_server_reactor_pool_enabled()
+        || !http_server_config_has_h3(server)
+        || server->server_scope == NULL) {
+        return;
+    }
+
+    server->worker_inbox = worker_inbox_create(server, server->server_scope,
+                                               /*own_scope=*/true,
+                                               http_server_worker_response_sink, NULL);
+
+    if (server->worker_inbox == NULL) {
+        return;
+    }
+
+    const int slot = worker_registry_add(g_worker_registry, server->worker_inbox);
+
+    if (slot < 0) {
+        worker_inbox_free(server->worker_inbox);
+        server->worker_inbox = NULL;
+        return;
+    }
+
+    fprintf(stderr,
+        "[true-async-server] worker inbox published: slot %d of %d\n",
+        slot, worker_registry_capacity(g_worker_registry));
+    fflush(stderr);
+}
+
 static int http_server_start_pool(http_server_object *server,
                                   zval *this_zv,
                                   const int workers)
@@ -2101,6 +2583,11 @@ static int http_server_start_pool(http_server_object *server,
     server->pool_worker_ctx       = ctxs;
     server->pool_worker_ctx_count = workers;
 
+    /* Stand up the transport reactor pool + worker registry BEFORE submitting
+     * workers, so a worker that comes up fast finds the registry ready to
+     * publish into. */
+    http_server_reactor_pool_up(server, workers);
+
     pool_await_state_t *st = ecalloc(1, sizeof(*st));
     st->pending = workers;
     st->all_done = create_server_wait_event();
@@ -2155,6 +2642,11 @@ cleanup:
     server->running = false;
     server->stopping = false;
     server->in_pool_mode = false;
+
+    /* Workers have quiesced (the suspend returned). Tear down the transport
+     * reactor pool: this releases the H3 listeners the gated reactors own,
+     * frees the worker registry, and stops the reactor loops. */
+    http_server_reactor_pool_down(server);
 
     if (st->all_done != NULL) {
         st->all_done->dispose(st->all_done);
@@ -2453,6 +2945,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * explicitly release it. */
     server->scope_object = server->server_scope->scope_object;
 
+    /* Worker-pool clone under the reactor-pool gate: publish a request inbox so
+     * a reactor can route parsed requests to this worker. No-op otherwise. */
+    http_server_worker_inbox_up(server);
+
     /* Build TLS context up-front if any listener declared tls=true.
      * Doing this *before* binding sockets keeps the failure path cheap:
      * a bad cert means no listen_event allocation at all, and the
@@ -2637,6 +3133,16 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         }
 #ifdef HAVE_HTTP_SERVER_HTTP3
         else if (strcmp(Z_STRVAL_P(type_zv), "udp_h3") == 0) {
+            /* Under the reactor-pool gate the transport reactor owns the H3
+             * listener (spawned by the parent in http_server_reactor_pool_up);
+             * a worker clone must NOT spawn its own, or two listeners would
+             * REUSEPORT-share the socket and the reactor split would not hold.
+             * The worker still publishes its request inbox for the reactor to
+             * route to. */
+            if (http_server_reactor_pool_enabled() && server->is_worker_clone) {
+                continue;
+            }
+
             if (server->http3_listener_count >= MAX_LISTENERS) {
                 continue;
             }
@@ -2656,7 +3162,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 # endif
             http3_listener_t *h3 = http3_listener_spawn(
                 Z_STRVAL_P(host_zv), (int)Z_LVAL_P(port_zv), ssl_ctx,
-                /* server_obj: */ server);
+                /* server_obj: */ server, /* reactor_ctx: */ NULL);
             if (!h3) {
                 /* Unwind both TCP and H3 listeners — start() is all-or-nothing. */
                 for (size_t i = 0; i < server->listener_count; i++) {
@@ -3214,13 +3720,133 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
 }
 /* }}} */
 
+#ifdef HAVE_HTTP_SERVER_HTTP3
+/* Append one listener's stats snapshot to the result array. Factored out so
+ * both the single-thread listeners (server->http3_listeners) and the reactor-
+ * owned listeners (server->reactor_h3_listeners) report identically.
+ * The reactor-owned read is cross-thread (the reactor writes these counters on
+ * its own thread); they are advisory uint64s, so a torn read is benign. */
+static void http3_emit_listener_stats(zval *return_value, http3_listener_t *listener)
+{
+    http3_listener_stats_t s;
+    http3_listener_get_stats(listener, &s);
+
+    zval entry;
+    array_init(&entry);
+    add_assoc_string(&entry, "host", (char *)http3_listener_host(listener));
+    add_assoc_long  (&entry, "port", http3_listener_port(listener));
+    add_assoc_long  (&entry, "datagrams_received", (zend_long)s.datagrams_received);
+    add_assoc_long  (&entry, "bytes_received",     (zend_long)s.bytes_received);
+    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)s.datagrams_errored);
+    add_assoc_long  (&entry, "last_datagram_size", (zend_long)s.last_datagram_size);
+    add_assoc_string(&entry, "last_peer",          s.last_peer);
+
+    /* QUIC packet classification counters. */
+    add_assoc_long(&entry, "quic_initial",            (zend_long)s.packet.quic_initial);
+    add_assoc_long(&entry, "quic_short_header",       (zend_long)s.packet.quic_short_header);
+    add_assoc_long(&entry, "quic_version_negotiated", (zend_long)s.packet.quic_version_negotiated);
+    add_assoc_long(&entry, "quic_parse_errors",       (zend_long)s.packet.quic_parse_errors);
+    /* ngtcp2_conn lifecycle counters. */
+    add_assoc_long(&entry, "quic_conn_accepted",      (zend_long)s.packet.quic_conn_accepted);
+    add_assoc_long(&entry, "quic_conn_rejected",      (zend_long)s.packet.quic_conn_rejected);
+    /* Read-path counters. */
+    add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
+    add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
+    add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
+    add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
+    add_assoc_long(&entry, "quic_migration_storm_shed", (zend_long)s.packet.quic_migration_storm_shed);
+    /* CID steering. */
+    add_assoc_long(&entry, "quic_steered_out",        (zend_long)s.packet.quic_steered_out);
+    add_assoc_long(&entry, "quic_steered_in",         (zend_long)s.packet.quic_steered_in);
+    add_assoc_long(&entry, "quic_steered_drop",       (zend_long)s.packet.quic_steered_drop);
+    /* Issued / retired alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1). */
+    add_assoc_long(&entry, "quic_new_cid_issued",     (zend_long)s.packet.quic_new_cid_issued);
+    add_assoc_long(&entry, "quic_cid_retired",        (zend_long)s.packet.quic_cid_retired);
+    /* Write-loop + timer counters. */
+    add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
+    add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);
+    add_assoc_long(&entry, "quic_timer_fired",        (zend_long)s.packet.quic_timer_fired);
+    add_assoc_long(&entry, "quic_write_error",        (zend_long)s.packet.quic_write_error);
+    /* Handshake / ALPN counters. */
+    add_assoc_long(&entry, "quic_handshake_completed", (zend_long)s.packet.quic_handshake_completed);
+    add_assoc_long(&entry, "quic_alpn_mismatch",       (zend_long)s.packet.quic_alpn_mismatch);
+    /* nghttp3 lifecycle counters. */
+    add_assoc_long(&entry, "h3_init_ok",            (zend_long)s.packet.h3_init_ok);
+    add_assoc_long(&entry, "h3_init_failed",        (zend_long)s.packet.h3_init_failed);
+    add_assoc_long(&entry, "h3_stream_close",       (zend_long)s.packet.h3_stream_close);
+    add_assoc_long(&entry, "h3_stream_read_error",  (zend_long)s.packet.h3_stream_read_error);
+    /* Request-assembly counters. */
+    add_assoc_long(&entry, "h3_request_received",   (zend_long)s.packet.h3_request_received);
+    add_assoc_long(&entry, "h3_request_oversized",  (zend_long)s.packet.h3_request_oversized);
+    add_assoc_long(&entry, "h3_streams_opened",     (zend_long)s.packet.h3_streams_opened);
+    /* Response counters. */
+    add_assoc_long(&entry, "h3_response_submitted",   (zend_long)s.packet.h3_response_submitted);
+    add_assoc_long(&entry, "h3_response_submit_error",(zend_long)s.packet.h3_response_submit_error);
+    /* Connection lifecycle counters. */
+    add_assoc_long(&entry, "quic_connection_close_sent", (zend_long)s.packet.quic_connection_close_sent);
+    add_assoc_long(&entry, "quic_conn_in_closing",       (zend_long)s.packet.quic_conn_in_closing);
+    add_assoc_long(&entry, "quic_conn_in_draining",      (zend_long)s.packet.quic_conn_in_draining);
+    add_assoc_long(&entry, "quic_conn_idle_closed",      (zend_long)s.packet.quic_conn_idle_closed);
+    add_assoc_long(&entry, "quic_conn_handshake_timeout",(zend_long)s.packet.quic_conn_handshake_timeout);
+    add_assoc_long(&entry, "quic_conn_reaped",           (zend_long)s.packet.quic_conn_reaped);
+    add_assoc_long(&entry, "quic_stateless_reset_sent",  (zend_long)s.packet.quic_stateless_reset_sent);
+    add_assoc_long(&entry, "quic_retry_sent",            (zend_long)s.packet.quic_retry_sent);
+    add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
+    add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
+    add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
+    add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
+    add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
+    /* Audit hardening counters. */
+    add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
+    add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
+
+    /* Reactor-iteration watchdog. Tick = one poll-cb wakeup; on the single
+     * reactor thread its latency is the ACK/PTO delay imposed on every live
+     * connection. */
+    add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
+    add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
+    add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
+    add_assoc_long(&entry, "reactor_slow_ticks",       (zend_long)s.packet.reactor_slow_ticks);
+    add_assoc_long(&entry, "reactor_timer_late",       (zend_long)s.packet.reactor_timer_late);
+    add_assoc_long(&entry, "reactor_max_timer_late_ns",(zend_long)s.packet.reactor_max_timer_late_ns);
+    {
+        zval hist;
+        array_init(&hist);
+
+        const size_t nbuckets = sizeof(s.packet.reactor_lat_bucket)
+                              / sizeof(s.packet.reactor_lat_bucket[0]);
+
+        for (size_t i = 0; i < nbuckets; ++i) {
+            add_next_index_long(&hist, (zend_long)s.packet.reactor_lat_bucket[i]);
+        }
+
+        add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
+    }
+
+    /* Send-path error categorisation. */
+    add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
+    add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);
+    add_assoc_long(&entry, "quic_send_emsgsize",         (zend_long)s.packet.quic_send_emsgsize);
+    add_assoc_long(&entry, "quic_send_unreach",          (zend_long)s.packet.quic_send_unreach);
+    add_assoc_long(&entry, "quic_send_other_error",      (zend_long)s.packet.quic_send_other_error);
+    add_assoc_long(&entry, "quic_gso_disabled",          (zend_long)s.packet.quic_gso_disabled);
+
+    /* Async errors observed via MSG_ERRQUEUE. */
+    add_assoc_long(&entry, "quic_errqueue_emsgsize",     (zend_long)s.packet.quic_errqueue_emsgsize);
+    add_assoc_long(&entry, "quic_errqueue_unreach",      (zend_long)s.packet.quic_errqueue_unreach);
+    add_assoc_long(&entry, "quic_errqueue_other",        (zend_long)s.packet.quic_errqueue_other);
+
+    add_next_index_zval(return_value, &entry);
+}
+#endif
+
 /* {{{ proto HttpServer::getHttp3Stats(): array
  *
- * Per-listener observability for the HTTP/3 bootstrap path. Returns an
- * array indexed by listener position; each entry has host, port,
- * datagrams_received, bytes_received, datagrams_errored, last_datagram_size,
- * last_peer. Counters let tests confirm the UDP pipe is live end-to-end.
- */
+ * Per-listener observability for the HTTP/3 path. In single-thread / worker
+ * mode the listeners live on this server; in the reactor-pool split the
+ * transport reactors own them (server->reactor_h3_listeners) — report both so
+ * a pooled server is observable too. Counters let tests confirm the UDP pipe
+ * is live end-to-end. */
 ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -3231,88 +3857,16 @@ ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     for (size_t i = 0; i < server->http3_listener_count; i++) {
-        http3_listener_t *l = server->http3_listeners[i];
+        if (server->http3_listeners[i] != NULL) {
+            http3_emit_listener_stats(return_value, server->http3_listeners[i]);
+        }
+    }
 
-        if (l == NULL) continue;
-
-        http3_listener_stats_t s;
-        http3_listener_get_stats(l, &s);
-
-        zval entry;
-        array_init(&entry);
-        add_assoc_string(&entry, "host", (char *)http3_listener_host(l));
-        add_assoc_long  (&entry, "port", http3_listener_port(l));
-        add_assoc_long  (&entry, "datagrams_received", (zend_long)s.datagrams_received);
-        add_assoc_long  (&entry, "bytes_received",     (zend_long)s.bytes_received);
-        add_assoc_long  (&entry, "datagrams_errored",  (zend_long)s.datagrams_errored);
-        add_assoc_long  (&entry, "last_datagram_size", (zend_long)s.last_datagram_size);
-        add_assoc_string(&entry, "last_peer",          s.last_peer);
-
-        /* QUIC packet classification counters. */
-        add_assoc_long(&entry, "quic_initial",            (zend_long)s.packet.quic_initial);
-        add_assoc_long(&entry, "quic_short_header",       (zend_long)s.packet.quic_short_header);
-        add_assoc_long(&entry, "quic_version_negotiated", (zend_long)s.packet.quic_version_negotiated);
-        add_assoc_long(&entry, "quic_parse_errors",       (zend_long)s.packet.quic_parse_errors);
-        /* ngtcp2_conn lifecycle counters. */
-        add_assoc_long(&entry, "quic_conn_accepted",      (zend_long)s.packet.quic_conn_accepted);
-        add_assoc_long(&entry, "quic_conn_rejected",      (zend_long)s.packet.quic_conn_rejected);
-        /* Read-path counters. */
-        add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
-        add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
-        add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
-        add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
-        /* Write-loop + timer counters. */
-        add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
-        add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);
-        add_assoc_long(&entry, "quic_timer_fired",        (zend_long)s.packet.quic_timer_fired);
-        add_assoc_long(&entry, "quic_write_error",        (zend_long)s.packet.quic_write_error);
-        /* Handshake / ALPN counters. */
-        add_assoc_long(&entry, "quic_handshake_completed", (zend_long)s.packet.quic_handshake_completed);
-        add_assoc_long(&entry, "quic_alpn_mismatch",       (zend_long)s.packet.quic_alpn_mismatch);
-        /* nghttp3 lifecycle counters. */
-        add_assoc_long(&entry, "h3_init_ok",            (zend_long)s.packet.h3_init_ok);
-        add_assoc_long(&entry, "h3_init_failed",        (zend_long)s.packet.h3_init_failed);
-        add_assoc_long(&entry, "h3_stream_close",       (zend_long)s.packet.h3_stream_close);
-        add_assoc_long(&entry, "h3_stream_read_error",  (zend_long)s.packet.h3_stream_read_error);
-        /* Request-assembly counters. */
-        add_assoc_long(&entry, "h3_request_received",   (zend_long)s.packet.h3_request_received);
-        add_assoc_long(&entry, "h3_request_oversized",  (zend_long)s.packet.h3_request_oversized);
-        add_assoc_long(&entry, "h3_streams_opened",     (zend_long)s.packet.h3_streams_opened);
-        /* Response counters. */
-        add_assoc_long(&entry, "h3_response_submitted",   (zend_long)s.packet.h3_response_submitted);
-        add_assoc_long(&entry, "h3_response_submit_error",(zend_long)s.packet.h3_response_submit_error);
-        /* Connection lifecycle counters. */
-        add_assoc_long(&entry, "quic_connection_close_sent", (zend_long)s.packet.quic_connection_close_sent);
-        add_assoc_long(&entry, "quic_conn_in_closing",       (zend_long)s.packet.quic_conn_in_closing);
-        add_assoc_long(&entry, "quic_conn_in_draining",      (zend_long)s.packet.quic_conn_in_draining);
-        add_assoc_long(&entry, "quic_conn_idle_closed",      (zend_long)s.packet.quic_conn_idle_closed);
-        add_assoc_long(&entry, "quic_conn_handshake_timeout",(zend_long)s.packet.quic_conn_handshake_timeout);
-        add_assoc_long(&entry, "quic_conn_reaped",           (zend_long)s.packet.quic_conn_reaped);
-        add_assoc_long(&entry, "quic_stateless_reset_sent",  (zend_long)s.packet.quic_stateless_reset_sent);
-        add_assoc_long(&entry, "quic_retry_sent",            (zend_long)s.packet.quic_retry_sent);
-        add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
-        add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
-        add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
-        add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
-        add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
-        /* Audit hardening counters. */
-        add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
-        add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
-
-        /* Send-path error categorisation. */
-        add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
-        add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);
-        add_assoc_long(&entry, "quic_send_emsgsize",         (zend_long)s.packet.quic_send_emsgsize);
-        add_assoc_long(&entry, "quic_send_unreach",          (zend_long)s.packet.quic_send_unreach);
-        add_assoc_long(&entry, "quic_send_other_error",      (zend_long)s.packet.quic_send_other_error);
-        add_assoc_long(&entry, "quic_gso_disabled",          (zend_long)s.packet.quic_gso_disabled);
-
-        /* Async errors observed via MSG_ERRQUEUE. */
-        add_assoc_long(&entry, "quic_errqueue_emsgsize",     (zend_long)s.packet.quic_errqueue_emsgsize);
-        add_assoc_long(&entry, "quic_errqueue_unreach",      (zend_long)s.packet.quic_errqueue_unreach);
-        add_assoc_long(&entry, "quic_errqueue_other",        (zend_long)s.packet.quic_errqueue_other);
-
-        add_next_index_zval(return_value, &entry);
+    /* Reactor-pool split: the transport reactors own the H3 listeners. */
+    for (size_t i = 0; i < server->reactor_h3_listener_count; i++) {
+        if (server->reactor_h3_listeners[i].listener != NULL) {
+            http3_emit_listener_stats(return_value, server->reactor_h3_listeners[i].listener);
+        }
     }
 #endif
 }
@@ -3526,6 +4080,18 @@ static void http_server_free(zend_object *obj)
 #endif
 
     zval_ptr_dtor(&server->config);
+
+    /* Reactor pool. Normally torn down in the start_pool cleanup path; this is
+     * the defensive catch-all if the server is freed without a clean pool
+     * exit. */
+    http_server_reactor_pool_down(server);
+
+    /* This worker clone's request inbox. Producers (reactors) have quiesced by
+     * the time a worker is freed. */
+    if (server->worker_inbox != NULL) {
+        worker_inbox_free(server->worker_inbox);
+        server->worker_inbox = NULL;
+    }
 
     /* Pool-mode worker ctx array (issue #11). NULL outside pool mode;
      * non-NULL only for parent servers that ran with workers > 1.

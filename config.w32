@@ -43,6 +43,12 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "async_plain_event.c " +
         "thread_queue.cc " +
         "thread_mailbox.c " +
+        "reactor_pool.c " +
+        "reactor_pool_test_hooks.c " +
+        "response_wire.c " +
+        "worker_dispatch.c " +
+        "worker_inbox.c " +
+        "worker_registry.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +

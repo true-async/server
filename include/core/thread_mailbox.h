@@ -23,10 +23,11 @@
  * blocks (full => clean backpressure), and the consumer never touches the queue
  * off its reactor thread.
  *
- * Lost-wakeup safety: the producer signals only on the empty->non-empty edge,
- * the enqueue (release) happens-before that signal, and the consumer drains to
- * empty before returning. uv_async coalescing plus drain-to-empty means no item
- * is ever stranded.
+ * Lost-wakeup safety: the producer signals on every post. The enqueue (release)
+ * happens-before the signal, and uv_async_send coalesces (it writes the eventfd
+ * only on the 0->1 pending transition), so unconditional signalling is cheap and
+ * leaves no item stranded. An earlier empty->non-empty edge optimisation raced
+ * drain-to-empty (the length counter lags the dequeue) and was removed.
  *
  * Threading contract:
  *   - thread_mailbox_create()/free() run on the consumer's reactor thread (they
@@ -53,6 +54,14 @@ void thread_mailbox_free(thread_mailbox_t *mb);
 /* Producer side — any thread. Returns true if accepted, false if the mailbox is
  * full (the caller decides whether to drop, retry, or close). */
 bool thread_mailbox_post(thread_mailbox_t *mb, void *item);
+
+/* Opt-in: make the wakeup handle keep the consumer's reactor loop alive (uv_ref
+ * via the trigger's start()). Mailboxes default to NOT keeping the loop alive —
+ * they are a wake source for a loop already kept running by other handles (a
+ * listener, coroutines). A dedicated reactor thread whose only handle is its
+ * inbound mailbox enables this so its loop blocks on the kernel instead of
+ * spinning. Consumer-thread only. */
+void thread_mailbox_keepalive(thread_mailbox_t *mb, bool enable);
 
 /* Approximate number of queued items. */
 size_t thread_mailbox_count(const thread_mailbox_t *mb);

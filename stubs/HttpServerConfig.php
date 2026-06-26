@@ -783,6 +783,22 @@ final class HttpServerConfig
      */
     public function getPrivateKey(): ?string {}
 
+    /**
+     * Set the hq-interop (HTTP/0.9-over-QUIC) document root.
+     *
+     * Files under this directory are served verbatim to hq-interop clients
+     * (the QUIC interop test matrix speaks hq, not h3). No effect on h3.
+     *
+     * @param string $path Document root directory
+     * @return static
+     */
+    public function setHttp3HqDocroot(string $path): static {}
+
+    /**
+     * Get the hq-interop document root.
+     */
+    public function getHttp3HqDocroot(): ?string {}
+
     // === Body handling ===
 
     /**

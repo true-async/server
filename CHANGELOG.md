@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **hq-interop (HTTP/0.9-over-QUIC) for the interop matrix (#80).** A second QUIC
+  ALPN, `hq-interop`, served straight off the transport (no nghttp3): a raw bidi
+  stream `GET <path>` returns the file bytes + FIN from `setHttp3HqDocroot()`.
+  Lets the quic-interop-runner reach the server for the whole transport matrix
+  (transfer/multiplexing/migration/loss), which it negotiates over hq, not h3.
+  `h3` stays preferred when a peer offers both; the h3 path is unchanged.
+
+- **HTTP/3 transport reactor pool (experimental, #80).** Behind
+  `TRUE_ASYNC_SERVER_REACTOR_POOL=1` + `setWorkers(2+)`: dedicated C reactors own the
+  QUIC sockets (no PHP on the transport thread), hand parsed requests to PHP workers
+  by pointer, and serve responses back over a non-blocking reverse channel; static
+  files are served on the reactor. Adds CID steering (owner-reactor id encoded in the
+  connection id, forwarding migrated clients across the split — #72) and a
+  migration-storm guard that sheds clients rebinding past a rate cap. Dispatch is
+  reactor-paired: a connection sticks to one of its reactor's workers and spills to a
+  less-loaded worker when its home backs up or dies. Off by default.
 - Lock-free inter-thread message queue primitive (#81): bounded MPSC/SPSC C-ABI
   wrappers over moodycamel (`thread_queue`) plus a reactor-integrated MPSC mailbox
   (`thread_mailbox`) that wakes the consumer's loop via a trigger event with

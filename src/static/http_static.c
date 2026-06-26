@@ -181,9 +181,22 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 										   const http_static_dispatch_cbs_t *cbs,
 										   void *user)
 {
-	const size_t mount_count = http_static_handler_count(server);
+	return http_static_try_serve_mounts(
+		http_static_handler_mounts(server), http_static_handler_count(server),
+		http_static_cache_acquire(server), request, response_obj, counters, cbs,
+		user);
+}
 
-	if (UNEXPECTED(mount_count == 0)) {
+http_static_result_t http_static_try_serve_mounts(
+	const http_static_handler_t *const *mounts, size_t mount_count,
+	struct http_static_cache_s *cache,
+	http_request_t *request,
+	zend_object *response_obj,
+	http_server_counters_t *counters,
+	const http_static_dispatch_cbs_t *cbs,
+	void *user)
+{
+	if (UNEXPECTED(mount_count == 0 || mounts == NULL)) {
 		return HTTP_STATIC_PASSTHROUGH;
 	}
 
@@ -211,7 +224,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 	}
 
 	for (size_t mi = 0; mi < mount_count; mi++) {
-		const http_static_handler_t *mount = http_static_handler_get(server, mi);
+		const http_static_handler_t *mount = mounts[mi];
 
 		if (UNEXPECTED(mount == NULL)) {
 			continue;
@@ -337,7 +350,6 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 		size_t override_ct_len = 0;
 
 		const uint32_t precomp_mask = mount_precomp_mask(mount->flags);
-		http_static_cache_t *cache = http_static_cache_acquire(server);
 
 		if (precomp_mask != 0) {
 			const char *pre_ct = NULL;
@@ -467,7 +479,8 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 			cfg.mime_overrides = mount->mime_overrides;
 			cfg.cache_view = have_view ? &cv : NULL;
 			cfg.counters = counters;
-			cfg.server = server;
+			cfg.server = NULL;
+			cfg.cache = cache;
 			cfg.content_encoding = picked_encoding;
 			cfg.content_encoding_len = picked_encoding_len;
 

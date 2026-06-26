@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: 5e06258fb3426d3a0088e298517aef1a146f1a81 */
+ * Stub hash: 8a6df78fa87bb63b7abc69d5acd4c8ef760086d0 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -145,10 +145,6 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
-
-#define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
-
 #define arginfo_class_TrueAsync_HttpServerConfig_setHttp3Pacing arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isHttp3Pacing arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
@@ -156,6 +152,10 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setRequestScope arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isRequestScope arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_isHttp3AltSvcEnabled
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, level, IS_LONG, 0)
@@ -223,6 +223,10 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setPrivateKey arginfo_class_TrueAsync_HttpServerConfig_addUnixListener
 
 #define arginfo_class_TrueAsync_HttpServerConfig_getPrivateKey arginfo_class_TrueAsync_HttpServerConfig_getCertificate
+
+#define arginfo_class_TrueAsync_HttpServerConfig_setHttp3HqDocroot arginfo_class_TrueAsync_HttpServerConfig_addUnixListener
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getHttp3HqDocroot arginfo_class_TrueAsync_HttpServerConfig_getCertificate
 
 #define arginfo_class_TrueAsync_HttpServerConfig_setAutoAwaitBody arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
@@ -344,6 +348,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setCertificate);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getCertificate);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setPrivateKey);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getPrivateKey);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3HqDocroot);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3HqDocroot);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setAutoAwaitBody);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isAutoAwaitBodyEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSeverity);
@@ -447,6 +453,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getCertificate, arginfo_class_TrueAsync_HttpServerConfig_getCertificate, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setPrivateKey, arginfo_class_TrueAsync_HttpServerConfig_setPrivateKey, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getPrivateKey, arginfo_class_TrueAsync_HttpServerConfig_getPrivateKey, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3HqDocroot, arginfo_class_TrueAsync_HttpServerConfig_setHttp3HqDocroot, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3HqDocroot, arginfo_class_TrueAsync_HttpServerConfig_getHttp3HqDocroot, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setAutoAwaitBody, arginfo_class_TrueAsync_HttpServerConfig_setAutoAwaitBody, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isAutoAwaitBodyEnabled, arginfo_class_TrueAsync_HttpServerConfig_isAutoAwaitBodyEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setLogSeverity, arginfo_class_TrueAsync_HttpServerConfig_setLogSeverity, ZEND_ACC_PUBLIC)

@@ -208,6 +208,23 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 										   const http_static_dispatch_cbs_t *cbs,
 										   void *user);
 
+/* Server-free core of the dispatch hook. Identical logic to
+ * http_static_try_serve but keyed on a borrowed mount array + an
+ * explicit open-file cache (NULL = uncached) instead of the PHP server
+ * object — the transport reactor has no server object on its thread but
+ * can hold its own refs to the persistent, atomically-refcounted mounts.
+ * http_static_try_serve is a thin wrapper that resolves these from the
+ * server and forwards. */
+struct http_static_cache_s;
+http_static_result_t http_static_try_serve_mounts(
+	const http_static_handler_t *const *mounts, size_t mount_count,
+	struct http_static_cache_s *cache,
+	struct http_request_t *request,
+	zend_object *response_obj,
+	http_server_counters_t *counters,
+	const http_static_dispatch_cbs_t *cbs,
+	void *user);
+
 /* Out-of-line "is any mount registered" helper. The struct layout
  * lives in http_server_class.c so the count is not directly visible to
  * the dispatcher TU; this getter is the single authority and is cheap
@@ -220,6 +237,13 @@ size_t http_static_handler_count(const http_server_object *server);
  * server-object struct layout. */
 const http_static_handler_t *http_static_handler_get(const http_server_object *server,
 													 size_t index);
+
+/* Borrow the server's contiguous mount-pointer array (length ==
+ * http_static_handler_count). NULL when there are no mounts. Stable for
+ * the server's lifetime. Lets a caller pass the whole array to
+ * http_static_try_serve_mounts without the server struct layout. */
+const http_static_handler_t *const *
+http_static_handler_mounts(const http_server_object *server);
 
 /* Open file cache accessor — lazily creates the cache on first call,
  * returns it on subsequent calls. NULL if the server is NULL or

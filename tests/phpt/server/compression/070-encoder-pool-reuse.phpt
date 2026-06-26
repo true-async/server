@@ -6,8 +6,7 @@ true_async
 --SKIPIF--
 <?php
 if (!class_exists('TrueAsync\HttpServerConfig')) die('skip http_server not loaded');
-if (PHP_OS_FAMILY === 'Windows') die('skip requires a POSIX gzip/gunzip CLI for the proc_open round-trip');
-if (trim((string)shell_exec('command -v gunzip 2>/dev/null')) === '') die('skip gunzip(1) not in PATH');
+if (trim((string)shell_exec('command -v gunzip')) === '') die('skip gunzip(1) not in PATH');
 ?>
 --FILE--
 <?php

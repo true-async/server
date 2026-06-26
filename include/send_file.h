@@ -105,6 +105,11 @@ typedef struct
 	 * NULL = cache disabled (sendFile case). */
 	http_server_object *server;
 
+	/* Open-file cache to insert into on the miss path, used in preference
+	 * to `server` when set. Lets a caller with no PHP server object (the
+	 * transport reactor) supply its own per-thread cache. */
+	http_static_cache_t *cache;
+
 	send_file_on_error_t on_error;
 } send_file_config_t;
 

@@ -58,37 +58,11 @@ $client = spawn(function() use ($port, $server, $body) {
          * separately so we can parse ":status" and Content-Length
          * cleanly even on 206 / 304. */
         $args = ['--http2-prior-knowledge', '-sS', '-i', '--max-time', '3'];
-
-        /* Route request headers through a curl --config file rather than
-         * shell-quoted -H. An ETag is `W/"hex"`, and PHP's escapeshellarg()
-         * on Windows cannot carry a double quote — it replaces every " with
-         * a space, so `If-None-Match: W/"hex"` would reach curl as
-         * `W/ hex `. Leading/trailing whitespace makes that a malformed
-         * HTTP/2 field value (RFC 9113 §8.2.1), which the server correctly
-         * rejects with a stream PROTOCOL_ERROR. curl config files use curl's
-         * own (shell-independent) quoting, so the quotes survive everywhere. */
-        $rest = []; $cfg_lines = []; $cfg = null;
-        for ($i = 0, $n = count($extra_args); $i < $n; $i++) {
-            if ($extra_args[$i] === '-H' && $i + 1 < $n) {
-                $val = $extra_args[++$i];
-                $esc = str_replace(['\\', '"'], ['\\\\', '\\"'], $val);
-                $cfg_lines[] = 'header = "' . $esc . '"';
-            } else {
-                $rest[] = $extra_args[$i];
-            }
-        }
-        if ($cfg_lines) {
-            $cfg = tempnam(sys_get_temp_dir(), 'h2cfg');
-            file_put_contents($cfg, implode("\n", $cfg_lines) . "\n");
-            $args[] = '--config';
-            $args[] = $cfg;
-        }
-        foreach ($rest as $a) $args[] = $a;
+        foreach ($extra_args as $a) $args[] = $a;
         $args[] = "http://127.0.0.1:$port$path";
         $cmd = 'curl ' . implode(' ', array_map('escapeshellarg', $args));
         $out = []; $rc = 0;
         exec($cmd . ' 2>&1', $out, $rc);
-        if ($cfg !== null) @unlink($cfg);
         $resp = implode("\n", $out);
         /* Parse a curl -i response: header block ends at the blank
          * line; HTTP/2 status line is "HTTP/2 NNN". */

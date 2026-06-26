@@ -116,15 +116,19 @@ void thread_mailbox_free(thread_mailbox_t *mb)
 
 bool thread_mailbox_post(thread_mailbox_t *mb, void *item)
 {
-    bool was_empty = false;
-
-    if (!thread_mpsc_enqueue(mb->queue, item, &was_empty)) {
+    if (UNEXPECTED(!thread_mpsc_enqueue(mb->queue, item, NULL))) {
         return false;
     }
 
-    if (was_empty) {
-        mb->trigger->trigger(mb->trigger);
-    }
+    /* Wake the consumer unconditionally. The was_empty edge optimisation had a
+     * lost-wakeup race against drain-to-empty: thread_mpsc_drain pulls items
+     * from the queue before it decrements the length counter, so a producer
+     * that posts in that window reads prev > 0, computes was_empty == false,
+     * and skips the signal — stranding its item and deadlocking teardown
+     * (confirmed under ASan). uv_async_send coalesces (it writes the eventfd
+     * only on the 0->1 pending transition), so an unconditional signal is
+     * cheap and correct. */
+    mb->trigger->trigger(mb->trigger);
 
     return true;
 }
@@ -132,4 +136,13 @@ bool thread_mailbox_post(thread_mailbox_t *mb, void *item)
 size_t thread_mailbox_count(const thread_mailbox_t *mb)
 {
     return thread_mpsc_count(mb->queue);
+}
+
+void thread_mailbox_keepalive(thread_mailbox_t *mb, const bool enable)
+{
+    if (enable) {
+        mb->trigger->base.start(&mb->trigger->base);
+    } else {
+        mb->trigger->base.stop(&mb->trigger->base);
+    }
 }

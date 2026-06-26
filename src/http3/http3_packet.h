@@ -41,6 +41,25 @@ typedef struct _http3_packet_stats_s {
      * necessarily validated). */
     uint64_t quic_path_migrations;
 
+    /* Migration-storm guard: connections shed for rebinding faster
+     * than their path validates (a wedge or a migration flood). */
+    uint64_t quic_migration_storm_shed;
+
+    /* CID steering. A short-header datagram whose DCID decodes
+     * to another reactor (a migrated client SO_REUSEPORT-rehashed onto us) is
+     * forwarded to its owner; the owner counts it as steered_in. steered_drop
+     * is a forward refused by a full reactor mailbox (packet dropped, QUIC
+     * retransmits). */
+    uint64_t quic_steered_out;        /* forwarded to the owning reactor */
+    uint64_t quic_steered_in;         /* received via forward from another reactor */
+    uint64_t quic_steered_drop;       /* forward refused (mailbox full) — dropped */
+
+    /* Server-issued alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1). Each
+     * is registered in conn_map so a client that rotates its DCID still routes
+     * home; retired ones are dropped on RETIRE_CONNECTION_ID. */
+    uint64_t quic_new_cid_issued;     /* get_new_connection_id_cb registered a CID */
+    uint64_t quic_cid_retired;        /* remove_connection_id_cb dropped a CID */
+
     /* Write-loop / timer counters. */
     uint64_t quic_packets_sent;       /* datagrams emitted by writev_stream */
     uint64_t quic_bytes_sent;         /* cumulative bytes over those datagrams */
@@ -97,6 +116,27 @@ typedef struct _http3_packet_stats_s {
     /* Audit hardening counters. */
     uint64_t h3_framing_error;        /* nghttp3_conn_writev_stream returned <0 */
     uint64_t quic_drain_iter_cap_hit; /* drain_out hit per-call iteration cap */
+
+    /* Reactor-iteration watchdog. The poll-cb is the H3
+     * reactor's unit of work: one recvmmsg drain + per-conn output flush.
+     * On a single reactor thread a long tick delays ACK/PTO generation for
+     * EVERY live connection by exactly the tick duration, which inflates the
+     * peer's RTT/PTO and stalls cwnd. So we time each tick and flag overruns
+     * of the budget (default 10 ms, below QUIC max_ack_delay 25 ms). This
+     * histogram is the listener-level proxy for "worst-case ACK delay"; the
+     * timer-late fields below are its per-connection counterpart. */
+    uint64_t reactor_ticks;            /* poll-cb wakeups measured */
+    uint64_t reactor_busy_ns;          /* cumulative poll-cb wall time (ns) */
+    uint64_t reactor_max_tick_ns;      /* slowest single poll-cb (ns) */
+    uint64_t reactor_slow_ticks;       /* poll-cb wakeups exceeding the budget */
+    uint64_t reactor_lat_bucket[12];   /* tick-latency histogram, ACK-budget edges */
+
+    /* Per-connection ACK/PTO service delay: how late the retransmission/
+     * ACK-delay timer fired versus the deadline ngtcp2 asked for. A late
+     * fire means the reactor was busy when this connection's ACK/PTO was
+     * due — the per-conn view of the same stall the histogram aggregates. */
+    uint64_t reactor_timer_late;       /* timer fires past deadline + budget */
+    uint64_t reactor_max_timer_late_ns;/* worst observed fire lateness (ns) */
 
     /* Send-path error categorisation. Every outbound sendmsg lands in
      * exactly one of these buckets (success increments quic_packets_sent

@@ -34,9 +34,15 @@ $server->addHttpHandler(function ($req, $res) {
 $client = spawn(function () use ($port, $server) {
     usleep(30000);
 
-    /* First connection — accept trips hard-cap → drain epoch=1. */
+    /* First connection — accept trips hard-cap → drain epoch=1.
+     * `Connection: close` so the server frees the single conn slot right
+     * after the response (server-initiated close), instead of leaving conn1
+     * as an idle keep-alive that only frees when the client read times out.
+     * Without it the slot-free → listener-resume → conn2-accept chain can
+     * overrun conn2's read window on a slow/loaded debug build, leaving
+     * cooldown_blocked at 0 (the CI flake). */
     $fp1 = stream_socket_client("tcp://127.0.0.1:$port", $e, $es, 3);
-    fwrite($fp1, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    fwrite($fp1, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     stream_set_timeout($fp1, 3);
     while (!feof($fp1)) {
         $c = fread($fp1, 4096); if ($c === '' || $c === false) break;
@@ -66,9 +72,17 @@ $client = spawn(function () use ($port, $server) {
     }
     fclose($fp2);
 
-    usleep(100000);
-
+    /* conn2's blocked event registers when the server accepts it — which only
+     * happens after conn1 drains and the listener resumes. On a slow / loaded
+     * debug build that chain can lag well past any fixed sleep (observed in CI:
+     * cooldown_blocked still 0 at read time). The terminal state (1/1/1) is
+     * stable once reached, so poll for it instead of reading once. */
     $tel = $server->getTelemetry();
+    for ($i = 0; $i < 200 && (int)$tel['drain_events_cooldown_blocked_total'] < 1; $i++) {
+        usleep(50000);
+        $tel = $server->getTelemetry();
+    }
+
     echo "epoch=",                 (int)$tel['drain_epoch_current'], "\n";
     echo "reactive_events=",       (int)$tel['drain_events_reactive_total'], "\n";
     echo "cooldown_blocked=",      (int)$tel['drain_events_cooldown_blocked_total'], "\n";

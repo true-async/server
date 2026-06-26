@@ -94,6 +94,61 @@ ZEND_METHOD(TrueAsync_HttpRequest, __construct)
     ZEND_PARSE_PARAMETERS_NONE();
 }
 
+/* Hand a request string to PHP in the worker's ZMM domain. A reactor-built
+ * (persistent malloc) string must be deep-copied — the engine would otherwise
+ * efree malloc memory. ZMM / interned strings are returned by addref as before.
+ * The domain is read off the string itself (self-describing), so mixed-domain
+ * requests (persistent method/uri/headers + ZMM path/query) are handled per
+ * field. */
+static void http_request_retval_str(zval *out, zend_string *str)
+{
+    if (UNEXPECTED(GC_FLAGS(str) & IS_STR_PERSISTENT)) {
+        ZVAL_STRINGL(out, ZSTR_VAL(str), ZSTR_LEN(str));
+    } else {
+        ZVAL_STR_COPY(out, str);
+    }
+}
+
+/* Hand a request HashTable to PHP in the worker's ZMM domain. ZMM tables are
+ * dup'd (cheap, refcounted) as before; a persistent (reactor-built) table is
+ * rebuilt with ZMM copies — zend_array_dup would addref persistent keys/values
+ * that the engine then efree's (heap corruption). Request tables hold string
+ * values only. */
+static void http_request_retval_ht(zval *out, HashTable *ht)
+{
+    if (EXPECTED(!(GC_FLAGS(ht) & IS_ARRAY_PERSISTENT))) {
+        ZVAL_ARR(out, zend_array_dup(ht));
+        return;
+    }
+
+    zend_array *dst;
+    ALLOC_HASHTABLE(dst);
+    zend_hash_init(dst, zend_hash_num_elements(ht), NULL, ZVAL_PTR_DTOR, 0);
+
+    zend_string *key;
+    zend_ulong   idx;
+    zval        *val;
+    ZEND_HASH_FOREACH_KEY_VAL(ht, idx, key, val) {
+        zval copy;
+
+        if (EXPECTED(Z_TYPE_P(val) == IS_STRING)) {
+            ZVAL_STRINGL(&copy, Z_STRVAL_P(val), Z_STRLEN_P(val));
+        } else {
+            ZVAL_COPY(&copy, val);
+        }
+
+        if (key != NULL) {
+            zend_string *const key_copy = zend_string_init(ZSTR_VAL(key), ZSTR_LEN(key), 0);
+            zend_hash_update(dst, key_copy, &copy);
+            zend_string_release(key_copy);
+        } else {
+            zend_hash_index_update(dst, idx, &copy);
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    ZVAL_ARR(out, dst);
+}
+
 ZEND_METHOD(TrueAsync_HttpRequest, getMethod)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
@@ -103,7 +158,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getMethod)
         RETURN_EMPTY_STRING();
     }
 
-    RETURN_STR_COPY(intern->request->method);
+    http_request_retval_str(return_value, intern->request->method);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getUri)
@@ -115,7 +170,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getUri)
         RETURN_EMPTY_STRING();
     }
 
-    RETURN_STR_COPY(intern->request->uri);
+    http_request_retval_str(return_value, intern->request->uri);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getHttpVersion)
@@ -163,7 +218,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, getHeader)
     zend_string_release(name_lower);
 
     if (value && Z_TYPE_P(value) == IS_STRING) {
-        RETURN_STR_COPY(Z_STR_P(value));
+        http_request_retval_str(return_value, Z_STR_P(value));
+        return;
     }
 
     RETURN_NULL();
@@ -184,7 +240,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, getHeaderLine)
 
     /* In our implementation headers are stored as single strings */
     if (value && Z_TYPE_P(value) == IS_STRING) {
-        RETURN_STR_COPY(Z_STR_P(value));
+        http_request_retval_str(return_value, Z_STR_P(value));
+        return;
     }
 
     RETURN_EMPTY_STRING();
@@ -195,7 +252,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getHeaders)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
-    ZVAL_ARR(return_value, zend_array_dup(intern->request->headers));
+    http_request_retval_ht(return_value, intern->request->headers);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getBody)
@@ -207,7 +264,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getBody)
         RETURN_EMPTY_STRING();
     }
 
-    RETURN_STR_COPY(intern->request->body);
+    http_request_retval_str(return_value, intern->request->body);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, hasBody)
@@ -232,7 +289,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getPost)
     ZEND_PARSE_PARAMETERS_NONE();
 
     if (intern->request->post_data) {
-        ZVAL_ARR(return_value, zend_array_dup(intern->request->post_data));
+        http_request_retval_ht(return_value, intern->request->post_data);
     } else {
         array_init(return_value);
     }
@@ -244,7 +301,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFiles)
     ZEND_PARSE_PARAMETERS_NONE();
 
     if (intern->request->files) {
-        ZVAL_ARR(return_value, zend_array_dup(intern->request->files));
+        http_request_retval_ht(return_value, intern->request->files);
     } else {
         array_init(return_value);
     }
@@ -306,7 +363,12 @@ static void http_request_ensure_uri_parsed(http_request_t *req)
     const char *q    = memchr(uri, '?', ulen);
 
     if (!q) {
-        req->path         = zend_string_copy(req->uri);
+        /* path is a worker-derived (ZMM) field. Aliasing a persistent uri
+         * by addref would make path persistent; deep-copy in that case so
+         * getPath can addref it to PHP. ZMM uri stays a cheap shared ref. */
+        req->path         = (GC_FLAGS(req->uri) & IS_STR_PERSISTENT)
+                                ? zend_string_init(ZSTR_VAL(req->uri), ZSTR_LEN(req->uri), 0)
+                                : zend_string_copy(req->uri);
         req->query_params = zend_new_array(0);
         return;
     }
@@ -342,7 +404,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getQuery)
     ZEND_PARSE_PARAMETERS_NONE();
 
     http_request_ensure_uri_parsed(intern->request);
-    ZVAL_ARR(return_value, zend_array_dup(intern->request->query_params));
+    http_request_retval_ht(return_value, intern->request->query_params);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam)
@@ -417,7 +479,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceParent)
         RETURN_NULL();
     }
 
-    RETURN_STR_COPY(intern->request->traceparent_raw);
+    http_request_retval_str(return_value, intern->request->traceparent_raw);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getTraceState)
@@ -429,7 +491,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceState)
         RETURN_NULL();
     }
 
-    RETURN_STR_COPY(intern->request->tracestate_raw);
+    http_request_retval_str(return_value, intern->request->tracestate_raw);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getTraceId)
@@ -694,6 +756,33 @@ void http_request_class_register(void)
     http_request_object_handlers.offset = offsetof(http_request_object, std);
     http_request_object_handlers.free_obj = http_request_free_object;
     http_request_object_handlers.clone_obj = NULL;  /* No cloning */
+}
+
+/* Value dtor for a persistent (reactor-built) headers HashTable. Header
+ * values are always zend_strings; zend_string_release is flag-aware
+ * (pefree for IS_STR_PERSISTENT), unlike ZVAL_PTR_DTOR which routes
+ * IS_STRING through zend_string_destroy == efree and would corrupt the
+ * malloc heap on a persistent string. */
+static void http_request_persistent_header_dtor(zval *zv)
+{
+    zend_string_release(Z_STR_P(zv));
+}
+
+void http_request_init_headers(http_request_t *req)
+{
+    if (req->headers != NULL) {
+        return;
+    }
+
+    if (req->persistent) {
+        req->headers = pemalloc(sizeof(HashTable), 1);
+        zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL,
+                       http_request_persistent_header_dtor, 1);
+        return;
+    }
+
+    ALLOC_HASHTABLE(req->headers);
+    zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
 }
 
 /* Helper: Create HttpRequest object wrapping an already-parsed

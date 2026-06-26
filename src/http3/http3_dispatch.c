@@ -25,6 +25,7 @@
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
+#include "core/response_wire.h"             /* response_wire_* (reverse path) */
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -113,9 +114,189 @@ static const http_static_dispatch_cbs_t h3_static_dispatch_cbs = {
  * If the server has no handler registered (defensive — addHttpHandler
  * is normally a hard requirement of HttpServer::start) we fall back to
  * a 500 so the peer never sees an indefinite half-open stream. */
+/* Inbox backlog (undrained requests) at which a connection's home worker is
+ * considered busy and a request spills to a less-loaded worker. Well below
+ * WORKER_INBOX_CAPACITY (1024) so spill kicks in before hard backpressure; -D-overridable. */
+#ifndef H3_WORKER_SPILL_DEPTH
+#define H3_WORKER_SPILL_DEPTH 64
+#endif
+
+/* Reactor mode: hand the parsed request to a PHP worker by pointer
+ * instead of spawning a handler coroutine here on the transport thread. The
+ * embedded persistent http_request_t crosses to the worker; the worker reads
+ * it, runs the handler, and posts the response + consumed back over the reverse
+ * channel. The reactor keeps the stream alive via a worker-borrow ref until the
+ * consumed arrives. No request-service stats here — those are the
+ * worker's job (handler runs there). */
+static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_t *s,
+                                             const http3_reactor_ctx_t *rctx)
+{
+    /* Reactor-paired sticky dispatch. A connection homes to one of this
+     * reactor's owned workers and reuses it for all its streams (locality); a home
+     * that backs up past H3_WORKER_SPILL_DEPTH spills this request to a less-loaded
+     * worker (owned first, else any), and a home whose worker died is re-homed. */
+    worker_registry_t *const reg = rctx->registry;
+    int slot = c->worker_slot;
+    worker_inbox_t *inbox = slot >= 0 ? worker_registry_at(reg, slot) : NULL;
+
+    if (inbox == NULL) {
+        inbox = worker_registry_least_busy(reg, rctx->reactor_id, rctx->n_reactors, &slot);
+
+        if (inbox == NULL) {
+            inbox = worker_registry_least_busy(reg, -1, rctx->n_reactors, &slot);
+        }
+
+        if (inbox != NULL) {
+            c->worker_slot = slot;
+        }
+    }
+
+    if (inbox != NULL && worker_inbox_depth(inbox) >= H3_WORKER_SPILL_DEPTH) {
+        int spill_slot;
+        worker_inbox_t *alt =
+            worker_registry_least_busy(reg, rctx->reactor_id, rctx->n_reactors, &spill_slot);
+
+        if (alt == NULL || worker_inbox_depth(alt) >= H3_WORKER_SPILL_DEPTH) {
+            worker_inbox_t *const any =
+                worker_registry_least_busy(reg, -1, rctx->n_reactors, &spill_slot);
+
+            if (any != NULL) {
+                alt = any;
+            }
+        }
+
+        if (alt != NULL) {
+            inbox = alt;
+        }
+    }
+
+    if (inbox == NULL) {
+        /* No worker published yet — leave the stream undispatched. It is torn
+         * down on the normal QUIC lifecycle (client PTO/RST); reactor teardown
+         * frees the request fields (s->dispatched stays false). */
+        return;
+    }
+
+    s->conn = c;
+
+    /* Routing for the reverse path. reactor_id selects the reverse channel;
+     * reactor_conn carries the raw stream pointer (kept alive by the
+     * worker-borrow ref below until consumed, so it is valid when the response
+     * comes back); stream_id is for validation/logging. The raw pointer becomes
+     * a generationed handle when validate-and-drop lands. */
+    s->request->reactor_id        = (uint32_t)rctx->reactor_id;
+    s->request->reactor_stream_id = s->stream_id;
+    s->request->reactor_conn      = s;
+
+    s->dispatched = true;
+    s->refcount++;   /* worker-borrow ref; dropped by the consumed apply */
+
+    if (UNEXPECTED(!worker_inbox_post(inbox, s->request))) {
+        /* Backpressure: the request was not handed off. Undo so the normal
+         * teardown reclaims it (s->dispatched=false => reactor teardown frees
+         * the fields). */
+        s->refcount--;
+        s->dispatched = false;
+        return;
+    }
+
+    H3T(s->stream_id, "1.dispatch_to_worker");
+}
+
+/* Reverse path: apply a worker-rendered response_wire on the reactor
+ * thread (posted via reactor_pool_post_exec). The wire carries the raw stream
+ * pointer (response_wire_conn) — valid here because the worker-borrow ref keeps
+ * the stream alive until the consumed that follows the response (FIFO on one
+ * reactor mailbox). If the stream/connection is already gone (client RST), the
+ * lookup is the validate-and-drop point: free the wire and return. On success,
+ * QPACK-encode + submit, then drain it out on this tick. Takes ownership of the
+ * wire. */
+void http3_reactor_apply_response(void *arg)
+{
+    response_wire_t *const rw = (response_wire_t *)arg;
+
+    if (rw == NULL) {
+        return;
+    }
+
+    http3_stream_t *const s = (http3_stream_t *)response_wire_conn(rw);
+    http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
+
+    if (c != NULL && !c->closed && c->nghttp3_conn != NULL) {
+        if (http3_stream_submit_response_wire(c, s, rw)) {
+            http3_connection_drain_out(c);
+            http3_connection_arm_timer(c);
+        }
+    }
+
+    response_wire_free(rw);
+}
+
+/* Reactor-side static serving: serve files
+ * entirely on the transport reactor — no PHP, no worker round-trip. Returns
+ * true when the static FSM claimed the request (HANDLED inline / HARD_ZERO
+ * sendfile), false on PASSTHROUGH so the caller routes to a worker. The
+ * response is built and submitted in the reactor's own ZMM; s->request is
+ * read-only here (persistent), freed by the reactor on stream release. */
+static bool http3_reactor_try_static(http3_connection_t *c, http3_stream_t *s,
+                                     const http3_reactor_ctx_t *rctx)
+{
+    if (rctx->static_mount_count == 0 || rctx->static_mounts == NULL) {
+        return false;
+    }
+
+    object_init_ex(&s->response_zv, http_response_ce);
+    http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
+
+    const http_static_result_t rc = http_static_try_serve_mounts(
+        (const http_static_handler_t *const *)rctx->static_mounts,
+        rctx->static_mount_count, rctx->static_cache,
+        s->request, Z_OBJ(s->response_zv), c->counters,
+        &h3_static_dispatch_cbs, s);
+
+    if (rc == HTTP_STATIC_PASSTHROUGH) {
+        zval_ptr_dtor(&s->response_zv);
+        ZVAL_UNDEF(&s->response_zv);
+        return false;
+    }
+
+    if (rc == HTTP_STATIC_HARD_ZERO) {
+        /* Sendfile pump owns the stream: on_armed pinned s->refcount + the
+         * in-flight counter; on_static_done runs h3_dispose_tail. */
+        return true;
+    }
+
+    /* HANDLED: inline body / 4xx. Take a serving ref (mirrors the local
+     * coroutine ref) so the slab survives the dispose_tail release until
+     * nghttp3 closes the stream, then submit + drain. */
+    s->refcount++;
+
+    if (!c->closed && c->nghttp3_conn != NULL) {
+        (void)http3_stream_submit_response(c, s, false);
+    }
+
+    h3_dispose_tail(c, s);
+    return true;
+}
+
 void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
 {
-    if (c == NULL || s == NULL || s->dispatched || s->request == NULL) {
+    if (c == NULL || s == NULL || s->dispatched) {
+        return;
+    }
+
+    ZEND_ASSERT(s->request != NULL);
+
+    /* Reactor mode: serve static here on the transport thread; otherwise route
+     * the request to a PHP worker instead of dispatching locally. */
+    const http3_reactor_ctx_t *const rctx = http3_listener_reactor_ctx(c->listener);
+
+    if (rctx != NULL) {
+        if (http3_reactor_try_static(c, s, rctx)) {
+            return;
+        }
+
+        http3_stream_dispatch_to_worker(c, s, rctx);
         return;
     }
 
@@ -186,7 +367,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
                                      &h3_stream_ops, s);
 
 #ifdef HAVE_HTTP_COMPRESSION
-    /* Attach compression state (issue #8). Server pointer comes from
+    /* Attach compression state. Server pointer comes from
      * the listener — same pattern that http3_handler_coroutine uses
      * for the request-sample bookkeeping. */
     {
@@ -206,7 +387,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     }
 #endif
 
-    /* Static-handler dispatch (issue #60). Same policy as the H1/H2
+    /* Static-handler dispatch. Same policy as the H1/H2
      * sites:
      *   HARD_ZERO   — FSM owns the request; on_armed pinned the stream.
      *                 Return without spawning a coroutine; on_static_done
@@ -283,8 +464,9 @@ static void h3_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     http3_stream_t *s = (http3_stream_t *)co->extended_data;
+    ZEND_ASSERT(s != NULL);
 
-    if (s == NULL || s->conn == NULL) return;
+    if (s->conn == NULL) return;
 
     /* Static-handler HANDLED path: response_zv already carries the
      * synchronous body (inline small file or 4xx). Skip the user handler;
@@ -314,7 +496,7 @@ static void h3_handler_coroutine_entry(void)
     if (fcall == NULL) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
-    /* Inbound Content-Encoding decode (issue #8). Same shape as the
+    /* Inbound Content-Encoding decode. Same shape as the
      * H1/H2 handler entries. */
     if (s->request != NULL) {
         extern int http_compression_decode_request_body(
@@ -498,8 +680,7 @@ static bool h3_arm_sendfile(http3_connection_t *c, http3_stream_t *s)
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http3_stream_t *s = (http3_stream_t *)coroutine->extended_data;
-
-    if (s == NULL) return;
+    ZEND_ASSERT(s != NULL);
 
     H3T(s->stream_id, "4.dispose_enter");
 

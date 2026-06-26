@@ -1,0 +1,7 @@
+{
+  "trueasync": {
+    "image": "trueasync/quic-interop-endpoint:latest",
+    "url": "https://github.com/true-async/server",
+    "role": "server"
+  }
+}

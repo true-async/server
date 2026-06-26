@@ -17,9 +17,25 @@
  */
 
 #include "php.h"
+#include "http1/http_parser.h"   /* http_request_t layout + HTTP_HEADERS_INITIAL_SIZE */
 
 /* Extension class entries (normally populated at MINIT). */
 zend_class_entry *http_exception_ce __attribute__((weak)) = NULL;
+
+/* http_request_init_headers lives in http_request.c (the PHP-object TU, not
+ * linked into the fuzz harness). http_parser.c / http2_session.c call it to
+ * lazily allocate req->headers before storing parsed headers, so a no-op
+ * would leave the HT NULL and crash the path under test. Fuzz requests are
+ * always ZMM (non-persistent), so the real non-persistent init is correct. */
+__attribute__((weak)) void http_request_init_headers(http_request_t *req)
+{
+    if (req->headers != NULL) {
+        return;
+    }
+
+    ALLOC_HASHTABLE(req->headers);
+    zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
+}
 
 /* Server-level telemetry hooks invoked by h2 session/strategy TUs.
  * All NULL-safe in production; here they're no-ops since fuzz has
@@ -93,9 +109,8 @@ __attribute__((weak)) struct zend_async_event_s *async_plain_event_new(void)
 }
 
 /* http_body_stream_pop calls these on h2 streaming bodies to grant the
- * peer credit (commit c812184: per-stream INITIAL_WINDOW=64K + flow-
- * control backpressure). Fuzz harnesses don't drive a real h2 session,
- * so no-op is safe — the parser path under test is identical. */
+ * peer credit. Fuzz harnesses don't drive a real h2 session, so no-op
+ * is safe — the parser path under test is identical. */
 struct nghttp2_session;
 struct http2_session_t;
 __attribute__((weak)) int nghttp2_session_consume(struct nghttp2_session *session,

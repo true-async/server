@@ -28,6 +28,7 @@
 #include "Zend/zend_hrtime.h"              /* zend_hrtime — drain stamps */
 #include "http3_listener.h"                /* listener accessors */
 #include "http3_packet.h"                  /* version_negotiation / stateless_reset */
+#include "http3_steer.h"                   /* CID steering encode */
 #include "http3/http3_stream.h"            /* http3_stream_t (callbacks.c symmetry) */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* recv_client_initial / hp_mask */
@@ -137,10 +138,9 @@ void http3_debug_logger(void *user_data, const char *fmt, ...)
  *
  * ngtcp2_path matching is strict: the local addr passed to read_pkt /
  * writev_stream must be the same value on every call after server_new.
- * The proper plumbing for this is `zend_async_udp_sockname` (parked as
- * a Step-6 upstream blocker per project_http3_progress.md); until that
- * lands we fabricate the sockaddr from the bind config so at least it
- * is stable across calls. peer_family lets us produce v4 / v6 to match
+ * The proper plumbing for this is `zend_async_udp_sockname`, which is
+ * not yet available; until it lands we fabricate the sockaddr from the
+ * bind config so at least it is stable across calls. peer_family lets us produce v4 / v6 to match
  * the inbound datagram. Returns 0 on success. */
 int http3_build_listener_local(const http3_listener_t *l,
                                int peer_family,
@@ -149,7 +149,7 @@ int http3_build_listener_local(const http3_listener_t *l,
 {
     memset(out, 0, sizeof(*out));
     const char *host = http3_listener_host(l);
-    int port = http3_listener_port(l);
+    const int port = http3_listener_port(l);
 
     if (host == NULL) host = (peer_family == AF_INET6) ? "::" : "0.0.0.0";
 
@@ -272,6 +272,7 @@ static http3_connection_t *http3_connection_accept(
      * failure, which the caller undoes (peer_dec) and drops silently. */
     http3_connection_t *c = ecalloc(1, sizeof(http3_connection_t));
     c->listener = listener;
+    c->worker_slot = -1;   /* unassigned until the first dispatch homes it */
     /* Cache hot-path slices. http3_listener_server_obj() returns NULL
      * for an unparented listener — accessor handles that, returning the
      * dummy / default fallbacks. */
@@ -297,8 +298,16 @@ static http3_connection_t *http3_connection_accept(
     /* Generate our own SCID; subsequent client packets address us with
      * this as their DCID. A DRBG failure here must NOT fall through to
      * a zero SCID (would collide in conn_map with any other conn whose
-     * SCID generation also failed) — fail the accept cleanly instead. */
-    if (!http3_fill_random(c->scid, HTTP3_SCID_LEN)) {
+     * SCID generation also failed) — fail the accept cleanly instead.
+     *
+     * With CID steering active the SCID encodes this reactor's
+     * id so a migrated client rehashed onto another reactor routes back here;
+     * otherwise it is fully random as before. */
+    const int reactor_id = http3_listener_reactor_id(listener);
+    const bool steer = http3_steer_active() && reactor_id >= 0;
+
+    if (steer ? !http3_steer_encode(c->scid, reactor_id)
+              : !http3_fill_random(c->scid, HTTP3_SCID_LEN)) {
         OPENSSL_cleanse(c, sizeof(*c));
         efree(c);
         return NULL;
@@ -354,13 +363,13 @@ static http3_connection_t *http3_connection_accept(
      * accept path uses for read-header timeouts in this server. */
     settings.handshake_timeout = 10 * NGTCP2_SECONDS;
 
-    if (c != NULL && c->log_state != NULL
+    if (c->log_state != NULL
         && c->log_state->severity != HTTP_LOG_OFF
         && (int)HTTP_LOG_DEBUG >= (int)c->log_state->severity) {
         settings.log_printf = http3_debug_logger;
     }
 
-    /* Transport params resolution (NEXT_STEPS.md §5):
+    /* Transport params resolution:
      *   1. HttpServerConfig setters at server start() time.
      *   2. PHP_HTTP3_BENCH_FC=1 raises FC + streams to bench-grade
      *      values (NEVER enable in production — disables back-pressure).
@@ -375,9 +384,9 @@ static http3_connection_t *http3_connection_accept(
     const http_server_object *srv_obj =
         (const http_server_object *)http3_listener_server_obj(listener);
 
-    uint32_t cfg_window  = http_server_get_http3_stream_window_bytes(srv_obj);
-    uint32_t cfg_streams = http_server_get_http3_max_concurrent_streams(srv_obj);
-    uint32_t cfg_idle_ms = http_server_get_http3_idle_timeout_ms(srv_obj);
+    const uint32_t cfg_window  = http_server_get_http3_stream_window_bytes(srv_obj);
+    const uint32_t cfg_streams = http_server_get_http3_max_concurrent_streams(srv_obj);
+    const uint32_t cfg_idle_ms = http_server_get_http3_idle_timeout_ms(srv_obj);
 
     uint64_t window_bytes = cfg_window != 0 ? (uint64_t)cfg_window : (256ull * 1024);
     uint64_t streams_bidi = cfg_streams != 0 ? (uint64_t)cfg_streams : 100;
@@ -545,14 +554,23 @@ static http3_connection_t *http3_connection_accept(
  * Packet entry — listener calls this for each inbound datagram
  * ------------------------------------------------------------------------ */
 
+/* Migration-storm guard thresholds: more than HTTP3_MIGRATE_STORM_MAX path
+ * migrations within HTTP3_MIGRATE_STORM_WINDOW_NS is well past any legitimate
+ * client (which migrates rarely and re-validates in ~1 RTT) — it is a wedge or
+ * a flood, and we shed the connection. -D-overridable for tuning/tests. */
+#ifndef HTTP3_MIGRATE_STORM_MAX
+# define HTTP3_MIGRATE_STORM_MAX 8u
+#endif
+#ifndef HTTP3_MIGRATE_STORM_WINDOW_NS
+# define HTTP3_MIGRATE_STORM_WINDOW_NS 1000000000ULL /* 1 s */
+#endif
+
 bool http3_connection_dispatch(
     http3_listener_t *listener,
     const uint8_t *data, size_t datalen, uint8_t ecn,
     const struct sockaddr *peer, socklen_t peer_len)
 {
-    if (listener == NULL || data == NULL || datalen == 0) {
-        return false;
-    }
+    ZEND_ASSERT(listener != NULL && data != NULL && datalen > 0);
 
     http3_packet_stats_t *stats = http3_listener_packet_stats(listener);
 
@@ -584,6 +602,16 @@ bool http3_connection_dispatch(
         : NULL;
 
     if (conn == NULL) {
+        /* CID steering: a short-header packet for a conn we do
+         * not own may belong to another reactor — a client that migrated and
+         * was SO_REUSEPORT-rehashed onto us. If its DCID decodes to a different
+         * reactor, forward it there instead of resetting a live connection. */
+        if (http3_listener_try_steer(listener, vc.version,
+                                     vc.dcid, vc.dcidlen,
+                                     data, datalen, ecn, peer, peer_len)) {
+            return true;
+        }
+
         /* No matching connection. For a long-header (version != 0) INITIAL
          * this is expected — we create one. For a short-header (version == 0)
          * it is a 1-RTT packet for a conn we do not know: answer with a
@@ -787,6 +815,23 @@ bool http3_connection_dispatch(
             memcpy(&conn->peer, cur->remote.addr, (size_t)cur->remote.addrlen);
             conn->peer_len = (socklen_t)cur->remote.addrlen;
             stats->quic_path_migrations++;
+
+            /* Migration-storm guard: a client rebinding faster than its path
+             * validates wedges ngtcp2 (responses chase the stale path). Count
+             * migrations in a sliding window; past the cap, flag the conn so
+             * the next flush sheds it (graceful close to the live peer) rather
+             * than spinning PTO probes for seconds. */
+            const uint64_t now_ns = (uint64_t)zend_hrtime();
+
+            if (now_ns - conn->migrate_window_start_ns
+                    > HTTP3_MIGRATE_STORM_WINDOW_NS) {
+                conn->migrate_window_start_ns = now_ns;
+                conn->migrate_count = 0;
+            }
+
+            if (++conn->migrate_count > HTTP3_MIGRATE_STORM_MAX) {
+                conn->migration_storm = true;
+            }
         }
     } else if (pkt_rv == NGTCP2_ERR_DRAINING ||
                pkt_rv == NGTCP2_ERR_CLOSING ||
@@ -812,6 +857,89 @@ bool http3_connection_dispatch(
 /* ------------------------------------------------------------------------
  * Connection free — teardown order
  * ------------------------------------------------------------------------ */
+
+/* ---- Server-issued alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1) ----
+ * Each CID we hand the client is registered in the listener conn_map and
+ * recorded here so it can be unregistered before the conn is freed,
+ * independent of ngtcp2's retired-CID grace period (see http3_connection.h). */
+
+void http3_connection_register_issued_cid(
+    http3_connection_t *c, const uint8_t *cid, size_t cidlen)
+{
+    HashTable *map = http3_listener_conn_map(c->listener);
+
+    if (map == NULL) {
+        return;
+    }
+    /* add-if-absent: a byte-for-byte collision with a live key owned by a
+     * different conn fails the add — do NOT record it, so reap never evicts a
+     * key this connection does not own. */
+    if (zend_hash_str_add_ptr(map, (const char *)cid, cidlen, c) == NULL) {
+        return;
+    }
+
+    if (c->issued_cid_count == c->issued_cid_cap) {
+        const size_t ncap = c->issued_cid_cap == 0 ? 8 : c->issued_cid_cap * 2;
+        c->issued_cids = erealloc(c->issued_cids,
+                                  ncap * sizeof(http3_issued_cid_t));
+        c->issued_cid_cap = ncap;
+    }
+
+    http3_issued_cid_t *const e = &c->issued_cids[c->issued_cid_count++];
+    memcpy(e->data, cid, cidlen);
+    e->len = cidlen;
+
+    http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
+
+    if (stats != NULL) {
+        stats->quic_new_cid_issued++;
+    }
+}
+
+void http3_connection_unregister_issued_cid(
+    http3_connection_t *c, const uint8_t *cid, size_t cidlen)
+{
+    for (size_t i = 0; i < c->issued_cid_count; i++) {
+        if (c->issued_cids[i].len != cidlen
+            || memcmp(c->issued_cids[i].data, cid, cidlen) != 0) {
+            continue;
+        }
+
+        HashTable *map = http3_listener_conn_map(c->listener);
+
+        if (map != NULL) {
+            zend_hash_str_del(map, (const char *)cid, cidlen);
+        }
+
+        http3_packet_stats_t *const stats =
+            http3_listener_packet_stats(c->listener);
+
+        if (stats != NULL) {
+            stats->quic_cid_retired++;
+        }
+
+        c->issued_cids[i] = c->issued_cids[--c->issued_cid_count];
+        return;
+    }
+}
+
+void http3_connection_unregister_all_issued_cids(http3_connection_t *c)
+{
+    if (c->issued_cid_count == 0) {
+        return;
+    }
+
+    HashTable *map = http3_listener_conn_map(c->listener);
+
+    if (map != NULL) {
+        for (size_t i = 0; i < c->issued_cid_count; i++) {
+            zend_hash_str_del(map,
+                (const char *)c->issued_cids[i].data, c->issued_cids[i].len);
+        }
+    }
+
+    c->issued_cid_count = 0;
+}
 
 void http3_connection_free(http3_connection_t *conn)
 {
@@ -923,6 +1051,15 @@ void http3_connection_free(http3_connection_t *conn)
     if (conn->ngtcp2_conn != NULL) {
         ngtcp2_conn_del((ngtcp2_conn *)conn->ngtcp2_conn);
         conn->ngtcp2_conn = NULL;
+    }
+
+    /* Free the issued-CID record. On the reap path its conn_map keys were
+     * already removed by http3_listener_remove_connection; on the listener-
+     * teardown path the whole map is bulk-destroyed right after, so only the
+     * heap array itself needs releasing here. */
+    if (conn->issued_cids != NULL) {
+        efree(conn->issued_cids);
+        conn->issued_cids = NULL;
     }
     /* Wipe the struct shell before returning to ZendMM. Holds random
      * SCID/original_dcid, peer sockaddr, and pointer slots whose values

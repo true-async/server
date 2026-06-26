@@ -98,9 +98,7 @@ nghttp2_session *http2_session_get_ng(http2_session_t *session)
 static void ensure_headers_table(http_request_t *req)
 {
     if (req->headers == NULL) {
-        ALLOC_HASHTABLE(req->headers);
-        zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE,
-                       NULL, ZVAL_PTR_DTOR, 0);
+        http_request_init_headers(req);
     }
 }
 
@@ -119,10 +117,10 @@ static void store_header_value(http_request_t *req,
     const bool name_owned = (name_str == NULL);
 
     if (name_owned) {
-        name_str = zend_string_init(name, namelen, 0);
+        name_str = zend_string_init(name, namelen, req->persistent);
     }
 
-    zend_string *val_str = zend_string_init(value, valuelen, 0);
+    zend_string *val_str = zend_string_init(value, valuelen, req->persistent);
 
     zval tmp;
     ZVAL_STR(&tmp, val_str);
@@ -303,12 +301,12 @@ static int cb_on_header(nghttp2_session *ng,
                 req->method = http_known_method_lookup(value_c, valuelen);
 
                 if (req->method == NULL) {
-                    req->method = zend_string_init(value_c, valuelen, 0);
+                    req->method = zend_string_init(value_c, valuelen, req->persistent);
                 }
             }
         } else if (namelen == 5 && memcmp(name, ":path", 5) == 0) {
             if (req->uri == NULL) {
-                req->uri = zend_string_init(value_c, valuelen, 0);
+                req->uri = zend_string_init(value_c, valuelen, req->persistent);
             }
         } else if (namelen == 10 && memcmp(name, ":authority", 10) == 0) {
             /* Map :authority → Host header per RFC 9113 §8.3.1, so
