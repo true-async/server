@@ -33,7 +33,7 @@
  * client's version-negotiation logic, not to randomise our wire bytes. */
 #define HTTP3_GREASE_VERSION 0x1a2a3a4aU
 
-/* Reactor watchdog budget (#80 Phase 0). Default 10 ms keeps a tick well
+/* Reactor watchdog budget. Default 10 ms keeps a tick well
  * under QUIC max_ack_delay (25 ms); PHP_HTTP3_REACTOR_BUDGET_MS overrides at
  * process start. Cached on first read — same one-shot getenv pattern as the
  * H3_TRACE / peer-budget knobs. */

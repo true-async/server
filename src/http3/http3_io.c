@@ -69,7 +69,7 @@ static void timer_fire_cb(zend_async_event_t *event,
     if (stats != NULL) {
         stats->quic_timer_fired++;
 
-        /* Per-connection ACK/PTO service delay (#80 Phase 0): how far past
+        /* Per-connection ACK/PTO service delay: how far past
          * its armed deadline this timer actually fired. Anything beyond the
          * reactor budget means the reactor was busy when this connection's
          * ACK/loss timer was due. */
@@ -159,7 +159,7 @@ void http3_connection_arm_timer(http3_connection_t *c)
     }
 
     /* Stamp the deadline we're arming for so timer_fire_cb can measure how
-     * late the fire actually was (reactor service delay, #80 Phase 0). */
+     * late the fire actually was (reactor service delay). */
     c->timer_expiry_ns = (uint64_t)expiry;
 
     ngtcp2_tstamp now = http3_ts_now();
@@ -294,7 +294,7 @@ void http3_connection_drain_out(http3_connection_t *c)
         }                                                                      \
     } while (0)
 
-    /* Phase 2 — opt-in pacing (#59, HttpServerConfig::setHttp3Pacing). OFF
+    /* Opt-in pacing (HttpServerConfig::setHttp3Pacing). OFF
      * by default: the block below is inert and the drain runs exactly as
      * before. ON: cap each burst at the congestion controller's
      * send_quantum and yield to the timer only for a real inter-burst gap

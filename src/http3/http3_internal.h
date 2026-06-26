@@ -64,7 +64,7 @@
  * consistent — zend_hrtime fits. */
 ngtcp2_tstamp http3_ts_now(void);
 
-/* Reactor-iteration watchdog budget in nanoseconds (#80 Phase 0). A poll-cb
+/* Reactor-iteration watchdog budget in nanoseconds. A poll-cb
  * tick or a timer fire that takes longer than this is "slow" — on the single
  * reactor thread that delay is imposed on every connection's ACK/PTO. Read
  * once from PHP_HTTP3_REACTOR_BUDGET_MS (default 10 ms); cached thereafter. */
@@ -159,7 +159,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming);
 
-/* Reverse path (#80, B4): submit a buffered response from a worker-rendered
+/* Reverse path: submit a buffered response from a worker-rendered
  * response_wire instead of the per-stream HttpResponse zval. Reactor thread. */
 typedef struct response_wire_s response_wire_t;
 bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,

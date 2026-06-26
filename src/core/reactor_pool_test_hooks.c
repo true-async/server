@@ -147,8 +147,8 @@ PHP_FUNCTION(_http_server_reactor_pool_selftest)
 }
 
 /* Build a synthetic http_request_t the way the #80 reactor will: persistent
- * (malloc) domain method/uri/headers + routing triple, ZMM body (worker-domain,
- * as the D7.6 command stream will deliver it — deliberately mixed-domain).
+ * (malloc) domain method/uri/headers + routing triple, ZMM body (worker-domain
+ * — deliberately mixed-domain).
  * Returns a refcount=1 request the caller owns (hand to dispatch/inbox, or
  * release via http_request_destroy). NULL only on persistent-alloc failure.
  * `headers`/`body` may be NULL. */
@@ -929,9 +929,7 @@ PHP_FUNCTION(_http_server_worker_registry_route_selftest)
  * transport reactor thread (not a PHP worker) and that the reactor's own loop
  * actually services inbound datagrams. The listener is spawned with
  * server_obj == NULL and ssl_ctx == NULL: no PHP dispatch (http3_stream_dispatch
- * guards on server == NULL) and no crypto — a recv-only spike. Real dispatch
- * (build persistent request → worker_inbox_post) and the reverse path land in
- * B3p3-b / B4. */
+ * guards on server == NULL) and no crypto — a recv-only spike. */
 #if defined(HAVE_HTTP_SERVER_HTTP3) && !defined(PHP_WIN32)
 
 /* Spawn the listener ON the reactor thread (its uv handles must be created on

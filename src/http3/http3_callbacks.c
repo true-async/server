@@ -37,8 +37,8 @@
 #include "core/http_protocol_handlers.h"   /* http_protocol_get_handler */
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
-#include "http3_steer.h"                   /* CID steering encode (#80 D6 / #72) */
-#include "core/response_wire.h"            /* response_wire_* (reverse path B4) */
+#include "http3_steer.h"                   /* CID steering encode */
+#include "core/response_wire.h"            /* response_wire_* (reverse path) */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
@@ -53,10 +53,6 @@
 /* Listener accessors not exposed via http3_listener.h. */
 extern http3_packet_stats_t *http3_listener_packet_stats(http3_listener_t *l);
 extern const uint8_t *http3_listener_sr_key(const http3_listener_t *l);
-
-/* http3_stream_submit_response forward — used by streaming append_chunk
- * (here) and by http3_dispatch.c on the buffered REST commit path.
- * Declared cross-TU in http3_internal.h. */
 
 /* ------------------------------------------------------------------------
  * ngtcp2 base callbacks: rand + new connection id (with deterministic
@@ -94,7 +90,7 @@ static int get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid,
      * (peer caches the token from NEW_CONNECTION_ID; when a forged-or-
      * legitimate reset arrives we recompute the same value here).
      *
-     * With CID steering active (#80 D6 / #72) every CID we hand out must encode
+     * With CID steering active every CID we hand out must encode
      * this reactor's id too — a client may rotate to one of these as its DCID on
      * migration, and it must still route back here. */
     const int reactor_id = c != NULL ? http3_listener_reactor_id(c->listener) : -1;
@@ -365,8 +361,8 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
-    /* Reactor mode (#80): defer dispatch to h3_end_stream_cb. The reactor must
-     * not write into the request after hand-off (D7), so the body is assembled
+    /* Reactor mode: defer dispatch to h3_end_stream_cb. The reactor must
+     * not write into the request after hand-off, so the body is assembled
      * (persistent) before the worker gets the pointer — buffered, not streamed. */
     if (c != NULL && http3_listener_reactor_ctx(c->listener) != NULL) {
         return 0;
@@ -690,7 +686,7 @@ headers_done:
     return false;
 }
 
-/* Reverse path (#80, B4): submit a buffered response from a flat response_wire
+/* Reverse path: submit a buffered response from a flat response_wire
  * (rendered by a worker, handed back over the reverse channel) instead of from
  * the per-stream HttpResponse zval. Runs ON THE REACTOR thread. The wire's
  * headers were already filtered to the H2/H3-allowed set on the worker, so no
@@ -1028,7 +1024,7 @@ static void http3_finalize_request_body(http3_stream_t *s)
         smart_str_0(&s->body_buf);
 
         if (req->persistent) {
-            /* Reactor mode (#80): the worker reads req->body on its own thread,
+            /* Reactor mode: the worker reads req->body on its own thread,
              * so copy the ZMM smart_str into a persistent (malloc) zend_string
              * and drop the builder. getBody() deep-copies it back into ZMM. */
             req->body = zend_string_init(ZSTR_VAL(s->body_buf.s),
@@ -1341,9 +1337,7 @@ static int handshake_completed_cb(ngtcp2_conn *conn, void *user_data)
  * The interop test matrix speaks raw HTTP/0.9 on QUIC bidi streams, not
  * HTTP/3, so an hq connection has no nghttp3. Ingress accumulates the
  * "GET <path>\r\n" request line; egress (http3_io.c drain) writes
- * s->response_body raw + FIN. Step 2 answers with a synthetic body to
- * prove the raw path end-to-end; serving real files from a docroot is a
- * follow-up. */
+ * s->response_body raw + FIN. */
 /* Map a docroot-relative file into s->hq_body for zero-copy raw egress, or
  * return false on any failure. Rejects traversal by canonicalising both
  * docroot and target with realpath and requiring the target to stay under

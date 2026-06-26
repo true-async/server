@@ -61,7 +61,7 @@ worker_inbox_t *worker_registry_at(worker_registry_t *reg, int idx);
  * slot is published yet. Any thread. */
 worker_inbox_t *worker_registry_pick(worker_registry_t *reg);
 
-/* Least-loaded published inbox for a reactor, by worker_inbox_depth (D5). Ownership
+/* Least-loaded published inbox for a reactor, by worker_inbox_depth. Ownership
  * is strided: reactor `reactor_id` owns slots {i : i % n_reactors == reactor_id}.
  * `reactor_id` < 0 (or `n_reactors` <= 1) scans ALL slots — the global spill / fallback.
  * Ties rotate via the round-robin counter so connections homing while idle spread

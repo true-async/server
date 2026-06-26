@@ -25,7 +25,7 @@
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
-#include "core/response_wire.h"             /* response_wire_* (reverse path B4) */
+#include "core/response_wire.h"             /* response_wire_* (reverse path) */
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -115,23 +115,23 @@ static const http_static_dispatch_cbs_t h3_static_dispatch_cbs = {
  * is normally a hard requirement of HttpServer::start) we fall back to
  * a 500 so the peer never sees an indefinite half-open stream. */
 /* Inbox backlog (undrained requests) at which a connection's home worker is
- * considered busy and a request spills to a less-loaded worker (#80 D5). Well below
+ * considered busy and a request spills to a less-loaded worker. Well below
  * WORKER_INBOX_CAPACITY (1024) so spill kicks in before hard backpressure; -D-overridable. */
 #ifndef H3_WORKER_SPILL_DEPTH
 #define H3_WORKER_SPILL_DEPTH 64
 #endif
 
-/* Reactor mode (#80, B3p3-b): hand the parsed request to a PHP worker by pointer
+/* Reactor mode: hand the parsed request to a PHP worker by pointer
  * instead of spawning a handler coroutine here on the transport thread. The
  * embedded persistent http_request_t crosses to the worker; the worker reads
  * it, runs the handler, and posts the response + consumed back over the reverse
  * channel. The reactor keeps the stream alive via a worker-borrow ref until the
- * consumed arrives (D7.5). No request-service stats here — those are the
+ * consumed arrives. No request-service stats here — those are the
  * worker's job (handler runs there). */
 static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_t *s,
                                              const http3_reactor_ctx_t *rctx)
 {
-    /* Reactor-paired sticky dispatch (#80 D5). A connection homes to one of this
+    /* Reactor-paired sticky dispatch. A connection homes to one of this
      * reactor's owned workers and reuses it for all its streams (locality); a home
      * that backs up past H3_WORKER_SPILL_DEPTH spills this request to a less-loaded
      * worker (owned first, else any), and a home whose worker died is re-homed. */
@@ -183,13 +183,13 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
      * reactor_conn carries the raw stream pointer (kept alive by the
      * worker-borrow ref below until consumed, so it is valid when the response
      * comes back); stream_id is for validation/logging. The raw pointer becomes
-     * a generationed handle when validate-and-drop (D4/D8) lands. */
+     * a generationed handle when validate-and-drop lands. */
     s->request->reactor_id        = (uint32_t)rctx->reactor_id;
     s->request->reactor_stream_id = s->stream_id;
     s->request->reactor_conn      = s;
 
     s->dispatched = true;
-    s->refcount++;   /* worker-borrow ref; dropped by the consumed apply (D7.5) */
+    s->refcount++;   /* worker-borrow ref; dropped by the consumed apply */
 
     if (UNEXPECTED(!worker_inbox_post(inbox, s->request))) {
         /* Backpressure: the request was not handed off. Undo so the normal
@@ -203,7 +203,7 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
     H3T(s->stream_id, "1.dispatch_to_worker");
 }
 
-/* Reverse path (#80, B4): apply a worker-rendered response_wire on the reactor
+/* Reverse path: apply a worker-rendered response_wire on the reactor
  * thread (posted via reactor_pool_post_exec). The wire carries the raw stream
  * pointer (response_wire_conn) — valid here because the worker-borrow ref keeps
  * the stream alive until the consumed that follows the response (FIFO on one
@@ -232,7 +232,7 @@ void http3_reactor_apply_response(void *arg)
     response_wire_free(rw);
 }
 
-/* Reactor-side static serving (#80, issue #60 in the split): serve files
+/* Reactor-side static serving: serve files
  * entirely on the transport reactor — no PHP, no worker round-trip. Returns
  * true when the static FSM claimed the request (HANDLED inline / HARD_ZERO
  * sendfile), false on PASSTHROUGH so the caller routes to a worker. The
@@ -365,7 +365,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
                                      &h3_stream_ops, s);
 
 #ifdef HAVE_HTTP_COMPRESSION
-    /* Attach compression state (issue #8). Server pointer comes from
+    /* Attach compression state. Server pointer comes from
      * the listener — same pattern that http3_handler_coroutine uses
      * for the request-sample bookkeeping. */
     {
@@ -385,7 +385,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     }
 #endif
 
-    /* Static-handler dispatch (issue #60). Same policy as the H1/H2
+    /* Static-handler dispatch. Same policy as the H1/H2
      * sites:
      *   HARD_ZERO   — FSM owns the request; on_armed pinned the stream.
      *                 Return without spawning a coroutine; on_static_done
@@ -493,7 +493,7 @@ static void h3_handler_coroutine_entry(void)
     if (fcall == NULL) return;
 
 #ifdef HAVE_HTTP_COMPRESSION
-    /* Inbound Content-Encoding decode (issue #8). Same shape as the
+    /* Inbound Content-Encoding decode. Same shape as the
      * H1/H2 handler entries. */
     if (s->request != NULL) {
         extern int http_compression_decode_request_body(

@@ -289,15 +289,14 @@ struct http_server_object {
     http_pool_tcp_fd_t       pool_tcp_fds[MAX_LISTENERS];
     size_t                   pool_tcp_fd_count;
 
-    /* Pure-C transport reactor pool (#80). Parent-only, brought up in
-     * http_server_start_pool when an H3 listener is configured and the
-     * opt-in env gate is set; NULL otherwise. Owns no PHP state — see
-     * core/reactor_pool.h. Torn down in the start_pool cleanup path. */
+    /* Pure-C transport reactor pool. Parent-only, brought up when an H3
+     * listener is configured and the opt-in env gate is set; NULL otherwise.
+     * Owns no PHP state. */
     reactor_pool_t          *reactor_pool;
 
-    /* This worker clone's request inbox (#80, B3). Non-NULL only on a worker
-     * clone running under the reactor-pool gate; the reactor posts parsed
-     * requests here and the drain dispatches them on this thread. */
+    /* This worker clone's request inbox. Non-NULL only on a worker clone
+     * running under the reactor-pool gate; the reactor posts parsed requests
+     * here and the drain dispatches them on this thread. */
     worker_inbox_t          *worker_inbox;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
@@ -307,22 +306,22 @@ struct http_server_object {
     http3_listener_t        *http3_listeners[MAX_LISTENERS];
     size_t                   http3_listener_count;
 
-    /* Reactor-owned H3 listeners (#80, B3p3-b). Parent-only, under the gate: one
-     * per (reactor x configured udp_h3 listener), spawned ON the reactor thread
-     * so its uv socket lives on the right loop, and routing parsed requests to
-     * workers. The parent owns these + their thread-clean contexts + a shared
-     * SSL_CTX; all torn down with the reactor pool. Each entry remembers which
-     * reactor it runs on so teardown can run on that thread. */
+    /* Reactor-owned H3 listeners. Parent-only, under the gate: one per
+     * (reactor x configured udp_h3 listener), spawned ON the reactor thread so
+     * its uv socket lives on the right loop. The parent owns these + their
+     * thread-clean contexts + a shared SSL_CTX; all torn down with the reactor
+     * pool. Each entry remembers which reactor it runs on so teardown can run
+     * on that thread. */
     struct { http3_listener_t *listener; int reactor_id; }
                              reactor_h3_listeners[MAX_LISTENERS];
     size_t                   reactor_h3_listener_count;
     http3_reactor_ctx_t     *reactor_h3_ctx;          /* [reactor count] */
     tls_context_t           *reactor_tls_ctx;         /* parent-built shared SSL_CTX */
 
-    /* CID steering groups (#80 D6 / #72), one per H3 endpoint. Each groups that
-     * endpoint's per-reactor listeners by reactor id so any reactor can forward
-     * a stray (migrated) datagram to the owner. Built after the listeners spawn,
-     * freed after they tear down. */
+    /* CID steering groups, one per H3 endpoint. Each groups that endpoint's
+     * per-reactor listeners by reactor id so any reactor can forward a stray
+     * (migrated) datagram to the owner. Built after the listeners spawn, freed
+     * after they tear down. */
     http3_steer_group_t     *reactor_h3_steer[MAX_LISTENERS];
     size_t                   reactor_h3_steer_count;
 
@@ -2063,18 +2062,18 @@ static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
 
 #endif  /* !PHP_WIN32 */
 
-/* Process-wide registry of worker inboxes (#80, B3). The pool parent creates it;
- * worker clones publish their inbox into it; reactor threads read it to pick a
- * worker. One per process (a single pool parent), shared across all threads. */
+/* Process-wide registry of worker inboxes. The pool parent creates it; worker
+ * clones publish their inbox into it; reactor threads read it to pick a worker.
+ * One per process, shared across all threads. */
 static worker_registry_t *g_worker_registry = NULL;
 
-/* Process-wide reactor pool handle (#80, B4). The pool itself is owned by the
- * parent's http_server_object; this global lets a worker thread reach it to post
+/* Process-wide reactor pool handle. The pool itself is owned by the parent's
+ * http_server_object; this global lets a worker thread reach it to post
  * responses back over the reverse channel (reactor_pool_post_exec), addressed by
  * the reactor_id carried on each request/response. One pool per process. */
 static reactor_pool_t *g_reactor_pool = NULL;
 
-/* Reactor pool (#80) opt-in gate. While the H3-listener-on-reactor wiring is
+/* Reactor pool opt-in gate. While the H3-listener-on-reactor wiring is
  * incomplete the pool is brought up only when TRUE_ASYNC_SERVER_REACTOR_POOL=1
  * so the default server behaves exactly as before. */
 static bool http_server_reactor_pool_enabled(void)
@@ -2339,8 +2338,8 @@ static void http_server_reactor_h3_teardown(http_server_object *server)
 #endif /* HAVE_HTTP_SERVER_HTTP3 */
 
 /* Bring up the transport reactor pool on the parent before workers run.
- * reactors = min(workers, cores) per the accepted R:W topology (#80). No-op
- * (and leaves reactor_pool NULL) when the gate is off or no H3 listener is
+ * reactors = min(workers, cores) per the accepted R:W topology. No-op (and
+ * leaves reactor_pool NULL) when the gate is off or no H3 listener is
  * configured. Non-fatal: a failed bring-up logs and the server runs without
  * it. */
 static void http_server_reactor_pool_up(http_server_object *server, const int workers)
@@ -2376,8 +2375,8 @@ static void http_server_reactor_pool_up(http_server_object *server, const int wo
 
     size_t h3_spawned = 0;
 #ifdef HAVE_HTTP_SERVER_HTTP3
-    /* Arm CID steering (#80 D6 / #72) before any reactor mints a CID: encode the
-     * owner reactor's id into every server CID so a migrated client rehashed by
+    /* Arm CID steering before any reactor mints a CID: encode the owner
+     * reactor's id into every server CID so a migrated client rehashed by
      * SO_REUSEPORT onto another reactor routes back to its owner. Active only
      * with >1 reactor (the id is one byte, so cap at 256). */
     const int real_reactors = reactor_pool_count(server->reactor_pool);
@@ -2439,8 +2438,8 @@ static void http_server_reactor_pool_down(http_server_object *server)
 #endif
 }
 
-/* Worker response sink (#80, B4): post the rendered response back to the
- * originating reactor for nghttp3 encode + send. Runs on the worker thread (from
+/* Worker response sink: post the rendered response back to the originating
+ * reactor for nghttp3 encode + send. Runs on the worker thread (from
  * the handler coroutine's dispose). reactor_id (echoed on the wire) selects the
  * reverse channel; ownership of `rw` transfers to the reactor apply on success.
  * On failure (no pool / full mailbox) drop it — the client times out and the
@@ -2586,7 +2585,7 @@ static int http_server_start_pool(http_server_object *server,
 
     /* Stand up the transport reactor pool + worker registry BEFORE submitting
      * workers, so a worker that comes up fast finds the registry ready to
-     * publish into (#80, gated). */
+     * publish into. */
     http_server_reactor_pool_up(server, workers);
 
     pool_await_state_t *st = ecalloc(1, sizeof(*st));
@@ -2946,8 +2945,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     server->scope_object = server->server_scope->scope_object;
 
     /* Worker-pool clone under the reactor-pool gate: publish a request inbox so
-     * a reactor can route parsed requests to this worker (#80, B3). No-op
-     * otherwise. */
+     * a reactor can route parsed requests to this worker. No-op otherwise. */
     http_server_worker_inbox_up(server);
 
     /* Build TLS context up-front if any listener declared tls=true.
@@ -3139,7 +3137,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
              * a worker clone must NOT spawn its own, or two listeners would
              * REUSEPORT-share the socket and the reactor split would not hold.
              * The worker still publishes its request inbox for the reactor to
-             * route to (#80, B3p3-b). */
+             * route to. */
             if (http_server_reactor_pool_enabled() && server->is_worker_clone) {
                 continue;
             }
@@ -3724,7 +3722,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
 #ifdef HAVE_HTTP_SERVER_HTTP3
 /* Append one listener's stats snapshot to the result array. Factored out so
  * both the single-thread listeners (server->http3_listeners) and the reactor-
- * owned listeners (#80, server->reactor_h3_listeners) report identically.
+ * owned listeners (server->reactor_h3_listeners) report identically.
  * The reactor-owned read is cross-thread (the reactor writes these counters on
  * its own thread); they are advisory uint64s, so a torn read is benign. */
 static void http3_emit_listener_stats(zval *return_value, http3_listener_t *l)
@@ -3757,7 +3755,7 @@ static void http3_emit_listener_stats(zval *return_value, http3_listener_t *l)
         add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
         add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
         add_assoc_long(&entry, "quic_migration_storm_shed", (zend_long)s.packet.quic_migration_storm_shed);
-        /* CID steering (#80 D6 / #72). */
+        /* CID steering. */
         add_assoc_long(&entry, "quic_steered_out",        (zend_long)s.packet.quic_steered_out);
         add_assoc_long(&entry, "quic_steered_in",         (zend_long)s.packet.quic_steered_in);
         add_assoc_long(&entry, "quic_steered_drop",       (zend_long)s.packet.quic_steered_drop);
@@ -3802,9 +3800,9 @@ static void http3_emit_listener_stats(zval *return_value, http3_listener_t *l)
         add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
         add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
 
-        /* Reactor-iteration watchdog (#80 Phase 0). Tick = one poll-cb
-         * wakeup; on the single reactor thread its latency is the ACK/PTO
-         * delay imposed on every live connection. */
+        /* Reactor-iteration watchdog. Tick = one poll-cb wakeup; on the single
+         * reactor thread its latency is the ACK/PTO delay imposed on every live
+         * connection. */
         add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
         add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
         add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
@@ -3843,7 +3841,7 @@ static void http3_emit_listener_stats(zval *return_value, http3_listener_t *l)
 /* {{{ proto HttpServer::getHttp3Stats(): array
  *
  * Per-listener observability for the HTTP/3 path. In single-thread / worker
- * mode the listeners live on this server; in the reactor-pool split (#80) the
+ * mode the listeners live on this server; in the reactor-pool split the
  * transport reactors own them (server->reactor_h3_listeners) — report both so
  * a pooled server is observable too. Counters let tests confirm the UDP pipe
  * is live end-to-end. */
@@ -4082,13 +4080,13 @@ static void http_server_free(zend_object *obj)
 
     zval_ptr_dtor(&server->config);
 
-    /* Reactor pool (#80). Normally torn down in the start_pool cleanup
-     * path; this is the defensive catch-all if the server is freed without
-     * a clean pool exit. */
+    /* Reactor pool. Normally torn down in the start_pool cleanup path; this is
+     * the defensive catch-all if the server is freed without a clean pool
+     * exit. */
     http_server_reactor_pool_down(server);
 
-    /* This worker clone's request inbox (#80, B3). Producers (reactors) have
-     * quiesced by the time a worker is freed. */
+    /* This worker clone's request inbox. Producers (reactors) have quiesced by
+     * the time a worker is freed. */
     if (server->worker_inbox != NULL) {
         worker_inbox_free(server->worker_inbox);
         server->worker_inbox = NULL;

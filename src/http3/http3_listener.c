@@ -16,7 +16,7 @@
 #include "http3_packet.h"
 #include "http3_connection.h"
 #include "http3_internal.h"   /* http3_reactor_budget_ns */
-#include "http3_steer.h"      /* CID steering (#80 D6 / #72) */
+#include "http3_steer.h"      /* CID steering */
 #include "php_http_server.h"
 #include "log/http_log.h"
 #include "Zend/zend_atomic.h"
@@ -110,7 +110,7 @@ struct _http3_listener_s {
      * twice as we would if we iterated conn_map. */
     http3_connection_t        *conn_list;
 
-    /* Phase-1 deferred-output dirty-list head, linked through
+    /* Deferred-output dirty-list head, linked through
      * conn->dirty_next. The read path marks conns here instead of
      * draining per datagram; http3_listener_flush_dirty drains the list
      * once per recvmmsg tick. Always empty between ticks — populated and
@@ -131,19 +131,19 @@ struct _http3_listener_s {
      * (the server object lives on the parent thread). */
     void                      *server_obj;
 
-    /* Reactor mode (#80, B3p3-b). Non-NULL => this listener runs on a transport
+    /* Reactor mode. Non-NULL => this listener runs on a transport
      * reactor and routes parsed requests to PHP workers via the registry
      * instead of dispatching locally. Non-owning (the parent owns it). NULL is
      * the unchanged single-thread path. */
     const http3_reactor_ctx_t *reactor_ctx;
 
-    /* CID steering group (#80 D6 / #72). Non-NULL => this listener forwards
+    /* CID steering group. Non-NULL => this listener forwards
      * stray datagrams (DCID decodes to another reactor) to their owner. Shared
      * across the endpoint's per-reactor listeners; owned by the parent, outlives
      * the listener. NULL = no steering (single reactor / single-thread). */
     http3_steer_group_t *steer;
 
-    /* Drain-batch deferred-flush link (#80 D6). A forwarded datagram marks its
+    /* Drain-batch deferred-flush link. A forwarded datagram marks its
      * owner listener here instead of flushing per packet; the reactor drain
      * epilogue flushes the whole batch once, mirroring the recvmmsg tick's
      * single deferred flush. in_steer_flush guards double-linking. Touched only
@@ -195,7 +195,7 @@ struct _http3_listener_s {
 
     http3_listener_stats_t     stats;
 
-    /* Reactor watchdog (#80 Phase 0) rate-limit gate: hrtime of the last
+    /* Reactor watchdog rate-limit gate: hrtime of the last
      * slow-tick WARN we emitted. Kept off the stats snapshot — it is
      * internal throttle state, not a counter. */
     uint64_t                   wd_last_warn_ns;
@@ -412,7 +412,7 @@ static unsigned h3_reactor_lat_bucket(uint64_t ns)
     return 11;                  /* >= 100 ms */
 }
 
-/* Record one reactor tick (#80 Phase 0). dt_ns is the poll-cb wall time;
+/* Record one reactor tick. dt_ns is the poll-cb wall time;
  * datagrams is how many were processed this wakeup (for the WARN line). On
  * a budget overrun, emit at most one WARN per second so a sustained stall
  * does not flood the log. Cheap enough to run unconditionally — two
@@ -486,7 +486,7 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
         return;
     }
 
-    /* Reactor watchdog (#80 Phase 0): time this whole tick. Capture before
+    /* Reactor watchdog: time this whole tick. Capture before
      * the errq drain so the measurement covers every bit of reactor work,
      * and route all exits through the tick_done tail. */
     const uint64_t wd_t0 = (uint64_t)zend_hrtime();
@@ -735,8 +735,8 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
 
     /* Legacy libuv path — used on Windows/macOS and any other non-Linux
      * platform. TrueAsync's UDP API has no synchronous best-effort send
-     * (`ZEND_ASYNC_UDP_TRY_SEND` was sketched in the Step-9 audit but
-     * never landed); we fire-and-forget through ZEND_ASYNC_UDP_SENDTO
+     * (`ZEND_ASYNC_UDP_TRY_SEND` was sketched but never landed); we
+     * fire-and-forget through ZEND_ASYNC_UDP_SENDTO
      * which queues to libuv's uv_udp_send. UDP is all-or-nothing per
      * datagram, so reporting `len` bytes accepted is correct as long as
      * the request object initialised. */
@@ -897,7 +897,7 @@ int http3_listener_reactor_id(const http3_listener_t *l)
 }
 
 /* ------------------------------------------------------------------------
- * CID steering (#80 D6 / #72)
+ * CID steering
  * ------------------------------------------------------------------------ */
 
 /* The per-endpoint table of reactor-owned listeners, indexed by reactor id.

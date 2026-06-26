@@ -20,7 +20,7 @@
 struct worker_registry_s {
     zend_atomic_ptr *slots;     /* [capacity], each a worker_inbox_t* or NULL */
     zend_atomic_int  rr;        /* round-robin cursor */
-    zend_atomic_int  next;      /* next slot to claim (worker_registry_add) */
+    zend_atomic_int  next;      /* next slot to claim */
     int              capacity;
 };
 

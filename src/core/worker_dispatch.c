@@ -22,16 +22,15 @@
 
 #include <string.h>
 
-/* Defined in src/http_request.c (no public header — same extern the H3 dispatch
- * site uses). Wraps an http_request_t in an HttpRequest zval, taking ownership
- * of the request's single reference. */
+/* Defined in src/http_request.c (no public header). Wraps an http_request_t in
+ * an HttpRequest zval, taking ownership of the request's single reference. */
 extern zval *http_request_create_from_parsed(http_request_t *req);
 
 /* Per-request worker-side dispatch state. Lives from worker_dispatch_request
  * until the handler coroutine's dispose; ecalloc/efree on the worker thread. */
 typedef struct {
     http_server_object     *server;
-    http_server_counters_t *counters;       /* worker's real counters (#80 group-2) */
+    http_server_counters_t *counters;       /* worker's real counters */
     zval                    request_zv;
     zval                    response_zv;
 
@@ -55,9 +54,7 @@ typedef struct {
     bool                    is_head;       /* suppress the body on render */
 } worker_dispatch_ctx_t;
 
-/* Handler coroutine body: run the registered user handler with (request,
- * response). Mirrors h3_handler_coroutine_entry, minus the H3-specific
- * telemetry / compression / static paths (added when wired to a real worker). */
+/* Handler coroutine body: run the registered user handler with (request, response). */
 static void worker_dispatch_entry(void)
 {
     const zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -67,8 +64,7 @@ static void worker_dispatch_entry(void)
         return;
     }
 
-    /* Synthetic 404 (no handler) still counts as a served request — mirror the
-     * skip_handler branch of h3_handler_coroutine_entry. */
+    /* Synthetic 404 (no handler) still counts as a served request. */
     if (ctx->skip_handler) {
         http_server_count_request(ctx->counters);
         return;
@@ -115,9 +111,8 @@ static void worker_dispatch_entry(void)
         return;
     }
 
-    /* Count the request + feed the sojourn/service sample (mirrors the H3
-     * handler entry). Stamp end before the retval dtor so destructor time is
-     * not charged as service time. */
+    /* Stamp end before the retval dtor so destructor time is not charged as
+     * service time. */
     http_server_count_request(ctx->counters);
 
     if (ctx->stamps) {
@@ -131,10 +126,8 @@ static void worker_dispatch_entry(void)
     zval_ptr_dtor(&retval);
 }
 
-/* Flatten the committed HttpResponse into a response_wire. Buffered only: reads
- * status / headers / body straight out of the response object (the same
- * accessors http3_stream_submit_response uses). Returns NULL on allocation
- * failure. */
+/* Flatten the committed HttpResponse into a response_wire. Buffered only.
+ * Returns NULL on allocation failure. */
 static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
 {
     zend_object *const resp = Z_OBJ(ctx->response_zv);
@@ -205,8 +198,7 @@ static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
 
 /* Coroutine dispose: commit the response (or derive a 500 from an unhandled
  * exception), render it into a response_wire, hand it to the sink, and drop the
- * per-request state. Mirrors the commit policy of h3_handler_coroutine_dispose,
- * with the nghttp3 submit replaced by the response_wire hand-off. */
+ * per-request state. */
 static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)coroutine->extended_data;
@@ -302,8 +294,7 @@ bool worker_dispatch_request(http_server_object *server,
     http_response_set_protocol_version(Z_OBJ(ctx->response_zv), "3.0");
 
     /* No handler registered: synthesise a 404 so the sink still fires with a
-     * response instead of leaving the stream hanging. Mirrors the H1/H2/H3
-     * dispatch sites. */
+     * response instead of leaving the stream hanging. */
     HashTable *const handlers = http_server_get_protocol_handlers(server);
     zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
 

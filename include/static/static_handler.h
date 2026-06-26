@@ -208,7 +208,7 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 										   const http_static_dispatch_cbs_t *cbs,
 										   void *user);
 
-/* Server-free core of the dispatch hook (#80). Identical logic to
+/* Server-free core of the dispatch hook. Identical logic to
  * http_static_try_serve but keyed on a borrowed mount array + an
  * explicit open-file cache (NULL = uncached) instead of the PHP server
  * object — the transport reactor has no server object on its thread but

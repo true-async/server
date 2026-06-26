@@ -201,10 +201,9 @@ struct http_request_t {
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 
-    /* #80 reactor split: reverse-path routing. Set by the reactor that built
-     * the request; echoed onto the response so the reactor resolves which QUIC
-     * stream to emit on. All zero on the single-thread path. The conn handle is
-     * refined to a generationed id in D8. */
+    /* Reverse-path routing. Set by the reactor that built the request;
+     * echoed onto the response so the reactor resolves which QUIC stream to
+     * emit on. All zero on the single-thread path. */
     void        *reactor_conn;
     int64_t      reactor_stream_id;
     uint32_t     reactor_id;
@@ -224,7 +223,7 @@ struct http_request_t {
      * low-water mark. Unused by the MVP — see TODO in on_body. */
     bool         body_paused;
 
-    /* #80 reactor split: allocation domain of reactor-produced fields
+    /* Allocation domain of reactor-produced fields
      * (method/uri/headers + the headers HashTable + the struct block).
      * false = ZMM (worker-built, default), true = persistent malloc
      * (reactor-built) → those frees go through pefree, flag-aware. Body

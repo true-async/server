@@ -28,7 +28,7 @@
 #include "Zend/zend_hrtime.h"              /* zend_hrtime — drain stamps */
 #include "http3_listener.h"                /* listener accessors */
 #include "http3_packet.h"                  /* version_negotiation / stateless_reset */
-#include "http3_steer.h"                   /* CID steering encode (#80 D6 / #72) */
+#include "http3_steer.h"                   /* CID steering encode */
 #include "http3/http3_stream.h"            /* http3_stream_t (callbacks.c symmetry) */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* recv_client_initial / hp_mask */
@@ -138,10 +138,9 @@ void http3_debug_logger(void *user_data, const char *fmt, ...)
  *
  * ngtcp2_path matching is strict: the local addr passed to read_pkt /
  * writev_stream must be the same value on every call after server_new.
- * The proper plumbing for this is `zend_async_udp_sockname` (parked as
- * a Step-6 upstream blocker per project_http3_progress.md); until that
- * lands we fabricate the sockaddr from the bind config so at least it
- * is stable across calls. peer_family lets us produce v4 / v6 to match
+ * The proper plumbing for this is `zend_async_udp_sockname`, which is
+ * not yet available; until it lands we fabricate the sockaddr from the
+ * bind config so at least it is stable across calls. peer_family lets us produce v4 / v6 to match
  * the inbound datagram. Returns 0 on success. */
 int http3_build_listener_local(const http3_listener_t *l,
                                int peer_family,
@@ -273,7 +272,7 @@ static http3_connection_t *http3_connection_accept(
      * failure, which the caller undoes (peer_dec) and drops silently. */
     http3_connection_t *c = ecalloc(1, sizeof(http3_connection_t));
     c->listener = listener;
-    c->worker_slot = -1;   /* unassigned until the first dispatch homes it (#80 D5) */
+    c->worker_slot = -1;   /* unassigned until the first dispatch homes it */
     /* Cache hot-path slices. http3_listener_server_obj() returns NULL
      * for an unparented listener — accessor handles that, returning the
      * dummy / default fallbacks. */
@@ -301,7 +300,7 @@ static http3_connection_t *http3_connection_accept(
      * a zero SCID (would collide in conn_map with any other conn whose
      * SCID generation also failed) — fail the accept cleanly instead.
      *
-     * With CID steering active (#80 D6 / #72) the SCID encodes this reactor's
+     * With CID steering active the SCID encodes this reactor's
      * id so a migrated client rehashed onto another reactor routes back here;
      * otherwise it is fully random as before. */
     const int reactor_id = http3_listener_reactor_id(listener);
@@ -370,7 +369,7 @@ static http3_connection_t *http3_connection_accept(
         settings.log_printf = http3_debug_logger;
     }
 
-    /* Transport params resolution (NEXT_STEPS.md §5):
+    /* Transport params resolution:
      *   1. HttpServerConfig setters at server start() time.
      *   2. PHP_HTTP3_BENCH_FC=1 raises FC + streams to bench-grade
      *      values (NEVER enable in production — disables back-pressure).
@@ -605,7 +604,7 @@ bool http3_connection_dispatch(
         : NULL;
 
     if (conn == NULL) {
-        /* CID steering (#80 D6 / #72): a short-header packet for a conn we do
+        /* CID steering: a short-header packet for a conn we do
          * not own may belong to another reactor — a client that migrated and
          * was SO_REUSEPORT-rehashed onto us. If its DCID decodes to a different
          * reactor, forward it there instead of resetting a live connection. */

@@ -41,7 +41,7 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
     s->request = &s->_request_storage;
     s->request->refcount = 1;
     s->request->release  = http3_stream_release_via_request;
-    /* Reactor mode (#80, B3p3-b): the listener routes parsed requests to PHP
+    /* Reactor mode: the listener routes parsed requests to PHP
      * workers, so the parser builds the request in the persistent (malloc)
      * domain — it crosses the reactor->worker thread boundary. NULL reactor ctx
      * (the default) keeps the ZMM fast path. */
@@ -61,7 +61,7 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
  * return the slot to the slab pool — separating these phases lets
  * the slot stay alive across the gap between stream_release (early)
  * and the eventual destroy from a PHP HttpRequest wrapper (late). */
-/* Reverse-path consumed apply (#80, B3p3-b), run ON THE REACTOR thread: the
+/* Reverse-path consumed apply, run ON THE REACTOR thread: the
  * worker is done with the request, so drop the reactor's worker-borrow stream
  * ref. When it is the last ref, the slab slot returns to the pool here (all
  * slab ops stay on the reactor that owns the pool). */
@@ -76,10 +76,10 @@ static void http3_stream_release_via_request(http_request_t *req)
      * http3_stream_t, so the same byte address is both. */
     http3_stream_t *s = (http3_stream_t *)req;
 
-    /* Reactor mode (#80, B3p3-b): this fires on the WORKER thread (the request's
+    /* Reactor mode: this fires on the WORKER thread (the request's
      * last ref dropped as the HttpRequest wrapper was freed). The slab is the
      * reactor's — freeing it here would be a cross-thread pool free. Instead
-     * signal the owning reactor to reclaim the slot on its own thread (D7.5);
+     * signal the owning reactor to reclaim the slot on its own thread;
      * the actual http3_stream_pool_free happens in http3_reactor_consumed_apply
      * -> http3_stream_release. */
     const http3_reactor_ctx_t *const rctx =

@@ -48,7 +48,7 @@ static const char reactor_stop_token;
  *          drain must never free it.
  *   POST — like EXEC but fire-and-forget (reactor_pool_post_exec): the reactor
  *          runs fn(arg) and frees the heap envelope, no `done` ack. This is the
- *          worker->reactor reverse path's delivery (D8/B4). */
+ *          worker->reactor reverse path's delivery. */
 typedef enum {
     REACTOR_CMD_NOOP,
     REACTOR_CMD_EXEC,
@@ -103,8 +103,7 @@ static void reactor_pool_msleep(void)
 }
 
 /* Runs on the reactor thread when its inbound mailbox has items. The stop
- * sentinel asks the loop to leave; everything else is real work, counted here
- * (response dispatch lands on top of this later). */
+ * sentinel asks the loop to leave; everything else is real work, counted here. */
 static void reactor_drain(void **items, const size_t count, void *arg)
 {
     reactor_ctx_t *const rc = (reactor_ctx_t *)arg;
@@ -126,7 +125,6 @@ static void reactor_drain(void **items, const size_t count, void *arg)
                 break;
 
             case REACTOR_CMD_POST:
-                /* Fire-and-forget: run, then free the heap envelope. */
                 cmd->fn(cmd->arg);
                 free(cmd);
                 break;

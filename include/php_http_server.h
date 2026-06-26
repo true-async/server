@@ -136,8 +136,7 @@ struct _http_server_config_t {
     zend_string *tls_cert_path;
     zend_string *tls_key_path;
 
-    /* hq-interop (HTTP/0.9-over-QUIC) document root. Set via
-     * setHttp3HqDocroot; the interop hq shim serves files from here.
+    /* hq-interop (HTTP/0.9-over-QUIC) document root.
      * NULL = hq serves no files. No effect on h3. */
     zend_string *http3_hq_docroot;
 
@@ -519,7 +518,7 @@ zend_async_scope_t *http_server_get_scope            (http_server_object *server
 
 /* Resolve the core server object from its PHP wrapper (the create_object stash).
  * The wrapper layout is private to http_server_class.c, so this is the public
- * way to reach the core from another TU (used by the worker-dispatch test hook). */
+ * way to reach the core from another TU. */
 http_server_object *http_server_object_from_zend(zend_object *obj);
 
 /* Live HttpServerConfig the server was constructed with. The returned

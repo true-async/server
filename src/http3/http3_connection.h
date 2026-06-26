@@ -125,7 +125,7 @@ struct _http3_connection_s {
     /* Deadline (ngtcp2 expiry, hrtime ns) the timer was last armed for.
      * timer_fire_cb subtracts it from the actual fire time to measure how
      * late the reactor serviced this connection's ACK/PTO — the per-conn
-     * view of reactor stall (#80 Phase 0). 0 = no timer armed. */
+     * view of reactor stall. 0 = no timer armed. */
     uint64_t                     timer_expiry_ns;
 
     /* Intrusive list link. The listener tracks connections through this
@@ -135,7 +135,7 @@ struct _http3_connection_s {
      * The hashtable stays non-owning; this list is the ownership edge. */
     http3_connection_t          *next;
 
-    /* Phase-1 deferred-output dirty-list link. The read path marks the
+    /* Deferred-output dirty-list link. The read path marks the
      * conn via http3_listener_mark_flush instead of draining per datagram;
      * the listener flushes the whole list once per recvmmsg tick, so a
      * burst of N datagrams for one conn coalesces into one drain (one GSO
@@ -166,7 +166,7 @@ struct _http3_connection_s {
      * does not emit a second CONNECTION_CLOSE on the same conn. */
     bool sent_connection_close;
 
-    /* Migration-storm guard (#80 D6). A client that NAT-rebinds faster than
+    /* Migration-storm guard. A client that NAT-rebinds faster than
      * its path can validate (RFC 9000 §9.3 lets the server decline migration)
      * wedges ngtcp2 path validation — responses chase a stale path while the
      * live path only gets PTO probes. Count migrations in a sliding window;
@@ -177,7 +177,7 @@ struct _http3_connection_s {
     uint32_t migrate_count;
     bool     migration_storm;
 
-    /* Reactor/worker dispatch home (#80 D5). The worker slot this connection's
+    /* Reactor/worker dispatch home. The worker slot this connection's
      * requests stick to — one of this reactor's owned workers (reactor-paired pool).
      * -1 until the first dispatch homes it; re-homed if that worker dies. A busy
      * home spills individual requests elsewhere without changing this. Reactor-thread

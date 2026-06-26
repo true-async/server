@@ -174,9 +174,6 @@ static void static_emit_ok_headers(zend_object *response_obj,
 	apply_mount_headers(response_obj, mount, true);
 }
 
-/* Thin wrapper: resolve mounts + open-file cache from the PHP server
- * object and forward to the server-free core. The single-thread / worker
- * paths keep calling this unchanged. */
 http_static_result_t http_static_try_serve(http_server_object *server,
 										   http_request_t *request,
 										   zend_object *response_obj,

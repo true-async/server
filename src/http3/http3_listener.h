@@ -30,7 +30,7 @@
 typedef struct _http3_listener_s http3_listener_t;
 typedef struct _http3_connection_s http3_connection_t;  /* defined in http3_connection.h */
 
-/* Thread-clean context for a reactor-OWNED H3 listener (#80, B3p3-b).
+/* Thread-clean context for a reactor-OWNED H3 listener.
  *
  * Everything a transport reactor needs to serve QUIC and route parsed requests
  * to PHP workers, WITHOUT the PHP server object — that lives on the parent
@@ -47,7 +47,7 @@ typedef struct {
     worker_registry_t *registry;            /* pick a worker to hand requests to */
     reactor_pool_t    *pool;                 /* reverse path posts back here */
     int                reactor_id;           /* this listener's reactor slot */
-    int                n_reactors;            /* reactor count — strided worker ownership (D5) */
+    int                n_reactors;            /* reactor count — strided worker ownership */
     uint32_t           socket_buffer_bytes;  /* config scalars resolved on the parent */
     uint32_t           peer_budget;
     uint32_t           max_conns;
@@ -89,7 +89,7 @@ const http3_reactor_ctx_t *http3_listener_reactor_ctx(const http3_listener_t *li
 /* This listener's reactor id, or -1 in single-thread mode. */
 int http3_listener_reactor_id(const http3_listener_t *listener);
 
-/* CID steering group (#80 D6 / #72): the set of one endpoint's per-reactor
+/* CID steering group: the set of one endpoint's per-reactor
  * listeners, indexed by reactor id and shared by all of them, so any reactor
  * that receives a stray datagram can forward it to the owner. Opaque; created
  * and freed on the parent. Slots are published atomically as listeners spawn
@@ -114,7 +114,7 @@ bool http3_listener_try_steer(http3_listener_t *listener,
                               const uint8_t *data, size_t datalen, uint8_t ecn,
                               const struct sockaddr *peer, socklen_t peer_len);
 
-/* Reverse-path apply (#80, B4), run ON THE REACTOR thread via
+/* Reverse-path apply, run ON THE REACTOR thread via
  * reactor_pool_post_exec: `arg` is a response_wire_t* (ownership transfers) that
  * the worker rendered; encode + submit + drain it on the addressed stream, or
  * drop it if the stream is already gone. Declared here (void* arg) so the
@@ -198,7 +198,7 @@ ssize_t http3_listener_send_gso(http3_listener_t *listener,
  * worker, so no locking. Returns non-NULL once the listener is up. */
 http3_stream_pool_t *http3_listener_stream_pool(http3_listener_t *listener);
 
-/* Phase-1 deferred output. mark_flush records that `conn` produced
+/* Deferred output. mark_flush records that `conn` produced
  * ngtcp2 output this tick (idempotent — guarded by conn->in_dirty);
  * flush_dirty drains every marked conn once and clears the list. The
  * read path marks instead of draining, so a multi-datagram burst to one

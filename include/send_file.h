@@ -107,7 +107,7 @@ typedef struct
 
 	/* Open-file cache to insert into on the miss path, used in preference
 	 * to `server` when set. Lets a caller with no PHP server object (the
-	 * #80 transport reactor) supply its own per-thread cache. */
+	 * transport reactor) supply its own per-thread cache. */
 	http_static_cache_t *cache;
 
 	send_file_on_error_t on_error;

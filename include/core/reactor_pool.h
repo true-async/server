@@ -73,7 +73,7 @@ bool reactor_pool_exec(reactor_pool_t *rp, int idx, reactor_exec_fn fn, void *ar
  * inbound and return immediately, without waiting for it to run. The reactor
  * runs it on its drain pass and frees the internal envelope; there is no
  * completion handshake. This is the worker->reactor reverse path's delivery
- * primitive (D8/B4) — the worker posts an apply callback + its message and never
+ * primitive — the worker posts an apply callback + its message and never
  * blocks. Ownership of whatever `arg` points at is the callback's concern (it
  * runs once on the reactor). Returns false for a bad index, a NULL fn, a
  * non-running reactor, or a full mailbox (backpressure — the caller keeps `arg`

@@ -109,9 +109,8 @@ __attribute__((weak)) struct zend_async_event_s *async_plain_event_new(void)
 }
 
 /* http_body_stream_pop calls these on h2 streaming bodies to grant the
- * peer credit (commit c812184: per-stream INITIAL_WINDOW=64K + flow-
- * control backpressure). Fuzz harnesses don't drive a real h2 session,
- * so no-op is safe — the parser path under test is identical. */
+ * peer credit. Fuzz harnesses don't drive a real h2 session, so no-op
+ * is safe — the parser path under test is identical. */
 struct nghttp2_session;
 struct http2_session_t;
 __attribute__((weak)) int nghttp2_session_consume(struct nghttp2_session *session,

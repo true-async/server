@@ -41,11 +41,11 @@ typedef struct _http3_packet_stats_s {
      * necessarily validated). */
     uint64_t quic_path_migrations;
 
-    /* Migration-storm guard (#80 D6): connections shed for rebinding faster
+    /* Migration-storm guard: connections shed for rebinding faster
      * than their path validates (a wedge or a migration flood). */
     uint64_t quic_migration_storm_shed;
 
-    /* CID steering (#80 D6 / #72). A short-header datagram whose DCID decodes
+    /* CID steering. A short-header datagram whose DCID decodes
      * to another reactor (a migrated client SO_REUSEPORT-rehashed onto us) is
      * forwarded to its owner; the owner counts it as steered_in. steered_drop
      * is a forward refused by a full reactor mailbox (packet dropped, QUIC
@@ -117,7 +117,7 @@ typedef struct _http3_packet_stats_s {
     uint64_t h3_framing_error;        /* nghttp3_conn_writev_stream returned <0 */
     uint64_t quic_drain_iter_cap_hit; /* drain_out hit per-call iteration cap */
 
-    /* Reactor-iteration watchdog (#80 Phase 0). The poll-cb is the H3
+    /* Reactor-iteration watchdog. The poll-cb is the H3
      * reactor's unit of work: one recvmmsg drain + per-conn output flush.
      * On a single reactor thread a long tick delays ACK/PTO generation for
      * EVERY live connection by exactly the tick duration, which inflates the
