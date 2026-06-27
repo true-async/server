@@ -880,6 +880,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
         return;
     }
 
+    if (response->sse_mode) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is in SSE mode — use sseEvent()/sseComment() instead of send()", 0);
+        return;
+    }
+
     if (response->send_file_req != NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Response is sealed by sendFile() — no further mutation allowed", 0);

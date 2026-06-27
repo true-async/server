@@ -57,6 +57,7 @@ typedef struct {
     bool             closed;
     bool             committed;
     bool             streaming;         /* send() has been called — setBody/setHeader now throw */
+    bool             sse_mode;           /* SSE helpers committed the stream — send() now throws, sse* re-entry is allowed */
 
     /* Compression module state (issue #8). Opaque ptr — owned by the
      * compression TU; allocated by http_compression_attach at dispatch
