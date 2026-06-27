@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SSE: `sseStart()` with no event now commits an empty `200` on H2/H3 (#3).**
+  Starting an event stream and closing it before any `sseEvent()`/`sseComment()`
+  left HTTP/2 and HTTP/3 without a HEADERS frame (the client saw a reset stream),
+  while HTTP/1.1 already sent a clean empty `text/event-stream`. `mark_ended` now
+  commits the empty streaming response on all three protocols.
+- **SSE: mixing `send()` and the `sse*` helpers now throws (#3).** A response is
+  either a plain `send()` stream or an SSE stream; crossing over silently shipped
+  wrong-`Content-Type` (and possibly gzip-wrapped) event records. Each side now
+  raises `HttpServerRuntimeException` once the other has committed the stream.
 - **Windows: TCP listeners now bind.** The server failed to start on Windows
   with `Async\AsyncException: Failed to bind to <host>:<port>: operation not
   supported on socket`. The listener requested `SO_REUSEPORT`, which libuv's

@@ -980,6 +980,16 @@ void h3_stream_mark_ended(void *ctx)
         || s->conn->nghttp3_conn == NULL) {
         return;
     }
+
+    /* sseStart() with no following event: submit_response was never called
+     * (only append_chunk's first-call path does it). Commit an empty
+     * streaming response now so the peer gets a valid 200, not a header-less
+     * stream. With no chunk_queue and no response_body the data_reader hits
+     * immediate EOF. Mirrors h1_stream_mark_ended's lazy header commit. */
+    if (s->chunk_queue == NULL) {
+        (void)http3_stream_submit_response(s->conn, s, true);
+    }
+
     /* Wake the data_reader so it sees streaming_ended + empty queue
      * → EOF, and drive a final drain so the EOF actually goes out. */
     (void)nghttp3_conn_resume_stream(

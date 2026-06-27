@@ -110,6 +110,16 @@ static bool sse_content_type_conflicts(const HashTable *headers)
 static bool sse_ensure_started(http_response_object *response)
 {
 	if (response->streaming) {
+		/* Already streaming via send() (or another non-SSE path) — emitting
+		 * SSE framing now would ship event records without the event-stream
+		 * headers, and possibly through send()'s gzip wrapper. Reject the
+		 * misuse instead of silently corrupting the stream. */
+		if (!response->sse_mode) {
+			zend_throw_exception(http_server_runtime_exception_ce,
+								 "Response is already streaming via send() — cannot switch to SSE", 0);
+			return false;
+		}
+
 		return true;
 	}
 
@@ -158,6 +168,7 @@ static bool sse_ensure_started(http_response_object *response)
 #endif
 
 	response->streaming = true;
+	response->sse_mode = true;
 	response->committed = true;
 	response->headers_sent = true;
 	return true;

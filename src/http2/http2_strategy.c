@@ -1642,6 +1642,19 @@ static void h2_stream_mark_ended(void *ctx)
         return;
     }
 
+    /* sseStart() with no following event: headers/data-provider were never
+     * committed (append_chunk's first-call path never ran). Commit an empty
+     * streaming response now so the peer gets a valid 200, not a header-less
+     * reset. The provider sees an empty ring + streaming_ended → EOF.
+     * Mirrors h1_stream_mark_ended's lazy header commit. */
+    if (stream->chunk_queue == NULL) {
+        http_connection_t *conn = http2_session_get_conn(stream->session);
+
+        if (!h2_stream_init_ring(conn, stream)) {
+            return;
+        }
+    }
+
     (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
 
     http2_session_emit(stream->session);

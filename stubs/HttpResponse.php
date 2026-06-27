@@ -317,7 +317,7 @@ final class HttpResponse
     // === Server-Sent Events (text/event-stream) ===
 
     /**
-     * Switch the response into Server-Sent Events mode and commit headers.
+     * Switch the response into Server-Sent Events mode and lock the headers.
      *
      * Sets the three canonical SSE headers — `Content-Type:
      * text/event-stream`, `Cache-Control: no-cache, no-transform` and
@@ -330,9 +330,14 @@ final class HttpResponse
      * data is emitted until the first sseEvent()/sseComment().
      *
      * Calling sseStart() is optional — the first sseEvent()/sseComment()
-     * starts the stream implicitly. Use it when you want headers on the
-     * wire immediately (e.g. to unblock the browser's `onopen`) before any
-     * event is ready.
+     * starts the stream implicitly. Note that sseStart() alone does NOT
+     * flush the status line / headers onto the wire: the commit is lazy and
+     * happens on the first sseEvent()/sseComment()/sseRetry() (or, if none
+     * is ever sent, an empty `200 text/event-stream` is flushed when the
+     * response ends). To open the stream eagerly — e.g. to unblock the
+     * browser's `onopen` before any real event is ready — send an initial
+     * `sseComment()` (the conventional `:\n\n` prelude), which both starts
+     * the stream and puts the headers on the wire immediately.
      *
      * Throws {@see HttpServerInvalidArgumentException} if the handler has
      * already set a Content-Type other than `text/event-stream`, and
