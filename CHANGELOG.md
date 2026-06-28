@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the canonical, catchable `HttpException` (499 "stream closed by peer"). New phpt
   `025-h1-sse-client-disconnect` reproduces the crash (RST mid-SSE) and asserts the
   499 instead.
+- **H3 static-file pump now absorbs a read-submit failure too (#3).** The same
+  asymmetry on the file-read side: when `ZEND_ASYNC_IO_READ` failed at submit, the
+  producer coroutine broke out of the pump loop without clearing the reactor
+  exception it left in `EG(exception)`, which would then surface as an uncaught
+  fatal on unwind. It now absorbs it (the completion-error case was already
+  handled via `req->exception`), keeping error handling symmetric across the
+  write and read submit paths.
 - **SSE: `sseStart()` with no event now commits an empty `200` on H2/H3 (#3).**
   Starting an event stream and closing it before any `sseEvent()`/`sseComment()`
   left HTTP/2 and HTTP/3 without a HEADERS frame (the client saw a reset stream),

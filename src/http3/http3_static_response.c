@@ -59,6 +59,7 @@
 
 #include "php.h"
 #include "Zend/zend_async_API.h"
+#include "Zend/zend_exceptions.h"   /* zend_clear_exception */
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
@@ -134,6 +135,16 @@ static void h3_static_pump_entry(void)
                                                       buf, want);
 
         if (UNEXPECTED(req == NULL)) {
+            /* Submit failed: the reactor left an exception in EG. This pump runs
+             * in a coroutine, so absorb it the way the socket-write submit path
+             * does — otherwise it surfaces as an uncaught top-level fatal when
+             * the coroutine unwinds. status=-1 lets the on_done policy retire the
+             * stream. (The completion-error case below is already absorbed via
+             * req->exception.) */
+            if (EG(exception) != NULL) {
+                zend_clear_exception();
+            }
+
             state->status = -1;
             break;
         }
