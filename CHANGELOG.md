@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-28
+
+### Fixed
+
+- **SSE/streaming: a client that aborts mid-stream no longer crashes the server (#3).**
+  When the peer sent a RST, the next write's `uv_write()` failed at *submit* and the
+  reactor left an `Async\AsyncException` ("Failed to start stream write: broken pipe")
+  in `EG(exception)`. The awaiting send path (`http_connection_send_raw`) returned
+  failure without absorbing it — unlike a *completion* failure, which
+  `async_io_req_await()` already clears, and unlike the fire-and-forget writers, which
+  call `http_absorb_io_submission_exception()`. The orphaned exception then surfaced
+  with no PHP frame (`#0 {main}`) as an uncaught fatal, taking down every connection.
+  The submit-failure branch now absorbs it too, so a dead peer reaches the handler as
+  the canonical, catchable `HttpException` (499 "stream closed by peer"). New phpt
+  `025-h1-sse-client-disconnect` reproduces the crash (RST mid-SSE) and asserts the
+  499 instead.
+- **H3 static-file pump now absorbs a read-submit failure too (#3).** The same
+  asymmetry on the file-read side: when `ZEND_ASYNC_IO_READ` failed at submit, the
+  producer coroutine broke out of the pump loop without clearing the reactor
+  exception it left in `EG(exception)`, which would then surface as an uncaught
+  fatal on unwind. It now absorbs it (the completion-error case was already
+  handled via `req->exception`), keeping error handling symmetric across the
+  write and read submit paths.
+
+## [0.8.0] - 2026-06-27
+
 ### Added
 
 - **Server-Sent Events API (#3).** First-class `text/event-stream` helpers on
@@ -43,25 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **SSE/streaming: a client that aborts mid-stream no longer crashes the server (#3).**
-  When the peer sent a RST, the next write's `uv_write()` failed at *submit* and the
-  reactor left an `Async\AsyncException` ("Failed to start stream write: broken pipe")
-  in `EG(exception)`. The awaiting send path (`http_connection_send_raw`) returned
-  failure without absorbing it — unlike a *completion* failure, which
-  `async_io_req_await()` already clears, and unlike the fire-and-forget writers, which
-  call `http_absorb_io_submission_exception()`. The orphaned exception then surfaced
-  with no PHP frame (`#0 {main}`) as an uncaught fatal, taking down every connection.
-  The submit-failure branch now absorbs it too, so a dead peer reaches the handler as
-  the canonical, catchable `HttpException` (499 "stream closed by peer"). New phpt
-  `025-h1-sse-client-disconnect` reproduces the crash (RST mid-SSE) and asserts the
-  499 instead.
-- **H3 static-file pump now absorbs a read-submit failure too (#3).** The same
-  asymmetry on the file-read side: when `ZEND_ASYNC_IO_READ` failed at submit, the
-  producer coroutine broke out of the pump loop without clearing the reactor
-  exception it left in `EG(exception)`, which would then surface as an uncaught
-  fatal on unwind. It now absorbs it (the completion-error case was already
-  handled via `req->exception`), keeping error handling symmetric across the
-  write and read submit paths.
 - **SSE: `sseStart()` with no event now commits an empty `200` on H2/H3 (#3).**
   Starting an event stream and closing it before any `sseEvent()`/`sseComment()`
   left HTTP/2 and HTTP/3 without a HEADERS frame (the client saw a reset stream),
@@ -640,5 +647,7 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/true-async/server/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/true-async/server/compare/v0.7.3...v0.8.0
 [0.1.0]: https://github.com/true-async/server/releases/tag/v0.1.0
