@@ -1236,6 +1236,10 @@ bool http_connection_read(http_connection_t *conn)
 }
 /* }}} */
 
+/* Defined below, with the fire-and-forget writers that share it; forward-declared
+ * here because the awaiting send path needs it on its submit-failure branch too. */
+static void http_absorb_io_submission_exception(const http_connection_t *conn, const char *op);
+
 /* {{{ http_connection_send_raw
  *
  * Synchronous socket-level send (from a coroutine — uses async_io_req_await).
@@ -1291,6 +1295,18 @@ bool http_connection_send_raw(http_connection_t *conn,
         const ssize_t transferred = req->transferred;
         req->dispose(req);
         ok_total = ok && !had_exc && transferred == (ssize_t)len;
+    } else {
+        /* Submit failed synchronously: uv_write() returned an error (e.g. EPIPE
+         * to a peer that's already gone), so ZEND_ASYNC_IO_WRITE left an
+         * AsyncException in EG and returned NULL. Unlike a completion failure
+         * — which async_io_req_await() absorbs — this awaiting path never went
+         * through await, so the submit exception must be absorbed here too (the
+         * fire-and-forget writers below already do). Reporting the failure
+         * through the return value lets the caller raise the canonical,
+         * CATCHABLE signal (HttpException 499 "stream closed by peer"); leaking
+         * the reactor exception to the top level would take the whole server
+         * down on a single dropped connection. */
+        http_absorb_io_submission_exception(conn, __func__);
     }
 
     if (write_timeout_ms > 0) {

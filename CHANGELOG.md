@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SSE/streaming: a client that aborts mid-stream no longer crashes the server (#3).**
+  When the peer sent a RST, the next write's `uv_write()` failed at *submit* and the
+  reactor left an `Async\AsyncException` ("Failed to start stream write: broken pipe")
+  in `EG(exception)`. The awaiting send path (`http_connection_send_raw`) returned
+  failure without absorbing it — unlike a *completion* failure, which
+  `async_io_req_await()` already clears, and unlike the fire-and-forget writers, which
+  call `http_absorb_io_submission_exception()`. The orphaned exception then surfaced
+  with no PHP frame (`#0 {main}`) as an uncaught fatal, taking down every connection.
+  The submit-failure branch now absorbs it too, so a dead peer reaches the handler as
+  the canonical, catchable `HttpException` (499 "stream closed by peer"). New phpt
+  `025-h1-sse-client-disconnect` reproduces the crash (RST mid-SSE) and asserts the
+  499 instead.
 - **SSE: `sseStart()` with no event now commits an empty `200` on H2/H3 (#3).**
   Starting an event stream and closing it before any `sseEvent()`/`sseComment()`
   left HTTP/2 and HTTP/3 without a HEADERS frame (the client saw a reset stream),
