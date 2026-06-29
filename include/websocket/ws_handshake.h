@@ -74,13 +74,25 @@ int ws_handshake_compute_accept(const char *client_key, size_t client_key_len,
  * zend_string ready to be handed to http_connection_send.
  *
  * Includes mandatory headers (Upgrade, Connection, Sec-WebSocket-Accept)
- * and, if `subprotocol` is non-NULL, Sec-WebSocket-Protocol. The
+ * and, if `subprotocol` is non-NULL, Sec-WebSocket-Protocol. When
+ * `deflate` is true, advertises the negotiated permessage-deflate
+ * extension (RFC 7692) with server+client no_context_takeover. The
  * `accept` argument is the 28-char output of ws_handshake_compute_accept.
  *
  * Returns NULL on allocation failure. Caller owns the returned string
  * and must release it with zend_string_release.
  */
 zend_string *ws_handshake_build_101_response(const char *accept,
-                                             const char *subprotocol);
+                                             const char *subprotocol,
+                                             bool deflate);
+
+/*
+ * Does the request offer permessage-deflate (RFC 7692)? Scans the
+ * Sec-WebSocket-Extensions header for a "permessage-deflate" extension
+ * token. Read-only. Returns false when the header is absent, the
+ * extension is not offered, or the offer pins a server_max_window_bits
+ * smaller than our fixed window (which we cannot honour, so we decline).
+ */
+bool ws_pmce_offered(const http_request_t *req);
 
 #endif /* WS_HANDSHAKE_H */

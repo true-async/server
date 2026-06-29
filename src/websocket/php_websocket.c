@@ -291,12 +291,30 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
         }
     }
 
+    /* permessage-deflate (RFC 7692): enabled iff the server opted in AND
+     * the client offered it. Shared decision for H1 and H2. */
+    bool pmce = false;
+#ifdef HAVE_HTTP_COMPRESSION
+    {
+        const http_server_config_t *cfg = (w->conn->server != NULL)
+            ? http_server_get_config(w->conn->server) : NULL;
+        if (cfg != NULL && cfg->ws_permessage_deflate &&
+            Z_TYPE(w->upgrade_zv) == IS_OBJECT) {
+            websocket_upgrade_object *u =
+                websocket_upgrade_from_obj(Z_OBJ(w->upgrade_zv));
+            if (u->req != NULL && ws_pmce_offered(u->req)) {
+                pmce = true;
+            }
+        }
+    }
+#endif
+
 #ifdef HAVE_HTTP2
     /* HTTP/2 (RFC 8441): no 101 and no strategy swap. Accept is a
      * streaming 200 on the stream; a per-stream wslay session bridges
      * the H2 DATA frames. http2_ws_accept sets w->session for us. */
     if (w->h2_stream != NULL) {
-        if (!http2_ws_accept(w->h2_stream, w, subprotocol)) {
+        if (!http2_ws_accept(w->h2_stream, w, subprotocol, pmce)) {
             zend_throw_exception_ex(websocket_closed_exception_ce, 0,
                 "WebSocket: failed to accept HTTP/2 Extended CONNECT");
             w->closed = true;
@@ -308,7 +326,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
 #endif
 
     zend_string *resp = ws_handshake_build_101_response(w->accept_value,
-                                                        subprotocol);
+                                                        subprotocol, pmce);
     if (resp == NULL) {
         zend_throw_exception_ex(websocket_closed_exception_ce, 0,
             "WebSocket: out of memory building 101 response");
@@ -373,6 +391,17 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
     }
     w->session   = session;
     w->committed = true;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Bring the codec online before any buffered frame is fed below — the
+     * RSV1 allowance must be in place before wslay sees a compressed frame. */
+    if (pmce && !ws_session_enable_pmce(session)) {
+        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            "WebSocket: failed to enable permessage-deflate");
+        w->closed = true;
+        return false;
+    }
+#endif
 
     /* The H1 parse that finished the upgrade GET set request_in_flight so
      * the read loop would BUFFER (not parse) further bytes — correct for
@@ -662,15 +691,45 @@ static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
     }
     ws_session_t *const s = w->session;
 
-    const struct wslay_event_msg msg = {
-        .opcode     = opcode,
-        .msg        = (const uint8_t *)ZSTR_VAL(payload),
-        .msg_length = ZSTR_LEN(payload),
-    };
-    if (wslay_event_queue_msg(s->ctx, &msg) != 0) {
-        zend_throw_exception_ex(websocket_exception_ce, 0,
-            "WebSocket queue_msg failed (out of memory or session closed)");
-        return;
+#ifdef HAVE_HTTP_COMPRESSION
+    /* permessage-deflate: compress the payload, then queue it with the
+     * RSV1 bit set. wslay copies the buffer, so `comp` is freed at once. */
+    if (s->pmce_enabled) {
+        smart_str comp = {0};
+        if (ws_session_pmce_deflate(s, ZSTR_VAL(payload), ZSTR_LEN(payload),
+                                    &comp) != 0) {
+            smart_str_free(&comp);
+            zend_throw_exception_ex(websocket_exception_ce, 0,
+                "WebSocket deflate failed");
+            return;
+        }
+
+        const struct wslay_event_msg msg = {
+            .opcode     = opcode,
+            .msg        = (const uint8_t *)(comp.s ? ZSTR_VAL(comp.s) : ""),
+            .msg_length = comp.s ? ZSTR_LEN(comp.s) : 0,
+        };
+        const int qrc = wslay_event_queue_msg_ex(s->ctx, &msg, WSLAY_RSV1_BIT);
+        smart_str_free(&comp);
+
+        if (qrc != 0) {
+            zend_throw_exception_ex(websocket_exception_ce, 0,
+                "WebSocket queue_msg failed (out of memory or session closed)");
+            return;
+        }
+    } else
+#endif
+    {
+        const struct wslay_event_msg msg = {
+            .opcode     = opcode,
+            .msg        = (const uint8_t *)ZSTR_VAL(payload),
+            .msg_length = ZSTR_LEN(payload),
+        };
+        if (wslay_event_queue_msg(s->ctx, &msg) != 0) {
+            zend_throw_exception_ex(websocket_exception_ce, 0,
+                "WebSocket queue_msg failed (out of memory or session closed)");
+            return;
+        }
     }
 
     if (s->flushing) {

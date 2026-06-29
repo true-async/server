@@ -12,6 +12,7 @@
 #include "php.h"
 #include "php_http_server.h"
 #include "Zend/zend_async_API.h"
+#include "zend_smart_str.h"
 
 #include <wslay/wslay.h>
 
@@ -113,6 +114,17 @@ typedef struct ws_session_t {
      * "no message yet" (suspend) from "no more messages ever". */
     unsigned peer_closed : 1;
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* permessage-deflate (RFC 7692). Set by ws_session_enable_pmce()
+     * once negotiated; gates the RSV1 deflate/inflate paths. */
+    unsigned pmce_enabled : 1;
+
+    /* A compressed inbound message failed to inflate (zip-bomb past the
+     * cap, or malformed deflate). Latched in on_msg_recv_callback;
+     * ws_session_feed() returns -1 so the connection is torn down. */
+    unsigned pmce_error : 1;
+#endif
+
     /* Inbound message FIFO. Producer = ws_session_on_msg_recv_callback
      * (event-loop context), Consumer = WebSocket::recv() (coroutine
      * context). Single-threaded coroutine model — no atomics needed.
@@ -138,6 +150,17 @@ typedef struct ws_session_t {
      * ws_session_destroy. NULL when keepalive is disabled. */
     zend_async_event_t          *ping_timer;
     zend_async_event_callback_t *ping_timer_cb;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Raw-deflate streams for permessage-deflate (windowBits -15, no
+     * zlib/gzip wrapper). void* so the header stays zlib-free; the .c
+     * casts to z_stream*. Reset after every message (no_context_takeover).
+     * pmce_max_msg bounds the INFLATED size — wslay bounds the compressed
+     * size; this is the second cap that stops a zip-bomb. */
+    void   *pmce_deflate;
+    void   *pmce_inflate;
+    size_t  pmce_max_msg;
+#endif
 } ws_session_t;
 
 /*
@@ -188,5 +211,25 @@ ws_pending_message_t *ws_session_recv_pop(ws_session_t *session);
  * sees the closed state and returns NULL.
  */
 void ws_session_mark_peer_closed(ws_session_t *session);
+
+#ifdef HAVE_HTTP_COMPRESSION
+/*
+ * Turn on permessage-deflate for this session: allocate the raw
+ * deflate/inflate streams, allow the RSV1 frame bit, and pin the
+ * decompressed-size cap from the owning server config. Must be called
+ * after ws_session_init* and BEFORE the first ws_session_feed(). Returns
+ * false on allocation failure (caller tears the connection down).
+ */
+bool ws_session_enable_pmce(ws_session_t *session);
+
+/*
+ * Compress one outbound message body per RFC 7692 §7.2.1: raw-deflate
+ * with Z_SYNC_FLUSH, then drop the trailing 4-byte 00 00 FF FF marker.
+ * Appends the result to `out` (caller owns it). deflateReset afterwards
+ * (no_context_takeover). Returns 0 on success, -1 on a deflate error.
+ */
+int ws_session_pmce_deflate(ws_session_t *session,
+                            const char *in, size_t in_len, smart_str *out);
+#endif
 
 #endif /* WS_SESSION_H */

@@ -184,7 +184,8 @@ int ws_handshake_compute_accept(const char *client_key, size_t client_key_len,
 }
 
 zend_string *ws_handshake_build_101_response(const char *accept,
-                                             const char *subprotocol)
+                                             const char *subprotocol,
+                                             bool deflate)
 {
     /* Status line + 4 mandatory headers come to ~140 bytes; subprotocol
      * adds ~30 + token. One smart_str grow is enough — preallocate. */
@@ -209,8 +210,94 @@ zend_string *ws_handshake_build_101_response(const char *accept,
         smart_str_appends(&buf, "\r\n");
     }
 
+    if (deflate) {
+        /* no_context_takeover both ways → we reset the deflate/inflate
+         * streams per message (RFC 7692 §7.1.1). We do not negotiate a
+         * reduced window; both sides stay at the default 15. */
+        smart_str_appends(&buf, "Sec-WebSocket-Extensions: permessage-deflate; "
+            "server_no_context_takeover; client_no_context_takeover\r\n");
+    }
+
     smart_str_appends(&buf, "\r\n");
     smart_str_0(&buf);
 
     return buf.s;
+}
+
+bool ws_pmce_offered(const http_request_t *req)
+{
+    size_t ext_len = 0;
+    const char *ext = header_lookup(req, "sec-websocket-extensions",
+                                    sizeof("sec-websocket-extensions") - 1,
+                                    &ext_len);
+    if (ext == NULL) {
+        return false;
+    }
+
+    /* Walk the comma-separated offer list. Each offer is "name; params". */
+    size_t i = 0;
+    while (i < ext_len) {
+        const size_t offer_start = i;
+        while (i < ext_len && ext[i] != ',') i++;
+        const size_t offer_end = i;
+        if (i < ext_len) i++;   /* consume comma */
+
+        size_t p          = offer_start;
+        size_t name_start = p;
+        while (p < offer_end && ext[p] != ';') p++;
+        size_t name_end = p;
+        while (name_start < name_end &&
+               (ext[name_start] == ' ' || ext[name_start] == '\t')) name_start++;
+        while (name_end > name_start &&
+               (ext[name_end - 1] == ' ' || ext[name_end - 1] == '\t')) name_end--;
+
+        if (name_end - name_start != sizeof("permessage-deflate") - 1 ||
+            strncasecmp(ext + name_start, "permessage-deflate",
+                        sizeof("permessage-deflate") - 1) != 0) {
+            continue;
+        }
+
+        /* Matched. Decline only if it pins server_max_window_bits below our
+         * fixed window of 15 — we always deflate with the full window. */
+        bool acceptable = true;
+        size_t q = p;
+        while (q < offer_end) {
+            if (ext[q] == ';') q++;
+            while (q < offer_end && (ext[q] == ' ' || ext[q] == '\t')) q++;
+            const size_t ps = q;
+            while (q < offer_end && ext[q] != ';' && ext[q] != '=') q++;
+            size_t pe = q;
+            while (pe > ps && (ext[pe - 1] == ' ' || ext[pe - 1] == '\t')) pe--;
+
+            long val = -1;
+            if (q < offer_end && ext[q] == '=') {
+                q++;
+                while (q < offer_end &&
+                       (ext[q] == ' ' || ext[q] == '\t' || ext[q] == '"')) q++;
+                bool have = false;
+                val = 0;
+                while (q < offer_end && ext[q] >= '0' && ext[q] <= '9') {
+                    val = val * 10 + (ext[q] - '0');
+                    q++;
+                    have = true;
+                }
+                if (!have) val = -1;
+                while (q < offer_end && ext[q] != ';') q++;
+            }
+
+            if (pe - ps == sizeof("server_max_window_bits") - 1 &&
+                strncasecmp(ext + ps, "server_max_window_bits",
+                            sizeof("server_max_window_bits") - 1) == 0 &&
+                val >= 0 && val < 15) {
+                acceptable = false;
+                break;
+            }
+        }
+
+        if (acceptable) {
+            return true;
+        }
+    }
+
+    return false;
 }

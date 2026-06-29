@@ -20,6 +20,32 @@
 #include <errno.h>
 #include <string.h>
 
+#ifdef HAVE_HTTP_COMPRESSION
+#  ifdef HAVE_ZLIB_NG
+#    include <zlib-ng.h>
+#    define ZS                zng_stream
+#    define ZS_DEFLATE_INIT2  zng_deflateInit2
+#    define ZS_DEFLATE        zng_deflate
+#    define ZS_DEFLATE_END    zng_deflateEnd
+#    define ZS_DEFLATE_RESET  zng_deflateReset
+#    define ZS_INFLATE_INIT2  zng_inflateInit2
+#    define ZS_INFLATE        zng_inflate
+#    define ZS_INFLATE_END    zng_inflateEnd
+#    define ZS_INFLATE_RESET  zng_inflateReset
+#  else
+#    include <zlib.h>
+#    define ZS                z_stream
+#    define ZS_DEFLATE_INIT2  deflateInit2
+#    define ZS_DEFLATE        deflate
+#    define ZS_DEFLATE_END    deflateEnd
+#    define ZS_DEFLATE_RESET  deflateReset
+#    define ZS_INFLATE_INIT2  inflateInit2
+#    define ZS_INFLATE        inflate
+#    define ZS_INFLATE_END    inflateEnd
+#    define ZS_INFLATE_RESET  inflateReset
+#  endif
+#endif
+
 /* {{{ ws_session_recv_callback
  *
  * wslay pulls bytes by calling this. We hand it the slice of
@@ -248,6 +274,204 @@ static void ws_notify_recv_waiter(ws_session_t *s)
 }
 /* }}} */
 
+#ifdef HAVE_HTTP_COMPRESSION
+/* {{{ permessage-deflate (RFC 7692) — codec over the existing zlib(-ng)
+ * dependency. Raw deflate/inflate (windowBits -15); per-message reset
+ * (no_context_takeover); inflate is bomb-capped at pmce_max_msg. */
+
+/* Drive deflate to completion for the bytes currently in avail_in with the
+ * given flush mode, appending output to `out`. Returns 0 / -1. */
+static int pmce_deflate_drain(ZS *zs, smart_str *out, const int flush)
+{
+    unsigned char buf[8192];
+    do {
+        zs->next_out  = buf;
+        zs->avail_out = (unsigned)sizeof(buf);
+
+        const int rc = ZS_DEFLATE(zs, flush);
+
+        if (rc != Z_OK && rc != Z_BUF_ERROR) {
+            return -1;
+        }
+
+        const size_t produced = sizeof(buf) - zs->avail_out;
+        if (produced > 0) {
+            smart_str_appendl(out, (const char *)buf, produced);
+        }
+    } while (zs->avail_out == 0);
+
+    return 0;
+}
+
+int ws_session_pmce_deflate(ws_session_t *session,
+                            const char *in, size_t in_len, smart_str *out)
+{
+    ZS *const zs = (ZS *)session->pmce_deflate;
+
+    /* Feed input in <=1 GiB chunks so avail_in never overflows zlib's uInt;
+     * only the final flush emits the sync marker. */
+    const size_t          in_chunk  = (size_t)1 << 30;
+    const unsigned char  *cursor    = (const unsigned char *)in;
+    size_t                remaining = in_len;
+
+    while (remaining > 0) {
+        const size_t chunk = remaining < in_chunk ? remaining : in_chunk;
+        zs->next_in  = (void *)(uintptr_t)cursor;
+        zs->avail_in = (unsigned)chunk;
+
+        if (pmce_deflate_drain(zs, out, Z_NO_FLUSH) != 0) {
+            (void)ZS_DEFLATE_RESET(zs);
+            return -1;
+        }
+
+        cursor    += chunk;
+        remaining -= chunk;
+    }
+
+    zs->next_in  = NULL;
+    zs->avail_in = 0;
+
+    if (pmce_deflate_drain(zs, out, Z_SYNC_FLUSH) != 0) {
+        (void)ZS_DEFLATE_RESET(zs);
+        return -1;
+    }
+
+    /* Drop the trailing 00 00 FF FF empty-block marker (RFC 7692 §7.2.1).
+     * Z_SYNC_FLUSH always emits at least those 4 bytes. */
+    if (out->s != NULL && ZSTR_LEN(out->s) >= 4) {
+        ZSTR_LEN(out->s) -= 4;
+    }
+
+    (void)ZS_DEFLATE_RESET(zs);
+    return 0;
+}
+
+/* Inflate one inbound compressed message: append the synthetic
+ * 00 00 FF FF tail (RFC 7692 §7.2.2), raw-inflate, and abort the moment
+ * the decompressed size would exceed pmce_max_msg. On success *out_str is
+ * a fresh owned zend_string. Returns 0, or -1 on bomb / malformed input. */
+static int pmce_inflate_msg(ws_session_t *s,
+                            const uint8_t *in, size_t in_len,
+                            zend_string **out_str)
+{
+    ZS *const zs = (ZS *)s->pmce_inflate;
+    const size_t hard_cap = s->pmce_max_msg > 0 ? s->pmce_max_msg : (1u << 20);
+
+    static const unsigned char tail[4] = { 0x00, 0x00, 0xff, 0xff };
+
+    size_t out_cap = 4096;
+    if (out_cap > hard_cap + 1) {
+        out_cap = hard_cap + 1;
+    }
+    zend_string *out = zend_string_alloc(out_cap, 0);
+    size_t produced  = 0;
+    bool   tail_fed  = false;
+
+    zs->next_in   = (void *)(uintptr_t)in;
+    zs->avail_in  = (unsigned)in_len;
+    zs->next_out  = (unsigned char *)ZSTR_VAL(out);
+    zs->avail_out = (unsigned)out_cap;
+
+    for (;;) {
+        const int rc = ZS_INFLATE(zs, Z_NO_FLUSH);
+        produced = out_cap - zs->avail_out;
+
+        if (produced > hard_cap) {
+            ZS_INFLATE_RESET(zs);
+            zend_string_release(out);
+            return -1;
+        }
+
+        if (rc != Z_OK && rc != Z_BUF_ERROR && rc != Z_STREAM_END) {
+            ZS_INFLATE_RESET(zs);
+            zend_string_release(out);
+            return -1;
+        }
+
+        if (zs->avail_in == 0 && !tail_fed) {
+            tail_fed      = true;
+            zs->next_in   = (void *)(uintptr_t)tail;
+            zs->avail_in  = (unsigned)sizeof(tail);
+            continue;
+        }
+
+        if (rc == Z_STREAM_END || zs->avail_out > 0) {
+            break;
+        }
+
+        /* Output full → grow, bounded to hard_cap + 1 so an over-cap
+         * payload is caught on the next pass, not after ballooning. */
+        if (out_cap >= hard_cap + 1) {
+            ZS_INFLATE_RESET(zs);
+            zend_string_release(out);
+            return -1;
+        }
+        size_t new_cap = out_cap * 2;
+        if (new_cap > hard_cap + 1) {
+            new_cap = hard_cap + 1;
+        }
+        out = zend_string_realloc(out, new_cap, 0);
+        zs->next_out  = (unsigned char *)ZSTR_VAL(out) + produced;
+        zs->avail_out = (unsigned)(new_cap - produced);
+        out_cap = new_cap;
+    }
+
+    ZS_INFLATE_RESET(zs);
+
+    if (produced != out_cap) {
+        out = zend_string_truncate(out, produced, 0);
+    }
+    ZSTR_VAL(out)[produced] = '\0';
+    *out_str = out;
+    return 0;
+}
+
+bool ws_session_enable_pmce(ws_session_t *s)
+{
+    if (s->pmce_enabled) {
+        return true;
+    }
+    if (s->ctx == NULL) {
+        return false;
+    }
+
+    ZS *const def = ecalloc(1, sizeof(ZS));
+    ZS *const inf = ecalloc(1, sizeof(ZS));
+
+    /* windowBits -15 = raw deflate stream, no zlib/gzip wrapper. */
+    if (ZS_DEFLATE_INIT2(def, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                         -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        efree(def);
+        efree(inf);
+        return false;
+    }
+
+    if (ZS_INFLATE_INIT2(inf, -15) != Z_OK) {
+        ZS_DEFLATE_END(def);
+        efree(def);
+        efree(inf);
+        return false;
+    }
+
+    s->pmce_deflate = def;
+    s->pmce_inflate = inf;
+
+    size_t cap = 1024 * 1024;
+    if (s->conn != NULL && s->conn->server != NULL) {
+        const http_server_config_t *cfg = http_server_get_config(s->conn->server);
+        if (cfg != NULL && cfg->ws_max_message_size > 0) {
+            cap = cfg->ws_max_message_size;
+        }
+    }
+    s->pmce_max_msg = cap;
+
+    wslay_event_config_set_allowed_rsv_bits(s->ctx, WSLAY_RSV1_BIT);
+    s->pmce_enabled = 1;
+    return true;
+}
+/* }}} */
+#endif /* HAVE_HTTP_COMPRESSION */
+
 /* {{{ ws_session_on_msg_recv_callback
  *
  * Fires once per fully-reassembled WebSocket message — text or
@@ -278,10 +502,31 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
     }
 
     /* Text (0x1) or binary (0x2) data message — enqueue. */
+    zend_string *data;
+#ifdef HAVE_HTTP_COMPRESSION
+    if (s->pmce_enabled && wslay_get_rsv1(arg->rsv)) {
+        if (pmce_inflate_msg(s, arg->msg, arg->msg_length, &data) != 0) {
+            /* zip-bomb past the cap or malformed deflate. Tell the peer
+             * (1009) and latch the error so feed() returns -1 and the
+             * transport tears the connection/stream down — the worker
+             * stays alive. mark_peer_closed wakes a recv()-suspended
+             * handler at once on every transport (H1/wss/H2). */
+            s->pmce_error = 1;
+            (void)wslay_event_queue_close(ctx, WSLAY_CODE_MESSAGE_TOO_BIG,
+                                          NULL, 0);
+            ws_session_mark_peer_closed(s);
+            return;
+        }
+    } else
+#endif
+    {
+        data = zend_string_init((const char *)arg->msg, arg->msg_length, 0);
+    }
+
     ws_pending_message_t *node = emalloc(sizeof(*node));
     node->next   = NULL;
     node->binary = (arg->opcode == WSLAY_BINARY_FRAME);
-    node->data   = zend_string_init((const char *)arg->msg, arg->msg_length, 0);
+    node->data   = data;
 
     if (s->recv_tail != NULL) {
         s->recv_tail->next = node;
@@ -390,6 +635,20 @@ void ws_session_destroy(ws_session_t *session)
         wslay_event_context_free(session->ctx);
     }
 
+#ifdef HAVE_HTTP_COMPRESSION
+    if (session->pmce_deflate != NULL) {
+        ZS_DEFLATE_END((ZS *)session->pmce_deflate);
+        efree(session->pmce_deflate);
+        session->pmce_deflate = NULL;
+    }
+
+    if (session->pmce_inflate != NULL) {
+        ZS_INFLATE_END((ZS *)session->pmce_inflate);
+        efree(session->pmce_inflate);
+        session->pmce_inflate = NULL;
+    }
+#endif
+
     /* Drain the FIFO. Any messages that nobody got around to popping
      * leak owned zend_strings if we don't release them here. */
     ws_pending_message_t *node = session->recv_head;
@@ -468,5 +727,12 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
     if (rc != 0) {
         return -1;
     }
+#ifdef HAVE_HTTP_COMPRESSION
+    /* A compressed message overflowed the cap (or was malformed): the
+     * 1009 close queued in on_msg_recv was just flushed above; tear down. */
+    if (session->pmce_error) {
+        return -1;
+    }
+#endif
     return 0;
 }

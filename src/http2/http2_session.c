@@ -423,13 +423,21 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
      * deadlock. Before accept (ws_session not yet created) buffer into
      * request_body_buf; http2_ws_accept replays it. */
     if (stream->is_websocket) {
+        int ws_rc = 0;
         if (stream->ws_session != NULL) {
-            (void)ws_session_feed(stream->ws_session, data, len);
+            ws_rc = ws_session_feed(stream->ws_session, data, len);
         } else {
             smart_str_appendl(&stream->request_body_buf, (const char *)data, len);
         }
         nghttp2_session_consume(ng, stream_id, len);
         h2_session_schedule_emit(session);
+        /* A WS codec/protocol error (e.g. a permessage-deflate bomb past the
+         * cap) tears down THIS stream only — RST_STREAM via nghttp2. The 1009
+         * CLOSE queued by ws_session_feed flushes with the emit above, and
+         * on_stream_close wakes any recv()-suspended handler. */
+        if (UNEXPECTED(ws_rc != 0)) {
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        }
         return 0;
     }
 #endif

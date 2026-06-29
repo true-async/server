@@ -154,7 +154,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session);
  * (only when HTTP/2 is compiled in). Returns false on failure. */
 struct http2_stream_t;
 bool http2_ws_accept(struct http2_stream_t *stream, websocket_object *w,
-                     const char *subprotocol);
+                     const char *subprotocol, bool deflate);
 
 /*
  * Factory: build a WebSocketMessage from the assembled payload

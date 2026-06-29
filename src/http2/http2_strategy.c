@@ -1786,8 +1786,9 @@ static const ws_transport_ops_t ws_h2_transport = {
  * Deferred until the first WS I/O (so the handler may reject() first).
  * Sets BOTH stream->ws_session and w->session. */
 bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
-                     const char *subprotocol)
+                     const char *subprotocol, bool deflate)
 {
+    (void)deflate;
     if (stream->ws_session != NULL) {
         return true;   /* already accepted */
     }
@@ -1809,18 +1810,29 @@ bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
         stream->chunk_read_offset = 0;
     }
 
-    http2_header_view_t hv;
+    http2_header_view_t hv[2];
     size_t nhv = 0;
     if (subprotocol != NULL) {
-        hv.name      = "sec-websocket-protocol";
-        hv.name_len  = sizeof("sec-websocket-protocol") - 1;
-        hv.value     = subprotocol;
-        hv.value_len = strlen(subprotocol);
-        nhv = 1;
+        hv[nhv].name      = "sec-websocket-protocol";
+        hv[nhv].name_len  = sizeof("sec-websocket-protocol") - 1;
+        hv[nhv].value     = subprotocol;
+        hv[nhv].value_len = strlen(subprotocol);
+        nhv++;
     }
+#ifdef HAVE_HTTP_COMPRESSION
+    if (deflate) {
+        static const char ext[] = "permessage-deflate; "
+            "server_no_context_takeover; client_no_context_takeover";
+        hv[nhv].name      = "sec-websocket-extensions";
+        hv[nhv].name_len  = sizeof("sec-websocket-extensions") - 1;
+        hv[nhv].value     = ext;
+        hv[nhv].value_len = sizeof(ext) - 1;
+        nhv++;
+    }
+#endif
 
     if (http2_session_submit_response_streaming(stream->session,
-            stream->stream_id, 200, nhv ? &hv : NULL, nhv) != 0) {
+            stream->stream_id, 200, nhv ? hv : NULL, nhv) != 0) {
         return false;
     }
     http2_session_emit(stream->session);
@@ -1831,6 +1843,13 @@ bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
     }
     stream->is_websocket = true;
     w->session = stream->ws_session;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Enable the codec before replaying any buffered DATA below. */
+    if (deflate && !ws_session_enable_pmce(stream->ws_session)) {
+        return false;
+    }
+#endif
 
     /* Replay DATA the client pipelined before accept. */
     if (stream->request_body_buf.s != NULL) {
