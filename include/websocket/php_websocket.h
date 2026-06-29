@@ -79,6 +79,8 @@ typedef struct {
     char            accept_value[28]; /* WS_ACCEPT_LEN; pre-computed */
     zval            upgrade_zv;       /* IS_OBJECT WebSocketUpgrade; cleared on dispose */
     http_connection_t *conn;          /* borrowed; needed for commit-time I/O */
+    struct http2_stream_t *h2_stream; /* RFC 8441: set when this WS lives in
+                                       * an H2 stream; NULL for H1 / wss */
     zend_object     std;
 } websocket_object;
 
@@ -145,6 +147,14 @@ zend_object *websocket_object_create_pre_commit(http_connection_t *conn,
  * coroutine on the 101 socket write.
  */
 bool ws_commit_upgrade(websocket_object *w, bool install_session);
+
+/* HTTP/2 (RFC 8441) accept: commit a streaming 200 on the stream, create
+ * the per-stream wslay session bound to the H2 DATA transport, and set
+ * both stream->ws_session and w->session. Defined in http2_strategy.c
+ * (only when HTTP/2 is compiled in). Returns false on failure. */
+struct http2_stream_t;
+bool http2_ws_accept(struct http2_stream_t *stream, websocket_object *w,
+                     const char *subprotocol);
 
 /*
  * Factory: build a WebSocketMessage from the assembled payload

@@ -82,6 +82,16 @@ void http2_stream_release(http2_stream_t *stream)
      * HttpRequest wrapper. The release callback installed at alloc
      * time efrees the slot once the wrapper finally releases. */
 
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* WebSocket-over-H2 session is stream-owned (RFC 8441). Destroy it
+     * before the ring teardown so its keepalive timer is stopped first. */
+    if (stream->ws_session != NULL) {
+        extern void ws_session_destroy(struct ws_session_t *session);
+        ws_session_destroy(stream->ws_session);
+        stream->ws_session = NULL;
+    }
+#endif
+
     smart_str_free(&stream->request_body_buf);
 
     if (stream->chunk_queue != NULL) {

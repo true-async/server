@@ -77,6 +77,7 @@ static zend_object *websocket_create(zend_class_entry *ce)
     obj->closed         = true;   /* default-closed; the factory clears this */
     obj->committed      = false;
     obj->conn           = NULL;
+    obj->h2_stream      = NULL;
     ZVAL_UNDEF(&obj->upgrade_zv);
     memset(obj->accept_value, 0, sizeof(obj->accept_value));
 
@@ -290,6 +291,22 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
         }
     }
 
+#ifdef HAVE_HTTP2
+    /* HTTP/2 (RFC 8441): no 101 and no strategy swap. Accept is a
+     * streaming 200 on the stream; a per-stream wslay session bridges
+     * the H2 DATA frames. http2_ws_accept sets w->session for us. */
+    if (w->h2_stream != NULL) {
+        if (!http2_ws_accept(w->h2_stream, w, subprotocol)) {
+            zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+                "WebSocket: failed to accept HTTP/2 Extended CONNECT");
+            w->closed = true;
+            return false;
+        }
+        w->committed = true;
+        return true;
+    }
+#endif
+
     zend_string *resp = ws_handshake_build_101_response(w->accept_value,
                                                         subprotocol);
     if (resp == NULL) {
@@ -401,16 +418,6 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
 #include "../../stubs/WebSocketUpgrade.php_arginfo.h"
 #include "../../stubs/WebSocket.php_arginfo.h"
 #include "../../stubs/WebSocketExceptions.php_arginfo.h"
-
-/* Common helper: every method body in this scaffold throws so that
- * accidental invocation surfaces a loud, actionable error instead of
- * silent success. Replaced one method at a time as real
- * implementations land. */
-static void ws_throw_unimplemented(const char *what)
-{
-    zend_throw_exception_ex(websocket_exception_ce, 0,
-        "WebSocket %s is not yet implemented in this build", what);
-}
 
 /* {{{ WebSocketMessage methods */
 ZEND_METHOD(TrueAsync_WebSocketMessage, __construct)

@@ -196,6 +196,14 @@ struct http2_stream_t {
      * Dispatch bumps to 2 (coroutine holds). Each release path
      * decrements; the last release actually efree's. */
     unsigned             refcount;
+
+    /* WebSocket-over-HTTP/2 (RFC 8441). Set when this stream is an
+     * accepted Extended-CONNECT WebSocket: ws_session bridges wslay to
+     * the stream's DATA frames; is_websocket routes inbound DATA to it.
+     * NULL / false for ordinary request streams. Owned by the stream —
+     * freed in http2_stream_release. */
+    bool                 is_websocket;
+    struct ws_session_t *ws_session;
 };
 
 /* Shift live ring entries to index 0 so tail can advance. No-op when head==0. */

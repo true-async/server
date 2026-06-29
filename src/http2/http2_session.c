@@ -17,6 +17,9 @@
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_protocol_handlers.h"  /* http_protocol_has_handler (RFC 8441 gate) */
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/ws_session.h"  /* ws_session_feed (RFC 8441 inbound DATA) */
+#endif
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http_known_strings.h"
@@ -412,6 +415,24 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
     if (session != NULL && session->conn != NULL) {
         http_server_on_h2_data_recv(session->conn->counters, len);
     }
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* WebSocket-over-H2 (RFC 8441): inbound DATA is WS frame bytes, not a
+     * request body. Feed wslay (it drains synchronously into the recv
+     * FIFO) and grant peer credit at once — no recv-side flow-control
+     * deadlock. Before accept (ws_session not yet created) buffer into
+     * request_body_buf; http2_ws_accept replays it. */
+    if (stream->is_websocket) {
+        if (stream->ws_session != NULL) {
+            (void)ws_session_feed(stream->ws_session, data, len);
+        } else {
+            smart_str_appendl(&stream->request_body_buf, (const char *)data, len);
+        }
+        nghttp2_session_consume(ng, stream_id, len);
+        h2_session_schedule_emit(session);
+        return 0;
+    }
+#endif
 
     /* Streaming mode (issue #26) — push the chunk into the per-request
      * queue instead of accumulating into stream->request_body_buf. The
