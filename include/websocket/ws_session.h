@@ -55,13 +55,31 @@ typedef struct ws_pending_message_t {
  * (handshake hash, frame builder scratch) live inside wslay_event
  * and are owned by it.
  */
+/* Transport binding for outbound wslay bytes. H1 / wss bind to the
+ * whole connection; H2 (RFC 8441) binds to a single multiplexed stream.
+ * Two entries so producer-context sends (MAY suspend for backpressure)
+ * and internal event-loop sends (keepalive PING / auto-PONG; MUST NOT
+ * suspend) each take the right path. Both return false on a sticky
+ * write error (the session is then torn down). */
+typedef struct ws_transport_ops_t {
+    bool (*send)(void *ctx, const uint8_t *data, size_t len);
+    bool (*send_internal)(void *ctx, const uint8_t *data, size_t len);
+} ws_transport_ops_t;
+
 typedef struct ws_session_t {
     /* Owning wslay context. NULL until ws_session_init() succeeds. */
     wslay_event_context_ptr ctx;
 
     /* Borrowed back-pointer for callbacks. The session's lifetime is
-     * a strict subset of conn's, so no refcount needed. */
+     * a strict subset of conn's, so no refcount needed. For H2 this is
+     * session->conn (shared) — config + remote-addr still resolve. */
     http_connection_t *conn;
+
+    /* Where wslay's outbound bytes go (connection vs H2 stream). Set at
+     * init. transport_ctx is the opaque target (http_connection_t* for
+     * H1/wss, http2_stream_t* for H2). */
+    const ws_transport_ops_t *transport;
+    void                     *transport_ctx;
 
     /* Inbound staging buffer. Filled by ws_session_feed() from the
      * connection's read pipeline; drained by ws_session_recv_callback.
@@ -132,6 +150,13 @@ typedef struct ws_session_t {
  * responsible for ws_session_destroy() before conn is freed.
  */
 ws_session_t *ws_session_init(http_connection_t *conn);
+
+/* As ws_session_init, but with an explicit transport binding. H2 (RFC
+ * 8441) binds to a stream; ws_session_init() is the H1/wss convenience
+ * wrapper that binds to the whole connection. */
+ws_session_t *ws_session_init_ex(http_connection_t *conn,
+                                 const ws_transport_ops_t *transport,
+                                 void *transport_ctx);
 
 /*
  * Tear down the wslay context and free the session. Idempotent —

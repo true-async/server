@@ -71,6 +71,37 @@ static ssize_t ws_session_recv_callback(wslay_event_context_ptr ctx,
  * (covered in feed-side decisions later) and return -1; wslay tears
  * the session down on the next wslay_event_send invocation.
  */
+/* H1 / wss transport ops — wslay outbound bytes target the whole
+ * connection. `send` is the producer path (suspending: backpressure +
+ * TLS handled by http_connection_send). `send_internal` is the
+ * event-loop path (keepalive PING / auto-PONG) which MUST NOT suspend:
+ * TLS → the FSM atomic SSL_write; plaintext → the fire-and-forget
+ * batched writer. transport_ctx is the http_connection_t. */
+static bool ws_h1_send(void *ctx, const uint8_t *data, size_t len)
+{
+    return http_connection_send((http_connection_t *)ctx,
+                                (const char *)data, len);
+}
+
+static bool ws_h1_send_internal(void *ctx, const uint8_t *data, size_t len)
+{
+    http_connection_t *const conn = (http_connection_t *)ctx;
+#ifdef HAVE_OPENSSL
+    if (conn->tls != NULL) {
+        return http_connection_tls_fsm_send_plaintext_atomic(
+            conn, (const char *)data, len);
+    }
+#endif
+    char *copy = emalloc(len);
+    memcpy(copy, data, len);
+    return http_connection_send_batched(conn, copy, len);
+}
+
+static const ws_transport_ops_t ws_h1_transport = {
+    .send          = ws_h1_send,
+    .send_internal = ws_h1_send_internal,
+};
+
 static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
                                         const uint8_t *data, size_t len,
                                         int flags, void *user_data)
@@ -78,46 +109,21 @@ static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
     (void)flags;
     ws_session_t *const s = (ws_session_t *)user_data;
 
-    if (UNEXPECTED(s->write_error)) {
-        wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
-        return -1;
-    }
-    if (UNEXPECTED(s->conn == NULL)) {
+    if (UNEXPECTED(s->write_error) || UNEXPECTED(s->conn == NULL)
+        || UNEXPECTED(s->transport == NULL)) {
         wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
         return -1;
     }
 
-    /* Internal sends (keepalive PING from the timer, and any control
-     * reply driven outside a producer coroutine) run in event-loop
-     * context with no coroutine to park, so they MUST NOT suspend.
-     * Route them through the non-suspending fire-and-forget writer,
-     * which queues behind any in-flight write and preserves order.
-     * Plaintext path — wss:// internal sends arrive with the TLS work. */
-    if (s->internal_send) {
-#ifdef HAVE_OPENSSL
-        if (s->conn->tls != NULL) {
-            /* TLS: encrypt via the FSM atomic send (SSL_write + drain) —
-             * non-suspending, safe from this event-loop context. */
-            if (!http_connection_tls_fsm_send_plaintext_atomic(
-                    s->conn, (const char *)data, len)) {
-                s->write_error = 1;
-                wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
-                return -1;
-            }
-            return (ssize_t)len;
-        }
-#endif
-        char *copy = emalloc(len);
-        memcpy(copy, data, len);
-        if (!http_connection_send_batched(s->conn, copy, len)) {
-            s->write_error = 1;
-            wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
-            return -1;
-        }
-        return (ssize_t)len;
-    }
+    /* Internal sends (keepalive PING / auto-PONG) run in event-loop
+     * context and MUST NOT suspend; producer sends ($ws->send) MAY
+     * suspend for backpressure. The transport vtable picks the right
+     * sink — the connection (H1/wss) or a single H2 stream (RFC 8441). */
+    const bool ok = s->internal_send
+        ? s->transport->send_internal(s->transport_ctx, data, len)
+        : s->transport->send(s->transport_ctx, data, len);
 
-    if (!http_connection_send(s->conn, (const char *)data, len)) {
+    if (!ok) {
         s->write_error = 1;
         wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
         return -1;
@@ -294,8 +300,20 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
 
 ws_session_t *ws_session_init(http_connection_t *conn)
 {
+    /* H1 / wss convenience wrapper: bind the transport to the whole
+     * connection. H2 (RFC 8441) calls ws_session_init_ex directly with
+     * a per-stream transport. */
+    return ws_session_init_ex(conn, &ws_h1_transport, conn);
+}
+
+ws_session_t *ws_session_init_ex(http_connection_t *conn,
+                                 const ws_transport_ops_t *transport,
+                                 void *transport_ctx)
+{
     ws_session_t *const s = ecalloc(1, sizeof(*s));
-    s->conn = conn;
+    s->conn          = conn;
+    s->transport     = transport;
+    s->transport_ctx = transport_ctx;
 
     static const struct wslay_event_callbacks cb = {
         .recv_callback         = ws_session_recv_callback,
