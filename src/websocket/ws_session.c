@@ -13,6 +13,7 @@
 #include "php.h"
 #include "websocket/ws_session.h"
 #include "core/http_connection.h"
+#include "core/http_connection_internal.h"  /* http_connection_tls_fsm_send_plaintext_atomic */
 
 #include <wslay/wslay.h>
 
@@ -93,6 +94,19 @@ static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
      * which queues behind any in-flight write and preserves order.
      * Plaintext path — wss:// internal sends arrive with the TLS work. */
     if (s->internal_send) {
+#ifdef HAVE_OPENSSL
+        if (s->conn->tls != NULL) {
+            /* TLS: encrypt via the FSM atomic send (SSL_write + drain) —
+             * non-suspending, safe from this event-loop context. */
+            if (!http_connection_tls_fsm_send_plaintext_atomic(
+                    s->conn, (const char *)data, len)) {
+                s->write_error = 1;
+                wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
+                return -1;
+            }
+            return (ssize_t)len;
+        }
+#endif
         char *copy = emalloc(len);
         memcpy(copy, data, len);
         if (!http_connection_send_batched(s->conn, copy, len)) {

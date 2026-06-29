@@ -19,6 +19,7 @@
 #include "websocket/ws_handshake.h"
 #include "websocket/websocket_strategy.h"
 #include "core/http_connection.h"
+#include "core/http_connection_internal.h"  /* http_connection_tls_arm_read */
 #include "core/http_protocol_strategy.h"
 #include "http1/http_parser.h"   /* full http_request_t for u->req->headers */
 
@@ -369,8 +370,8 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
     conn->request_in_flight = false;
 
     /* A fast client may have pipelined its first frame(s) before reading
-     * the 101; those bytes are already in read_buffer. Feed them now —
-     * wslay buffers any partial frame internally. */
+     * the 101; those bytes are already in read_buffer (decrypted, for
+     * TLS). Feed them now — wslay buffers any partial frame internally. */
     if (conn->read_buffer_len > 0) {
         size_t consumed = 0;
         (void)conn->strategy->feed(conn->strategy, conn,
@@ -378,6 +379,18 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
                                    &consumed);
         conn->read_buffer_len = 0;
     }
+
+#ifdef HAVE_OPENSSL
+    /* TLS: the FSM set tls_awaiting_handler after the upgrade GET and
+     * idled WITHOUT re-arming the one-shot read. Clear the gate and arm
+     * the read so the next frame's ciphertext flows into the decrypt→
+     * ws_feed loop; the FSM's WebSocket branch keeps it armed thereafter.
+     * (Plaintext needs neither: conn->io is MULTISHOT and stays armed.) */
+    if (conn->tls != NULL) {
+        conn->tls_awaiting_handler = false;
+        http_connection_tls_arm_read(conn);
+    }
+#endif
 
     return true;
 }

@@ -938,7 +938,15 @@ static void tls_advance_state(http_connection_t *conn)
          * would synchronously dispatch handler N+1 — overlapping handler
          * coroutines on the same conn, single-flusher-deadlock in
          * tls_drain, and lost responses on the LAST request (065 flake). */
-        if (conn->tls_awaiting_handler) {
+        if (conn->tls_awaiting_handler
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+            /* A committed WebSocket connection is a continuous frame
+             * stream, not request/response: its long-lived handler stays
+             * suspended in recv() for the whole session, so never gate the
+             * decrypt→feed step on an "in-flight handler". */
+            && conn->protocol_type != HTTP_PROTOCOL_WEBSOCKET
+#endif
+           ) {
             return;
         }
 
@@ -971,6 +979,19 @@ static void tls_advance_state(http_connection_t *conn)
         }
 
         if (feed == 0) {
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+            /* WebSocket: feed==0 just means we consumed the frames in
+             * this chunk — there is no "next request" to await. Re-arm
+             * the read so the next frame's ciphertext flows in, keeping
+             * the connection a continuous duplex stream. */
+            if (conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET) {
+                if (UNEXPECTED(!tls_arm_one_shot_read(conn))) {
+                    conn->state = CONN_STATE_CLOSING;
+                    continue;
+                }
+                return;
+            }
+#endif
             /* Parser hit on_message_complete. If the handler was
              * already dispatched at on_headers_complete (request
              * bodies of any size), it owns the next state transition;

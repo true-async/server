@@ -21,6 +21,7 @@
 #include "websocket/php_websocket.h"
 
 #include "core/http_connection.h"
+#include "core/http_connection_internal.h"  /* http_connection_tls_fsm_send_plaintext_atomic */
 #include "core/http_protocol_strategy.h"
 #include "core/http_protocol_handlers.h"
 #include "http1/http_parser.h"
@@ -88,14 +89,6 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
     if (v == WS_HANDSHAKE_NOT_AN_UPGRADE) {
         return false;
     }
-
-    /* TLS WS (wss://) routes through tls_push_and_maybe_flush instead
-     * of raw IO_WRITE; that path lands with the WSS commit. */
-#ifdef HAVE_OPENSSL
-    if (conn->tls != NULL) {
-        return false;
-    }
-#endif
 
     HashTable *const handlers =
         http_server_get_protocol_handlers(conn->server);
@@ -254,6 +247,19 @@ static zend_string *build_error_response(int status, const char *extra_header)
 static bool ws_submit_reject_write(http_connection_t *conn,
                                    char *buf, size_t len)
 {
+#ifdef HAVE_OPENSSL
+    /* Over TLS the raw IO_WRITE below would ship plaintext. Encrypt the
+     * 4xx via the FSM's non-suspending atomic send (we are in event-loop
+     * context — no coroutine to drive the suspending tls_push), then mark
+     * the connection for close. */
+    if (conn->tls != NULL) {
+        const bool ok = http_connection_tls_fsm_send_plaintext_atomic(conn, buf, len);
+        efree(buf);
+        conn->keep_alive = false;
+        return ok;
+    }
+#endif
+
     ws_pending_write_t *pw = (ws_pending_write_t *)
         ZEND_ASYNC_EVENT_CALLBACK_EX(ws_pending_write_complete_cb,
                                      sizeof(ws_pending_write_t));
