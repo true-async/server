@@ -246,6 +246,13 @@ struct _http_server_config_t {
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
 
+    /* WebSocket knobs (PLAN_WEBSOCKET.md §5): message/frame caps + ping
+     * cadence + pong deadline. See HttpServerConfig::setWs* setters. */
+    uint32_t ws_max_message_size;
+    uint32_t ws_max_frame_size;
+    uint32_t ws_ping_interval_ms;
+    uint32_t ws_pong_timeout_ms;
+
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
      * phase 2 adds Brotli + zstd through the same vtable.
      *   compression_enabled         — master switch (default true).
