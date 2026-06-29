@@ -20,6 +20,13 @@ PHP_ARG_ENABLE([http3],
   [yes],
   [no])
 
+PHP_ARG_ENABLE([websocket],
+  [whether to enable WebSocket support],
+  [AS_HELP_STRING([--enable-websocket],
+    [Enable WebSocket (RFC 6455) support; uses bundled wslay (default: enabled)])],
+  [yes],
+  [no])
+
 PHP_ARG_ENABLE([http-server-test-hooks],
   [whether to compile internal test hooks],
   [AS_HELP_STRING([--enable-http-server-test-hooks],
@@ -100,6 +107,16 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   PHP_ADD_INCLUDE([$ext_srcdir/deps/llhttp/include])
   PHP_ADD_INCLUDE([$ext_builddir/deps/llhttp/include])
   AC_DEFINE([HAVE_LLHTTP], [1], [Whether llhttp is available])
+
+  dnl Bundled wslay (RFC 6455 frame parser). Gated by --enable-websocket.
+  dnl The wslay include path is added after PHP_NEW_EXTENSION (see the
+  dnl include block near the bottom) — $ext_srcdir is not usable before it.
+  if test "$PHP_WEBSOCKET" = "yes"; then
+    AC_MSG_CHECKING([for wslay])
+    AC_MSG_RESULT([using bundled wslay])
+    AC_DEFINE([HAVE_WSLAY], [1], [Whether bundled wslay is available])
+    AC_DEFINE([HAVE_HTTP_SERVER_WEBSOCKET], [1], [Whether WebSocket support is enabled])
+  fi
 
   dnl Macro for checking library with pkg-config
   AC_DEFUN([PHP_CHECK_LIBRARY_PKG_CONFIG], [
@@ -606,6 +623,25 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     "
   fi
 
+  dnl WebSocket (RFC 6455) — bundled wslay frame parser + our strategy,
+  dnl session bridge, handshake, dispatch and PHP object layer. Gated by
+  dnl --enable-websocket (default yes). wss:// reuses the TLS send path;
+  dnl RFC 8441 (H2) and permessage-deflate (RFC 7692) are follow-ups.
+  if test "$PHP_WEBSOCKET" = "yes"; then
+    http_server_sources="$http_server_sources
+      deps/wslay/lib/wslay_event.c
+      deps/wslay/lib/wslay_frame.c
+      deps/wslay/lib/wslay_net.c
+      deps/wslay/lib/wslay_queue.c
+      deps/wslay/lib/wslay_stack.c
+      src/websocket/websocket_strategy.c
+      src/websocket/ws_session.c
+      src/websocket/ws_handshake.c
+      src/websocket/ws_dispatch.c
+      src/websocket/php_websocket.c
+    "
+  fi
+
   dnl Hardening + diagnostic flags. Probed individually so old/non-GCC
   dnl toolchains don't break — flags that aren't accepted are dropped
   dnl silently. -fstack-protector-strong and -Wformat=2 are universally
@@ -665,5 +701,14 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   if test "$PHP_HTTP3" = "yes"; then
     PHP_ADD_BUILD_DIR([$ext_builddir/src/http3])
     PHP_ADD_INCLUDE([$ext_srcdir/src/http3])
+  fi
+
+  if test "$PHP_WEBSOCKET" = "yes"; then
+    PHP_ADD_BUILD_DIR([$ext_builddir/deps/wslay/lib])
+    PHP_ADD_BUILD_DIR([$ext_builddir/src/websocket])
+    dnl wslay's own headers do #include <wslay/wslay.h>, so its include
+    dnl directory is mandatory (llhttp is only included via relative path).
+    PHP_ADD_INCLUDE([$ext_srcdir/deps/wslay/includes])
+    PHP_ADD_INCLUDE([$ext_srcdir/include/websocket])
   fi
 fi
