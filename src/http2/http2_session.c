@@ -16,6 +16,7 @@
 #include "Zend/zend_hrtime.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
+#include "core/http_protocol_handlers.h"  /* http_protocol_has_handler (RFC 8441 gate) */
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http_known_strings.h"
@@ -317,6 +318,14 @@ static int cb_on_header(nghttp2_session *ng,
             /* No natural HTTP/1 mapping; park under `scheme` so PHP
              * handlers can inspect it via $request->getHeader("scheme"). */
             store_header_value(req, "scheme", 6, value_c, valuelen);
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+        } else if (namelen == 9 && memcmp(name, ":protocol", 9) == 0) {
+            /* RFC 8441 Extended CONNECT — park under `protocol` so the
+             * WS dispatch path can detect :protocol=websocket. nghttp2
+             * only permits :protocol once ENABLE_CONNECT_PROTOCOL has
+             * been advertised, so it appears only for genuine upgrades. */
+            store_header_value(req, "protocol", 8, value_c, valuelen);
+#endif
         }
         /* Unknown pseudo-headers — nghttp2 already rejects them. */
         return 0;
@@ -1107,17 +1116,33 @@ static void apply_hardened_options(nghttp2_option *opt)
 
 static int submit_initial_settings(http2_session_t *session)
 {
-    static const nghttp2_settings_entry iv[] = {
+    nghttp2_settings_entry iv[] = {
         { NGHTTP2_SETTINGS_ENABLE_PUSH,            0                            },
         { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, HTTP2_SETTINGS_MAX_CONCURRENT },
         { NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE,    HTTP2_SETTINGS_INITIAL_WINDOW },
         { NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE,   HTTP2_SETTINGS_MAX_HEADER_LIST },
         { NGHTTP2_SETTINGS_HEADER_TABLE_SIZE,      HTTP2_SETTINGS_HEADER_TABLE_BYTES },
         { NGHTTP2_SETTINGS_MAX_FRAME_SIZE,         HTTP2_SETTINGS_MAX_FRAME },
+        { 0, 0 },   /* optional RFC 8441 bit, appended below */
     };
+    size_t niv = 6;
 
-    if (nghttp2_submit_settings(session->ng, NGHTTP2_FLAG_NONE, iv,
-                                sizeof(iv) / sizeof(iv[0])) != 0) {
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* RFC 8441: advertise Extended CONNECT (:protocol) support ONLY when
+     * a WebSocket handler is registered. The handler registry is frozen
+     * before start(), so this is stable for the connection's lifetime.
+     * Lets H2 clients open WebSocket streams via :method=CONNECT. */
+    if (session->conn != NULL) {
+        HashTable *const h = http_server_get_protocol_handlers(session->conn->server);
+        if (h != NULL && http_protocol_has_handler(h, HTTP_PROTOCOL_WEBSOCKET)) {
+            iv[niv].settings_id = NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL;
+            iv[niv].value       = 1;
+            niv++;
+        }
+    }
+#endif
+
+    if (nghttp2_submit_settings(session->ng, NGHTTP2_FLAG_NONE, iv, niv) != 0) {
         return -1;
     }
 
