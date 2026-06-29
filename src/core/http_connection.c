@@ -21,6 +21,9 @@
 #include "conn_arena.h"
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/ws_dispatch.h"  /* ws_dispatch_try_upgrade — Upgrade short-circuit */
+#endif
 #include "static/static_handler.h"  /* issue #13 — dispatch hook */
 #include "http_send_file.h"          /* issue #13 — Response::sendFile() */
 #include "http_response_internal.h"  /* http_response_take_send_file */
@@ -134,6 +137,17 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
         req->enqueue_ns = zend_hrtime();
     }
 
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* WebSocket Upgrade short-circuit. Returns true when the request
+     * carried Upgrade: websocket and we either accepted it (101 sent +
+     * WS handler coroutine spawned) or rejected it (4xx/426). In both
+     * cases the normal H1 dispatch must not run. The common no-Upgrade
+     * case exits cheaply inside ws_dispatch_try_upgrade. */
+    if (ws_dispatch_try_upgrade(conn, req)) {
+        return;
+    }
+#endif
+
     http_connection_dispatch_request(conn, req);
 }
 /* }}} */
@@ -160,6 +174,7 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
     }
 
     conn->server = server;
+    conn->client_fd = socket_fd;
 
     conn->io = ZEND_ASYNC_IO_CREATE(
         (zend_file_descriptor_t)socket_fd,
@@ -214,6 +229,45 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
     conn->config    = NULL;  /* bound by http_server_bind_connection */
 
     return conn;
+}
+/* }}} */
+
+/* {{{ http_connection_remote_address
+ *
+ * Resolve the peer as "host:port" (IPv4) or "[host]:port" (IPv6) via
+ * getpeername() on the accepted fd. Returns a fresh zend_string the
+ * caller owns, or NULL when there is no IP peer (Unix-socket listener,
+ * closed fd, or getpeername failure). Lazy — only reached from
+ * WebSocket::getRemoteAddress(), never on the accept hot path. */
+zend_string *http_connection_remote_address(const http_connection_t *conn)
+{
+    if (conn == NULL) {
+        return NULL;
+    }
+
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
+    if (getpeername(conn->client_fd, (struct sockaddr *)&ss, &slen) != 0) {
+        return NULL;
+    }
+
+    char ip[INET6_ADDRSTRLEN];
+    char out[INET6_ADDRSTRLEN + 16];
+    ip[0] = '\0';
+
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in *const sin = (const struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+        snprintf(out, sizeof(out), "%s:%u", ip, (unsigned)ntohs(sin->sin_port));
+    } else if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *const sin6 = (const struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &sin6->sin6_addr, ip, sizeof(ip));
+        snprintf(out, sizeof(out), "[%s]:%u", ip, (unsigned)ntohs(sin6->sin6_port));
+    } else {
+        return NULL;  /* AF_UNIX etc. — no host:port */
+    }
+
+    return zend_string_init(out, strlen(out), 0);
 }
 /* }}} */
 
@@ -1080,12 +1134,32 @@ static void http_connection_read_callback_fn(
             conn->io->event.stop(&conn->io->event);
             req->dispose(req);
         }
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+        /* WS peer-close: a handler may be suspended in recv() waiting on
+         * the session. Mark the session peer-closed BEFORE the deferred-
+         * destroy check below so recv() wakes, returns NULL (graceful
+         * EOS), and the handler exits; its dispose drops handler_refcount
+         * and the deferred destroy then fires. */
+        if (conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET && conn->strategy != NULL) {
+            extern struct ws_session_t *ws_strategy_get_session(http_protocol_strategy_t *);
+            extern void ws_session_mark_peer_closed(struct ws_session_t *);
+            ws_session_mark_peer_closed(ws_strategy_get_session(conn->strategy));
+        }
+#endif
         /* Defer destroy if a handler is in flight or the read_buffer holds
          * a pipelined tail — flagging keep_alive=false makes handler dispose
          * tear the conn down once it (and any pipelined chain) has finished
          * responding. Without this, an EOF from a peer that sent its last
          * request and shut down the write half kills mid-flight responses. */
-        if (conn->request_in_flight || conn->read_buffer_len > 0) {
+        if (conn->request_in_flight || conn->read_buffer_len > 0
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+            /* A committed WS connection keeps no request_in_flight (frames
+             * must keep feeding the strategy), so defer on the live WS
+             * handler instead — its dispose owns teardown. */
+            || (conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET
+                && conn->handler_refcount > 0)
+#endif
+           ) {
             conn->keep_alive = false;
             return;
         }

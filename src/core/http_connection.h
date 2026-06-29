@@ -68,6 +68,11 @@ struct _http_connection_t {
     zend_async_io_t           *io;         /* TrueAsync TCP IO handle — owns the accepted socket */
     http_connection_read_cb_t *read_cb;    /* Persistent read callback attached to io->event */
 
+    /* Accepted socket fd, retained so the peer address can be resolved
+     * via getpeername() on demand (WebSocket::getRemoteAddress); keeps
+     * address resolution off the accept hot path. */
+    php_socket_t               client_fd;
+
     /* Owning server. NULL when the connection runs unsupervised (tests).
      * http_connection.c calls http_server_on_request_sample /
      * http_server_on_connection_close directly through this pointer.
@@ -365,6 +370,12 @@ struct http_server_object;
 http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
+
+/* Resolve the peer as "host:port" (IPv4) / "[host]:port" (IPv6) via
+ * getpeername() on the accepted fd. Returns a fresh zend_string the
+ * caller owns, or NULL when there is no IP peer (Unix-socket listener,
+ * closed fd, getpeername failure). */
+zend_string *http_connection_remote_address(const http_connection_t *conn);
 
 /* Teardown a connection that just went idle (handler_refcount == 0 and
  * destroy_pending), but defer the actual http_connection_destroy to a
