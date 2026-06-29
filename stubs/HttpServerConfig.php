@@ -445,6 +445,18 @@ final class HttpServerConfig
     /** @return int */
     public function getWsPongTimeoutMs(): int {}
 
+    /**
+     * Enable RFC 7692 permessage-deflate (per-message compression). Off
+     * by default — opt-in because it costs CPU and widens the
+     * decompression-bomb surface. Negotiated only when the client offers
+     * it; the reassembled-message cap is enforced before and after
+     * inflate. Requires the build to include zlib (HTTP compression).
+     */
+    public function setWsPermessageDeflate(bool $enabled): static {}
+
+    /** @return bool */
+    public function getWsPermessageDeflate(): bool {}
+
     // === HTTP/3 production knobs (NEXT_STEPS.md §5) ===
 
     /**

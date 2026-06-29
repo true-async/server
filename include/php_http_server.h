@@ -252,6 +252,7 @@ struct _http_server_config_t {
     uint32_t ws_max_frame_size;
     uint32_t ws_ping_interval_ms;
     uint32_t ws_pong_timeout_ms;
+    bool     ws_permessage_deflate;   /* RFC 7692 permessage-deflate; default off */
 
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
      * phase 2 adds Brotli + zstd through the same vtable.
