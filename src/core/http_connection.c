@@ -44,9 +44,14 @@ extern void http_response_set_default_json_flags(zend_object *, uint32_t);
 #include <stdint.h>
 #ifdef _WIN32
 #  include <windows.h>
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
 #else
 #  include <sys/syscall.h>
 #  include <unistd.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>          /* inet_ntop — not transitively pulled on macOS */
 #endif
 #ifdef HAVE_EXECINFO_H
 #  include <execinfo.h>
