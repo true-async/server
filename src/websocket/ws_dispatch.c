@@ -100,7 +100,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
     if (handler == NULL) {
         zend_string *resp = build_error_response(426,
             "Sec-WebSocket-Version: 13\r\n");
-        if (resp == NULL) { conn->keep_alive = false; return true; }
+        if (resp == NULL) { conn->keep_alive = false; http_request_destroy(req); return true; }
         char *buf = emalloc(ZSTR_LEN(resp));
         memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
         size_t len = ZSTR_LEN(resp);
@@ -108,6 +108,9 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         if (!ws_submit_reject_write(conn, buf, len)) {
             conn->keep_alive = false;
         }
+
+        /* Reject path owns req (no HttpRequest object wraps it here). */
+        http_request_destroy(req);
         return true;
     }
 
@@ -122,7 +125,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
             default:                              status = 400; extra = NULL; break;
         }
         zend_string *resp = build_error_response(status, extra);
-        if (resp == NULL) { conn->keep_alive = false; return true; }
+        if (resp == NULL) { conn->keep_alive = false; http_request_destroy(req); return true; }
         char *buf = emalloc(ZSTR_LEN(resp));
         memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
         size_t len = ZSTR_LEN(resp);
@@ -130,6 +133,9 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         if (!ws_submit_reject_write(conn, buf, len)) {
             conn->keep_alive = false;
         }
+
+        /* Reject path owns req (no HttpRequest object wraps it here). */
+        http_request_destroy(req);
         return true;
     }
 
@@ -140,12 +146,14 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         "sec-websocket-key", sizeof("sec-websocket-key") - 1);
     if (UNEXPECTED(key_zv == NULL || Z_TYPE_P(key_zv) != IS_STRING)) {
         conn->keep_alive = false;
+        http_request_destroy(req);
         return true;
     }
     char accept_value[WS_ACCEPT_LEN];
     if (ws_handshake_compute_accept(Z_STRVAL_P(key_zv), Z_STRLEN_P(key_zv),
                                     accept_value) != 0) {
         conn->keep_alive = false;
+        http_request_destroy(req);
         return true;
     }
 
