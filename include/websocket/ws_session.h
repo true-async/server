@@ -114,6 +114,11 @@ typedef struct ws_session_t {
      * "no message yet" (suspend) from "no more messages ever". */
     unsigned peer_closed : 1;
 
+    /* A keepalive PING was sent and we are awaiting its PONG. Set when
+     * the ping timer fires, cleared when the matching PONG arrives. Gates
+     * the pong-deadline timer (PLAN_WEBSOCKET.md §6.6). */
+    unsigned pong_pending : 1;
+
 #ifdef HAVE_HTTP_COMPRESSION
     /* permessage-deflate (RFC 7692). Set by ws_session_enable_pmce()
      * once negotiated; gates the RSV1 deflate/inflate paths. */
@@ -158,6 +163,16 @@ typedef struct ws_session_t {
      * ws_session_destroy. NULL when keepalive is disabled. */
     zend_async_event_t          *ping_timer;
     zend_async_event_callback_t *ping_timer_cb;
+
+    /* Pong deadline (PLAN_WEBSOCKET.md §5/§6.6). ws_pong_timeout_ms is
+     * cached from the owning HttpServerConfig at init (0 = disabled). When
+     * a keepalive PING is sent, a one-shot timer is armed for that many ms;
+     * the matching PONG disarms it. If it fires with pong_pending still set
+     * the peer missed the liveness deadline and the connection is closed
+     * 1001 Going Away. NULL when disabled or no ping is outstanding. */
+    uint32_t                     pong_timeout_ms;
+    zend_async_event_t          *pong_timer;
+    zend_async_event_callback_t *pong_timer_cb;
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* Raw-deflate streams for permessage-deflate (windowBits -15, no

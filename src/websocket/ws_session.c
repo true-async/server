@@ -187,6 +187,8 @@ static void ws_ping_timer_cb_dispose(
     efree(callback);
 }
 
+static void ws_session_arm_pong_timer(ws_session_t *s, uint32_t timeout_ms);
+
 static void ws_ping_timer_fire(zend_async_event_t *event,
                                zend_async_event_callback_t *callback,
                                void *result, zend_object *exception)
@@ -219,6 +221,13 @@ static void ws_ping_timer_fire(zend_async_event_t *event,
         (void)wslay_event_send(s->ctx);
         s->internal_send = 0;
         s->flushing      = 0;
+    }
+
+    /* Arm the pong deadline once per outstanding ping (PLAN §6.6). A peer
+     * that never answers is closed 1001 after ws_pong_timeout_ms. */
+    if (s->pong_timeout_ms > 0 && !s->pong_pending) {
+        s->pong_pending = 1;
+        ws_session_arm_pong_timer(s, s->pong_timeout_ms);
     }
 }
 
@@ -255,6 +264,100 @@ void ws_session_arm_ping_timer(ws_session_t *s, uint32_t interval_ms)
     }
     s->ping_timer    = &t->base;
     s->ping_timer_cb = &cb->base;
+}
+/* }}} */
+
+/* {{{ pong deadline (PLAN_WEBSOCKET.md §5/§6.6)
+ *
+ * One-shot timer armed when a keepalive PING is sent; disarmed by the
+ * matching inbound PONG. If it fires with pong_pending still set, the
+ * peer failed the RFC 6455 §5.5.2 liveness check and we close 1001.
+ * Reuses ws_ping_timer_cb_t (same shape) and its dispose. */
+
+static void ws_pong_timer_fire(zend_async_event_t *event,
+                               zend_async_event_callback_t *callback,
+                               void *result, zend_object *exception)
+{
+    (void)event; (void)result; (void)exception;
+    ws_ping_timer_cb_t *cb = (ws_ping_timer_cb_t *)callback;
+    ws_session_t *s = cb->session;
+    if (s == NULL || s->ctx == NULL || s->peer_closed || s->write_error) {
+        return;
+    }
+    if (!s->pong_pending) {
+        return;   /* PONG landed between the deadline firing and now */
+    }
+
+    /* Peer missed the PONG deadline. Queue CLOSE 1001 and tear down. */
+    s->pong_pending = 0;
+    (void)wslay_event_queue_close(s->ctx, WSLAY_CODE_GOING_AWAY, NULL, 0);
+
+    if (!s->flushing) {
+        s->flushing      = 1;
+        s->internal_send = 1;
+        (void)wslay_event_send(s->ctx);
+        s->internal_send = 0;
+        s->flushing      = 0;
+    }
+
+    ws_session_mark_peer_closed(s);
+}
+
+static void ws_session_arm_pong_timer(ws_session_t *s, uint32_t timeout_ms)
+{
+    if (s->pong_timer != NULL) {
+        return;
+    }
+    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT(
+        (zend_ulong)timeout_ms, /*is_periodic=*/false);
+    if (t == NULL) {
+        return;
+    }
+    /* One-shot: is_periodic=false and no ZEND_ASYNC_TIMER_SET_MULTISHOT,
+     * so it fires once — the matching PONG (disarm) or this deadline
+     * (close 1001) resolves it; a healthy peer re-arms it on the next ping. */
+    ws_ping_timer_cb_t *cb = (ws_ping_timer_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(ws_pong_timer_fire, sizeof(*cb));
+    if (cb == NULL) {
+        t->base.dispose(&t->base);
+        return;
+    }
+    cb->base.dispose = ws_ping_timer_cb_dispose;
+    cb->session      = s;
+
+    if (!t->base.add_callback(&t->base, &cb->base)) {
+        efree(cb);
+        t->base.dispose(&t->base);
+        return;
+    }
+    if (!t->base.start(&t->base)) {
+        zend_async_callbacks_remove(&t->base, &cb->base);
+        t->base.dispose(&t->base);
+        return;
+    }
+    s->pong_timer    = &t->base;
+    s->pong_timer_cb = &cb->base;
+}
+
+static void ws_session_disarm_pong_timer(ws_session_t *s)
+{
+    s->pong_pending = 0;
+    if (s->pong_timer == NULL) {
+        return;
+    }
+
+    if (s->pong_timer_cb != NULL) {
+        ((ws_ping_timer_cb_t *)s->pong_timer_cb)->session = NULL;
+        zend_async_callbacks_remove(s->pong_timer, s->pong_timer_cb);
+        s->pong_timer_cb = NULL;
+    }
+
+    if (s->pong_timer->loop_ref_count > 0) {
+        s->pong_timer->stop(s->pong_timer);
+    }
+
+    s->pong_timer->dispose(s->pong_timer);
+    s->pong_timer = NULL;
 }
 /* }}} */
 
@@ -495,11 +598,12 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
     if (wslay_is_ctrl_frame(arg->opcode)) {
         if (arg->opcode == WSLAY_CONNECTION_CLOSE) {
             ws_session_mark_peer_closed(s);
+        } else if (arg->opcode == WSLAY_PONG) {
+            /* Liveness confirmed — disarm the pong deadline (PLAN §6.6). */
+            ws_session_disarm_pong_timer(s);
         }
-        /* PING / PONG: wslay_event auto-handles PING (queues a PONG
-         * via the outbound machinery). PONG is just a keepalive
-         * response — we'll consume it in the keepalive timer commit.
-         * Either way, never surfaces to the PHP layer. */
+        /* PING: wslay_event auto-handles it (queues a PONG via the
+         * outbound machinery). No control frame ever surfaces to PHP. */
         return;
     }
 
@@ -693,6 +797,15 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
         ws_session_arm_ping_timer(s, ping_ms);
     }
 
+    /* Cache the pong deadline (PLAN §6.6). Only meaningful alongside the
+     * ping keepalive — the deadline is armed from the ping timer fire. */
+    if (conn != NULL && conn->server != NULL) {
+        const http_server_config_t *cfg = http_server_get_config(conn->server);
+        if (cfg != NULL) {
+            s->pong_timeout_ms = cfg->ws_pong_timeout_ms;
+        }
+    }
+
     /* Pull the configured cap from the owning server's frozen config
      * (the values were validated by the HttpServerConfig::setWs*
      * setters). Falls back to the documented 1 MiB default when this
@@ -742,6 +855,9 @@ void ws_session_destroy(ws_session_t *session)
         session->ping_timer->dispose(session->ping_timer);
         session->ping_timer = NULL;
     }
+
+    /* Same race guard for the one-shot pong deadline timer. */
+    ws_session_disarm_pong_timer(session);
 
     if (session->ctx) {
         wslay_event_context_free(session->ctx);
