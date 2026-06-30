@@ -333,10 +333,27 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
         return false;
     }
 
-    /* Suspending send — we are in coroutine context (handler called
-     * us) so this is the canonical use of http_connection_send. */
-    bool ok = http_connection_send(w->conn,
-                                   ZSTR_VAL(resp), ZSTR_LEN(resp));
+    /* Non-suspending 101 send. Commit fires lazily from the first WS I/O on
+     * ANY coroutine, and a handler plus a spawned writer can both reach here
+     * before either finishes. A suspending send would yield mid-commit, let
+     * the second coroutine pass the w->committed guard, and run a duplicate
+     * strategy-swap whose ws_cleanup frees the first session under the first
+     * (UAF). The tiny 101 goes out fire-and-forget — TLS via the FSM atomic
+     * SSL_write, plaintext via the batched writer — exactly as the reject
+     * path does; frames queue behind it (libuv FIFO on the same handle), so
+     * wire order stays 101-then-frames. */
+    bool ok;
+#ifdef HAVE_OPENSSL
+    if (w->conn->tls != NULL) {
+        ok = http_connection_tls_fsm_send_plaintext_atomic(
+            w->conn, ZSTR_VAL(resp), ZSTR_LEN(resp));
+    } else
+#endif
+    {
+        char *copy = emalloc(ZSTR_LEN(resp));
+        memcpy(copy, ZSTR_VAL(resp), ZSTR_LEN(resp));
+        ok = http_connection_send_batched(w->conn, copy, ZSTR_LEN(resp));
+    }
     zend_string_release(resp);
 
     if (!ok) {
