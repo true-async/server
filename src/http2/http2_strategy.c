@@ -12,6 +12,7 @@
 
 
 #include "php.h"
+#include "zend_exceptions.h"     /* zend_clear_exception — not transitive on macOS */
 #include "Zend/zend_hrtime.h"
 #include "Zend/zend_async_API.h"
 #include "php_http_server.h"     /* http_response_get_* + http_connection_send */
