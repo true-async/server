@@ -139,7 +139,7 @@ final class WebSocket {
 
     // === control ===
     public function ping(string $payload = ''): void;
-    public function close(WebSocketCloseCode|int $code = WebSocketCloseCode::Normal,
+    public function close(WebSocketCloseCode|int $code = WebSocketCloseCode::NORMAL,
                           string $reason = ''): void;
 
     // === state ===
@@ -161,27 +161,29 @@ final class WebSocketUpgrade {
 }
 
 enum WebSocketCloseCode: int {
-    case Normal              = 1000;
-    case GoingAway           = 1001;
-    case ProtocolError       = 1002;
-    case UnsupportedData     = 1003;
-    case NoStatus            = 1005;
-    case AbnormalClosure     = 1006;
-    case InvalidFramePayload = 1007;
-    case PolicyViolation     = 1008;
-    case MessageTooBig       = 1009;
-    case MandatoryExtension  = 1010;
-    case InternalServerError = 1011;
-    case TlsHandshake        = 1015;
+    case NORMAL                = 1000;
+    case GOING_AWAY            = 1001;
+    case PROTOCOL_ERROR        = 1002;
+    case UNSUPPORTED_DATA      = 1003;
+    case NO_STATUS             = 1005;
+    case ABNORMAL_CLOSURE      = 1006;
+    case INVALID_FRAME_PAYLOAD = 1007;
+    case POLICY_VIOLATION      = 1008;
+    case MESSAGE_TOO_BIG       = 1009;
+    case MANDATORY_EXTENSION   = 1010;
+    case INTERNAL_SERVER_ERROR = 1011;
+    case TLS_HANDSHAKE         = 1015;
 }
 
-final class WebSocketClosedException extends \RuntimeException {
-    public readonly int    $code;
-    public readonly string $reason;
+// All WS exceptions extend WebSocketException (itself extends the
+// project-wide HttpServerException) so existing catch-all handlers work.
+final class WebSocketClosedException extends WebSocketException {
+    public readonly int    $closeCode;
+    public readonly string $closeReason;
 }
 
-final class WebSocketBackpressureException extends \RuntimeException {}
-final class WebSocketConcurrentReadException extends \LogicException {}
+final class WebSocketBackpressureException extends WebSocketException {}
+final class WebSocketConcurrentReadException extends WebSocketException {}
 ```
 
 Handler registration arity-driven:

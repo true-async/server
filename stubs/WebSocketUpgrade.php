@@ -60,9 +60,11 @@ final class WebSocketUpgrade
     public function getOfferedSubprotocols(): array {}
 
     /**
-     * @return string[] Raw extension offers from Sec-WebSocket-Extensions.
-     * permessage-deflate is not negotiated in this release — the list
-     * is informational only. Empty when none offered.
+     * @return string[] Raw extension offers from Sec-WebSocket-Extensions,
+     * in client-preferred order. permessage-deflate (RFC 7692) is
+     * negotiated automatically when enabled via
+     * HttpServerConfig::setWsPermessageDeflate(); the remaining offers are
+     * informational. Empty when the client did not offer any.
      */
     public function getOfferedExtensions(): array {}
 }
