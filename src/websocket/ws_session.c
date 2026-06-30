@@ -12,6 +12,8 @@
 
 #include "php.h"
 #include "websocket/ws_session.h"
+#include "websocket/websocket_strategy.h"  /* ws_strategy_get_session — drain hook */
+#include "core/async_plain_event.h"        /* in-thread coroutine wakeup event */
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"  /* http_connection_tls_fsm_send_plaintext_atomic */
 
@@ -539,6 +541,108 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
 }
 /* }}} */
 
+/* {{{ Outbound backpressure (transport-level, H1/wss)
+ *
+ * The connection's batched-output queue grows under a slow consumer. The
+ * transport exposes a high/low-water predicate (gated on
+ * stream_write_buffer_bytes); here we bridge it to wslay producers:
+ *  - on_outbound_drain fires from the batched completion path once the
+ *    queue falls below the low-water mark — we wake any blocked producer;
+ *  - ws_session_wait_writable parks a producer over the high-water mark.
+ * H2 binds to a stream and uses the chunk-ring's own backpressure, so the
+ * predicate is forced false there (transport_ctx != conn). */
+void ws_session_notify_writable(ws_session_t *session)
+{
+    async_plain_event_fire(session->drain_event);
+}
+
+/* Connection drain hook: the H1 batched-output tail (Buffer 2) fell below
+ * its low-water mark — wake any blocked producer to re-check. */
+static void ws_h1_on_outbound_drain(http_connection_t *conn)
+{
+    ws_session_t *const s = ws_strategy_get_session(conn->strategy);
+    if (s != NULL) {
+        ws_session_notify_writable(s);
+    }
+}
+
+bool ws_session_over_highwater(const ws_session_t *session)
+{
+    if (session->conn == NULL || session->conn->server == NULL) {
+        return false;
+    }
+
+    const uint32_t high =
+        http_server_get_stream_write_buffer_bytes(session->conn->server);
+    if (high == 0) {
+        return false;
+    }
+
+    /* Primary vector: the wslay outbound queue (Buffer 1), where producer
+     * sends pile up while another coroutine holds the flusher role. wslay
+     * tracks the exact queued byte sum for us. */
+    if (session->ctx != NULL
+        && wslay_event_get_queued_msg_length(session->ctx) >= high) {
+        return true;
+    }
+
+    /* Secondary: the H1 batched-output tail (Buffer 2) — internal control
+     * sends / future streaming. H2 binds to a stream, so skip it there. */
+    return session->transport_ctx == session->conn
+        && http_connection_outbound_over_highwater(session->conn);
+}
+
+ws_writable_t ws_session_wait_writable(ws_session_t *session, uint32_t timeout_ms)
+{
+    if (!ws_session_over_highwater(session)) {
+        return WS_WRITABLE_OK;
+    }
+
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+        return WS_WRITABLE_OK;   /* no coroutine to suspend — caller proceeds */
+    }
+
+    if (session->drain_event == NULL) {
+        session->drain_event = async_plain_event_new();
+        if (session->drain_event == NULL) {
+            return WS_WRITABLE_TIMEOUT;   /* degrade to backpressure signal */
+        }
+    }
+
+    /* The waker owns its timeout timer (created + disposed internally — the
+     * same primitive Async\delay uses, so no manual lifecycle and no timer
+     * leak). On timeout it resumes cleanly (no exception); the outcome is then
+     * decided by re-checking state below. Only a genuine cancellation
+     * (teardown / server stop) sets an exception. */
+    if (zend_async_waker_new_with_timeout(co, timeout_ms, NULL) == NULL) {
+        return WS_WRITABLE_CLOSED;
+    }
+
+    zend_async_resume_when(co, session->drain_event, false,
+                           zend_async_waker_callback_resolve, NULL);
+
+    ZEND_ASYNC_SUSPEND();
+    zend_async_waker_clean(co);
+
+    if (EG(exception) != NULL) {
+        return WS_WRITABLE_CLOSED;   /* cancellation — propagate */
+    }
+
+    if (session->conn == NULL || session->write_error || session->peer_closed) {
+        return WS_WRITABLE_CLOSED;
+    }
+
+    /* A clean wake still over the high-water mark means the timeout fired —
+     * the drain event would have dropped us below it. */
+    if (ws_session_over_highwater(session)) {
+        return WS_WRITABLE_TIMEOUT;
+    }
+
+    return WS_WRITABLE_OK;   /* drain fired → below low-water */
+}
+/* }}} */
+
 /* genmask is a client-side concern (RFC 6455 §5.3 — only clients mask
  * outbound frames). Server contexts never invoke it; leaving the slot
  * NULL in the callbacks struct is safe per wslay docs. */
@@ -605,6 +709,14 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
     }
     wslay_event_config_set_max_recv_msg_length(s->ctx, max_msg);
 
+    /* H1/wss: wire the transport drain hook so a producer blocked over the
+     * high-water mark in send() is woken when the batched queue drains.
+     * transport_ctx == conn marks the H1 binding; H2 binds to a stream and
+     * relies on its chunk-ring backpressure, so the hook stays unset there. */
+    if (conn != NULL && transport_ctx == conn) {
+        conn->on_outbound_drain = ws_h1_on_outbound_drain;
+    }
+
     return s;
 }
 
@@ -659,6 +771,17 @@ void ws_session_destroy(ws_session_t *session)
         }
         efree(node);
         node = next;
+    }
+
+    /* Unhook the transport drain callback before freeing — a late batched
+     * completion must not resolve a freed session through conn->strategy. */
+    if (session->conn != NULL
+        && session->conn->on_outbound_drain == ws_h1_on_outbound_drain) {
+        session->conn->on_outbound_drain = NULL;
+    }
+
+    if (session->drain_event != NULL) {
+        session->drain_event->dispose(session->drain_event);
     }
 
     if (session->recv_event != NULL) {

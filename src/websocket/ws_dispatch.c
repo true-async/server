@@ -436,8 +436,16 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * NOT for the reject / never-committed path: there an async 4xx write
      * is in flight and its completion callback (ws_pending_write_complete_cb)
      * owns teardown — destroying here would free conn under that write. */
-    if (conn->handler_refcount == 0 && w != NULL && w->committed) {
-        http_connection_destroy(conn);
+    if (w != NULL && w->committed) {
+        if (conn->handler_refcount == 0) {
+            http_connection_destroy(conn);
+        } else {
+            /* A flusher pin is still held (e.g. a user-spawned writer
+             * coroutine suspended inside wslay_event_send). Mark the
+             * teardown pending; releasing the last pin runs it via
+             * http_connection_destroy_if_idle_deferred. */
+            conn->destroy_pending = true;
+        }
     }
 }
 /* }}} */

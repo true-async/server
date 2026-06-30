@@ -15,6 +15,14 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_sendBi
 	ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_trySend, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, text, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_trySendBinary, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_ping, 0, 0, IS_VOID, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, payload, IS_STRING, 0, "\'\'")
 ZEND_END_ARG_INFO()
@@ -37,6 +45,8 @@ ZEND_METHOD(TrueAsync_WebSocket, __construct);
 ZEND_METHOD(TrueAsync_WebSocket, recv);
 ZEND_METHOD(TrueAsync_WebSocket, send);
 ZEND_METHOD(TrueAsync_WebSocket, sendBinary);
+ZEND_METHOD(TrueAsync_WebSocket, trySend);
+ZEND_METHOD(TrueAsync_WebSocket, trySendBinary);
 ZEND_METHOD(TrueAsync_WebSocket, ping);
 ZEND_METHOD(TrueAsync_WebSocket, close);
 ZEND_METHOD(TrueAsync_WebSocket, isClosed);
@@ -48,6 +58,8 @@ static const zend_function_entry class_TrueAsync_WebSocket_methods[] = {
 	ZEND_ME(TrueAsync_WebSocket, recv, arginfo_class_TrueAsync_WebSocket_recv, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, send, arginfo_class_TrueAsync_WebSocket_send, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, sendBinary, arginfo_class_TrueAsync_WebSocket_sendBinary, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, trySend, arginfo_class_TrueAsync_WebSocket_trySend, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, trySendBinary, arginfo_class_TrueAsync_WebSocket_trySendBinary, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, ping, arginfo_class_TrueAsync_WebSocket_ping, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, close, arginfo_class_TrueAsync_WebSocket_close, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, isClosed, arginfo_class_TrueAsync_WebSocket_isClosed, ZEND_ACC_PUBLIC)

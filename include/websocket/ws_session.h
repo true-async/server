@@ -143,6 +143,14 @@ typedef struct ws_session_t {
      * concurrent recv() throws WebSocketConcurrentReadException. */
     zend_coroutine_t *recv_waiter;
 
+    /* Outbound backpressure (transport-level). Plain in-thread event
+     * (async_plain_event — CODING_STANDARDS §1.4; a trigger event is the
+     * cross-thread primitive and wrong here). Fired by the flusher / the
+     * connection's batched-tail drain hook to wake a producer suspended in
+     * send() over the high-water mark. Lazy — created on the first send()
+     * that blocks. H1/wss only; H2 leans on its chunk-ring backpressure. */
+    zend_async_event_t *drain_event;
+
     /* Periodic keepalive PING (PLAN_WEBSOCKET.md §6.6). Created when
      * ws_ping_interval_ms > 0 in the owning HttpServerConfig. Fires
      * every interval; the callback queues a control PING through
@@ -211,6 +219,37 @@ ws_pending_message_t *ws_session_recv_pop(ws_session_t *session);
  * sees the closed state and returns NULL.
  */
 void ws_session_mark_peer_closed(ws_session_t *session);
+
+/* Outbound backpressure (transport-level, H1/wss). */
+typedef enum {
+    WS_WRITABLE_OK = 0,    /* below high-water — safe to enqueue */
+    WS_WRITABLE_TIMEOUT,   /* stayed over high-water past the wait bound */
+    WS_WRITABLE_CLOSED,    /* connection went away while waiting */
+} ws_writable_t;
+
+/*
+ * True when the connection's outbound batched queue is at/over its
+ * high-water mark. Gated on HttpServerConfig stream_write_buffer_bytes
+ * (0 = disabled → always false). H1/wss only — H2 binds to a stream and
+ * relies on the chunk-ring's own backpressure, so this returns false there.
+ */
+bool ws_session_over_highwater(const ws_session_t *session);
+
+/*
+ * Suspend the calling producer coroutine until the outbound queue drains
+ * below the low-water mark (WS_WRITABLE_OK), timeout_ms elapses with the
+ * queue still backed up (WS_WRITABLE_TIMEOUT), or the connection is torn
+ * down while waiting (WS_WRITABLE_CLOSED). Must be called from coroutine
+ * context. Only meaningful when ws_session_over_highwater() is true.
+ */
+ws_writable_t ws_session_wait_writable(ws_session_t *session, uint32_t timeout_ms);
+
+/*
+ * Wake any producer suspended in ws_session_wait_writable. Called by the
+ * flusher after wslay_event_send drains the outbound queue, and by the
+ * connection's batched-tail drain hook. No-op when nobody is waiting.
+ */
+void ws_session_notify_writable(ws_session_t *session);
 
 #ifdef HAVE_HTTP_COMPRESSION
 /*

@@ -663,33 +663,71 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
     }
 }
 
-/* {{{ ws_do_send — internal helper for both send() and sendBinary()
+/* Backpressure-wait bound. Half the connection write timeout so a blocked
+ * producer surfaces a graceful WebSocketBackpressureException BEFORE the
+ * transport write-deadline force-closes the connection (which would instead
+ * read as a closed exception). Falls back to 15s when the write timeout is
+ * disabled, so a permanently-stuck peer can never park a producer forever. */
+static uint32_t ws_backpressure_timeout_ms(const websocket_object *w)
+{
+    const uint32_t t = (w->conn != NULL) ? w->conn->write_timeout_ms : 0;
+    return t != 0 ? (t / 2 != 0 ? t / 2 : 1) : 15000u;
+}
+
+/* {{{ ws_do_send — internal helper behind send/sendBinary/trySend/trySendBinary
  *
- * 1. wslay_event_queue_msg — copies the payload into wslay's outbound
- *    queue (multi-producer-safe; wslay's queue is just a FIFO of
- *    message structs, mutated only on the single-threaded scheduler).
- * 2. Flusher discipline (PLAN_WEBSOCKET.md §2.4): if no other
- *    coroutine currently holds the flusher role, become one and
- *    drive wslay_event_send. Otherwise just enqueue and return —
- *    the active flusher will eventually pick our bytes up.
+ * 1. Backpressure (transport-level): over the high-water mark a blocking
+ *    send() suspends until the queue drains (bounded by the write timeout →
+ *    WebSocketBackpressureException); a non-blocking send returns false
+ *    (BUSY) without queueing.
+ * 2. wslay_event_queue_msg copies the payload into wslay's outbound FIFO.
+ * 3. Flusher discipline (PLAN_WEBSOCKET.md §2.4): the first producer with no
+ *    active flusher drives wslay_event_send; others just enqueue.
  *
- * Backpressure (queue size cap, suspension on overflow, escape via
- * WebSocketBackpressureException) is the next commit; for now the
- * queue is unbounded.
+ * Returns true when the payload was accepted (queued/sent); false otherwise,
+ * with a PHP exception set except for the non-blocking BUSY case.
  */
-static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
+static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
+                       const bool nonblocking)
 {
     websocket_object *const w = Z_WEBSOCKET_P(zv_this);
 
     if (!w->committed && !ws_commit_upgrade(w, true)) {
-        return;   /* exception already set */
+        return false;   /* exception already set */
     }
     if (w->session == NULL || w->closed) {
         zend_throw_exception_ex(websocket_closed_exception_ce, 0,
             "Cannot send on a closed WebSocket");
-        return;
+        return false;
     }
     ws_session_t *const s = w->session;
+
+    /* Backpressure gate. send() parks over the high-water mark until the
+     * queue drains; trySend() reports BUSY. No-op when the knob is off or
+     * the queue has room (ws_session_over_highwater returns false). */
+    if (ws_session_over_highwater(s)) {
+        if (nonblocking) {
+            return false;   /* BUSY — caller drops / retries; no exception */
+        }
+
+        const ws_writable_t wr =
+            ws_session_wait_writable(s, ws_backpressure_timeout_ms(w));
+
+        if (wr == WS_WRITABLE_TIMEOUT) {
+            zend_throw_exception_ex(websocket_backpressure_exception_ce, 0,
+                "WebSocket send backpressure: outbound queue stayed over the "
+                "high-water mark past the write timeout");
+            return false;
+        }
+
+        if (wr == WS_WRITABLE_CLOSED || w->session == NULL || w->closed) {
+            if (EG(exception) == NULL) {
+                zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+                    "WebSocket closed while waiting on send backpressure");
+            }
+            return false;
+        }
+    }
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* permessage-deflate: compress the payload, then queue it with the
@@ -701,7 +739,7 @@ static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
             smart_str_free(&comp);
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket deflate failed");
-            return;
+            return false;
         }
 
         const struct wslay_event_msg msg = {
@@ -715,7 +753,7 @@ static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
         if (qrc != 0) {
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket queue_msg failed (out of memory or session closed)");
-            return;
+            return false;
         }
     } else
 #endif
@@ -728,19 +766,46 @@ static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
         if (wslay_event_queue_msg(s->ctx, &msg) != 0) {
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket queue_msg failed (out of memory or session closed)");
-            return;
+            return false;
         }
     }
 
     if (s->flushing) {
         /* Another coroutine already drives the flusher; it'll pick up
          * the message we just enqueued. */
-        return;
+        return true;
     }
 
+    /* Pin the connection across the flush. wslay_event_send may suspend the
+     * producer inside http_connection_send (socket backpressure); if the
+     * owning handler coroutine exits meanwhile (or a user-spawned writer holds
+     * the flusher role past the handler), teardown must NOT free the session
+     * out from under the suspended flusher — that frees the wslay context and
+     * the next send_callback writes through freed memory. The pin defers
+     * teardown until the flush unwinds. */
+    http_connection_t *const flush_conn = w->conn;
+    if (flush_conn != NULL) { flush_conn->handler_refcount++; }
+
+    /* trySend must never suspend: drive the flush through the non-suspending
+     * internal sink (socket-full → park in the bounded batched tail / drop a
+     * control frame) instead of the producer path that may block on the
+     * socket. Blocking send() keeps the suspending producer path. */
     s->flushing = 1;
+    if (nonblocking) { s->internal_send = 1; }
     const int rc = wslay_event_send(s->ctx);
+    if (nonblocking) { s->internal_send = 0; }
     s->flushing = 0;
+
+    /* Wake any producer blocked over the high-water. Still safe — the pin is
+     * held, so the session is alive. */
+    ws_session_notify_writable(s);
+
+    /* Release the pin. This may now run the deferred teardown (freeing the
+     * session), so `s` and `w` MUST NOT be touched afterwards. */
+    if (flush_conn != NULL) {
+        if (flush_conn->handler_refcount > 0) { flush_conn->handler_refcount--; }
+        http_connection_destroy_if_idle_deferred(flush_conn);
+    }
 
     if (rc != 0) {
         /* Sticky write error or session-internal failure. The next
@@ -749,7 +814,10 @@ static void ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode)
          * because the read-side teardown owns that path. */
         zend_throw_exception_ex(websocket_closed_exception_ce, 0,
             "WebSocket send failed (peer closed or write error)");
+        return false;
     }
+
+    return true;
 }
 /* }}} */
 
@@ -759,7 +827,7 @@ ZEND_METHOD(TrueAsync_WebSocket, send)
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(text)
     ZEND_PARSE_PARAMETERS_END();
-    ws_do_send(ZEND_THIS, text, WSLAY_TEXT_FRAME);
+    (void)ws_do_send(ZEND_THIS, text, WSLAY_TEXT_FRAME, false);
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, sendBinary)
@@ -768,7 +836,25 @@ ZEND_METHOD(TrueAsync_WebSocket, sendBinary)
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(data)
     ZEND_PARSE_PARAMETERS_END();
-    ws_do_send(ZEND_THIS, data, WSLAY_BINARY_FRAME);
+    (void)ws_do_send(ZEND_THIS, data, WSLAY_BINARY_FRAME, false);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, trySend)
+{
+    zend_string *text;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(text)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(ws_do_send(ZEND_THIS, text, WSLAY_TEXT_FRAME, true));
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, trySendBinary)
+{
+    zend_string *data;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(data)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_BOOL(ws_do_send(ZEND_THIS, data, WSLAY_BINARY_FRAME, true));
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, ping)

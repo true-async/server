@@ -285,6 +285,7 @@ typedef struct {
 
 static void conn_destroy_microtask_handler(zend_async_microtask_t *mt)
 {
+
     conn_destroy_microtask_t *t = (conn_destroy_microtask_t *)mt;
     http_connection_t *conn = t->conn;
 
@@ -1485,6 +1486,9 @@ static void http_absorb_io_submission_exception(const http_connection_t *conn,
     zend_clear_exception();
 }
 
+/* Defined below, after the high/low-water helpers. */
+static void out_signal_drain(http_connection_t *conn);
+
 /* Shared tail for batched-send completion callbacks: clears the in-flight
  * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. */
 static void http_send_batched_finish(http_connection_t *conn)
@@ -1497,6 +1501,7 @@ static void http_send_batched_finish(http_connection_t *conn)
         return;
     }
 
+    out_signal_drain(conn);
     http2_conn_notify_emit(conn);
 }
 
@@ -1522,6 +1527,42 @@ static void out_pending_append(http_connection_t *conn,
     conn->out_pending_len += len;
 }
 
+size_t http_connection_outbound_pending_bytes(const http_connection_t *conn)
+{
+    return conn->out_pending_len;
+}
+
+bool http_connection_outbound_over_highwater(const http_connection_t *conn)
+{
+    if (conn->server == NULL) {
+        return false;
+    }
+
+    const uint32_t high = http_server_get_stream_write_buffer_bytes(conn->server);
+    return high != 0 && conn->out_pending_len >= (size_t)high;
+}
+
+/* Low-water mark = half the high-water (gated knob). Producers suspended
+ * over the high-water resume once the coalesce tail falls to/below this. */
+static bool out_below_lowwater(const http_connection_t *conn)
+{
+    if (conn->server == NULL) {
+        return true;
+    }
+
+    const uint32_t high = http_server_get_stream_write_buffer_bytes(conn->server);
+    return high == 0 || conn->out_pending_len <= (size_t)(high / 2);
+}
+
+/* Wake a producer that suspended over the high-water mark, once the tail
+ * has drained back below the low-water mark. No-op unless one is waiting. */
+static void out_signal_drain(http_connection_t *conn)
+{
+    if (conn->on_outbound_drain != NULL && out_below_lowwater(conn)) {
+        conn->on_outbound_drain(conn);
+    }
+}
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1545,6 +1586,8 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
         if (UNEXPECTED(req == NULL)) {
             http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
+        } else {
+            out_signal_drain(conn);
         }
 
         return;
@@ -1695,6 +1738,8 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         if (UNEXPECTED(req == NULL)) {
             http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
+        } else {
+            out_signal_drain(conn);
         }
 
         return;

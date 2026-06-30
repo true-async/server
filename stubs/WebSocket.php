@@ -81,6 +81,30 @@ final class WebSocket
     public function sendBinary(string $data): void {}
 
     /**
+     * Non-blocking send. Queues a text frame and returns true when the
+     * outbound queue is below the high-water mark; returns false WITHOUT
+     * queueing when it is at/over the mark, so the caller can drop the
+     * message, slow down, or close. Never suspends the calling coroutine —
+     * the right tool for a broadcast loop where one slow client must not
+     * stall delivery to the others.
+     *
+     * The high-water mark is HttpServerConfig::setStreamWriteBufferBytes()
+     * (0 = disabled → trySend always queues and returns true).
+     *
+     * @return bool true if accepted, false if backpressured (BUSY).
+     * @throws WebSocketClosedException if the connection is already closed.
+     */
+    public function trySend(string $text): bool {}
+
+    /**
+     * Non-blocking binary send. @see trySend() for the semantics.
+     *
+     * @return bool true if accepted, false if backpressured (BUSY).
+     * @throws WebSocketClosedException if the connection is already closed.
+     */
+    public function trySendBinary(string $data): bool {}
+
+    /**
      * Send a PING frame. The peer is required by RFC 6455 §5.5.2 to
      * reply with a PONG. Application code rarely needs to call this —
      * the server's keepalive timer (HttpServerConfig::setWsPingIntervalMs)
