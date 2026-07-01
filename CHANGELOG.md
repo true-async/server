@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-01
+
+### Added
+
+- **WebSocket support (RFC 6455), experimental (#2).** Full-duplex over HTTP/1.1
+  Upgrade, `wss://`, and HTTP/2 Extended CONNECT (RFC 8441), with permessage-deflate
+  (RFC 7692). `HttpServer::addWebSocketHandler()`; `WebSocket` / `WebSocketMessage` /
+  `WebSocketUpgrade` classes, `WebSocketCloseCode` enum, exception hierarchy.
+- **Pull API** — `recv()` and `foreach ($ws as $msg)` (`WebSocket` is an `Iterator`);
+  a graceful close ends the loop, an error close throws `WebSocketClosedException`
+  carrying `$closeCode` / `$closeReason`.
+- **Multi-producer send** — `send()` / `sendBinary()` safe from any coroutine, plus
+  non-blocking `trySend()` / `trySendBinary()` and `WebSocketBackpressureException`
+  under sustained backpressure.
+- **Keepalive** — server-initiated ping (`ws_ping_interval_ms`) and a pong deadline
+  (`ws_pong_timeout_ms`) that closes an unresponsive peer with 1001.
+- **Outbound auto-fragmentation** — messages larger than `ws_max_frame_size` are
+  split into continuation fragments no larger than the cap.
+- **Conformance & fuzzing** — Autobahn|Testsuite runner (`e2e/autobahn/`, built from
+  source in Docker, 246/246 on `behavior`) wired into CI, plus a wslay frame-ingress
+  libFuzzer harness (`fuzz/fuzz_ws_frame.c`).
+
+### Fixed
+
+- **UTF-8 fail-fast no longer lingers the socket (#2).** On a protocol error wslay
+  queues a CLOSE but `wslay_event_recv` still returns 0, so the handler stayed parked
+  in `recv()` and the TCP hung forever once the peer echoed the close; now detected
+  via `wslay_event_want_read()` and torn down.
+- **Handshake-reject paths no longer leak the parsed request (#2).**
+
+### Performance
+
+- **One write per WebSocket frame (#2).** Frame header and payload were written
+  separately (two `write()` syscalls per frame); coalesced into one — 51% fewer
+  write syscalls and ~43% higher echo throughput under load.
+
 ## [0.8.1] - 2026-06-28
 
 ### Fixed
@@ -647,7 +683,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/true-async/server/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/true-async/server/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/true-async/server/compare/v0.7.3...v0.8.0
 [0.1.0]: https://github.com/true-async/server/releases/tag/v0.1.0
