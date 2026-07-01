@@ -809,7 +809,7 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
      * socket. Blocking send() keeps the suspending producer path. */
     s->flushing = 1;
     if (nonblocking) { s->internal_send = 1; }
-    const int rc = wslay_event_send(s->ctx);
+    const int rc = ws_session_drive_send(s);
     if (nonblocking) { s->internal_send = 0; }
     s->flushing = 0;
 
@@ -920,7 +920,7 @@ ZEND_METHOD(TrueAsync_WebSocket, ping)
     /* Drive the flusher unless another producer already holds it. */
     if (!s->flushing) {
         s->flushing = 1;
-        (void)wslay_event_send(s->ctx);
+        (void)ws_session_drive_send(s);
         s->flushing = 0;
     }
 }
@@ -994,7 +994,7 @@ ZEND_METHOD(TrueAsync_WebSocket, close)
      * subject to the same flusher discipline as ordinary send(). */
     if (rc == 0 && !s->flushing) {
         s->flushing = 1;
-        wslay_event_send(s->ctx);
+        ws_session_drive_send(s);
         s->flushing = 0;
     }
 

@@ -90,6 +90,13 @@ typedef struct ws_session_t {
     size_t         recv_buf_len;     /* bytes available in recv_buf */
     size_t         recv_buf_pos;     /* bytes already consumed by wslay */
 
+    /* Outbound coalescing buffer. wslay's send_callback fires once per
+     * frame chunk (header, then payload); we accumulate here and flush the
+     * whole frame in a single transport write after wslay_event_send —
+     * halving write syscalls on the send hot path. Length reset (capacity
+     * kept) after each flush; freed in ws_session_destroy. */
+    smart_str      send_buf;
+
     /* Outbound flusher discipline. See docs/PLAN_WEBSOCKET.md §2.4.
      * Set by the producer that takes on the flusher role; cleared
      * before it returns. Other producers find it set and just enqueue.
@@ -220,6 +227,15 @@ void ws_session_destroy(ws_session_t *session);
  * requires connection teardown.
  */
 int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len);
+
+/*
+ * Drive wslay's outbound queue to the wire: serialize queued frames into
+ * the per-session coalescing buffer, then flush the whole buffer in one
+ * transport write. Returns wslay_event_send's rc. The caller sets
+ * session->internal_send appropriately (event-loop vs producer) around
+ * the call, and holds the flusher role (session->flushing).
+ */
+int ws_session_drive_send(ws_session_t *session);
 
 /*
  * Pop the head message from the recv FIFO. Returns the node (caller

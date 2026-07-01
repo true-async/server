@@ -143,20 +143,50 @@ static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
         return -1;
     }
 
-    /* Internal sends (keepalive PING / auto-PONG) run in event-loop
-     * context and MUST NOT suspend; producer sends ($ws->send) MAY
-     * suspend for backpressure. The transport vtable picks the right
-     * sink — the connection (H1/wss) or a single H2 stream (RFC 8441). */
+    /* Coalesce: wslay fires this once for the frame header and again for
+     * the payload. Accumulate into the per-session buffer instead of doing
+     * a transport write per chunk; ws_session_drive_send flushes the whole
+     * frame in one write after wslay_event_send drains the queue. */
+    smart_str_appendl(&s->send_buf, (const char *)data, len);
+    return (ssize_t)len;
+}
+/* }}} */
+
+/* {{{ ws_session_flush_output / ws_session_drive_send
+ *
+ * Flush the coalescing buffer in a single transport write, then drive
+ * wslay's queue through it. internal_send (keepalive / auto-reply, run in
+ * event-loop context — MUST NOT suspend) vs producer ($ws->send, MAY
+ * suspend for backpressure) picks the sink variant, matching the flag the
+ * caller set around the drive. The buffer's length is reset (capacity
+ * kept) for reuse; a failed write latches write_error so wslay tears the
+ * session down on the next drive. */
+static void ws_session_flush_output(ws_session_t *s)
+{
+    if (s->send_buf.s == NULL || ZSTR_LEN(s->send_buf.s) == 0
+        || s->write_error || s->transport == NULL) {
+        if (s->send_buf.s != NULL) { ZSTR_LEN(s->send_buf.s) = 0; }
+        return;
+    }
+
+    const uint8_t *const data = (const uint8_t *)ZSTR_VAL(s->send_buf.s);
+    const size_t len = ZSTR_LEN(s->send_buf.s);
     const bool ok = s->internal_send
         ? s->transport->send_internal(s->transport_ctx, data, len)
         : s->transport->send(s->transport_ctx, data, len);
 
+    ZSTR_LEN(s->send_buf.s) = 0;
+
     if (!ok) {
         s->write_error = 1;
-        wslay_event_set_error(ctx, WSLAY_ERR_CALLBACK_FAILURE);
-        return -1;
     }
-    return (ssize_t)len;
+}
+
+int ws_session_drive_send(ws_session_t *session)
+{
+    const int rc = wslay_event_send(session->ctx);
+    ws_session_flush_output(session);
+    return rc;
 }
 /* }}} */
 
@@ -218,7 +248,7 @@ static void ws_ping_timer_fire(zend_async_event_t *event,
     if (!s->flushing) {
         s->flushing      = 1;
         s->internal_send = 1;   /* timer context: non-suspending write path */
-        (void)wslay_event_send(s->ctx);
+        (void)ws_session_drive_send(s);
         s->internal_send = 0;
         s->flushing      = 0;
     }
@@ -295,7 +325,7 @@ static void ws_pong_timer_fire(zend_async_event_t *event,
     if (!s->flushing) {
         s->flushing      = 1;
         s->internal_send = 1;
-        (void)wslay_event_send(s->ctx);
+        (void)ws_session_drive_send(s);
         s->internal_send = 0;
         s->flushing      = 0;
     }
@@ -863,6 +893,8 @@ void ws_session_destroy(ws_session_t *session)
         wslay_event_context_free(session->ctx);
     }
 
+    smart_str_free(&session->send_buf);
+
 #ifdef HAVE_HTTP_COMPRESSION
     if (session->pmce_deflate != NULL) {
         ZS_DEFLATE_END((ZS *)session->pmce_deflate);
@@ -958,7 +990,7 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
         && wslay_event_want_write(session->ctx)) {
         session->flushing      = 1;
         session->internal_send = 1;
-        (void)wslay_event_send(session->ctx);
+        (void)ws_session_drive_send(session);
         session->internal_send = 0;
         session->flushing      = 0;
     }
