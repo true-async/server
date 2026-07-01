@@ -135,7 +135,7 @@ static void php_http_server_init_globals(void *globals_ptr)
 /* }}} */
 
 /* Module entry point */
-zend_module_entry http_server_module_entry = {
+zend_module_entry true_async_server_module_entry = {
 	STANDARD_MODULE_HEADER,
 	"true_async_server",
 	ext_functions,                             /* functions */
@@ -153,7 +153,7 @@ zend_module_entry http_server_module_entry = {
 };
 
 #ifdef COMPILE_DL_TRUE_ASYNC_SERVER
-ZEND_GET_MODULE(http_server)
+ZEND_GET_MODULE(true_async_server)
 #endif
 
 /* {{{ PHP_MINIT_FUNCTION */
