@@ -719,6 +719,13 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
 
     if (wslay_is_ctrl_frame(arg->opcode)) {
         if (arg->opcode == WSLAY_CONNECTION_CLOSE) {
+            s->close_code = arg->status_code;   /* 0 if the peer sent no code */
+            /* arg->msg carries the full CLOSE payload: the 2-byte status
+             * code followed by the optional UTF-8 reason. Skip the code. */
+            if (arg->msg_length > 2 && s->close_reason == NULL) {
+                s->close_reason = zend_string_init((const char *)arg->msg + 2,
+                                                   arg->msg_length - 2, 0);
+            }
             ws_session_mark_peer_closed(s);
         } else if (arg->opcode == WSLAY_PONG) {
             /* Liveness confirmed — disarm the pong deadline. */
@@ -988,6 +995,11 @@ void ws_session_destroy(ws_session_t *session)
 
     smart_str_free(&session->send_buf);
 
+    if (session->close_reason != NULL) {
+        zend_string_release(session->close_reason);
+        session->close_reason = NULL;
+    }
+
     /* Free any fragmented-send sources still queued (connection died
      * before wslay read them to eof). */
     while (session->frag_sources != NULL) {
@@ -1103,12 +1115,18 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
      * (Autobahn 6.4.x hang). */
     if (session->ctx != NULL && !session->peer_closed
         && !wslay_event_want_read(session->ctx)) {
+        if (session->close_code == 0) {
+            session->close_code = wslay_event_get_status_code_sent(session->ctx);
+        }
         ws_session_mark_peer_closed(session);
         return -1;
     }
 
     if (rc != 0) {
         /* Hard wslay recv failure — same teardown. */
+        if (session->close_code == 0 && session->ctx != NULL) {
+            session->close_code = wslay_event_get_status_code_sent(session->ctx);
+        }
         ws_session_mark_peer_closed(session);
         return -1;
     }

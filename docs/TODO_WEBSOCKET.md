@@ -12,13 +12,6 @@ it supersedes the original pre-implementation design plan.
   `$msg->binary`. (php_websocket.c + stub + arginfo.)
 - **`IteratorAggregate`** — `foreach ($ws as $msg)` as an alternative to the
   `recv()` loop. Deferred.
-- **`close(WebSocketCloseCode|int)`** — decide whether to drop the `int`
-  half of the union (application codes 4000-4999) once the API settles.
-
-## Behaviour
-- **`WebSocketClosedException` propagation** — `recv()` currently returns
-  null on every close; on a protocol / abnormal close it should throw
-  `WebSocketClosedException` with `$closeCode` / `$closeReason` set.
 
 ## Telemetry & lifecycle
 - Counters: active WS, frames in/out by opcode, control-frame ratio.

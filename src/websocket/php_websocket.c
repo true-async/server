@@ -25,20 +25,6 @@
 
 #include <string.h>
 
-/*
- * SCAFFOLD ONLY.
- *
- * This commit registers every WebSocket-related class and enum so the
- * public PHP API surface is visible at MINIT and reflectable from
- * userland. Method bodies throw "not implemented" for everything that
- * actually does work — recv / send / close / etc. land in dedicated
- * follow-up commits
- *
- * Splitting registration from behaviour makes each subsequent commit a
- * pure body replacement against a fixed signature, which is the
- * easiest possible review unit for security-sensitive code.
- */
-
 zend_class_entry *websocket_ce                          = NULL;
 zend_class_entry *websocket_message_ce                  = NULL;
 zend_class_entry *websocket_upgrade_ce                  = NULL;
@@ -58,6 +44,49 @@ extern zend_class_entry *http_server_exception_ce;
 static zend_object_handlers websocket_handlers;
 static zend_object_handlers websocket_message_handlers;
 static zend_object_handlers websocket_upgrade_handlers;
+
+/* {{{ ws_throw_closed — throw WebSocketClosedException with its readonly
+ * closeCode / closeReason properties initialised. Every throw of this
+ * exception routes through here so user code can always read those typed
+ * props (reading an uninitialised typed readonly prop is a hard Error).
+ * `code` is 0/1000/1001/1005 for a clean close, an RFC 6455 error code, or
+ * 1006 for an operation attempted on an abnormally-closed connection. */
+static void ws_throw_closed(uint16_t code, zend_string *reason,
+                            const char *format, ...)
+{
+    char msg[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(msg, sizeof(msg), format, args);
+    va_end(args);
+
+    zval ex;
+    object_init_ex(&ex, websocket_closed_exception_ce);
+    zend_object *const obj = Z_OBJ(ex);
+
+    zend_update_property_string(zend_ce_exception, obj, ZEND_STRL("message"), msg);
+
+    /* Direct slot writes are the one-time-init escape hatch past the
+     * readonly write guard (same pattern as WebSocketMessage). */
+    const zend_property_info *const pc = zend_hash_str_find_ptr(
+        &websocket_closed_exception_ce->properties_info, ZEND_STRL("closeCode"));
+    zval *const slot_c = OBJ_PROP(obj, pc->offset);
+    zval_ptr_dtor(slot_c);
+    ZVAL_LONG(slot_c, code);
+
+    const zend_property_info *const pr = zend_hash_str_find_ptr(
+        &websocket_closed_exception_ce->properties_info, ZEND_STRL("closeReason"));
+    zval *const slot_r = OBJ_PROP(obj, pr->offset);
+    zval_ptr_dtor(slot_r);
+    if (reason != NULL) {
+        ZVAL_STR_COPY(slot_r, reason);
+    } else {
+        ZVAL_EMPTY_STRING(slot_r);
+    }
+
+    zend_throw_exception_object(&ex);
+}
+/* }}} */
 
 /* {{{ create / free for WebSocket
  *
@@ -253,7 +282,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
         return true;
     }
     if (w->conn == NULL) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket has no connection");
         return false;
     }
@@ -267,7 +296,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
         websocket_upgrade_object *u =
             websocket_upgrade_from_obj(Z_OBJ(w->upgrade_zv));
         if (u->reject_status != 0) {
-            zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            ws_throw_closed(1006, NULL,
                 "WebSocket upgrade was rejected (%d)", u->reject_status);
             return false;
         }
@@ -315,7 +344,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
      * the H2 DATA frames. http2_ws_accept sets w->session for us. */
     if (w->h2_stream != NULL) {
         if (!http2_ws_accept(w->h2_stream, w, subprotocol, pmce)) {
-            zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+            ws_throw_closed(1006, NULL,
                 "WebSocket: failed to accept HTTP/2 Extended CONNECT");
             w->closed = true;
             return false;
@@ -328,7 +357,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
     zend_string *resp = ws_handshake_build_101_response(w->accept_value,
                                                         subprotocol, pmce);
     if (resp == NULL) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket: out of memory building 101 response");
         return false;
     }
@@ -357,7 +386,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
     zend_string_release(resp);
 
     if (!ok) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket: peer closed before 101 could be flushed");
         w->closed = true;
         return false;
@@ -393,7 +422,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
     conn->strategy      = http_protocol_strategy_websocket_create();
     conn->protocol_type = HTTP_PROTOCOL_WEBSOCKET;
     if (conn->strategy == NULL) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket: out of memory installing strategy");
         w->closed = true;
         return false;
@@ -401,7 +430,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
 
     ws_session_t *session = ws_strategy_ensure_session(conn->strategy, conn);
     if (session == NULL) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket: out of memory creating session");
         w->closed = true;
         return false;
@@ -413,7 +442,7 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
     /* Bring the codec online before any buffered frame is fed below — the
      * RSV1 allowance must be in place before wslay sees a compressed frame. */
     if (pmce && !ws_session_enable_pmce(session)) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket: failed to enable permessage-deflate");
         w->closed = true;
         return false;
@@ -640,10 +669,18 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
             RETURN_OBJ(msg);
         }
 
-        /* Drained — was the connection closed while we waited? */
+        /* Drained — closed while we waited? A normal close ends the loop
+         * (null); a protocol error / abnormal / explicit error close is
+         * surfaced as WebSocketClosedException carrying the code + reason. */
         if (session->peer_closed) {
             session->recv_waiter = NULL;
-            RETURN_NULL();
+            const uint16_t cc = session->close_code;
+            if (cc == 0 || cc == 1000 || cc == 1001 || cc == 1005) {
+                RETURN_NULL();
+            }
+            ws_throw_closed(cc, session->close_reason,
+                "WebSocket closed abnormally (code %u)", (unsigned)cc);
+            RETURN_THROWS();
         }
 
         /* Need to suspend until on_msg_recv_callback (or peer FIN)
@@ -713,7 +750,7 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
         return false;   /* exception already set */
     }
     if (w->session == NULL || w->closed) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "Cannot send on a closed WebSocket");
         return false;
     }
@@ -739,7 +776,7 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
 
         if (wr == WS_WRITABLE_CLOSED || w->session == NULL || w->closed) {
             if (EG(exception) == NULL) {
-                zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+                ws_throw_closed(1006, NULL,
                     "WebSocket closed while waiting on send backpressure");
             }
             return false;
@@ -822,7 +859,7 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
          * recv()/send() will see write_error and route to a closed
          * exception; we don't tear the connection down from here
          * because the read-side teardown owns that path. */
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "WebSocket send failed (peer closed or write error)");
         return false;
     }
@@ -881,7 +918,7 @@ ZEND_METHOD(TrueAsync_WebSocket, ping)
         return;   /* exception already set */
     }
     if (w->session == NULL || w->closed) {
-        zend_throw_exception_ex(websocket_closed_exception_ce, 0,
+        ws_throw_closed(1006, NULL,
             "Cannot ping a closed WebSocket");
         return;
     }

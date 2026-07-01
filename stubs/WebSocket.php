@@ -45,11 +45,13 @@ final class WebSocket
      * closes.
      *
      * @return WebSocketMessage|null A message, or null when the peer
-     * closed the connection cleanly (CLOSE frame with a normal code).
-     * Loops typically `while (($m = $ws->recv()) !== null) { ... }`.
+     * closed cleanly — a normal CLOSE code (1000/1001/1005) or a plain
+     * disconnect with no CLOSE frame. Loops typically
+     * `while (($m = $ws->recv()) !== null) { ... }`.
      *
-     * @throws WebSocketClosedException for non-graceful close
-     *         (protocol error, abnormal close, peer reset).
+     * @throws WebSocketClosedException on a protocol error or an explicit
+     *         error close code; the exception's readonly $closeCode /
+     *         $closeReason carry the RFC 6455 code and reason text.
      * @throws WebSocketConcurrentReadException if another coroutine is
      *         already blocked in recv() on this connection.
      */

@@ -121,6 +121,14 @@ typedef struct ws_session_t {
      * "no message yet" (suspend) from "no more messages ever". */
     unsigned peer_closed : 1;
 
+    /* Close bookkeeping for recv(): the RFC 6455 close code (0 = none /
+     * plain EOF; the peer's status_code on a CLOSE frame; the code WE sent
+     * on a protocol-error teardown) and the peer's optional reason text.
+     * recv() returns null on a normal close (0/1000/1001/1005) and throws
+     * WebSocketClosedException carrying these on any other code. */
+    uint16_t     close_code;
+    zend_string *close_reason;
+
     /* A keepalive PING was sent and we are awaiting its PONG. Set when
      * the ping timer fires, cleared when the matching PONG arrives. Gates
      * the pong-deadline timer. */
