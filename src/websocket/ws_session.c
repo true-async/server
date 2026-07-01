@@ -963,15 +963,11 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
         session->flushing      = 0;
     }
 
-    /* wslay may have generated a CLOSE while receiving. On a protocol error
-     * (bad UTF-8, reserved bits, fragmented control frame) wslay queues the
-     * close and STOPS reading, yet wslay_event_recv still returns 0 and no
-     * CONNECTION_CLOSE message is surfaced — so peer_closed was never set and
-     * rc is 0. Detect it via want_read going false: wake any recv()-suspended
-     * handler so it exits and drops handler_refcount, letting the deferred
-     * connection teardown fire and close the TCP. Without this the handler
-     * stays parked in recv() forever and the socket lingers when the peer
-     * echoes the close (Autobahn 6.4.x hang). */
+    /* Protocol error (bad UTF-8, reserved bits, fragmented control): wslay
+     * queues a CLOSE and stops reading, but recv still returns 0 with no
+     * CONNECTION_CLOSE surfaced. Detect via want_read and tear down — else the
+     * handler parks in recv() and the socket lingers on the peer's close echo
+     * (Autobahn 6.4.x hang). */
     if (session->ctx != NULL && !session->peer_closed
         && !wslay_event_want_read(session->ctx)) {
         ws_session_mark_peer_closed(session);
