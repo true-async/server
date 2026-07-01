@@ -353,6 +353,50 @@ set(LLHTTP_SOURCES
     deps/llhttp/llhttp.c
 )
 
+# WebSocket (RFC 6455) — bundled wslay frame parser + our strategy,
+# session, handshake, dispatch and PHP object layer. Mirrors config.m4:
+# wslay is always bundled (never system), gated by ENABLE_WEBSOCKET.
+# Defines are GLOBAL (add_compile_definitions) so every TU sees a
+# consistent HAVE_HTTP_SERVER_WEBSOCKET — per-target risks ODR/inline skew.
+option(ENABLE_WEBSOCKET "Enable WebSocket (RFC 6455) support (bundled wslay)" ON)
+if(ENABLE_WEBSOCKET)
+    add_compile_definitions(HAVE_WSLAY=1 HAVE_HTTP_SERVER_WEBSOCKET=1)
+
+    # wslay's header/byteswap selection keys off these (config.m4 probes
+    # them for the autotools build); probe them here too so wslay compiles
+    # cleanly under CMake without implicit htons/htonl declarations.
+    include(CheckIncludeFile)
+    check_include_file(netinet/in.h HAVE_NETINET_IN_H)
+    check_include_file(arpa/inet.h  HAVE_ARPA_INET_H)
+    check_include_file(winsock2.h   HAVE_WINSOCK2_H)
+    if(HAVE_NETINET_IN_H)
+        add_compile_definitions(HAVE_NETINET_IN_H=1)
+    endif()
+    if(HAVE_ARPA_INET_H)
+        add_compile_definitions(HAVE_ARPA_INET_H=1)
+    endif()
+    if(HAVE_WINSOCK2_H)
+        add_compile_definitions(HAVE_WINSOCK2_H=1)
+    endif()
+
+    set(WEBSOCKET_SOURCES
+        deps/wslay/lib/wslay_event.c
+        deps/wslay/lib/wslay_frame.c
+        deps/wslay/lib/wslay_net.c
+        deps/wslay/lib/wslay_queue.c
+        deps/wslay/lib/wslay_stack.c
+        src/websocket/websocket_strategy.c
+        src/websocket/ws_session.c
+        src/websocket/ws_handshake.c
+        src/websocket/ws_dispatch.c
+        src/websocket/php_websocket.c
+    )
+    message(STATUS "  WebSocket: enabled (bundled wslay)")
+else()
+    set(WEBSOCKET_SOURCES "")
+    message(STATUS "  WebSocket: disabled")
+endif()
+
 # All sources combined
 set(ALL_SOURCES
     ${CORE_SOURCES}
@@ -366,6 +410,7 @@ set(ALL_SOURCES
     ${STATIC_SOURCES}
     ${COMPRESSION_SOURCES}
     ${HTTP3_SOURCES}
+    ${WEBSOCKET_SOURCES}
 )
 
 # Extension DLL / shared library
@@ -386,6 +431,8 @@ target_include_directories(php_true_async_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/llhttp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/concurrentqueue
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/wslay/includes
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/websocket
 )
 
 # PHP headers — added as SYSTEM so the compiler suppresses their warnings.

@@ -1,0 +1,13 @@
+{
+    "_comment": "Full run inside docker-compose — all ~500 cases incl. compression (12-13) and limits (9-10). Nightly.",
+    "outdir": "./reports/servers",
+    "servers": [
+        {
+            "agent": "true-async-server",
+            "url": "ws://echo:9001"
+        }
+    ],
+    "cases": ["*"],
+    "exclude-cases": [],
+    "exclude-agent-cases": {}
+}

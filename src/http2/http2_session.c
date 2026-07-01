@@ -16,6 +16,10 @@
 #include "Zend/zend_hrtime.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
+#include "core/http_protocol_handlers.h"  /* http_protocol_has_handler (RFC 8441 gate) */
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/ws_session.h"  /* ws_session_feed (RFC 8441 inbound DATA) */
+#endif
 #include "http2/http2_session.h"
 #include "http2/http2_stream.h"
 #include "http_known_strings.h"
@@ -317,6 +321,14 @@ static int cb_on_header(nghttp2_session *ng,
             /* No natural HTTP/1 mapping; park under `scheme` so PHP
              * handlers can inspect it via $request->getHeader("scheme"). */
             store_header_value(req, "scheme", 6, value_c, valuelen);
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+        } else if (namelen == 9 && memcmp(name, ":protocol", 9) == 0) {
+            /* RFC 8441 Extended CONNECT — park under `protocol` so the
+             * WS dispatch path can detect :protocol=websocket. nghttp2
+             * only permits :protocol once ENABLE_CONNECT_PROTOCOL has
+             * been advertised, so it appears only for genuine upgrades. */
+            store_header_value(req, "protocol", 8, value_c, valuelen);
+#endif
         }
         /* Unknown pseudo-headers — nghttp2 already rejects them. */
         return 0;
@@ -403,6 +415,32 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
     if (session != NULL && session->conn != NULL) {
         http_server_on_h2_data_recv(session->conn->counters, len);
     }
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* WebSocket-over-H2 (RFC 8441): inbound DATA is WS frame bytes, not a
+     * request body. Feed wslay (it drains synchronously into the recv
+     * FIFO) and grant peer credit at once — no recv-side flow-control
+     * deadlock. Before accept (ws_session not yet created) buffer into
+     * request_body_buf; http2_ws_accept replays it. */
+    if (stream->is_websocket) {
+        int ws_rc = 0;
+        if (stream->ws_session != NULL) {
+            ws_rc = ws_session_feed(stream->ws_session, data, len);
+        } else {
+            smart_str_appendl(&stream->request_body_buf, (const char *)data, len);
+        }
+        nghttp2_session_consume(ng, stream_id, len);
+        h2_session_schedule_emit(session);
+        /* A WS codec/protocol error (e.g. a permessage-deflate bomb past the
+         * cap) tears down THIS stream only — RST_STREAM via nghttp2. The 1009
+         * CLOSE queued by ws_session_feed flushes with the emit above, and
+         * on_stream_close wakes any recv()-suspended handler. */
+        if (UNEXPECTED(ws_rc != 0)) {
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        }
+        return 0;
+    }
+#endif
 
     /* Streaming mode (issue #26) — push the chunk into the per-request
      * queue instead of accumulating into stream->request_body_buf. The
@@ -1107,17 +1145,33 @@ static void apply_hardened_options(nghttp2_option *opt)
 
 static int submit_initial_settings(http2_session_t *session)
 {
-    static const nghttp2_settings_entry iv[] = {
+    nghttp2_settings_entry iv[] = {
         { NGHTTP2_SETTINGS_ENABLE_PUSH,            0                            },
         { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, HTTP2_SETTINGS_MAX_CONCURRENT },
         { NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE,    HTTP2_SETTINGS_INITIAL_WINDOW },
         { NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE,   HTTP2_SETTINGS_MAX_HEADER_LIST },
         { NGHTTP2_SETTINGS_HEADER_TABLE_SIZE,      HTTP2_SETTINGS_HEADER_TABLE_BYTES },
         { NGHTTP2_SETTINGS_MAX_FRAME_SIZE,         HTTP2_SETTINGS_MAX_FRAME },
+        { 0, 0 },   /* optional RFC 8441 bit, appended below */
     };
+    size_t niv = 6;
 
-    if (nghttp2_submit_settings(session->ng, NGHTTP2_FLAG_NONE, iv,
-                                sizeof(iv) / sizeof(iv[0])) != 0) {
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* RFC 8441: advertise Extended CONNECT (:protocol) support ONLY when
+     * a WebSocket handler is registered. The handler registry is frozen
+     * before start(), so this is stable for the connection's lifetime.
+     * Lets H2 clients open WebSocket streams via :method=CONNECT. */
+    if (session->conn != NULL) {
+        HashTable *const h = http_server_get_protocol_handlers(session->conn->server);
+        if (h != NULL && http_protocol_has_handler(h, HTTP_PROTOCOL_WEBSOCKET)) {
+            iv[niv].settings_id = NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL;
+            iv[niv].value       = 1;
+            niv++;
+        }
+    }
+#endif
+
+    if (nghttp2_submit_settings(session->ng, NGHTTP2_FLAG_NONE, iv, niv) != 0) {
         return -1;
     }
 

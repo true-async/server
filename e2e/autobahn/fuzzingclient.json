@@ -1,0 +1,13 @@
+{
+    "_comment": "Full Autobahn|Testsuite run (~500 cases). Nightly gate. The URL host is 127.0.0.1 because run.sh launches wstest with --network host.",
+    "outdir": "./reports/servers",
+    "servers": [
+        {
+            "agent": "true-async-server",
+            "url": "ws://127.0.0.1:9001"
+        }
+    ],
+    "cases": ["*"],
+    "exclude-cases": [],
+    "exclude-agent-cases": {}
+}

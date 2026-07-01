@@ -1,0 +1,74 @@
+name: Autobahn (WebSocket conformance)
+
+# Runs the Autobahn|Testsuite fuzzingclient against an echo server built
+# from scratch (PHP true-async fork + ext/async + true_async_server) in
+# docker — see e2e/autobahn/. Smoke (RFC 6455 cases 1-7) gates PRs that
+# touch the WebSocket code; the full ~500-case run is nightly.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/websocket/**'
+      - 'include/websocket/**'
+      - 'deps/wslay/**'
+      - 'e2e/autobahn/**'
+      - '.github/workflows/autobahn.yml'
+  schedule:
+    - cron: '0 4 * * *'   # nightly full run
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'smoke (cases 1-7) or full (~500)'
+        default: 'smoke'
+
+jobs:
+  autobahn:
+    name: fuzzingclient
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=smoke" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build the echo-server image from scratch, cloning the PR's own
+      # commit. Layer cache keeps the native-stack + PHP build off the
+      # critical path on reruns.
+      - name: Build echo image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: e2e/autobahn/Dockerfile
+          load: true
+          tags: trueasync-ws-echo:local
+          build-args: |
+            SERVER_REPO=${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}
+            SERVER_REF=${{ github.head_ref || github.ref_name }}
+          cache-from: type=gha,scope=autobahn
+          cache-to: type=gha,mode=max,scope=autobahn
+
+      - name: Run Autobahn (${{ steps.mode.outputs.mode }})
+        working-directory: e2e/autobahn
+        env:
+          NO_BUILD: '1'
+        run: ./run-docker.sh ${{ steps.mode.outputs.mode }}
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-report-${{ steps.mode.outputs.mode }}
+          path: e2e/autobahn/reports/
+          if-no-files-found: ignore

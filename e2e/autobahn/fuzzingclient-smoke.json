@@ -1,0 +1,13 @@
+{
+    "_comment": "Smoke run — RFC 6455 core cases 1-7 (framing, pings/pongs, reserved bits, fragmentation, UTF-8 handling, close behaviour). Gates every PR. Compression (12-13) and limits (9-10) are nightly-only via fuzzingclient.json.",
+    "outdir": "./reports/servers",
+    "servers": [
+        {
+            "agent": "true-async-server",
+            "url": "ws://127.0.0.1:9001"
+        }
+    ],
+    "cases": ["1.*", "2.*", "3.*", "4.*", "5.*", "6.*", "7.*"],
+    "exclude-cases": [],
+    "exclude-agent-cases": {}
+}

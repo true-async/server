@@ -79,5 +79,24 @@ fuzz_h2_session: fuzz_h2_session.c harness_common.c $(H2_SRC) $(STUBS_SRC)
 	      -DHAVE_LLHTTP=1 -DHAVE_PHP_H=1 -DHAVE_HTTP2=1 \
 	      -o $@ $^ $(PHP_LDFLAGS) $(NGHTTP2_LIBS)
 
+# WebSocket frame-ingress fuzzer — feeds mutated bytes through
+# ws_session_feed (our wslay integration). Built WITHOUT permessage-deflate
+# (no config.h → HAVE_HTTP_COMPRESSION undefined) so the core recv path is
+# covered without a zlib dependency. PHP embed for emalloc / zend_string.
+WS_SRC = \
+    ../src/websocket/ws_session.c \
+    ../deps/wslay/lib/wslay_event.c \
+    ../deps/wslay/lib/wslay_frame.c \
+    ../deps/wslay/lib/wslay_net.c \
+    ../deps/wslay/lib/wslay_queue.c \
+    ../deps/wslay/lib/wslay_stack.c
+
+WS_INCLUDES = -I../include/websocket -I../deps/wslay/includes
+
+fuzz_ws_frame: fuzz_ws_frame.c harness_common.c $(WS_SRC) $(STUBS_SRC)
+	$(CC) $(CFLAGS) $(INCLUDES) $(WS_INCLUDES) $(PHP_CFLAGS) \
+	      -DHAVE_PHP_H=1 -DHAVE_ARPA_INET_H=1 -DHAVE_NETINET_IN_H=1 \
+	      -o $@ $^ $(PHP_LDFLAGS)
+
 clean:
-	rm -f fuzz_multipart fuzz_http1_parser fuzz_h2_session *.o
+	rm -f fuzz_multipart fuzz_http1_parser fuzz_h2_session fuzz_ws_frame *.o

@@ -68,6 +68,11 @@ struct _http_connection_t {
     zend_async_io_t           *io;         /* TrueAsync TCP IO handle — owns the accepted socket */
     http_connection_read_cb_t *read_cb;    /* Persistent read callback attached to io->event */
 
+    /* Accepted socket fd, retained so the peer address can be resolved
+     * via getpeername() on demand (WebSocket::getRemoteAddress); keeps
+     * address resolution off the accept hot path. */
+    php_socket_t               client_fd;
+
     /* Owning server. NULL when the connection runs unsupervised (tests).
      * http_connection.c calls http_server_on_request_sample /
      * http_server_on_connection_close directly through this pointer.
@@ -196,6 +201,12 @@ struct _http_connection_t {
      * writev completion forwards them and then drains pending. */
     zend_async_io_write_free_cb_t out_writev_user_cb;
     void                         *out_writev_user_data;
+
+    /* Outbound-drain hook (transport backpressure). A consumer that
+     * suspended a producer over the high-water mark sets this; the batched
+     * completion path calls it once out_pending falls back to/below the
+     * low-water mark so the producer can resume. NULL = nobody waiting. */
+    void                       (*on_outbound_drain)(http_connection_t *conn);
 
     /* 4-byte fields */
     http_connection_state_t  state;
@@ -366,6 +377,12 @@ http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 
+/* Resolve the peer as "host:port" (IPv4) / "[host]:port" (IPv6) via
+ * getpeername() on the accepted fd. Returns a fresh zend_string the
+ * caller owns, or NULL when there is no IP peer (Unix-socket listener,
+ * closed fd, getpeername failure). */
+zend_string *http_connection_remote_address(const http_connection_t *conn);
+
 /* Teardown a connection that just went idle (handler_refcount == 0 and
  * destroy_pending), but defer the actual http_connection_destroy to a
  * microtask running at the top of the next loop iteration. Use this
@@ -422,6 +439,16 @@ bool http_connection_send_batched_writev(http_connection_t *conn,
  * Plaintext only — same TLS caveat as send_str_owned. */
 bool http_connection_send_strv_owned(http_connection_t *conn,
                                      zend_string * const *bufs, unsigned nbufs);
+
+/* Outbound backpressure (transport-level, plaintext batched path).
+ * pending_bytes = coalesced tail waiting behind the single in-flight
+ * batched write — the part that grows under a slow consumer. The
+ * high-water predicate is gated on stream_write_buffer_bytes: 0 (the
+ * default) disables it so behaviour is byte-for-byte as before. A future
+ * blocking producer suspends while over_highwater; a non-blocking one
+ * (WebSocket::trySend) reports BUSY. */
+size_t http_connection_outbound_pending_bytes(const http_connection_t *conn);
+bool   http_connection_outbound_over_highwater(const http_connection_t *conn);
 
 /* Build and emit the RFC-compliant 4xx response for a parser failure.
  * Reads parser->parse_error, maps to status + reason, writes through

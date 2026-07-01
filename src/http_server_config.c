@@ -85,6 +85,13 @@ struct _http_server_shared_config_t {
     uint32_t                http3_socket_buffer_bytes;
     uint32_t                tls_buffer_bytes;
 
+    /* WS knobs — see http_server_config_t for semantics. */
+    uint32_t                ws_max_message_size;
+    uint32_t                ws_max_frame_size;
+    uint32_t                ws_ping_interval_ms;
+    uint32_t                ws_pong_timeout_ms;
+    bool                    ws_permessage_deflate;
+
     /* Compression — see http_server_config_t for semantics. The MIME
      * whitelist is deep-copied to a persistent zend_string array so
      * cross-thread LOAD can rebuild it without touching the source
@@ -157,6 +164,14 @@ static void http_server_config_populate_from_shared(
 #define DEFAULT_MAX_BODY_SIZE               (10u * 1024u * 1024u)          /* 10 MiB */
 #define MAX_BODY_SIZE_MIN                   1024u                          /* 1 KiB */
 #define MAX_BODY_SIZE_MAX                   ((size_t)16 * 1024 * 1024 * 1024) /* 16 GiB */
+
+/* WebSocket defaults. */
+#define DEFAULT_WS_MAX_MESSAGE_SIZE     (1u * 1024u * 1024u)   /* 1 MiB */
+#define DEFAULT_WS_MAX_FRAME_SIZE       (1u * 1024u * 1024u)   /* 1 MiB */
+#define DEFAULT_WS_PING_INTERVAL_MS     30000u
+#define DEFAULT_WS_PONG_TIMEOUT_MS      60000u
+#define WS_MAX_MESSAGE_SIZE_MIN         128u
+#define WS_MAX_MESSAGE_SIZE_MAX         (256u * 1024u * 1024u) /* 256 MiB hard cap */
 
 /* H3 defaults (NEXT_STEPS.md §5). Values mirror the in-tree QUIC
  * `transport_params` defaults at http3_connection.c:2200-2230. Bounds
@@ -402,6 +417,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->http3_peer_connection_budget = DEFAULT_HTTP3_PEER_BUDGET;
     config->http3_socket_buffer_bytes = DEFAULT_HTTP3_SOCKET_BUFFER_BYTES;
     config->tls_buffer_bytes = DEFAULT_TLS_BUFFER_BYTES;
+    config->ws_max_message_size  = DEFAULT_WS_MAX_MESSAGE_SIZE;
+    config->ws_max_frame_size    = DEFAULT_WS_MAX_FRAME_SIZE;
+    config->ws_ping_interval_ms  = DEFAULT_WS_PING_INTERVAL_MS;
+    config->ws_pong_timeout_ms   = DEFAULT_WS_PONG_TIMEOUT_MS;
+    config->ws_permessage_deflate = false;
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->http3_pacing = false;          /* QUIC send pacing — opt-in (#59) */
     config->request_scope = true;          /* Per-request child scope on by default */
@@ -1289,6 +1309,126 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxBodySize)
     ZEND_PARSE_PARAMETERS_NONE();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     RETURN_LONG((zend_long)config->max_body_size);
+}
+
+/* === WebSocket knobs ============================== */
+
+/* proto HttpServerConfig::setWsMaxMessageSize(int $bytes): static
+ * Reassembled-message cap. Oversize messages → RFC 6455 1009 + close. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxMessageSize)
+{
+    zend_long bytes;
+    ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(bytes) ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    if (bytes < (zend_long)WS_MAX_MESSAGE_SIZE_MIN
+        || (zend_ulong)bytes > (zend_ulong)WS_MAX_MESSAGE_SIZE_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "WsMaxMessageSize must be between 128 and 268435456 (256 MiB)", 0);
+        return;
+    }
+    config->ws_max_message_size = (uint32_t)bytes;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsMaxMessageSize(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxMessageSize)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_max_message_size);
+}
+
+/* proto HttpServerConfig::setWsMaxFrameSize(int $bytes): static
+ * Per-frame cap (defence against fragment-flood). */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxFrameSize)
+{
+    zend_long bytes;
+    ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(bytes) ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    if (bytes < (zend_long)WS_MAX_MESSAGE_SIZE_MIN
+        || (zend_ulong)bytes > (zend_ulong)WS_MAX_MESSAGE_SIZE_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "WsMaxFrameSize must be between 128 and 268435456 (256 MiB)", 0);
+        return;
+    }
+    config->ws_max_frame_size = (uint32_t)bytes;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsMaxFrameSize(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxFrameSize)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_max_frame_size);
+}
+
+/* proto HttpServerConfig::setWsPingIntervalMs(int $ms): static
+ * Server-initiated PING cadence. 0 = no automatic ping. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPingIntervalMs)
+{
+    zend_long ms;
+    ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(ms) ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    if (ms < 0 || (zend_ulong)ms > (zend_ulong)UINT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "WsPingIntervalMs must be a non-negative uint32", 0);
+        return;
+    }
+    config->ws_ping_interval_ms = (uint32_t)ms;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsPingIntervalMs(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPingIntervalMs)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_ping_interval_ms);
+}
+
+/* proto HttpServerConfig::setWsPongTimeoutMs(int $ms): static
+ * Pong deadline. 0 = no timeout. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPongTimeoutMs)
+{
+    zend_long ms;
+    ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(ms) ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    if (ms < 0 || (zend_ulong)ms > (zend_ulong)UINT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "WsPongTimeoutMs must be a non-negative uint32", 0);
+        return;
+    }
+    config->ws_pong_timeout_ms = (uint32_t)ms;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsPongTimeoutMs(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPongTimeoutMs)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_pong_timeout_ms);
+}
+
+/* proto HttpServerConfig::setWsPermessageDeflate(bool $enabled): static
+ * RFC 7692 permessage-deflate. Default off (opt-in: CPU cost + the
+ * decompression-bomb surface). Negotiated only if the client offers it. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPermessageDeflate)
+{
+    bool enabled;
+    ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_BOOL(enabled) ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    config->ws_permessage_deflate = enabled;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsPermessageDeflate(): bool */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPermessageDeflate)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_permessage_deflate);
 }
 
 /* === HTTP/3 production knobs (NEXT_STEPS.md §5) ============================
@@ -2574,6 +2714,11 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->http3_peer_connection_budget = 0;
     config->http3_socket_buffer_bytes = 0;
     config->tls_buffer_bytes = 0;
+    config->ws_max_message_size          = 0;
+    config->ws_max_frame_size            = 0;
+    config->ws_ping_interval_ms          = 0;
+    config->ws_pong_timeout_ms           = 0;
+    config->ws_permessage_deflate        = false;
     config->http3_alt_svc_enabled = true;
     config->http3_pacing = false;
     config->request_scope = true;
@@ -2711,6 +2856,11 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->stream_write_buffer_bytes   = src->stream_write_buffer_bytes;
     shared->max_body_size               = src->max_body_size;
     shared->h2_static_budget_max        = src->h2_static_budget_max;
+    shared->ws_max_message_size          = src->ws_max_message_size;
+    shared->ws_max_frame_size            = src->ws_max_frame_size;
+    shared->ws_ping_interval_ms          = src->ws_ping_interval_ms;
+    shared->ws_pong_timeout_ms           = src->ws_pong_timeout_ms;
+    shared->ws_permessage_deflate        = src->ws_permessage_deflate;
     shared->http3_idle_timeout_ms        = src->http3_idle_timeout_ms;
     shared->http3_stream_window_bytes    = src->http3_stream_window_bytes;
     shared->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
@@ -2874,6 +3024,11 @@ static void http_server_config_populate_from_shared(
     dst->stream_write_buffer_bytes   = src->stream_write_buffer_bytes;
     dst->max_body_size               = src->max_body_size;
     dst->h2_static_budget_max        = src->h2_static_budget_max;
+    dst->ws_max_message_size          = src->ws_max_message_size;
+    dst->ws_max_frame_size            = src->ws_max_frame_size;
+    dst->ws_ping_interval_ms          = src->ws_ping_interval_ms;
+    dst->ws_pong_timeout_ms           = src->ws_pong_timeout_ms;
+    dst->ws_permessage_deflate        = src->ws_permessage_deflate;
     dst->http3_idle_timeout_ms        = src->http3_idle_timeout_ms;
     dst->http3_stream_window_bytes    = src->http3_stream_window_bytes;
     dst->http3_max_concurrent_streams = src->http3_max_concurrent_streams;

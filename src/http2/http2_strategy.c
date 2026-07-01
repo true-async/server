@@ -12,6 +12,7 @@
 
 
 #include "php.h"
+#include "zend_exceptions.h"     /* zend_clear_exception — not transitive on macOS */
 #include "Zend/zend_hrtime.h"
 #include "Zend/zend_async_API.h"
 #include "php_http_server.h"     /* http_response_get_* + http_connection_send */
@@ -22,6 +23,11 @@
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
 #include "core/async_plain_event.h"
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
+# include "websocket/php_websocket.h"      /* websocket_object + http2_ws_accept */
+# include "websocket/ws_session.h"         /* ws_session_init_ex / feed / mark_peer_closed */
+#endif
 
 #ifdef HAVE_OPENSSL
 #include <openssl/bio.h>
@@ -183,6 +189,11 @@ static const http_static_dispatch_cbs_t h2_static_dispatch_cbs = {
  * the stream, so concurrent streams can't trample each other —
  * unlike HTTP/1's one-request-per-connection generic on_request_ready
  * path. */
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+static bool h2_request_is_ws_connect(http_request_t *req);
+static void http2_ws_dispatch(http2_strategy_t *self, http2_stream_t *stream);
+#endif
+
 static void http2_strategy_dispatch(struct http_request_t *request,
                                     const uint32_t stream_id,
                                     void *user_data)
@@ -196,6 +207,19 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     if (stream == NULL || self->conn == NULL) {
         return;
     }
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* RFC 8441 Extended CONNECT → WebSocket. Detected before the normal
+     * request / static / handler-null checks below (a WS-only server has
+     * no conn->handler). Routes to the registered WS handler. */
+    if (h2_request_is_ws_connect(stream->request)
+        && http_protocol_has_handler(
+               http_server_get_protocol_handlers(self->conn->server),
+               HTTP_PROTOCOL_WEBSOCKET)) {
+        http2_ws_dispatch(self, stream);
+        return;
+    }
+#endif
     /* Static-only deployments register a static mount but no PHP
      * handler — the static dispatch path below claims the request
      * before we ever check conn->handler. The PHP-handler-required
@@ -1700,6 +1724,306 @@ const http_response_stream_ops_t h2_stream_ops = {
     .get_wait_event      = h2_stream_get_wait_event,
     .send_static_response = h2_stream_send_static_response,
 };
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+/* ===== WebSocket over HTTP/2 (RFC 8441) ===================================
+ * A WebSocket lives in ONE multiplexed stream. Accept = a streaming 200
+ * (no END_STREAM); outbound wslay frames ride the chunk-ring as DATA;
+ * inbound DATA feeds wslay (cb_on_data_chunk_recv). Reuses the existing
+ * per-stream streaming machinery + handler-coroutine lifecycle. The
+ * ws_session is owned by the stream (freed in http2_stream_release). */
+
+extern zval *http_request_create_from_parsed(http_request_t *req);
+
+/* True for an RFC 8441 Extended CONNECT: :method=CONNECT + :protocol=websocket. */
+static bool h2_request_is_ws_connect(http_request_t *req)
+{
+    if (req == NULL || req->method == NULL || req->headers == NULL
+        || !zend_string_equals_literal_ci(req->method, "CONNECT")) {
+        return false;
+    }
+    zval *p = zend_hash_str_find(req->headers, "protocol", sizeof("protocol") - 1);
+    return p != NULL && Z_TYPE_P(p) == IS_STRING
+        && zend_string_equals_literal_ci(Z_STR_P(p), "websocket");
+}
+
+/* --- transport ops: wslay outbound bytes → this stream's DATA ring --- */
+static bool ws_h2_send(void *ctx, const uint8_t *data, size_t len)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+    /* append_chunk takes ownership of the zend_string and suspends the
+     * producer coroutine for backpressure when the ring is full. */
+    zend_string *z = zend_string_init((const char *)data, len, 0);
+    return h2_stream_append_chunk(stream, z) == HTTP_STREAM_APPEND_OK;
+}
+
+static bool ws_h2_send_internal(void *ctx, const uint8_t *data, size_t len)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+    /* Event-loop context (keepalive PING / auto-PONG): MUST NOT suspend.
+     * Append directly when a ring slot is free; drop otherwise — control
+     * frames are losslessly re-sent next interval. */
+    if (stream->chunk_queue == NULL || stream->peer_closed) {
+        return true;
+    }
+    http2_stream_compact_chunk_queue(stream);
+    if (stream->chunk_queue_tail >= stream->chunk_queue_cap) {
+        return true;
+    }
+    stream->chunk_queue[stream->chunk_queue_tail++] =
+        zend_string_init((const char *)data, len, 0);
+    stream->chunk_queue_bytes += len;
+    (void)http2_session_resume_stream_data(stream->session, stream->stream_id);
+    h2_session_schedule_emit(stream->session);   /* deferred — safe from cb ctx */
+    return true;
+}
+
+static const ws_transport_ops_t ws_h2_transport = {
+    .send          = ws_h2_send,
+    .send_internal = ws_h2_send_internal,
+};
+
+/* Commit the streaming 200 + bring the per-stream wslay session online.
+ * Deferred until the first WS I/O (so the handler may reject() first).
+ * Sets BOTH stream->ws_session and w->session. */
+bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
+                     const char *subprotocol, bool deflate)
+{
+    (void)deflate;
+    if (stream->ws_session != NULL) {
+        return true;   /* already accepted */
+    }
+
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+    if (conn == NULL) {
+        return false;
+    }
+
+    /* Pre-allocate the chunk ring directly — h2_stream_init_ring would
+     * commit headers from a response object a WebSocket has none of. */
+    if (stream->chunk_queue == NULL) {
+        stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
+        stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
+                                            sizeof(zend_string *));
+        stream->chunk_queue_head  = 0;
+        stream->chunk_queue_tail  = 0;
+        stream->chunk_queue_bytes = 0;
+        stream->chunk_read_offset = 0;
+    }
+
+    http2_header_view_t hv[2];
+    size_t nhv = 0;
+    if (subprotocol != NULL) {
+        hv[nhv].name      = "sec-websocket-protocol";
+        hv[nhv].name_len  = sizeof("sec-websocket-protocol") - 1;
+        hv[nhv].value     = subprotocol;
+        hv[nhv].value_len = strlen(subprotocol);
+        nhv++;
+    }
+#ifdef HAVE_HTTP_COMPRESSION
+    if (deflate) {
+        static const char ext[] = "permessage-deflate; "
+            "server_no_context_takeover; client_no_context_takeover";
+        hv[nhv].name      = "sec-websocket-extensions";
+        hv[nhv].name_len  = sizeof("sec-websocket-extensions") - 1;
+        hv[nhv].value     = ext;
+        hv[nhv].value_len = sizeof(ext) - 1;
+        nhv++;
+    }
+#endif
+
+    if (http2_session_submit_response_streaming(stream->session,
+            stream->stream_id, 200, nhv ? hv : NULL, nhv) != 0) {
+        return false;
+    }
+    http2_session_emit(stream->session);
+
+    stream->ws_session = ws_session_init_ex(conn, &ws_h2_transport, stream);
+    if (stream->ws_session == NULL) {
+        return false;
+    }
+    stream->is_websocket = true;
+    w->session = stream->ws_session;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Enable the codec before replaying any buffered DATA below. */
+    if (deflate && !ws_session_enable_pmce(stream->ws_session)) {
+        return false;
+    }
+#endif
+
+    /* Replay DATA the client pipelined before accept. */
+    if (stream->request_body_buf.s != NULL) {
+        (void)ws_session_feed(stream->ws_session,
+            (const uint8_t *)ZSTR_VAL(stream->request_body_buf.s),
+            ZSTR_LEN(stream->request_body_buf.s));
+        smart_str_free(&stream->request_body_buf);
+    }
+    return true;
+}
+
+/* Stream-close hook (peer END_STREAM or RST): wake a recv()-blocked
+ * handler so it returns NULL / unwinds. Fired once from cb_on_stream_close. */
+static void ws_h2_on_close(void *user, uint32_t error_code)
+{
+    (void)error_code;
+    http2_stream_t *stream = (http2_stream_t *)user;
+    if (stream->ws_session != NULL) {
+        ws_session_mark_peer_closed(stream->ws_session);
+    }
+}
+
+/* Per-stream WS handler context (mirrors H1 ws_handler_ctx_t). */
+typedef struct {
+    http2_stream_t *stream;
+    zend_fcall_t   *handler;
+    zval            websocket_zv;
+    zval            request_zv;
+    zval            upgrade_zv;
+} ws_h2_ctx_t;
+
+static void ws_h2_handler_entry(void)
+{
+    const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    ws_h2_ctx_t *ctx = (ws_h2_ctx_t *)co->extended_data;
+
+    zval params[3], retval;
+    ZVAL_COPY_VALUE(&params[0], &ctx->websocket_zv);
+    ZVAL_COPY_VALUE(&params[1], &ctx->request_zv);
+    ZVAL_COPY_VALUE(&params[2], &ctx->upgrade_zv);
+    ZVAL_UNDEF(&retval);
+
+    call_user_function(NULL, NULL, &ctx->handler->fci.function_name,
+                       &retval, 3, params);
+    zval_ptr_dtor(&retval);
+}
+
+static void ws_h2_handler_dispose(zend_coroutine_t *coroutine)
+{
+    ws_h2_ctx_t *ctx = (ws_h2_ctx_t *)coroutine->extended_data;
+    if (ctx == NULL) {
+        return;
+    }
+    http2_stream_t *stream = ctx->stream;
+    coroutine->extended_data = NULL;
+    stream->coroutine = NULL;
+    if (stream->request != NULL) {
+        stream->request->coroutine = NULL;
+    }
+
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+    if (conn != NULL) {
+        http_server_on_request_dispose(conn->counters);
+    }
+
+    websocket_object *w = (Z_TYPE(ctx->websocket_zv) == IS_OBJECT)
+        ? websocket_from_obj(Z_OBJ(ctx->websocket_zv)) : NULL;
+    websocket_upgrade_object *u = (Z_TYPE(ctx->upgrade_zv) == IS_OBJECT)
+        ? websocket_upgrade_from_obj(Z_OBJ(ctx->upgrade_zv)) : NULL;
+
+    if (u != NULL && w != NULL && !w->committed && u->reject_status != 0) {
+        /* reject() pre-commit → 4xx HEADERS + END_STREAM. */
+        if (!stream->peer_closed) {
+            (void)http2_session_submit_response(stream->session,
+                stream->stream_id, u->reject_status, NULL, 0, NULL, 0);
+            http2_session_emit(stream->session);
+        }
+    } else if (w != NULL && !w->committed) {
+        /* Handler exited without WS I/O and without rejecting: accept,
+         * then end the stream so the peer sees a clean open/close. */
+        (void)ws_commit_upgrade(w, true);
+        if (EG(exception) != NULL) {
+            zend_clear_exception();
+        }
+        if (!stream->peer_closed) {
+            h2_stream_mark_ended(stream);
+        }
+    } else if (w != NULL && w->committed && !stream->peer_closed) {
+        /* Normal exit: flush any queued CLOSE frame + EOF the stream. */
+        h2_stream_mark_ended(stream);
+    }
+
+    if (w != NULL) {
+        w->closed  = true;
+        w->session = NULL;
+    }
+
+    zval_ptr_dtor(&ctx->request_zv);
+    zval_ptr_dtor(&ctx->websocket_zv);
+    zval_ptr_dtor(&ctx->upgrade_zv);
+    efree(ctx);
+
+    http2_stream_release(stream);
+
+    if (conn != NULL && conn->handler_refcount > 0) {
+        conn->handler_refcount--;
+    }
+}
+
+/* Spawn the WS handler coroutine for an accepted Extended CONNECT stream.
+ * Mirrors http2_strategy_dispatch's spawn + ws_dispatch_try_upgrade's WS
+ * object wiring. */
+static void http2_ws_dispatch(http2_strategy_t *self, http2_stream_t *stream)
+{
+    http_connection_t *conn = self->conn;
+    HashTable *const handlers = http_server_get_protocol_handlers(conn->server);
+    zend_fcall_t *const handler = handlers != NULL
+        ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_WEBSOCKET) : NULL;
+
+    if (handler == NULL) {
+        return;   /* caller already checked, but be defensive */
+    }
+
+    ws_h2_ctx_t *ctx = ecalloc(1, sizeof(*ctx));
+    ctx->stream  = stream;
+    ctx->handler = handler;
+
+    zval *req_obj = http_request_create_from_parsed(stream->request);
+    ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
+    efree(req_obj);
+
+    /* No Sec-WebSocket-Accept in RFC 8441 — pass a zeroed slot. */
+    static const char ws_h2_no_accept[28] = {0};
+    zend_object *ws_obj = websocket_object_create_pre_commit(conn, ws_h2_no_accept);
+    ZVAL_OBJ(&ctx->websocket_zv, ws_obj);
+    websocket_object *w = websocket_from_obj(ws_obj);
+    w->h2_stream = stream;
+
+    zend_object *up_obj = websocket_upgrade_object_create(conn, stream->request);
+    ZVAL_OBJ(&ctx->upgrade_zv, up_obj);
+    Z_ADDREF(ctx->upgrade_zv);
+    ZVAL_COPY_VALUE(&w->upgrade_zv, &ctx->upgrade_zv);
+    websocket_upgrade_from_obj(up_obj)->ws = ws_obj;
+
+    /* Mark WS now so pre-accept inbound DATA is buffered (not parsed as a
+     * body) and a peer close/RST wakes a suspended recv(). */
+    stream->is_websocket  = true;
+    stream->on_close      = ws_h2_on_close;
+    stream->on_close_user = stream;
+
+    zend_coroutine_t *co = http_request_handler_coroutine_new(
+        conn->scope, ws_h2_handler_entry, ctx, ws_h2_handler_dispose,
+        conn->view != NULL ? conn->view->request_scope : true);
+
+    if (co == NULL) {
+        zval_ptr_dtor(&ctx->request_zv);
+        zval_ptr_dtor(&ctx->websocket_zv);
+        zval_ptr_dtor(&ctx->upgrade_zv);
+        efree(ctx);
+        stream->is_websocket  = false;
+        stream->on_close      = NULL;
+        stream->on_close_user = NULL;
+        return;
+    }
+
+    stream->coroutine          = co;
+    stream->request->coroutine = co;
+    http_server_on_request_dispatch(conn->counters);
+    stream->refcount++;
+    conn->handler_refcount++;
+    ZEND_ASYNC_ENQUEUE_COROUTINE(co);
+}
+#endif /* HAVE_HTTP_SERVER_WEBSOCKET */
 
 /* External entry for tls_cipher_completion. No-op on non-h2. */
 void http2_conn_notify_emit(http_connection_t *conn)

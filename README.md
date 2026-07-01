@@ -44,7 +44,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **HTTP/2** | Multiplexing, server push (via nghttp2) |
 | ✅ Ready | **HTTP/3 / QUIC** | UDP transport via ngtcp2 + nghttp3; OpenSSL 3.5 QUIC API |
 | ✅ Ready | **Compression** | gzip (zlib-ng / zlib), Brotli, zstd — response encoding + inbound decode across H1/H2/H3. Server-side preference `zstd > br > gzip`; per-codec level setters. See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
-| 📋 Planned | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2, full duplex |
+| 🧪 Experimental | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure |
 | ✅ Ready | **SSE (Server-Sent Events)** | `text/event-stream` framing (WHATWG §9.2) over H1/H2/H3 via `HttpResponse::sseStart/sseEvent/sseComment/sseRetry` |
 | 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |
 
@@ -55,7 +55,7 @@ HTTP/1.1   ████████████████████  100%
 TLS        ████████████████████  100%
 HTTP/2     ████████████████████  100%
 HTTP/3     ████████████████████  100%
-WebSocket  ░░░░░░░░░░░░░░░░░░░░    0%
+WebSocket  ██████████████████░░   90%
 SSE        ████████████████████  100%
 gRPC       ░░░░░░░░░░░░░░░░░░░░    0%
 ```
