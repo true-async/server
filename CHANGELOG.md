@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **WebSocket support (RFC 6455), experimental (#2).** Full-duplex over HTTP/1.1
+- **WebSocket support (RFC 6455) (#2).** Full-duplex over HTTP/1.1
   Upgrade, `wss://`, and HTTP/2 Extended CONNECT (RFC 8441), with permessage-deflate
   (RFC 7692). `HttpServer::addWebSocketHandler()`; `WebSocket` / `WebSocketMessage` /
   `WebSocketUpgrade` classes, `WebSocketCloseCode` enum, exception hierarchy.

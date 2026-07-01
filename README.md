@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/HTTP-1.1%20%7C%202%20%7C%203-green.svg" alt="HTTP 1.1 | 2 | 3"/>
   <img src="https://img.shields.io/badge/TLS-1.2%20%7C%201.3-green.svg" alt="TLS 1.2 | 1.3"/>
   <img src="https://img.shields.io/badge/compression-gzip%20%7C%20br%20%7C%20zstd-green.svg" alt="compression: gzip, brotli, zstd"/>
-  <img src="https://img.shields.io/badge/WebSocket-RFC%206455-orange.svg" alt="WebSocket"/>
+  <img src="https://img.shields.io/badge/WebSocket-RFC%206455-green.svg" alt="WebSocket"/>
   <img src="https://img.shields.io/badge/gRPC-supported-orange.svg" alt="gRPC"/>
   <img src="https://img.shields.io/badge/security-audited-brightgreen.svg" alt="Security Audited"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg" alt="Platform: Linux | macOS | Windows"/>
@@ -44,7 +44,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **HTTP/2** | Multiplexing, server push (via nghttp2) |
 | ✅ Ready | **HTTP/3 / QUIC** | UDP transport via ngtcp2 + nghttp3; OpenSSL 3.5 QUIC API |
 | ✅ Ready | **Compression** | gzip (zlib-ng / zlib), Brotli, zstd — response encoding + inbound decode across H1/H2/H3. Server-side preference `zstd > br > gzip`; per-codec level setters. See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
-| 🧪 Experimental | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure |
+| ✅ Ready | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure — 246/246 Autobahn conformance |
 | ✅ Ready | **SSE (Server-Sent Events)** | `text/event-stream` framing (WHATWG §9.2) over H1/H2/H3 via `HttpResponse::sseStart/sseEvent/sseComment/sseRetry` |
 | 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |
 
@@ -55,7 +55,7 @@ HTTP/1.1   ████████████████████  100%
 TLS        ████████████████████  100%
 HTTP/2     ████████████████████  100%
 HTTP/3     ████████████████████  100%
-WebSocket  ██████████████████░░   90%
+WebSocket  ████████████████████  100%
 SSE        ████████████████████  100%
 gRPC       ░░░░░░░░░░░░░░░░░░░░    0%
 ```
