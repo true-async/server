@@ -32,7 +32,7 @@ namespace TrueAsync;
  *   and there is no defined semantics for multiple readers.
  * - close() is idempotent and can be called from any coroutine.
  */
-final class WebSocket
+final class WebSocket implements \Iterator
 {
     /**
      * Instances are constructed internally by the server.
@@ -146,4 +146,13 @@ final class WebSocket
      * for TCP listeners. Empty string for Unix-socket listeners.
      */
     public function getRemoteAddress(): string {}
+
+    // === Iterator === so `foreach ($ws as $msg)` mirrors a recv() loop.
+    // The cursor advances by pulling the next message; iteration ends on a
+    // graceful close and throws WebSocketClosedException on an error close.
+    public function current(): ?WebSocketMessage {}
+    public function key(): int {}
+    public function next(): void {}
+    public function rewind(): void {}
+    public function valid(): bool {}
 }

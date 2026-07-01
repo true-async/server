@@ -81,6 +81,10 @@ typedef struct {
     http_connection_t *conn;          /* borrowed; needed for commit-time I/O */
     struct http2_stream_t *h2_stream; /* RFC 8441: set when this WS lives in
                                        * an H2 stream; NULL for H1 / wss */
+    /* foreach cursor (Iterator): current message + key. iter_current is a
+     * WebSocketMessage while iterating, IS_NULL at end-of-stream. */
+    zval            iter_current;
+    zend_long       iter_key;
     zend_object     std;
 } websocket_object;
 

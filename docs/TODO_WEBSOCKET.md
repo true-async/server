@@ -9,9 +9,8 @@ it supersedes the original pre-implementation design plan.
 ## API ergonomics
 - **`send()` / `sendBinary()` accept a `WebSocketMessage`** so echo/relay
   handlers can write `$ws->send($msg)` instead of branching on
-  `$msg->binary`. (php_websocket.c + stub + arginfo.)
-- **`IteratorAggregate`** — `foreach ($ws as $msg)` as an alternative to the
-  `recv()` loop. Deferred.
+  `$msg->binary`. (php_websocket.c + stub + arginfo.) — reviewed as YAGNI;
+  keep only if a real relay use case appears.
 
 ## Telemetry & lifecycle
 - Counters: active WS, frames in/out by opcode, control-frame ratio.

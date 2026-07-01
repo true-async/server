@@ -1,5 +1,5 @@
 /* This is a generated file, edit WebSocket.php.stub.php instead.
- * Stub hash: 83c088a730e54d0300ced649a8a43c1836e895cf */
+ * Stub hash: e8df45965d0a2e5b3dc1481708688d6abbf6892f */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_WebSocket___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -41,6 +41,18 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getRemoteAddress, 0, 0, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+#define arginfo_class_TrueAsync_WebSocket_current arginfo_class_TrueAsync_WebSocket_recv
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_key, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_next, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_WebSocket_rewind arginfo_class_TrueAsync_WebSocket_next
+
+#define arginfo_class_TrueAsync_WebSocket_valid arginfo_class_TrueAsync_WebSocket_isClosed
+
 ZEND_METHOD(TrueAsync_WebSocket, __construct);
 ZEND_METHOD(TrueAsync_WebSocket, recv);
 ZEND_METHOD(TrueAsync_WebSocket, send);
@@ -52,6 +64,11 @@ ZEND_METHOD(TrueAsync_WebSocket, close);
 ZEND_METHOD(TrueAsync_WebSocket, isClosed);
 ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol);
 ZEND_METHOD(TrueAsync_WebSocket, getRemoteAddress);
+ZEND_METHOD(TrueAsync_WebSocket, current);
+ZEND_METHOD(TrueAsync_WebSocket, key);
+ZEND_METHOD(TrueAsync_WebSocket, next);
+ZEND_METHOD(TrueAsync_WebSocket, rewind);
+ZEND_METHOD(TrueAsync_WebSocket, valid);
 
 static const zend_function_entry class_TrueAsync_WebSocket_methods[] = {
 	ZEND_ME(TrueAsync_WebSocket, __construct, arginfo_class_TrueAsync_WebSocket___construct, ZEND_ACC_PRIVATE)
@@ -65,15 +82,21 @@ static const zend_function_entry class_TrueAsync_WebSocket_methods[] = {
 	ZEND_ME(TrueAsync_WebSocket, isClosed, arginfo_class_TrueAsync_WebSocket_isClosed, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getSubprotocol, arginfo_class_TrueAsync_WebSocket_getSubprotocol, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getRemoteAddress, arginfo_class_TrueAsync_WebSocket_getRemoteAddress, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, current, arginfo_class_TrueAsync_WebSocket_current, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, key, arginfo_class_TrueAsync_WebSocket_key, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, next, arginfo_class_TrueAsync_WebSocket_next, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, rewind, arginfo_class_TrueAsync_WebSocket_rewind, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, valid, arginfo_class_TrueAsync_WebSocket_valid, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
-static zend_class_entry *register_class_TrueAsync_WebSocket(void)
+static zend_class_entry *register_class_TrueAsync_WebSocket(zend_class_entry *class_entry_Iterator)
 {
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "TrueAsync", "WebSocket", class_TrueAsync_WebSocket_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+	zend_class_implements(class_entry, 1, class_entry_Iterator);
 
 	return class_entry;
 }

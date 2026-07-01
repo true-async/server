@@ -12,6 +12,7 @@
 
 #include "php.h"
 #include "zend_exceptions.h"
+#include "zend_interfaces.h"   /* zend_ce_iterator */
 #include "zend_enum.h"
 #include "Zend/zend_async_API.h"
 #include "websocket/php_websocket.h"
@@ -108,6 +109,8 @@ static zend_object *websocket_create(zend_class_entry *ce)
     obj->conn           = NULL;
     obj->h2_stream      = NULL;
     ZVAL_UNDEF(&obj->upgrade_zv);
+    ZVAL_NULL(&obj->iter_current);
+    obj->iter_key       = 0;
     memset(obj->accept_value, 0, sizeof(obj->accept_value));
 
     zend_object_std_init(&obj->std, ce);
@@ -133,6 +136,7 @@ static void websocket_free(zend_object *obj)
     if (Z_TYPE(w->upgrade_zv) != IS_UNDEF) {
         zval_ptr_dtor(&w->upgrade_zv);
     }
+    zval_ptr_dtor(&w->iter_current);
 
     zend_object_std_dtor(&w->std);
 }
@@ -626,12 +630,11 @@ ZEND_METHOD(TrueAsync_WebSocket, __construct)
     ZEND_PARSE_PARAMETERS_NONE();
 }
 
-ZEND_METHOD(TrueAsync_WebSocket, recv)
+/* Shared recv core — writes a WebSocketMessage or null into return_value,
+ * or leaves EG(exception) set. Backs both WebSocket::recv() and the
+ * foreach iterator (ws_get_iterator). */
+static void ws_do_recv(websocket_object *const w, zval *return_value)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-
-    websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
-
     /* Auto-commit on first WS I/O. If reject() was called, this
      * throws WebSocketClosedException and recv() propagates. */
     if (!w->committed && !ws_commit_upgrade(w, true)) {
@@ -716,6 +719,60 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
          * by mark_peer_closed. */
     }
 }
+
+ZEND_METHOD(TrueAsync_WebSocket, recv)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    ws_do_recv(Z_WEBSOCKET_P(ZEND_THIS), return_value);
+}
+
+/* {{{ Iterator — WebSocket implements Iterator directly, backed by
+ * ws_do_recv, so `foreach ($ws as $msg)` behaves exactly like a
+ * `while (($msg = $ws->recv()) !== null)` loop: a graceful close ends the
+ * loop; a protocol/error close throws WebSocketClosedException out of the
+ * foreach. Single-reader enforcement is inherited from recv(). The cursor
+ * lives on the WebSocket object (iter_current / iter_key). */
+static void ws_iter_fetch(websocket_object *w)
+{
+    zval_ptr_dtor(&w->iter_current);
+    ZVAL_NULL(&w->iter_current);
+    ws_do_recv(w, &w->iter_current);   /* WebSocketMessage, null, or throw */
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, rewind)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+    w->iter_key = 0;
+    ws_iter_fetch(w);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, next)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+    w->iter_key++;
+    ws_iter_fetch(w);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, valid)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(Z_TYPE(Z_WEBSOCKET_P(ZEND_THIS)->iter_current) == IS_OBJECT);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, current)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_COPY(&Z_WEBSOCKET_P(ZEND_THIS)->iter_current);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, key)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG(Z_WEBSOCKET_P(ZEND_THIS)->iter_key);
+}
+/* }}} */
 
 /* Backpressure-wait bound. Half the connection write timeout so a blocked
  * producer surfaces a graceful WebSocketBackpressureException BEFORE the
@@ -1078,7 +1135,7 @@ void ws_php_classes_register(void)
     websocket_close_code_ce = register_class_TrueAsync_WebSocketCloseCode();
     websocket_message_ce    = register_class_TrueAsync_WebSocketMessage();
     websocket_upgrade_ce    = register_class_TrueAsync_WebSocketUpgrade();
-    websocket_ce            = register_class_TrueAsync_WebSocket();
+    websocket_ce            = register_class_TrueAsync_WebSocket(zend_ce_iterator);
 
     /* Wire object handlers. Same pattern as http_response_handlers —
      * memcpy std defaults, then override offset (so PHP knows where
