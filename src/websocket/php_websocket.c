@@ -32,7 +32,7 @@
  * public PHP API surface is visible at MINIT and reflectable from
  * userland. Method bodies throw "not implemented" for everything that
  * actually does work — recv / send / close / etc. land in dedicated
- * follow-up commits per docs/PLAN_WEBSOCKET.md §8.
+ * follow-up commits
  *
  * Splitting registration from behaviour makes each subsequent commit a
  * pure body replacement against a fixed signature, which is the
@@ -616,7 +616,7 @@ ZEND_METHOD(TrueAsync_WebSocket, recv)
         RETURN_NULL();
     }
 
-    /* Single-reader enforcement (docs/PLAN_WEBSOCKET.md §6.9). The
+    /* Single-reader enforcement. The
      * wire is one byte stream; defining round-robin / fan-out
      * semantics for multiple readers has no real use case and is
      * easy to write race-prone code around, so we reject it loudly. */
@@ -698,7 +698,7 @@ static uint32_t ws_backpressure_timeout_ms(const websocket_object *w)
  *    WebSocketBackpressureException); a non-blocking send returns false
  *    (BUSY) without queueing.
  * 2. wslay_event_queue_msg copies the payload into wslay's outbound FIFO.
- * 3. Flusher discipline (PLAN_WEBSOCKET.md §2.4): the first producer with no
+ * 3. Flusher discipline: the first producer with no
  *    active flusher drives wslay_event_send; others just enqueue.
  *
  * Returns true when the payload was accepted (queued/sent); false otherwise,

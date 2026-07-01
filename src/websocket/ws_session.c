@@ -88,7 +88,7 @@ static ssize_t ws_session_recv_callback(wslay_event_context_ptr ctx,
  * per-connection write deadline all keep working without the WS
  * code reimplementing them.
  *
- * Per docs/PLAN_WEBSOCKET.md §2.4 the flusher discipline is held by
+ * The flusher discipline is held by
  * whichever PHP coroutine first picked up the producer role in
  * WebSocket::send(); other coroutines just enqueue and return. By
  * the time we get here, we ARE that coroutine, so suspension is
@@ -244,7 +244,7 @@ static void ws_ping_timer_fire(zend_async_event_t *event,
     /* Drive the send only if no other coroutine is currently
      * flushing — they'll pick up our frame on their next iteration.
      * This honours the same flusher-role discipline as
-     * WebSocket::send() (PLAN_WEBSOCKET.md §2.4). */
+     * WebSocket::send(). */
     if (!s->flushing) {
         s->flushing      = 1;
         s->internal_send = 1;   /* timer context: non-suspending write path */
@@ -253,7 +253,7 @@ static void ws_ping_timer_fire(zend_async_event_t *event,
         s->flushing      = 0;
     }
 
-    /* Arm the pong deadline once per outstanding ping (PLAN §6.6). A peer
+    /* Arm the pong deadline once per outstanding ping. A peer
      * that never answers is closed 1001 after ws_pong_timeout_ms. */
     if (s->pong_timeout_ms > 0 && !s->pong_pending) {
         s->pong_pending = 1;
@@ -297,7 +297,7 @@ void ws_session_arm_ping_timer(ws_session_t *s, uint32_t interval_ms)
 }
 /* }}} */
 
-/* {{{ pong deadline (PLAN_WEBSOCKET.md §5/§6.6)
+/* {{{ pong deadline
  *
  * One-shot timer armed when a keepalive PING is sent; disarmed by the
  * matching inbound PONG. If it fires with pong_pending still set, the
@@ -629,7 +629,7 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
         if (arg->opcode == WSLAY_CONNECTION_CLOSE) {
             ws_session_mark_peer_closed(s);
         } else if (arg->opcode == WSLAY_PONG) {
-            /* Liveness confirmed — disarm the pong deadline (PLAN §6.6). */
+            /* Liveness confirmed — disarm the pong deadline. */
             ws_session_disarm_pong_timer(s);
         }
         /* PING: wslay_event auto-handles it (queues a PONG via the
@@ -827,7 +827,7 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
         ws_session_arm_ping_timer(s, ping_ms);
     }
 
-    /* Cache the pong deadline (PLAN §6.6). Only meaningful alongside the
+    /* Cache the pong deadline. Only meaningful alongside the
      * ping keepalive — the deadline is armed from the ping timer fire. */
     if (conn != NULL && conn->server != NULL) {
         const http_server_config_t *cfg = http_server_get_config(conn->server);

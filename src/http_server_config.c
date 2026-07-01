@@ -165,7 +165,7 @@ static void http_server_config_populate_from_shared(
 #define MAX_BODY_SIZE_MIN                   1024u                          /* 1 KiB */
 #define MAX_BODY_SIZE_MAX                   ((size_t)16 * 1024 * 1024 * 1024) /* 16 GiB */
 
-/* WebSocket defaults (PLAN_WEBSOCKET.md §5 / §6.4-6.6). */
+/* WebSocket defaults. */
 #define DEFAULT_WS_MAX_MESSAGE_SIZE     (1u * 1024u * 1024u)   /* 1 MiB */
 #define DEFAULT_WS_MAX_FRAME_SIZE       (1u * 1024u * 1024u)   /* 1 MiB */
 #define DEFAULT_WS_PING_INTERVAL_MS     30000u
@@ -1311,7 +1311,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getMaxBodySize)
     RETURN_LONG((zend_long)config->max_body_size);
 }
 
-/* === WebSocket knobs (PLAN_WEBSOCKET.md §5) ============================== */
+/* === WebSocket knobs ============================== */
 
 /* proto HttpServerConfig::setWsMaxMessageSize(int $bytes): static
  * Reassembled-message cap. Oversize messages → RFC 6455 1009 + close. */

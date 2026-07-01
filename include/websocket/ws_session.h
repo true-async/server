@@ -48,7 +48,7 @@ typedef struct ws_pending_message_t {
  *      construction — wslay's queue is just a FIFO of message
  *      structs). wslay_event_send() then drives
  *      ws_session_send_callback, which writes through the connection's
- *      send_raw path. Per docs/PLAN_WEBSOCKET.md §2.4 the flusher
+ *      send_raw path. The flusher
  *      role is held cooperatively by whichever producer first finds
  *      `flushing == 0`; later producers just enqueue and return.
  *
@@ -97,7 +97,7 @@ typedef struct ws_session_t {
      * kept) after each flush; freed in ws_session_destroy. */
     smart_str      send_buf;
 
-    /* Outbound flusher discipline. See docs/PLAN_WEBSOCKET.md §2.4.
+    /* Outbound flusher discipline.
      * Set by the producer that takes on the flusher role; cleared
      * before it returns. Other producers find it set and just enqueue.
      * Single-threaded coroutine model — no atomic primitive needed. */
@@ -123,7 +123,7 @@ typedef struct ws_session_t {
 
     /* A keepalive PING was sent and we are awaiting its PONG. Set when
      * the ping timer fires, cleared when the matching PONG arrives. Gates
-     * the pong-deadline timer (PLAN_WEBSOCKET.md §6.6). */
+     * the pong-deadline timer. */
     unsigned pong_pending : 1;
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -150,7 +150,7 @@ typedef struct ws_session_t {
      * first recv() that finds the FIFO empty. */
     zend_async_trigger_event_t *recv_event;
 
-    /* Single-reader enforcement (docs/PLAN_WEBSOCKET.md §6.9). NULL
+    /* Single-reader enforcement. NULL
      * when no recv() is suspended; non-NULL while one is. A second
      * concurrent recv() throws WebSocketConcurrentReadException. */
     zend_coroutine_t *recv_waiter;
@@ -163,7 +163,7 @@ typedef struct ws_session_t {
      * that blocks. H1/wss only; H2 leans on its chunk-ring backpressure. */
     zend_async_event_t *drain_event;
 
-    /* Periodic keepalive PING (PLAN_WEBSOCKET.md §6.6). Created when
+    /* Periodic keepalive PING. Created when
      * ws_ping_interval_ms > 0 in the owning HttpServerConfig. Fires
      * every interval; the callback queues a control PING through
      * wslay and drives wslay_event_send. Stopped + disposed in
@@ -171,7 +171,7 @@ typedef struct ws_session_t {
     zend_async_event_t          *ping_timer;
     zend_async_event_callback_t *ping_timer_cb;
 
-    /* Pong deadline (PLAN_WEBSOCKET.md §5/§6.6). ws_pong_timeout_ms is
+    /* Pong deadline. ws_pong_timeout_ms is
      * cached from the owning HttpServerConfig at init (0 = disabled). When
      * a keepalive PING is sent, a one-shot timer is armed for that many ms;
      * the matching PONG disarms it. If it fires with pong_pending still set

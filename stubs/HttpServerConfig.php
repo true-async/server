@@ -396,7 +396,7 @@ final class HttpServerConfig
     /** @return int */
     public function getMaxBodySize(): int {}
 
-    // === WebSocket knobs (PLAN_WEBSOCKET.md §5) ===
+    // === WebSocket knobs ===
 
     /**
      * Maximum reassembled WebSocket message size in bytes. Frames whose

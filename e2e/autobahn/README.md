@@ -2,9 +2,8 @@
 
 Drives the canonical [Autobahn|Testsuite](https://github.com/crossbario/autobahn-testsuite)
 `fuzzingclient` (~500 RFC 6455 + RFC 7692 conformance cases) against the
-TrueAsync WebSocket server. This is the ready-made, industry-standard
-protocol conformance suite referenced in
-[`docs/PLAN_WEBSOCKET.md`](../../docs/PLAN_WEBSOCKET.md) §7.
+TrueAsync WebSocket server — the ready-made, industry-standard protocol
+conformance suite for RFC 6455.
 
 ## Layout
 

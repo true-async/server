@@ -8,7 +8,7 @@ use TrueAsync\HttpServerConfig;
 
 $c = new HttpServerConfig();
 
-// Defaults per PLAN_WEBSOCKET.md §5.
+// Defaults per docs/TODO_WEBSOCKET.md.
 echo "default msg:  ", $c->getWsMaxMessageSize(), "\n";
 echo "default frm:  ", $c->getWsMaxFrameSize(), "\n";
 echo "default ping: ", $c->getWsPingIntervalMs(), "\n";

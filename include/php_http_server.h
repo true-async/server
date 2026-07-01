@@ -246,7 +246,7 @@ struct _http_server_config_t {
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
 
-    /* WebSocket knobs (PLAN_WEBSOCKET.md §5): message/frame caps + ping
+    /* WebSocket knobs: message/frame caps + ping
      * cadence + pong deadline. See HttpServerConfig::setWs* setters. */
     uint32_t ws_max_message_size;
     uint32_t ws_max_frame_size;

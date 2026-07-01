@@ -8,7 +8,7 @@
 
 /*
  * libFuzzer harness for the WebSocket frame ingress (src/websocket/
- * ws_session.c). Per PLAN_WEBSOCKET.md §7: wslay itself is fuzz-tested
+ * ws_session.c). wslay itself is fuzz-tested
  * upstream, but OUR integration — the recv-buffer staging in
  * ws_session_feed(), the recv_callback copy-out, and the callback-driven
  * state in on_msg_recv_callback (FIFO append, pmce inflate, CLOSE/PONG

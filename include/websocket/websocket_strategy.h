@@ -25,7 +25,7 @@ typedef struct ws_session_t ws_session_t;
  * Frame parsing, masking, fragmentation reassembly, UTF-8 validation
  * and control-frame invariants are delegated to bundled wslay
  * (deps/wslay/), called via the standard wslay_event_callbacks bound
- * to the connection. See docs/PLAN_WEBSOCKET.md §2.1.
+ * to the connection.
  */
 http_protocol_strategy_t* http_protocol_strategy_websocket_create(void);
 
