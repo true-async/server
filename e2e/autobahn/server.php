@@ -14,6 +14,7 @@
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use TrueAsync\WebSocket;
+use TrueAsync\WebSocketException;
 use TrueAsync\HttpRequest;
 
 $port = (int)($argv[1] ?? 9001);
@@ -31,12 +32,21 @@ $config = (new HttpServerConfig())
 $server = new HttpServer($config);
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req): void {
-    while (($msg = $ws->recv()) !== null) {
-        if ($msg->binary) {
-            $ws->sendBinary($msg->data);
-        } else {
-            $ws->send($msg->data);
+    // Autobahn deliberately sends protocol violations (reserved bits,
+    // bad UTF-8, oversized control frames). The server closes the
+    // connection on those, after which recv()/send() throw — catch it
+    // so one misbehaving connection can never take the whole server
+    // down. A real application would catch WebSocketException the same way.
+    try {
+        while (($msg = $ws->recv()) !== null) {
+            if ($msg->binary) {
+                $ws->sendBinary($msg->data);
+            } else {
+                $ws->send($msg->data);
+            }
         }
+    } catch (WebSocketException $e) {
+        // Connection closed mid-exchange — end this handler cleanly.
     }
 });
 

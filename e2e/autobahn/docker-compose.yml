@@ -1,0 +1,41 @@
+# Full-docker Autobahn run: our from-scratch-built PHP echo server and the
+# upstream wstest fuzzingclient on one network — no host networking needed.
+#
+#   docker compose -f e2e/autobahn/docker-compose.yml up --build --abort-on-container-exit
+#
+# or drive it via run-docker.sh (handles smoke/full + report grading).
+services:
+  echo:
+    build:
+      context: ../..
+      dockerfile: e2e/autobahn/Dockerfile
+      args:
+        SERVER_REPO: ${SERVER_REPO:-https://github.com/true-async/server.git}
+        SERVER_REF: ${SERVER_REF:-2-websocket-support-rfc-6455}
+    image: trueasync-ws-echo:local
+    networks: [ab]
+    expose:
+      - "9001"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9001' 2>/dev/null || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 3s
+
+  autobahn:
+    image: crossbario/autobahn-testsuite:latest
+    depends_on:
+      echo:
+        condition: service_healthy
+    networks: [ab]
+    volumes:
+      - ./:/spec
+    working_dir: /spec
+    # SPEC is injected by run-docker.sh; defaults to the smoke spec.
+    command: >
+      wstest -m fuzzingclient
+      -s /spec/${SPEC:-fuzzingclient-docker-smoke.json}
+
+networks:
+  ab: {}

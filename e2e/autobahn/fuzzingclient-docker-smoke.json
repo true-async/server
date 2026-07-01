@@ -1,0 +1,13 @@
+{
+    "_comment": "Smoke run inside docker-compose — wstest reaches the echo server by service name. RFC 6455 core cases 1-7 (PR gate).",
+    "outdir": "./reports/servers",
+    "servers": [
+        {
+            "agent": "true-async-server",
+            "url": "ws://echo:9001"
+        }
+    ],
+    "cases": ["1.*", "2.*", "3.*", "4.*", "5.*", "6.*", "7.*"],
+    "exclude-cases": [],
+    "exclude-agent-cases": {}
+}

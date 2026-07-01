@@ -1,0 +1,31 @@
+# Keep the build context lean and the copied tree pristine — the
+# Dockerfile re-runs phpize + ./configure from scratch, so host build
+# artifacts must not leak in.
+.git
+.serena
+modules/
+**/.libs/
+**/.deps
+**/*.lo
+**/*.la
+**/*.o
+**/*.so
+**/*.dep
+configure
+Makefile
+config.status
+config.log
+config.nice
+config.h
+config.cache
+autom4te.cache/
+libtool
+Makefile.objects
+Makefile.fragments
+run-tests.php
+tmp-php.ini
+e2e/autobahn/reports/
+fuzz/fuzz_multipart
+fuzz/fuzz_http1_parser
+fuzz/fuzz_h2_session
+fuzz/fuzz_ws_frame
