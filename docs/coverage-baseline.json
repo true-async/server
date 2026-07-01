@@ -2,11 +2,11 @@
   "totals": {
     "lines": {
       "total": 17975,
-      "hit": 13682
+      "hit": 13683
     },
     "functions": {
       "total": 1226,
-      "hit": 1033
+      "hit": 1034
     }
   },
   "files": {
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 357,
-        "hit": 263
+        "hit": 262
       },
       "functions": {
         "total": 22,
@@ -393,11 +393,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 696,
-        "hit": 429
+        "hit": 431
       },
       "functions": {
         "total": 36,
-        "hit": 25
+        "hit": 26
       }
     },
     "src/http3/http3_connection.c": {
