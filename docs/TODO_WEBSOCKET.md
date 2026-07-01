@@ -16,9 +16,6 @@ it supersedes the original pre-implementation design plan.
   half of the union (application codes 4000-4999) once the API settles.
 
 ## Behaviour
-- **`ws_max_frame_size` outbound auto-fragmentation** — the knob is wired
-  end to end but the strategy does not yet split outbound payloads larger
-  than it. Either implement the split or drop the setter.
 - **`WebSocketClosedException` propagation** — `recv()` currently returns
   null on every close; on a protocol / abnormal close it should throw
   `WebSocketClosedException` with `$closeCode` / `$closeReason` set.

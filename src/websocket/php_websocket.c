@@ -759,12 +759,9 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
             return false;
         }
 
-        const struct wslay_event_msg msg = {
-            .opcode     = opcode,
-            .msg        = (const uint8_t *)(comp.s ? ZSTR_VAL(comp.s) : ""),
-            .msg_length = comp.s ? ZSTR_LEN(comp.s) : 0,
-        };
-        const int qrc = wslay_event_queue_msg_ex(s->ctx, &msg, WSLAY_RSV1_BIT);
+        const int qrc = ws_session_queue_payload(s, opcode,
+            comp.s ? ZSTR_VAL(comp.s) : "", comp.s ? ZSTR_LEN(comp.s) : 0,
+            WSLAY_RSV1_BIT);
         smart_str_free(&comp);
 
         if (qrc != 0) {
@@ -775,12 +772,8 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
     } else
 #endif
     {
-        const struct wslay_event_msg msg = {
-            .opcode     = opcode,
-            .msg        = (const uint8_t *)ZSTR_VAL(payload),
-            .msg_length = ZSTR_LEN(payload),
-        };
-        if (wslay_event_queue_msg(s->ctx, &msg) != 0) {
+        if (ws_session_queue_payload(s, opcode, ZSTR_VAL(payload),
+                                     ZSTR_LEN(payload), WSLAY_RSV_NONE) != 0) {
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket queue_msg failed (out of memory or session closed)");
             return false;

@@ -190,6 +190,98 @@ int ws_session_drive_send(ws_session_t *session)
 }
 /* }}} */
 
+/* {{{ outbound auto-fragmentation (ws_max_frame_size, RFC 6455 §5.4)
+ *
+ * wslay's queue_msg sends a message as a single frame; to bound frame
+ * size we queue oversize payloads via queue_fragmented_msg with a read
+ * callback that hands wslay at most max_frame_size bytes per fragment.
+ * wslay does not copy for fragmented msgs, so the source owns a copy of
+ * the payload until fully read — freed on eof by the callback, or
+ * wholesale in ws_session_destroy if the connection dies mid-send. */
+typedef struct ws_frag_source_t {
+    struct ws_frag_source_t *next;
+    ws_session_t            *session;
+    size_t                   len;
+    size_t                   off;
+    char                     buf[];   /* emalloc(sizeof(*src) + len) */
+} ws_frag_source_t;
+
+static void ws_frag_source_free(ws_frag_source_t *src)
+{
+    ws_frag_source_t **pp = &src->session->frag_sources;
+    while (*pp != NULL && *pp != src) {
+        pp = &(*pp)->next;
+    }
+
+    if (*pp == src) {
+        *pp = src->next;
+    }
+
+    efree(src);
+}
+
+static ssize_t ws_frag_read_callback(wslay_event_context_ptr ctx,
+                                     uint8_t *buf, size_t len,
+                                     const union wslay_event_msg_source *source,
+                                     int *eof, void *user_data)
+{
+    (void)ctx; (void)user_data;
+    ws_frag_source_t *const src = (ws_frag_source_t *)source->data;
+
+    size_t n = src->len - src->off;
+    if (n > len) {
+        n = len;
+    }
+
+    if (src->session->max_frame_size > 0 && n > src->session->max_frame_size) {
+        n = src->session->max_frame_size;
+    }
+
+    memcpy(buf, src->buf + src->off, n);
+    src->off += n;
+
+    if (src->off >= src->len) {
+        *eof = 1;
+        ws_frag_source_free(src);
+    }
+
+    return (ssize_t)n;
+}
+
+int ws_session_queue_payload(ws_session_t *session, uint8_t opcode,
+                             const char *data, size_t len, uint8_t rsv)
+{
+    if (session->max_frame_size == 0 || len <= session->max_frame_size) {
+        const struct wslay_event_msg msg = {
+            .opcode     = opcode,
+            .msg        = (const uint8_t *)data,
+            .msg_length = len,
+        };
+        return wslay_event_queue_msg_ex(session->ctx, &msg, rsv);
+    }
+
+    ws_frag_source_t *const src = emalloc(sizeof(*src) + len);
+    src->session = session;
+    src->len     = len;
+    src->off     = 0;
+    memcpy(src->buf, data, len);
+    src->next             = session->frag_sources;
+    session->frag_sources = src;
+
+    const struct wslay_event_fragmented_msg farg = {
+        .opcode        = opcode,
+        .source        = { .data = src },
+        .read_callback = ws_frag_read_callback,
+    };
+    const int rc = wslay_event_queue_fragmented_msg_ex(session->ctx, &farg, rsv);
+    if (rc != 0) {
+        ws_frag_source_free(src);
+    }
+
+    return rc;
+}
+/* }}} */
+
 /* {{{ ws_ping_timer_cb_t / ws_ping_timer_fire — periodic keepalive
  *
  * Fires every ws_ping_interval_ms. Queues a zero-payload PING into
@@ -833,6 +925,7 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
         const http_server_config_t *cfg = http_server_get_config(conn->server);
         if (cfg != NULL) {
             s->pong_timeout_ms = cfg->ws_pong_timeout_ms;
+            s->max_frame_size  = cfg->ws_max_frame_size;   /* outbound split cap */
         }
     }
 
@@ -894,6 +987,14 @@ void ws_session_destroy(ws_session_t *session)
     }
 
     smart_str_free(&session->send_buf);
+
+    /* Free any fragmented-send sources still queued (connection died
+     * before wslay read them to eof). */
+    while (session->frag_sources != NULL) {
+        ws_frag_source_t *const next = session->frag_sources->next;
+        efree(session->frag_sources);
+        session->frag_sources = next;
+    }
 
 #ifdef HAVE_HTTP_COMPRESSION
     if (session->pmce_deflate != NULL) {

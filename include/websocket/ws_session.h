@@ -126,6 +126,16 @@ typedef struct ws_session_t {
      * the pong-deadline timer. */
     unsigned pong_pending : 1;
 
+    /* Outbound per-frame cap (ws_max_frame_size, cached at init; 0 =
+     * disabled). Messages longer than this are auto-split into fragments
+     * no larger than it. */
+    uint32_t max_frame_size;
+
+    /* Pending outbound fragmented-message sources (owns a copy of the
+     * payload until wslay has read it all). Freed on eof by the read
+     * callback, or wholesale in ws_session_destroy. */
+    struct ws_frag_source_t *frag_sources;
+
 #ifdef HAVE_HTTP_COMPRESSION
     /* permessage-deflate (RFC 7692). Set by ws_session_enable_pmce()
      * once negotiated; gates the RSV1 deflate/inflate paths. */
@@ -236,6 +246,16 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len);
  * the call, and holds the flusher role (session->flushing).
  */
 int ws_session_drive_send(ws_session_t *session);
+
+/*
+ * Queue one outbound message. When ws_max_frame_size is set and `len`
+ * exceeds it, the payload is auto-split into continuation fragments no
+ * larger than the cap (RFC 6455 §5.4); otherwise it goes as a single
+ * frame. `rsv` carries WSLAY_RSV1_BIT for permessage-deflate, else
+ * WSLAY_RSV_NONE. Returns wslay's queue rc (0 on success).
+ */
+int ws_session_queue_payload(ws_session_t *session, uint8_t opcode,
+                             const char *data, size_t len, uint8_t rsv);
 
 /*
  * Pop the head message from the recv FIFO. Returns the node (caller
