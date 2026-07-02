@@ -2,7 +2,7 @@
 
 # Issue #93 — Hot-reload воркеров: дизайн
 
-> **Решение (итог обсуждения 2026-07-01).** Выбран подход **blue-green между потоками** через новый примитив `respawn_worker` (публичный PHP API). Ниже — согласованный план и решения по деталям; дальше (раздел «Исходный анализ») идёт multi-agent-разбор, на котором это основано.
+> **Решение (итог обсуждения 2026-07-01, пересмотрено).** Выбран подход **blue-green между потоками** через примитив **`ThreadPool::reload()` (channel-swap, см. A.3)** — своп task-канала + 1:1 замены по exit-токенам. Прежний вариант `respawn_worker`/`request_worker_exit` (индексный таргетинг, per-slot флаги) **ОТВЕРГНУТ**; его упоминания ниже по тексту — исторический анализ, не план. Хардening reload() (сериализация+схлопывание, identity-gate, единая точка токена) — `docs/PLAN_RELOAD_HARDENING.md`. Ниже — согласованный план и решения по деталям; дальше (раздел «Исходный анализ») идёт multi-agent-разбор, на котором это основано.
 
 ## A. Согласованное решение
 
@@ -102,7 +102,7 @@ Async\ThreadPool::respawnWorker(int $i): Future; // примитив
 Только `opcache_invalidate($file, true)` изменённых файлов до респавна. **Никогда `opcache_reset()`** (в prod `validate_timestamps=0`; под ZTS reset потенциально небезопасен — см. §7 ниже).
 
 ### A.9. Фазировка / PR
-- **Фаза 1 (php-async):** A.3 — примитив `respawn_worker` + per-worker poison + PHP-метод + временный слот.
+- **Фаза 1 (php-async):** A.3 — `ThreadPool::reload()` (channel-swap: своп канала + 1:1 замены по exit-токенам) + ABI v0.22. **СДЕЛАНО** (ветка fs-watcher-recursive-linux, df5dbfa + hardening по PLAN_RELOAD_HARDENING.md).
 - **Фаза 2 (сервер, TCP):** A.2 + A.4(TCP/h1/h2/WS) + A.6/A.7(watch+API) + A.8 → `HttpServer::reload()` + blue-green. Закрывает #93 для HTTP/1.1 и HTTP/2.
 - **Фаза 3 (H3 дефолт):** A.5 дефолт-режим — GOAWAY-дренаж.
 - **Фаза 4 (H3 реактор):** A.5 реактор-режим — `worker_registry` disable + `worker_inbox` drain-mode.
