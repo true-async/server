@@ -640,6 +640,19 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/websocket/ws_dispatch.c
       src/websocket/php_websocket.c
     "
+
+    dnl wslay_net.h pulls in <arpa/inet.h> / <netinet/in.h> (for htons/ntohs)
+    dnl only when HAVE_ARPA_INET_H / HAVE_NETINET_IN_H are defined. Those land
+    dnl in php_config.h, which the vendored wslay TUs never see — they include
+    dnl only wslay headers, not php.h. Pass the defines explicitly (gated on the
+    dnl AC_CHECK_HEADERS results above) so htons()/ntohs() are declared; strict
+    dnl C99 compilers such as clang/zig-cc reject the implicit declaration.
+    if test "$ac_cv_header_arpa_inet_h" = "yes"; then
+      HTTP_SERVER_WSLAY_DEFS="$HTTP_SERVER_WSLAY_DEFS -DHAVE_ARPA_INET_H=1"
+    fi
+    if test "$ac_cv_header_netinet_in_h" = "yes"; then
+      HTTP_SERVER_WSLAY_DEFS="$HTTP_SERVER_WSLAY_DEFS -DHAVE_NETINET_IN_H=1"
+    fi
   fi
 
   dnl Hardening + diagnostic flags. Probed individually so old/non-GCC
@@ -674,7 +687,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
 
   dnl Create extension. The trailing "cxx" arg makes the shared module link
   dnl through $(CXX) so the C++ TU's runtime (libstdc++) is pulled in.
-  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING $HTTP_SERVER_TEST_HOOKS_FLAG, cxx)
+  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING $HTTP_SERVER_TEST_HOOKS_FLAG $HTTP_SERVER_WSLAY_DEFS, cxx)
   PHP_SUBST(TRUE_ASYNC_SERVER_SHARED_LIBADD)
 
   dnl Add include paths
