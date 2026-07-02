@@ -105,7 +105,7 @@ Async\ThreadPool::respawnWorker(int $i): Future; // примитив
 
 ### A.9. Фазировка / PR
 - **Фаза 1 (php-async):** A.3 — `ThreadPool::reload()` (channel-swap: своп канала + 1:1 замены по exit-токенам) + ABI v0.22. **СДЕЛАНО** (ветка fs-watcher-recursive-linux, df5dbfa + hardening по PLAN_RELOAD_HARDENING.md).
-- **Фаза 2 (сервер, TCP):** A.2 + A.4(TCP/h1/h2/WS) + A.6/A.7(watch+API) + A.8 → `HttpServer::reload()` + blue-green. Закрывает #93 для HTTP/1.1 и HTTP/2. **Обязательно логирование** через существующий `http_log` (`http_log_emitf` на `server->log_state`): начало перезагрузки (+ триггер: watcher/SIGHUP/ручной вызов), завершение с длительностью, деградации (замена не поднялась).
+- **Фаза 2 (сервер, TCP):** A.2 + A.4(TCP/h1/h2/WS) + A.6/A.7(watch+API) + A.8 → `HttpServer::reload()` + blue-green. Закрывает #93 для HTTP/1.1 и HTTP/2. **Обязательно логирование через СОБСТВЕННЫЕ обработчики сервера** (`http_logf_info` на `server->log_state`; сейчас пишутся только `server.start`:3338 / `server.stop`:3459): (1) `pool_worker_handler` (:1809) логирует `worker.start` / `worker.exit` — при ротации старая и новая когорты сами видны в логе без доп. машинерии; (2) reload-путь оркестратора логирует `reload.start` (+триггер: watcher/SIGHUP/ручной), `reload.done` (длительность) и деградации (замена не поднялась).
 - **Фаза 3 (H3 дефолт):** A.5 дефолт-режим — GOAWAY-дренаж.
 - **Фаза 4 (H3 реактор):** A.5 реактор-режим — `worker_registry` disable + `worker_inbox` drain-mode.
 
