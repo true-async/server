@@ -2,11 +2,11 @@
   "totals": {
     "lines": {
       "total": 17975,
-      "hit": 13683
+      "hit": 13681
     },
     "functions": {
       "total": 1226,
-      "hit": 1034
+      "hit": 1033
     }
   },
   "files": {
@@ -393,11 +393,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 696,
-        "hit": 431
+        "hit": 429
       },
       "functions": {
         "total": 36,
-        "hit": 26
+        "hit": 25
       }
     },
     "src/http3/http3_connection.c": {
