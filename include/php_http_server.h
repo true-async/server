@@ -37,8 +37,9 @@
  * and BaseTsd.h / MAX_PATH are already visible. */
 #include "win32_compat.h"
 
-extern zend_module_entry true_async_server_module_entry;
-#define phpext_true_async_server_ptr &true_async_server_module_entry
+/* Module entry declaration lives in the flat root header so php-src's
+ * static-build codegen (genif.sh) can discover it; see the comment there. */
+#include "php_true_async_server.h"
 
 #define PHP_HTTP_SERVER_VERSION "0.9.0"
 

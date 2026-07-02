@@ -678,6 +678,10 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   PHP_SUBST(TRUE_ASYNC_SERVER_SHARED_LIBADD)
 
   dnl Add include paths
+  dnl $ext_srcdir (extension root) holds the flat public header
+  dnl php_true_async_server.h — needed so include/php_http_server.h can
+  dnl reach the module-entry declaration.
+  PHP_ADD_INCLUDE([$ext_srcdir])
   PHP_ADD_INCLUDE([$ext_srcdir/include])
   PHP_ADD_INCLUDE([$ext_srcdir/src])
   PHP_ADD_INCLUDE([$ext_srcdir/src/core])

@@ -14,22 +14,26 @@
   +----------------------------------------------------------------------+
 */
 
-#ifndef PHP_SERVER_STATIC_H
-#define PHP_SERVER_STATIC_H
+#ifndef PHP_TRUE_ASYNC_SERVER_H
+#define PHP_TRUE_ASYNC_SERVER_H
 
 #include <Zend/zend_modules.h>
 
 /*
+ * Public registration header for the true_async_server extension.
+ *
+ * It is kept flat at the extension root (not under include/) on purpose:
  * php-src's static-build codegen (build/genif.sh + build/print_include.awk)
  * discovers each bundled extension's module_entry by globbing
- * ext/<name>/*.h directly and grepping matched files for a "phpext_" line
- * — it does not follow nested #include paths. This extension keeps its
- * real header under include/php_http_server.h, so this flat file exists
- * purely so static (non-shared, e.g. static-php-cli) builds can find
- * phpext_true_async_server_ptr. Shared/dynamic builds never read this file.
+ * ext/<name>/*.h non-recursively and grepping the matched files for a
+ * "phpext_" line — it does not follow nested #include paths. Keeping the
+ * module-entry declaration here, at ext/server/php_true_async_server.h,
+ * lets static (non-shared) builds such as static-php-cli find
+ * phpext_true_async_server_ptr. The extension's other headers live under
+ * include/.
  */
 
 extern zend_module_entry true_async_server_module_entry;
 #define phpext_true_async_server_ptr &true_async_server_module_entry
 
-#endif
+#endif /* PHP_TRUE_ASYNC_SERVER_H */

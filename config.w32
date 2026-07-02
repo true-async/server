@@ -104,6 +104,9 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     ADD_SOURCES(configure_module_dirname + "/deps/llhttp", http_server_llhttp,  "true_async_server");
 
     // Include paths
+    // Module root holds the flat public header php_true_async_server.h,
+    // reached from include/php_http_server.h.
+    ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname);
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/include");
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/src");
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/src/core");
