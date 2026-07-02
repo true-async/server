@@ -7,8 +7,9 @@ name: Ctrl+C signal delivery (macOS + Linux)
 # with pcntl-interaction and open-connection cases.
 #
 # Bugs found by this harness (03-pcntl-after hang, 04-pcntl-before SEGV,
-# identical on macOS and Linux) are fixed in php-async
-# fix-signal-pcntl-clobber — all scenarios are expected green.
+# identical on macOS and Linux) are fixed by the #109 pair: php-src
+# 109-zend-sigaction-hook (zend_sigaction delegates to the reactor) +
+# php-async fix-signal-pcntl-clobber — all scenarios are expected green.
 
 on:
   workflow_dispatch:
@@ -18,8 +19,9 @@ on:
       - '.github/workflows/ctrl-c.yml'
 
 env:
-  PHP_SRC_BRANCH: true-async
-  # TODO: back to `main` after true-async/php-async fix-signal-pcntl-clobber merges.
+  # TODO: back to `true-async` / `main` after the #109 sigaction-hook pair merges
+  # (php-src 109-zend-sigaction-hook + php-async fix-signal-pcntl-clobber).
+  PHP_SRC_BRANCH: 109-zend-sigaction-hook
   PHP_ASYNC_BRANCH: fix-signal-pcntl-clobber
   CCACHE_DIR: /tmp/ccache
 
