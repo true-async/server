@@ -31,11 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the pool parent arms a persistent `SIGHUP` handler that calls
     `HttpServer::reload()`.
 
+- **Reload under the reactor pool (#93).** `HttpServer::reload()` now works with
+  `TRUE_ASYNC_SERVER_REACTOR_POOL=1`. A worker-inbox retirement protocol
+  unpublishes the retiring slot (admin mutex; picks stay lock-free), fences every
+  reactor so no pre-retire inbox pointer survives, and a zero-crossing decrement
+  wakes the worker to free its inbox — connections homed to the slot re-home on
+  their next request. Slots are reclaimed so a rotated pool can re-register.
+
 ### Fixed
 
 - **~10 KB leaked per reload rotation (#93).** The worker transit shell's C-state
   and side-cars were not released when the old cohort exited; now freed after the
   rotation completes.
+- **Heap corruption on rotation under the gated reactor pool (#93).** A dying
+  worker clone's free path unconditionally tore down the *global* worker registry
+  and `g_reactor_pool` from the worker thread while the parent's reactors were
+  live; the catch-all teardown is now parent-only.
+- **macOS build: TSRM mutex instead of `uv_mutex` in the worker registry (#93)** —
+  macOS TUs have no libuv include path.
 
 ### Changed
 
