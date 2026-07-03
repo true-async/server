@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-03
+
+### Added
+
+- **`HttpServer::reload()` — hot reload of the worker pool without dropping the
+  listen sockets (#93).** Pool-parent only. Bumps a shared epoch beacon
+  (`pemalloc`'d, parent-owned, fanned out to worker clones through the transit
+  shells); workers watch it from the deadline tick and retire themselves from a
+  fresh main-scope coroutine (drain in-flight → `stop` → exit to the closed pool
+  channel). The pool then rotates via the ThreadPool ABI `reload()` — replacement
+  threads re-run the bootloader, so changed code is picked up — and one `start()`
+  task per worker is resubmitted onto the fresh channel. Suspends until the old
+  cohort has fully drained. Reload is serialized (one rotation at a time) and the
+  lifecycle is logged (`reload.start` / `reload.done`, per-worker
+  `server.stop reason=reload`).
+- **Built-in hot-reload triggers (#93).**
+  - `HttpServerConfig::enableHotReload(array $watchPaths, array $extensions = ['php'], int $debounceMs = 300, int $maxHoldMs = 2000)` —
+    dev trigger: the pool parent spawns one recursive `Async\FileSystemWatcher`
+    per path; a debounced change event invalidates the watched trees in opcache
+    and calls `HttpServer::reload()`.
+  - `HttpServerConfig::enableReloadOnSignal(bool $enabled = true)` — prod trigger:
+    the pool parent arms a persistent `SIGHUP` handler that calls
+    `HttpServer::reload()`.
+
+### Fixed
+
+- **~10 KB leaked per reload rotation (#93).** The worker transit shell's C-state
+  and side-cars were not released when the old cohort exited; now freed after the
+  rotation completes.
+
+### Changed
+
+- **Test suite: kernel-allocated ports across every phpt (#93).** All phpt now bind
+  to an OS-assigned port instead of a fixed one, eliminating the port-collision
+  flake class (previously seen on the `h2/012` + `core/051`/`052` cluster).
+- **Ctrl+C signal-delivery test harness (#94)** for macOS/Linux, covering
+  interrupt, `SIGTERM`, `pcntl`-before/after, open-connection, multi-waiter, and
+  dev-server scenarios.
+
+## [0.9.1] - 2026-07-02
+
+### Fixed
+
+- **Static-build header discovery.** Canonical flat `php_true_async_server.h`
+  registration header so `genif`/static builds resolve the extension header; added
+  a flat `php_server.h` shim and renamed `http_server_module_entry` →
+  `true_async_server_module_entry`. WebSocket server 0.9.0 feature set unchanged.
+- **`htons`/`ntohs` declared for the bundled wslay under strict C99 compilers**
+  (clang / zig-cc), fixing the WebSocket build on those toolchains.
+
 ## [0.9.0] - 2026-07-01
 
 ### Added
