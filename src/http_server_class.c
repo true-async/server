@@ -1868,6 +1868,8 @@ typedef struct {
     zval  server_transit;   /* per-worker persistent shell */
 } pool_worker_ctx_t;
 
+static void http_server_release_worker_shell(zval *transit);
+
 typedef struct {
     int                          pending;     /* workers not yet done */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
@@ -2651,7 +2653,7 @@ static int http_server_start_pool(http_server_object *server,
         if (UNEXPECTED(EG(exception))) {
             /* Roll back transfers we already did. */
             for (int j = 0; j <= i; j++) {
-                ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[j].server_transit);
+                http_server_release_worker_shell(&ctxs[j].server_transit);
             }
 
             pefree(ctxs, 1);
@@ -3652,7 +3654,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
 
         if (UNEXPECTED(EG(exception))) {
             for (int j = 0; j <= i; j++) {
-                ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&fresh[j].server_transit);
+                http_server_release_worker_shell(&fresh[j].server_transit);
             }
 
             pefree(fresh, 1);
@@ -3684,7 +3686,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         }
 
         for (int i = 0; i < workers; i++) {
-            ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&fresh[i].server_transit);
+            http_server_release_worker_shell(&fresh[i].server_transit);
         }
 
         pefree(fresh, 1);
@@ -3728,7 +3730,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
     pool_worker_ctx_t *old_ctxs = server->pool_worker_ctx;
 
     for (int i = 0; i < workers; i++) {
-        ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&old_ctxs[i].server_transit);
+        http_server_release_worker_shell(&old_ctxs[i].server_transit);
     }
 
     pefree(old_ctxs, 1);
@@ -4353,7 +4355,7 @@ static void http_server_free(zend_object *obj)
     if (server->pool_worker_ctx != NULL) {
         pool_worker_ctx_t *ctxs = server->pool_worker_ctx;
         for (int i = 0; i < server->pool_worker_ctx_count; i++) {
-            ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[i].server_transit);
+            http_server_release_worker_shell(&ctxs[i].server_transit);
         }
 
         pefree(ctxs, 1);
@@ -4486,6 +4488,39 @@ static void http_server_transit_static_release(http_server_transit_static_t *t)
     }
 
     pefree(t, 1);
+}
+
+/* Release one worker transit shell INCLUDING the pemalloc'd C-state that
+ * transfer_obj(TRANSFER) hung off the wrapper — the engine's generic release
+ * frees only the wrapper graph, so the C-state and its side-cars leaked one
+ * set per shell (#93 found it: ~10KB per reload rotation). Safe both before
+ * and after LOAD (consumed closures release as empty skeletons). */
+static void http_server_release_worker_shell(zval *transit)
+{
+    if (Z_TYPE_P(transit) == IS_OBJECT) {
+        http_server_object *shell = http_server_from_obj(Z_OBJ_P(transit));
+
+        if (Z_TYPE(shell->config) == IS_OBJECT) {
+            ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&shell->config);
+        }
+
+        http_server_transit_handlers_t *th = shell->transit_handlers;
+
+        if (th != NULL) {
+            for (size_t i = 0; i < th->count; i++) {
+                ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&th->entries[i].closure);
+            }
+
+            pefree(th, 1);
+        }
+
+        http_server_transit_static_release(
+            (http_server_transit_static_t *) shell->transit_static_mounts);
+
+        pefree(shell, 1);
+    }
+
+    ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(transit);
 }
 
 static zend_object *http_server_transfer_obj(
