@@ -463,6 +463,22 @@ struct http_server_object {
     void                    *pool_worker_ctx;
     int                      pool_worker_ctx_count;
 
+    /* The built-in worker pool handle (issue #93 hot reload). Retained on the
+     * parent so HttpServer::reload() can drive ThreadPool::reload() — swap the
+     * task channel, drain the old worker cohort, and resubmit fresh start()
+     * tasks. NULL outside pool mode; owned ref released in start_pool cleanup. */
+    zend_async_thread_pool_t *worker_pool;
+
+    /* Hot-reload beacon (issue #93): pemalloc'd http_server_reload_shared_t
+     * owned by the pool parent (start_pool alloc/free), pointer fanned out to
+     * worker clones through the transfer shells. A worker watches `epoch` from
+     * its deadline tick and self-stops when it moves; the parent bumps it and
+     * rotates the pool. */
+    void                    *reload_shared;
+    int                      reload_epoch_seen; /* worker clone: last epoch acted on */
+    bool                     reload_in_progress;/* parent: one rotation at a time */
+    void                    *pool_await_state;  /* parent: st of the active pool run */
+
     /* Transit sidecar — non-NULL only in the persistent shell created by
      * transfer_obj(TRANSFER). Holds pemalloc-copied closures so the LOAD
      * side can rebuild fcall_t entries in the destination thread's heap.
@@ -552,6 +568,30 @@ static void http_server_accept_callback(
     void *result,
     zend_object *exception);
 
+/* Hot-reload beacon (issue #93): one per pool run, pemalloc'd and owned by the
+ * pool parent (start_pool alloc/free); worker clones get the pointer through
+ * their transfer shells and watch `epoch` from the deadline tick below. */
+typedef struct {
+    zend_atomic_int epoch;
+} http_server_reload_shared_t;
+
+static void http_server_do_stop(http_server_object *server, const char *reason);
+
+/* Runs on a fresh coroutine enqueued by the deadline tick: stop() disposes that
+ * very tick timer, which must not happen from inside its own callback. */
+static void http_server_reload_stop_entry(void)
+{
+    http_server_object *server =
+        (http_server_object *) ZEND_ASYNC_CURRENT_COROUTINE->extended_data;
+
+    if (UNEXPECTED(server == NULL || !server->running || server->stopping)) {
+        return;
+    }
+
+    server->stopping = true;
+    http_server_do_stop(server, "reload");
+}
+
 /* ==========================================================================
  * Deadline watchdog — one periodic libuv timer per worker, walks the
  * conn arena's alive list each tick and force-closes conns whose
@@ -595,6 +635,27 @@ static void http_server_deadline_tick_fn(zend_async_event_t *event,
 
         c = next;
     }
+
+    /* Hot reload (issue #93): the pool parent bumped the shared epoch — retire
+     * this worker from a fresh coroutine, not from this timer's own callback. */
+    if (server->is_worker_clone && server->reload_shared != NULL
+        && server->running && !server->stopping) {
+        http_server_reload_shared_t *shared = server->reload_shared;
+        const int epoch = zend_atomic_int_load(&shared->epoch);
+
+        if (UNEXPECTED(epoch != server->reload_epoch_seen)) {
+            /* Main scope, not server_scope: the retire coroutine must survive
+             * the scope drain it triggers. */
+            zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(ZEND_ASYNC_MAIN_SCOPE);
+
+            if (EXPECTED(co != NULL)) {
+                server->reload_epoch_seen = epoch;
+                co->internal_entry = http_server_reload_stop_entry;
+                co->extended_data  = server;
+                ZEND_ASYNC_ENQUEUE_COROUTINE(co);
+            }
+        }
+    }
 }
 
 /* tick_ms = max(250, min(read, write, keepalive) / 2). */
@@ -612,12 +673,19 @@ static uint32_t http_server_deadline_tick_ms(const http_server_object *server)
     if (m == UINT32_MAX) {
         /* All timeouts disabled — still tick at a slow cadence so a
          * broadcast / future graceful-shutdown walker has a heartbeat. */
-        return 60000;
+        m = 120000;
     }
 
     uint32_t tick = m / 2;
 
     if (tick < 250) tick = 250;
+
+    /* Pool workers also watch the hot-reload epoch from this tick — cap the
+     * cadence so a reload is noticed within a second (issue #93). */
+    if (server->is_worker_clone && server->reload_shared != NULL && tick > 1000) {
+        tick = 1000;
+    }
+
     return tick;
 }
 
@@ -1800,6 +1868,8 @@ typedef struct {
     zval  server_transit;   /* per-worker persistent shell */
 } pool_worker_ctx_t;
 
+static void http_server_release_worker_shell(zval *transit);
+
 typedef struct {
     int                          pending;     /* workers not yet done */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
@@ -2520,6 +2590,18 @@ static int http_server_start_pool(http_server_object *server,
         boot_ptr = &boot;
     }
 
+    /* The pool parent gets its own log lifecycle: reload() reports through it
+     * (issue #93), and pool-mode start/stop become visible like worker ones. */
+    if (boot_cfg != NULL) {
+        zval *log_stream = (Z_TYPE(boot_cfg->log_stream) != IS_UNDEF)
+                         ? &boot_cfg->log_stream : NULL;
+        http_log_server_start(&server->log_state,
+                              (http_log_severity_t)boot_cfg->log_severity,
+                              log_stream);
+        http_logf_info(&server->log_state, "server.start mode=pool workers=%d",
+                       workers);
+    }
+
     /* queue_size = workers so submit doesn't block before workers reach
      * the receive loop — fresh-pool boot-up is otherwise faster on the
      * parent than on worker threads. */
@@ -2555,6 +2637,12 @@ static int http_server_start_pool(http_server_object *server,
     }
 #endif
 
+    /* Hot-reload beacon (issue #93): allocated BEFORE the transfer loop so
+     * every worker shell fans the pointer out to its clone. */
+    http_server_reload_shared_t *reload_shared = pecalloc(1, sizeof(*reload_shared), 1);
+    ZEND_ATOMIC_INT_INIT(&reload_shared->epoch, 0);
+    server->reload_shared = reload_shared;
+
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
     pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
@@ -2565,10 +2653,12 @@ static int http_server_start_pool(http_server_object *server,
         if (UNEXPECTED(EG(exception))) {
             /* Roll back transfers we already did. */
             for (int j = 0; j <= i; j++) {
-                ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[j].server_transit);
+                http_server_release_worker_shell(&ctxs[j].server_transit);
             }
 
             pefree(ctxs, 1);
+            server->reload_shared = NULL;
+            pefree(reload_shared, 1);
             ZEND_THREAD_POOL_DELREF(pool);
 #ifndef PHP_WIN32
             http_server_close_pool_unix_fds(server);
@@ -2592,6 +2682,12 @@ static int http_server_start_pool(http_server_object *server,
     st->pending = workers;
     st->all_done = create_server_wait_event();
     st->cb.callback = pool_worker_done_cb;
+
+    /* Retained for HttpServer::reload() (issue #93): it rotates worker_pool and
+     * balances pool_await_state->pending for the fresh cohort. Cleared below
+     * before the pool ref is dropped. */
+    server->worker_pool      = pool;
+    server->pool_await_state = st;
 
     int rc = FAILURE;
     for (int i = 0; i < workers; i++) {
@@ -2642,6 +2738,8 @@ cleanup:
     server->running = false;
     server->stopping = false;
     server->in_pool_mode = false;
+    server->worker_pool = NULL;
+    server->pool_await_state = NULL;
 
     /* Workers have quiesced (the suspend returned). Tear down the transport
      * reactor pool: this releases the H3 listeners the gated reactors own,
@@ -2654,6 +2752,13 @@ cleanup:
 
     efree(st);
     ZEND_THREAD_POOL_DELREF(pool);
+
+    /* Every clone (and its epoch-watching tick) is gone — drop the beacon. */
+    server->reload_shared = NULL;
+    pefree(reload_shared, 1);
+
+    http_logf_info(&server->log_state, "server.stop mode=pool");
+    http_log_server_stop(&server->log_state);
 
 #ifndef PHP_WIN32
     /* Every worker has drained and closed its own dup; this final close
@@ -3407,30 +3512,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 }
 /* }}} */
 
-/* {{{ proto HttpServer::stop(): bool */
-ZEND_METHOD(TrueAsync_HttpServer, stop)
+/* stop() core, shared by the PHP method and the hot-reload self-stop coroutine
+ * (issue #93). Never suspends. `reason` != NULL tags the log line. */
+static void http_server_do_stop(http_server_object *server, const char *reason)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-
-    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
-
-    if (!server->running) {
-        RETURN_TRUE;
-    }
-
-    server->stopping = true;
-
-    /* Pool-mode parent has no listen events of its own — it's awaiting
-     * worker-completion callbacks. Cross-thread shutdown isn't wired up
-     * yet (issue #11): each worker has to stop itself from within its
-     * own handler. */
-    if (server->in_pool_mode) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "stop() on a pool-parent HttpServer is not supported yet "
-            "(issue #11). Stop each worker from within its own handler.", 0);
-        RETURN_FALSE;
-    }
-
     /* Stop the deadline watchdog FIRST so the periodic timer no longer
      * keeps the libuv loop alive past server stop. Without this, the
      * loop drains forever and stop() never lets the script exit. */
@@ -3456,7 +3541,12 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
     /* Logger teardown must precede the wait_event notify: waking
      * start() can let the scheduler tear down before our async write
      * completes, leaving the spawn coroutine here stuck mid-await. */
-    http_logf_info(&server->log_state, "server.stop");
+    if (reason != NULL) {
+        http_logf_info(&server->log_state, "server.stop reason=%s", reason);
+    } else {
+        http_logf_info(&server->log_state, "server.stop");
+    }
+
     http_log_server_stop(&server->log_state);
 
     /* Resolve wait event to wake up start(). The event is released by the
@@ -3482,8 +3572,174 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
 #ifdef HAVE_HTTP_COMPRESSION
     http_compression_pool_shutdown();
 #endif
+}
 
+/* {{{ proto HttpServer::stop(): bool */
+ZEND_METHOD(TrueAsync_HttpServer, stop)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (!server->running) {
+        RETURN_TRUE;
+    }
+
+    server->stopping = true;
+
+    /* Pool-mode parent has no listen events of its own — it's awaiting
+     * worker-completion callbacks. Cross-thread shutdown isn't wired up
+     * yet (issue #11): each worker has to stop itself from within its
+     * own handler. */
+    if (server->in_pool_mode) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "stop() on a pool-parent HttpServer is not supported yet "
+            "(issue #11). Stop each worker from within its own handler.", 0);
+        RETURN_FALSE;
+    }
+
+    http_server_do_stop(server, NULL);
     RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto HttpServer::reload(): bool
+ * Hot reload (issue #93), pool parent only. Bumps the shared epoch (workers
+ * self-stop from their deadline tick: drain #74 + stop + exit to the closed
+ * pool channel), rotates the pool via ThreadPool ABI reload() — replacement
+ * threads re-run the bootloader, picking up changed code — then resubmits one
+ * start() task per worker onto the fresh channel. Suspends until the old
+ * cohort has fully drained. */
+ZEND_METHOD(TrueAsync_HttpServer, reload)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (UNEXPECTED(!server->in_pool_mode || server->worker_pool == NULL
+                   || server->pool_await_state == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "reload() requires the built-in worker pool "
+            "(config->setWorkers(N) and a running start())", 0);
+        RETURN_THROWS();
+    }
+
+    if (UNEXPECTED(server->worker_pool->reload == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "true_async is too old for hot reload (ThreadPool ABI < 0.22)", 0);
+        RETURN_THROWS();
+    }
+
+    if (server->reload_in_progress) {
+        RETURN_FALSE; /* one rotation at a time — call again after it returns */
+    }
+
+    server->reload_in_progress = true;
+
+    const int workers = server->pool_worker_ctx_count;
+    pool_await_state_t *st = server->pool_await_state;
+    http_server_reload_shared_t *shared = server->reload_shared;
+    const uint64_t t0 = ZEND_ASYNC_NOW();
+
+    http_logf_info(&server->log_state, "reload.start workers=%d", workers);
+
+    /* Transit shells are single-load (the clone consumes the persistent closure
+     * copies), so every replacement cohort needs a fresh transfer. Done BEFORE
+     * anything is disrupted — a transfer failure aborts the reload cleanly. */
+    pool_worker_ctx_t *fresh = pemalloc(sizeof(*fresh) * (size_t)workers, 1);
+
+    for (int i = 0; i < workers; i++) {
+        ZVAL_UNDEF(&fresh[i].server_transit);
+        ZEND_ASYNC_THREAD_TRANSFER_ZVAL_TOPLEVEL(&fresh[i].server_transit, ZEND_THIS);
+
+        if (UNEXPECTED(EG(exception))) {
+            for (int j = 0; j <= i; j++) {
+                http_server_release_worker_shell(&fresh[j].server_transit);
+            }
+
+            pefree(fresh, 1);
+            http_logf_info(&server->log_state, "reload.failed stage=transfer");
+            server->reload_in_progress = false;
+            RETURN_THROWS();
+        }
+    }
+
+    /* Reserve completion slots for the fresh cohort BEFORE any old handler can
+     * finish, or all_done fires mid-rotation and start_pool tears the pool
+     * down under us. */
+    st->pending += workers;
+
+    /* Workers notice the bump on their next tick and retire themselves. */
+    zend_atomic_int_inc(&shared->epoch);
+
+    /* Rotate: suspends until every old worker exited; the engine spawns the
+     * replacement threads 1:1, each re-running the bootloader. */
+    server->worker_pool->reload(server->worker_pool);
+
+    if (UNEXPECTED(EG(exception))) {
+        /* Rotation aborted (cancellation) — drop the reservation and the fresh
+         * shells; a follow-up reload() builds new ones and heals the cohort. */
+        st->pending -= workers;
+
+        if (st->pending == 0 && st->all_done != NULL) {
+            ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
+        }
+
+        for (int i = 0; i < workers; i++) {
+            http_server_release_worker_shell(&fresh[i].server_transit);
+        }
+
+        pefree(fresh, 1);
+        http_logf_info(&server->log_state, "reload.failed duration_ms=%lu",
+                       (unsigned long)(ZEND_ASYNC_NOW() - t0));
+        server->reload_in_progress = false;
+        RETURN_THROWS();
+    }
+
+    /* Replacement threads are parked on the new task channel — hand each one
+     * its start() task from the fresh shells. */
+    int submitted = 0;
+
+    for (int i = 0; i < workers; i++) {
+        zend_async_event_t *worker_evt =
+            server->worker_pool->submit_internal(server->worker_pool,
+                                                 pool_worker_handler, &fresh[i]);
+
+        if (UNEXPECTED(worker_evt == NULL)) {
+            if (EG(exception)) {
+                zend_clear_exception();
+            }
+
+            st->pending--;
+            http_logf_info(&server->log_state, "reload.degraded worker=%d of %d",
+                           i + 1, workers);
+            continue;
+        }
+
+        zend_async_callbacks_push(worker_evt, &st->cb);
+        submitted++;
+    }
+
+    if (st->pending == 0 && st->all_done != NULL) {
+        ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
+    }
+
+    /* The old cohort has exited: its consumed shells can be released now. The
+     * fresh array takes their slot on the server (http_server_free releases
+     * whichever array is current at destruction). */
+    pool_worker_ctx_t *old_ctxs = server->pool_worker_ctx;
+
+    for (int i = 0; i < workers; i++) {
+        http_server_release_worker_shell(&old_ctxs[i].server_transit);
+    }
+
+    pefree(old_ctxs, 1);
+    server->pool_worker_ctx = fresh;
+
+    http_logf_info(&server->log_state, "reload.done workers=%d/%d duration_ms=%lu",
+                   submitted, workers, (unsigned long)(ZEND_ASYNC_NOW() - t0));
+    server->reload_in_progress = false;
+    RETURN_BOOL(submitted == workers);
 }
 /* }}} */
 
@@ -4099,7 +4355,7 @@ static void http_server_free(zend_object *obj)
     if (server->pool_worker_ctx != NULL) {
         pool_worker_ctx_t *ctxs = server->pool_worker_ctx;
         for (int i = 0; i < server->pool_worker_ctx_count; i++) {
-            ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&ctxs[i].server_transit);
+            http_server_release_worker_shell(&ctxs[i].server_transit);
         }
 
         pefree(ctxs, 1);
@@ -4234,6 +4490,39 @@ static void http_server_transit_static_release(http_server_transit_static_t *t)
     pefree(t, 1);
 }
 
+/* Release one worker transit shell INCLUDING the pemalloc'd C-state that
+ * transfer_obj(TRANSFER) hung off the wrapper — the engine's generic release
+ * frees only the wrapper graph, so the C-state and its side-cars leaked one
+ * set per shell (#93 found it: ~10KB per reload rotation). Safe both before
+ * and after LOAD (consumed closures release as empty skeletons). */
+static void http_server_release_worker_shell(zval *transit)
+{
+    if (Z_TYPE_P(transit) == IS_OBJECT) {
+        http_server_object *shell = http_server_from_obj(Z_OBJ_P(transit));
+
+        if (Z_TYPE(shell->config) == IS_OBJECT) {
+            ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&shell->config);
+        }
+
+        http_server_transit_handlers_t *th = shell->transit_handlers;
+
+        if (th != NULL) {
+            for (size_t i = 0; i < th->count; i++) {
+                ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&th->entries[i].closure);
+            }
+
+            pefree(th, 1);
+        }
+
+        http_server_transit_static_release(
+            (http_server_transit_static_t *) shell->transit_static_mounts);
+
+        pefree(shell, 1);
+    }
+
+    ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(transit);
+}
+
 static zend_object *http_server_transfer_obj(
     zend_object *object,
     zend_async_thread_transfer_ctx_t *ctx,
@@ -4243,7 +4532,10 @@ static zend_object *http_server_transfer_obj(
     if (kind == ZEND_OBJECT_TRANSFER) {
         http_server_object *src = http_server_from_obj(object);
 
-        if (src->running) {
+        /* The pool parent is exempt: it owns no live listeners — `running` only
+         * means it awaits its workers — and reload() re-transfers fresh shells
+         * for every replacement cohort (transit closures are single-load). */
+        if (src->running && !src->in_pool_mode) {
             ctx->error = "Cannot transfer HttpServer while running; "
                          "transfer the server before any thread calls start()";
             return NULL;
@@ -4337,6 +4629,10 @@ static zend_object *http_server_transfer_obj(
                sizeof(dst_shell->pool_tcp_fds));
         dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
 
+        /* Hot-reload beacon (issue #93): plain pointer copy — the pemalloc'd
+         * struct is owned by the pool parent and outlives every clone. */
+        dst_shell->reload_shared = src->reload_shared;
+
         return dst;
     }
 
@@ -4359,6 +4655,16 @@ static zend_object *http_server_transfer_obj(
      * the standalone event loop, otherwise we'd recursively spawn a
      * fresh ThreadPool on every worker. */
     dst_obj->is_worker_clone = true;
+
+    /* Hot-reload beacon (issue #93): the clone watches epoch from its deadline
+     * tick. Snapshot the current value — only a bump AFTER this load retires
+     * the worker. */
+    dst_obj->reload_shared = src_shell->reload_shared;
+
+    if (dst_obj->reload_shared != NULL) {
+        dst_obj->reload_epoch_seen = zend_atomic_int_load(
+            &((http_server_reload_shared_t *) dst_obj->reload_shared)->epoch);
+    }
 
     if (Z_TYPE(src_shell->config) == IS_OBJECT) {
         /* create_object zeroed dst->config; drop the UNDEF and install loaded. */
