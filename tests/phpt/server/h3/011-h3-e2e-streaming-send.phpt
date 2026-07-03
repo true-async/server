@@ -47,8 +47,9 @@ $expected_body = implode('', $chunks);
 $expected_sha1 = sha1($expected_body);
 $expected_len  = strlen($expected_body);
 
-$port = 20500 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)

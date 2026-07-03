@@ -14,8 +14,9 @@ use function Async\await;
 // drops trailers silently per the stub doc — no need for an H2 client
 // to verify the in-handler getters).
 
-$port = 19250 + getmypid() % 1000;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $server = new HttpServer((new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setReadTimeout(5)->setWriteTimeout(5));

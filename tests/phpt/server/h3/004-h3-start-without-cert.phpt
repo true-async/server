@@ -18,8 +18,9 @@ if (!class_exists('TrueAsync\HttpServer')) die('skip http_server not loaded');
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 
-$port = 20100 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addHttp3Listener('127.0.0.1', $port)
     ->setReadTimeout(2);

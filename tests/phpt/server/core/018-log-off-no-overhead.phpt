@@ -17,6 +17,8 @@ if (getenv('GITHUB_ACTIONS') !== false || getenv('SKIP_PERF_TESTS') !== false) {
 ?>
 --FILE--
 <?php
+require_once __DIR__ . '/../_free_port.inc';
+
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use TrueAsync\LogSeverity;
@@ -46,7 +48,7 @@ function gen_body(string $boundary, int $fields): string {
 }
 
 function run(?int $severity_value, ?string $logfile): float {
-    $port = 19850 + getmypid() % 30 + ($severity_value ?? 0);
+    $port = tas_free_port();
     $cfg = (new HttpServerConfig())
         ->addListener('127.0.0.1', $port)
         ->setReadTimeout(5)

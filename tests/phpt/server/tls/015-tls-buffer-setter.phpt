@@ -47,7 +47,9 @@ $key  = sys_get_temp_dir() . '/tls015-' . getmypid() . '.key';
 if (!tls_gen_cert($key, $cert)) { echo "cert gen failed\n"; exit(1); }
 register_shutdown_function(function () use ($cert, $key) { @unlink($cert); @unlink($key); });
 
-$port = 19945 + getmypid() % 20;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $size = 200000;                                            /* > one record → exercises park path */
 $body = str_repeat("\0", $size);
 for ($i = 0; $i < $size; $i++) { $body[$i] = chr(($i * 31 + 7) & 0xff); }

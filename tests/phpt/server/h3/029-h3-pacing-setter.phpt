@@ -42,7 +42,9 @@ register_shutdown_function(function () use ($tmp, $cert, $key) {
     @unlink($cert); @unlink($key); @rmdir($tmp);
 });
 
-$port = 20460 + getmypid() % 40;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port_span(2);
 $size = 256 * 1024;
 $body = str_repeat("\0", $size);
 for ($i = 0; $i < $size; $i++) { $body[$i] = chr(($i * 31 + 7) & 0xff); }

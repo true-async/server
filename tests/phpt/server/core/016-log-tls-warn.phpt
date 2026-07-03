@@ -23,7 +23,9 @@ $cert = $tmp . '/cert.pem';
 $key  = $tmp . '/key.pem';
 if (!tls_gen_cert($key, $cert)) { echo "cert generation failed\n"; exit(1); }
 
-$port = 19940 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $logfile = sys_get_temp_dir() . "/php-http-server-093-" . getmypid() . ".log";
 @unlink($logfile);
 $logfh = fopen($logfile, "w+b");

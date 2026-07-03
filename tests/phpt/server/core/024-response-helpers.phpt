@@ -13,8 +13,9 @@ use function Async\await;
 // One server, three requests against three different paths — each path
 // triggers a different helper. Server stops after the third response.
 
-$port = 19230 + getmypid() % 1000;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $server = new HttpServer((new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setReadTimeout(5)->setWriteTimeout(5));

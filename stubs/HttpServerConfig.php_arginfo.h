@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: 3f74222f92482fa79cba17174f12fd9f023a317f */
+ * Stub hash: 4d389377f8768c3f1faf3593872627ba44c80676 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -41,6 +41,17 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setBootloader, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_OBJ_INFO(0, bootloader, Closure, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_enableHotReload, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, watchPaths, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, extensions, IS_ARRAY, 0, "[\'php\']")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, debounceMs, IS_LONG, 0, "300")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, maxHoldMs, IS_LONG, 0, "2000")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_enableReloadOnSignal, 0, 0, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, enabled, _IS_BOOL, 0, "true")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getBootloader, 0, 0, Closure, 1)
@@ -289,6 +300,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setBacklog);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWorkers);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWorkers);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBootloader);
+ZEND_METHOD(TrueAsync_HttpServerConfig, enableHotReload);
+ZEND_METHOD(TrueAsync_HttpServerConfig, enableReloadOnSignal);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getBootloader);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getBacklog);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxConnections);
@@ -404,6 +417,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, setWorkers, arginfo_class_TrueAsync_HttpServerConfig_setWorkers, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getWorkers, arginfo_class_TrueAsync_HttpServerConfig_getWorkers, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setBootloader, arginfo_class_TrueAsync_HttpServerConfig_setBootloader, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, enableHotReload, arginfo_class_TrueAsync_HttpServerConfig_enableHotReload, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, enableReloadOnSignal, arginfo_class_TrueAsync_HttpServerConfig_enableReloadOnSignal, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getBootloader, arginfo_class_TrueAsync_HttpServerConfig_getBootloader, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getBacklog, arginfo_class_TrueAsync_HttpServerConfig_getBacklog, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setMaxConnections, arginfo_class_TrueAsync_HttpServerConfig_setMaxConnections, ZEND_ACC_PUBLIC)

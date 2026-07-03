@@ -40,8 +40,9 @@ $buf = substr($buf, 0, $size);
 file_put_contents($payload, $buf);
 $expected_sha1 = sha1($buf);
 
-$port = 19920 + getmypid() % 20;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
     ->enableTls(true)

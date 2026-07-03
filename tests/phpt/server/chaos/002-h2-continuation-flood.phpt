@@ -27,8 +27,9 @@ use function Async\delay;
 
 require __DIR__ . '/../h2/_h2_client.inc';
 
-$port = 19872 + getmypid() % 100;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setReadTimeout(10)

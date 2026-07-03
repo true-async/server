@@ -411,6 +411,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->stream_write_buffer_bytes    = DEFAULT_STREAM_WRITE_BUFFER_BYTES;
     config->max_body_size                = DEFAULT_MAX_BODY_SIZE;
     config->h2_static_budget_max         = 0;  /* 0 = auto from memory_limit */
+    ZVAL_UNDEF(&config->hot_reload_paths);
+    ZVAL_UNDEF(&config->hot_reload_extensions);
+    config->hot_reload_debounce_ms       = 300;
+    config->hot_reload_max_hold_ms       = 2000;
+    config->reload_on_sighup             = false;
     config->http3_idle_timeout_ms        = DEFAULT_HTTP3_IDLE_TIMEOUT_MS;
     config->http3_stream_window_bytes    = DEFAULT_HTTP3_STREAM_WINDOW_BYTES;
     config->http3_max_concurrent_streams = DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS;
@@ -724,6 +729,111 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getWorkers)
     ZEND_PARSE_PARAMETERS_NONE();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     RETURN_LONG(config->workers);
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::enableHotReload(array $watchPaths, array $extensions = ['php'], int $debounceMs = 300, int $maxHoldMs = 2000): static
+ *
+ * Dev hot-reload trigger (issue #93), pool mode only. The pool parent spawns
+ * one recursive Async\FileSystemWatcher per path with the given debounce; a
+ * collapsed change event invalidates the watched trees in opcache and calls
+ * HttpServer::reload() — replacement workers re-run the bootloader. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, enableHotReload)
+{
+    HashTable *paths;
+    HashTable *extensions = NULL;
+    zend_long debounce_ms = 300;
+    zend_long max_hold_ms = 2000;
+
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+        Z_PARAM_ARRAY_HT(paths)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_HT(extensions)
+        Z_PARAM_LONG(debounce_ms)
+        Z_PARAM_LONG(max_hold_ms)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (zend_hash_num_elements(paths) == 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "enableHotReload() requires at least one watch path", 0);
+        return;
+    }
+
+    const zval *entry;
+    ZEND_HASH_FOREACH_VAL(paths, entry)
+    {
+        if (Z_TYPE_P(entry) != IS_STRING || Z_STRLEN_P(entry) == 0) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "enableHotReload() watch paths must be non-empty strings", 0);
+            return;
+        }
+    }
+    ZEND_HASH_FOREACH_END();
+
+    if (debounce_ms < 1 || debounce_ms > 600000 || max_hold_ms < 0 || max_hold_ms > 600000) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "enableHotReload() debounceMs must be 1..600000, maxHoldMs 0..600000", 0);
+        return;
+    }
+
+    if (Z_TYPE(config->hot_reload_paths) != IS_UNDEF) {
+        zval_ptr_dtor(&config->hot_reload_paths);
+    }
+
+    if (Z_TYPE(config->hot_reload_extensions) != IS_UNDEF) {
+        zval_ptr_dtor(&config->hot_reload_extensions);
+        ZVAL_UNDEF(&config->hot_reload_extensions);
+    }
+
+    ZVAL_ARR(&config->hot_reload_paths, zend_array_dup(paths));
+
+    if (extensions != NULL && zend_hash_num_elements(extensions) > 0) {
+        ZVAL_ARR(&config->hot_reload_extensions, zend_array_dup(extensions));
+    }
+
+    config->hot_reload_debounce_ms = (uint32_t)debounce_ms;
+    config->hot_reload_max_hold_ms = (uint32_t)max_hold_ms;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::enableReloadOnSignal(bool $enabled = true): static
+ *
+ * Prod hot-reload trigger (issue #93), pool mode only: the pool parent arms a
+ * persistent SIGHUP handler that calls HttpServer::reload(). */
+ZEND_METHOD(TrueAsync_HttpServerConfig, enableReloadOnSignal)
+{
+    bool enabled = true;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+#ifdef PHP_WIN32
+    if (enabled) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "enableReloadOnSignal() is not supported on Windows (no SIGHUP)", 0);
+        return;
+    }
+#endif
+
+    config->reload_on_sighup = enabled;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 /* }}} */
 
@@ -2800,6 +2910,16 @@ static void http_server_config_free(zend_object *obj)
     if (Z_TYPE(config->log_stream) != IS_UNDEF) {
         zval_ptr_dtor(&config->log_stream);
         ZVAL_UNDEF(&config->log_stream);
+    }
+
+    if (Z_TYPE(config->hot_reload_paths) != IS_UNDEF) {
+        zval_ptr_dtor(&config->hot_reload_paths);
+        ZVAL_UNDEF(&config->hot_reload_paths);
+    }
+
+    if (Z_TYPE(config->hot_reload_extensions) != IS_UNDEF) {
+        zval_ptr_dtor(&config->hot_reload_extensions);
+        ZVAL_UNDEF(&config->hot_reload_extensions);
     }
 
     if (Z_TYPE(config->bootloader) != IS_UNDEF) {

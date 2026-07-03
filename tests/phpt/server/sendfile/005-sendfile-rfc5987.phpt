@@ -31,7 +31,9 @@ $cases = [
             "attachment; filename*=UTF-8''a%22b.txt"],
 ];
 
-$port   = 28430 + getmypid() % 1000;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
 $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) use ($tmp, $cases) {

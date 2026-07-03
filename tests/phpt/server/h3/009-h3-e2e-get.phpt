@@ -40,8 +40,9 @@ exec(sprintf('openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes '
     escapeshellarg($key), escapeshellarg($cert)), $_, $rc);
 if ($rc !== 0) { echo "cert gen failed\n"; exit(1); }
 
-$port = 20300 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)   /* TCP listener required by start() */
     ->addHttp3Listener('127.0.0.1', $port)

@@ -30,8 +30,9 @@ $cert_path = $tmp_dir . '/cert.pem';
 $key_path  = $tmp_dir . '/key.pem';
 if (!h3_gen_cert($key_path, $cert_path)) { echo "cert gen failed\n"; exit(1); }
 
-$port = 19900 + getmypid() % 100;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)  /* dummy TCP so start() has >=1 listener pre-H3 */
     ->addHttp3Listener('127.0.0.1', $port)

@@ -31,8 +31,9 @@ $cert = $tmp . '/cert.pem';
 $key  = $tmp . '/key.pem';
 if (!h3_gen_cert($key, $cert)) { echo "cert gen failed\n"; exit(1); }
 
-$port = 21000 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1, true)
     ->addHttp3Listener('127.0.0.1', $port)

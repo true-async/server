@@ -30,7 +30,9 @@ register_shutdown_function(function() use ($root) {
     @rmdir($root);
 });
 
-$port = 19940 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $workers = 2;
 
 $config = (new HttpServerConfig())

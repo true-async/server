@@ -32,7 +32,9 @@ use function Async\spawn;
 use function Async\await;
 use function Async\delay;
 
-$port = 19680 + getmypid() % 100;
+require_once __DIR__ . '/../server/_free_port.inc';
+
+$port = tas_free_port();
 $N    = 4;
 
 $config = (new HttpServerConfig())

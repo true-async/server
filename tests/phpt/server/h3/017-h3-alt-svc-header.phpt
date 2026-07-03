@@ -63,7 +63,9 @@ function run_server(int $tcp_port, int $udp_port, string $cert, string $key, boo
     return $captured;
 }
 
-$port_tcp = 20900 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port_tcp = tas_free_port_span(11);
 $port_udp = $port_tcp + 1;
 
 $out = run_server($port_tcp, $port_udp, $cert, $key, /* disable */ false);

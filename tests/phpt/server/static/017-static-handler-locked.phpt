@@ -21,7 +21,9 @@ $root = sys_get_temp_dir() . '/sh-lock-' . getmypid() . '-' . bin2hex(random_byt
 mkdir($root, 0700, true);
 register_shutdown_function(fn() => @rmdir($root));
 
-$port   = 28560 + getmypid() % 1000;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $sh     = new StaticHandler('/s/', $root);
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
 $server = new HttpServer($config);

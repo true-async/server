@@ -33,6 +33,10 @@
 #include "core/worker_registry.h"
 #include "core/response_wire.h"
 #include "log/http_log.h"
+#ifndef PHP_WIN32
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 #include "static/static_handler.h"
 #include "static/http_static_cache.h"
 #ifdef HAVE_HTTP_SERVER_HTTP3
@@ -479,6 +483,14 @@ struct http_server_object {
     bool                     reload_in_progress;/* parent: one rotation at a time */
     void                    *pool_await_state;  /* parent: st of the active pool run */
 
+    /* Hot-reload triggers (issue #93), pool parent only. Watcher objects are
+     * closed and released by http_server_hot_reload_down; the SIGHUP event is
+     * owned by its orchestrator coroutine (the pointer here only lets teardown
+     * wake it). */
+    zval                     hot_reload_watchers; /* array of Async\FileSystemWatcher */
+    void                    *sighup_event;        /* zend_async_signal_event_t* */
+    bool                     hot_reload_stopping; /* orchestrators must exit */
+
     /* Transit sidecar — non-NULL only in the persistent shell created by
      * transfer_obj(TRANSFER). Holds pemalloc-copied closures so the LOAD
      * side can rebuild fcall_t entries in the destination thread's heap.
@@ -576,6 +588,9 @@ typedef struct {
 } http_server_reload_shared_t;
 
 static void http_server_do_stop(http_server_object *server, const char *reason);
+static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
+                                      http_server_config_t *cfg);
+static void http_server_hot_reload_down(http_server_object *server);
 
 /* Runs on a fresh coroutine enqueued by the deadline tick: stop() disposes that
  * very tick timer, which must not happen from inside its own callback. */
@@ -2710,6 +2725,12 @@ static int http_server_start_pool(http_server_object *server,
     server->in_pool_mode = true;
     server->running = true;
 
+    /* Arm hot-reload triggers (issue #93) on the parent before it suspends. */
+    if (boot_cfg != NULL
+        && (Z_TYPE(boot_cfg->hot_reload_paths) == IS_ARRAY || boot_cfg->reload_on_sighup)) {
+        http_server_hot_reload_up(server, this_zv, boot_cfg);
+    }
+
     /* Suspend until all submitted workers report done. Skip the suspend
      * entirely when nothing got submitted — there is no callback to
      * notify all_done, so awaiting on it would deadlock. */
@@ -2740,6 +2761,9 @@ cleanup:
     server->in_pool_mode = false;
     server->worker_pool = NULL;
     server->pool_await_state = NULL;
+
+    /* Retire the hot-reload orchestrators before the pool machinery goes. */
+    http_server_hot_reload_down(server);
 
     /* Workers have quiesced (the suspend returned). Tear down the transport
      * reactor pool: this releases the H3 listeners the gated reactors own,
@@ -3630,6 +3654,17 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         RETURN_THROWS();
     }
 
+    /* The gated transport reactor pool (#80) routes requests through worker
+     * inboxes registered for the pool's lifetime; retiring a worker while the
+     * reactors are live would leave them posting into freed inboxes (there is
+     * no registry unregister yet). Refuse loudly instead of corrupting. */
+    if (UNEXPECTED(http_server_reactor_pool_enabled())) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "reload() is not yet supported with TRUE_ASYNC_SERVER_REACTOR_POOL=1 "
+            "(worker inbox rotation is not implemented, #93)", 0);
+        RETURN_THROWS();
+    }
+
     if (server->reload_in_progress) {
         RETURN_FALSE; /* one rotation at a time — call again after it returns */
     }
@@ -3742,6 +3777,433 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
     RETURN_BOOL(submitted == workers);
 }
 /* }}} */
+
+/* ==========================================================================
+ * Hot-reload triggers (issue #93) — pool-parent orchestrators.
+ * ========================================================================== */
+
+typedef struct {
+    zend_object *server_obj;   /* addref'd parent HttpServer */
+    zval         watcher;      /* owned Async\FileSystemWatcher */
+} hot_reload_watch_ctx_t;
+
+typedef struct {
+    zend_object *server_obj;
+} hot_reload_sighup_ctx_t;
+
+static void hot_reload_watch_ctx_dispose(zend_coroutine_t *co)
+{
+    hot_reload_watch_ctx_t *ctx = co->extended_data;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    co->extended_data = NULL;
+    zval_ptr_dtor(&ctx->watcher);
+    OBJ_RELEASE(ctx->server_obj);
+    efree(ctx);
+}
+
+static void hot_reload_sighup_ctx_dispose(zend_coroutine_t *co)
+{
+    hot_reload_sighup_ctx_t *ctx = co->extended_data;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    co->extended_data = NULL;
+    OBJ_RELEASE(ctx->server_obj);
+    efree(ctx);
+}
+
+#ifndef PHP_WIN32
+/* Case-insensitive extension allow-list check; NULL/empty list = every file. */
+static bool hot_reload_ext_matches(const HashTable *exts, const char *name)
+{
+    if (exts == NULL || zend_hash_num_elements((HashTable *)exts) == 0) {
+        return true;
+    }
+
+    const char *dot = strrchr(name, '.');
+
+    if (dot == NULL || dot[1] == '\0') {
+        return false;
+    }
+
+    const zval *entry;
+    ZEND_HASH_FOREACH_VAL((HashTable *)exts, entry)
+    {
+        if (Z_TYPE_P(entry) != IS_STRING) {
+            continue;
+        }
+
+        const char *e = Z_STRVAL_P(entry);
+
+        if (e[0] == '.') {
+            e++;
+        }
+
+        if (strcasecmp(dot + 1, e) == 0) {
+            return true;
+        }
+    }
+    ZEND_HASH_FOREACH_END();
+
+    return false;
+}
+
+/* opcache_invalidate($file, true) for every matching file under `dir`.
+ * `fname` is the pre-resolved "opcache_invalidate" callable zval. */
+static void hot_reload_invalidate_tree(const char *dir, const HashTable *exts,
+                                       zval *fname, const int depth)
+{
+    if (depth > 16) {
+        return;
+    }
+
+    DIR *d = opendir(dir);
+
+    if (d == NULL) {
+        return;
+    }
+
+    const struct dirent *ent;
+
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.'
+            && (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) {
+            continue;
+        }
+
+        char full[MAXPATHLEN];
+
+        if ((size_t)snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name) >= sizeof(full)) {
+            continue;
+        }
+
+        struct stat st;
+
+        if (lstat(full, &st) != 0) {
+            continue;
+        }
+
+        if (S_ISDIR(st.st_mode)) {
+            hot_reload_invalidate_tree(full, exts, fname, depth + 1);
+            continue;
+        }
+
+        if (!S_ISREG(st.st_mode) || !hot_reload_ext_matches(exts, ent->d_name)) {
+            continue;
+        }
+
+        zval rv, params[2];
+        ZVAL_UNDEF(&rv);
+        ZVAL_STRING(&params[0], full);
+        ZVAL_TRUE(&params[1]);
+        call_user_function(NULL, NULL, fname, &rv, 2, params);
+        zval_ptr_dtor(&params[0]);
+        zval_ptr_dtor(&rv);
+
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+    }
+
+    closedir(d);
+}
+#endif /* !PHP_WIN32 */
+
+/* One trigger firing: invalidate the watched trees in opcache (so replacement
+ * bootloaders recompile the changed files) and rotate via HttpServer::reload(). */
+static void http_server_hot_reload_fire(zend_object *server_obj, const char *trigger)
+{
+    http_server_object *server = http_server_from_obj(server_obj);
+
+    if (server->hot_reload_stopping || !server->in_pool_mode) {
+        return;
+    }
+
+    http_logf_info(&server->log_state, "reload.trigger source=%s", trigger);
+
+#ifndef PHP_WIN32
+    http_server_config_t *cfg = http_server_get_config(server);
+
+    if (cfg != NULL && Z_TYPE(cfg->hot_reload_paths) == IS_ARRAY) {
+        zval fname;
+        ZVAL_STRING(&fname, "opcache_invalidate");
+
+        if (zend_is_callable(&fname, 0, NULL)) {
+            const HashTable *exts = (Z_TYPE(cfg->hot_reload_extensions) == IS_ARRAY)
+                                  ? Z_ARRVAL(cfg->hot_reload_extensions) : NULL;
+            const zval *path;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL(cfg->hot_reload_paths), path)
+            {
+                hot_reload_invalidate_tree(Z_STRVAL_P(path), exts, &fname, 0);
+            }
+            ZEND_HASH_FOREACH_END();
+        }
+
+        zval_ptr_dtor(&fname);
+    }
+#endif
+
+    zval rv;
+    ZVAL_UNDEF(&rv);
+    zend_call_method_with_0_params(server_obj, NULL, NULL, "reload", &rv);
+    zval_ptr_dtor(&rv);
+
+    if (EG(exception)) {
+        http_logf_info(&server->log_state, "reload.trigger source=%s failed", trigger);
+        zend_clear_exception();
+    }
+}
+
+/* Coroutine: drive one watcher's iterator; every delivered (debounced) event
+ * is one reload. Ends when the watcher is closed by teardown. */
+static void http_server_hot_reload_watch_entry(void)
+{
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    hot_reload_watch_ctx_t *ctx = co->extended_data;
+    http_server_object *server = http_server_from_obj(ctx->server_obj);
+
+    zval iter;
+    ZVAL_UNDEF(&iter);
+    zend_call_method_with_0_params(Z_OBJ(ctx->watcher), NULL, NULL, "getIterator", &iter);
+
+    if (EG(exception) || Z_TYPE(iter) != IS_OBJECT) {
+        zend_clear_exception();
+        zval_ptr_dtor(&iter);
+        return;
+    }
+
+    zval rv;
+    ZVAL_UNDEF(&rv);
+    zend_call_method_with_0_params(Z_OBJ(iter), NULL, NULL, "rewind", &rv);
+    zval_ptr_dtor(&rv);
+
+    while (!EG(exception) && !server->hot_reload_stopping) {
+        zval valid;
+        ZVAL_UNDEF(&valid);
+        zend_call_method_with_0_params(Z_OBJ(iter), NULL, NULL, "valid", &valid);
+
+        const bool go = !EG(exception) && zend_is_true(&valid);
+        zval_ptr_dtor(&valid);
+
+        if (!go || server->hot_reload_stopping) {
+            break;
+        }
+
+        http_server_hot_reload_fire(ctx->server_obj, "watcher");
+
+        if (server->hot_reload_stopping) {
+            break;
+        }
+
+        ZVAL_UNDEF(&rv);
+        zend_call_method_with_0_params(Z_OBJ(iter), NULL, NULL, "next", &rv);
+        zval_ptr_dtor(&rv);
+    }
+
+    if (EG(exception)) {
+        zend_clear_exception();
+    }
+
+    zval_ptr_dtor(&iter);
+}
+
+#ifndef PHP_WIN32
+/* Coroutine: persistent SIGHUP handler — one signal event armed for the whole
+ * pool run (no unarmed window), each delivery is one reload. */
+static void http_server_hot_reload_sighup_entry(void)
+{
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    hot_reload_sighup_ctx_t *ctx = co->extended_data;
+    http_server_object *server = http_server_from_obj(ctx->server_obj);
+
+    zend_async_signal_event_t *sig = ZEND_ASYNC_NEW_SIGNAL_EVENT(SIGHUP);
+
+    if (UNEXPECTED(sig == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    if (UNEXPECTED(!sig->base.start(&sig->base))) {
+        zend_clear_exception();
+        sig->base.dispose(&sig->base);
+        return;
+    }
+
+    server->sighup_event = sig;
+    http_logf_info(&server->log_state, "reload.signal armed signal=SIGHUP");
+
+    while (!server->hot_reload_stopping) {
+        zend_async_resume_when(co, &sig->base, false, zend_async_waker_callback_resolve, NULL);
+        ZEND_ASYNC_SUSPEND();
+        ZEND_ASYNC_WAKER_DESTROY(co);
+
+        if (EG(exception)) {
+            zend_clear_exception();
+            break;
+        }
+
+        if (server->hot_reload_stopping) {
+            break;
+        }
+
+        http_server_hot_reload_fire(ctx->server_obj, "sighup");
+    }
+
+    server->sighup_event = NULL;
+    sig->base.stop(&sig->base);
+    sig->base.dispose(&sig->base);
+}
+#endif /* !PHP_WIN32 */
+
+/* Arm the configured triggers on the pool parent (called from start_pool just
+ * before it suspends). Failures degrade to "trigger off" with a log line. */
+static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
+                                      http_server_config_t *cfg)
+{
+    server->hot_reload_stopping = false;
+
+    if (Z_TYPE(cfg->hot_reload_paths) == IS_ARRAY) {
+        zend_string *cls = zend_string_init("Async\\FileSystemWatcher",
+                                            sizeof("Async\\FileSystemWatcher") - 1, 0);
+        zend_class_entry *ce = zend_lookup_class(cls);
+        zend_string_release(cls);
+
+        if (UNEXPECTED(ce == NULL)) {
+            zend_clear_exception();
+            http_logf_info(&server->log_state,
+                           "reload.watch unavailable (Async\\FileSystemWatcher missing)");
+            return;
+        }
+
+        array_init(&server->hot_reload_watchers);
+
+        const zval *path;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(cfg->hot_reload_paths), path)
+        {
+            zval watcher;
+
+            if (object_init_ex(&watcher, ce) != SUCCESS) {
+                zend_clear_exception();
+                continue;
+            }
+
+            zval args[6], rv;
+            ZVAL_COPY(&args[0], path);
+            ZVAL_TRUE(&args[1]);                                /* recursive */
+            ZVAL_TRUE(&args[2]);                                /* coalesce  */
+            ZVAL_LONG(&args[3], cfg->hot_reload_debounce_ms);
+            ZVAL_LONG(&args[4], cfg->hot_reload_max_hold_ms);
+
+            if (Z_TYPE(cfg->hot_reload_extensions) == IS_ARRAY) {
+                ZVAL_COPY(&args[5], &cfg->hot_reload_extensions);
+            } else {
+                array_init(&args[5]);
+            }
+
+            ZVAL_UNDEF(&rv);
+            zend_call_known_function(ce->constructor, Z_OBJ(watcher), ce, &rv,
+                                     6, args, NULL);
+            zval_ptr_dtor(&rv);
+            zval_ptr_dtor(&args[0]);
+            zval_ptr_dtor(&args[5]);
+
+            if (EG(exception)) {
+                http_logf_info(&server->log_state, "reload.watch failed path=%s",
+                               Z_STRVAL_P(path));
+                zend_clear_exception();
+                zval_ptr_dtor(&watcher);
+                continue;
+            }
+
+            hot_reload_watch_ctx_t *wctx = emalloc(sizeof(*wctx));
+            wctx->server_obj = Z_OBJ_P(this_zv);
+            GC_ADDREF(wctx->server_obj);
+            ZVAL_COPY(&wctx->watcher, &watcher);
+
+            zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(ZEND_ASYNC_MAIN_SCOPE);
+
+            if (UNEXPECTED(co == NULL)) {
+                zend_clear_exception();
+                zval_ptr_dtor(&wctx->watcher);
+                OBJ_RELEASE(wctx->server_obj);
+                efree(wctx);
+                zval_ptr_dtor(&watcher);
+                continue;
+            }
+
+            co->internal_entry   = http_server_hot_reload_watch_entry;
+            co->extended_data    = wctx;
+            co->extended_dispose = hot_reload_watch_ctx_dispose;
+            ZEND_ASYNC_ENQUEUE_COROUTINE(co);
+
+            add_next_index_zval(&server->hot_reload_watchers, &watcher);
+            http_logf_info(&server->log_state,
+                           "reload.watch armed path=%s debounce_ms=%u max_hold_ms=%u",
+                           Z_STRVAL_P(path), cfg->hot_reload_debounce_ms,
+                           cfg->hot_reload_max_hold_ms);
+        }
+        ZEND_HASH_FOREACH_END();
+    }
+
+#ifndef PHP_WIN32
+    if (cfg->reload_on_sighup) {
+        hot_reload_sighup_ctx_t *sctx = emalloc(sizeof(*sctx));
+        sctx->server_obj = Z_OBJ_P(this_zv);
+        GC_ADDREF(sctx->server_obj);
+
+        zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(ZEND_ASYNC_MAIN_SCOPE);
+
+        if (UNEXPECTED(co == NULL)) {
+            zend_clear_exception();
+            OBJ_RELEASE(sctx->server_obj);
+            efree(sctx);
+            return;
+        }
+
+        co->internal_entry   = http_server_hot_reload_sighup_entry;
+        co->extended_data    = sctx;
+        co->extended_dispose = hot_reload_sighup_ctx_dispose;
+        ZEND_ASYNC_ENQUEUE_COROUTINE(co);
+    }
+#endif
+}
+
+/* Retire the triggers: closing a watcher ends its iterator (the orchestrator
+ * sees valid()=false); notifying the signal event wakes its waiter, which
+ * observes hot_reload_stopping and disposes the event itself. */
+static void http_server_hot_reload_down(http_server_object *server)
+{
+    server->hot_reload_stopping = true;
+
+    if (Z_TYPE(server->hot_reload_watchers) == IS_ARRAY) {
+        const zval *w;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(server->hot_reload_watchers), w)
+        {
+            zval rv;
+            ZVAL_UNDEF(&rv);
+            zend_call_method_with_0_params(Z_OBJ_P(w), NULL, NULL, "close", &rv);
+            zval_ptr_dtor(&rv);
+
+            if (EG(exception)) {
+                zend_clear_exception();
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+
+        zval_ptr_dtor(&server->hot_reload_watchers);
+        ZVAL_UNDEF(&server->hot_reload_watchers);
+    }
+
+    if (server->sighup_event != NULL) {
+        ZEND_ASYNC_CALLBACKS_NOTIFY((zend_async_event_t *) server->sighup_event, NULL, NULL);
+    }
+}
 
 /* {{{ proto HttpServer::isRunning(): bool */
 ZEND_METHOD(TrueAsync_HttpServer, isRunning)
