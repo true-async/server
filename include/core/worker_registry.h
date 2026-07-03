@@ -44,10 +44,17 @@ worker_registry_t *worker_registry_create(int capacity);
  * own thread once its inbox is up. Returns false for an out-of-range slot. */
 bool worker_registry_publish(worker_registry_t *reg, int idx, worker_inbox_t *inbox);
 
-/* Atomically claim the next free slot and publish `inbox` into it — lets each
- * worker register without being told its index. Returns the slot index, or -1
- * if the table is full. Any thread. */
+/* Claim a free slot and publish `inbox` into it — lets each worker register
+ * without being told its index. Slots freed by worker_registry_retire are
+ * reused, so a rotated pool (#93) keeps registering replacements. Returns the
+ * slot index, or -1 if the table is full. Any thread. */
 int worker_registry_add(worker_registry_t *reg, worker_inbox_t *inbox);
+
+/* Unpublish `inbox` (its slot becomes claimable again). After this returns no
+ * NEW pick/at can see the inbox; a producer that loaded the pointer just
+ * before must still be fenced out by the caller (reactor fence) before the
+ * inbox memory is released. Any thread. Returns false if not found. */
+bool worker_registry_retire(worker_registry_t *reg, const worker_inbox_t *inbox);
 
 /* Number of slots, and number currently published. */
 int worker_registry_capacity(const worker_registry_t *reg);
