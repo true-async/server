@@ -19,7 +19,8 @@ use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
-$port  = 19880 + getmypid() % 100;
+require __DIR__ . '/../_free_port.inc';
+$port  = tas_free_port();
 $vfile = sys_get_temp_dir() . '/tas_reload_ver_' . getmypid();
 $bfile = sys_get_temp_dir() . '/tas_reload_boot_' . getmypid();
 file_put_contents($vfile, 'v1');

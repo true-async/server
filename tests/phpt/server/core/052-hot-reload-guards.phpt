@@ -16,7 +16,8 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 /* Guard: reload() outside pool mode is a hard error. */
-$plain = new HttpServer((new HttpServerConfig())->addListener('127.0.0.1', 19870));
+require __DIR__ . '/../_free_port.inc';
+$plain = new HttpServer((new HttpServerConfig())->addListener('127.0.0.1', tas_free_port()));
 try {
     $plain->reload();
     echo "no-throw\n";
@@ -25,7 +26,7 @@ try {
 }
 
 /* Serving continuity: requests keep being answered across a rotation. */
-$port = 19780 + getmypid() % 100;
+$port = tas_free_port();
 
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
