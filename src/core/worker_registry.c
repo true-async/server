@@ -17,10 +17,16 @@
 #include "Zend/zend_atomic.h"
 #include "core/worker_registry.h"
 
+#ifdef PHP_WIN32
+#include "libuv/uv.h"
+#else
+#include <uv.h>
+#endif
+
 struct worker_registry_s {
     zend_atomic_ptr *slots;     /* [capacity], each a worker_inbox_t* or NULL */
     zend_atomic_int  rr;        /* round-robin cursor */
-    zend_atomic_int  next;      /* next slot to claim */
+    uv_mutex_t       admin;     /* serialises add/retire (rare); picks stay lock-free */
     int              capacity;
 };
 
@@ -34,7 +40,7 @@ worker_registry_t *worker_registry_create(const int capacity)
     reg->slots    = pecalloc((size_t)capacity, sizeof(zend_atomic_ptr), 0);
     reg->capacity = capacity;
     ZEND_ATOMIC_INT_INIT(&reg->rr, 0);
-    ZEND_ATOMIC_INT_INIT(&reg->next, 0);
+    uv_mutex_init(&reg->admin);
 
     for (int i = 0; i < capacity; i++) {
         ZEND_ATOMIC_PTR_INIT(&reg->slots[i], NULL);
@@ -60,15 +66,40 @@ int worker_registry_add(worker_registry_t *reg, worker_inbox_t *inbox)
         return -1;
     }
 
-    const int idx = zend_atomic_int_fetch_add(&reg->next, 1);
+    int idx = -1;
+    uv_mutex_lock(&reg->admin);
 
-    if (idx >= reg->capacity) {
-        return -1;
+    for (int i = 0; i < reg->capacity; i++) {
+        if (zend_atomic_ptr_load_ex(&reg->slots[i]) == NULL) {
+            zend_atomic_ptr_store_ex(&reg->slots[i], inbox);
+            idx = i;
+            break;
+        }
     }
 
-    zend_atomic_ptr_store_ex(&reg->slots[idx], inbox);
-
+    uv_mutex_unlock(&reg->admin);
     return idx;
+}
+
+bool worker_registry_retire(worker_registry_t *reg, const worker_inbox_t *inbox)
+{
+    if (UNEXPECTED(reg == NULL || inbox == NULL)) {
+        return false;
+    }
+
+    bool found = false;
+    uv_mutex_lock(&reg->admin);
+
+    for (int i = 0; i < reg->capacity; i++) {
+        if (zend_atomic_ptr_load_ex(&reg->slots[i]) == (void *)inbox) {
+            zend_atomic_ptr_store_ex(&reg->slots[i], NULL);
+            found = true;
+            break;
+        }
+    }
+
+    uv_mutex_unlock(&reg->admin);
+    return found;
 }
 
 int worker_registry_capacity(const worker_registry_t *reg)
@@ -190,6 +221,7 @@ void worker_registry_free(worker_registry_t *reg)
         return;
     }
 
+    uv_mutex_destroy(&reg->admin);
     pefree(reg->slots, 0);
     pefree(reg, 0);
 }

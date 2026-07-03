@@ -591,6 +591,7 @@ static void http_server_do_stop(http_server_object *server, const char *reason);
 static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
                                       http_server_config_t *cfg);
 static void http_server_hot_reload_down(http_server_object *server);
+static void http_server_worker_inbox_retire(http_server_object *server);
 
 /* Runs on a fresh coroutine enqueued by the deadline tick: stop() disposes that
  * very tick timer, which must not happen from inside its own callback. */
@@ -602,6 +603,10 @@ static void http_server_reload_stop_entry(void)
     if (UNEXPECTED(server == NULL || !server->running || server->stopping)) {
         return;
     }
+
+    /* Reactor-pool mode: unpublish our inbox and fence the reactors BEFORE the
+     * stop — a producer must never post into a dying worker's inbox (#93). */
+    http_server_worker_inbox_retire(server);
 
     server->stopping = true;
     http_server_do_stop(server, "reload");
@@ -2493,6 +2498,13 @@ static void http_server_reactor_pool_up(http_server_object *server, const int wo
  * Idempotent; safe when the pool was never brought up. */
 static void http_server_reactor_pool_down(http_server_object *server)
 {
+    /* Parent-only: a worker clone dying mid-run (hot reload rotation, #93)
+     * must not tear down the GLOBAL registry/pool the live reactors and the
+     * other workers are using. */
+    if (server->is_worker_clone) {
+        return;
+    }
+
 #ifdef HAVE_HTTP_SERVER_HTTP3
     /* Reactor-owned H3 listeners first, on their own threads, while the reactors
      * still run — then stop the pool. */
@@ -2543,6 +2555,112 @@ static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
 #endif
 
     response_wire_free(rw);
+}
+
+/* Suspend the current coroutine for `ms` on a one-shot timer; lets the worker
+ * loop keep draining (mailbox, scheduler) while we wait. */
+static void hot_reload_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
+{
+    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    t->base.start(&t->base);
+    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    ZEND_ASYNC_WAKER_DESTROY(co);
+
+    if (EG(exception)) {
+        zend_clear_exception();
+    }
+}
+
+/* Reactor fence bookkeeping (#93): the decrement that reaches zero fires the
+ * retiring worker's trigger — from a reactor thread, or from the worker itself
+ * when a post could not be delivered. */
+typedef struct {
+    zend_atomic_int              remaining;
+    zend_async_trigger_event_t  *done;
+} inbox_fence_t;
+
+static void http_server_inbox_fence_cb(void *arg)
+{
+    inbox_fence_t *const fence = arg;
+
+    if (zend_atomic_int_fetch_sub(&fence->remaining, 1) == 1) {
+        fence->done->trigger(fence->done);
+    }
+}
+
+/* Unpublish this worker's inbox before the worker dies (#93 reload):
+ * 1. retire the registry slot — no NEW pick can return the inbox;
+ * 2. fence every reactor — a dispatch that loaded the pointer just before the
+ *    retire has finished by the time its reactor runs the fence (dispatch is
+ *    synchronous on the reactor loop, the fence queues behind it);
+ * 3. wait out the residual mailbox — items already posted drain on our own
+ *    loop into server_scope, where the normal stop-path drain awaits them.
+ * After this the clone's worker_inbox_free really does run with quiesced
+ * producers, which is the contract it always assumed. */
+static void http_server_worker_inbox_retire(http_server_object *server)
+{
+    if (server->worker_inbox == NULL || g_worker_registry == NULL) {
+        return;
+    }
+
+    worker_registry_retire(g_worker_registry, server->worker_inbox);
+
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    const int n = g_reactor_pool != NULL ? reactor_pool_count(g_reactor_pool) : 0;
+
+    if (n > 0 && co != NULL) {
+        zend_async_trigger_event_t *done = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+        if (done != NULL) {
+            inbox_fence_t *fence = pemalloc(sizeof(*fence), 1);
+            fence->done = done;
+            ZEND_ATOMIC_INT_INIT(&fence->remaining, n);
+
+            /* Subscribe BEFORE posting: a fence that fires instantly resolves
+             * the waker and the suspend below returns immediately. */
+            zend_async_resume_when(co, &done->base, false,
+                                   zend_async_waker_callback_resolve, NULL);
+
+            for (int i = 0; i < n; i++) {
+                if (!reactor_pool_post_exec(g_reactor_pool, i,
+                                            http_server_inbox_fence_cb, fence)) {
+                    /* Undeliverable (reactor gone / mailbox full): take over its
+                     * decrement; fire ourselves on the zero transition. */
+                    if (zend_atomic_int_fetch_sub(&fence->remaining, 1) == 1) {
+                        done->trigger(done);
+                    }
+                }
+            }
+
+            ZEND_ASYNC_SUSPEND();
+            ZEND_ASYNC_WAKER_DESTROY(co);
+
+            if (EG(exception)) {
+                zend_clear_exception();
+            }
+
+            done->base.dispose(&done->base);
+            pefree(fence, 1);
+        }
+    }
+
+    /* Residual items already in the mailbox drain on our loop while we sleep;
+     * bounded so a wedged reactor cannot park the rotation forever. */
+    if (co != NULL) {
+        for (int spin = 0; spin < 400 && worker_inbox_depth(server->worker_inbox) > 0; spin++) {
+            hot_reload_sleep_ms(co, 5);
+        }
+    }
+
+    http_logf_info(&server->log_state, "reload.inbox retired depth=%zu",
+                   worker_inbox_depth(server->worker_inbox));
 }
 
 /* Stand up this worker clone's request inbox and publish it to the shared
@@ -3654,16 +3772,6 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         RETURN_THROWS();
     }
 
-    /* The gated transport reactor pool (#80) routes requests through worker
-     * inboxes registered for the pool's lifetime; retiring a worker while the
-     * reactors are live would leave them posting into freed inboxes (there is
-     * no registry unregister yet). Refuse loudly instead of corrupting. */
-    if (UNEXPECTED(http_server_reactor_pool_enabled())) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "reload() is not yet supported with TRUE_ASYNC_SERVER_REACTOR_POOL=1 "
-            "(worker inbox rotation is not implemented, #93)", 0);
-        RETURN_THROWS();
-    }
 
     if (server->reload_in_progress) {
         RETURN_FALSE; /* one rotation at a time — call again after it returns */
