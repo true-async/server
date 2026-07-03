@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 17975,
-      "hit": 13681
+      "total": 18101,
+      "hit": 13691
     },
     "functions": {
-      "total": 1226,
-      "hit": 1033
+      "total": 1230,
+      "hit": 1034
     }
   },
   "files": {
@@ -652,12 +652,12 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 1715,
-        "hit": 1086
+        "total": 1841,
+        "hit": 1096
       },
       "functions": {
-        "total": 93,
-        "hit": 72
+        "total": 97,
+        "hit": 73
       }
     },
     "src/http_server_config.c": {
