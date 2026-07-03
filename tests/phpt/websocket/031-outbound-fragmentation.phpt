@@ -13,8 +13,9 @@ use function Async\spawn;
 use function Async\await;
 use function Async\delay;
 
-$port = 19740 + getmypid() % 100;
+require_once __DIR__ . '/../server/_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port)
     ->setReadTimeout(5)->setWriteTimeout(5)
     ->setWsMaxFrameSize(128);   // cap each frame at 128 bytes (setter minimum)

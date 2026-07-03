@@ -46,7 +46,9 @@ if (!tls_gen_cert($key, $cert)) {
     exit(1);
 }
 
-$port = 19800 + getmypid() % 200;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $body_bytes = 256 * 1024;
 
 $config = (new HttpServerConfig())

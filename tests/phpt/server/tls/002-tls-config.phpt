@@ -29,9 +29,9 @@ if (!tls_gen_cert($key_path, $cert_path)) {
     exit(1);
 }
 
-$port = 19960 + getmypid() % 30;
+require_once __DIR__ . '/../_free_port.inc';
 
-// --- Case 1: TLS listener with valid cert/key starts and stops cleanly.
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)   // tls=true
     ->enableTls(true)

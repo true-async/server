@@ -38,8 +38,9 @@ if ($rc !== 0) { echo "cert gen failed\n"; exit(1); }
 
 putenv('PHP_HTTP3_PEER_BUDGET=1');
 
-$port = 20800 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)

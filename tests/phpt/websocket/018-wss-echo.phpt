@@ -52,8 +52,9 @@ echo "$status op=0x", dechex($op), " payload=$p\n";
 CLIENT
 );
 
-$port = 19920 + getmypid() % 30;
+require_once __DIR__ . '/../server/_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
     ->enableTls(true)

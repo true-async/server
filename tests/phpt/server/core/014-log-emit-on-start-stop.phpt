@@ -10,7 +10,9 @@ use TrueAsync\HttpServerConfig;
 use TrueAsync\LogSeverity;
 use function Async\spawn;
 
-$port = 19960 + getmypid() % 30;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port_span(2);
 $logfile = sys_get_temp_dir() . "/php-http-server-091-" . getmypid() . ".log";
 @unlink($logfile);
 $logfh = fopen($logfile, "w+b");

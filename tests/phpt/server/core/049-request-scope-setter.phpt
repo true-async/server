@@ -25,7 +25,8 @@ echo "set true  -> " . (int)$c->setRequestScope(true)->isRequestScope() . "\n"; 
 echo "chainable=" . (int)($c->setRequestScope(false) instanceof HttpServerConfig) . "\n"; /* 1 */
 
 /* === Part B: locked after the config is handed to a server === */
-$port = 19965 + getmypid() % 20;
+require_once __DIR__ . '/../_free_port.inc';
+$port = tas_free_port();
 $cfg = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setRequestScope(false)                /* serve with the per-request scope OFF */

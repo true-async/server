@@ -49,7 +49,9 @@ register_shutdown_function(function() use ($base, $forbidden) {
     $rm($base);
 });
 
-$port = 19817 + getmypid() % 1000;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
 $server = new HttpServer($config);
 $h = new StaticHandler('/static/', $root);

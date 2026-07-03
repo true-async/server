@@ -27,7 +27,9 @@ if (!tls_gen_cert($key_path, $cert_path, 1024, 'sha1')) {
     exit(1);
 }
 
-$port = 19990 + getmypid() % 20;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
     ->enableTls(true)

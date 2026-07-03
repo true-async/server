@@ -28,7 +28,9 @@ $cert = $tmp_dir . '/cert.pem';
 $key  = $tmp_dir . '/key.pem';
 if (!h2_gen_cert($key, $cert)) { echo "cert gen failed\n"; exit(1); }
 
-$port = 19890 + getmypid() % 20;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $size = 256 * 1024;
 $body = str_repeat('A', $size);
 

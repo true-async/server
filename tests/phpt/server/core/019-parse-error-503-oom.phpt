@@ -22,8 +22,9 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 use function Async\await;
 
-$port = 19900 + getmypid() % 100;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setMaxBodySize(128 * 1024 * 1024)  /* allow big bodies in principle */

@@ -25,8 +25,9 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 use function Async\await;
 
-$port = 19920 + getmypid() % 100;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $CHUNK_SZ = 8192;
 $N_CHUNKS = 48;
 

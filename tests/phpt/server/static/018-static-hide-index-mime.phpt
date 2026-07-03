@@ -38,7 +38,9 @@ register_shutdown_function(function() use ($root1, $root2) {
     @rmdir("$root1/sub"); @rmdir($root1); @rmdir($root2);
 });
 
-$port   = 19880 + getmypid() % 30;
+require_once __DIR__ . '/../_free_port.inc';
+
+$port = tas_free_port();
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
 $server = new HttpServer($config);
 

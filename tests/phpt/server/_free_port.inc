@@ -24,3 +24,31 @@ function tas_free_port(): int
 
     return (int) substr($name, strrpos($name, ':') + 1);
 }
+
+/* A base port P such that P..P+$count-1 are all bindable — for tests that
+ * derive sibling ports as $port + N (e.g. a TCP listener next to the H3 UDP
+ * one). Retries with fresh kernel-assigned bases until a whole span fits. */
+function tas_free_port_span(int $count): int
+{
+    for ($try = 0; $try < 32; $try++) {
+        $base = tas_free_port();
+        $held = [];
+        $ok = true;
+
+        for ($i = 0; $i < $count; $i++) {
+            $h = @stream_socket_server("tcp://127.0.0.1:" . ($base + $i), $e, $m);
+            if ($h === false) { $ok = false; break; }
+            $held[] = $h;
+        }
+
+        foreach ($held as $h) {
+            fclose($h);
+        }
+
+        if ($ok) {
+            return $base;
+        }
+    }
+
+    die('skip cannot allocate a free port span');
+}

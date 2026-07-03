@@ -36,8 +36,9 @@ $expected_body =
     "data: multi\ndata: line\n\n" .
     "id: 7\nevent: ping\ndata: named\n\n";
 
-$port = 20560 + getmypid() % 40;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)

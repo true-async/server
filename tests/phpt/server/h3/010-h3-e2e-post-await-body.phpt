@@ -38,8 +38,9 @@ file_put_contents($body_path, $body);
 $expected = sprintf("len=%d sha1=%s method=POST",
     strlen($body), sha1($body));
 
-$port = 20400 + getmypid() % 50;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)

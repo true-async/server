@@ -31,8 +31,9 @@ register_shutdown_function(function () use ($tmp, $cert, $key) {
     @unlink($cert); @unlink($key); @rmdir($tmp);
 });
 
-$port = 20760 + getmypid() % 40;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)

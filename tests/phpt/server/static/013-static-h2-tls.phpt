@@ -49,8 +49,9 @@ register_shutdown_function(function() use ($root, $tmp) {
     @rmdir($tmp);
 });
 
-$port = 19980 + getmypid() % 15;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
     ->enableTls(true)

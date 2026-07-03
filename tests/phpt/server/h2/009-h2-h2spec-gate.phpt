@@ -41,9 +41,9 @@ if ($h2spec === '' && is_executable($home = (string)getenv('HOME') . '/.local/bi
     $h2spec = $home;
 }
 
-$port = 19500 + getmypid() % 200;
+require_once __DIR__ . '/../_free_port.inc';
 
-// PHP_BINARY would re-enter THIS test under the phpt runner; use its
+$port = tas_free_port();
 // caller chain via posix or fall back to reading /proc/self/exe.
 $php = PHP_BINARY;
 

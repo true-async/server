@@ -16,8 +16,9 @@ use function Async\spawn;
 use function Async\await;
 use function Async\delay;
 
-$port = 19900 + getmypid() % 80;
+require_once __DIR__ . '/../_free_port.inc';
 
+$port = tas_free_port();
 $server = new HttpServer(
     (new HttpServerConfig())
         ->addListener('127.0.0.1', $port)
