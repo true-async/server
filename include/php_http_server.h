@@ -307,6 +307,15 @@ struct _http_server_config_t {
     zval     log_stream;
     bool     telemetry_enabled;
 
+    /* Hot-reload triggers (issue #93) — consumed by the pool parent only
+     * (the orchestrator coroutines run there), never snapshotted.
+     * hot_reload_paths IS_UNDEF = watcher trigger off. */
+    zval     hot_reload_paths;       /* array of directories to watch */
+    zval     hot_reload_extensions;  /* array of extensions; empty = all */
+    uint32_t hot_reload_debounce_ms;
+    uint32_t hot_reload_max_hold_ms;
+    bool     reload_on_sighup;
+
     /* Frozen persistent snapshot — populated at lock time, shared refcounted
      * across threads. NULL until the owning HttpServer constructs (which calls
      * http_server_config_lock) or the Config is transferred directly via a

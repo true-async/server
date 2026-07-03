@@ -139,6 +139,27 @@ final class HttpServerConfig
     public function setBootloader(?\Closure $bootloader): static {}
 
     /**
+     * Dev hot-reload trigger (issue #93), pool mode only ({@see setWorkers()} > 1).
+     * The pool parent watches each path recursively (with the given debounce);
+     * a collapsed change event invalidates the watched trees in opcache and
+     * calls {@see HttpServer::reload()} — replacement workers re-run the
+     * bootloader with the changed code, on the same listen sockets.
+     *
+     * @param array $watchPaths Directories to watch (recursively).
+     * @param array $extensions Case-insensitive extension allow-list; empty = every file.
+     * @param int $debounceMs Quiet window before a burst of changes fires one reload.
+     * @param int $maxHoldMs Force a reload at most this long after the first change (0 = no cap).
+     */
+    public function enableHotReload(array $watchPaths, array $extensions = ['php'], int $debounceMs = 300, int $maxHoldMs = 2000): static {}
+
+    /**
+     * Prod hot-reload trigger (issue #93), pool mode only: the pool parent arms
+     * a persistent SIGHUP handler that calls {@see HttpServer::reload()}.
+     * Not supported on Windows.
+     */
+    public function enableReloadOnSignal(bool $enabled = true): static {}
+
+    /**
      * Returns the bootloader previously set, or null.
      */
     public function getBootloader(): ?\Closure {}
