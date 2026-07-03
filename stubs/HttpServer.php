@@ -104,6 +104,19 @@ final class HttpServer
     public function stop(): bool {}
 
     /**
+     * Hot-reload the worker pool (issue #93). Pool parent only: workers finish
+     * their in-flight work, stop and exit; fresh worker threads re-run the
+     * bootloader — picking up changed code — and take over on the same listen
+     * sockets. Suspends until the old cohort has drained. Call from a coroutine
+     * on the pool parent (start() keeps running throughout); invalidate changed
+     * files first (opcache_invalidate) or rely on opcache timestamp validation.
+     *
+     * @return bool True when every replacement worker was resubmitted; false if
+     *              a reload is already in progress or some replacement failed.
+     */
+    public function reload(): bool {}
+
+    /**
      * Check if server is running
      */
     public function isRunning(): bool {}
