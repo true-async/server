@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 18439,
-      "hit": 13698
+      "hit": 13697
     },
     "functions": {
       "total": 1245,
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 357,
-        "hit": 263
+        "hit": 262
       },
       "functions": {
         "total": 22,
