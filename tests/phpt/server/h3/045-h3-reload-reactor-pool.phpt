@@ -1,5 +1,5 @@
 --TEST--
-HttpServer: reload() under the gated reactor pool is refused — inbox rotation not implemented (#93)
+HttpServer: HTTP/3 through the reactor pool survives a worker rotation (#93)
 --EXTENSIONS--
 true_async_server
 true_async
@@ -14,18 +14,19 @@ TRUE_ASYNC_SERVER_REACTOR_POOL=1
 PHP_HTTP3_DISABLE_RETRY=1
 --FILE--
 <?php
-/* Reactor-pool (#80) + hot reload (#93): the C transport reactors keep routing
- * through worker inboxes registered for the pool's lifetime, and there is no
- * registry unregister yet — retiring a worker under live reactors corrupts
- * the heap (reactors post into freed inboxes). Until inbox rotation exists,
- * reload() must refuse loudly, and H3 service must keep working afterwards. */
+/* Reactor-pool (#80) + hot reload (#93). The C transport reactors own the H3
+ * listeners and outlive the PHP worker rotation. A retiring worker unpublishes
+ * its inbox from the registry, fences every reactor (so no dispatch can still
+ * hold the pointer), and waits out its mailbox tail; the replacements publish
+ * fresh inboxes into the reused slots. An H3 GET must succeed both before and
+ * after HttpServer::reload(). */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 require __DIR__ . '/_h3_skipif.inc';
-require __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../_free_port.inc';
 
 $tmp = __DIR__ . '/tmp-045';
 @mkdir($tmp, 0700, true);
@@ -67,16 +68,17 @@ spawn(function () use ($server, $port, $client_bin) {
 
     echo "before=", $get('/one'), "\n";
 
-    try {
-        $server->reload();
-        echo "reload=no-throw\n";
-    } catch (\Throwable $e) {
-        echo "reload_refused=",
-            (int)(strpos($e->getMessage(), 'REACTOR_POOL') !== false), "\n";
+    $ok = $server->reload();
+    echo "reload=", var_export($ok, true), "\n";
+
+    /* Replacements may still be booting/publishing — retry the H3 GET. */
+    $after = '';
+    for ($i = 0; $i < 30 && $after !== '201:echo:GET:/two'; $i++) {
+        usleep(300000);
+        $after = $get('/two');
     }
 
-    /* The refusal must be side-effect free: H3 keeps serving. */
-    echo "after=", $get('/two'), "\n";
+    echo "after=", $after, "\n";
 
     posix_kill(getmypid(), SIGKILL);
 });
@@ -85,6 +87,8 @@ $server->start();
 ?>
 --EXPECTF--
 %Abefore=201:echo:GET:/one
-reload_refused=1
+%A
+reload=true
+%A
 after=201:echo:GET:/two
 %A
