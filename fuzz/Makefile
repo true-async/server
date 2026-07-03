@@ -18,7 +18,7 @@ CC       = clang
 CFLAGS   = -g -O1 -fno-omit-frame-pointer \
            -fsanitize=fuzzer,address,undefined \
            -D_GNU_SOURCE
-INCLUDES = -I../include -I../include/formats -I../include/http1 \
+INCLUDES = -I.. -I../include -I../include/formats -I../include/http1 \
            -I../src -I../src/core -I../src/http1 -I../src/http2 \
            -I../src/formats -I../src/log -I../deps/llhttp
 
