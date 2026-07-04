@@ -23,13 +23,21 @@ _Status: living document. Last updated 2026-07-04._
   EOF trailers). Tests: `/004` (server-streaming, N framed responses), `/005`
   (client-streaming, N request messages), `/006` (bidi half-duplex, N-in/N-out
   on one stream).
-  **Deferred to a Phase 2b follow-up** (coupled + substantial, not yet needed by
-  the buffered path): true *full-duplex interleaved* bidi — reading each message
-  as it arrives while writing — needs `readMessage()` wired to the incremental
-  `http_body_stream` (issue #26) instead of the buffered `req->body`, and with it
-  the body-cap fix (§4.3, the cumulative lifetime cap in `http_body_stream.c`).
-  gRPC uses the buffered request body today, so §4.3 does not bite yet;
-  server/client/half-duplex-bidi work fully.
+  See Phase 2b for the full-duplex (incremental) path.
+- **Phase 2b — DONE (true full-duplex, H2).** `readMessage()` now has a second
+  path: when the request qualifies for `http_body_stream` (issue #26 —
+  `setBodyStreamingEnabled(true)` + Content-Length 0 / ≥1 MiB, or the
+  64 KiB–1 MiB upgrade band), it pops body chunks into a per-request
+  reassembly buffer (`grpc_reassembly` on `http_request_t`) and deframes
+  incrementally, so a handler reads each message *as it arrives* (client-
+  streaming / full-duplex) without `awaitBody()`. Buffered path unchanged →
+  the 11 existing gRPC tests still pass. Body-cap fix (§4.3): the H2 streaming
+  ingest now caps the **live** (queued) bytes, not the monotonic cumulative
+  total, so long client-streaming / bidi streams aren't RST at `max_body_size`.
+  Test: `/013` (three ~40–50 KiB messages spanning DATA frames, drained
+  incrementally). H2 + h1 + gRPC + `050` suites green. **Note:** the H3
+  dispatch has no `body_streaming` policy yet, so incremental read is H2-only;
+  H3 gRPC uses the buffered path.
 - **Phase 3 — DONE (propagation); hard auto-cancel deferred.** `grpc-timeout`
   is parsed (`grpc_parse_timeout_ns`) and exposed to handlers via
   `HttpRequest::getGrpcTimeout(): ?float` (seconds), so a handler can bound its

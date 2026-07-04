@@ -1082,6 +1082,9 @@ void http_request_free_fields(http_request_t *req)
     body_release(req->body);
     req->body = NULL;
 
+    /* gRPC streaming reassembly buffer (HttpRequest::readMessage). */
+    smart_str_free(&req->grpc_reassembly);
+
     /* Dispose body-progress event if awaitBody() created one */
     if (req->body_event) {
         req->body_event->dispose(req->body_event);

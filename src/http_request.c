@@ -282,15 +282,107 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
 
     http_request_t *req = intern->request;
 
-    if (req == NULL || req->body == NULL) {
+    if (req == NULL) {
         RETURN_NULL();
     }
 
     zend_string *msg = NULL;
     bool         compressed = false;
-    const int rc = grpc_deframe_next(ZSTR_VAL(req->body), ZSTR_LEN(req->body),
-                                     &req->grpc_read_offset,
-                                     GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+    int          rc;
+
+    /* Middle-band request (SMALL <= Content-Length < AUTO): the parser
+     * buffered so far; upgrade to the streaming queue on first read so
+     * incremental deframing works there too (mirror of readBody Case 2). */
+    if (!req->body_streaming && req->body_upgrade_to_stream != NULL) {
+        req->body_upgrade_to_stream(req);
+    }
+
+    if (req->body_streaming) {
+        /* True full-duplex path: accumulate popped body-stream chunks into
+         * grpc_reassembly until one length-prefixed message is framed, then
+         * deframe it — a handler can readMessage() while the client is still
+         * sending. Suspends between chunks. Enabled when the server ran with
+         * setBodyStreamingEnabled(true) and the request qualified. */
+
+        /* Drop the previous message's consumed prefix so the buffer holds
+         * only the not-yet-deframed tail (bounds memory on long streams). */
+        if (req->grpc_read_offset > 0 && req->grpc_reassembly.s != NULL) {
+            const size_t total  = ZSTR_LEN(req->grpc_reassembly.s);
+            const size_t remain = req->grpc_read_offset < total
+                                 ? total - req->grpc_read_offset : 0;
+            if (remain > 0) {
+                memmove(ZSTR_VAL(req->grpc_reassembly.s),
+                        ZSTR_VAL(req->grpc_reassembly.s) + req->grpc_read_offset,
+                        remain);
+            }
+            ZSTR_LEN(req->grpc_reassembly.s) = remain;
+            ZSTR_VAL(req->grpc_reassembly.s)[remain] = '\0';
+            req->grpc_read_offset = 0;
+        }
+
+        for (;;) {
+            const char  *buf = req->grpc_reassembly.s
+                             ? ZSTR_VAL(req->grpc_reassembly.s) : "";
+            const size_t len = req->grpc_reassembly.s
+                             ? ZSTR_LEN(req->grpc_reassembly.s) : 0;
+
+            rc = grpc_deframe_next(buf, len, &req->grpc_read_offset,
+                                   GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+
+            if (rc != 0) {
+                break;   /* 1 = message extracted, -1 = protocol error */
+            }
+
+            /* Incomplete frame — pull the next body chunk, or wait / EOF. */
+            zend_string *chunk = http_body_stream_pop(req);
+
+            if (chunk != NULL) {
+                smart_str_append(&req->grpc_reassembly, chunk);
+                zend_string_release(chunk);
+                continue;
+            }
+
+            if (req->body_eof) {
+                if (UNEXPECTED(req->body_error)) {
+                    zend_throw_exception(http_server_runtime_exception_ce,
+                        "gRPC request body stream error", 0);
+                    RETURN_THROWS();
+                }
+                RETURN_NULL();   /* client half-closed, no more messages */
+            }
+
+            if (req->body_data_event == NULL) {
+                req->body_data_event = async_plain_event_new();
+                if (req->body_data_event == NULL) {
+                    RETURN_NULL();
+                }
+            }
+
+            zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+            if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+                RETURN_NULL();
+            }
+            if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+                return;
+            }
+            zend_async_resume_when(co, req->body_data_event, false,
+                                   zend_async_waker_callback_resolve, NULL);
+            ZEND_ASYNC_SUSPEND();
+            zend_async_waker_clean(co);
+
+            if (EG(exception) != NULL) {
+                return;
+            }
+        }
+    } else {
+        /* Buffered: deframe from the fully-received body via the cursor. */
+        if (req->body == NULL) {
+            RETURN_NULL();
+        }
+        rc = grpc_deframe_next(ZSTR_VAL(req->body), ZSTR_LEN(req->body),
+                               &req->grpc_read_offset,
+                               GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+    }
 
     if (rc < 0) {
         zend_throw_exception(http_server_runtime_exception_ce,

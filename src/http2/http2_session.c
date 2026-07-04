@@ -455,7 +455,15 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
             body_cap = HTTP2_MAX_BODY_SIZE;
         }
 
-        if (req->body_bytes_consumed + req->body_bytes_queued + len > body_cap) {
+        /* Cap the LIVE (queued, not-yet-drained) bytes, not the cumulative
+         * total. body_bytes_consumed is monotonic, so the old
+         * consumed+queued check RST'd long client-streaming / bidi streams
+         * once their *total* passed max_body_size — even when the handler
+         * drained every chunk (issue #4 §4.3). A streaming body is
+         * legitimately unbounded in total; max_body_size now bounds only the
+         * in-flight buffer (backpressure), matching readBody()/readMessage()
+         * consumers that keep up with the peer. */
+        if (req->body_bytes_queued + len > body_cap) {
             return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
         }
 

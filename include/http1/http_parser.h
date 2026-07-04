@@ -91,10 +91,17 @@ struct http_request_t {
     /* Body */
     zend_string *body;
 
-    /* gRPC deframer cursor into `body` — advanced by HttpRequest::readMessage()
-     * as it extracts each 5-byte-length-prefixed message. Zero-initialised
-     * with the rest of the request (memset on alloc). */
+    /* gRPC deframer cursor — advanced by HttpRequest::readMessage() as it
+     * extracts each 5-byte-length-prefixed message. For a buffered request it
+     * indexes `body`; for a streaming request (body_streaming) it indexes the
+     * grpc_reassembly buffer below. Zero-initialised (memset on alloc). */
     size_t       grpc_read_offset;
+
+    /* gRPC incremental reassembly buffer for streaming requests: readMessage()
+     * appends popped body-stream chunks here until a full length-prefixed
+     * message is available, so messages that span DATA frames are handled.
+     * Empty {NULL,0} until first use; freed in http_request_destroy. */
+    smart_str    grpc_reassembly;
 
     /* Body-progress event.
      * Lazily created by awaitBody() on the first suspend; notified by
