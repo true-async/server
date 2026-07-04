@@ -493,6 +493,18 @@ void http_response_promote_trailers_to_headers(zend_object *obj)
     zend_hash_clean(response->trailers);
 }
 
+/* Clear the response trailer table (without touching headers). Used by the
+ * grpc-web dispose path: it moves grpc-status/grpc-message into an in-body
+ * trailer frame, so the HTTP/2 trailer emission must find nothing. */
+void http_response_clear_trailers(zend_object *obj)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    if (response->trailers != NULL) {
+        zend_hash_clean(response->trailers);
+    }
+}
+
 /* Default the `grpc-status` trailer to `status` (decimal) unless the handler
  * already set one. Called from the H2/H3 gRPC dispose path so every gRPC
  * response carries a status even when the handler forgot — grpc-status is

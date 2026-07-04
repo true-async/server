@@ -13,6 +13,7 @@
 
 #include "grpc.h"
 #include "http1/http_parser.h"   /* http_request_t */
+#include "zend_smart_str.h"
 
 #include <string.h>
 #include <strings.h>             /* strncasecmp */
@@ -38,6 +39,62 @@ bool grpc_request_is_grpc(const http_request_t *req)
 
     return Z_STRLEN_P(ct) >= prefix_len
         && strncasecmp(Z_STRVAL_P(ct), GRPC_CONTENT_TYPE, prefix_len) == 0;
+}
+
+bool grpc_request_is_grpc_web(const http_request_t *req)
+{
+    if (req == NULL || req->headers == NULL) {
+        return false;
+    }
+
+    zval *ct = zend_hash_str_find(req->headers, "content-type",
+                                  sizeof("content-type") - 1);
+
+    if (ct == NULL || Z_TYPE_P(ct) != IS_STRING) {
+        return false;
+    }
+
+    const size_t prefix_len = sizeof(GRPC_WEB_CONTENT_TYPE_PREFIX) - 1;  /* 20 */
+
+    return Z_STRLEN_P(ct) >= prefix_len
+        && strncasecmp(Z_STRVAL_P(ct), GRPC_WEB_CONTENT_TYPE_PREFIX,
+                       prefix_len) == 0;
+}
+
+zend_string *grpc_web_trailer_frame(HashTable *trailers)
+{
+    smart_str body = {0};
+
+    if (trailers != NULL) {
+        zend_string *name;
+        zval        *val;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+            if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
+            smart_str_append(&body, name);
+            smart_str_appendl(&body, ": ", 2);
+            smart_str_append(&body, Z_STR_P(val));
+            smart_str_appendl(&body, "\r\n", 2);
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    const size_t tlen = body.s != NULL ? ZSTR_LEN(body.s) : 0;
+
+    zend_string   *out = zend_string_alloc(5 + tlen, 0);
+    unsigned char *p   = (unsigned char *)ZSTR_VAL(out);
+
+    p[0] = 0x80u;   /* trailer frame, uncompressed */
+    p[1] = (unsigned char)((tlen >> 24) & 0xffu);
+    p[2] = (unsigned char)((tlen >> 16) & 0xffu);
+    p[3] = (unsigned char)((tlen >>  8) & 0xffu);
+    p[4] = (unsigned char)( tlen        & 0xffu);
+
+    if (tlen > 0) {
+        memcpy(p + 5, ZSTR_VAL(body.s), tlen);
+    }
+
+    ZSTR_VAL(out)[5 + tlen] = '\0';
+    smart_str_free(&body);
+    return out;
 }
 
 uint64_t grpc_parse_timeout_ns(const http_request_t *req)

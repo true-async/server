@@ -40,12 +40,31 @@ struct http_request_t;
 #define GRPC_MAX_RECV_MESSAGE   (16u * 1024u * 1024u)
 
 /* Canonical gRPC content-type prefix (matches application/grpc,
- * application/grpc+proto, application/grpc;charset=..., etc.). */
+ * application/grpc+proto, application/grpc;charset=..., AND the grpc-web
+ * variants below, which also start with this prefix). */
 #define GRPC_CONTENT_TYPE       "application/grpc"
 
+/* grpc-web content-type prefix (application/grpc-web, .../grpc-web+proto,
+ * .../grpc-web-text) and the response content-type the server emits. */
+#define GRPC_WEB_CONTENT_TYPE_PREFIX  "application/grpc-web"
+#define GRPC_WEB_RESPONSE_CONTENT_TYPE "application/grpc-web+proto"
+
 /* True when the request is a gRPC call — POST with a content-type that
- * begins with `application/grpc`. */
+ * begins with `application/grpc` (this includes grpc-web). */
 bool grpc_request_is_grpc(const struct http_request_t *req);
+
+/* True when the request is a grpc-web call — content-type begins with
+ * `application/grpc-web`. grpc-web carries the trailers inside the response
+ * body (a 0x80-flagged frame) instead of as HTTP/2 trailers, because
+ * browsers cannot read HTTP trailers. */
+bool grpc_request_is_grpc_web(const struct http_request_t *req);
+
+/* Build the grpc-web in-body trailer frame from a response trailer map:
+ *   byte 0     : 0x80 (trailer frame, uncompressed)
+ *   bytes 1..4 : trailer block length, uint32 big-endian
+ *   bytes 5..  : `name: value\r\n` lines (HTTP/1.1 style)
+ * Returns a new zend_string the caller owns. `trailers` may be NULL/empty. */
+zend_string *grpc_web_trailer_frame(HashTable *trailers);
 
 /* Parse the `grpc-timeout` request header (`<up-to-8-digits><unit>`, unit ∈
  * {H,M,S,m,u,n}) into nanoseconds. Returns 0 when absent or malformed. */

@@ -100,6 +100,12 @@ extern const http_response_stream_ops_t h2_stream_ops;
  * handler skipped $res->end(). Defined further down. */
 static void h2_stream_mark_ended(void *ctx);
 
+/* Forward decls so the dispose path can finalize a grpc-web reply — append
+ * the in-body trailer frame via the streaming append and end the stream. */
+static int  h2_stream_append_chunk(void *ctx, zend_string *chunk);
+static void h2_grpc_web_finalize(http2_stream_t *stream,
+                                 zend_object *response_obj);
+
 /* Suspend the current handler coroutine until either
  *  - stream->write_event fires (cb_on_frame_recv saw WINDOW_UPDATE
  *    and opened the flow-control window for us), or
@@ -233,7 +239,8 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         && http_protocol_has_handler(
                http_server_get_protocol_handlers(self->conn->server),
                HTTP_PROTOCOL_GRPC);
-    stream->is_grpc = is_grpc;
+    stream->is_grpc  = is_grpc;
+    stream->grpc_web = is_grpc && grpc_request_is_grpc_web(stream->request);
 
     /* Static-only deployments register a static mount but no PHP
      * handler — the static dispatch path below claims the request
@@ -289,11 +296,18 @@ static void http2_strategy_dispatch(struct http_request_t *request,
 
     /* gRPC: default the response content-type so handlers need not set it.
      * Rides the initial HEADERS; a handler may still override before its
-     * first writeMessage(). */
+     * first writeMessage(). grpc-web gets its own content-type. */
     if (is_grpc) {
-        http_response_static_set_header(Z_OBJ(stream->response_zv),
-            "content-type", sizeof("content-type") - 1,
-            GRPC_CONTENT_TYPE, sizeof(GRPC_CONTENT_TYPE) - 1);
+        if (stream->grpc_web) {
+            http_response_static_set_header(Z_OBJ(stream->response_zv),
+                "content-type", sizeof("content-type") - 1,
+                GRPC_WEB_RESPONSE_CONTENT_TYPE,
+                sizeof(GRPC_WEB_RESPONSE_CONTENT_TYPE) - 1);
+        } else {
+            http_response_static_set_header(Z_OBJ(stream->response_zv),
+                "content-type", sizeof("content-type") - 1,
+                GRPC_CONTENT_TYPE, sizeof(GRPC_CONTENT_TYPE) - 1);
+        }
     }
 
     /* Static-handler dispatch (issue #13). Identical policy to the
@@ -626,7 +640,12 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     const bool is_streaming = !Z_ISUNDEF(stream->response_zv)
                               && http_response_is_streaming(Z_OBJ(stream->response_zv));
 
-    if (is_streaming) {
+    if (stream->grpc_web && !Z_ISUNDEF(stream->response_zv)) {
+        /* grpc-web: trailers ride the response body as a 0x80 frame, never
+         * as HTTP/2 trailers (browsers can't read those). Handles both a
+         * streamed reply and a zero-message status/error. */
+        h2_grpc_web_finalize(stream, Z_OBJ(stream->response_zv));
+    } else if (is_streaming) {
         if (!stream->streaming_ended) {
             h2_stream_mark_ended(stream);
         }
@@ -1677,6 +1696,28 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
     http2_session_emit(stream->session);
 
     return HTTP_STREAM_APPEND_OK;
+}
+
+/* Finalize a grpc-web reply: the grpc-status/grpc-message trailers are sent
+ * as an in-body 0x80 frame (browsers cannot read HTTP/2 trailers), then the
+ * stream ends normally with END_STREAM on DATA. Works for both a streamed
+ * reply (messages already queued) and a zero-message status/error (the
+ * trailer frame is the only DATA, committing HEADERS on append). */
+static void h2_grpc_web_finalize(http2_stream_t *stream,
+                                 zend_object *response_obj)
+{
+    HashTable   *trailers = http_response_get_trailers(response_obj);
+    zend_string *frame    = grpc_web_trailer_frame(trailers);
+
+    /* Clear the HTTP trailers so the streaming EOF path (h2_dp_mark_eof)
+     * does not also emit them as a terminal HEADERS(trailers) frame. */
+    http_response_clear_trailers(response_obj);
+
+    (void)h2_stream_append_chunk(stream, frame);   /* consumes the ref */
+
+    if (!stream->streaming_ended) {
+        h2_stream_mark_ended(stream);
+    }
 }
 
 static void h2_stream_mark_ended(void *ctx)

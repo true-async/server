@@ -54,6 +54,19 @@ _Status: living document. Last updated 2026-07-04._
   distinct from HTTP-body `Content-Encoding`, which is why it needs its own
   path rather than the streaming HTTP-body encoder. Test: `/008` (10 KB gzip
   round-trip both directions).
+- **Phase 5a — DONE (grpc-web, binary).** grpc-web carries the trailers inside
+  the response body as a `0x80`-flagged frame (browsers can't read HTTP/2
+  trailers). Same `addGrpcHandler` / `readMessage` / `writeMessage` API — only
+  the finalize differs: `grpc_request_is_grpc_web` (content-type
+  `application/grpc-web…`) sets `stream->grpc_web`; the response content-type
+  becomes `application/grpc-web+proto`; and `h2_grpc_web_finalize`
+  (`http2_strategy.c`) builds the trailer frame via `grpc_web_trailer_frame`,
+  clears the HTTP trailers, appends the frame as the final DATA, and ends the
+  stream with END_STREAM (no HTTP trailer). Works for streamed and
+  zero-message replies. Tests: `/009` (binary round-trip + in-body trailers),
+  `/010` (zero-message error). **Deferred (Phase 5c): grpc-web-text** (base64)
+  — needs a stateful streaming base64 layer on request and response; binary
+  grpc-web is the common case and is complete.
 
 ### Discovered pre-existing bug (independent of gRPC) — NOT yet fixed
 

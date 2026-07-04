@@ -1137,6 +1137,10 @@ void           http_response_ensure_grpc_status(zend_object *obj, int status);
  * gRPC Trailers-Only reply when the handler streamed no messages. */
 void           http_response_promote_trailers_to_headers(zend_object *obj);
 
+/* Clear the response trailer table (headers untouched). Used by the grpc-web
+ * dispose path, which emits trailers as an in-body frame instead. */
+void           http_response_clear_trailers(zend_object *obj);
+
 /* Borrow the body's underlying zend_string. Returns NULL when the body
  * is empty. The string is owned by the response object — addref it if
  * you need to outlive the response. Avoids a full body memcpy on the
