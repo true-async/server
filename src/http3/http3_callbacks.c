@@ -475,6 +475,25 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
         if (s->chunk_read_idx >= s->chunk_queue_tail) {
             if (s->streaming_ended) {
                 *pflags |= NGHTTP3_DATA_FLAG_EOF;
+
+                /* gRPC native trailers: submit here, at true EOF — nghttp3
+                 * needs the trailer submit after the last DATA. The nv was
+                 * captured in dispose (response_zv is gone now). Keep the
+                 * sending side open with NO_END_STREAM so the trailer HEADERS
+                 * carry the fin instead of this DATA. */
+                if (s->grpc_trailer_nv != NULL && !s->trailers_submitted) {
+                    s->trailers_submitted = true;
+                    if (nghttp3_conn_submit_trailers(conn, s->stream_id,
+                            (const nghttp3_nv *)s->grpc_trailer_nv,
+                            s->grpc_trailer_count) == 0) {
+                        s->has_trailers = true;
+                    }
+                }
+
+                if (s->has_trailers) {
+                    *pflags |= NGHTTP3_DATA_FLAG_NO_END_STREAM;
+                }
+
                 return 0;
             }
 
@@ -572,6 +591,67 @@ static inline bool h3_nv_push(h3_nv_buf_t *b,
  *   - Streaming (HttpResponse::send loop): chunk_queue is the body
  *     source; we skip the body copy entirely. Caller has already
  *     primed the queue with the first chunk by the time we run. */
+/* Capture the response trailer map (grpc-status/grpc-message) into a malloc'd
+ * nghttp3_nv[] + backing byte buffer on the stream. Called from dispose while
+ * response_zv is still alive; the data reader submits it at true EOF, because
+ * nghttp3_conn_submit_trailers must follow the last DATA (which stamps
+ * NO_END_STREAM) yet response_zv is freed by then. malloc (not emalloc) — the
+ * data reader runs outside a request memory context. No-op when there are no
+ * trailers or a capture already exists. Freed in http3_stream_release. */
+void http3_stream_capture_trailers(http3_stream_t *s)
+{
+    if (Z_ISUNDEF(s->response_zv) || s->grpc_trailer_nv != NULL) {
+        return;
+    }
+
+    HashTable *trailers = http_response_get_trailers(Z_OBJ(s->response_zv));
+
+    if (trailers == NULL || zend_hash_num_elements(trailers) == 0) {
+        return;
+    }
+
+    size_t count = 0, total = 0;
+    zend_string *name;
+    zval        *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+        if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
+        count++;
+        total += ZSTR_LEN(name) + Z_STRLEN_P(val);
+    } ZEND_HASH_FOREACH_END();
+
+    if (count == 0) {
+        return;
+    }
+
+    nghttp3_nv *nv    = malloc(count * sizeof(nghttp3_nv));
+    char       *bytes = malloc(total ? total : 1);
+
+    if (nv == NULL || bytes == NULL) {
+        free(nv);
+        free(bytes);
+        return;
+    }
+
+    size_t ni = 0, bi = 0;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+        if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
+        memcpy(bytes + bi, ZSTR_VAL(name), ZSTR_LEN(name));
+        nv[ni].name    = (uint8_t *)(bytes + bi);
+        nv[ni].namelen = ZSTR_LEN(name);
+        bi += ZSTR_LEN(name);
+        memcpy(bytes + bi, Z_STRVAL_P(val), Z_STRLEN_P(val));
+        nv[ni].value    = (uint8_t *)(bytes + bi);
+        nv[ni].valuelen = Z_STRLEN_P(val);
+        bi += Z_STRLEN_P(val);
+        nv[ni].flags = NGHTTP3_NV_FLAG_NONE;
+        ni++;
+    } ZEND_HASH_FOREACH_END();
+
+    s->grpc_trailer_nv    = nv;
+    s->grpc_trailer_count = ni;
+    s->grpc_trailer_bytes = bytes;
+}
+
 bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming)

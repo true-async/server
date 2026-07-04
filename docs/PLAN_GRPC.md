@@ -67,8 +67,33 @@ _Status: living document. Last updated 2026-07-04._
   `/010` (zero-message error). **Deferred (Phase 5c): grpc-web-text** (base64)
   — needs a stateful streaming base64 layer on request and response; binary
   grpc-web is the common case and is complete.
+- **Phase 5b — DONE (gRPC over HTTP/3, non-reactor path).** Native gRPC + grpc-web
+  work over H3, with grpc-status/grpc-message emitted through
+  `nghttp3_conn_submit_trailers`. Tests `/011` (native) + `/012` (grpc-web) via a
+  real aioquic client. Reactor/worker H3 path deferred. Details in §5b below.
 
-### Phase 5b — gRPC over HTTP/3 (feasibility confirmed; not yet built)
+### Phase 5b — gRPC over HTTP/3 — DONE (non-reactor path)
+
+Native gRPC **and** grpc-web now work over HTTP/3. Routing in
+`http3_stream_dispatch` + the coroutine entry (classify via
+`grpc_request_is_grpc`/`_web`, add `HTTP_PROTOCOL_GRPC` to the handler lookup,
+default the content-type); `is_grpc`/`grpc_web`/`has_trailers`/
+`trailers_submitted` + a captured-trailer nv on `http3_stream_t`. Native
+trailers: `http3_stream_capture_trailers` snapshots grpc-status/grpc-message in
+dispose (while `response_zv` is alive), and the data reader
+(`h3_read_data_cb`) submits them via `nghttp3_conn_submit_trailers` at true EOF
+with `NGHTTP3_DATA_FLAG_NO_END_STREAM` — the capture-then-submit split is
+required because the H3 data reader runs async, *after* dispose frees the
+zvals (unlike H2's synchronous provider). grpc-web reuses `grpc_web_trailer_frame`
+via `h3_grpc_web_finalize`. Tests: `tests/phpt/server/grpc/011` (native H3
+unary + trailers) and `/012` (grpc-web H3), driven by a real **aioquic** H3
+client (`_h3grpc_client.py`) — the bundled C `h3client` can't read HTTP/3
+trailers, and aioquic is the same QUIC stack the hq-interop tests use. H3 suite
+(47) + gRPC suite (12) green. **Deferred:** the reactor/worker H3 path
+(`worker_dispatch.c`, `REACTOR_POOL=1`) still needs the same gRPC routing.
+
+_Historical (superseded): the original feasibility note below predates the
+implementation._
 
 Feasibility mapped against the live tree + installed nghttp3 **1.15.0**. The
 verdict is favorable but the work is the **largest single phase** and touches

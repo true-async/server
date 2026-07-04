@@ -159,6 +159,12 @@ bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming);
 
+/* Capture the response trailers (grpc-status/grpc-message) onto the stream
+ * from the streaming dispose branch, while response_zv is still alive. The
+ * data reader submits them via nghttp3_conn_submit_trailers at true EOF (the
+ * reader runs async, after response_zv is freed). */
+void http3_stream_capture_trailers(http3_stream_t *s);
+
 /* Reverse path: submit a buffered response from a worker-rendered
  * response_wire instead of the per-stream HttpResponse zval. Reactor thread. */
 typedef struct response_wire_s response_wire_t;

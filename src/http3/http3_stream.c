@@ -157,6 +157,18 @@ void http3_stream_release(http3_stream_t *s)
         s->chunk_queue = NULL;
     }
 
+    /* gRPC trailer capture (malloc'd in http3_stream_capture_trailers). Held
+     * until teardown so the nv stays valid through the async trailer submit. */
+    if (s->grpc_trailer_nv != NULL) {
+        free(s->grpc_trailer_nv);
+        s->grpc_trailer_nv = NULL;
+    }
+
+    if (s->grpc_trailer_bytes != NULL) {
+        free(s->grpc_trailer_bytes);
+        s->grpc_trailer_bytes = NULL;
+    }
+
     if (s->write_event != NULL) {
         zend_async_event_t *ev = &s->write_event->base;
 
