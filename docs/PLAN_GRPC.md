@@ -68,6 +68,51 @@ _Status: living document. Last updated 2026-07-04._
   — needs a stateful streaming base64 layer on request and response; binary
   grpc-web is the common case and is complete.
 
+### Phase 5b — gRPC over HTTP/3 (feasibility confirmed; not yet built)
+
+Feasibility mapped against the live tree + installed nghttp3 **1.15.0**. The
+verdict is favorable but the work is the **largest single phase** and touches
+the QUIC/nghttp3 internals, the reactor/worker path, and the C test client.
+
+**Reuse (already works on H3):** the gRPC data plane is transport-agnostic —
+`writeMessage()`/`readMessage()`, the framing/deframing codec, per-message
+gzip, `grpc-timeout`, and every response-object trailer helper
+(`ensure_grpc_status`, `promote_trailers_to_headers`, `clear_trailers`,
+`grpc_web_trailer_frame`) are shared C. H3 installs the same
+`http_response_install_stream_ops` seam (`http3_dispatch.c:366`) with its own
+`h3_stream_ops`, so message streaming over H3 already functions.
+
+**What must be built (H3-only):**
+1. **Stream state** — add `is_grpc` / `grpc_web` / `has_trailers` /
+   `trailers_submitted` to `http3_stream_t` (`include/http3/http3_stream.h`,
+   near `streaming_ended:127`).
+2. **Routing** — in `http3_stream_dispatch` (`http3_dispatch.c:282`): classify
+   via `grpc_request_is_grpc`/`_web`, add `HTTP_PROTOCOL_GRPC` to the handler
+   lookup (`:317-321`), relax the `fcall == NULL` bail (`:328`) for gRPC-only,
+   inject the response content-type after `response_zv` init (`:360-367`).
+   **Also the reactor path**: `http3_stream_dispatch_to_worker` (`:299`) →
+   `worker_dispatch.c` needs the same gRPC routing for `REACTOR_POOL=1`.
+3. **Trailer emission** — the real work, API available: change the streaming
+   EOF branch of `h3_read_data_cb` (`http3_callbacks.c:476-479`) to set
+   `NGHTTP3_DATA_FLAG_EOF | NGHTTP3_DATA_FLAG_NO_END_STREAM` and call
+   `nghttp3_conn_submit_trailers(conn, stream_id, nv, nvlen)` when the response
+   has trailers — mirroring `h2_dp_mark_eof`. Add an H3
+   `submit_response_trailers` helper (QPACK-flatten via the existing
+   `h3_nv_push`). Add the Trailers-Only / grpc-web finalize to
+   `h3_handler_coroutine_dispose` (`http3_dispatch.c:680`), reusing
+   `grpc_web_trailer_frame` + `clear_trailers` exactly as `h2_grpc_web_finalize`.
+4. **Test client** — extend `tests/h3client/h3client.c`: inject arbitrary
+   request headers (fixed 5-header set today at `:311`, so it can't send
+   `content-type: application/grpc`) and record response trailer name/values
+   (`h3_recv_header:113` discards non-`:status`). Then add
+   `tests/phpt/server/h3/` gRPC tests.
+
+**Why it's its own effort:** multi-file change across the trickiest subsystem
+(QUIC + nghttp3 data-reader) plus the reactor/worker path plus a C QUIC-client
+extension to make it testable. High reuse keeps it bounded, but it is not a
+quick add — best done as a focused session, not rushed onto the end of the H2
+work.
+
 ### Discovered pre-existing bug (independent of gRPC) — NOT yet fixed
 
 An **uncaught exception in any HTTP/2 handler** (gRPC or plain HTTP, GET or
