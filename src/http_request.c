@@ -287,9 +287,10 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
     }
 
     zend_string *msg = NULL;
+    bool         compressed = false;
     const int rc = grpc_deframe_next(ZSTR_VAL(req->body), ZSTR_LEN(req->body),
                                      &req->grpc_read_offset,
-                                     GRPC_MAX_RECV_MESSAGE, NULL, &msg);
+                                     GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
 
     if (rc < 0) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -300,6 +301,22 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
     if (rc == 0) {
         /* No complete message left at the cursor. */
         RETURN_NULL();
+    }
+
+    if (compressed) {
+        /* Per-message compression: decode per grpc-encoding (gzip). */
+        zend_string *inflated = NULL;
+
+        if (grpc_message_inflate(req, ZSTR_VAL(msg), ZSTR_LEN(msg),
+                                 &inflated) != 0) {
+            zend_string_release(msg);
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "unsupported or invalid gRPC message compression", 0);
+            RETURN_NULL();
+        }
+
+        zend_string_release(msg);
+        RETURN_STR(inflated);
     }
 
     RETURN_STR(msg);

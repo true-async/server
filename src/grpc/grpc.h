@@ -68,4 +68,15 @@ int grpc_deframe_next(const char *buf, size_t len, size_t *cursor,
                       uint32_t max_msg, bool *out_compressed,
                       zend_string **out);
 
+/* Decompress a message that carried the compressed flag, per the request's
+ * grpc-encoding header (gzip only, via the shared compression backend).
+ * Returns 0 on success (*out owned by caller), -1 on an unsupported encoding,
+ * corrupt data, or when no compression backend is compiled in. */
+int grpc_message_inflate(const struct http_request_t *req,
+                         const char *in, size_t in_len, zend_string **out);
+
+/* Gzip-compress a message for `grpc-encoding: gzip`. Returns a new
+ * zend_string the caller owns, or NULL when gzip is unavailable / failed. */
+zend_string *grpc_message_deflate_gzip(const char *in, size_t in_len);
+
 #endif /* HTTP_GRPC_H */

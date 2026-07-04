@@ -38,6 +38,22 @@ _Status: living document. Last updated 2026-07-04._
   cancellation into the coroutine (the same unwind path that leaks a handle in
   #101), so it is coupled to that fix; and server-emitted `DEADLINE_EXCEEDED`
   is not required for interop (the client enforces its own deadline).
+- **Phase 4 — DONE (per-message gzip), reusing the existing compression
+  backend.** No second zlib wrapper: the one-shot buffer helpers live in
+  `src/compression/` and share the module's zlib(-ng) abstraction —
+  `http_compression_gzip_deflate_buffer` (in `http_compression_gzip.c`) and
+  `http_compression_gzip_inflate_buffer` (factored out of the request-body
+  `decode_gzip`, which now calls it). Declared in
+  `include/compression/http_compression_message.h`. gRPC calls them via
+  `grpc_message_inflate` / `grpc_message_deflate_gzip`.
+  `readMessage()` transparently inflates a message whose compressed flag is
+  set (per `grpc-encoding`, gzip only); `writeMessage($msg, compress: true)`
+  gzips the reply and sets the `grpc-encoding: gzip` response header. Gated on
+  `HAVE_HTTP_COMPRESSION` — identity-only when no zlib backend is built. Note:
+  gRPC compression is **per-message** (a flag byte per message) and is
+  distinct from HTTP-body `Content-Encoding`, which is why it needs its own
+  path rather than the streaming HTTP-body encoder. Test: `/008` (10 KB gzip
+  round-trip both directions).
 
 ### Discovered pre-existing bug (independent of gRPC) — NOT yet fixed
 

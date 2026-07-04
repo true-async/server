@@ -1026,9 +1026,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 {
     zend_string *message;
+    bool         compress = false;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    ZEND_PARSE_PARAMETERS_START(1, 2)
         Z_PARAM_STR(message)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(compress)
     ZEND_PARSE_PARAMETERS_END();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
@@ -1051,6 +1054,29 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
+    /* Optional per-message gzip. If gzip is not compiled in, transparently
+     * fall back to identity (flag 0). grpc-encoding must ride the initial
+     * HEADERS, so declare it before the first message commits. */
+    zend_string *payload = message;
+    bool         gzipped = false;
+
+    if (compress) {
+        zend_string *gz = grpc_message_deflate_gzip(
+            ZSTR_VAL(message), ZSTR_LEN(message));
+
+        if (gz != NULL) {
+            payload = gz;
+            gzipped = true;
+
+            if (!response->streaming) {
+                zval enc;
+                ZVAL_STRING(&enc, "gzip");
+                zend_hash_str_update(response->headers, "grpc-encoding",
+                                     sizeof("grpc-encoding") - 1, &enc);
+            }
+        }
+    }
+
     /* First message — lock headers and switch to streaming mode. Mirrors
      * send(): after this, setBody / setHeader / setStatusCode throw, but
      * setTrailer() stays allowed (grpc-status is set post-commit). */
@@ -1063,7 +1089,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
     /* Prepend the 5-byte gRPC frame header. The queue takes ownership of
      * this fresh string (append_chunk consumes the ref), so no release. */
     zend_string *framed = grpc_frame_message(
-        ZSTR_VAL(message), ZSTR_LEN(message), false);
+        ZSTR_VAL(payload), ZSTR_LEN(payload), gzipped);
+
+    if (gzipped) {
+        zend_string_release(payload);   /* framed copied it; drop the gz buffer */
+    }
 
     const int rc = response->stream_ops->append_chunk(
         response->stream_ctx, framed);

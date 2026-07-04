@@ -29,8 +29,10 @@
 #endif
 
 #include "compression/http_encoder.h"
+#include "compression/http_compression_message.h"
 
 #include "php.h"  /* emalloc / efree — unit tests provide a minimal Zend */
+#include <string.h>
 
 #ifdef HAVE_ZLIB_NG
 #  include <zlib-ng.h>
@@ -40,6 +42,7 @@
 #  define ZS_DEFLATE_END      zng_deflateEnd
 #  define ZS_DEFLATE_RESET    zng_deflateReset
 #  define ZS_DEFLATE_PARAMS   zng_deflateParams
+#  define ZS_DEFLATE_BOUND    zng_deflateBound
 #else
 #  include <zlib.h>
 #  define ZS                  z_stream
@@ -48,6 +51,7 @@
 #  define ZS_DEFLATE_END      deflateEnd
 #  define ZS_DEFLATE_RESET    deflateReset
 #  define ZS_DEFLATE_PARAMS   deflateParams
+#  define ZS_DEFLATE_BOUND    deflateBound
 #endif
 
 typedef struct {
@@ -183,3 +187,46 @@ const http_encoder_vtable_t http_compression_gzip_vt = {
     .reset   = gz_reset,
     .destroy = gz_destroy,
 };
+
+/* One-shot whole-buffer gzip compress — see http_compression_message.h. Sizes
+ * the output via deflateBound and finishes in a single deflate() pass, so it
+ * never needs the streaming NEED_OUTPUT loop above. */
+zend_string *http_compression_gzip_deflate_buffer(const char *in, size_t in_len,
+                                                   int level)
+{
+    if (level < 1) level = 1;
+
+    if (level > 9) level = 9;
+
+    ZS s;
+    memset(&s, 0, sizeof(s));
+
+    if (ZS_DEFLATE_INIT2(&s, level, Z_DEFLATED, MAX_WBITS + 16, 8,
+                         Z_DEFAULT_STRATEGY) != Z_OK) {
+        return NULL;
+    }
+
+    const size_t bound = ZS_DEFLATE_BOUND(&s, in_len);
+    zend_string *out   = zend_string_alloc(bound, 0);
+
+    s.next_in   = (void *)(uintptr_t)in;
+    s.avail_in  = (unsigned)in_len;
+    s.next_out  = (unsigned char *)ZSTR_VAL(out);
+    s.avail_out = (unsigned)bound;
+
+    const int    rc       = ZS_DEFLATE(&s, Z_FINISH);
+    const size_t produced = bound - s.avail_out;
+    (void)ZS_DEFLATE_END(&s);
+
+    if (rc != Z_STREAM_END) {
+        zend_string_release(out);
+        return NULL;
+    }
+
+    if (produced != bound) {
+        out = zend_string_truncate(out, produced, 0);
+    }
+
+    ZSTR_VAL(out)[produced] = '\0';
+    return out;
+}

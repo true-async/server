@@ -17,6 +17,10 @@
 #include <string.h>
 #include <strings.h>             /* strncasecmp */
 
+#ifdef HAVE_HTTP_COMPRESSION
+#  include "compression/http_compression_message.h"  /* one-shot gzip */
+#endif
+
 bool grpc_request_is_grpc(const http_request_t *req)
 {
     if (req == NULL || req->headers == NULL) {
@@ -132,4 +136,39 @@ int grpc_deframe_next(const char *buf, size_t len, size_t *cursor,
     *out    = zend_string_init(buf + pos + 5, mlen, 0);
     *cursor = pos + 5 + (size_t)mlen;
     return 1;
+}
+
+int grpc_message_inflate(const http_request_t *req,
+                         const char *in, size_t in_len, zend_string **out)
+{
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Compressed flag set → the algorithm is named by grpc-encoding. gRPC's
+     * baseline is gzip; anything else is unsupported here. */
+    zval *enc = (req != NULL && req->headers != NULL)
+        ? zend_hash_str_find(req->headers, "grpc-encoding",
+                             sizeof("grpc-encoding") - 1)
+        : NULL;
+
+    if (enc == NULL || Z_TYPE_P(enc) != IS_STRING
+        || !zend_string_equals_literal(Z_STR_P(enc), "gzip")) {
+        return -1;
+    }
+
+    return http_compression_gzip_inflate_buffer(in, in_len,
+                                                GRPC_MAX_RECV_MESSAGE, out) == 0
+               ? 0 : -1;
+#else
+    (void)req; (void)in; (void)in_len; (void)out;
+    return -1;
+#endif
+}
+
+zend_string *grpc_message_deflate_gzip(const char *in, size_t in_len)
+{
+#ifdef HAVE_HTTP_COMPRESSION
+    return http_compression_gzip_deflate_buffer(in, in_len, 6 /* default */);
+#else
+    (void)in; (void)in_len;
+    return NULL;
+#endif
 }
