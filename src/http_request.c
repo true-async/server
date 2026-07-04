@@ -14,6 +14,7 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "http_body_stream.h"
+#include "grpc/grpc.h"
 #include "core/async_plain_event.h"
 #include "log/trace_context.h"
 #include "Zend/zend_async_API.h"
@@ -265,6 +266,64 @@ ZEND_METHOD(TrueAsync_HttpRequest, getBody)
     }
 
     http_request_retval_str(return_value, intern->request->body);
+}
+
+/* {{{ proto HttpRequest::readMessage(): ?string
+ *
+ * Deframe and return the next gRPC message from the request body (one
+ * 5-byte-length-prefixed frame), advancing an internal cursor. Returns
+ * null once no complete message remains — call once for a unary RPC, loop
+ * for client-streaming. The returned bytes are the raw (protobuf) message;
+ * decoding stays in PHP userland. */
+ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_request_t *req = intern->request;
+
+    if (req == NULL || req->body == NULL) {
+        RETURN_NULL();
+    }
+
+    zend_string *msg = NULL;
+    const int rc = grpc_deframe_next(ZSTR_VAL(req->body), ZSTR_LEN(req->body),
+                                     &req->grpc_read_offset,
+                                     GRPC_MAX_RECV_MESSAGE, NULL, &msg);
+
+    if (rc < 0) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "gRPC message length exceeds the maximum allowed size", 0);
+        RETURN_NULL();
+    }
+
+    if (rc == 0) {
+        /* No complete message left at the cursor. */
+        RETURN_NULL();
+    }
+
+    RETURN_STR(msg);
+}
+
+/* {{{ proto HttpRequest::getGrpcTimeout(): ?float
+ *
+ * The gRPC call deadline parsed from the `grpc-timeout` request header, in
+ * seconds (fractional), or null when the client sent none / it was
+ * malformed. The server does not itself abort the handler when the deadline
+ * elapses (the client enforces its own deadline); a handler can read this
+ * and bound its own work against it. */
+ZEND_METHOD(TrueAsync_HttpRequest, getGrpcTimeout)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const uint64_t ns = grpc_parse_timeout_ns(intern->request);
+
+    if (ns == 0) {
+        RETURN_NULL();
+    }
+
+    RETURN_DOUBLE((double)ns / 1000000000.0);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, hasBody)

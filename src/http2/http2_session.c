@@ -1467,12 +1467,78 @@ bool http2_session_want_write(const http2_session_t *session)
  * Response submission
  * ------------------------------------------------------------------------- */
 
+/* Extract response trailers (name => value zend_string map) from the PHP
+ * HttpResponse and submit them via nghttp2_submit_trailer. Shared by the
+ * buffered (unary) commit — which submits eagerly before its drain — and
+ * the streaming path, which submits lazily at true EOF (h2_dp_mark_eof)
+ * once every queued DATA chunk has drained. No-op when the response has no
+ * trailers. Canonical gRPC consumer: grpc-status / grpc-message. */
+void http2_session_submit_response_trailers(http2_session_t *session,
+                                            const uint32_t stream_id,
+                                            zend_object *response_obj)
+{
+    if (response_obj == NULL) {
+        return;
+    }
+
+    HashTable *trailers = http_response_get_trailers(response_obj);
+
+    if (trailers == NULL || zend_hash_num_elements(trailers) == 0) {
+        return;
+    }
+
+    http2_header_view_t scratch[HTTP2_NV_SCRATCH];
+    http2_header_view_t *view = scratch;
+    http2_header_view_t *heap = NULL;
+    const size_t count = zend_hash_num_elements(trailers);
+
+    if (count > HTTP2_NV_SCRATCH) {
+        heap = emalloc(count * sizeof(*heap));
+        view = heap;
+    }
+
+    size_t n = 0;
+    zend_string *name;
+    zval        *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+        if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
+        view[n].name      = ZSTR_VAL(name);
+        view[n].name_len  = ZSTR_LEN(name);
+        view[n].value     = Z_STRVAL_P(val);
+        view[n].value_len = Z_STRLEN_P(val);
+        n++;
+    } ZEND_HASH_FOREACH_END();
+
+    if (n > 0) {
+        (void)http2_session_submit_trailer(session, stream_id, view, n);
+    }
+
+    if (heap != NULL) { efree(heap); }
+}
+
 /* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending) on the
- * provider's data_flags. */
-static inline void h2_dp_mark_eof(const http2_stream_t *stream,
+ * provider's data_flags.
+ *
+ * Streaming responses submit their trailers HERE — at true EOF, inside
+ * nghttp2's send loop, after every queued DATA chunk has drained.
+ * Submitting earlier (while data is still queued) makes nghttp2 drop the
+ * pending DATA. The buffered/unary path submits eagerly in its commit, so
+ * it is excluded via the chunk_queue check; run at most once per stream. */
+static inline void h2_dp_mark_eof(http2_stream_t *stream,
                                   uint32_t *data_flags)
 {
     *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+
+    if (stream->chunk_queue != NULL && !stream->trailers_submitted) {
+        stream->trailers_submitted = true;
+
+        if (!Z_ISUNDEF(stream->response_zv)) {
+            http2_session_submit_response_trailers(
+                stream->session, stream->stream_id,
+                Z_OBJ(stream->response_zv));
+        }
+    }
+
     if (stream->has_trailers) {
         *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
     }

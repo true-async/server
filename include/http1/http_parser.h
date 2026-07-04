@@ -91,6 +91,11 @@ struct http_request_t {
     /* Body */
     zend_string *body;
 
+    /* gRPC deframer cursor into `body` — advanced by HttpRequest::readMessage()
+     * as it extracts each 5-byte-length-prefixed message. Zero-initialised
+     * with the rest of the request (memset on alloc). */
+    size_t       grpc_read_offset;
+
     /* Body-progress event.
      * Lazily created by awaitBody() on the first suspend; notified by
      * the parser on body_complete once the event-loop read path lands.

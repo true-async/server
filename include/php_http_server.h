@@ -1129,6 +1129,14 @@ HashTable     *http_response_get_headers (zend_object *obj);
 HashTable     *http_response_get_trailers(zend_object *obj);
 const char    *http_response_get_body    (zend_object *obj, size_t *len_out);
 
+/* Default the grpc-status trailer to `status` unless one is already set.
+ * Used by the gRPC dispose path (grpc-status is mandatory on the wire). */
+void           http_response_ensure_grpc_status(zend_object *obj, int status);
+
+/* Fold response trailers into headers (then clear trailers). Used to build a
+ * gRPC Trailers-Only reply when the handler streamed no messages. */
+void           http_response_promote_trailers_to_headers(zend_object *obj);
+
 /* Borrow the body's underlying zend_string. Returns NULL when the body
  * is empty. The string is owned by the response object — addref it if
  * you need to outlive the response. Avoids a full body memcpy on the

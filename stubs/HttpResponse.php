@@ -179,6 +179,21 @@ final class HttpResponse
     public function send(string $chunk): static {}
 
     /**
+     * Frame and stream one gRPC message.
+     *
+     * Prepends the 5-byte gRPC length prefix (identity encoding) to
+     * $message and streams it as a single gRPC message. Activates
+     * streaming mode on the first call, exactly like send(). Call once for
+     * a unary reply, repeatedly for server-streaming. Pass the already
+     * protobuf-encoded bytes; the grpc-status is carried separately via
+     * setTrailer() (defaults to 0 when unset).
+     *
+     * @param string $message Protobuf-encoded message bytes.
+     * @return static
+     */
+    public function writeMessage(string $message): static {}
+
+    /**
      * Advisory, non-blocking backpressure check for streaming responses.
      *
      * Returns true when send() would accept a chunk without suspending

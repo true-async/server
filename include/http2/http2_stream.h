@@ -96,6 +96,18 @@ struct http2_stream_t {
      * the final DATA slice. */
     bool                 has_trailers;
 
+    /* Guards the lazy streaming-trailer submission in h2_dp_mark_eof so a
+     * multi-slice EOF (e.g. a trailing zero-length DATA frame) submits the
+     * response trailers exactly once. Buffered/unary responses submit
+     * eagerly in the commit path and never touch this. */
+    bool                 trailers_submitted;
+
+    /* True when this stream carries a gRPC call (content-type
+     * application/grpc + a registered gRPC handler). Set at dispatch;
+     * routes the coroutine to the gRPC handler and makes dispose default
+     * the grpc-status trailer. */
+    bool                 is_grpc;
+
     /* Streaming-response chunk queue.
      *
      * Active only when the handler called HttpResponse::send(); a

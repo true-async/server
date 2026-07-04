@@ -1542,14 +1542,19 @@ ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler)
         return;
     }
 
-    /* Store handler - will be used when gRPC support is implemented */
     http_protocol_add_handler_internal(
         INTERNAL_FUNCTION_PARAM_PASSTHRU,
         &server->protocol_handlers,
         HTTP_PROTOCOL_GRPC,
         Z_OBJ_P(ZEND_THIS)
     );
-    server->view.protocol_mask |= HTTP_PROTO_MASK_GRPC;
+
+    /* gRPC is carried over HTTP/2 — enable the h2 transport so the h2c
+     * preface / h2 ALPN is accepted even on a gRPC-only server (no
+     * addHttp2Handler). The per-stream dispatch then routes application/grpc
+     * requests to the gRPC handler and everything else to the HTTP handler
+     * (absent here → 404). */
+    server->view.protocol_mask |= HTTP_PROTO_MASK_GRPC | HTTP_PROTO_MASK_HTTP2;
 }
 /* }}} */
 
@@ -1822,7 +1827,14 @@ static void http_server_accept_callback(
         handler = http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2);
     }
 
-    if (UNEXPECTED(handler == NULL && server->static_handler_count == 0)) {
+    /* gRPC-only servers register no h1/h2 handler — accept the connection
+     * anyway (gRPC rides h2). conn->handler stays NULL; the per-stream
+     * dispatch routes application/grpc to the gRPC handler. */
+    const bool accept_grpc =
+        http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_GRPC);
+
+    if (UNEXPECTED(handler == NULL && server->static_handler_count == 0
+                   && !accept_grpc)) {
         closesocket(client_fd);
         return;
     }
@@ -2927,16 +2939,18 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         RETURN_FALSE;
     }
 
-    /* Require at least one handler that serves HTTP requests (h1 or h2),
-     * OR at least one static mount. h2-only deployments use
-     * addHttp2Handler; dual-protocol deployments use addHttpHandler;
-     * static-only deployments use addStaticHandler (issue #13). */
+    /* Require at least one handler that serves requests (h1 or h2, or a
+     * gRPC handler over h2), OR at least one static mount. h2-only
+     * deployments use addHttp2Handler; dual-protocol use addHttpHandler;
+     * static-only use addStaticHandler (issue #13); gRPC-only servers use
+     * addGrpcHandler (issue #4). */
     if (!http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP1) &&
         !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2) &&
+        !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_GRPC) &&
         server->static_handler_count == 0) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "No HTTP handler registered. Call addHttpHandler(), "
-            "addHttp2Handler(), or addStaticHandler() first", 0);
+            "addHttp2Handler(), addGrpcHandler(), or addStaticHandler() first", 0);
         RETURN_FALSE;
     }
 
