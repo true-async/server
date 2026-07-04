@@ -1,8 +1,21 @@
 # Known issue — SIGSEGV during pool reload when the bootloader spawns a long‑lived coroutine (#93)
 
-Status: **OPEN.** The reload **deadlock** is fixed (see "Fix that shipped"); a
-separate **intermittent crash** it exposes under stress is not yet solved. This
-file captures everything proven so far so we can pick the investigation back up.
+Status: reload **deadlock** is fixed (see "Fix that shipped"). The **intermittent
+crash** it exposes is now **root-caused and filed as an ext/async bug**:
+[true-async/php-async#176](https://github.com/true-async/php-async/issues/176).
+
+**Root cause (confirmed — code + ASAN + gdb):** `async_thread_create_closure`
+(`thread.c`) does `memcpy(&func, copy->func, sizeof(zend_op_array))` — a *shallow*
+copy of only the **top-level** op_array. Its `dynamic_func_defs` (nested closures
+declared inside the transferred closure, e.g. the `spawn(fn: while(true) delay())`
+inside the bootloader) are copied as a pointer → **all workers share the same
+nested op_array** from the persistent snapshot (proven: same `func` address
+`0x531…` on every worker; top-level closures are per-worker `0x7fff…`). Then
+`zend_create_closure` writes a per-thread arena `run_time_cache` **direct pointer**
+into that shared op_array (`zend_closures.c:817`), which is read from another
+thread / after that worker's arena is freed → dangling read → SEGV. Fix belongs
+in ext/async: deep-copy `dynamic_func_defs` per worker (like the top-level).
+Everything below is the raw investigation trail.
 
 ---
 
