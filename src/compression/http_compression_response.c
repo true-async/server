@@ -118,6 +118,7 @@ static void merge_vary_accept_encoding(HashTable *ht)
             }
         }
         /* Build "<cur>, Accept-Encoding" in one allocation, store it. */
+        if (cl > SIZE_MAX - AE_LEN - 2) { return; }
         zend_string *merged = zend_string_alloc(cl + 2 + AE_LEN, 0);
         memcpy(ZSTR_VAL(merged), cur, cl);
         memcpy(ZSTR_VAL(merged) + cl, ", ", 2);
