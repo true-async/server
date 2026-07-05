@@ -2,13 +2,13 @@
 
 HTTP/1.1 RFC 9110/9112 compliance + request-smuggling + malformed-input + header-normalization + caching/cookie probe ([MDA2AV/Http11Probe](https://github.com/MDA2AV/Http11Probe)).
 
-_Generated: 2026-06-28 08:32 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
+_Generated: 2026-07-05 08:17 UTC — refreshed weekly by `.github/workflows/chaos.yml`._
 
 ## Summary
 
 | Total | Scored | Passed | Warnings | Failed | Errors |
 |------:|-------:|-------:|---------:|-------:|-------:|
-| 215 | 161 | 148 | 13 | 0 | 0 |
+| 215 | 161 | 149 | 12 | 0 | 0 |
 
 ## Failures (1)
 
@@ -16,7 +16,7 @@ _Generated: 2026-06-28 08:32 UTC — refreshed weekly by `.github/workflows/chao
 |----------|-------|-----------|----------|-----|
 | Compliance | `COMP-HTTP12-VERSION` | May | 200 or 505 | status=400 conn=ClosedByServer |
 
-## Warnings (26)
+## Warnings (25)
 
 | Category | Check | RFC level | Expected | Got |
 |----------|-------|-----------|----------|-----|
@@ -45,5 +45,4 @@ _Generated: 2026-06-28 08:32 UTC — refreshed weekly by `.github/workflows/chao
 | Smuggling | `SMUG-TRAILER-CONTENT-TYPE` | Must | 400 or 2xx | status=200 conn=Open |
 | Smuggling | `SMUG-TRAILER-HOST` | Must | 400 or 2xx | status=200 conn=Open |
 | Smuggling | `SMUG-TRANSFER_ENCODING` | Must | 400 or 2xx | status=200 conn=Open |
-| WebSockets | `WS-UPGRADE-INVALID-VER` | Must | non-101 (426 preferred) | status=200 conn=ClosedByServer |
 
