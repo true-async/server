@@ -18,6 +18,7 @@
 #include "http3/http3_stream.h"
 #include "http3/http3_stream_pool.h"
 #include "http3_connection.h"   /* http3_connection_t — list ownership at teardown */
+#include "core/stream_credit.h" /* reverse-path flow control — teardown release */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
 
 
@@ -155,6 +156,14 @@ void http3_stream_release(http3_stream_t *s)
 
         efree(s->chunk_queue);
         s->chunk_queue = NULL;
+    }
+
+    /* Reverse-path credit: the stream is going away — unblock a parked
+     * producer, then drop the reactor's ref. */
+    if (s->wire_credit != NULL) {
+        stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
+        stream_credit_release((stream_credit_t *)s->wire_credit);
+        s->wire_credit = NULL;
     }
 
     /* Trailer capture (malloc'd in http3_stream_capture_trailers). Held

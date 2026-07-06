@@ -18,9 +18,16 @@
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
+#include "core/stream_credit.h"              /* per-stream flow-control credit */
 #include "grpc/grpc.h"                       /* grpc_request_is_grpc / _is_grpc_web */
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
+
+/* Streaming reverse-path flow control: how many un-acked bytes a stream may
+ * have in flight before append_chunk parks the producer coroutine, and how
+ * often a parked producer re-reads the credit counter. */
+#define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
+#define WORKER_CREDIT_POLL_MS      2
 
 #include <string.h>
 
@@ -64,6 +71,12 @@ typedef struct {
      * stream_started, dispose skips the buffered FULL render. */
     bool                    stream_started;
     bool                    stream_ended;
+
+    /* Flow control (step 3): `credit` is shared with the reactor (see
+     * stream_credit.h); posted_bytes is worker-local. In-flight =
+     * posted_bytes - acked; append parks over WORKER_STREAM_INFLIGHT_CAP. */
+    stream_credit_t        *credit;
+    uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
 /* Handler coroutine body: run the registered user handler with (request, response). */
@@ -230,17 +243,77 @@ static void worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
  * END (trailers + EOF). Backpressure credits are the step-3 follow-up —
  * until then append never reports BACKPRESSURE.
  * ------------------------------------------------------------------- */
+/* Suspend the producer coroutine for `ms` on a one-shot timer so the worker
+ * loop keeps draining while we wait for credit. Best-effort: bails silently
+ * outside a coroutine (flush stays best-effort, mirroring the local path). */
+static void worker_credit_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
+{
+    zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    t->base.start(&t->base);
+    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    ZEND_ASYNC_WAKER_DESTROY(co);
+}
+
+/* Park the producer until in-flight drops under the cap, the stream dies,
+ * or the write timeout elapses. Returns false when the stream is dead. */
+static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
+{
+    if (ctx->credit == NULL) {
+        return true;
+    }
+
+    const uint32_t timeout_ms =
+        http_server_get_write_timeout_s(ctx->server) * 1000u;
+    uint64_t waited_ms = 0;
+
+    while (ctx->posted_bytes - stream_credit_acked(ctx->credit)
+               >= WORKER_STREAM_INFLIGHT_CAP) {
+        if (stream_credit_is_dead(ctx->credit)) {
+            return false;
+        }
+
+        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+            return true;   /* can't suspend — degrade to unbounded */
+        }
+
+        worker_credit_sleep_ms(co, WORKER_CREDIT_POLL_MS);
+
+        if (EG(exception) != NULL) {
+            return false;   /* cancelled while parked */
+        }
+
+        waited_ms += WORKER_CREDIT_POLL_MS;
+
+        if (timeout_ms > 0 && waited_ms >= timeout_ms) {
+            return false;   /* peer stopped reading — treat as dead */
+        }
+    }
+
+    return true;
+}
+
 static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
-    if (UNEXPECTED(ctx->stream_ended)) {
+    if (UNEXPECTED(ctx->stream_ended)
+        || (ctx->credit != NULL && stream_credit_is_dead(ctx->credit))) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
     /* First send(): the response just committed — flatten status + headers
-     * into the STREAM_HEADERS wire that opens the stream on the reactor. */
+     * into the STREAM_HEADERS wire that opens the stream on the reactor,
+     * carrying the shared credit block (the reactor adopts one ref). */
     if (!ctx->stream_started) {
         response_wire_t *const hw =
             response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
@@ -250,7 +323,10 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
 
+        ctx->credit = stream_credit_create();   /* NULL degrades to unbounded */
+
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
+        response_wire_set_credit(hw, ctx->credit);
         worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv));
         worker_wire_post(ctx, hw);
         ctx->stream_started = true;
@@ -273,10 +349,40 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
+    const size_t chunk_len = ZSTR_LEN(chunk);
+
     worker_wire_post(ctx, cw);
     zend_string_release(chunk);   /* bytes copied into the wire arena */
 
+    /* Flow control: account the bytes, then park until the reactor retires
+     * enough of the backlog (peer ACKs) — mirrors the local path suspending
+     * on write_event, but over the thread boundary via the credit block. */
+    ctx->posted_bytes += chunk_len;
+
+    if (!worker_stream_wait_credit(ctx)) {
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     return HTTP_STREAM_APPEND_OK;
+}
+
+/* Advisory for HttpResponse::sendable(): true while append_chunk would not
+ * park (room under the in-flight cap and the stream is alive). */
+static bool worker_stream_sendable(void *vctx)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (ctx->stream_ended) {
+        return false;
+    }
+
+    if (ctx->credit == NULL) {
+        return true;
+    }
+
+    return !stream_credit_is_dead(ctx->credit)
+           && ctx->posted_bytes - stream_credit_acked(ctx->credit)
+                  < WORKER_STREAM_INFLIGHT_CAP;
 }
 
 static void worker_stream_mark_ended(void *vctx)
@@ -303,9 +409,9 @@ static void worker_stream_mark_ended(void *vctx)
 
 static const http_response_stream_ops_t worker_stream_ops = {
     .append_chunk   = worker_stream_append_chunk,
-    .sendable       = NULL,   /* no staging-ring visibility yet (step 3) */
+    .sendable       = worker_stream_sendable,
     .mark_ended     = worker_stream_mark_ended,
-    .get_wait_event = NULL,   /* append never reports BACKPRESSURE yet */
+    .get_wait_event = NULL,   /* backpressure parks inside append_chunk */
 };
 
 /* gRPC finish ops (grpc_call_finish seam) — the worker-side delivery
@@ -438,6 +544,11 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
          * this dispose; ctx dies below, so a late send() must throw the
          * standard "not available" instead of touching freed memory. */
         http_response_replace_stream_ops(resp, NULL, NULL);
+    }
+
+    if (ctx->credit != NULL) {
+        stream_credit_release(ctx->credit);   /* worker-side ref */
+        ctx->credit = NULL;
     }
 
     if (!Z_ISUNDEF(ctx->request_zv)) {

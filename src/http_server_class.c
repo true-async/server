@@ -32,6 +32,7 @@
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
 #include "core/response_wire.h"
+#include "core/stream_credit.h"
 #include "log/http_log.h"
 #ifndef PHP_WIN32
 #include <dirent.h>
@@ -2582,6 +2583,15 @@ static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
         }
     }
 #endif
+
+    /* Undeliverable: the reactor never adopts a HEADERS wire's credit ref,
+     * so take it over — unblock the parked producer, drop the ref. */
+    stream_credit_t *const orphan = (stream_credit_t *)response_wire_credit(rw);
+
+    if (orphan != NULL) {
+        stream_credit_mark_dead(orphan);
+        stream_credit_release(orphan);
+    }
 
     response_wire_free(rw);
 }

@@ -32,6 +32,7 @@ struct response_wire_s {
     void    *conn;
 
     response_wire_kind_t kind;   /* FULL unless set otherwise */
+    void    *credit;             /* opaque stream_credit_t*, not owned */
     int      status;
 
     /* Growable byte arena: every span's bytes are copied in here. */
@@ -117,6 +118,16 @@ void response_wire_set_kind(response_wire_t *rw, const response_wire_kind_t kind
 response_wire_kind_t response_wire_kind(const response_wire_t *rw)
 {
     return rw->kind;
+}
+
+void response_wire_set_credit(response_wire_t *rw, void *credit)
+{
+    rw->credit = credit;
+}
+
+void *response_wire_credit(const response_wire_t *rw)
+{
+    return rw->credit;
 }
 
 void response_wire_set_status(response_wire_t *rw, const int status)

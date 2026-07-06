@@ -24,6 +24,7 @@
 #include "http_connection.h"               /* http_handler_log_bailout */
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
+#include "core/stream_credit.h"             /* reverse-path flow control */
 #include "grpc/grpc.h"                      /* gRPC request classification */
 #include "grpc/grpc_call.h"                 /* gRPC call lifecycle policy */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
@@ -225,6 +226,17 @@ void http3_reactor_apply_response(void *arg)
     http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
 
     if (c == NULL || c->closed || c->nghttp3_conn == NULL) {
+        /* The stream is already gone, so nobody will adopt a HEADERS
+         * wire's credit ref — take it over: unblock the parked producer
+         * and drop the reactor-side ref here. */
+        stream_credit_t *const orphan =
+            (stream_credit_t *)response_wire_credit(rw);
+
+        if (orphan != NULL) {
+            stream_credit_mark_dead(orphan);
+            stream_credit_release(orphan);
+        }
+
         response_wire_free(rw);
         return;
     }

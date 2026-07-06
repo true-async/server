@@ -39,6 +39,7 @@
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
 #include "http3_steer.h"                   /* CID steering encode */
 #include "core/response_wire.h"            /* response_wire_* (reverse path) */
+#include "core/stream_credit.h"            /* reverse-path flow control */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
@@ -925,6 +926,10 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
 
     if (streaming) {
         h3_chunk_queue_init(s);
+        /* Adopt the worker's credit ref: acked advances in
+         * h3_acked_stream_data_cb, dead on stream death, release at
+         * teardown. */
+        s->wire_credit = response_wire_credit(rw);
     } else {
         size_t      blen = 0;
         const char *body = response_wire_body(rw, &blen);
@@ -966,8 +971,14 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
 
     if (streaming) {
         /* The reader was never registered; make sure late STREAM_CHUNK /
-         * STREAM_END applies see a dead stream and drop. */
+         * STREAM_END applies see a dead stream and drop, and unblock a
+         * producer parked on credit. The teardown release still runs, so
+         * only mark here. */
         s->streaming_ended = true;
+
+        if (s->wire_credit != NULL) {
+            stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
+        }
     }
 
     return false;
@@ -1315,6 +1326,11 @@ static void h3_stream_mark_peer_closed(http3_stream_t *s)
 
     s->peer_closed = true;
 
+    /* Unblock a worker producer parked on credit — the stream is gone. */
+    if (s->wire_credit != NULL) {
+        stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
+    }
+
     if (s->write_event != NULL) {
         zend_async_trigger_event_t *trig =
             s->write_event;
@@ -1398,6 +1414,12 @@ static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
 
     if (s == NULL || s->chunk_queue == NULL) {
         return 0;
+    }
+
+    /* Reverse-path flow control: retire the acked bytes so a worker
+     * producer parked on the credit cap resumes. */
+    if (s->wire_credit != NULL) {
+        stream_credit_ack((stream_credit_t *)s->wire_credit, datalen);
     }
 
     s->chunk_ack_credit += datalen;

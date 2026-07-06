@@ -155,6 +155,13 @@ struct _http3_stream_s {
      * unwinds cleanly with HttpException(499). */
     bool              peer_closed;
 
+    /* Reverse-path flow control (#80 step 3): the worker's credit block,
+     * adopted from the STREAM_HEADERS wire. void* keeps core headers out
+     * of this one; the reactor advances acked on peer ACK, marks dead on
+     * stream death, releases its ref at teardown. NULL for local /
+     * buffered streams. */
+    void             *wire_credit;
+
     /* Trigger event the handler awaits on under flow-control
      * backpressure. The data_reader fires it (lazily) when ngtcp2
      * extends the per-stream write window; lazy-created on first wait,
