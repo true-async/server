@@ -18,6 +18,8 @@
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
+#include "grpc/grpc.h"                       /* grpc_request_is_grpc / _is_grpc_web */
+#include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 
 #include <string.h>
@@ -52,6 +54,16 @@ typedef struct {
 
     bool                    skip_handler;  /* synthetic 404 already populated */
     bool                    is_head;       /* suppress the body on render */
+
+    /* gRPC classification (once, at dispatch — the transports do the same). */
+    bool                    is_grpc;
+    bool                    grpc_web;
+
+    /* Streaming reverse path: STREAM_HEADERS posted on the first
+     * append_chunk; STREAM_END posted by mark_ended (idempotent). When
+     * stream_started, dispose skips the buffered FULL render. */
+    bool                    stream_started;
+    bool                    stream_ended;
 } worker_dispatch_ctx_t;
 
 /* Handler coroutine body: run the registered user handler with (request, response). */
@@ -68,7 +80,13 @@ static void worker_dispatch_entry(void)
     }
 
     HashTable *const handlers = http_server_get_protocol_handlers(ctx->server);
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    zend_fcall_t *fcall = ctx->is_grpc
+        ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC)
+        : NULL;
+
+    if (fcall == NULL) {
+        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    }
 
     if (fcall == NULL) {
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
@@ -123,6 +141,215 @@ static void worker_dispatch_entry(void)
     zval_ptr_dtor(&retval);
 }
 
+/* Flatten status + H2/H3-allowed headers of the response onto a wire. */
+static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp)
+{
+    int status = http_response_get_status(resp);
+
+    if (UNEXPECTED(status <= 0)) {
+        status = 200;
+    }
+
+    response_wire_set_status(rw, status);
+
+    HashTable *const headers = http_response_get_headers(resp);
+
+    if (headers == NULL) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *values;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
+        if (UNEXPECTED(name == NULL)) {
+            continue;
+        }
+
+        if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) {
+            continue;
+        }
+
+        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
+            response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                     Z_STRVAL_P(values), Z_STRLEN_P(values));
+        } else if (Z_TYPE_P(values) == IS_ARRAY) {
+            zval *v;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
+                if (Z_TYPE_P(v) != IS_STRING) {
+                    continue;
+                }
+
+                response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                         Z_STRVAL_P(v), Z_STRLEN_P(v));
+            } ZEND_HASH_FOREACH_END();
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
+/* Flatten the trailer map (setTrailer / gRPC grpc-status) onto a wire — flat
+ * string pairs, same discipline as http3_stream_capture_trailers locally. */
+static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
+{
+    HashTable *const trailers = http_response_get_trailers(resp);
+
+    if (trailers == NULL) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+        if (UNEXPECTED(name == NULL) || Z_TYPE_P(val) != IS_STRING) {
+            continue;
+        }
+
+        response_wire_add_trailer(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                  Z_STRVAL_P(val), Z_STRLEN_P(val));
+    } ZEND_HASH_FOREACH_END();
+}
+
+/* Hand a wire to the reverse channel. The sink owns it on success. Stream
+ * kinds must not be silently dropped mid-stream, so the sink (which retries
+ * on a transiently full mailbox) is the single delivery point. */
+static void worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
+{
+    if (ctx->sink != NULL) {
+        ctx->sink(rw, ctx->sink_arg);
+    } else {
+        response_wire_free(rw);
+    }
+}
+
+/* ---------------------------------------------------------------------
+ * Streaming reverse path (worker side of #80 D3, streaming leg).
+ *
+ * The worker's HttpResponse gets these stream ops so send()/writeMessage()
+ * work under the pool: each op flattens its payload into a STREAM_* wire
+ * and posts it to the originating reactor. Ordering is the mailbox FIFO;
+ * the reactor applies HEADERS (streaming submit), CHUNKs (chunk_queue),
+ * END (trailers + EOF). Backpressure credits are the step-3 follow-up —
+ * until then append never reports BACKPRESSURE.
+ * ------------------------------------------------------------------- */
+static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (UNEXPECTED(ctx->stream_ended)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* First send(): the response just committed — flatten status + headers
+     * into the STREAM_HEADERS wire that opens the stream on the reactor. */
+    if (!ctx->stream_started) {
+        response_wire_t *const hw =
+            response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+        if (UNEXPECTED(hw == NULL)) {
+            zend_string_release(chunk);
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
+
+        response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
+        worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv));
+        worker_wire_post(ctx, hw);
+        ctx->stream_started = true;
+    }
+
+    response_wire_t *const cw =
+        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+    if (UNEXPECTED(cw == NULL)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    response_wire_set_kind(cw, RESPONSE_WIRE_STREAM_CHUNK);
+
+    if (UNEXPECTED(!response_wire_set_body(cw, ZSTR_VAL(chunk), ZSTR_LEN(chunk),
+                                           false))) {
+        response_wire_free(cw);
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    worker_wire_post(ctx, cw);
+    zend_string_release(chunk);   /* bytes copied into the wire arena */
+
+    return HTTP_STREAM_APPEND_OK;
+}
+
+static void worker_stream_mark_ended(void *vctx)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (!ctx->stream_started || ctx->stream_ended) {
+        return;
+    }
+
+    ctx->stream_ended = true;
+
+    response_wire_t *const ew =
+        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+    if (UNEXPECTED(ew == NULL)) {
+        return;
+    }
+
+    response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_END);
+    worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv));
+    worker_wire_post(ctx, ew);
+}
+
+static const http_response_stream_ops_t worker_stream_ops = {
+    .append_chunk   = worker_stream_append_chunk,
+    .sendable       = NULL,   /* no staging-ring visibility yet (step 3) */
+    .mark_ended     = worker_stream_mark_ended,
+    .get_wait_event = NULL,   /* append never reports BACKPRESSURE yet */
+};
+
+/* gRPC finish ops (grpc_call_finish seam) — the worker-side delivery
+ * actions; what to send is decided in src/grpc/grpc_call.c. */
+
+/* grpc-web in-body trailer frame. Streamed reply: one more CHUNK + END.
+ * Zero-message reply: the frame becomes the buffered body — the FULL wire
+ * rendered right after grpc_call_finish carries it. Consumes the ref. */
+static void worker_grpc_append_frame_and_end(void *vctx, zend_string *frame)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
+        /* append_chunk consumes the ref (success or failure). */
+        if (worker_stream_append_chunk(ctx, frame) == HTTP_STREAM_APPEND_OK) {
+            worker_stream_mark_ended(ctx);
+        }
+
+        return;
+    }
+
+    http_response_static_set_body_str(Z_OBJ(ctx->response_zv), frame);
+    zend_string_release(frame);
+}
+
+static void worker_grpc_end_stream(void *vctx)
+{
+    worker_stream_mark_ended(vctx);
+}
+
+/* Trailers-Only: grpc_call_finish already promoted the trailers into the
+ * initial HEADERS; dispose renders + posts the FULL wire right after this
+ * returns, so there is nothing left to commit here. */
+static void worker_grpc_commit(void *vctx)
+{
+    (void)vctx;
+}
+
+static const grpc_finish_ops_t worker_grpc_finish_ops = {
+    .append_frame_and_end = worker_grpc_append_frame_and_end,
+    .end_stream           = worker_grpc_end_stream,
+    .commit               = worker_grpc_commit,
+};
+
 /* Flatten the committed HttpResponse into a response_wire. Buffered only.
  * Returns NULL on allocation failure. */
 static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
@@ -136,61 +363,8 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         return NULL;
     }
 
-    int status = http_response_get_status(resp);
-
-    if (UNEXPECTED(status <= 0)) {
-        status = 200;
-    }
-
-    response_wire_set_status(rw, status);
-
-    HashTable *const headers = http_response_get_headers(resp);
-
-    if (headers != NULL) {
-        zend_string *name;
-        zval        *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (UNEXPECTED(name == NULL)) {
-                continue;
-            }
-
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) {
-                continue;
-            }
-
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                         Z_STRVAL_P(values), Z_STRLEN_P(values));
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *v;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
-                    if (Z_TYPE_P(v) != IS_STRING) {
-                        continue;
-                    }
-
-                    response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                             Z_STRVAL_P(v), Z_STRLEN_P(v));
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
-
-    /* Trailer map (setTrailer / gRPC grpc-status): flat string pairs, same
-     * discipline as http3_stream_capture_trailers on the local path. */
-    HashTable *const trailers = http_response_get_trailers(resp);
-
-    if (trailers != NULL) {
-        zend_string *name;
-        zval        *val;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
-            if (UNEXPECTED(name == NULL) || Z_TYPE_P(val) != IS_STRING) {
-                continue;
-            }
-
-            response_wire_add_trailer(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                      Z_STRVAL_P(val), Z_STRLEN_P(val));
-        } ZEND_HASH_FOREACH_END();
-    }
+    worker_wire_copy_head(rw, resp);
+    worker_wire_copy_trailers(rw, resp);
 
     /* http_response_get_body_str returns a borrowed reference; the bytes are
      * copied into the arena, so nothing to release. HEAD carries the headers
@@ -227,23 +401,43 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     if (!Z_ISUNDEF(ctx->response_zv)) {
         zend_object *const resp = Z_OBJ(ctx->response_zv);
 
-        if (coroutine->exception != NULL && !http_response_is_committed(resp)) {
+        /* A gRPC outcome is expressed as grpc-status on a 200, not as an
+         * HTTP 500 — grpc_call_ensure_status maps the exception below. */
+        if (coroutine->exception != NULL && !ctx->is_grpc
+            && !http_response_is_committed(resp)) {
             http_response_reset_to_error(resp, 500, "Internal Server Error");
+        }
+
+        if (ctx->is_grpc) {
+            grpc_call_ensure_status(resp, coroutine->exception != NULL);
         }
 
         if (!http_response_is_committed(resp)) {
             http_response_set_committed(resp);
         }
 
-        response_wire_t *const rw = worker_render_response(ctx);
+        /* Delivery shape. gRPC policy decides via grpc_call_finish; a plain
+         * streamed response just needs its END (idempotent — a handler that
+         * called end() already posted it). A response that never streamed is
+         * the buffered FULL wire, exactly as before. */
+        if (ctx->is_grpc) {
+            grpc_call_finish(resp, ctx->grpc_web, &worker_grpc_finish_ops, ctx);
+        } else if (http_response_is_streaming(resp)) {
+            worker_stream_mark_ended(ctx);
+        }
 
-        if (rw != NULL) {
-            if (ctx->sink != NULL) {
-                ctx->sink(rw, ctx->sink_arg);   /* sink owns rw now */
-            } else {
-                response_wire_free(rw);
+        if (!ctx->stream_started) {
+            response_wire_t *const rw = worker_render_response(ctx);
+
+            if (rw != NULL) {
+                worker_wire_post(ctx, rw);   /* sink owns rw now */
             }
         }
+
+        /* Detach the ops: a handler may have kept $response alive beyond
+         * this dispose; ctx dies below, so a late send() must throw the
+         * standard "not available" instead of touching freed memory. */
+        http_response_replace_stream_ops(resp, NULL, NULL);
     }
 
     if (!Z_ISUNDEF(ctx->request_zv)) {
@@ -280,6 +474,13 @@ bool worker_dispatch_request(http_server_object *server,
     void *const    conn       = req->reactor_conn;
     const bool     is_head    = http_request_method_is_head(req);
 
+    /* gRPC classification — once, here, exactly like the transports do
+     * (application/grpc* + a registered addGrpcHandler). */
+    HashTable *const handlers = http_server_get_protocol_handlers(server);
+    const bool is_grpc  = grpc_request_is_grpc(req)
+                          && http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC);
+    const bool grpc_web = is_grpc && grpc_request_is_grpc_web(req);
+
     zval *const req_obj = http_request_create_from_parsed(req);
 
     if (UNEXPECTED(req_obj == NULL)) {
@@ -297,6 +498,8 @@ bool worker_dispatch_request(http_server_object *server,
     ctx->sink       = sink;
     ctx->sink_arg   = sink_arg;
     ctx->is_head    = is_head;
+    ctx->is_grpc    = is_grpc;
+    ctx->grpc_web   = grpc_web;
 
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
     efree(req_obj);                 /* the heap zval wrapper, not the object */
@@ -304,10 +507,24 @@ bool worker_dispatch_request(http_server_object *server,
     object_init_ex(&ctx->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(ctx->response_zv), "3.0");
 
+    /* Streaming reverse path: send()/writeMessage() flatten into STREAM_*
+     * wires posted through the sink instead of throwing. */
+    http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
+                                     &worker_stream_ops, ctx);
+
+    if (is_grpc) {
+        grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_web);
+    }
+
     /* No handler registered: synthesise a 404 so the sink still fires with a
      * response instead of leaving the stream hanging. */
-    HashTable *const handlers = http_server_get_protocol_handlers(server);
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    zend_fcall_t *fcall = is_grpc
+        ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC)
+        : NULL;
+
+    if (fcall == NULL) {
+        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    }
 
     if (fcall == NULL) {
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);

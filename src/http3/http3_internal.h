@@ -165,11 +165,23 @@ bool http3_stream_submit_response(http3_connection_t *c,
  * reader runs async, after response_zv is freed). */
 void http3_stream_capture_trailers(http3_stream_t *s);
 
-/* Reverse path: submit a buffered response from a worker-rendered
- * response_wire instead of the per-stream HttpResponse zval. Reactor thread. */
+/* Reverse path: submit a response from a worker-rendered response_wire
+ * instead of the per-stream HttpResponse zval. Reactor thread. FULL wires
+ * submit buffered; STREAM_HEADERS wires submit with the streaming reader
+ * (chunk ring primed, fed by the STREAM_CHUNK/STREAM_END applies below). */
 typedef struct response_wire_s response_wire_t;
 bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
                                        const response_wire_t *rw);
+
+/* Copy a wire's trailer pairs into the stream's malloc'd trailer capture
+ * (STREAM_END apply / buffered FULL submit). Reactor thread. */
+void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *rw);
+
+/* Streaming chunk ring, factored for the reverse path: init is lazy and
+ * idempotent (a non-NULL ring is what flips the data reader to streaming);
+ * push takes the chunk ref. */
+void h3_chunk_queue_init(http3_stream_t *s);
+void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk);
 
 /* Streaming-vtable hooks reused by the static-file delivery TU
  * (http3_static_response.c). Pumping a file through chunk_queue is

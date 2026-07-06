@@ -2558,11 +2558,28 @@ static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
     (void)arg;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
-    if (g_reactor_pool != NULL
-        && reactor_pool_post_exec(g_reactor_pool,
-                                  (int)response_wire_reactor_id(rw),
-                                  http3_reactor_apply_response, rw)) {
-        return;   /* the reactor owns rw now */
+    if (g_reactor_pool != NULL) {
+        const int reactor = (int)response_wire_reactor_id(rw);
+
+        if (reactor_pool_post_exec(g_reactor_pool, reactor,
+                                   http3_reactor_apply_response, rw)) {
+            return;   /* the reactor owns rw now */
+        }
+
+        /* STREAM_* wires are ordered fragments — dropping one silently
+         * corrupts the stream, so retry a transiently full mailbox (the
+         * reactor drains continuously; same discipline as the consumed
+         * spin in http3_stream_release_via_request). Bounded so a reactor
+         * that left RUN (shutdown) cannot pin the worker forever. Interim
+         * until the step-3 credit protocol paces the producer. */
+        if (response_wire_kind(rw) != RESPONSE_WIRE_FULL) {
+            for (int spin = 0; spin < 1000000; spin++) {
+                if (reactor_pool_post_exec(g_reactor_pool, reactor,
+                                           http3_reactor_apply_response, rw)) {
+                    return;
+                }
+            }
+        }
     }
 #endif
 

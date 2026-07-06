@@ -224,11 +224,55 @@ void http3_reactor_apply_response(void *arg)
     http3_stream_t *const s = (http3_stream_t *)response_wire_conn(rw);
     http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
 
-    if (c != NULL && !c->closed && c->nghttp3_conn != NULL) {
-        if (http3_stream_submit_response_wire(c, s, rw)) {
+    if (c == NULL || c->closed || c->nghttp3_conn == NULL) {
+        response_wire_free(rw);
+        return;
+    }
+
+    switch (response_wire_kind(rw)) {
+        case RESPONSE_WIRE_FULL:
+        case RESPONSE_WIRE_STREAM_HEADERS:
+            if (http3_stream_submit_response_wire(c, s, rw)) {
+                http3_connection_drain_out(c);
+                http3_connection_arm_timer(c);
+            }
+            break;
+
+        case RESPONSE_WIRE_STREAM_CHUNK: {
+            /* Validate-and-drop: the stream may have died (peer RST) or the
+             * HEADERS submit may have failed (no ring) since the worker
+             * posted this chunk. */
+            size_t      blen  = 0;
+            const char *bytes = response_wire_body(rw, &blen);
+
+            if (s->peer_closed || s->streaming_ended
+                || s->chunk_queue == NULL || bytes == NULL || blen == 0) {
+                break;
+            }
+
+            h3_chunk_queue_push(s, zend_string_init(bytes, blen, 0));
+            http_server_on_stream_send(c->counters, blen);
+
+            (void)nghttp3_conn_resume_stream(
+                (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
             http3_connection_drain_out(c);
             http3_connection_arm_timer(c);
+            break;
         }
+
+        case RESPONSE_WIRE_STREAM_END:
+            if (s->peer_closed || s->streaming_ended || s->chunk_queue == NULL) {
+                break;
+            }
+
+            http3_stream_adopt_wire_trailers(s, rw);
+            s->streaming_ended = true;
+
+            (void)nghttp3_conn_resume_stream(
+                (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
+            http3_connection_drain_out(c);
+            http3_connection_arm_timer(c);
+            break;
     }
 
     response_wire_free(rw);

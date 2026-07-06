@@ -31,6 +31,7 @@ struct response_wire_s {
     int64_t  stream_id;
     void    *conn;
 
+    response_wire_kind_t kind;   /* FULL unless set otherwise */
     int      status;
 
     /* Growable byte arena: every span's bytes are copied in here. */
@@ -106,6 +107,16 @@ response_wire_t *response_wire_create(const uint32_t reactor_id, const int64_t s
     rw->conn       = conn;
 
     return rw;
+}
+
+void response_wire_set_kind(response_wire_t *rw, const response_wire_kind_t kind)
+{
+    rw->kind = kind;
+}
+
+response_wire_kind_t response_wire_kind(const response_wire_t *rw)
+{
+    return rw->kind;
 }
 
 void response_wire_set_status(response_wire_t *rw, const int status)

@@ -799,6 +799,65 @@ headers_done:
     return false;
 }
 
+/* Copy the wire's trailer pairs into the stream's malloc'd capture — the
+ * wire dies right after the apply, and the data reader submits at true EOF
+ * (same fields http3_stream_capture_trailers fills on the local path).
+ * No-op when the wire has no trailers or a capture already exists. */
+void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *rw)
+{
+    const size_t tcount = response_wire_trailer_count(rw);
+
+    if (tcount == 0 || s->trailer_nv != NULL) {
+        return;
+    }
+
+    size_t total = 0;
+
+    for (size_t i = 0; i < tcount; i++) {
+        const char *nm, *val;
+        size_t      nl, vl;
+
+        if (response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
+            total += nl + vl;
+        }
+    }
+
+    nghttp3_nv *tnv    = malloc(tcount * sizeof(nghttp3_nv));
+    char       *tbytes = malloc(total ? total : 1);
+
+    if (tnv == NULL || tbytes == NULL) {
+        free(tnv);
+        free(tbytes);
+        return;
+    }
+
+    size_t ni = 0, bi = 0;
+
+    for (size_t i = 0; i < tcount; i++) {
+        const char *nm, *val;
+        size_t      nl, vl;
+
+        if (!response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
+            continue;
+        }
+
+        memcpy(tbytes + bi, nm, nl);
+        tnv[ni].name    = (uint8_t *)(tbytes + bi);
+        tnv[ni].namelen = nl;
+        bi += nl;
+        memcpy(tbytes + bi, val, vl);
+        tnv[ni].value    = (uint8_t *)(tbytes + bi);
+        tnv[ni].valuelen = vl;
+        bi += vl;
+        tnv[ni].flags = NGHTTP3_NV_FLAG_NONE;
+        ni++;
+    }
+
+    s->trailer_nv    = tnv;
+    s->trailer_count = ni;
+    s->trailer_bytes = tbytes;
+}
+
 /* Reverse path: submit a buffered response from a flat response_wire
  * (rendered by a worker, handed back over the reverse channel) instead of from
  * the per-stream HttpResponse zval. Runs ON THE REACTOR thread. The wire's
@@ -858,64 +917,24 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
         nvi++;
     }
 
-    size_t      blen = 0;
-    const char *body = response_wire_body(rw, &blen);
+    /* Body source. FULL: single-slice from response_body. STREAM_HEADERS:
+     * prime the chunk ring — the data reader parks on WOULDBLOCK until the
+     * first STREAM_CHUNK apply pushes bytes (or STREAM_END fires EOF). */
+    const bool streaming =
+        response_wire_kind(rw) == RESPONSE_WIRE_STREAM_HEADERS;
 
-    if (body != NULL && blen > 0) {
-        s->response_body        = zend_string_init(body, blen, 0);
-        s->response_body_offset = 0;
-    }
+    if (streaming) {
+        h3_chunk_queue_init(s);
+    } else {
+        size_t      blen = 0;
+        const char *body = response_wire_body(rw, &blen);
 
-    /* Trailers: copy out of the wire into the stream's malloc'd capture (the
-     * wire dies right after this call; the data reader submits at true EOF —
-     * same fields http3_stream_capture_trailers fills on the local path). */
-    const size_t tcount = response_wire_trailer_count(rw);
-
-    if (tcount > 0 && s->trailer_nv == NULL) {
-        size_t total = 0;
-
-        for (size_t i = 0; i < tcount; i++) {
-            const char *nm, *val;
-            size_t      nl, vl;
-
-            if (response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
-                total += nl + vl;
-            }
+        if (body != NULL && blen > 0) {
+            s->response_body        = zend_string_init(body, blen, 0);
+            s->response_body_offset = 0;
         }
 
-        nghttp3_nv *tnv    = malloc(tcount * sizeof(nghttp3_nv));
-        char       *tbytes = malloc(total ? total : 1);
-
-        if (tnv != NULL && tbytes != NULL) {
-            size_t ni = 0, bi = 0;
-
-            for (size_t i = 0; i < tcount; i++) {
-                const char *nm, *val;
-                size_t      nl, vl;
-
-                if (!response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
-                    continue;
-                }
-
-                memcpy(tbytes + bi, nm, nl);
-                tnv[ni].name    = (uint8_t *)(tbytes + bi);
-                tnv[ni].namelen = nl;
-                bi += nl;
-                memcpy(tbytes + bi, val, vl);
-                tnv[ni].value    = (uint8_t *)(tbytes + bi);
-                tnv[ni].valuelen = vl;
-                bi += vl;
-                tnv[ni].flags = NGHTTP3_NV_FLAG_NONE;
-                ni++;
-            }
-
-            s->trailer_nv    = tnv;
-            s->trailer_count = ni;
-            s->trailer_bytes = tbytes;
-        } else {
-            free(tnv);
-            free(tbytes);
-        }
+        http3_stream_adopt_wire_trailers(s, rw);
     }
 
     const nghttp3_data_reader dr = { .read_data = h3_read_data_cb };
@@ -930,6 +949,11 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
 
     if (rv == 0) {
         if (stats != NULL) stats->h3_response_submitted++;
+
+        if (streaming) {
+            http_server_on_streaming_response_started(c->counters);
+        }
+
         return true;
     }
 
@@ -938,6 +962,12 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
     if (s->response_body != NULL) {
         zend_string_release(s->response_body);
         s->response_body = NULL;
+    }
+
+    if (streaming) {
+        /* The reader was never registered; make sure late STREAM_CHUNK /
+         * STREAM_END applies see a dead stream and drop. */
+        s->streaming_ended = true;
     }
 
     return false;
@@ -954,41 +984,29 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
  * the caller suspends on write_event, which extend_max_stream_data_cb
  * fires when the peer extends the window via MAX_STREAM_DATA.
  * ------------------------------------------------------------------- */
-int h3_stream_append_chunk(void *ctx, zend_string *chunk)
+/* Lazily create the streaming chunk ring. Idempotent. A non-NULL queue is
+ * what flips the data reader into its streaming branch. */
+void h3_chunk_queue_init(http3_stream_t *s)
 {
-    http3_stream_t *const s = (http3_stream_t *)ctx;
-
-    if (s == NULL || s->conn == NULL || s->peer_closed) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    if (s->chunk_queue != NULL) {
+        return;
     }
 
-    http3_connection_t *const c = s->conn;
+    s->chunk_queue_cap     = 8;
+    s->chunk_queue         = ecalloc(s->chunk_queue_cap, sizeof(zend_string *));
+    s->chunk_queue_head    = 0;
+    s->chunk_read_idx      = 0;
+    s->chunk_queue_tail    = 0;
+    s->chunk_pending_bytes = 0;
+    s->chunk_read_offset   = 0;
+    s->chunk_ack_credit    = 0;
+}
 
-    if (c->closed || c->nghttp3_conn == NULL) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
-
-    /* First send() — lazy queue + HEADERS commit (submit_response with
-     * the streaming data_reader). The data_reader reads the chunk we
-     * are about to enqueue. */
-    const bool first_call = s->chunk_queue == NULL;
-
-    if (first_call) {
-        s->chunk_queue_cap     = 8;
-        s->chunk_queue         = ecalloc(s->chunk_queue_cap, sizeof(zend_string *));
-        s->chunk_queue_head    = 0;
-        s->chunk_read_idx      = 0;
-        s->chunk_queue_tail    = 0;
-        s->chunk_pending_bytes = 0;
-        s->chunk_read_offset   = 0;
-        s->chunk_ack_credit    = 0;
-    }
-
-    /* Grow ring if full — compact head→0 first to avoid unbounded
-     * growth on long-lived streams. Compaction shifts head, read_idx,
-     * and tail by the same delta. */
+/* Enqueue a chunk (takes the ref). Grows the ring if full — compact head→0
+ * first to avoid unbounded growth on long-lived streams. Compaction shifts
+ * head, read_idx, and tail by the same delta. */
+void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk)
+{
     if (s->chunk_queue_tail == s->chunk_queue_cap) {
         if (s->chunk_queue_head > 0) {
             const size_t shift = s->chunk_queue_head;
@@ -1011,6 +1029,34 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
 
     s->chunk_queue[s->chunk_queue_tail++] = chunk;
     s->chunk_pending_bytes += ZSTR_LEN(chunk);
+}
+
+int h3_stream_append_chunk(void *ctx, zend_string *chunk)
+{
+    http3_stream_t *const s = (http3_stream_t *)ctx;
+
+    if (s == NULL || s->conn == NULL || s->peer_closed) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    http3_connection_t *const c = s->conn;
+
+    if (c->closed || c->nghttp3_conn == NULL) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* First send() — lazy queue + HEADERS commit (submit_response with
+     * the streaming data_reader). The data_reader reads the chunk we
+     * are about to enqueue. */
+    const bool first_call = s->chunk_queue == NULL;
+
+    if (first_call) {
+        h3_chunk_queue_init(s);
+    }
+
+    h3_chunk_queue_push(s, chunk);
 
     /* Telemetry — match the H1/H2 vantage so operators see one
      * unified streaming-load picture across protocols. */

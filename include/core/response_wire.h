@@ -37,10 +37,25 @@
 
 typedef struct response_wire_s response_wire_t;
 
+/* Message kind on the reverse channel. FULL is the original single-shot shape
+ * (everything in one wire at dispose). The STREAM_* kinds carry a streamed
+ * response incrementally — same routing, same arena, posted in order on one
+ * reactor mailbox (FIFO): one STREAM_HEADERS, any number of STREAM_CHUNKs,
+ * one STREAM_END (which may carry trailers). */
+typedef enum {
+    RESPONSE_WIRE_FULL = 0,
+    RESPONSE_WIRE_STREAM_HEADERS,
+    RESPONSE_WIRE_STREAM_CHUNK,
+    RESPONSE_WIRE_STREAM_END,
+} response_wire_kind_t;
+
 /* Create an empty response wire. routing identifies the origin stream the
  * reactor must send on (echoed from the request_wire). status starts unset (0).
  * Returns NULL on allocation failure. */
 response_wire_t *response_wire_create(uint32_t reactor_id, int64_t stream_id, void *conn);
+
+void                 response_wire_set_kind(response_wire_t *rw, response_wire_kind_t kind);
+response_wire_kind_t response_wire_kind(const response_wire_t *rw);
 
 /* Builders — copy bytes into the arena. set_status replaces; add_header
  * appends; set_body replaces. All accept non-NUL-terminated spans. The header
