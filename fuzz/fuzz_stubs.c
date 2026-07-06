@@ -125,6 +125,16 @@ __attribute__((weak)) void h2_session_schedule_emit(struct http2_session_t *sess
     (void)session;
 }
 
+/* http_response_get_trailers lives in http_response_server_api.c (the
+ * PHP-object TU, not linked into the fuzz harness). Referenced by
+ * http2_session_submit_response_trailers; fuzz sessions have no PHP
+ * response object, and the caller treats a NULL map as "no trailers". */
+__attribute__((weak)) HashTable *http_response_get_trailers(zend_object *obj)
+{
+    (void)obj;
+    return NULL;
+}
+
 /* h2_static_account_debit lives in http2_static_response.c (not linked
  * into the fuzz harness). The inline release wrappers in
  * include/http2/http2_stream.h call it from drain paths in http2_session.c
