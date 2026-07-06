@@ -40,6 +40,7 @@
 #include "http3_steer.h"                   /* CID steering encode */
 #include "core/response_wire.h"            /* response_wire_* (reverse path) */
 #include "core/stream_credit.h"            /* reverse-path flow control */
+#include "http_body_stream.h"              /* streaming request body (issue #26) */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
@@ -366,11 +367,37 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
+/* Splice whatever h3_recv_data_cb already buffered for this stream into the
+ * body queue as one chunk, then flip body_streaming so subsequent chunks
+ * push directly. Invoked from HttpRequest::readBody()/readMessage() for the
+ * "buffered → stream" upgrade (Case 2). Idempotent. The pre-upgrade bytes
+ * were already credited eagerly; re-crediting them on pop merely over-grants
+ * window, which QUIC permits. */
+static void http3_request_body_upgrade(http_request_t *req)
+{
+    if (req->body_streaming) {
+        return;
+    }
+
+    http3_stream_t *const s = (http3_stream_t *)req->body_transport_ctx;
+
+    if (s != NULL && s->body_buf.s != NULL && ZSTR_LEN(s->body_buf.s) > 0) {
+        smart_str_0(&s->body_buf);
+        zend_string *const initial = s->body_buf.s;
+        s->body_buf.s = NULL;
+
+        http_body_stream_push(req, initial);
+        zend_string_release(initial);
+    }
+
+    req->body_streaming = true;
+}
+
 static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
                              int fin, void *conn_user_data,
                              void *stream_user_data)
 {
-    (void)conn; (void)stream_id; (void)fin;
+    (void)conn; (void)fin;
     http3_connection_t *const c = (http3_connection_t *)conn_user_data;
     http3_stream_t *s     = (http3_stream_t *)stream_user_data;
 
@@ -380,9 +407,31 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
 
     /* Reactor mode: defer dispatch to h3_end_stream_cb. The reactor must
      * not write into the request after hand-off, so the body is assembled
-     * (persistent) before the worker gets the pointer — buffered, not streamed. */
+     * (persistent) before the worker gets the pointer — buffered, not
+     * streamed (the body queue is same-thread by contract). */
     if (c != NULL && http3_listener_reactor_ctx(c->listener) != NULL) {
         return 0;
+    }
+
+    /* Streaming body mode (issue #26). Three-case policy by Content-Length
+     * — mirror of H2 cb_on_frame_recv:
+     *   CL == 0 (unknown) or CL >= AUTO → stream immediately
+     *   SMALL <= CL < AUTO → buffer + install upgrade hook
+     *   CL <  SMALL → buffer, never stream. */
+    if (c != NULL && c->view != NULL && c->view->body_streaming_enabled
+        && s->request != NULL) {
+        http_request_t *const r = s->request;
+
+        r->body_h3_conn      = c;
+        r->body_h3_stream_id = stream_id;
+
+        if (r->content_length == 0
+            || r->content_length >= HTTP_BODY_STREAM_AUTO_THRESHOLD) {
+            r->body_streaming = true;
+        } else if (r->content_length >= HTTP_BODY_STREAM_THRESHOLD) {
+            r->body_upgrade_to_stream = http3_request_body_upgrade;
+            r->body_transport_ctx     = s;
+        }
     }
 
     /* Dispatch the handler the moment headers are complete,
@@ -394,15 +443,70 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
+/* Grant QUIC flow-control credit for `len` request-body bytes.
+ * nghttp3_conn_read_stream's consumed count deliberately EXCLUDES DATA
+ * payload (deferred-consume contract) — the application must extend the
+ * stream + connection windows itself once it has taken the bytes. */
+static void h3_extend_body_window(http3_connection_t *c, const int64_t stream_id,
+                                  const size_t len)
+{
+    if (c != NULL && c->ngtcp2_conn != NULL && !c->closed) {
+        ngtcp2_conn_extend_max_stream_offset((ngtcp2_conn *)c->ngtcp2_conn,
+                                             stream_id, len);
+        ngtcp2_conn_extend_max_offset((ngtcp2_conn *)c->ngtcp2_conn, len);
+    }
+}
+
 static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
                            const uint8_t *data, size_t datalen,
                            void *conn_user_data, void *stream_user_data)
 {
-    (void)conn; (void)stream_id;
+    (void)conn;
     http3_connection_t *const c = (http3_connection_t *)conn_user_data;
     http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
     if (UNEXPECTED(s == NULL || s->rejected)) {
+        /* Bytes still count against the peer's window — return the credit
+         * so an already-rejected stream cannot wedge the connection cap. */
+        h3_extend_body_window(c, stream_id, datalen);
+        return 0;
+    }
+
+    /* Streaming mode (issue #26) — push the chunk into the per-request
+     * queue instead of accumulating into body_buf. Credit is NOT granted
+     * here: http_body_stream_pop extends the window as the handler drains
+     * (http3_request_body_consume), which is the backpressure. The cap
+     * bounds only the LIVE (queued, un-drained) bytes — a long-lived
+     * client-streaming body is legitimately unbounded in total. */
+    if (s->request != NULL && s->request->body_streaming) {
+        http_request_t *const req = s->request;
+        size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+
+        if (body_cap == 0) {
+            body_cap = HTTP3_MAX_BODY_BYTES;
+        }
+
+        if (UNEXPECTED(req->body_bytes_queued + datalen > body_cap)) {
+            http3_packet_stats_t *const stats = c != NULL
+                ? http3_listener_packet_stats(c->listener) : NULL;
+
+            if (stats != NULL) stats->h3_request_oversized++;
+            h3_extend_body_window(c, stream_id, datalen);
+            h3_reject_request_stream(c, s, stream_id);
+            return 0;
+        }
+
+        zend_string *const chunk =
+            zend_string_init((const char *)data, datalen, 0);
+        const bool pushed = http_body_stream_push(req, chunk);
+
+        zend_string_release(chunk);
+
+        if (UNEXPECTED(!pushed)) {
+            h3_extend_body_window(c, stream_id, datalen);
+            h3_reject_request_stream(c, s, stream_id);
+        }
+
         return 0;
     }
 
@@ -415,6 +519,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
             ? http3_listener_packet_stats(c->listener) : NULL;
 
         if (stats != NULL) stats->h3_request_oversized++;
+        h3_extend_body_window(c, stream_id, datalen);
         /* RFC 9114: reject this stream, don't kill the connection. */
         h3_reject_request_stream(c, s, stream_id);
         return 0;
@@ -427,6 +532,11 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     }
 
     smart_str_appendl(&s->body_buf, (const char *)data, datalen);
+
+    /* Buffered mode consumes the bytes right here — return the window
+     * immediately so an upload larger than the initial stream window
+     * (256 KiB default) keeps flowing. */
+    h3_extend_body_window(c, stream_id, datalen);
     return 0;
 }
 
@@ -1246,6 +1356,15 @@ static void http3_finalize_request_body(http3_stream_t *s)
     http_request_t *const req = s->request;
     ZEND_ASSERT(req != NULL);
 
+    /* Streaming mode (issue #26): no smart_str to move — close the queue
+     * so a parked readBody()/readMessage() consumer sees EOF. */
+    if (req->body_streaming) {
+        http_body_stream_close(req);
+        req->complete   = true;
+        s->fin_received = true;
+        return;
+    }
+
     /* Move the assembled body bytes into the request. smart_str leaves
      * a NUL-terminated zend_string with refcount 1; we transfer that
      * ownership to req->body and clear our handle. */
@@ -1329,6 +1448,13 @@ static void h3_stream_mark_peer_closed(http3_stream_t *s)
     /* Unblock a worker producer parked on credit — the stream is gone. */
     if (s->wire_credit != NULL) {
         stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
+    }
+
+    /* A consumer parked in readBody()/readMessage() on a streamed body
+     * must wake too: RST before fin means the body will never complete. */
+    if (s->request != NULL && s->request->body_streaming
+        && !s->fin_received) {
+        http_body_stream_error(s->request);
     }
 
     if (s->write_event != NULL) {
@@ -1865,6 +1991,24 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
     ngtcp2_conn_extend_max_stream_offset(conn, stream_id, consumed);
     ngtcp2_conn_extend_max_offset(conn, consumed);
     return 0;
+}
+
+/* Deferred inbound flow control (issue #26): called from
+ * http_body_stream_pop on the connection's own thread as the handler
+ * drains queued body chunks. Extends the QUIC windows and drives the
+ * socket so the MAX_STREAM_DATA actually reaches the peer. */
+void http3_request_body_consume(void *conn_opaque, const int64_t stream_id,
+                                const size_t len)
+{
+    http3_connection_t *const c = (http3_connection_t *)conn_opaque;
+
+    if (c == NULL || c->closed || c->ngtcp2_conn == NULL) {
+        return;
+    }
+
+    h3_extend_body_window(c, stream_id, len);
+    http3_connection_drain_out(c);
+    http3_connection_arm_timer(c);
 }
 
 /* Peer extended our send window for this stream (or for the

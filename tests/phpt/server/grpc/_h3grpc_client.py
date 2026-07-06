@@ -8,6 +8,9 @@ header AND trailer ("HDR name: value") plus the body hex ("BODYHEX ..."), so
 the test can assert grpc-status.
 
   usage: _h3grpc_client.py <host> <port> <path> <ctype> <body-hex>
+
+The body argument may be @/path/to/file to read the hex from a file
+(large bodies exceed the argv limit).
 """
 import asyncio
 import ssl
@@ -45,6 +48,9 @@ class H3Client(QuicConnectionProtocol):
 
 
 async def main(host, port, path, ctype, body_hex):
+    if body_hex.startswith("@"):
+        with open(body_hex[1:]) as f:
+            body_hex = f.read().strip()
     config = QuicConfiguration(is_client=True, alpn_protocols=["h3"])
     config.verify_mode = ssl.CERT_NONE
     async with connect(host, int(port), configuration=config,

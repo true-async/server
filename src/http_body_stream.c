@@ -18,6 +18,10 @@
 #include "http2/http2_session.h"
 #endif
 
+#ifdef HAVE_HTTP_SERVER_HTTP3
+#include "http3/http3_internal.h"   /* http3_request_body_consume */
+#endif
+
 static void fire_data_event(const http_request_t *req)
 {
     async_plain_event_fire(req->body_data_event);
@@ -104,6 +108,15 @@ zend_string *http_body_stream_pop(http_request_t *req)
         (void)nghttp2_session_consume(s->ng, req->body_h2_stream_id,
                                       ZSTR_LEN(data));
         h2_session_schedule_emit(s);
+    }
+#endif
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* Same discipline over QUIC: extend the stream + connection windows for
+     * the drained bytes and drive the MAX_STREAM_DATA out. */
+    if (req->body_h3_conn != NULL) {
+        http3_request_body_consume(req->body_h3_conn,
+                                   req->body_h3_stream_id, ZSTR_LEN(data));
     }
 #endif
 

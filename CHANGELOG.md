@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RST / connection close unparks it into the standard stream-dead path
     (`send()` throws 499).
 
+- **HTTP/3 streaming request bodies (#26 policy on H3).** With
+  `setBodyStreamingEnabled(true)` the H3 dispatch now applies the same
+  three-case Content-Length policy as HTTP/2, so `readBody()` and
+  incremental `readMessage()` (true full-duplex gRPC) work over HTTP/3.
+  QUIC flow-control credit is deferred: the window refills as the handler
+  drains chunks, bounding un-read bytes by `max_body_size`.
+
+### Fixed
+
+- **HTTP/3 uploads larger than the initial stream window (256 KiB default)
+  stalled forever.** `nghttp3_conn_read_stream`'s consumed count excludes
+  DATA payload by contract, and nothing extended the QUIC windows for
+  buffered body bytes — now `h3_recv_data_cb` returns the credit as it
+  consumes them.
+
 ### Changed
 
 - **gRPC layering: call-lifecycle policy extracted out of the transports (#4).**

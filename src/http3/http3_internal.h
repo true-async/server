@@ -177,6 +177,11 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
  * (STREAM_END apply / buffered FULL submit). Reactor thread. */
 void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *rw);
 
+/* Deferred inbound flow control (issue #26): grant QUIC credit for body
+ * bytes the handler actually drained (http_body_stream_pop) and push the
+ * resulting MAX_STREAM_DATA out. conn_opaque is the http3_connection_t. */
+void http3_request_body_consume(void *conn_opaque, int64_t stream_id, size_t len);
+
 /* Streaming chunk ring, factored for the reverse path: init is lazy and
  * idempotent (a non-NULL ring is what flips the data reader to streaming);
  * push takes the chunk ref. */

@@ -215,6 +215,12 @@ struct http_request_t {
      * these fields. body_h3_stream is the matching ngtcp2 hook. */
     void                     *body_h2_session;
     int32_t                   body_h2_stream_id;
+
+    /* H3 mirror of the pair above: the owning http3_connection_t and QUIC
+     * stream id, set when the streaming policy engages. http_body_stream_pop
+     * grants deferred QUIC flow-control credit through these (issue #26). */
+    void                     *body_h3_conn;
+    int64_t                   body_h3_stream_id;
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 
