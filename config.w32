@@ -21,6 +21,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "src\\http_request.c " +
         "src\\http_response.c " +
         "src\\grpc\\grpc.c " +
+        "src\\grpc\\grpc_call.c " +
         "src\\http_sse.c " +
         "src\\http_response_server_api.c " +
         "src\\uploaded_file.c " +

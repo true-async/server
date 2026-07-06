@@ -136,15 +136,17 @@ struct _http3_stream_s {
     bool              has_trailers;
     bool              trailers_submitted;
 
-    /* gRPC trailers captured in dispose (while response_zv is alive) and
+    /* Response trailers captured in dispose (while response_zv is alive) and
      * submitted by the data reader at true EOF — nghttp3 requires the trailer
      * submit AFTER the last DATA stamps NO_END_STREAM, but response_zv is
-     * freed by then. grpc_trailer_nv is a malloc'd nghttp3_nv[] whose name/
-     * value point into grpc_trailer_bytes; both freed in http3_stream_release.
-     * void* keeps nghttp3 out of this header. */
-    void             *grpc_trailer_nv;
-    size_t            grpc_trailer_count;
-    char             *grpc_trailer_bytes;
+     * freed by then. trailer_nv is a malloc'd nghttp3_nv[] whose name/
+     * value point into trailer_bytes; both freed in http3_stream_release.
+     * void* keeps nghttp3 out of this header. Canonical consumer: gRPC
+     * (grpc-status / grpc-message), but any streaming response with a
+     * trailer map is delivered this way. */
+    void             *trailer_nv;
+    size_t            trailer_count;
+    char             *trailer_bytes;
 
     /* Set by h3_stream_close_cb / h3_reset_stream_cb when nghttp3
      * tears down stream state on a peer RST. After this point any

@@ -24,7 +24,8 @@
 #include "http_connection.h"               /* http_handler_log_bailout */
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
-#include "grpc/grpc.h"                      /* gRPC classification + trailer frame */
+#include "grpc/grpc.h"                      /* gRPC request classification */
+#include "grpc/grpc_call.h"                 /* gRPC call lifecycle policy */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
 
@@ -382,13 +383,9 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_response_install_stream_ops(Z_OBJ(s->response_zv),
                                      &h3_stream_ops, s);
 
-    /* gRPC: default the response content-type so handlers need not set it. */
+    /* gRPC: response defaults (content-type) live in the gRPC layer. */
     if (s->is_grpc) {
-        http_response_static_set_header(Z_OBJ(s->response_zv),
-            "content-type", sizeof("content-type") - 1,
-            s->grpc_web ? GRPC_WEB_RESPONSE_CONTENT_TYPE : GRPC_CONTENT_TYPE,
-            s->grpc_web ? sizeof(GRPC_WEB_RESPONSE_CONTENT_TYPE) - 1
-                        : sizeof(GRPC_CONTENT_TYPE) - 1);
+        grpc_call_init_response(Z_OBJ(s->response_zv), s->grpc_web);
     }
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -710,26 +707,58 @@ static bool h3_arm_sendfile(http3_connection_t *c, http3_stream_t *s)
     return true;
 }
 
-/* Finalize a grpc-web reply on H3: emit grpc-status/grpc-message as an
- * in-body 0x80 frame (browsers can't read HTTP/3 trailers), then end the
- * stream. Works for streamed and zero-message replies — append_chunk commits
- * HEADERS + inits the chunk queue on first use. */
-static void h3_grpc_web_finalize(http3_connection_t *c, http3_stream_t *s,
-                                 zend_object *resp_obj)
+/* End a streamed reply: capture the response trailer map for the data
+ * reader's EOF submit (no-op when the map is empty), then resume so the
+ * reader drains to EOF. The capture must happen here, while response_zv is
+ * still alive — the data reader runs async, after dispose frees the zvals.
+ * Shared by the dispose streaming branch and the gRPC finish ops (void *ctx
+ * so it slots into grpc_finish_ops_t.end_stream directly). */
+static void h3_stream_finish_streaming(void *ctx)
 {
-    HashTable   *trailers = http_response_get_trailers(resp_obj);
-    zend_string *frame    = grpc_web_trailer_frame(trailers);
+    http3_stream_t *s = (http3_stream_t *)ctx;
 
-    http_response_clear_trailers(resp_obj);
+    http3_stream_capture_trailers(s);
 
-    (void)h3_stream_ops.append_chunk(s, frame);   /* consumes the ref */
-
+    H3T(s->stream_id, s->streaming_ended ? "5.streaming_already_ended"
+                                         : "5.streaming_resume");
     if (!s->streaming_ended) {
         s->streaming_ended = true;
-        (void)nghttp3_conn_resume_stream((nghttp3_conn *)c->nghttp3_conn,
+        (void)nghttp3_conn_resume_stream((nghttp3_conn *)s->conn->nghttp3_conn,
                                          s->stream_id);
     }
 }
+
+/* gRPC finish ops (grpc_call_finish seam) — the transport-specific wire
+ * actions; what to send is decided in src/grpc/grpc_call.c. */
+
+/* Append one body frame (consumes the ref) and end the stream. Works for
+ * streamed and zero-message replies — append_chunk commits HEADERS + inits
+ * the chunk queue on first use. */
+static void h3_grpc_append_frame_and_end(void *ctx, zend_string *frame)
+{
+    http3_stream_t *s = (http3_stream_t *)ctx;
+
+    (void)h3_stream_ops.append_chunk(s, frame);   /* consumes the ref */
+
+    h3_stream_finish_streaming(s);
+}
+
+/* Buffered commit — single HEADERS + fin (the Trailers-Only shape). */
+static void h3_grpc_commit(void *ctx)
+{
+    http3_stream_t     *s = (http3_stream_t *)ctx;
+    http3_connection_t *c = s->conn;
+
+    if (c != NULL && !c->closed && c->nghttp3_conn != NULL) {
+        (void)http3_stream_submit_response(c, s, false);
+    }
+}
+
+static const grpc_finish_ops_t h3_grpc_finish_ops = {
+    .append_frame_and_end = h3_grpc_append_frame_and_end,
+    .end_stream           = h3_stream_finish_streaming,
+    .commit               = h3_grpc_commit,
+};
 
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
@@ -768,12 +797,10 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_set_committed(Z_OBJ(s->response_zv));
     }
 
-    /* gRPC outcome → grpc-status trailer. Success defaults to 0; an uncaught
-     * exception maps to INTERNAL (13) unless the handler set a status. gRPC
-     * carries its result in the trailer, not the HTTP status. */
+    /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
     if (s->is_grpc && !Z_ISUNDEF(s->response_zv)) {
-        http_response_ensure_grpc_status(Z_OBJ(s->response_zv),
-            coroutine->exception != NULL ? GRPC_STATUS_INTERNAL : GRPC_STATUS_OK);
+        grpc_call_ensure_status(Z_OBJ(s->response_zv),
+                                coroutine->exception != NULL);
     }
 
     /* Streaming-vs-buffered decision (mirror of H2 dispose).
@@ -791,30 +818,12 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     if (c != NULL && !c->closed && c->nghttp3_conn != NULL
         && !Z_ISUNDEF(s->response_zv)) {
-        if (s->grpc_web) {
-            /* grpc-web: trailers ride the body as a 0x80 frame, never as
-             * HTTP/3 trailers. Handles streamed and zero-message replies. */
-            h3_grpc_web_finalize(c, s, Z_OBJ(s->response_zv));
+        if (s->is_grpc) {
+            /* Delivery shape is gRPC policy — grpc_call_finish decides. */
+            grpc_call_finish(Z_OBJ(s->response_zv), s->grpc_web,
+                             &h3_grpc_finish_ops, s);
         } else if (is_streaming) {
-            /* Native gRPC: capture the grpc-status/grpc-message trailers now,
-             * while response_zv is alive — the data reader runs async (after
-             * this dispose frees the zvals) and submits them at true EOF. */
-            if (s->is_grpc && !Z_ISUNDEF(s->response_zv)) {
-                http3_stream_capture_trailers(s);
-            }
-
-            H3T(s->stream_id, s->streaming_ended ? "5.streaming_already_ended"
-                                                 : "5.streaming_resume");
-            if (!s->streaming_ended) {
-                s->streaming_ended = true;
-                (void)nghttp3_conn_resume_stream(
-                    (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
-            }
-        } else if (s->is_grpc) {
-            /* zero-message gRPC → Trailers-Only: fold grpc-status/grpc-message
-             * into the initial HEADERS (single HEADERS + fin). */
-            http_response_promote_trailers_to_headers(Z_OBJ(s->response_zv));
-            (void)http3_stream_submit_response(c, s, false);
+            h3_stream_finish_streaming(s);
         } else if (http_response_has_send_file(Z_OBJ(s->response_zv))) {
             /* sendFile: hand off to the static pump. On success it owns the
              * stream + response until on_done runs the tail — the pump

@@ -34,6 +34,7 @@
 #endif
 #include "http1/http_parser.h"   /* http_request_t */
 #include "grpc/grpc.h"           /* grpc_request_is_grpc */
+#include "grpc/grpc_call.h"      /* gRPC call lifecycle policy */
 #include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 #include "static/static_handler.h"
 #include "http_send_file.h"
@@ -100,11 +101,18 @@ extern const http_response_stream_ops_t h2_stream_ops;
  * handler skipped $res->end(). Defined further down. */
 static void h2_stream_mark_ended(void *ctx);
 
-/* Forward decls so the dispose path can finalize a grpc-web reply — append
- * the in-body trailer frame via the streaming append and end the stream. */
+/* gRPC finish ops (grpc_call_finish seam) — the transport-specific wire
+ * actions; what to send is decided in src/grpc/grpc_call.c. end_stream is
+ * h2_stream_mark_ended directly (it is idempotent). Bodies further down. */
 static int  h2_stream_append_chunk(void *ctx, zend_string *chunk);
-static void h2_grpc_web_finalize(http2_stream_t *stream,
-                                 zend_object *response_obj);
+static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame);
+static void h2_grpc_commit(void *ctx);
+
+static const grpc_finish_ops_t h2_grpc_finish_ops = {
+    .append_frame_and_end = h2_grpc_append_frame_and_end,
+    .end_stream           = h2_stream_mark_ended,
+    .commit               = h2_grpc_commit,
+};
 
 /* Suspend the current handler coroutine until either
  *  - stream->write_event fires (cb_on_frame_recv saw WINDOW_UPDATE
@@ -294,20 +302,9 @@ static void http2_strategy_dispatch(struct http_request_t *request,
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
     }
 
-    /* gRPC: default the response content-type so handlers need not set it.
-     * Rides the initial HEADERS; a handler may still override before its
-     * first writeMessage(). grpc-web gets its own content-type. */
+    /* gRPC: response defaults (content-type) live in the gRPC layer. */
     if (is_grpc) {
-        if (stream->grpc_web) {
-            http_response_static_set_header(Z_OBJ(stream->response_zv),
-                "content-type", sizeof("content-type") - 1,
-                GRPC_WEB_RESPONSE_CONTENT_TYPE,
-                sizeof(GRPC_WEB_RESPONSE_CONTENT_TYPE) - 1);
-        } else {
-            http_response_static_set_header(Z_OBJ(stream->response_zv),
-                "content-type", sizeof("content-type") - 1,
-                GRPC_CONTENT_TYPE, sizeof(GRPC_CONTENT_TYPE) - 1);
-        }
+        grpc_call_init_response(Z_OBJ(stream->response_zv), stream->grpc_web);
     }
 
     /* Static-handler dispatch (issue #13). Identical policy to the
@@ -616,13 +613,10 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_set_committed(Z_OBJ(stream->response_zv));
     }
 
-    /* gRPC outcome → grpc-status trailer. Success defaults to 0; an
-     * uncaught exception maps to INTERNAL (13) unless the handler already
-     * set a status. Rides the terminal HEADERS(trailers) frame. */
+    /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
     if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
-        http_response_ensure_grpc_status(Z_OBJ(stream->response_zv),
-            coroutine->exception != NULL ? GRPC_STATUS_INTERNAL
-                                         : GRPC_STATUS_OK);
+        grpc_call_ensure_status(Z_OBJ(stream->response_zv),
+                                coroutine->exception != NULL);
     }
 
     /* sendFile() handoff (issue #13). Take the descriptor before
@@ -640,24 +634,14 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     const bool is_streaming = !Z_ISUNDEF(stream->response_zv)
                               && http_response_is_streaming(Z_OBJ(stream->response_zv));
 
-    if (stream->grpc_web && !Z_ISUNDEF(stream->response_zv)) {
-        /* grpc-web: trailers ride the response body as a 0x80 frame, never
-         * as HTTP/2 trailers (browsers can't read those). Handles both a
-         * streamed reply and a zero-message status/error. */
-        h2_grpc_web_finalize(stream, Z_OBJ(stream->response_zv));
+    if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
+        /* Delivery shape is gRPC policy — grpc_call_finish decides. */
+        grpc_call_finish(Z_OBJ(stream->response_zv), stream->grpc_web,
+                         &h2_grpc_finish_ops, stream);
     } else if (is_streaming) {
         if (!stream->streaming_ended) {
             h2_stream_mark_ended(stream);
         }
-    } else if (stream->is_grpc && conn != NULL
-               && !Z_ISUNDEF(stream->response_zv)) {
-        /* gRPC handler that streamed no messages (immediate status / error).
-         * Emit a Trailers-Only reply: fold grpc-status/grpc-message into the
-         * initial HEADERS so the buffered commit sends a single
-         * HEADERS(:status 200, END_STREAM) frame — the canonical gRPC shape
-         * for a bodiless response. */
-        http_response_promote_trailers_to_headers(Z_OBJ(stream->response_zv));
-        (void)http2_commit_stream_response(conn, stream);
     } else if (conn != NULL && !Z_ISUNDEF(stream->response_zv)) {
         (void)http2_commit_stream_response(conn, stream);
     }
@@ -1698,25 +1682,34 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
     return HTTP_STREAM_APPEND_OK;
 }
 
-/* Finalize a grpc-web reply: the grpc-status/grpc-message trailers are sent
- * as an in-body 0x80 frame (browsers cannot read HTTP/2 trailers), then the
- * stream ends normally with END_STREAM on DATA. Works for both a streamed
- * reply (messages already queued) and a zero-message status/error (the
- * trailer frame is the only DATA, committing HEADERS on append). */
-static void h2_grpc_web_finalize(http2_stream_t *stream,
-                                 zend_object *response_obj)
+/* Append one body frame (consumes the ref), then end the stream normally
+ * with END_STREAM on DATA. Works for both a streamed reply (messages
+ * already queued) and a zero-message reply (the frame is the only DATA,
+ * committing HEADERS on the first append). */
+static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame)
 {
-    HashTable   *trailers = http_response_get_trailers(response_obj);
-    zend_string *frame    = grpc_web_trailer_frame(trailers);
+    http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    /* Clear the HTTP trailers so the streaming EOF path (h2_dp_mark_eof)
-     * does not also emit them as a terminal HEADERS(trailers) frame. */
-    http_response_clear_trailers(response_obj);
+    /* Connection may already be torn down when a late coroutine disposes
+     * (same guard as h2_grpc_commit); append_chunk derefs conn unchecked. */
+    if (http2_session_get_conn(stream->session) == NULL) {
+        zend_string_release(frame);
+        return;
+    }
 
     (void)h2_stream_append_chunk(stream, frame);   /* consumes the ref */
+    h2_stream_mark_ended(stream);
+}
 
-    if (!stream->streaming_ended) {
-        h2_stream_mark_ended(stream);
+/* Buffered commit — a single HEADERS(:status 200, END_STREAM) frame when
+ * the response carries no body (the Trailers-Only shape). */
+static void h2_grpc_commit(void *ctx)
+{
+    http2_stream_t    *stream = (http2_stream_t *)ctx;
+    http_connection_t *conn   = http2_session_get_conn(stream->session);
+
+    if (conn != NULL && !Z_ISUNDEF(stream->response_zv)) {
+        (void)http2_commit_stream_response(conn, stream);
     }
 }
 

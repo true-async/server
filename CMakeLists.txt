@@ -43,6 +43,7 @@ set(CORE_SOURCES
     src/http_request.c
     src/http_response.c
     src/grpc/grpc.c
+    src/grpc/grpc_call.c
     src/http_sse.c
     src/uploaded_file.c
     src/http_mime.c

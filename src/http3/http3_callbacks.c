@@ -476,16 +476,16 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
             if (s->streaming_ended) {
                 *pflags |= NGHTTP3_DATA_FLAG_EOF;
 
-                /* gRPC native trailers: submit here, at true EOF — nghttp3
+                /* Response trailers: submit here, at true EOF — nghttp3
                  * needs the trailer submit after the last DATA. The nv was
                  * captured in dispose (response_zv is gone now). Keep the
                  * sending side open with NO_END_STREAM so the trailer HEADERS
                  * carry the fin instead of this DATA. */
-                if (s->grpc_trailer_nv != NULL && !s->trailers_submitted) {
+                if (s->trailer_nv != NULL && !s->trailers_submitted) {
                     s->trailers_submitted = true;
                     if (nghttp3_conn_submit_trailers(conn, s->stream_id,
-                            (const nghttp3_nv *)s->grpc_trailer_nv,
-                            s->grpc_trailer_count) == 0) {
+                            (const nghttp3_nv *)s->trailer_nv,
+                            s->trailer_count) == 0) {
                         s->has_trailers = true;
                     }
                 }
@@ -591,16 +591,16 @@ static inline bool h3_nv_push(h3_nv_buf_t *b,
  *   - Streaming (HttpResponse::send loop): chunk_queue is the body
  *     source; we skip the body copy entirely. Caller has already
  *     primed the queue with the first chunk by the time we run. */
-/* Capture the response trailer map (grpc-status/grpc-message) into a malloc'd
- * nghttp3_nv[] + backing byte buffer on the stream. Called from dispose while
- * response_zv is still alive; the data reader submits it at true EOF, because
+/* Capture the response trailer map into a malloc'd nghttp3_nv[] + backing
+ * byte buffer on the stream. Called from dispose while response_zv is still
+ * alive; the data reader submits it at true EOF, because
  * nghttp3_conn_submit_trailers must follow the last DATA (which stamps
  * NO_END_STREAM) yet response_zv is freed by then. malloc (not emalloc) — the
  * data reader runs outside a request memory context. No-op when there are no
  * trailers or a capture already exists. Freed in http3_stream_release. */
 void http3_stream_capture_trailers(http3_stream_t *s)
 {
-    if (Z_ISUNDEF(s->response_zv) || s->grpc_trailer_nv != NULL) {
+    if (Z_ISUNDEF(s->response_zv) || s->trailer_nv != NULL) {
         return;
     }
 
@@ -647,9 +647,9 @@ void http3_stream_capture_trailers(http3_stream_t *s)
         ni++;
     } ZEND_HASH_FOREACH_END();
 
-    s->grpc_trailer_nv    = nv;
-    s->grpc_trailer_count = ni;
-    s->grpc_trailer_bytes = bytes;
+    s->trailer_nv    = nv;
+    s->trailer_count = ni;
+    s->trailer_bytes = bytes;
 }
 
 bool http3_stream_submit_response(http3_connection_t *c,
