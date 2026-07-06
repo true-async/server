@@ -33,8 +33,10 @@ $config = (new HttpServerConfig())
 $server = new HttpServer($config);
 $server->addGrpcHandler(function($req, $resp) {
     $req->awaitBody();
-    $msg = $req->readMessage();                 // auto-inflated
-    $resp->writeMessage('echo:' . $msg, true);  // gzip the reply
+    $msg   = $req->readMessage();               // auto-inflated
+    $empty = $req->readMessage();               // compressed empty message -> ""
+    $tail  = ($empty === '') ? ':empty-ok' : ':empty-bad';
+    $resp->writeMessage('echo:' . $msg . $tail, true);  // gzip the reply
 });
 
 $client = spawn(function() use ($port, $server) {
@@ -43,6 +45,7 @@ $client = spawn(function() use ($port, $server) {
     $payload = str_repeat('gRPC-', 2000);        // 10 KB
     $gz      = gzencode($payload);
     $frame   = "\x01" . pack('N', strlen($gz)) . $gz;   // compressed flag = 1
+    $frame  .= "\x01" . pack('N', 0);                   // compressed EMPTY message
 
     $bodyfile = tempnam(sys_get_temp_dir(), 'grpcreq');
     $outfile  = tempnam(sys_get_temp_dir(), 'grpcout');
@@ -69,7 +72,7 @@ $client = spawn(function() use ($port, $server) {
 
     echo "resp_grpc_encoding=", (int)(strpos($verbose, 'grpc-encoding: gzip') !== false), "\n";
     echo "resp_compressed_flag=", (int)($flag === 1), "\n";
-    echo "roundtrip_ok=", (int)($decoded === 'echo:' . $payload), "\n";
+    echo "roundtrip_ok=", (int)($decoded === 'echo:' . $payload . ':empty-ok'), "\n";
     echo "saw_grpc_status=", (int)(strpos($verbose, 'grpc-status: 0') !== false), "\n";
 
     $server->stop();

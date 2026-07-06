@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **gRPC over HTTP/2 and HTTP/3 (#4).** Requests whose content-type begins with
+  `application/grpc` route to the callable registered via
+  `HttpServer::addGrpcHandler()`; everything else is untouched, so gRPC and
+  regular HTTP handlers coexist on one listener.
+  - **All four RPC shapes** — unary, server-streaming, client-streaming and
+    true full-duplex bidi: `HttpRequest::readMessage()` deframes the request
+    stream incrementally (5-byte length-prefix framing, 16 MiB per-message cap),
+    `HttpResponse::writeMessage()` frames replies; the handler starts on
+    HEADERS, before the body finishes.
+  - **Trailers**: `grpc-status`/`grpc-message` ride real HTTP trailers on both
+    transports (nghttp2 trailer HEADERS; `nghttp3_conn_submit_trailers` at true
+    EOF on H3 — verified with a real aioquic client). `grpc-status: 0` is
+    defaulted on success, `13 INTERNAL` on an uncaught handler exception, and a
+    handler that writes no messages gets the canonical Trailers-Only reply.
+  - **grpc-web (binary)**: `application/grpc-web` calls carry their trailers
+    in-body as a `0x80`-flagged frame, on H2 and H3.
+  - **Per-message gzip**: inbound `grpc-encoding: gzip` messages inflate
+    transparently in `readMessage()`; `writeMessage(..., compress: true)`
+    emits compressed frames.
+  - **`grpc-timeout`** request header parsed and exposed via
+    `HttpRequest::getGrpcTimeout()`.
+  - Deferred: `grpc-web-text` (base64), gRPC under the reactor pool.
+
+### Changed
+
+- **gRPC layering: call-lifecycle policy extracted out of the transports (#4).**
+  `src/grpc/grpc_call.c` owns response defaults, outcome → `grpc-status` and
+  delivery shape (grpc-web in-body frame / streaming EOF / Trailers-Only);
+  HTTP/2 and HTTP/3 provide a 3-op wire vtable and stay gRPC-agnostic on
+  delivery. H3 response-trailer capture/submit is now generic — any streaming
+  response with a trailer map is delivered, not just gRPC (parity with H2).
+
 ## [0.9.2] - 2026-07-03
 
 ### Added
