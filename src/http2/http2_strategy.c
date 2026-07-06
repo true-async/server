@@ -302,9 +302,11 @@ static void http2_strategy_dispatch(struct http_request_t *request,
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
     }
 
-    /* gRPC: response defaults (content-type) live in the gRPC layer. */
+    /* gRPC: response defaults (content-type + delivery mode) live in the
+     * gRPC layer; the mode stamp is what finish/writeMessage read back. */
     if (is_grpc) {
-        grpc_call_init_response(Z_OBJ(stream->response_zv), stream->grpc_web);
+        grpc_call_init_response(Z_OBJ(stream->response_zv),
+                                grpc_request_mode(stream->request));
     }
 
     /* Static-handler dispatch (issue #13). Identical policy to the
@@ -636,7 +638,7 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
         /* Delivery shape is gRPC policy — grpc_call_finish decides. */
-        grpc_call_finish(Z_OBJ(stream->response_zv), stream->grpc_web,
+        grpc_call_finish(Z_OBJ(stream->response_zv),
                          &h2_grpc_finish_ops, stream);
     } else if (is_streaming) {
         if (!stream->streaming_ended) {

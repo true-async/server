@@ -439,9 +439,11 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_response_install_stream_ops(Z_OBJ(s->response_zv),
                                      &h3_stream_ops, s);
 
-    /* gRPC: response defaults (content-type) live in the gRPC layer. */
+    /* gRPC: response defaults (content-type + delivery mode) live in the
+     * gRPC layer; the mode stamp is what finish/writeMessage read back. */
     if (s->is_grpc) {
-        grpc_call_init_response(Z_OBJ(s->response_zv), s->grpc_web);
+        grpc_call_init_response(Z_OBJ(s->response_zv),
+                                grpc_request_mode(s->request));
     }
 
 #ifdef HAVE_HTTP_COMPRESSION
@@ -876,8 +878,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         && !Z_ISUNDEF(s->response_zv)) {
         if (s->is_grpc) {
             /* Delivery shape is gRPC policy — grpc_call_finish decides. */
-            grpc_call_finish(Z_OBJ(s->response_zv), s->grpc_web,
-                             &h3_grpc_finish_ops, s);
+            grpc_call_finish(Z_OBJ(s->response_zv), &h3_grpc_finish_ops, s);
         } else if (is_streaming) {
             h3_stream_finish_streaming(s);
         } else if (http_response_has_send_file(Z_OBJ(s->response_zv))) {

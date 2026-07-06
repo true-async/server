@@ -1085,6 +1085,13 @@ void http_request_free_fields(http_request_t *req)
     /* gRPC streaming reassembly buffer (HttpRequest::readMessage). */
     smart_str_free(&req->grpc_reassembly);
 
+    /* grpc-web-text decoded-body cache (same-thread as readMessage: the
+     * handler's thread frees the fields in every dispatched path). */
+    if (req->grpc_text_body != NULL) {
+        zend_string_release(req->grpc_text_body);
+        req->grpc_text_body = NULL;
+    }
+
     /* Dispose body-progress event if awaitBody() created one */
     if (req->body_event) {
         req->body_event->dispose(req->body_event);

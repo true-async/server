@@ -290,14 +290,39 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
     bool         compressed = false;
     int          rc;
 
+    /* grpc-web-text: the body is the base64-encoded frame stream. Decode
+     * once (lazily) and deframe from the decoded buffer — buffered-only,
+     * which matches the protocol (grpc-web clients can't stream requests). */
+    const bool web_text = grpc_request_is_grpc_web_text(req);
+
+    if (web_text && req->grpc_text_body == NULL) {
+        if (req->body == NULL) {
+            RETURN_NULL();
+        }
+
+        req->grpc_text_body =
+            grpc_web_text_decode(ZSTR_VAL(req->body), ZSTR_LEN(req->body));
+
+        if (req->grpc_text_body == NULL) {
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "malformed base64 in grpc-web-text request body", 0);
+            RETURN_NULL();
+        }
+    }
+
     /* Middle-band request (SMALL <= Content-Length < AUTO): the parser
      * buffered so far; upgrade to the streaming queue on first read so
      * incremental deframing works there too (mirror of readBody Case 2). */
-    if (!req->body_streaming && req->body_upgrade_to_stream != NULL) {
+    if (!web_text && !req->body_streaming && req->body_upgrade_to_stream != NULL) {
         req->body_upgrade_to_stream(req);
     }
 
-    if (req->body_streaming) {
+    if (web_text) {
+        rc = grpc_deframe_next(ZSTR_VAL(req->grpc_text_body),
+                               ZSTR_LEN(req->grpc_text_body),
+                               &req->grpc_read_offset,
+                               GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+    } else if (req->body_streaming) {
         /* True full-duplex path: accumulate popped body-stream chunks into
          * grpc_reassembly until one length-prefixed message is framed, then
          * deframe it — a handler can readMessage() while the client is still

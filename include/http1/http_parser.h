@@ -103,6 +103,11 @@ struct http_request_t {
      * Empty {NULL,0} until first use; freed in http_request_destroy. */
     smart_str    grpc_reassembly;
 
+    /* grpc-web-text: the base64-decoded request body, materialized lazily on
+     * the first readMessage() (the deframer cursor then indexes THIS buffer,
+     * not `body`). NULL until first use; freed in http_request_destroy. */
+    zend_string *grpc_text_body;
+
     /* Body-progress event.
      * Lazily created by awaitBody() on the first suspend; notified by
      * the parser on body_complete once the event-loop read path lands.

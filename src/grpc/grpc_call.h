@@ -43,24 +43,27 @@ typedef struct grpc_finish_ops {
     void (*commit)(void *ctx);
 } grpc_finish_ops_t;
 
-/* Dispatch-time response defaults: content-type application/grpc (or the
- * grpc-web response content-type). A handler may still override before
- * its first writeMessage(). */
-void grpc_call_init_response(zend_object *response_obj, bool grpc_web);
+/* Dispatch-time response defaults: content-type per delivery mode (native /
+ * grpc-web / grpc-web-text) + the mode stamped on the response so the
+ * framing layer picks the right per-frame transform. A handler may still
+ * override the content-type before its first writeMessage(). */
+void grpc_call_init_response(zend_object *response_obj, int grpc_mode);
 
 /* Outcome → grpc-status trailer. Success defaults to 0; an uncaught
  * handler exception maps to INTERNAL (13) unless the handler already set
  * a status. Call from dispose before delivery decisions. */
 void grpc_call_ensure_status(zend_object *response_obj, bool had_exception);
 
-/* Finalize delivery of a gRPC reply (dispose-time):
- *   grpc-web       → trailers become an in-body 0x80 frame, stream ends
- *                    (browsers cannot read HTTP trailers),
- *   streaming      → end the stream; native trailers ride the transport's
- *                    generic trailer path at EOF,
- *   zero-message   → Trailers-Only: fold grpc-status/grpc-message into the
- *                    initial HEADERS and commit the buffered response. */
-void grpc_call_finish(zend_object *response_obj, bool grpc_web,
+/* Finalize delivery of a gRPC reply (dispose-time). The delivery mode is
+ * read back off the response (stamped by grpc_call_init_response):
+ *   grpc-web[-text] → trailers become an in-body 0x80 frame (base64-encoded
+ *                     for web-text), stream ends (browsers cannot read HTTP
+ *                     trailers),
+ *   streaming       → end the stream; native trailers ride the transport's
+ *                     generic trailer path at EOF,
+ *   zero-message    → Trailers-Only: fold grpc-status/grpc-message into the
+ *                     initial HEADERS and commit the buffered response. */
+void grpc_call_finish(zend_object *response_obj,
                       const grpc_finish_ops_t *ops, void *ctx);
 
 #endif /* HTTP_GRPC_CALL_H */

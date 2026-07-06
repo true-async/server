@@ -14,6 +14,7 @@
 #include "grpc.h"
 #include "http1/http_parser.h"   /* http_request_t */
 #include "zend_smart_str.h"
+#include "ext/standard/base64.h" /* grpc-web-text per-frame transform */
 
 #include <string.h>
 #include <strings.h>             /* strncasecmp */
@@ -59,6 +60,55 @@ bool grpc_request_is_grpc_web(const http_request_t *req)
     return Z_STRLEN_P(ct) >= prefix_len
         && strncasecmp(Z_STRVAL_P(ct), GRPC_WEB_CONTENT_TYPE_PREFIX,
                        prefix_len) == 0;
+}
+
+bool grpc_request_is_grpc_web_text(const http_request_t *req)
+{
+    if (req == NULL || req->headers == NULL) {
+        return false;
+    }
+
+    zval *ct = zend_hash_str_find(req->headers, "content-type",
+                                  sizeof("content-type") - 1);
+
+    if (ct == NULL || Z_TYPE_P(ct) != IS_STRING) {
+        return false;
+    }
+
+    const size_t prefix_len = sizeof(GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX) - 1;
+
+    return Z_STRLEN_P(ct) >= prefix_len
+        && strncasecmp(Z_STRVAL_P(ct), GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX,
+                       prefix_len) == 0;
+}
+
+grpc_mode_t grpc_request_mode(const http_request_t *req)
+{
+    if (!grpc_request_is_grpc(req)) {
+        return GRPC_MODE_NONE;
+    }
+
+    /* Most-specific prefix first: is_grpc_web matches web-text too. */
+    if (grpc_request_is_grpc_web_text(req)) {
+        return GRPC_MODE_WEB_TEXT;
+    }
+
+    if (grpc_request_is_grpc_web(req)) {
+        return GRPC_MODE_WEB;
+    }
+
+    return GRPC_MODE_NATIVE;
+}
+
+zend_string *grpc_web_text_encode(const char *in, const size_t len)
+{
+    return php_base64_encode((const unsigned char *)in, len);
+}
+
+zend_string *grpc_web_text_decode(const char *in, const size_t len)
+{
+    return php_base64_decode_ex((const unsigned char *)in, len,
+                                /*strict=*/false);
 }
 
 zend_string *grpc_web_trailer_frame(HashTable *trailers)

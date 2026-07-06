@@ -49,6 +49,24 @@ struct http_request_t;
 #define GRPC_WEB_CONTENT_TYPE_PREFIX  "application/grpc-web"
 #define GRPC_WEB_RESPONSE_CONTENT_TYPE "application/grpc-web+proto"
 
+/* grpc-web-text: the grpc-web framing, base64-encoded — the fallback for
+ * transports/clients that cannot carry binary bodies (XHR). Each frame
+ * (message or trailer) is base64-encoded independently with its own
+ * padding, per the grpc-web protocol, so no cross-frame codec state. */
+#define GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX   "application/grpc-web-text"
+#define GRPC_WEB_TEXT_RESPONSE_CONTENT_TYPE "application/grpc-web-text+proto"
+
+/* Delivery mode of a gRPC call, classified once at dispatch from the request
+ * content-type and stamped on the response (grpc_call_init_response). The
+ * framing layer (writeMessage / grpc_call_finish) reads it back to pick the
+ * per-frame transform; transports never branch on it. */
+typedef enum {
+    GRPC_MODE_NONE = 0,   /* not a gRPC call */
+    GRPC_MODE_NATIVE,     /* application/grpc — trailers ride HTTP trailers */
+    GRPC_MODE_WEB,        /* application/grpc-web — in-body 0x80 trailer frame */
+    GRPC_MODE_WEB_TEXT,   /* application/grpc-web-text — WEB + per-frame base64 */
+} grpc_mode_t;
+
 /* True when the request is a gRPC call — POST with a content-type that
  * begins with `application/grpc` (this includes grpc-web). */
 bool grpc_request_is_grpc(const struct http_request_t *req);
@@ -58,6 +76,21 @@ bool grpc_request_is_grpc(const struct http_request_t *req);
  * body (a 0x80-flagged frame) instead of as HTTP/2 trailers, because
  * browsers cannot read HTTP trailers. */
 bool grpc_request_is_grpc_web(const struct http_request_t *req);
+
+/* True when the request is grpc-web-text — content-type begins with
+ * `application/grpc-web-text` (note: grpc_request_is_grpc_web also matches
+ * these, by prefix; check web-text FIRST when distinguishing). */
+bool grpc_request_is_grpc_web_text(const struct http_request_t *req);
+
+/* Classify the delivery mode from the request content-type. Returns
+ * GRPC_MODE_NONE for a non-gRPC request; the caller still gates on a
+ * registered gRPC handler. */
+grpc_mode_t grpc_request_mode(const struct http_request_t *req);
+
+/* Per-frame base64 transform for grpc-web-text. Both return a new
+ * zend_string the caller owns; decode returns NULL on malformed input. */
+zend_string *grpc_web_text_encode(const char *in, size_t len);
+zend_string *grpc_web_text_decode(const char *in, size_t len);
 
 /* Build the grpc-web in-body trailer frame from a response trailer map:
  *   byte 0     : 0x80 (trailer frame, uncompressed)

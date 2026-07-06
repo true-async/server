@@ -1107,6 +1107,18 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         zend_string_release(payload);   /* framed copied it; drop the gz buffer */
     }
 
+    /* grpc-web-text: every frame goes out base64-encoded, each with its own
+     * padding (the grpc-web protocol allows per-frame encoding, so no codec
+     * state spans messages). The trailer frame is encoded the same way in
+     * grpc_call_finish. */
+    if (response->grpc_mode == GRPC_MODE_WEB_TEXT) {
+        zend_string *const b64 =
+            grpc_web_text_encode(ZSTR_VAL(framed), ZSTR_LEN(framed));
+
+        zend_string_release(framed);
+        framed = b64;
+    }
+
     const int rc = response->stream_ops->append_chunk(
         response->stream_ctx, framed);
 
@@ -1342,6 +1354,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->closed = false;
     response->committed = false;
     response->streaming = false;
+    response->grpc_mode = 0;
     response->stream_ops = NULL;
     response->stream_ctx = NULL;
     response->compression_state = NULL;
@@ -1439,6 +1452,16 @@ void http_response_replace_stream_ops(zend_object *obj,
     http_response_object *r = http_response_from_obj(obj);
     r->stream_ops = ops;
     r->stream_ctx = ctx;
+}
+
+void http_response_set_grpc_mode(zend_object *obj, const uint8_t mode)
+{
+    http_response_from_obj(obj)->grpc_mode = mode;
+}
+
+uint8_t http_response_get_grpc_mode(zend_object *obj)
+{
+    return http_response_from_obj(obj)->grpc_mode;
 }
 
 smart_str *http_response_get_body_smart_str(zend_object *obj)

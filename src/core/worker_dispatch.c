@@ -18,6 +18,8 @@
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
+#include "zend_exceptions.h"                 /* zend_clear_exception */
+#include "http_response_internal.h"          /* http_response_replace_stream_ops */
 #include "core/stream_credit.h"              /* per-stream flow-control credit */
 #include "grpc/grpc.h"                       /* grpc_request_is_grpc / _is_grpc_web */
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
@@ -64,7 +66,6 @@ typedef struct {
 
     /* gRPC classification (once, at dispatch — the transports do the same). */
     bool                    is_grpc;
-    bool                    grpc_web;
 
     /* Streaming reverse path: STREAM_HEADERS posted on the first
      * append_chunk; STREAM_END posted by mark_ended (idempotent). When
@@ -527,7 +528,7 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
          * called end() already posted it). A response that never streamed is
          * the buffered FULL wire, exactly as before. */
         if (ctx->is_grpc) {
-            grpc_call_finish(resp, ctx->grpc_web, &worker_grpc_finish_ops, ctx);
+            grpc_call_finish(resp, &worker_grpc_finish_ops, ctx);
         } else if (http_response_is_streaming(resp)) {
             worker_stream_mark_ended(ctx);
         }
@@ -588,9 +589,9 @@ bool worker_dispatch_request(http_server_object *server,
     /* gRPC classification — once, here, exactly like the transports do
      * (application/grpc* + a registered addGrpcHandler). */
     HashTable *const handlers = http_server_get_protocol_handlers(server);
-    const bool is_grpc  = grpc_request_is_grpc(req)
-                          && http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC);
-    const bool grpc_web = is_grpc && grpc_request_is_grpc_web(req);
+    const grpc_mode_t grpc_mode = grpc_request_mode(req);
+    const bool is_grpc = grpc_mode != GRPC_MODE_NONE
+                         && http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC);
 
     zval *const req_obj = http_request_create_from_parsed(req);
 
@@ -610,7 +611,6 @@ bool worker_dispatch_request(http_server_object *server,
     ctx->sink_arg   = sink_arg;
     ctx->is_head    = is_head;
     ctx->is_grpc    = is_grpc;
-    ctx->grpc_web   = grpc_web;
 
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
     efree(req_obj);                 /* the heap zval wrapper, not the object */
@@ -624,7 +624,7 @@ bool worker_dispatch_request(http_server_object *server,
                                      &worker_stream_ops, ctx);
 
     if (is_grpc) {
-        grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_web);
+        grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_mode);
     }
 
     /* No handler registered: synthesise a 404 so the sink still fires with a
