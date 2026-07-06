@@ -57,13 +57,10 @@ HTTP/2     ████████████████████  100%
 HTTP/3     ████████████████████  100%
 WebSocket  ████████████████████  100%
 SSE        ████████████████████  100%
-gRPC       ██████████████████░░   90%
+gRPC       ████████████████████  100%
 ```
 
 All ten ship-gates of the HTTP/3 plan (transport, TLS 1.3, request/response, streaming, lifecycle + drain, Alt-Svc, compliance smoke, fuzzing) are merged. Open items are post-ship performance follow-ups — `recvmmsg` inbound batching and Linux GSO outbound coalescing — that require upstream TrueAsync API extensions, plus optional ECN/pacing.
-
-gRPC's remaining 10%: `grpc-web-text` (base64 framing) and gRPC under the
-reactor pool (`TRUE_ASYNC_SERVER_REACTOR_POOL=1`).
 
 ---
 

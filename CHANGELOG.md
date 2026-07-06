@@ -30,7 +30,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     emits compressed frames.
   - **`grpc-timeout`** request header parsed and exposed via
     `HttpRequest::getGrpcTimeout()`.
-  - Deferred: `grpc-web-text` (base64), gRPC under the reactor pool.
+  - **grpc-web-text**: `application/grpc-web-text` calls carry base64 both
+    directions — `readMessage()` decodes the request transparently, every
+    response frame (messages + the trailer frame) goes out independently
+    base64-encoded.
+  - **Works under the reactor pool** (`TRUE_ASYNC_SERVER_REACTOR_POOL=1`) —
+    gRPC rides the generic streaming reverse path below; no gRPC-specific
+    code in the reactor/worker split.
+
+- **Reactor-pool streaming reverse path (#80).** Under
+  `TRUE_ASYNC_SERVER_REACTOR_POOL=1` a worker response is no longer
+  buffered-only:
+  - `send()`/`writeMessage()`/SSE stream across the thread boundary — the
+    worker posts STREAM_HEADERS / STREAM_CHUNK / STREAM_END wires in FIFO
+    order; the reactor feeds its existing chunk ring and submits native
+    trailers at true EOF (so `setTrailer()` works under the pool, buffered
+    or streamed).
+  - **Credit-based backpressure**: a per-stream credit block (atomics,
+    malloc-domain) paces the producer — over 1 MiB un-acked in flight the
+    handler coroutine parks and resumes as the QUIC peer acknowledges
+    bytes, so a slow client cannot flood the shared reactor mailbox. Peer
+    RST / connection close unparks it into the standard stream-dead path
+    (`send()` throws 499).
 
 ### Changed
 
