@@ -436,6 +436,7 @@ jobs:
             --enable-pcntl \
             --enable-opcache \
             --with-openssl \
+            --with-zlib \
             --with-config-file-path=/etc \
             --with-config-file-scan-dir=/etc/php.d \
             --${{ matrix.debug && 'enable' || 'disable' }}-debug \
@@ -517,6 +518,15 @@ jobs:
           sudo sysctl -w kernel.core_uses_pid=1
           ulimit -c unlimited
           ulimit -c
+
+      # H3 gRPC tests (grpc/011, grpc/012) drive the server with a real
+      # aioquic Python client and SKIP when the module is missing —
+      # which silently drops the H3 trailer paths from coverage.
+      - name: Install aioquic (H3 gRPC client tests)
+        run: |
+          set -eux
+          python3 -m pip install --quiet aioquic
+          python3 -c "import aioquic"
 
       - name: Run http_server phpt suite
         working-directory: http-server
