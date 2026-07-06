@@ -175,6 +175,23 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         } ZEND_HASH_FOREACH_END();
     }
 
+    /* Trailer map (setTrailer / gRPC grpc-status): flat string pairs, same
+     * discipline as http3_stream_capture_trailers on the local path. */
+    HashTable *const trailers = http_response_get_trailers(resp);
+
+    if (trailers != NULL) {
+        zend_string *name;
+        zval        *val;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+            if (UNEXPECTED(name == NULL) || Z_TYPE_P(val) != IS_STRING) {
+                continue;
+            }
+
+            response_wire_add_trailer(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                      Z_STRVAL_P(val), Z_STRLEN_P(val));
+        } ZEND_HASH_FOREACH_END();
+    }
+
     /* http_response_get_body_str returns a borrowed reference; the bytes are
      * copied into the arena, so nothing to release. HEAD carries the headers
      * but no body (RFC 9110 §9.3.2). */

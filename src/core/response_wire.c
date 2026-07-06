@@ -45,6 +45,10 @@ struct response_wire_s {
     wire_header_t *headers;
     size_t         header_count;
     size_t         header_cap;
+
+    wire_header_t *trailers;
+    size_t         trailer_count;
+    size_t         trailer_cap;
 };
 
 /* Copy `len` bytes into the arena, growing it as needed. Returns the byte
@@ -109,21 +113,24 @@ void response_wire_set_status(response_wire_t *rw, const int status)
     rw->status = status;
 }
 
-bool response_wire_add_header(response_wire_t *rw,
-                              const char *name_ptr, const size_t name_len,
-                              const char *value_ptr, const size_t value_len)
+/* Append one (name, value) pair to a wire_header_t list (headers or trailers),
+ * copying both spans into the arena. */
+static bool wire_pair_add(response_wire_t *rw,
+                          wire_header_t **list, size_t *count, size_t *cap,
+                          const char *name_ptr, const size_t name_len,
+                          const char *value_ptr, const size_t value_len)
 {
-    if (rw->header_count == rw->header_cap) {
-        const size_t new_cap = rw->header_cap != 0 ? rw->header_cap * 2 : 8;
+    if (*count == *cap) {
+        const size_t new_cap = *cap != 0 ? *cap * 2 : 8;
         wire_header_t *const grown =
-            (wire_header_t *) realloc(rw->headers, new_cap * sizeof(*grown));
+            (wire_header_t *) realloc(*list, new_cap * sizeof(*grown));
 
         if (grown == NULL) {
             return false;
         }
 
-        rw->headers = grown;
-        rw->header_cap = new_cap;
+        *list = grown;
+        *cap  = new_cap;
     }
 
     const size_t name_off = arena_append(rw, name_ptr, name_len);
@@ -138,14 +145,30 @@ bool response_wire_add_header(response_wire_t *rw,
         return false;
     }
 
-    wire_header_t *const h = &rw->headers[rw->header_count];
+    wire_header_t *const h = &(*list)[*count];
     h->name_off  = name_off;
     h->name_len  = name_len;
     h->value_off = value_off;
     h->value_len = value_len;
-    rw->header_count++;
+    (*count)++;
 
     return true;
+}
+
+bool response_wire_add_header(response_wire_t *rw,
+                              const char *name_ptr, const size_t name_len,
+                              const char *value_ptr, const size_t value_len)
+{
+    return wire_pair_add(rw, &rw->headers, &rw->header_count, &rw->header_cap,
+                         name_ptr, name_len, value_ptr, value_len);
+}
+
+bool response_wire_add_trailer(response_wire_t *rw,
+                               const char *name_ptr, const size_t name_len,
+                               const char *value_ptr, const size_t value_len)
+{
+    return wire_pair_add(rw, &rw->trailers, &rw->trailer_count, &rw->trailer_cap,
+                         name_ptr, name_len, value_ptr, value_len);
 }
 
 bool response_wire_set_body(response_wire_t *rw, const char *ptr, const size_t len, const bool complete)
@@ -190,21 +213,45 @@ size_t response_wire_header_count(const response_wire_t *rw)
     return rw->header_count;
 }
 
-bool response_wire_header_at(const response_wire_t *rw, const size_t index,
-                             const char **name_ptr, size_t *name_len,
-                             const char **value_ptr, size_t *value_len)
+/* Resolve entry `index` of a wire_header_t list against the arena. */
+static bool wire_pair_at(const response_wire_t *rw,
+                         const wire_header_t *list, const size_t count,
+                         const size_t index,
+                         const char **name_ptr, size_t *name_len,
+                         const char **value_ptr, size_t *value_len)
 {
-    if (index >= rw->header_count) {
+    if (index >= count) {
         return false;
     }
 
-    const wire_header_t *const h = &rw->headers[index];
+    const wire_header_t *const h = &list[index];
     *name_ptr  = rw->arena + h->name_off;
     *name_len  = h->name_len;
     *value_ptr = rw->arena + h->value_off;
     *value_len = h->value_len;
 
     return true;
+}
+
+bool response_wire_header_at(const response_wire_t *rw, const size_t index,
+                             const char **name_ptr, size_t *name_len,
+                             const char **value_ptr, size_t *value_len)
+{
+    return wire_pair_at(rw, rw->headers, rw->header_count, index,
+                        name_ptr, name_len, value_ptr, value_len);
+}
+
+size_t response_wire_trailer_count(const response_wire_t *rw)
+{
+    return rw->trailer_count;
+}
+
+bool response_wire_trailer_at(const response_wire_t *rw, const size_t index,
+                              const char **name_ptr, size_t *name_len,
+                              const char **value_ptr, size_t *value_len)
+{
+    return wire_pair_at(rw, rw->trailers, rw->trailer_count, index,
+                        name_ptr, name_len, value_ptr, value_len);
 }
 
 uint32_t response_wire_reactor_id(const response_wire_t *rw)
@@ -230,5 +277,6 @@ void response_wire_free(response_wire_t *rw)
 
     free(rw->arena);
     free(rw->headers);
+    free(rw->trailers);
     free(rw);
 }

@@ -839,6 +839,10 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             (void)http3_stream_submit_response(c, s, false);
         } else {
             H3T(s->stream_id, "5.buffered_submit");
+            /* A buffered response can carry a trailer map too (setTrailer
+             * without streaming) — capture now, while response_zv is alive;
+             * the data reader submits at EOF. */
+            http3_stream_capture_trailers(s);
             (void)http3_stream_submit_response(c, s, false);
         }
     } else {

@@ -52,6 +52,11 @@ bool response_wire_add_header(response_wire_t *rw,
                               const char *name_ptr, size_t name_len,
                               const char *value_ptr, size_t value_len);
 bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len, bool complete);
+/* Trailers mirror headers: appended pairs, delivered by the transport after
+ * the last body byte (H2 trailer HEADERS / nghttp3 submit_trailers at EOF). */
+bool response_wire_add_trailer(response_wire_t *rw,
+                               const char *name_ptr, size_t name_len,
+                               const char *value_ptr, size_t value_len);
 
 /* Accessors. Returned pointers are valid until response_wire_free; *len
  * receives the span length. body returns NULL with *len = 0 when unset. */
@@ -64,6 +69,11 @@ size_t response_wire_header_count(const response_wire_t *rw);
 bool response_wire_header_at(const response_wire_t *rw, size_t index,
                              const char **name_ptr, size_t *name_len,
                              const char **value_ptr, size_t *value_len);
+
+size_t response_wire_trailer_count(const response_wire_t *rw);
+bool response_wire_trailer_at(const response_wire_t *rw, size_t index,
+                              const char **name_ptr, size_t *name_len,
+                              const char **value_ptr, size_t *value_len);
 
 uint32_t response_wire_reactor_id(const response_wire_t *rw);
 int64_t  response_wire_stream_id(const response_wire_t *rw);

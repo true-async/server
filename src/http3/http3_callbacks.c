@@ -442,6 +442,27 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
  * pointer alive until h3_acked_stream_data_cb fires (the peer ACK'd
  * the bytes). Releasing earlier is a UAF — under packet loss nghttp3
  * retransmits from the same iov, so a freed zend_string would crash. */
+/* True-EOF epilogue shared by the reader's streaming and buffered branches:
+ * submit the captured trailers (nghttp3 requires the submit after the last
+ * DATA) and keep the sending side open with NO_END_STREAM so the trailer
+ * HEADERS carry the fin instead of the final DATA. No-op without a capture. */
+static void h3_read_data_eof_trailers(nghttp3_conn *conn, http3_stream_t *s,
+                                      uint32_t *pflags)
+{
+    if (s->trailer_nv != NULL && !s->trailers_submitted) {
+        s->trailers_submitted = true;
+
+        if (nghttp3_conn_submit_trailers(conn, s->stream_id,
+                (const nghttp3_nv *)s->trailer_nv, s->trailer_count) == 0) {
+            s->has_trailers = true;
+        }
+    }
+
+    if (s->has_trailers) {
+        *pflags |= NGHTTP3_DATA_FLAG_NO_END_STREAM;
+    }
+}
+
 static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
                                      nghttp3_vec *vec, size_t veccnt,
                                      uint32_t *pflags,
@@ -476,24 +497,9 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
             if (s->streaming_ended) {
                 *pflags |= NGHTTP3_DATA_FLAG_EOF;
 
-                /* Response trailers: submit here, at true EOF — nghttp3
-                 * needs the trailer submit after the last DATA. The nv was
-                 * captured in dispose (response_zv is gone now). Keep the
-                 * sending side open with NO_END_STREAM so the trailer HEADERS
-                 * carry the fin instead of this DATA. */
-                if (s->trailer_nv != NULL && !s->trailers_submitted) {
-                    s->trailers_submitted = true;
-                    if (nghttp3_conn_submit_trailers(conn, s->stream_id,
-                            (const nghttp3_nv *)s->trailer_nv,
-                            s->trailer_count) == 0) {
-                        s->has_trailers = true;
-                    }
-                }
-
-                if (s->has_trailers) {
-                    *pflags |= NGHTTP3_DATA_FLAG_NO_END_STREAM;
-                }
-
+                /* The trailer nv was captured in dispose (response_zv is
+                 * gone by the time the reader runs). */
+                h3_read_data_eof_trailers(conn, s, pflags);
                 return 0;
             }
 
@@ -509,9 +515,12 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
         return 1;
     }
 
-    /* Buffered REST path — unchanged single-slice semantics. */
+    /* Buffered REST path — single-slice semantics, plus the trailer submit
+     * at EOF (a buffered response with a trailer map: worker-rendered
+     * response_wire or a local setTrailer without streaming). */
     if (s->response_body == NULL) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        h3_read_data_eof_trailers(conn, s, pflags);
         return 0;
     }
 
@@ -521,13 +530,21 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
 
     if (remaining == 0) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
+        h3_read_data_eof_trailers(conn, s, pflags);
         return 0;
     }
 
     vec[0].base = (uint8_t *)ZSTR_VAL(s->response_body) + s->response_body_offset;
     vec[0].len  = remaining;
     s->response_body_offset += remaining;
-    *pflags |= NGHTTP3_DATA_FLAG_EOF;
+
+    /* With trailers pending, hand the final slice without EOF — the submit
+     * must FOLLOW the last DATA, so the next invocation (remaining == 0)
+     * performs it. Without trailers keep the one-call fast path. */
+    if (s->trailer_nv == NULL) {
+        *pflags |= NGHTTP3_DATA_FLAG_EOF;
+    }
+
     return 1;
 }
 
@@ -847,6 +864,58 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
     if (body != NULL && blen > 0) {
         s->response_body        = zend_string_init(body, blen, 0);
         s->response_body_offset = 0;
+    }
+
+    /* Trailers: copy out of the wire into the stream's malloc'd capture (the
+     * wire dies right after this call; the data reader submits at true EOF —
+     * same fields http3_stream_capture_trailers fills on the local path). */
+    const size_t tcount = response_wire_trailer_count(rw);
+
+    if (tcount > 0 && s->trailer_nv == NULL) {
+        size_t total = 0;
+
+        for (size_t i = 0; i < tcount; i++) {
+            const char *nm, *val;
+            size_t      nl, vl;
+
+            if (response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
+                total += nl + vl;
+            }
+        }
+
+        nghttp3_nv *tnv    = malloc(tcount * sizeof(nghttp3_nv));
+        char       *tbytes = malloc(total ? total : 1);
+
+        if (tnv != NULL && tbytes != NULL) {
+            size_t ni = 0, bi = 0;
+
+            for (size_t i = 0; i < tcount; i++) {
+                const char *nm, *val;
+                size_t      nl, vl;
+
+                if (!response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
+                    continue;
+                }
+
+                memcpy(tbytes + bi, nm, nl);
+                tnv[ni].name    = (uint8_t *)(tbytes + bi);
+                tnv[ni].namelen = nl;
+                bi += nl;
+                memcpy(tbytes + bi, val, vl);
+                tnv[ni].value    = (uint8_t *)(tbytes + bi);
+                tnv[ni].valuelen = vl;
+                bi += vl;
+                tnv[ni].flags = NGHTTP3_NV_FLAG_NONE;
+                ni++;
+            }
+
+            s->trailer_nv    = tnv;
+            s->trailer_count = ni;
+            s->trailer_bytes = tbytes;
+        } else {
+            free(tnv);
+            free(tbytes);
+        }
     }
 
     const nghttp3_data_reader dr = { .read_data = h3_read_data_cb };
