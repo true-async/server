@@ -405,8 +405,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * gRPC-only server still dispatches. */
     const grpc_mode_t grpc_mode = grpc_classify(s->request, handlers);
 
-    s->is_grpc  = grpc_mode != GRPC_MODE_NONE;
-    s->grpc_web = grpc_mode == GRPC_MODE_WEB || grpc_mode == GRPC_MODE_WEB_TEXT;
+    s->is_grpc = grpc_mode != GRPC_MODE_NONE;
 
     zend_fcall_t *fcall = http_protocol_pick_handler(handlers, s->is_grpc);
 

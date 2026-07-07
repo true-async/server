@@ -246,9 +246,7 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         stream->request,
         http_server_get_protocol_handlers(self->conn->server));
     const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
-    stream->is_grpc  = is_grpc;
-    stream->grpc_web = grpc_mode == GRPC_MODE_WEB
-                       || grpc_mode == GRPC_MODE_WEB_TEXT;
+    stream->is_grpc = is_grpc;
 
     /* Static-only deployments register a static mount but no PHP
      * handler — the static dispatch path below claims the request

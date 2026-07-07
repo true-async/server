@@ -43,7 +43,6 @@ struct response_wire_s {
 
     size_t  body_off, body_len;
     bool    body_set;
-    bool    body_complete;
 
     wire_header_t *headers;
     size_t         header_count;
@@ -206,7 +205,7 @@ bool response_wire_add_trailer(response_wire_t *rw,
                          name_ptr, name_len, value_ptr, value_len);
 }
 
-bool response_wire_set_body(response_wire_t *rw, const char *ptr, const size_t len, const bool complete)
+bool response_wire_set_body(response_wire_t *rw, const char *ptr, const size_t len)
 {
     const size_t off = arena_append(rw, ptr, len);
 
@@ -214,10 +213,9 @@ bool response_wire_set_body(response_wire_t *rw, const char *ptr, const size_t l
         return false;
     }
 
-    rw->body_off      = off;
-    rw->body_len      = len;
-    rw->body_set      = true;
-    rw->body_complete = complete;
+    rw->body_off = off;
+    rw->body_len = len;
+    rw->body_set = true;
 
     return true;
 }
@@ -236,11 +234,6 @@ const char *response_wire_body(const response_wire_t *rw, size_t *len)
 
     *len = rw->body_len;
     return rw->arena + rw->body_off;
-}
-
-bool response_wire_body_complete(const response_wire_t *rw)
-{
-    return rw->body_complete;
 }
 
 size_t response_wire_header_count(const response_wire_t *rw)

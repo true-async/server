@@ -77,15 +77,14 @@ void  response_wire_set_chunk(response_wire_t *rw, void *persistent_str);
 void *response_wire_take_chunk(response_wire_t *rw);
 
 /* Builders — copy bytes into the arena. set_status replaces; add_header
- * appends; set_body replaces. All accept non-NUL-terminated spans. The header
- * builders return false on allocation failure (the wire stays usable/freeable).
- * `complete` is false when more body will be streamed to the reactor separately
- * after this hand-off. */
+ * appends; set_body replaces (FULL wires only; streamed bodies ride
+ * STREAM_CHUNK wires). All accept non-NUL-terminated spans; the pair
+ * builders return false on allocation failure (the wire stays freeable). */
 void response_wire_set_status(response_wire_t *rw, int status);
 bool response_wire_add_header(response_wire_t *rw,
                               const char *name_ptr, size_t name_len,
                               const char *value_ptr, size_t value_len);
-bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len, bool complete);
+bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len);
 /* Trailers mirror headers: appended pairs, delivered by the transport after
  * the last body byte (H2 trailer HEADERS / nghttp3 submit_trailers at EOF). */
 bool response_wire_add_trailer(response_wire_t *rw,
@@ -96,7 +95,6 @@ bool response_wire_add_trailer(response_wire_t *rw,
  * receives the span length. body returns NULL with *len = 0 when unset. */
 int         response_wire_status(const response_wire_t *rw);
 const char *response_wire_body(const response_wire_t *rw, size_t *len);
-bool        response_wire_body_complete(const response_wire_t *rw);
 
 size_t response_wire_header_count(const response_wire_t *rw);
 /* Resolve header `index` (0-based). Returns false for an out-of-range index. */

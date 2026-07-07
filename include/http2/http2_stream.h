@@ -108,12 +108,6 @@ struct http2_stream_t {
      * the grpc-status trailer. */
     bool                 is_grpc;
 
-    /* True when this gRPC stream is a grpc-web call (content-type
-     * application/grpc-web...). grpc-web carries trailers inside the
-     * response body as a 0x80-flagged frame instead of as HTTP/2 trailers,
-     * because browsers cannot read HTTP trailers. */
-    bool                 grpc_web;
-
     /* Streaming-response chunk queue.
      *
      * Active only when the handler called HttpResponse::send(); a

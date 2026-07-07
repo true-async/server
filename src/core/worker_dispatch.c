@@ -525,12 +525,12 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         zend_string *const body = http_response_get_body_str(resp);
 
         if (body != NULL && ZSTR_LEN(body) > 0) {
-            response_wire_set_body(rw, ZSTR_VAL(body), ZSTR_LEN(body), true);
+            response_wire_set_body(rw, ZSTR_VAL(body), ZSTR_LEN(body));
         } else {
-            response_wire_set_body(rw, NULL, 0, true);
+            response_wire_set_body(rw, NULL, 0);
         }
     } else {
-        response_wire_set_body(rw, NULL, 0, true);
+        response_wire_set_body(rw, NULL, 0);
     }
 
     return rw;

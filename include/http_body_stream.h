@@ -6,10 +6,13 @@
  * Streaming request body (issue #26).
  *
  * Per-request chunk queue + wakeup event. Producers are the protocol
- * parsers (H1 on_body, H2 cb_on_data_chunk_recv, H3 on_recv_data) and
- * the sole consumer is the handler coroutine via HttpRequest::readBody().
+ * parsers (H1 on_body, H2 cb_on_data_chunk_recv, H3 recv_data); consumers
+ * are readBody() and readMessage() in the handler coroutine.
  *
- * No locking — producer and consumer run on the same reactor thread.
+ * No locking — producer and consumer MUST run on the connection's thread:
+ * pop() grants transport flow-control credit (nghttp2 session_consume /
+ * ngtcp2 window extend + drain), i.e. it performs connection I/O. The
+ * reactor pool therefore never streams bodies (requests cross buffered).
  */
 
 #ifndef HTTP_BODY_STREAM_H
@@ -37,8 +40,8 @@ void http_body_stream_close(http_request_t *req);
  * body_error + body_eof and fires the wakeup event. */
 void http_body_stream_error(http_request_t *req);
 
-/* Pop one chunk from the queue. Returns NULL when queue is empty
- * (caller checks body_eof). Caller owns returned ref. */
+/* Pop one chunk (caller owns the ref). NULL when empty — check body_eof.
+ * Side effect: returns flow-control credit to the transport. */
 zend_string *http_body_stream_pop(http_request_t *req);
 
 /* Free the queue (releases all pending chunk refs) and dispose

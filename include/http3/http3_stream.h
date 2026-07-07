@@ -127,12 +127,11 @@ struct _http3_stream_s {
     bool              streaming_ended;
 
     /* gRPC (issue #4). is_grpc: the request is application/grpc — route to
-     * the addGrpcHandler callable, default grpc-status. grpc_web: an
-     * application/grpc-web call — trailers ride the body as a 0x80 frame.
+     * the addGrpcHandler callable, default grpc-status (web/web-text
+     * delivery is the response's grpc_mode stamp, not stream state).
      * has_trailers / trailers_submitted mirror http2_stream_t: the data
      * reader sets NO_END_STREAM + submits nghttp3 trailers once at EOF. */
     bool              is_grpc;
-    bool              grpc_web;
     bool              has_trailers;
     bool              trailers_submitted;
 
