@@ -79,6 +79,19 @@ static inline void stream_credit_mark_dead(stream_credit_t *sc)
     zend_atomic_int_store_ex(&sc->dead, 1);
 }
 
+/* Drop-site helper: nobody will retire this side's bytes anymore — unblock
+ * a parked producer FIRST (mark dead), then release this side's ref.
+ * NULL-safe. The ordering is the correctness story: a producer must be able
+ * to observe `dead` before the block can vanish. Use this at every point a
+ * credit-carrying wire dies undelivered or a stream is torn down. */
+static inline void stream_credit_abandon(stream_credit_t *sc)
+{
+    if (sc != NULL) {
+        stream_credit_mark_dead(sc);
+        stream_credit_release(sc);
+    }
+}
+
 static inline bool stream_credit_is_dead(const stream_credit_t *sc)
 {
     return zend_atomic_int_load_ex(&((stream_credit_t *)sc)->dead) != 0;

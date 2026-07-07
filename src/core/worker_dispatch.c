@@ -98,17 +98,8 @@ static void worker_dispatch_entry(void)
     }
 
     HashTable *const handlers = http_server_get_protocol_handlers(ctx->server);
-    zend_fcall_t *fcall = ctx->is_grpc
-        ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC)
-        : NULL;
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
-    }
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
+    zend_fcall_t *const fcall =
+        http_protocol_pick_handler(handlers, ctx->is_grpc);
 
     if (fcall == NULL) {
         return;
@@ -240,14 +231,7 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
     } else {
         /* No sink: nobody adopts a HEADERS wire's credit ref — take it
          * over so a parked producer cannot hang. */
-        stream_credit_t *const orphan =
-            (stream_credit_t *)response_wire_credit(rw);
-
-        if (orphan != NULL) {
-            stream_credit_mark_dead(orphan);
-            stream_credit_release(orphan);
-        }
-
+        stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
         response_wire_free(rw);
     }
 
@@ -634,12 +618,11 @@ bool worker_dispatch_request(http_server_object *server,
     void *const    conn       = req->reactor_conn;
     const bool     is_head    = http_request_method_is_head(req);
 
-    /* gRPC classification — once, here, exactly like the transports do
-     * (application/grpc* + a registered addGrpcHandler). */
+    /* gRPC classification — once, through the same seam the transports
+     * use (content-type mode gated on a registered addGrpcHandler). */
     HashTable *const handlers = http_server_get_protocol_handlers(server);
-    const grpc_mode_t grpc_mode = grpc_request_mode(req);
-    const bool is_grpc = grpc_mode != GRPC_MODE_NONE
-                         && http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC);
+    const grpc_mode_t grpc_mode = grpc_classify(req, handlers);
+    const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
 
     zval *const req_obj = http_request_create_from_parsed(req);
 
@@ -677,17 +660,7 @@ bool worker_dispatch_request(http_server_object *server,
 
     /* No handler registered: synthesise a 404 so the sink still fires with a
      * response instead of leaving the stream hanging. */
-    zend_fcall_t *fcall = is_grpc
-        ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC)
-        : NULL;
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
-    }
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
+    zend_fcall_t *const fcall = http_protocol_pick_handler(handlers, is_grpc);
 
     if (fcall == NULL) {
         http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);

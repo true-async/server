@@ -229,14 +229,7 @@ void http3_reactor_apply_response(void *arg)
         /* The stream is already gone, so nobody will adopt a HEADERS
          * wire's credit ref — take it over: unblock the parked producer
          * and drop the reactor-side ref here. */
-        stream_credit_t *const orphan =
-            (stream_credit_t *)response_wire_credit(rw);
-
-        if (orphan != NULL) {
-            stream_credit_mark_dead(orphan);
-            stream_credit_release(orphan);
-        }
-
+        stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
         response_wire_free(rw);
         return;
     }
@@ -390,30 +383,16 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     HashTable *handlers = http_server_get_protocol_handlers(server);
     zend_async_scope_t *scope = http_server_get_scope(server);
 
-    /* Pick the user handler. addHttpHandler stores it as HTTP1; H2 has
-     * its own slot. Try H1 first, then HTTP2 as a fallback so a server
-     * registered only via addHttp2Handler still services H3. Symmetric
-     * to how H2 strategy resolves it. */
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    /* gRPC (issue #4): classify ONCE through the shared seam (content-type
+     * mode gated on a registered addGrpcHandler); grpc-web carries trailers
+     * in-body. The handler pick below uses the shared precedence, so a
+     * gRPC-only server still dispatches. */
+    const grpc_mode_t grpc_mode = grpc_classify(s->request, handlers);
 
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
+    s->is_grpc  = grpc_mode != GRPC_MODE_NONE;
+    s->grpc_web = grpc_mode == GRPC_MODE_WEB || grpc_mode == GRPC_MODE_WEB_TEXT;
 
-    /* gRPC (issue #4): route application/grpc requests to addGrpcHandler.
-     * grpc-web (application/grpc-web) carries trailers in-body. Mirrors the
-     * H2 strategy — a gRPC-only server dispatches because fcall picks up the
-     * gRPC handler here. */
-    s->is_grpc  = grpc_request_is_grpc(s->request)
-                  && http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC);
-    s->grpc_web = s->is_grpc && grpc_request_is_grpc_web(s->request);
-
-    if (s->is_grpc) {
-        zend_fcall_t *g = http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC);
-        if (g != NULL) {
-            fcall = g;
-        }
-    }
+    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, s->is_grpc);
 
     /* Static-only deployments register a mount but no PHP handler — the
      * static gate below claims the request before any handler is needed.
@@ -464,8 +443,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     /* gRPC: response defaults (content-type + delivery mode) live in the
      * gRPC layer; the mode stamp is what finish/writeMessage read back. */
     if (s->is_grpc) {
-        grpc_call_init_response(Z_OBJ(s->response_zv),
-                                grpc_request_mode(s->request));
+        grpc_call_init_response(Z_OBJ(s->response_zv), grpc_mode);
     }
 
 #ifdef HAVE_HTTP_COMPRESSION

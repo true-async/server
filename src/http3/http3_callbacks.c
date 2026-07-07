@@ -731,6 +731,54 @@ static inline bool h3_nv_push(h3_nv_buf_t *b,
  * NO_END_STREAM) yet response_zv is freed by then. malloc (not emalloc) — the
  * data reader runs outside a request memory context. No-op when there are no
  * trailers or a capture already exists. Freed in http3_stream_release. */
+/* Shared malloc'd trailer capture (s->trailer_nv/count/bytes): init sizes
+ * the buffers, add packs one pair, callers iterate their own source. */
+typedef struct {
+    nghttp3_nv *nv;
+    char       *bytes;
+    size_t      ni, bi;
+} h3_trailer_pack_t;
+
+static bool h3_trailer_pack_init(h3_trailer_pack_t *p, const size_t count,
+                                 const size_t total)
+{
+    p->nv    = malloc(count * sizeof(nghttp3_nv));
+    p->bytes = malloc(total ? total : 1);
+    p->ni    = 0;
+    p->bi    = 0;
+
+    if (p->nv == NULL || p->bytes == NULL) {
+        free(p->nv);
+        free(p->bytes);
+        return false;
+    }
+
+    return true;
+}
+
+static void h3_trailer_pack_add(h3_trailer_pack_t *p,
+                                const char *nm, const size_t nl,
+                                const char *val, const size_t vl)
+{
+    memcpy(p->bytes + p->bi, nm, nl);
+    p->nv[p->ni].name    = (uint8_t *)(p->bytes + p->bi);
+    p->nv[p->ni].namelen = nl;
+    p->bi += nl;
+    memcpy(p->bytes + p->bi, val, vl);
+    p->nv[p->ni].value    = (uint8_t *)(p->bytes + p->bi);
+    p->nv[p->ni].valuelen = vl;
+    p->bi += vl;
+    p->nv[p->ni].flags = NGHTTP3_NV_FLAG_NONE;
+    p->ni++;
+}
+
+static void h3_trailer_pack_commit(http3_stream_t *s, h3_trailer_pack_t *p)
+{
+    s->trailer_nv    = p->nv;
+    s->trailer_count = p->ni;
+    s->trailer_bytes = p->bytes;
+}
+
 void http3_stream_capture_trailers(http3_stream_t *s)
 {
     if (Z_ISUNDEF(s->response_zv) || s->trailer_nv != NULL) {
@@ -752,37 +800,19 @@ void http3_stream_capture_trailers(http3_stream_t *s)
         total += ZSTR_LEN(name) + Z_STRLEN_P(val);
     } ZEND_HASH_FOREACH_END();
 
-    if (count == 0) {
+    h3_trailer_pack_t pack;
+
+    if (count == 0 || !h3_trailer_pack_init(&pack, count, total)) {
         return;
     }
 
-    nghttp3_nv *nv    = malloc(count * sizeof(nghttp3_nv));
-    char       *bytes = malloc(total ? total : 1);
-
-    if (nv == NULL || bytes == NULL) {
-        free(nv);
-        free(bytes);
-        return;
-    }
-
-    size_t ni = 0, bi = 0;
     ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
         if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
-        memcpy(bytes + bi, ZSTR_VAL(name), ZSTR_LEN(name));
-        nv[ni].name    = (uint8_t *)(bytes + bi);
-        nv[ni].namelen = ZSTR_LEN(name);
-        bi += ZSTR_LEN(name);
-        memcpy(bytes + bi, Z_STRVAL_P(val), Z_STRLEN_P(val));
-        nv[ni].value    = (uint8_t *)(bytes + bi);
-        nv[ni].valuelen = Z_STRLEN_P(val);
-        bi += Z_STRLEN_P(val);
-        nv[ni].flags = NGHTTP3_NV_FLAG_NONE;
-        ni++;
+        h3_trailer_pack_add(&pack, ZSTR_VAL(name), ZSTR_LEN(name),
+                            Z_STRVAL_P(val), Z_STRLEN_P(val));
     } ZEND_HASH_FOREACH_END();
 
-    s->trailer_nv    = nv;
-    s->trailer_count = ni;
-    s->trailer_bytes = bytes;
+    h3_trailer_pack_commit(s, &pack);
 }
 
 bool http3_stream_submit_response(http3_connection_t *c,
@@ -938,40 +968,22 @@ void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *
         }
     }
 
-    nghttp3_nv *tnv    = malloc(tcount * sizeof(nghttp3_nv));
-    char       *tbytes = malloc(total ? total : 1);
+    h3_trailer_pack_t pack;
 
-    if (tnv == NULL || tbytes == NULL) {
-        free(tnv);
-        free(tbytes);
+    if (!h3_trailer_pack_init(&pack, tcount, total)) {
         return;
     }
-
-    size_t ni = 0, bi = 0;
 
     for (size_t i = 0; i < tcount; i++) {
         const char *nm, *val;
         size_t      nl, vl;
 
-        if (!response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
-            continue;
+        if (response_wire_trailer_at(rw, i, &nm, &nl, &val, &vl)) {
+            h3_trailer_pack_add(&pack, nm, nl, val, vl);
         }
-
-        memcpy(tbytes + bi, nm, nl);
-        tnv[ni].name    = (uint8_t *)(tbytes + bi);
-        tnv[ni].namelen = nl;
-        bi += nl;
-        memcpy(tbytes + bi, val, vl);
-        tnv[ni].value    = (uint8_t *)(tbytes + bi);
-        tnv[ni].valuelen = vl;
-        bi += vl;
-        tnv[ni].flags = NGHTTP3_NV_FLAG_NONE;
-        ni++;
     }
 
-    s->trailer_nv    = tnv;
-    s->trailer_count = ni;
-    s->trailer_bytes = tbytes;
+    h3_trailer_pack_commit(s, &pack);
 }
 
 /* Reverse path: submit a buffered response from a flat response_wire

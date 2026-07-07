@@ -242,13 +242,13 @@ static void http2_strategy_dispatch(struct http_request_t *request,
      * addGrpcHandler(). Detected here — like the WS check — so a gRPC-only
      * server (no addHttpHandler) still dispatches past the handler-null
      * guards below. */
-    const bool is_grpc =
-        grpc_request_is_grpc(stream->request)
-        && http_protocol_has_handler(
-               http_server_get_protocol_handlers(self->conn->server),
-               HTTP_PROTOCOL_GRPC);
+    const grpc_mode_t grpc_mode = grpc_classify(
+        stream->request,
+        http_server_get_protocol_handlers(self->conn->server));
+    const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
     stream->is_grpc  = is_grpc;
-    stream->grpc_web = is_grpc && grpc_request_is_grpc_web(stream->request);
+    stream->grpc_web = grpc_mode == GRPC_MODE_WEB
+                       || grpc_mode == GRPC_MODE_WEB_TEXT;
 
     /* Static-only deployments register a static mount but no PHP
      * handler — the static dispatch path below claims the request
@@ -305,8 +305,7 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     /* gRPC: response defaults (content-type + delivery mode) live in the
      * gRPC layer; the mode stamp is what finish/writeMessage read back. */
     if (is_grpc) {
-        grpc_call_init_response(Z_OBJ(stream->response_zv),
-                                grpc_request_mode(stream->request));
+        grpc_call_init_response(Z_OBJ(stream->response_zv), grpc_mode);
     }
 
     /* Static-handler dispatch (issue #13). Identical policy to the

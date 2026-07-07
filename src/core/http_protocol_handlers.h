@@ -31,6 +31,13 @@ zend_fcall_t* http_protocol_get_handler(HashTable *handlers,
 /* Check if handler exists */
 bool http_protocol_has_handler(HashTable *handlers, http_protocol_type_t protocol);
 
+/* Resolve the user handler with the ONE shared precedence every dispatch
+ * site uses: the gRPC slot first when the call was classified gRPC, then
+ * HTTP1 (addHttpHandler's slot), then HTTP2 — so a server registered only
+ * via addHttp2Handler still services H3/worker requests. Returns NULL when
+ * nothing matches (callers synthesise a 404 / bail). */
+zend_fcall_t *http_protocol_pick_handler(HashTable *handlers, bool is_grpc);
+
 /* Remove handler from HashTable */
 void http_protocol_remove_handler(HashTable *handlers, http_protocol_type_t protocol);
 

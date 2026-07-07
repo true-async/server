@@ -2595,13 +2595,7 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
 
     /* Undeliverable: the reactor never adopts a HEADERS wire's credit ref,
      * so take it over — unblock the parked producer, drop the ref. */
-    stream_credit_t *const orphan = (stream_credit_t *)response_wire_credit(rw);
-
-    if (orphan != NULL) {
-        stream_credit_mark_dead(orphan);
-        stream_credit_release(orphan);
-    }
-
+    stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
     response_wire_free(rw);
     return false;
 }

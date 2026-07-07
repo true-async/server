@@ -162,8 +162,7 @@ void http3_stream_release(http3_stream_t *s)
     /* Reverse-path credit: the stream is going away — unblock a parked
      * producer, then drop the reactor's ref. */
     if (s->wire_credit != NULL) {
-        stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
-        stream_credit_release((stream_credit_t *)s->wire_credit);
+        stream_credit_abandon((stream_credit_t *)s->wire_credit);
         s->wire_credit = NULL;
     }
 

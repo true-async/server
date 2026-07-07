@@ -15,6 +15,7 @@
 #include "http1/http_parser.h"   /* http_request_t */
 #include "zend_smart_str.h"
 #include "ext/standard/base64.h" /* grpc-web-text per-frame transform */
+#include "core/http_protocol_handlers.h" /* handler-registry gate (grpc_classify) */
 
 #include <string.h>
 #include <strings.h>             /* strncasecmp */
@@ -80,6 +81,18 @@ bool grpc_request_is_grpc_web_text(const http_request_t *req)
     return Z_STRLEN_P(ct) >= prefix_len
         && strncasecmp(Z_STRVAL_P(ct), GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX,
                        prefix_len) == 0;
+}
+
+grpc_mode_t grpc_classify(const http_request_t *req, HashTable *handlers)
+{
+    const grpc_mode_t mode = grpc_request_mode(req);
+
+    if (mode == GRPC_MODE_NONE
+        || !http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC)) {
+        return GRPC_MODE_NONE;
+    }
+
+    return mode;
 }
 
 grpc_mode_t grpc_request_mode(const http_request_t *req)

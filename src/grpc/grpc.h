@@ -87,6 +87,13 @@ bool grpc_request_is_grpc_web_text(const struct http_request_t *req);
  * registered gRPC handler. */
 grpc_mode_t grpc_request_mode(const struct http_request_t *req);
 
+/* Classify-once entry point for dispatch sites: the delivery mode gated on
+ * a registered addGrpcHandler — GRPC_MODE_NONE when the request is not
+ * gRPC or no gRPC handler exists (the call then routes as plain HTTP).
+ * Every dispatch path (H2 / H3 / worker) must classify through THIS so a
+ * request can never be gRPC on one transport and plain HTTP on another. */
+grpc_mode_t grpc_classify(const struct http_request_t *req, HashTable *handlers);
+
 /* Per-frame base64 transform for grpc-web-text. Both return a new
  * zend_string the caller owns; decode returns NULL on malformed input. */
 zend_string *grpc_web_text_encode(const char *in, size_t len);

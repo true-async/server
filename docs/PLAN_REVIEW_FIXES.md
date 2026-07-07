@@ -103,20 +103,16 @@ two-pass malloc nv+bytes packer; only the pair source differs).
   (NULL-safe) in stream_credit.h; consider `response_wire_discard(rw)` that
   abandons an attached credit so future drop-sites are safe by construction.
 
-### 10. Shared coroutine-sleep helper
-`worker_credit_sleep_ms` duplicates `hot_reload_sleep_ms` (already diverging
-on EG(exception) handling); both are also the only park sites without
-ZEND_ASYNC_WAKER_NEW (works via enqueue auto-create, but non-idiomatic).
-- Fix: one helper in src/core/ (e.g. `http_async_sleep_ms(co, ms)`), used by
-  both; align the waker idiom with the rest of the codebase.
+### 10. Shared coroutine-sleep helper — DROPPED
+10 duplicated lines in two files are cheaper than a new module. Leave both
+static helpers where they are.
 
 ### 11. Header-flatten loop
 The "foreach allowed h2h3 header, string-or-array" flatten exists ~6×
 (worker_wire_copy_head, http2_strategy ×2, http2_static_response ×2,
 http3_callbacks).
-- Fix: `http_response_foreach_allowed_header(resp, emit_cb, arg)` next to
-  the allowed_h2h3 predicate; convert at least the new worker site now,
-  transports opportunistically.
+- DEFERRED: a helper used once is worse than the duplication. Convert
+  opportunistically when a site is touched anyway.
 
 ## P3 — Efficiency (reverse path)
 

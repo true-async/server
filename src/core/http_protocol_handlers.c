@@ -127,6 +127,25 @@ bool http_protocol_has_handler(HashTable *handlers, http_protocol_type_t protoco
 }
 /* }}} */
 
+/* {{{ http_protocol_pick_handler */
+zend_fcall_t *http_protocol_pick_handler(HashTable *handlers, const bool is_grpc)
+{
+    zend_fcall_t *fcall = is_grpc
+        ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC)
+        : NULL;
+
+    if (fcall == NULL) {
+        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    }
+
+    if (fcall == NULL) {
+        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
+    }
+
+    return fcall;
+}
+/* }}} */
+
 /* {{{ http_protocol_remove_handler */
 void http_protocol_remove_handler(HashTable *handlers, http_protocol_type_t protocol)
 {
