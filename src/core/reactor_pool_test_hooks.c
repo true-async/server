@@ -430,11 +430,19 @@ typedef struct {
     zend_async_event_t *done;      /* fired by the sink to wake the test */
 } dispatch_probe_t;
 
-static void dispatch_probe_sink(response_wire_t *rw, void *arg)
+static bool dispatch_probe_sink(response_wire_t *rw, void *arg)
 {
     dispatch_probe_t *const p = (dispatch_probe_t *)arg;
+
+    /* Self-test handlers are buffered-only: keep the FULL wire, free any
+     * earlier capture defensively so a streaming handler cannot leak. */
+    if (p->captured != NULL) {
+        response_wire_free(p->captured);
+    }
+
     p->captured = rw;             /* take ownership */
     async_plain_event_fire(p->done);
+    return true;
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_dispatch_from_wire_selftest, 0, 5,
@@ -561,7 +569,7 @@ typedef struct {
     zend_async_event_t *done;
 } inbox_probe_t;
 
-static void inbox_probe_sink(response_wire_t *rw, void *arg)
+static bool inbox_probe_sink(response_wire_t *rw, void *arg)
 {
     inbox_probe_t *const p = (inbox_probe_t *)arg;
 
@@ -580,6 +588,8 @@ static void inbox_probe_sink(response_wire_t *rw, void *arg)
     if (p->received >= p->expected && p->done != NULL) {
         async_plain_event_fire(p->done);
     }
+
+    return true;
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_worker_inbox_selftest, 0, 2,
@@ -698,7 +708,7 @@ typedef struct {
     int           per_inbox;  /* responses this inbox handled */
 } reg_slot_probe_t;
 
-static void reg_probe_sink(response_wire_t *rw, void *arg)
+static bool reg_probe_sink(response_wire_t *rw, void *arg)
 {
     reg_slot_probe_t *const p = (reg_slot_probe_t *)arg;
 
@@ -718,6 +728,8 @@ static void reg_probe_sink(response_wire_t *rw, void *arg)
     if (p->shared->received >= p->shared->expected && p->shared->done != NULL) {
         async_plain_event_fire(p->shared->done);
     }
+
+    return true;
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_worker_registry_selftest, 0, 3,

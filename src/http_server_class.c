@@ -2554,7 +2554,7 @@ static void http_server_reactor_pool_down(http_server_object *server)
  * reverse channel; ownership of `rw` transfers to the reactor apply on success.
  * On failure (no pool / full mailbox) drop it — the client times out and the
  * slab is still reclaimed by the consumed that follows. */
-static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
+static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
 {
     (void)arg;
 
@@ -2564,20 +2564,29 @@ static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
 
         if (reactor_pool_post_exec(g_reactor_pool, reactor,
                                    http3_reactor_apply_response, rw)) {
-            return;   /* the reactor owns rw now */
+            return true;   /* the reactor owns rw now */
         }
 
-        /* STREAM_* wires are ordered fragments — dropping one silently
-         * corrupts the stream, so retry a transiently full mailbox (the
-         * reactor drains continuously; same discipline as the consumed
-         * spin in http3_stream_release_via_request). Bounded so a reactor
-         * that left RUN (shutdown) cannot pin the worker forever. Interim
-         * until the step-3 credit protocol paces the producer. */
+        /* STREAM_* wires are ordered fragments — dropping one corrupts the
+         * stream, so ride out a transiently full mailbox (1024 slots; the
+         * reactor drains continuously). The credit protocol already paces
+         * CHUNK bytes, so a mailbox that stays full for ~100 ms means the
+         * reactor is gone or wedged — fail fast then: the caller marks the
+         * stream failed and its terminal wire becomes an ABORT. Short
+         * bounded sleeps, not a busy spin: this stalls only wires, never
+         * burns a core. */
         if (response_wire_kind(rw) != RESPONSE_WIRE_FULL) {
-            for (int spin = 0; spin < 1000000; spin++) {
+            for (int attempt = 0; attempt < 100; attempt++) {
+#ifdef PHP_WIN32
+                Sleep(1);
+#else
+                const struct timespec ts = { 0, 1000000 };   /* 1 ms */
+                nanosleep(&ts, NULL);
+#endif
+
                 if (reactor_pool_post_exec(g_reactor_pool, reactor,
                                            http3_reactor_apply_response, rw)) {
-                    return;
+                    return true;
                 }
             }
         }
@@ -2594,6 +2603,7 @@ static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
     }
 
     response_wire_free(rw);
+    return false;
 }
 
 /* Suspend the current coroutine for `ms` on a one-shot timer; lets the worker

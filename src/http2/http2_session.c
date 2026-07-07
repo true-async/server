@@ -26,6 +26,7 @@
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
+#include "grpc/grpc.h"            /* web-text is buffered-only (policy gate) */
 
 #include <string.h>
 
@@ -547,11 +548,24 @@ static void finalize_request_body(http2_stream_t *stream)
         return;
     }
 
-    /* Streaming mode (issue #26): no smart_str to finalize, just close
-     * the queue so a parked readBody() consumer sees EOF. */
+    /* Streaming mode (issue #26): no smart_str to finalize — close the
+     * queue so a parked readBody()/readMessage() consumer sees EOF, and
+     * fire body_event too: a handler suspended in awaitBody() (dispatched
+     * at headers, END_STREAM not yet seen) waits on THAT event, not the
+     * queue's data event. Mirrors the H1 parser's streaming-mode fire. */
     if (req->body_streaming) {
         http_body_stream_close(req);
         req->complete = true;
+
+        if (req->body_event != NULL) {
+            zend_async_trigger_event_t *trig =
+                (zend_async_trigger_event_t *)req->body_event;
+
+            if (trig->trigger != NULL) {
+                trig->trigger(trig);
+            }
+        }
+
         return;
     }
 
@@ -618,7 +632,12 @@ static int cb_on_frame_recv(nghttp2_session *ng,
              *   SMALL <= CL < AUTO → buffer + install upgrade hook
              *   CL <  SMALL → buffer, never stream. */
             if (session->conn != NULL && session->conn->view != NULL
-                && session->conn->view->body_streaming_enabled) {
+                && session->conn->view->body_streaming_enabled
+                /* grpc-web-text is buffered by protocol nature:
+                 * readMessage() base64-decodes the ASSEMBLED body; a
+                 * streamed queue would leave req->body NULL and silently
+                 * lose the call. */
+                && !grpc_request_is_grpc_web_text(stream->request)) {
                 http_request_t *r = stream->request;
 
                 if (r->content_length == 0

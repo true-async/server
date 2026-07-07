@@ -69,9 +69,13 @@ typedef struct {
 
     /* Streaming reverse path: STREAM_HEADERS posted on the first
      * append_chunk; STREAM_END posted by mark_ended (idempotent). When
-     * stream_started, dispose skips the buffered FULL render. */
+     * stream_started, dispose skips the buffered FULL render.
+     * stream_failed = the stream died mid-flight (credit timeout /
+     * cancellation / dropped wire) — the terminal wire becomes
+     * STREAM_ABORT so the peer sees a reset, not a clean FIN. */
     bool                    stream_started;
     bool                    stream_ended;
+    bool                    stream_failed;
 
     /* Flow control (step 3): `credit` is shared with the reactor (see
      * stream_credit.h); posted_bytes is worker-local. In-flight =
@@ -222,16 +226,37 @@ static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
     } ZEND_HASH_FOREACH_END();
 }
 
-/* Hand a wire to the reverse channel. The sink owns it on success. Stream
- * kinds must not be silently dropped mid-stream, so the sink (which retries
- * on a transiently full mailbox) is the single delivery point. */
-static void worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
+/* Hand a wire to the reverse channel; the sink owns it in every outcome.
+ * A failed STREAM_* delivery marks the stream failed — the terminal wire
+ * then becomes an ABORT, so the peer never mistakes the truncated body for
+ * a complete response. Returns the delivery verdict. */
+static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
 {
+    const response_wire_kind_t kind = response_wire_kind(rw);
+    bool delivered = false;
+
     if (ctx->sink != NULL) {
-        ctx->sink(rw, ctx->sink_arg);
+        delivered = ctx->sink(rw, ctx->sink_arg);
     } else {
+        /* No sink: nobody adopts a HEADERS wire's credit ref — take it
+         * over so a parked producer cannot hang. */
+        stream_credit_t *const orphan =
+            (stream_credit_t *)response_wire_credit(rw);
+
+        if (orphan != NULL) {
+            stream_credit_mark_dead(orphan);
+            stream_credit_release(orphan);
+        }
+
         response_wire_free(rw);
     }
+
+    if (!delivered && kind != RESPONSE_WIRE_FULL) {
+        ctx->stream_failed = true;
+        http_server_on_worker_wire_dropped(ctx->counters);
+    }
+
+    return delivered;
 }
 
 /* ---------------------------------------------------------------------
@@ -241,8 +266,11 @@ static void worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
  * work under the pool: each op flattens its payload into a STREAM_* wire
  * and posts it to the originating reactor. Ordering is the mailbox FIFO;
  * the reactor applies HEADERS (streaming submit), CHUNKs (chunk_queue),
- * END (trailers + EOF). Backpressure credits are the step-3 follow-up —
- * until then append never reports BACKPRESSURE.
+ * END (trailers + EOF) or ABORT (reset — the stream failed mid-flight).
+ * Backpressure: append_chunk parks the producer coroutine on the shared
+ * credit block (stream_credit.h) while > WORKER_STREAM_INFLIGHT_CAP bytes
+ * are un-acked, so it suspends INSIDE the op — BACKPRESSURE is never
+ * reported outward (same discipline as the local H2/H3 ops).
  * ------------------------------------------------------------------- */
 /* Suspend the producer coroutine for `ms` on a one-shot timer so the worker
  * loop keeps draining while we wait for credit. Best-effort: bails silently
@@ -306,7 +334,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
-    if (UNEXPECTED(ctx->stream_ended)
+    if (UNEXPECTED(ctx->stream_ended || ctx->stream_failed)
         || (ctx->credit != NULL && stream_credit_is_dead(ctx->credit))) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
@@ -361,6 +389,11 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
     ctx->posted_bytes += chunk_len;
 
     if (!worker_stream_wait_credit(ctx)) {
+        /* Credit timeout / cancellation while parked: the peer stopped
+         * retiring bytes but the QUIC stream may still be alive — flag the
+         * stream so dispose sends an ABORT, not a clean END that would make
+         * the truncation look like a complete response. */
+        ctx->stream_failed = true;
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
@@ -403,8 +436,15 @@ static void worker_stream_mark_ended(void *vctx)
         return;
     }
 
-    response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_END);
-    worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv));
+    /* A failed stream terminates with an ABORT (reactor resets the QUIC
+     * stream); only a healthy one ends cleanly, with trailers. */
+    if (ctx->stream_failed) {
+        response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_ABORT);
+    } else {
+        response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_END);
+        worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv));
+    }
+
     worker_wire_post(ctx, ew);
 }
 
@@ -530,6 +570,14 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
         if (ctx->is_grpc) {
             grpc_call_finish(resp, &worker_grpc_finish_ops, ctx);
         } else if (http_response_is_streaming(resp)) {
+            worker_stream_mark_ended(ctx);
+        }
+
+        /* Safety net: a started stream must ALWAYS get a terminal wire.
+         * grpc_call_finish's delivery can fail mid-way (e.g. the trailer
+         * frame append hit a failed stream) without ever reaching an END —
+         * the reactor would then park its data reader forever. Idempotent. */
+        if (ctx->stream_started && !ctx->stream_ended) {
             worker_stream_mark_ended(ctx);
         }
 

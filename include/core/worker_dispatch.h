@@ -33,11 +33,14 @@
 
 typedef struct http_server_object http_server_object;
 
-/* Sink for the rendered response, invoked on the worker thread from the handler
- * coroutine's dispose. Ownership of `rw` transfers to the sink: it must
- * response_wire_free() it once it has handed the bytes off (e.g. posted them
- * back to the reactor). */
-typedef void (*worker_response_sink_fn)(response_wire_t *rw, void *sink_arg);
+/* Sink for rendered response wires, invoked on the worker thread — from the
+ * handler coroutine's dispose (FULL / STREAM_END) and from the streaming ops
+ * during the handler (STREAM_HEADERS / STREAM_CHUNK). Ownership of `rw`
+ * transfers to the sink in EVERY outcome. Returns false when delivery
+ * definitively failed (reactor gone / mailbox full past the bounded retry):
+ * for STREAM_* wires the caller must then fail the stream (abort at
+ * dispose), never truncate it silently. */
+typedef bool (*worker_response_sink_fn)(response_wire_t *rw, void *sink_arg);
 
 /* Take ownership of `req` (a persistent reactor-built or ZMM request, refcount
  * 1), wrap it in an HttpRequest on THIS (worker) thread, spawn the user handler
@@ -53,8 +56,10 @@ typedef void (*worker_response_sink_fn)(response_wire_t *rw, void *sink_arg);
  * `own_scope` mirrors the H3 dispatch flag: true gives each request its own
  * request_context() subtree (a child of `scope`); false runs directly in
  * `scope`. When no handler is registered a 404 is synthesised so the sink still
- * fires. Buffered responses only for now (setBody / end) — a streaming send()
- * body is not marshalled yet.
+ * fires. Buffered responses go out as one FULL wire at dispose; a streaming
+ * response (send()/writeMessage()/SSE) is marshalled incrementally as
+ * STREAM_HEADERS / STREAM_CHUNK / STREAM_END wires, paced by the per-stream
+ * credit block (stream_credit.h) the reactor acknowledges against.
  *
  * Returns true once the handler coroutine is enqueued; false on hard failure
  * (bad args / allocation / no current coroutine to spawn under), in which case

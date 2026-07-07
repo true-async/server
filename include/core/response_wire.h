@@ -47,6 +47,11 @@ typedef enum {
     RESPONSE_WIRE_STREAM_HEADERS,
     RESPONSE_WIRE_STREAM_CHUNK,
     RESPONSE_WIRE_STREAM_END,
+    /* The stream died mid-flight on the worker (credit timeout, cancelled
+     * handler, dropped fragment): the reactor must RESET the QUIC stream so
+     * the peer sees an abort — a truncated body must never terminate with a
+     * clean FIN that reads as a complete response. */
+    RESPONSE_WIRE_STREAM_ABORT,
 } response_wire_kind_t;
 
 /* Create an empty response wire. routing identifies the origin stream the

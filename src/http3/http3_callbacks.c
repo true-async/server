@@ -41,6 +41,7 @@
 #include "core/response_wire.h"            /* response_wire_* (reverse path) */
 #include "core/stream_credit.h"            /* reverse-path flow control */
 #include "http_body_stream.h"              /* streaming request body (issue #26) */
+#include "grpc/grpc.h"                     /* web-text is buffered-only (policy gate) */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
@@ -419,7 +420,11 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
      *   SMALL <= CL < AUTO → buffer + install upgrade hook
      *   CL <  SMALL → buffer, never stream. */
     if (c != NULL && c->view != NULL && c->view->body_streaming_enabled
-        && s->request != NULL) {
+        && s->request != NULL
+        /* grpc-web-text is buffered by protocol nature: readMessage()
+         * base64-decodes the ASSEMBLED body; a streamed queue would leave
+         * req->body NULL and silently lose the call. */
+        && !grpc_request_is_grpc_web_text(s->request)) {
         http_request_t *const r = s->request;
 
         r->body_h3_conn      = c;
@@ -1357,11 +1362,24 @@ static void http3_finalize_request_body(http3_stream_t *s)
     ZEND_ASSERT(req != NULL);
 
     /* Streaming mode (issue #26): no smart_str to move — close the queue
-     * so a parked readBody()/readMessage() consumer sees EOF. */
+     * so a parked readBody()/readMessage() consumer sees EOF, and fire
+     * body_event too: a handler suspended in awaitBody() (dispatched at
+     * headers, fin not yet seen) waits on THAT event, not the queue's
+     * data event. Mirrors the H1 parser's explicit streaming-mode fire. */
     if (req->body_streaming) {
         http_body_stream_close(req);
         req->complete   = true;
         s->fin_received = true;
+
+        if (req->body_event != NULL) {
+            zend_async_trigger_event_t *const trig =
+                (zend_async_trigger_event_t *)req->body_event;
+
+            if (trig->trigger != NULL) {
+                trig->trigger(trig);
+            }
+        }
+
         return;
     }
 

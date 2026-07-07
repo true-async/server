@@ -19,6 +19,7 @@
 #include "http3/http3_stream_pool.h"
 #include "http3_connection.h"   /* http3_connection_t — list ownership at teardown */
 #include "core/stream_credit.h" /* reverse-path flow control — teardown release */
+#include "http_body_stream.h"   /* sever body_h3_conn + wake a parked consumer */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
 
 
@@ -164,6 +165,24 @@ void http3_stream_release(http3_stream_t *s)
         stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
         stream_credit_release((stream_credit_t *)s->wire_credit);
         s->wire_credit = NULL;
+    }
+
+    /* Inbound streaming (issue #26): the request can outlive this stream —
+     * a handler coroutine holds its own request ref and may still be
+     * draining the chunk queue. Sever the raw connection pointer NOW so a
+     * later http_body_stream_pop cannot call http3_request_body_consume on
+     * a freed connection (the conn dies right after this on the
+     * connection-free force-release path), and wake a consumer parked on
+     * the queue if the body never completed. Local mode only —
+     * body_h3_conn is never set under the reactor pool. The slab (and thus
+     * s->request) is guaranteed alive here: the request refcount keeps the
+     * slot allocated until http_request_destroy. */
+    if (s->request != NULL && s->request->body_h3_conn != NULL) {
+        s->request->body_h3_conn = NULL;
+
+        if (!s->fin_received) {
+            http_body_stream_error(s->request);
+        }
     }
 
     /* Trailer capture (malloc'd in http3_stream_capture_trailers). Held

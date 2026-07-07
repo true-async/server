@@ -743,6 +743,11 @@ typedef struct {
     uint64_t stream_bytes_sent_total;
     uint64_t stream_send_backpressure_events_total;
 
+    /* Reactor-pool reverse path: STREAM_* wires dropped because the reactor
+     * mailbox stayed full past the sink's bounded retry (the stream is then
+     * aborted, never silently truncated). */
+    uint64_t worker_wire_dropped_total;
+
     /* HTTP/2 stream-level. h2_streams_active is a gauge (++/--);
      * h2_ping_rtt_ns is the latest sample (overwrite). */
     uint64_t h2_streams_active;
@@ -900,6 +905,11 @@ static zend_always_inline void http_server_on_stream_send(http_server_counters_t
 static zend_always_inline void http_server_on_stream_backpressure(http_server_counters_t *c)
 {
     c->stream_send_backpressure_events_total++;
+}
+
+static zend_always_inline void http_server_on_worker_wire_dropped(http_server_counters_t *c)
+{
+    c->worker_wire_dropped_total++;
 }
 
 static zend_always_inline void http_server_on_static_zero_coroutine(http_server_counters_t *c)

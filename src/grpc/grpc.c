@@ -107,8 +107,61 @@ zend_string *grpc_web_text_encode(const char *in, const size_t len)
 
 zend_string *grpc_web_text_decode(const char *in, const size_t len)
 {
-    return php_base64_decode_ex((const unsigned char *)in, len,
-                                /*strict=*/false);
+    /* The body is a CONCATENATION of independently base64-encoded frames,
+     * each with its own '='-padding (that is what grpc-web clients and our
+     * own encoder emit). PHP's non-strict decoder does not reset its 6-bit
+     * group at padding, so a single pass garbles everything after the first
+     * block whose byte length is not a multiple of 3 — decode block-wise,
+     * splitting after each padding run. Blocks that need no padding
+     * (len % 3 == 0) leave the bit stream 4-char aligned, so letting them
+     * merge into the next block is correct. */
+    smart_str out = {0};
+    size_t    start = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        if (in[i] != '=') {
+            continue;
+        }
+
+        size_t end = i + 1;
+
+        while (end < len && in[end] == '=') {
+            end++;
+        }
+
+        zend_string *const part = php_base64_decode_ex(
+            (const unsigned char *)in + start, end - start, /*strict=*/false);
+
+        if (part == NULL) {
+            smart_str_free(&out);
+            return NULL;
+        }
+
+        smart_str_append(&out, part);
+        zend_string_release(part);
+        start = end;
+        i     = end - 1;
+    }
+
+    if (start < len) {
+        zend_string *const part = php_base64_decode_ex(
+            (const unsigned char *)in + start, len - start, /*strict=*/false);
+
+        if (part == NULL) {
+            smart_str_free(&out);
+            return NULL;
+        }
+
+        smart_str_append(&out, part);
+        zend_string_release(part);
+    }
+
+    if (out.s == NULL) {
+        return ZSTR_EMPTY_ALLOC();
+    }
+
+    smart_str_0(&out);
+    return smart_str_extract(&out);
 }
 
 zend_string *grpc_web_trailer_frame(HashTable *trailers)

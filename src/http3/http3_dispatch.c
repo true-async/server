@@ -285,6 +285,28 @@ void http3_reactor_apply_response(void *arg)
             http3_connection_drain_out(c);
             http3_connection_arm_timer(c);
             break;
+
+        case RESPONSE_WIRE_STREAM_ABORT:
+            /* The worker's stream died mid-flight (credit timeout /
+             * cancellation / dropped fragment): RESET the QUIC stream so
+             * the peer sees an abort — never a clean FIN over a truncated
+             * body. streaming_ended stops the data reader from being
+             * resumed for a stream that will not get more chunks. */
+            if (s->peer_closed || s->streaming_ended) {
+                break;
+            }
+
+            s->streaming_ended = true;
+
+            if (c->ngtcp2_conn != NULL) {
+                (void)ngtcp2_conn_shutdown_stream_write(
+                    (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
+                    NGHTTP3_H3_INTERNAL_ERROR);
+            }
+
+            http3_connection_drain_out(c);
+            http3_connection_arm_timer(c);
+            break;
     }
 
     response_wire_free(rw);

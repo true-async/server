@@ -56,19 +56,25 @@ $config = (new HttpServerConfig())
 $server = new HttpServer($config);
 $server->addGrpcHandler(function($req, $resp) {
     $req->awaitBody();
-    $msg = $req->readMessage();          // base64-decoded transparently
-    $resp->writeMessage('echo:' . $msg); // frame 1, base64 out
-    $resp->writeMessage('bye');          // frame 2 — proves per-frame b64
+    $m1 = $req->readMessage();                    // base64-decoded transparently
+    $m2 = $req->readMessage();                    // second client frame
+    $resp->writeMessage('echo:' . $m1 . '+' . $m2); // frame 1, base64 out
+    $resp->writeMessage('bye');                   // frame 2 — proves per-frame b64
     // grpc-status defaults to 0
 });
 
 $client = spawn(function() use ($port, $server) {
     usleep(30000);
 
-    $frame = "\x00" . pack('N', 4) . 'ping';
+    /* TWO frames, each base64-encoded independently with its own padding —
+     * the grpc-web-text shape. Frame 1 is 7 bytes (5+2, % 3 != 0) so its
+     * block ends in '==' MID-STREAM: a whole-body single-pass decode would
+     * garble frame 2 (PHP's decoder does not realign at padding). */
+    $frame1 = "\x00" . pack('N', 2) . 'hi';
+    $frame2 = "\x00" . pack('N', 4) . 'ping';
     $bodyfile = tempnam(sys_get_temp_dir(), 'grpcreq');
     $outfile  = tempnam(sys_get_temp_dir(), 'grpcout');
-    file_put_contents($bodyfile, base64_encode($frame));
+    file_put_contents($bodyfile, base64_encode($frame1) . base64_encode($frame2));
 
     $cmd = sprintf(
         'curl --http2-prior-knowledge -s -v --max-time 3 -H %s '
@@ -100,7 +106,7 @@ echo "Done\n";
 --EXPECT--
 resp_ctype_webtext=1
 body_is_base64=1
-data=echo:ping,bye
+data=echo:hi+ping,bye
 trailer_status=1
 no_http_trailer=1
 Done
