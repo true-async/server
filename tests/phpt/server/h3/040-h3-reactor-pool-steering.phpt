@@ -97,8 +97,7 @@ spawn(function () use ($server, $port, $client_bin) {
     /* Observability only (kernel reuseport may keep both rebinds on the owner). */
     fwrite(STDERR, "steered_total=$steered\n");
 
-    /* Issue #11: no clean cross-thread shutdown for the pool yet. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

@@ -24,9 +24,7 @@ PHP_HTTP3_DISABLE_RETRY=1
  * (previously only verified manually): the request method+uri must reach
  * the worker and the worker's status+body must reach the client.
  *
- * Multi-worker scope: the gated pool only engages at setWorkers>1, so a
- * clean in-process stop() is not available (issue #11) — SIGKILL after
- * the client finishes, %A swallows the abrupt exit. Stats are not asserted:
+ * Stats are not asserted:
  * in the split the listeners live on thread-clean reactor contexts without
  * the worker's request counters, so getHttp3Stats() does not reflect them. */
 
@@ -91,9 +89,7 @@ spawn(function () use ($server, $port, $client_bin) {
     echo "stats_request_received_ge1=",   ($req_recv >= 1 ? 1 : 0), "\n";
     echo "stats_response_submitted_ge1=", ($resp_sub >= 1 ? 1 : 0), "\n";
 
-    /* Issue #11: no clean cross-thread shutdown for the pool yet; SIGKILL
-     * skips PHP shutdown so the worker threads cannot deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

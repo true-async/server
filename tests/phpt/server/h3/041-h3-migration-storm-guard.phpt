@@ -99,8 +99,7 @@ spawn(function () use ($server, $port, $client_bin) {
      * full 6 s deadline. Generous bound to stay robust on a loaded CI box. */
     echo "no_hang=", ($elapsed < 4.0 ? 1 : 0), "\n";
 
-    /* Issue #11: no clean cross-thread shutdown for the pool yet. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

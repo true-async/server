@@ -74,9 +74,7 @@ spawn(function () use ($server, $port, $py) {
     echo "saw_wire_trailer=", (int)(strpos($out, 'HDR x-wire-trailer: crossed') !== false), "\n";
     echo "saw_grpc_status=",  (int)(strpos($out, 'HDR grpc-status: 0') !== false), "\n";
 
-    /* Issue #11: no clean cross-thread shutdown for the pool yet; SIGKILL
-     * skips PHP shutdown so the worker threads cannot deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

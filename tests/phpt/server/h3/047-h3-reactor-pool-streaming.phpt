@@ -72,9 +72,7 @@ spawn(function () use ($server, $port, $client_bin) {
     echo "status=", $status ?? -1, "\n";
     echo "body=",   trim($body), "\n";
 
-    /* Issue #11: no clean cross-thread shutdown for the pool yet; SIGKILL
-     * skips PHP shutdown so the worker threads cannot deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

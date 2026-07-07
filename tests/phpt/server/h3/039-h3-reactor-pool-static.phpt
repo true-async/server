@@ -90,8 +90,7 @@ spawn(function () use ($port, $client_bin, $big_sha1) {
     echo "big_match=", (strlen($big) === 262144 && sha1($big) === $big_sha1 ? "yes" : "no len=" . strlen($big)), "\n";
     echo "dynamic=", trim($run('/dyn')), "\n";
 
-    /* Issue #11: no clean cross-thread pool shutdown yet. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

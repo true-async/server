@@ -82,8 +82,7 @@ spawn(function () use ($port, $client_bin, $body_path, $expected) {
     echo "status=", $status ?? -1, "\n";
     echo "match=", ($body === $expected ? "yes" : "no\n  got=$body\n  want=$expected"), "\n";
 
-    /* Issue #11: no clean cross-thread pool shutdown yet. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

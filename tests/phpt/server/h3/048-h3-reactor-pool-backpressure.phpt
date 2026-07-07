@@ -83,9 +83,7 @@ spawn(function () use ($server, $port, $client_bin, $chunks, $chunk_len) {
     echo "len_ok=",  (int)(strlen($body) === strlen($expect)), "\n";
     echo "hash_ok=", (int)(hash('xxh128', $body) === hash('xxh128', $expect)), "\n";
 
-    /* Issue #11: no clean cross-thread shutdown for the pool yet; SIGKILL
-     * skips PHP shutdown so the worker threads cannot deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();
