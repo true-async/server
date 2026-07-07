@@ -1888,7 +1888,8 @@ static void http_server_accept_callback(
  * releases the array. */
 
 typedef struct {
-    zval  server_transit;   /* per-worker persistent shell */
+    zval                server_transit;   /* per-worker persistent shell */
+    zend_async_event_t *done_event;       /* completion future from submit_internal — owned here */
 } pool_worker_ctx_t;
 
 static void http_server_release_worker_shell(zval *transit);
@@ -1947,6 +1948,14 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
     zval_ptr_dtor(&server_zv);
     /* ctx is part of the parent's pool_worker_ctx array; freed once
      * by http_server_free when the parent server destructs. */
+}
+
+/* No-op: st->cb is embedded in pool_await_state and shared, so a disposed
+ * future's callbacks_free() must not free it (a NULL dispose would also crash). */
+static void pool_worker_cb_dispose(zend_async_event_callback_t *cb,
+                                   zend_async_event_t *event)
+{
+    (void)cb; (void)event;
 }
 
 static void pool_worker_done_cb(zend_async_event_t *event,
@@ -2785,6 +2794,7 @@ static int http_server_start_pool(http_server_object *server,
     pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
     for (int i = 0; i < workers; i++) {
         ZVAL_UNDEF(&ctxs[i].server_transit);
+        ctxs[i].done_event = NULL;
         ZEND_ASYNC_THREAD_TRANSFER_ZVAL_TOPLEVEL(&ctxs[i].server_transit, this_zv);
 
         if (UNEXPECTED(EG(exception))) {
@@ -2819,6 +2829,7 @@ static int http_server_start_pool(http_server_object *server,
     st->pending = workers;
     st->all_done = create_server_wait_event();
     st->cb.callback = pool_worker_done_cb;
+    st->cb.dispose  = pool_worker_cb_dispose;
 
     /* Retained for HttpServer::reload() (issue #93): it rotates worker_pool and
      * balances pool_await_state->pending for the fresh cohort. Cleared below
@@ -2842,6 +2853,7 @@ static int http_server_start_pool(http_server_object *server,
         }
 
         zend_async_callbacks_push(worker_evt, &st->cb);
+        ctxs[i].done_event = worker_evt;
     }
 
     server->in_pool_mode = true;
@@ -2868,6 +2880,10 @@ static int http_server_start_pool(http_server_object *server,
         zend_async_resume_when(coroutine, st->all_done, true,
                                zend_async_waker_callback_resolve, NULL);
         ZEND_ASYNC_SUSPEND();
+        /* resume_when(..., true) handed all_done to the waker; waker_clean
+         * disposes it. NULL our pointer so the cleanup dispose below is a no-op
+         * — disposing again is a use-after-free (same as server->wait_event). */
+        st->all_done = NULL;
         zend_async_waker_clean(coroutine);
 
         if (EG(exception)) {
@@ -2878,6 +2894,22 @@ static int http_server_start_pool(http_server_object *server,
     rc = (st->pending == 0) ? SUCCESS : FAILURE;
 
 cleanup:
+    /* Dispose the completion futures we own, else their cross-thread triggers
+     * linger armed on our reactor. Live cohort, not `ctxs` — reload() swaps it. */
+    {
+        pool_worker_ctx_t *cur = (pool_worker_ctx_t *) server->pool_worker_ctx;
+        for (int i = 0; cur != NULL && i < server->pool_worker_ctx_count; i++) {
+            zend_async_event_t *ev = cur[i].done_event;
+
+            if (ev == NULL) {
+                continue;
+            }
+
+            cur[i].done_event = NULL;
+            ZEND_ASYNC_EVENT_RELEASE(ev);
+        }
+    }
+
     server->running = false;
     server->stopping = false;
     server->in_pool_mode = false;
@@ -3797,6 +3829,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
 
     for (int i = 0; i < workers; i++) {
         ZVAL_UNDEF(&fresh[i].server_transit);
+        fresh[i].done_event = NULL;
         ZEND_ASYNC_THREAD_TRANSFER_ZVAL_TOPLEVEL(&fresh[i].server_transit, ZEND_THIS);
 
         if (UNEXPECTED(EG(exception))) {
@@ -3864,6 +3897,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         }
 
         zend_async_callbacks_push(worker_evt, &st->cb);
+        fresh[i].done_event = worker_evt;
         submitted++;
     }
 
@@ -3877,6 +3911,13 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
     pool_worker_ctx_t *old_ctxs = server->pool_worker_ctx;
 
     for (int i = 0; i < workers; i++) {
+        /* Dispose the retired cohort's completion futures per rotation, so they
+         * don't accumulate on the parent reactor across reloads. */
+        if (old_ctxs[i].done_event != NULL) {
+            ZEND_ASYNC_EVENT_RELEASE(old_ctxs[i].done_event);
+            old_ctxs[i].done_event = NULL;
+        }
+
         http_server_release_worker_shell(&old_ctxs[i].server_transit);
     }
 

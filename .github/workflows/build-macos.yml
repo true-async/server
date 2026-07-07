@@ -149,6 +149,23 @@ jobs:
             --set-timeout 120 \
             tests/phpt
 
+      - name: Collect crash backtraces
+        if: failure()
+        run: |
+          dest="$GITHUB_WORKSPACE/http-server/tests/phpt/crash-reports"
+          mkdir -p "$dest"
+          # macOS writes a per-crash report (.ips on 12+, .crash on older) with a
+          # symbolicated backtrace to DiagnosticReports; grab the recent php ones.
+          for d in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            [ -d "$d" ] || continue
+            find "$d" -name 'php-*' -newermt '-30 minutes' 2>/dev/null | while read -r f; do
+              echo "==================== $f ===================="
+              cat "$f"
+              cp "$f" "$dest/" 2>/dev/null || true
+            done
+          done
+          ls -la "$dest" 2>/dev/null || echo "no crash reports found"
+
       - name: Upload failing test artifacts
         if: failure()
         uses: actions/upload-artifact@v6
@@ -158,5 +175,6 @@ jobs:
             http-server/tests/phpt/**/*.out
             http-server/tests/phpt/**/*.diff
             http-server/tests/phpt/**/*.log
+            http-server/tests/phpt/crash-reports/*
           if-no-files-found: ignore
           retention-days: 7
