@@ -33,13 +33,9 @@
 
 typedef struct http_server_object http_server_object;
 
-/* Sink for rendered response wires, invoked on the worker thread — from the
- * handler coroutine's dispose (FULL / STREAM_END) and from the streaming ops
- * during the handler (STREAM_HEADERS / STREAM_CHUNK). Ownership of `rw`
- * transfers to the sink in EVERY outcome. Returns false when delivery
- * definitively failed (reactor gone / mailbox full past the bounded retry):
- * for STREAM_* wires the caller must then fail the stream (abort at
- * dispose), never truncate it silently. */
+/* Sink for response wires, worker thread. Owns `rw` in every outcome.
+ * Returns false on definitive delivery failure — the caller must then fail
+ * the stream (STREAM_* fragments must never be dropped silently). */
 typedef bool (*worker_response_sink_fn)(response_wire_t *rw, void *sink_arg);
 
 /* Take ownership of `req` (a persistent reactor-built or ZMM request, refcount

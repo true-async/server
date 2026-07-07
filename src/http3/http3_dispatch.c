@@ -296,11 +296,6 @@ void http3_reactor_apply_response(void *arg)
             break;
 
         case RESPONSE_WIRE_STREAM_ABORT:
-            /* The worker's stream died mid-flight (credit timeout /
-             * cancellation / dropped fragment): RESET the QUIC stream so
-             * the peer sees an abort — never a clean FIN over a truncated
-             * body. streaming_ended stops the data reader from being
-             * resumed for a stream that will not get more chunks. */
             if (s->peer_closed || s->streaming_ended) {
                 break;
             }

@@ -218,9 +218,8 @@ static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
 }
 
 /* Hand a wire to the reverse channel; the sink owns it in every outcome.
- * A failed STREAM_* delivery marks the stream failed — the terminal wire
- * then becomes an ABORT, so the peer never mistakes the truncated body for
- * a complete response. Returns the delivery verdict. */
+ * A failed STREAM_* delivery marks the stream failed (terminal wire becomes
+ * an ABORT — see response_wire_kind_t). */
 static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
 {
     const response_wire_kind_t kind = response_wire_kind(rw);
@@ -376,8 +375,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
 
     response_wire_set_kind(cw, RESPONSE_WIRE_STREAM_CHUNK);
 
-    /* One copy: handler ZMM string -> persistent; the reactor adopts the
-     * ref straight into its chunk ring. */
+    /* one copy: ZMM -> persistent; the reactor adopts the ref into its ring */
     zend_string *const pchunk =
         zend_string_init(ZSTR_VAL(chunk), ZSTR_LEN(chunk), 1);
 
@@ -394,11 +392,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
     ctx->posted_bytes += chunk_len;
 
     if (!worker_stream_wait_credit(ctx)) {
-        /* Credit timeout / cancellation while parked: the peer stopped
-         * retiring bytes but the QUIC stream may still be alive — flag the
-         * stream so dispose sends an ABORT, not a clean END that would make
-         * the truncation look like a complete response. */
-        ctx->stream_failed = true;
+        ctx->stream_failed = true;   /* credit timeout / cancelled while parked */
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
@@ -441,8 +435,6 @@ static void worker_stream_mark_ended(void *vctx)
         return;
     }
 
-    /* A failed stream terminates with an ABORT (reactor resets the QUIC
-     * stream); only a healthy one ends cleanly, with trailers. */
     if (ctx->stream_failed) {
         response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_ABORT);
     } else {
@@ -578,10 +570,8 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             worker_stream_mark_ended(ctx);
         }
 
-        /* Safety net: a started stream must ALWAYS get a terminal wire.
-         * grpc_call_finish's delivery can fail mid-way (e.g. the trailer
-         * frame append hit a failed stream) without ever reaching an END —
-         * the reactor would then park its data reader forever. Idempotent. */
+        /* A started stream must ALWAYS get a terminal wire (grpc finish can
+         * fail mid-way; the reactor's reader would park forever). Idempotent. */
         if (ctx->stream_started && !ctx->stream_ended) {
             worker_stream_mark_ended(ctx);
         }
