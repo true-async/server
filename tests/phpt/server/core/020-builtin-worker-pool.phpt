@@ -41,7 +41,7 @@ $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setBody('worker-tid=' . (function_exists('zend_thread_id') ? zend_thread_id() : '0'));
 });
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     /* Workers need a moment to thread up + bind. */
     usleep(400000);
 
@@ -56,10 +56,7 @@ spawn(function () use ($port) {
     }
     echo "got_responses=", ($hits >= 1 ? 1 : 0), "\n";
     echo "done\n";
-    /* Clean cross-thread broadcast is a follow-up (issue #11). Kill the
-     * whole process — phpt only checks stdout up to this point. SIGKILL
-     * skips PHP shutdown so worker threads can't deadlock the exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

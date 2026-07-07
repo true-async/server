@@ -63,9 +63,10 @@ spawn(function () use ($port) {
      * worker that serves the file body byte-exact. */
     echo "hits=", ($hits === 16 ? 'all' : (string) $hits), "\n";
     echo "done\n";
-    /* Issue #11: clean cross-thread shutdown is a follow-up; SIGKILL
-     * exits without running PHP shutdown so worker threads cannot
-     * deadlock on exit. */
+    /* $server->stop() currently aborts here: a static-handler libuv handle
+     * survives worker teardown and trips the ext/async debug assert
+     * "The event loop must be stopped" (scheduler.c fiber_entry). SIGKILL
+     * until that teardown leak is fixed. */
     posix_kill(getmypid(), SIGKILL);
 });
 

@@ -39,16 +39,14 @@ $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setBody($ctx === null ? "ctx=null\n" : "ctx=set\n");
 });
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     usleep(400000);  // let the pool thread up and the worker adopt its config
     $url = sprintf('http://127.0.0.1:%d/', $port);
     $body = trim((string) shell_exec(sprintf('curl -s --max-time 2 %s', escapeshellarg($url))));
     echo "worker_scope_off=", ($body === 'ctx=null' ? 'yes' : "no($body)"), "\n";
     echo "done\n";
 
-    /* Issue #11: clean cross-thread shutdown is a follow-up. SIGKILL skips
-     * PHP shutdown so worker threads cannot deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();
