@@ -2880,6 +2880,10 @@ static int http_server_start_pool(http_server_object *server,
         zend_async_resume_when(coroutine, st->all_done, true,
                                zend_async_waker_callback_resolve, NULL);
         ZEND_ASYNC_SUSPEND();
+        /* resume_when(..., true) handed all_done to the waker; waker_clean
+         * disposes it. NULL our pointer so the cleanup dispose below is a no-op
+         * — disposing again is a use-after-free (same as server->wait_event). */
+        st->all_done = NULL;
         zend_async_waker_clean(coroutine);
 
         if (EG(exception)) {
