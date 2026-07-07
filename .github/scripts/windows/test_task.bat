@@ -26,7 +26,10 @@ if exist "%DEPS_DIR%\bin" (
     echo WARNING: %DEPS_DIR%\bin missing — DLLs may be unresolved
 )
 
+REM protect_memory is process-global page protection toggled outside the compile
+REM lock; the threaded worker pool shares one address space and races on it. Off.
 %PHP_BUILD_DIR%\php.exe run-tests.php ^
+    -d opcache.protect_memory=0 ^
     -P -q -j2 ^
     -g FAIL,BORK,LEAK,XLEAK ^
     --no-progress ^

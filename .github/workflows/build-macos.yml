@@ -139,7 +139,14 @@ jobs:
       - name: Run http_server phpt suite
         working-directory: http-server
         run: |
+          # opcache.protect_memory=1 (a run-tests default) is process-global
+          # mprotect and is toggled outside the compile lock; with the threaded
+          # worker pool sharing one address space it races across workers and
+          # SIGBUS on SHM writes (opcache admits "mprotect() is process-global
+          # and races", ZendAccelerator.c). Not a production concern — the flag
+          # defaults off and real compilation is serialized by the SHM lock.
           /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            -d opcache.protect_memory=0 \
             -P -q -j"$(sysctl -n hw.logicalcpu)" \
             -g FAIL,BORK,LEAK,XLEAK \
             --no-progress \

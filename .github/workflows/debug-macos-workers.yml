@@ -124,7 +124,10 @@ jobs:
         working-directory: http-server
         run: |
           set +e
+          # protect_memory=1 is process-global mprotect — races across the
+          # threaded worker pool (false SIGBUS). Off; unused in production.
           "$PHP_PREFIX/bin/php" "$PHP_PREFIX/bin/run-tests.php" \
+            -d opcache.protect_memory=0 \
             -P -q -p "$PHP_PREFIX/bin/php" \
             --show-diff --show-out \
             --set-timeout 60 \
