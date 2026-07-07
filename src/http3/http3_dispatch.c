@@ -230,16 +230,28 @@ void http3_reactor_apply_response(void *arg)
          * wire's credit ref — take it over: unblock the parked producer
          * and drop the reactor-side ref here. */
         stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+        zend_string *const orphan_chunk =
+            (zend_string *)response_wire_take_chunk(rw);
+
+        if (orphan_chunk != NULL) {
+            zend_string_release(orphan_chunk);
+        }
+
         response_wire_free(rw);
         return;
     }
 
+    /* Coalesce output: several wires for one connection often land in one
+     * mailbox batch — mark the conn dirty and flush ONCE in the reactor's
+     * drain epilogue (same discipline as the steer feed / recvmmsg tick)
+     * instead of a full send-path walk per wire. */
     switch (response_wire_kind(rw)) {
         case RESPONSE_WIRE_FULL:
         case RESPONSE_WIRE_STREAM_HEADERS:
             if (http3_stream_submit_response_wire(c, s, rw)) {
-                http3_connection_drain_out(c);
-                http3_connection_arm_timer(c);
+                http3_listener_mark_flush(c->listener, c);
+                http3_listener_queue_epilogue_flush(c->listener);
             }
             break;
 
@@ -247,21 +259,25 @@ void http3_reactor_apply_response(void *arg)
             /* Validate-and-drop: the stream may have died (peer RST) or the
              * HEADERS submit may have failed (no ring) since the worker
              * posted this chunk. */
-            size_t      blen  = 0;
-            const char *bytes = response_wire_body(rw, &blen);
+            zend_string *const chunk =
+                (zend_string *)response_wire_take_chunk(rw);
 
-            if (s->peer_closed || s->streaming_ended
-                || s->chunk_queue == NULL || bytes == NULL || blen == 0) {
+            if (chunk == NULL) {
                 break;
             }
 
-            h3_chunk_queue_push(s, zend_string_init(bytes, blen, 0));
-            http_server_on_stream_send(c->counters, blen);
+            if (s->peer_closed || s->streaming_ended || s->chunk_queue == NULL) {
+                zend_string_release(chunk);
+                break;
+            }
+
+            h3_chunk_queue_push(s, chunk);
+            http_server_on_stream_send(c->counters, ZSTR_LEN(chunk));
 
             (void)nghttp3_conn_resume_stream(
                 (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
-            http3_connection_drain_out(c);
-            http3_connection_arm_timer(c);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
             break;
         }
 
@@ -275,8 +291,8 @@ void http3_reactor_apply_response(void *arg)
 
             (void)nghttp3_conn_resume_stream(
                 (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
-            http3_connection_drain_out(c);
-            http3_connection_arm_timer(c);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
             break;
 
         case RESPONSE_WIRE_STREAM_ABORT:
@@ -297,8 +313,8 @@ void http3_reactor_apply_response(void *arg)
                     NGHTTP3_H3_INTERNAL_ERROR);
             }
 
-            http3_connection_drain_out(c);
-            http3_connection_arm_timer(c);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
             break;
     }
 

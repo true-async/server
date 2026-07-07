@@ -33,6 +33,7 @@ struct response_wire_s {
 
     response_wire_kind_t kind;   /* FULL unless set otherwise */
     void    *credit;             /* opaque stream_credit_t*, not owned */
+    void    *chunk;              /* persistent zend_string*, owned until taken */
     int      status;
 
     /* Growable byte arena: every span's bytes are copied in here. */
@@ -128,6 +129,18 @@ void response_wire_set_credit(response_wire_t *rw, void *credit)
 void *response_wire_credit(const response_wire_t *rw)
 {
     return rw->credit;
+}
+
+void response_wire_set_chunk(response_wire_t *rw, void *persistent_str)
+{
+    rw->chunk = persistent_str;
+}
+
+void *response_wire_take_chunk(response_wire_t *rw)
+{
+    void *c = rw->chunk;
+    rw->chunk = NULL;
+    return c;
 }
 
 void response_wire_set_status(response_wire_t *rw, const int status)

@@ -112,11 +112,11 @@ zend_string *http_body_stream_pop(http_request_t *req)
 #endif
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
-    /* Same discipline over QUIC: extend the stream + connection windows for
-     * the drained bytes and drive the MAX_STREAM_DATA out. */
+    /* Same discipline over QUIC: return window credit for the drained bytes
+     * (coalesced inside consume). */
     if (req->body_h3_conn != NULL) {
-        http3_request_body_consume(req->body_h3_conn,
-                                   req->body_h3_stream_id, ZSTR_LEN(data));
+        http3_request_body_consume(req, ZSTR_LEN(data),
+                                   req->body_queue_head == NULL);
     }
 #endif
 

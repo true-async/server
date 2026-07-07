@@ -232,6 +232,14 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
         /* No sink: nobody adopts a HEADERS wire's credit ref — take it
          * over so a parked producer cannot hang. */
         stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+        zend_string *const orphan_chunk =
+            (zend_string *)response_wire_take_chunk(rw);
+
+        if (orphan_chunk != NULL) {
+            zend_string_release(orphan_chunk);
+        }
+
         response_wire_free(rw);
     }
 
@@ -284,7 +292,9 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
 
     const uint32_t timeout_ms =
         http_server_get_write_timeout_s(ctx->server) * 1000u;
-    uint64_t waited_ms = 0;
+    uint64_t waited_ms  = 0;
+    uint64_t poll_ms    = WORKER_CREDIT_POLL_MS;
+    uint64_t last_acked = stream_credit_acked(ctx->credit);
 
     while (ctx->posted_bytes - stream_credit_acked(ctx->credit)
                >= WORKER_STREAM_INFLIGHT_CAP) {
@@ -298,16 +308,27 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
             return true;   /* can't suspend — degrade to unbounded */
         }
 
-        worker_credit_sleep_ms(co, WORKER_CREDIT_POLL_MS);
+        worker_credit_sleep_ms(co, poll_ms);
 
         if (EG(exception) != NULL) {
             return false;   /* cancelled while parked */
         }
 
-        waited_ms += WORKER_CREDIT_POLL_MS;
+        waited_ms += poll_ms;
 
         if (timeout_ms > 0 && waited_ms >= timeout_ms) {
             return false;   /* peer stopped reading — treat as dead */
+        }
+
+        /* Back off while no progress (idle peer burns fewer timer allocs);
+         * snap back the moment ACKs move. */
+        const uint64_t acked = stream_credit_acked(ctx->credit);
+
+        if (acked == last_acked) {
+            poll_ms = poll_ms < 32 ? poll_ms * 2 : 32;
+        } else {
+            last_acked = acked;
+            poll_ms    = WORKER_CREDIT_POLL_MS;
         }
     }
 
@@ -355,12 +376,12 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
 
     response_wire_set_kind(cw, RESPONSE_WIRE_STREAM_CHUNK);
 
-    if (UNEXPECTED(!response_wire_set_body(cw, ZSTR_VAL(chunk), ZSTR_LEN(chunk),
-                                           false))) {
-        response_wire_free(cw);
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
+    /* One copy: handler ZMM string -> persistent; the reactor adopts the
+     * ref straight into its chunk ring. */
+    zend_string *const pchunk =
+        zend_string_init(ZSTR_VAL(chunk), ZSTR_LEN(chunk), 1);
+
+    response_wire_set_chunk(cw, pchunk);
 
     const size_t chunk_len = ZSTR_LEN(chunk);
 

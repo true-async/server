@@ -69,6 +69,13 @@ response_wire_kind_t response_wire_kind(const response_wire_t *rw);
 void  response_wire_set_credit(response_wire_t *rw, void *credit);
 void *response_wire_credit(const response_wire_t *rw);
 
+/* STREAM_CHUNK payload handoff: a PERSISTENT zend_string* whose ownership
+ * rides the wire (one copy total: handler ZMM -> persistent). The consumer
+ * takes it; a drop site must take + release it — the wire itself is a pure
+ * malloc TU and cannot. */
+void  response_wire_set_chunk(response_wire_t *rw, void *persistent_str);
+void *response_wire_take_chunk(response_wire_t *rw);
+
 /* Builders — copy bytes into the arena. set_status replaces; add_header
  * appends; set_body replaces. All accept non-NUL-terminated spans. The header
  * builders return false on allocation failure (the wire stays usable/freeable).

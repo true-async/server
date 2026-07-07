@@ -101,6 +101,7 @@ void http3_steer_group_publish(http3_steer_group_t *group, int reactor_id,
 void http3_steer_group_free(http3_steer_group_t *group);
 
 /* Put a listener into steering mode against its endpoint's group. */
+void http3_listener_queue_epilogue_flush(http3_listener_t *l);
 void http3_listener_set_steer(http3_listener_t *listener, http3_steer_group_t *group);
 
 /* If `listener` steers and `data` is a short-header datagram whose DCID decodes

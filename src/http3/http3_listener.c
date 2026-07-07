@@ -998,6 +998,16 @@ void http3_reactor_steer_flush_epilogue(void)
  * it had arrived on the owner's own socket. Marks the conn dirty (in dispatch)
  * and queues the listener for the drain-batch epilogue, so a burst of forwarded
  * datagrams flushes once — like a recvmmsg tick — not once per packet. */
+/* Queue this listener for the drain-batch epilogue flush. Idempotent. */
+void http3_listener_queue_epilogue_flush(http3_listener_t *l)
+{
+    if (!l->in_steer_flush) {
+        l->in_steer_flush   = true;
+        l->steer_flush_next = tls_steer_flush_head;
+        tls_steer_flush_head = l;
+    }
+}
+
 static void http3_steer_feed_fn(void *arg)
 {
     http3_steer_msg_t *const m = (http3_steer_msg_t *)arg;
@@ -1009,11 +1019,7 @@ static void http3_steer_feed_fn(void *arg)
         http3_connection_dispatch(target, m->data, m->datalen, m->ecn,
                                   (struct sockaddr *)&m->peer, m->peer_len);
 
-        if (!target->in_steer_flush) {
-            target->in_steer_flush   = true;
-            target->steer_flush_next = tls_steer_flush_head;
-            tls_steer_flush_head     = target;
-        }
+        http3_listener_queue_epilogue_flush(target);
     }
 
     pefree(m, 1);

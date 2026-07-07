@@ -221,6 +221,7 @@ struct http_request_t {
      * grants deferred QUIC flow-control credit through these (issue #26). */
     void                     *body_h3_conn;
     int64_t                   body_h3_stream_id;
+    size_t                    body_h3_uncredited;  /* drained, not yet flushed */
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 

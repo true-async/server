@@ -2596,6 +2596,13 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
     /* Undeliverable: the reactor never adopts a HEADERS wire's credit ref,
      * so take it over — unblock the parked producer, drop the ref. */
     stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+    zend_string *const orphan_chunk = (zend_string *)response_wire_take_chunk(rw);
+
+    if (orphan_chunk != NULL) {
+        zend_string_release(orphan_chunk);
+    }
+
     response_wire_free(rw);
     return false;
 }

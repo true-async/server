@@ -2027,16 +2027,26 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
  * http_body_stream_pop on the connection's own thread as the handler
  * drains queued body chunks. Extends the QUIC windows and drives the
  * socket so the MAX_STREAM_DATA actually reaches the peer. */
-void http3_request_body_consume(void *conn_opaque, const int64_t stream_id,
-                                const size_t len)
+void http3_request_body_consume(http_request_t *req, const size_t len,
+                                const bool queue_empty)
 {
-    http3_connection_t *const c = (http3_connection_t *)conn_opaque;
+    http3_connection_t *const c = (http3_connection_t *)req->body_h3_conn;
 
     if (c == NULL || c->closed || c->ngtcp2_conn == NULL) {
         return;
     }
 
-    h3_extend_body_window(c, stream_id, len);
+    /* Coalesce: a drain_out per ~1.2 KB chunk is a full send-path walk.
+     * Flush at 64 KiB, or when the queue just emptied (the consumer is
+     * about to wait — the peer may need the window to send more). */
+    req->body_h3_uncredited += len;
+
+    if (req->body_h3_uncredited < 64 * 1024 && !queue_empty) {
+        return;
+    }
+
+    h3_extend_body_window(c, req->body_h3_stream_id, req->body_h3_uncredited);
+    req->body_h3_uncredited = 0;
     http3_connection_drain_out(c);
     http3_connection_arm_timer(c);
 }
