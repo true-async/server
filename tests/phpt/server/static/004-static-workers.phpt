@@ -46,7 +46,7 @@ $server->addStaticHandler(
     (new StaticHandler('/static/', $root))->disableIndex()
 );
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     /* Workers need a moment to thread up + bind. */
     usleep(400000);
 
@@ -63,11 +63,7 @@ spawn(function () use ($port) {
      * worker that serves the file body byte-exact. */
     echo "hits=", ($hits === 16 ? 'all' : (string) $hits), "\n";
     echo "done\n";
-    /* $server->stop() currently aborts here: a static-handler libuv handle
-     * survives worker teardown and trips the ext/async debug assert
-     * "The event loop must be stopped" (scheduler.c fiber_entry). SIGKILL
-     * until that teardown leak is fixed. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();
