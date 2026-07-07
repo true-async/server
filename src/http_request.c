@@ -421,19 +421,20 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
     }
 
     if (compressed) {
+#ifdef HAVE_HTTP_COMPRESSION
         /* Per-message compression: decode per grpc-encoding (gzip). */
         zend_string *inflated = NULL;
 
         if (grpc_message_inflate(req, ZSTR_VAL(msg), ZSTR_LEN(msg),
-                                 &inflated) != 0) {
+                                 &inflated) == 0) {
             zend_string_release(msg);
-            zend_throw_exception(http_server_runtime_exception_ce,
-                "unsupported or invalid gRPC message compression", 0);
-            RETURN_NULL();
+            RETURN_STR(inflated);
         }
-
+#endif
         zend_string_release(msg);
-        RETURN_STR(inflated);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "unsupported or invalid gRPC message compression", 0);
+        RETURN_NULL();
     }
 
     RETURN_STR(msg);

@@ -29,7 +29,7 @@
 #endif
 
 #include "compression/http_encoder.h"
-#include "compression/http_compression_message.h"
+#include "compression/http_compression_request.h"
 
 #include "php.h"  /* emalloc / efree — unit tests provide a minimal Zend */
 #include <string.h>
@@ -188,7 +188,7 @@ const http_encoder_vtable_t http_compression_gzip_vt = {
     .destroy = gz_destroy,
 };
 
-/* One-shot whole-buffer gzip compress — see http_compression_message.h. Sizes
+/* One-shot whole-buffer gzip compress — see http_compression_request.h. Sizes
  * the output via deflateBound and finishes in a single deflate() pass, so it
  * never needs the streaming NEED_OUTPUT loop above. */
 zend_string *http_compression_gzip_deflate_buffer(const char *in, size_t in_len,

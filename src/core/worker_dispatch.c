@@ -21,7 +21,7 @@
 #include "zend_exceptions.h"                 /* zend_clear_exception */
 #include "http_response_internal.h"          /* http_response_replace_stream_ops */
 #include "core/stream_credit.h"              /* per-stream flow-control credit */
-#include "grpc/grpc.h"                       /* grpc_request_is_grpc / _is_grpc_web */
+#include "grpc/grpc.h"                       /* grpc_classify */
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 

@@ -29,7 +29,6 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "compression/http_compression_request.h"
-#include "compression/http_compression_message.h"
 #include "core/body_pool.h"
 
 #ifdef HAVE_ZLIB_NG
@@ -50,7 +49,7 @@
 
 /* Inflate a standalone gzip/zlib member into a fresh zend_string. Shared by
  * the request-body decoder below and the message-level path
- * (http_compression_message.h — e.g. gRPC per-message decompression), so the
+ * (e.g. gRPC per-message decompression), so the
  * inflate loop + zip-bomb guard live in exactly one place. Returns 0 on
  * success (*out set, caller owns it), -1 on a malformed stream, -2 when the
  * output would exceed max_out (max_out == 0 → unbounded). */

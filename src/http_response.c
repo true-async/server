@@ -1072,6 +1072,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
     zend_string *payload = message;
     bool         gzipped = false;
 
+#ifdef HAVE_HTTP_COMPRESSION
     if (compress) {
         zend_string *gz = grpc_message_deflate_gzip(
             ZSTR_VAL(message), ZSTR_LEN(message));
@@ -1088,6 +1089,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
             }
         }
     }
+#else
+    (void)compress;
+#endif
 
     /* First message — lock headers and switch to streaming mode. Mirrors
      * send(): after this, setBody / setHeader / setStatusCode throw, but

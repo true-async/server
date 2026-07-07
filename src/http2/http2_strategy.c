@@ -33,7 +33,7 @@
 #include <openssl/bio.h>
 #endif
 #include "http1/http_parser.h"   /* http_request_t */
-#include "grpc/grpc.h"           /* grpc_request_is_grpc */
+#include "grpc/grpc.h"           /* grpc_classify */
 #include "grpc/grpc_call.h"      /* gRPC call lifecycle policy */
 #include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 #include "static/static_handler.h"

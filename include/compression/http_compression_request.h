@@ -19,6 +19,8 @@
 #ifndef HTTP_COMPRESSION_REQUEST_H
 #define HTTP_COMPRESSION_REQUEST_H
 
+#include "php.h"   /* zend_string */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,6 +48,22 @@ int http_compression_decode_request_body(http_request_t *req,
  * defined, so unbuilt codecs do not need stub implementations. */
 int http_compression_decode_request_brotli(http_request_t *req, size_t cap);
 int http_compression_decode_request_zstd(http_request_t *req, size_t cap);
+
+/* One-shot whole-buffer gzip helpers for message-level compression (gRPC
+ * per-message frames), reusing the same zlib backend as the body paths.
+ *
+ * deflate: compress `in` as a standalone gzip member; returns a new
+ * zend_string the caller owns, or NULL on failure. `level` clamped to 1..9.
+ * Defined in http_compression_gzip.c.
+ *
+ * inflate: returns 0 on success (*out set, caller owns it), -1 on a
+ * malformed stream, -2 when the output would exceed `max_out`
+ * (max_out == 0 → unbounded). Shares the inflate loop + zip-bomb guard
+ * with the request-body decoder in this TU. */
+zend_string *http_compression_gzip_deflate_buffer(const char *in, size_t in_len,
+                                                  int level);
+int http_compression_gzip_inflate_buffer(const char *in, size_t in_len,
+                                         size_t max_out, zend_string **out);
 
 #ifdef __cplusplus
 }

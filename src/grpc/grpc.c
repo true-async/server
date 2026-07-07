@@ -12,75 +12,62 @@
 */
 
 #include "grpc.h"
-#include "http1/http_parser.h"   /* http_request_t */
+#include "http1/http_parser.h"
 #include "zend_smart_str.h"
-#include "ext/standard/base64.h" /* grpc-web-text per-frame transform */
-#include "core/http_protocol_handlers.h" /* handler-registry gate (grpc_classify) */
+#include "ext/standard/base64.h"
+#include "core/http_protocol_handlers.h"
 
 #include <string.h>
-#include <strings.h>             /* strncasecmp */
+#include <strings.h>
 
 #ifdef HAVE_HTTP_COMPRESSION
-#  include "compression/http_compression_message.h"  /* one-shot gzip */
+#  include "compression/http_compression_request.h"
 #endif
 
-bool grpc_request_is_grpc(const http_request_t *req)
+grpc_mode_t grpc_request_mode(const http_request_t *req)
 {
-    if (req == NULL || req->headers == NULL) {
-        return false;
+    if (req->headers == NULL) {
+        return GRPC_MODE_NONE;
     }
 
-    zval *ct = zend_hash_str_find(req->headers, "content-type",
-                                  sizeof("content-type") - 1);
+    zval *content_type = zend_hash_str_find(req->headers, "content-type",
+                                            sizeof("content-type") - 1);
 
-    if (ct == NULL || Z_TYPE_P(ct) != IS_STRING) {
-        return false;
+    if (content_type == NULL || Z_TYPE_P(content_type) != IS_STRING) {
+        return GRPC_MODE_NONE;
     }
 
-    const size_t prefix_len = sizeof(GRPC_CONTENT_TYPE) - 1;   /* 16 */
+    const char *val = Z_STRVAL_P(content_type);
+    size_t      len = Z_STRLEN_P(content_type);
 
-    return Z_STRLEN_P(ct) >= prefix_len
-        && strncasecmp(Z_STRVAL_P(ct), GRPC_CONTENT_TYPE, prefix_len) == 0;
-}
+    const size_t grpc_len = sizeof(GRPC_CONTENT_TYPE) - 1;
 
-bool grpc_request_is_grpc_web(const http_request_t *req)
-{
-    if (req == NULL || req->headers == NULL) {
-        return false;
+    if (len < grpc_len || strncasecmp(val, GRPC_CONTENT_TYPE, grpc_len) != 0) {
+        return GRPC_MODE_NONE;
     }
 
-    zval *ct = zend_hash_str_find(req->headers, "content-type",
-                                  sizeof("content-type") - 1);
+    /* Past "application/grpc" — the suffix picks the variant. Web-text
+     * before web: "-web" is a prefix of "-web-text". */
+    val += grpc_len;
+    len -= grpc_len;
 
-    if (ct == NULL || Z_TYPE_P(ct) != IS_STRING) {
-        return false;
+    const size_t text_len = sizeof(GRPC_WEB_TEXT_SUFFIX) - 1;
+    const size_t web_len  = sizeof(GRPC_WEB_SUFFIX) - 1;
+
+    if (len >= text_len && strncasecmp(val, GRPC_WEB_TEXT_SUFFIX, text_len) == 0) {
+        return GRPC_MODE_WEB_TEXT;
     }
 
-    const size_t prefix_len = sizeof(GRPC_WEB_CONTENT_TYPE_PREFIX) - 1;  /* 20 */
+    if (len >= web_len && strncasecmp(val, GRPC_WEB_SUFFIX, web_len) == 0) {
+        return GRPC_MODE_WEB;
+    }
 
-    return Z_STRLEN_P(ct) >= prefix_len
-        && strncasecmp(Z_STRVAL_P(ct), GRPC_WEB_CONTENT_TYPE_PREFIX,
-                       prefix_len) == 0;
+    return GRPC_MODE_NATIVE;
 }
 
 bool grpc_request_is_grpc_web_text(const http_request_t *req)
 {
-    if (req == NULL || req->headers == NULL) {
-        return false;
-    }
-
-    zval *ct = zend_hash_str_find(req->headers, "content-type",
-                                  sizeof("content-type") - 1);
-
-    if (ct == NULL || Z_TYPE_P(ct) != IS_STRING) {
-        return false;
-    }
-
-    const size_t prefix_len = sizeof(GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX) - 1;
-
-    return Z_STRLEN_P(ct) >= prefix_len
-        && strncasecmp(Z_STRVAL_P(ct), GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX,
-                       prefix_len) == 0;
+    return grpc_request_mode(req) == GRPC_MODE_WEB_TEXT;
 }
 
 grpc_mode_t grpc_classify(const http_request_t *req, HashTable *handlers)
@@ -95,27 +82,22 @@ grpc_mode_t grpc_classify(const http_request_t *req, HashTable *handlers)
     return mode;
 }
 
-grpc_mode_t grpc_request_mode(const http_request_t *req)
-{
-    if (!grpc_request_is_grpc(req)) {
-        return GRPC_MODE_NONE;
-    }
-
-    /* Most-specific prefix first: is_grpc_web matches web-text too. */
-    if (grpc_request_is_grpc_web_text(req)) {
-        return GRPC_MODE_WEB_TEXT;
-    }
-
-    if (grpc_request_is_grpc_web(req)) {
-        return GRPC_MODE_WEB;
-    }
-
-    return GRPC_MODE_NATIVE;
-}
-
 zend_string *grpc_web_text_encode(const char *in, const size_t len)
 {
     return php_base64_encode((const unsigned char *)in, len);
+}
+
+static bool b64_decode_append(smart_str *out, const char *in, size_t len)
+{
+    zend_string *part = php_base64_decode_ex((const unsigned char *)in, len,
+                                             /*strict=*/false);
+    if (part == NULL) {
+        return false;
+    }
+
+    smart_str_append(out, part);
+    zend_string_release(part);
+    return true;
 }
 
 zend_string *grpc_web_text_decode(const char *in, const size_t len)
@@ -131,6 +113,8 @@ zend_string *grpc_web_text_decode(const char *in, const size_t len)
     smart_str out = {0};
     size_t    start = 0;
 
+    smart_str_alloc(&out, (len / 4) * 3 + 3, 0);
+
     for (size_t i = 0; i < len; i++) {
         if (in[i] != '=') {
             continue;
@@ -142,74 +126,65 @@ zend_string *grpc_web_text_decode(const char *in, const size_t len)
             end++;
         }
 
-        zend_string *const part = php_base64_decode_ex(
-            (const unsigned char *)in + start, end - start, /*strict=*/false);
-
-        if (part == NULL) {
+        if (!b64_decode_append(&out, in + start, end - start)) {
             smart_str_free(&out);
             return NULL;
         }
 
-        smart_str_append(&out, part);
-        zend_string_release(part);
         start = end;
         i     = end - 1;
     }
 
-    if (start < len) {
-        zend_string *const part = php_base64_decode_ex(
-            (const unsigned char *)in + start, len - start, /*strict=*/false);
-
-        if (part == NULL) {
-            smart_str_free(&out);
-            return NULL;
-        }
-
-        smart_str_append(&out, part);
-        zend_string_release(part);
-    }
-
-    if (out.s == NULL) {
-        return ZSTR_EMPTY_ALLOC();
+    if (start < len && !b64_decode_append(&out, in + start, len - start)) {
+        smart_str_free(&out);
+        return NULL;
     }
 
     smart_str_0(&out);
     return smart_str_extract(&out);
 }
 
+/* 5-byte frame prefix: flag byte + uint32 big-endian payload length. */
+static void grpc_write_frame_header(unsigned char *p, unsigned char flag,
+                                    size_t len)
+{
+    p[0] = flag;
+    p[1] = (unsigned char)((len >> 24) & 0xffu);
+    p[2] = (unsigned char)((len >> 16) & 0xffu);
+    p[3] = (unsigned char)((len >>  8) & 0xffu);
+    p[4] = (unsigned char)( len        & 0xffu);
+}
+
 zend_string *grpc_web_trailer_frame(HashTable *trailers)
 {
-    smart_str body = {0};
+    zend_string *name;
+    zval        *val;
+    size_t       tlen = 0;
 
     if (trailers != NULL) {
-        zend_string *name;
-        zval        *val;
         ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
             if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
-            smart_str_append(&body, name);
-            smart_str_appendl(&body, ": ", 2);
-            smart_str_append(&body, Z_STR_P(val));
-            smart_str_appendl(&body, "\r\n", 2);
+            tlen += ZSTR_LEN(name) + 2 + Z_STRLEN_P(val) + 2;  /* ": " + CRLF */
         } ZEND_HASH_FOREACH_END();
     }
 
-    const size_t tlen = body.s != NULL ? ZSTR_LEN(body.s) : 0;
+    zend_string *out = zend_string_alloc(5 + tlen, 0);
+    char        *w   = ZSTR_VAL(out);
 
-    zend_string   *out = zend_string_alloc(5 + tlen, 0);
-    unsigned char *p   = (unsigned char *)ZSTR_VAL(out);
+    grpc_write_frame_header((unsigned char *)w, 0x80u /* trailer frame */, tlen);
+    w += 5;
 
-    p[0] = 0x80u;   /* trailer frame, uncompressed */
-    p[1] = (unsigned char)((tlen >> 24) & 0xffu);
-    p[2] = (unsigned char)((tlen >> 16) & 0xffu);
-    p[3] = (unsigned char)((tlen >>  8) & 0xffu);
-    p[4] = (unsigned char)( tlen        & 0xffu);
-
-    if (tlen > 0) {
-        memcpy(p + 5, ZSTR_VAL(body.s), tlen);
+    if (trailers != NULL) {
+        ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+            if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
+            memcpy(w, ZSTR_VAL(name), ZSTR_LEN(name)); w += ZSTR_LEN(name);
+            memcpy(w, ": ", 2);                        w += 2;
+            memcpy(w, Z_STRVAL_P(val), Z_STRLEN_P(val)); w += Z_STRLEN_P(val);
+            memcpy(w, "\r\n", 2);                      w += 2;
+        } ZEND_HASH_FOREACH_END();
     }
 
-    ZSTR_VAL(out)[5 + tlen] = '\0';
-    smart_str_free(&body);
+    *w = '\0';
     return out;
 }
 
@@ -219,15 +194,15 @@ uint64_t grpc_parse_timeout_ns(const http_request_t *req)
         return 0;
     }
 
-    zval *to = zend_hash_str_find(req->headers, "grpc-timeout",
-                                  sizeof("grpc-timeout") - 1);
+    zval *timeout = zend_hash_str_find(req->headers, "grpc-timeout",
+                                       sizeof("grpc-timeout") - 1);
 
-    if (to == NULL || Z_TYPE_P(to) != IS_STRING) {
+    if (timeout == NULL || Z_TYPE_P(timeout) != IS_STRING) {
         return 0;
     }
 
-    const char  *s = Z_STRVAL_P(to);
-    const size_t n = Z_STRLEN_P(to);
+    const char  *s = Z_STRVAL_P(timeout);
+    const size_t n = Z_STRLEN_P(timeout);
 
     /* Spec: 1..8 ASCII digits followed by a single unit char. */
     if (n < 2 || n > 9) {
@@ -244,12 +219,12 @@ uint64_t grpc_parse_timeout_ns(const http_request_t *req)
 
     uint64_t unit_ns;
     switch (s[n - 1]) {
-        case 'H': unit_ns = 3600ULL * 1000000000ULL; break;   /* hours   */
-        case 'M': unit_ns =   60ULL * 1000000000ULL; break;   /* minutes */
-        case 'S': unit_ns =          1000000000ULL;  break;   /* seconds */
-        case 'm': unit_ns =             1000000ULL;  break;   /* millis  */
-        case 'u': unit_ns =                1000ULL;  break;   /* micros  */
-        case 'n': unit_ns =                   1ULL;  break;   /* nanos   */
+        case 'H': unit_ns = 3600ULL * 1000000000ULL; break;
+        case 'M': unit_ns =   60ULL * 1000000000ULL; break;
+        case 'S': unit_ns =          1000000000ULL;  break;
+        case 'm': unit_ns =             1000000ULL;  break;
+        case 'u': unit_ns =                1000ULL;  break;
+        case 'n': unit_ns =                   1ULL;  break;
         default:  return 0;
     }
 
@@ -259,16 +234,12 @@ uint64_t grpc_parse_timeout_ns(const http_request_t *req)
 zend_string *grpc_frame_message(const char *msg, size_t len, bool compressed)
 {
     zend_string *out = zend_string_alloc(5 + len, 0);
-    unsigned char *p  = (unsigned char *)ZSTR_VAL(out);
 
-    p[0] = compressed ? 1u : 0u;
-    p[1] = (unsigned char)((len >> 24) & 0xffu);
-    p[2] = (unsigned char)((len >> 16) & 0xffu);
-    p[3] = (unsigned char)((len >>  8) & 0xffu);
-    p[4] = (unsigned char)( len        & 0xffu);
+    grpc_write_frame_header((unsigned char *)ZSTR_VAL(out),
+                            compressed ? 1u : 0u, len);
 
     if (len > 0) {
-        memcpy(p + 5, msg, len);
+        memcpy(ZSTR_VAL(out) + 5, msg, len);
     }
 
     ZSTR_VAL(out)[5 + len] = '\0';
@@ -311,13 +282,14 @@ int grpc_deframe_next(const char *buf, size_t len, size_t *cursor,
     return 1;
 }
 
+#ifdef HAVE_HTTP_COMPRESSION
+
 int grpc_message_inflate(const http_request_t *req,
                          const char *in, size_t in_len, zend_string **out)
 {
-#ifdef HAVE_HTTP_COMPRESSION
     /* Compressed flag set → the algorithm is named by grpc-encoding. gRPC's
      * baseline is gzip; anything else is unsupported here. */
-    zval *enc = (req != NULL && req->headers != NULL)
+    zval *enc = (req->headers != NULL)
         ? zend_hash_str_find(req->headers, "grpc-encoding",
                              sizeof("grpc-encoding") - 1)
         : NULL;
@@ -330,18 +302,11 @@ int grpc_message_inflate(const http_request_t *req,
     return http_compression_gzip_inflate_buffer(in, in_len,
                                                 GRPC_MAX_RECV_MESSAGE, out) == 0
                ? 0 : -1;
-#else
-    (void)req; (void)in; (void)in_len; (void)out;
-    return -1;
-#endif
 }
 
 zend_string *grpc_message_deflate_gzip(const char *in, size_t in_len)
 {
-#ifdef HAVE_HTTP_COMPRESSION
     return http_compression_gzip_deflate_buffer(in, in_len, 6 /* default */);
-#else
-    (void)in; (void)in_len;
-    return NULL;
-#endif
 }
+
+#endif /* HAVE_HTTP_COMPRESSION */
