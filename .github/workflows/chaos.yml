@@ -254,6 +254,7 @@ jobs:
             echo "::group::TRUE_ASYNC_SCHED=$sched"
             if ! TRUE_ASYNC_SCHED="$sched" /usr/local/bin/php \
                  "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+                 -d opcache.protect_memory=0 \
                  -P -q -j"$(nproc)" \
                  -g FAIL,BORK,LEAK,XLEAK \
                  --no-progress --offline --show-diff --set-timeout 120 \
