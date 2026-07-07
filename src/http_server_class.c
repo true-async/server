@@ -610,6 +610,9 @@ static void http_server_reload_stop_entry(void)
     http_server_worker_inbox_retire(server);
 
     server->stopping = true;
+    fprintf(stderr, "[true-async-server] worker shutting down (reason=reload, grace=%us)\n",
+            server->shutdown_timeout_s);
+    fflush(stderr);
     http_server_do_stop(server, "reload");
 }
 
@@ -1940,11 +1943,12 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
             fflush(stderr);
             zend_clear_exception();
         } else {
-            /* Even no-exception exit while server should still be running
-             * is suspicious — e.g. a bailout that left EG(exception) NULL
-             * (OOM during cleanup). Log a lighter notice. */
+            /* Clean exit — the normal path when a worker retires on reload
+             * (paired with the "worker shutting down" line above) or on a
+             * graceful stop. A clean exit while the server should still be
+             * running would instead point at a swallowed bailout. */
             fprintf(stderr,
-                "[true-async-server] worker thread exited cleanly\n");
+                "[true-async-server] worker exited\n");
             fflush(stderr);
         }
     } else {

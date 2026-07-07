@@ -24,8 +24,8 @@
  *
  * It is kept flat at the extension root (not under include/) on purpose:
  * php-src's static-build codegen (build/genif.sh + build/print_include.awk)
- * discovers each bundled extension's module_entry by globbing
- * ext/<name>/*.h non-recursively and grepping the matched files for a
+ * discovers each bundled extension's module_entry by globbing the
+ * ext/<name> directory for *.h files non-recursively and grepping them for a
  * "phpext_" line — it does not follow nested #include paths. Keeping the
  * module-entry declaration here, at ext/server/php_true_async_server.h,
  * lets static (non-shared) builds such as static-php-cli find
