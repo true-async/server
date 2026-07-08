@@ -1553,11 +1553,7 @@ ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler)
         Z_OBJ_P(ZEND_THIS)
     );
 
-    /* gRPC is carried over HTTP/2 — enable the h2 transport so the h2c
-     * preface / h2 ALPN is accepted even on a gRPC-only server (no
-     * addHttp2Handler). The per-stream dispatch then routes application/grpc
-     * requests to the gRPC handler and everything else to the HTTP handler
-     * (absent here → 404). */
+    /* gRPC rides h2 — a gRPC-only server must still accept h2c/h2 ALPN */
     server->view.protocol_mask |= HTTP_PROTO_MASK_GRPC | HTTP_PROTO_MASK_HTTP2;
 }
 /* }}} */
@@ -1831,9 +1827,7 @@ static void http_server_accept_callback(
         handler = http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2);
     }
 
-    /* gRPC-only servers register no h1/h2 handler — accept the connection
-     * anyway (gRPC rides h2). conn->handler stays NULL; the per-stream
-     * dispatch routes application/grpc to the gRPC handler. */
+    /* gRPC-only servers register no h1/h2 handler — accept anyway */
     const bool accept_grpc =
         http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_GRPC);
 
@@ -1943,10 +1937,7 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
             fflush(stderr);
             zend_clear_exception();
         } else {
-            /* Clean exit — the normal path when a worker retires on reload
-             * (paired with the "worker shutting down" line above) or on a
-             * graceful stop. A clean exit while the server should still be
-             * running would instead point at a swallowed bailout. */
+            /* normal on reload/stop; while running points at a swallowed bailout */
             fprintf(stderr,
                 "[true-async-server] worker exited\n");
             fflush(stderr);
@@ -2572,13 +2563,7 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
         }
 
         /* STREAM_* wires are ordered fragments — dropping one corrupts the
-         * stream, so ride out a transiently full mailbox (1024 slots; the
-         * reactor drains continuously). The credit protocol already paces
-         * CHUNK bytes, so a mailbox that stays full for ~100 ms means the
-         * reactor is gone or wedged — fail fast then: the caller marks the
-         * stream failed and its terminal wire becomes an ABORT. Short
-         * bounded sleeps, not a busy spin: this stalls only wires, never
-         * burns a core. */
+         * stream. Retry ~100 ms on a full mailbox, then fail fast (→ ABORT). */
         if (response_wire_kind(rw) != RESPONSE_WIRE_FULL) {
             for (int attempt = 0; attempt < 100; attempt++) {
 #ifdef PHP_WIN32
@@ -2597,8 +2582,7 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
     }
 #endif
 
-    /* Undeliverable: the reactor never adopts a HEADERS wire's credit ref,
-     * so take it over — unblock the parked producer, drop the ref. */
+    /* undeliverable: nobody adopts the credit ref — unblock the producer */
     stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
 
     zend_string *const orphan_chunk = (zend_string *)response_wire_take_chunk(rw);
@@ -2981,11 +2965,6 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         RETURN_FALSE;
     }
 
-    /* Require at least one handler that serves requests (h1 or h2, or a
-     * gRPC handler over h2), OR at least one static mount. h2-only
-     * deployments use addHttp2Handler; dual-protocol use addHttpHandler;
-     * static-only use addStaticHandler (issue #13); gRPC-only servers use
-     * addGrpcHandler (issue #4). */
     if (!http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP1) &&
         !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2) &&
         !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_GRPC) &&

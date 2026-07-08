@@ -82,9 +82,8 @@ typedef struct {
     char                       *buf;
 } ws_pending_write_t;
 
-/* Destroy a request the reject path owns, first severing the h1 parser's
- * borrow (parser->request) so a later read tick can't read it freed via
- * http_parser_is_complete. Mirrors the h1 dispatch spawn-fail path. */
+/* Destroy a reject-path request, severing the parser's borrow first
+ * (a later read tick must not see it freed). */
 static void ws_reject_destroy_request(http_connection_t *conn, http_request_t *req)
 {
     if (conn->parser != NULL) {
@@ -438,9 +437,7 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         w->session = NULL;
     }
 
-    /* Capture w->committed before the dtor below: releasing websocket_zv may
-     * drop w's last ref and free it, so reading w->committed at teardown time
-     * (further down) would be a use-after-free. */
+    /* capture before the dtor below frees w — reading it later is a UAF */
     const bool w_committed = (w != NULL) && w->committed;
 
     zval_ptr_dtor(&ctx->request_zv);
@@ -451,10 +448,8 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     conn->keep_alive = false;
     conn->current_request = NULL;
 
-    /* request_zv's dtor above may have freed the http_request the h1 parser
-     * still borrows (parser->request). Sever it exactly as the h1 dispatch
-     * path does (http_connection.c) — otherwise a later read tick reads a
-     * freed request via http_parser_is_complete. */
+    /* the dtor above may have freed the request the parser still borrows —
+     * sever it or a later read tick reads it freed */
     if (conn->parser != NULL) {
         http_parser_clear_request(conn->parser);
     }

@@ -51,12 +51,8 @@ void grpc_call_finish(zend_object *response_obj,
         (grpc_mode_t)http_response_get_grpc_mode(response_obj);
 
     if (mode == GRPC_MODE_WEB || mode == GRPC_MODE_WEB_TEXT) {
-        /* Trailers ride the response body as a 0x80 frame, never as HTTP
-         * trailers. Clear the trailer map so the transport's generic EOF
-         * path does not also emit them as a terminal trailer block.
-         * Handles both a streamed reply and a zero-message status/error
-         * (the trailer frame is then the only DATA). web-text encodes the
-         * frame independently, like every other frame on the stream. */
+        /* trailers ride in-body as a 0x80 frame; clear the map so the
+         * transport's EOF path doesn't emit them again */
         zend_string *frame =
             grpc_web_trailer_frame(http_response_get_trailers(response_obj));
 
@@ -74,17 +70,12 @@ void grpc_call_finish(zend_object *response_obj,
     }
 
     if (http_response_is_streaming(response_obj)) {
-        /* Native gRPC over a streamed body: just make sure the stream is
-         * ended; grpc-status/grpc-message ride the transport's generic
-         * response-trailer path at true EOF. */
+        /* native streamed: trailers ride the transport's trailer path at EOF */
         ops->end_stream(ctx);
         return;
     }
 
-    /* Handler streamed no messages (immediate status / error) →
-     * Trailers-Only: fold grpc-status/grpc-message into the initial
-     * HEADERS so the buffered commit sends a single HEADERS(:status 200,
-     * fin) — the canonical gRPC shape for a bodiless response. */
+    /* zero messages → Trailers-Only: fold trailers into the initial HEADERS */
     http_response_promote_trailers_to_headers(response_obj);
     ops->commit(ctx);
 }

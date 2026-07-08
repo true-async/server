@@ -66,12 +66,8 @@ void thread_mailbox_keepalive(thread_mailbox_t *mb, bool enable);
 /* Approximate number of queued items. */
 size_t thread_mailbox_count(const thread_mailbox_t *mb);
 
-/* ---------------------------------------------------------------------------
- * reactor_cmd_t mailbox — same wakeup/backpressure contract as the void*
- * mailbox above, but the command POD travels through the ring by value (no
- * per-message malloc on the hot worker->reactor path). Used by reactor_pool;
- * the void* mailbox stays for the opaque-pointer consumers (WebSocket, etc.).
- * ------------------------------------------------------------------------- */
+/* reactor_cmd_t mailbox — same contract as the void* mailbox above, but the
+ * POD travels by value: no per-message malloc on the hot worker→reactor path. */
 
 typedef struct reactor_cmd_s        reactor_cmd_t;   /* core/reactor_cmd.h */
 typedef struct thread_cmd_mailbox_s thread_cmd_mailbox_t;

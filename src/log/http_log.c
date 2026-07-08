@@ -545,9 +545,7 @@ void http_log_server_start(http_log_state_t *state,
     state->severity   = severity;
 }
 
-/* Yield to the reactor for a short beat so a pending log-write completion can
- * be delivered to writer_complete_cb (which disposes the req and kicks the
- * next). Stop-drain only; best-effort. */
+/* Yield to the reactor so a pending write completion can land. Best-effort. */
 static void http_log_stop_yield(zend_coroutine_t *co)
 {
     zend_async_timer_event_t *const t =
@@ -572,14 +570,9 @@ void http_log_server_stop(http_log_state_t *state)
 
     state->severity = HTTP_LOG_OFF;
 
-    /* Drain in-flight writes before tearing down — closing the io with reqs
-     * still pending would UAF on completion. writer_complete_cb fires on the
-     * reactor, disposes the req, and kicks any coalesced pending bytes, so we
-     * must NOT await the req ourselves: async_io_req_await reads req->completed
-     * after resuming, but the callback has already freed it by then (a UAF,
-     * caught under ASAN). Instead yield to the reactor and re-poll until idle.
-     * Requires a coroutine context, which the normal HttpServer::stop() path
-     * provides. */
+    /* Drain in-flight writes before teardown. Must NOT async_io_req_await:
+     * writer_complete_cb frees the req before the awaiter re-reads it (UAF
+     * under ASAN) — yield to the reactor and re-poll instead. */
     if (state->async_io != NULL && state->writer_cb != NULL
         && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
         zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;

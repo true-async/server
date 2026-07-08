@@ -47,12 +47,8 @@
 
 #include <string.h>
 
-/* Inflate a standalone gzip/zlib member into a fresh zend_string. Shared by
- * the request-body decoder below and the message-level path
- * (e.g. gRPC per-message decompression), so the
- * inflate loop + zip-bomb guard live in exactly one place. Returns 0 on
- * success (*out set, caller owns it), -1 on a malformed stream, -2 when the
- * output would exceed max_out (max_out == 0 → unbounded). */
+/* Inflate one gzip/zlib member; the shared inflate loop + zip-bomb guard.
+ * 0 = ok (*out owned by caller), -1 = malformed, -2 = exceeds max_out. */
 int http_compression_gzip_inflate_buffer(const char *in, size_t in_len,
                                          size_t max_out, zend_string **out)
 {

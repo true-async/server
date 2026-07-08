@@ -67,13 +67,8 @@ static inline bool response_check_closed(const http_response_object *response)
     return false;
 }
 
-/* Weaker guard for trailer setters. Trailers are emitted at stream end,
- * AFTER the body — so unlike headers/body they may legitimately be set
- * once a streaming response has already committed its HEADERS via send().
- * Only end() (closed) and sendFile() sealing forbid them. This is what the
- * "trailers are still allowed via non-guarded setters" contract means and
- * is required for gRPC server-streaming, where grpc-status is known only
- * after the messages have been streamed. */
+/* Trailers go out after the body, so setting them post-commit is legal;
+ * only end() and sendFile() sealing forbid them. */
 static inline bool response_check_trailer_sealed(const http_response_object *response)
 {
     if (response->closed) {
@@ -464,12 +459,7 @@ static inline void ensure_trailers_table(http_response_object *response)
     }
 }
 
-/* Fold every response trailer into the response headers, then clear the
- * trailer table. Used by the gRPC dispose path to build a Trailers-Only
- * reply — a single HEADERS(:status 200 + content-type + grpc-status
- * [+ grpc-message], END_STREAM) frame — when the handler streamed no
- * messages (immediate status / error). Trailer names are already
- * lowercased by setTrailer, so they are valid HPACK header names. */
+/* Fold trailers into headers and clear the table (gRPC Trailers-Only reply). */
 void http_response_promote_trailers_to_headers(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
@@ -493,9 +483,7 @@ void http_response_promote_trailers_to_headers(zend_object *obj)
     zend_hash_clean(response->trailers);
 }
 
-/* Clear the response trailer table (without touching headers). Used by the
- * grpc-web dispose path: it moves grpc-status/grpc-message into an in-body
- * trailer frame, so the HTTP/2 trailer emission must find nothing. */
+/* grpc-web moved the trailers in-body; the HTTP trailer emission must find nothing. */
 void http_response_clear_trailers(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
@@ -505,10 +493,7 @@ void http_response_clear_trailers(zend_object *obj)
     }
 }
 
-/* Default the `grpc-status` trailer to `status` (decimal) unless the handler
- * already set one. Called from the H2/H3 gRPC dispose path so every gRPC
- * response carries a status even when the handler forgot — grpc-status is
- * mandatory on the wire, including on success (0). */
+/* grpc-status is mandatory on the wire, even on success (0). */
 void http_response_ensure_grpc_status(zend_object *obj, int status)
 {
     http_response_object *response = http_response_from_obj(obj);
@@ -1028,13 +1013,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
-/* {{{ proto HttpResponse::writeMessage(string $message): static
- *
- * Frame $message with the 5-byte gRPC length prefix (identity encoding)
- * and stream it as one gRPC message. Activates streaming mode on the first
- * call, exactly like send(). Call once for a unary reply, repeatedly for
- * server-streaming. grpc-status is carried separately via setTrailer(); the
- * server defaults it to 0 if the handler set none. */
+/* {{{ proto HttpResponse::writeMessage(string $message, bool $compress = false): static
+ * Stream one gRPC length-prefixed message; first call commits, like send(). */
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 {
     zend_string *message;
@@ -1066,9 +1046,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
-    /* Optional per-message gzip. If gzip is not compiled in, transparently
-     * fall back to identity (flag 0). grpc-encoding must ride the initial
-     * HEADERS, so declare it before the first message commits. */
+    /* grpc-encoding must ride the initial HEADERS — declare before commit */
     zend_string *payload = message;
     bool         gzipped = false;
 
@@ -1093,17 +1071,13 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
     (void)compress;
 #endif
 
-    /* First message — lock headers and switch to streaming mode. Mirrors
-     * send(): after this, setBody / setHeader / setStatusCode throw, but
-     * setTrailer() stays allowed (grpc-status is set post-commit). */
     if (!response->streaming) {
         response->streaming = true;
         response->committed = true;
         response->headers_sent = true;
     }
 
-    /* Prepend the 5-byte gRPC frame header. The queue takes ownership of
-     * this fresh string (append_chunk consumes the ref), so no release. */
+    /* append_chunk consumes the ref */
     zend_string *framed = grpc_frame_message(
         ZSTR_VAL(payload), ZSTR_LEN(payload), gzipped);
 
@@ -1111,10 +1085,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         zend_string_release(payload);   /* framed copied it; drop the gz buffer */
     }
 
-    /* grpc-web-text: every frame goes out base64-encoded, each with its own
-     * padding (the grpc-web protocol allows per-frame encoding, so no codec
-     * state spans messages). The trailer frame is encoded the same way in
-     * grpc_call_finish. */
+    /* grpc-web-text: each frame is base64-encoded independently */
     if (response->grpc_mode == GRPC_MODE_WEB_TEXT) {
         zend_string *const b64 =
             grpc_web_text_encode(ZSTR_VAL(framed), ZSTR_LEN(framed));

@@ -159,16 +159,12 @@ bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming);
 
-/* Capture the response trailers (grpc-status/grpc-message) onto the stream
- * from the streaming dispose branch, while response_zv is still alive. The
- * data reader submits them via nghttp3_conn_submit_trailers at true EOF (the
- * reader runs async, after response_zv is freed). */
+/* Capture response trailers onto the stream while response_zv is alive;
+ * the data reader submits them at true EOF. */
 void http3_stream_capture_trailers(http3_stream_t *s);
 
-/* Reverse path: submit a response from a worker-rendered response_wire
- * instead of the per-stream HttpResponse zval. Reactor thread. FULL wires
- * submit buffered; STREAM_HEADERS wires submit with the streaming reader
- * (chunk ring primed, fed by the STREAM_CHUNK/STREAM_END applies below). */
+/* Submit a worker-rendered response_wire (reactor thread). FULL = buffered;
+ * STREAM_HEADERS = streaming reader over the chunk ring. */
 typedef struct response_wire_s response_wire_t;
 bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
                                        const response_wire_t *rw);
@@ -182,9 +178,7 @@ void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *
 void http3_request_body_consume(struct http_request_t *req, size_t len,
                                 bool queue_empty);
 
-/* Streaming chunk ring, factored for the reverse path: init is lazy and
- * idempotent (a non-NULL ring is what flips the data reader to streaming);
- * push takes the chunk ref. */
+/* Streaming chunk ring: init is idempotent; push takes the chunk ref. */
 void h3_chunk_queue_init(http3_stream_t *s);
 void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk);
 
@@ -195,10 +189,8 @@ void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk);
 int  h3_stream_append_chunk(void *ctx, zend_string *chunk);
 void h3_stream_mark_ended(void *ctx);
 
-/* Per-worker global memory accounting for HTTP/3 static delivery
- * (http3_static_response.c). append_chunk credits queued bytes via _alloc
- * when the stream tracks static bytes; the ACK path and teardown debit them.
- * Bounds total static read-ahead across concurrent streams (mirrors H2). */
+/* Per-worker memory accounting for static delivery: alloc on push, debit on
+ * ACK/teardown (http3_static_response.c). */
 void h3_static_account_alloc(size_t n);
 void h3_static_account_debit(size_t n);
 

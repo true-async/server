@@ -101,9 +101,6 @@ extern const http_response_stream_ops_t h2_stream_ops;
  * handler skipped $res->end(). Defined further down. */
 static void h2_stream_mark_ended(void *ctx);
 
-/* gRPC finish ops (grpc_call_finish seam) — the transport-specific wire
- * actions; what to send is decided in src/grpc/grpc_call.c. end_stream is
- * h2_stream_mark_ended directly (it is idempotent). Bodies further down. */
 static int  h2_stream_append_chunk(void *ctx, zend_string *chunk);
 static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame);
 static void h2_grpc_commit(void *ctx);
@@ -237,11 +234,6 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     }
 #endif
 
-    /* gRPC classification (issue #4): a request whose content-type begins
-     * with application/grpc, routed to the handler registered via
-     * addGrpcHandler(). Detected here — like the WS check — so a gRPC-only
-     * server (no addHttpHandler) still dispatches past the handler-null
-     * guards below. */
     const grpc_mode_t grpc_mode = grpc_classify(
         stream->request,
         http_server_get_protocol_handlers(self->conn->server));
@@ -300,8 +292,6 @@ static void http2_strategy_dispatch(struct http_request_t *request,
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
     }
 
-    /* gRPC: response defaults (content-type + delivery mode) live in the
-     * gRPC layer; the mode stamp is what finish/writeMessage read back. */
     if (is_grpc) {
         grpc_call_init_response(Z_OBJ(stream->response_zv), grpc_mode);
     }
@@ -427,8 +417,6 @@ static void http2_handler_coroutine_entry(void)
         return;
     }
 
-    /* gRPC streams route to the addGrpcHandler() callable; every other
-     * request uses the connection's HTTP handler. */
     zend_fcall_t *handler = conn->handler;
 
     if (stream->is_grpc) {
@@ -1681,16 +1669,12 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
     return HTTP_STREAM_APPEND_OK;
 }
 
-/* Append one body frame (consumes the ref), then end the stream normally
- * with END_STREAM on DATA. Works for both a streamed reply (messages
- * already queued) and a zero-message reply (the frame is the only DATA,
- * committing HEADERS on the first append). */
+/* Append one gRPC frame (consumes the ref) and end the stream. */
 static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    /* Connection may already be torn down when a late coroutine disposes
-     * (same guard as h2_grpc_commit); append_chunk derefs conn unchecked. */
+    /* conn may be torn down already; append_chunk derefs it unchecked */
     if (http2_session_get_conn(stream->session) == NULL) {
         zend_string_release(frame);
         return;
@@ -1700,8 +1684,7 @@ static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame)
     h2_stream_mark_ended(stream);
 }
 
-/* Buffered commit — a single HEADERS(:status 200, END_STREAM) frame when
- * the response carries no body (the Trailers-Only shape). */
+/* Buffered commit — the Trailers-Only shape. */
 static void h2_grpc_commit(void *ctx)
 {
     http2_stream_t    *stream = (http2_stream_t *)ctx;

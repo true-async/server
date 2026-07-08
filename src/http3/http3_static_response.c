@@ -72,12 +72,8 @@
 
 #define H3_STATIC_READ_CHUNK_BYTES (16u * 1024u)
 
-/* Per-worker static-delivery memory cap. Unlike H2's read-ahead ring, the H3
- * pump reads one 16 KiB chunk at a time and blocks on per-stream backpressure,
- * so the only unbounded axis is concurrency: N streams each holding up to a
- * BDP of un-ACKed chunks. This global counter bounds that sum. Formula and
- * clamps mirror http2_static_response.c: budget = memory_limit / 4, floored,
- * and never above memory_limit minus a reserve so it can't starve the heap. */
+/* Per-worker static-delivery memory cap across concurrent streams.
+ * Formula and clamps mirror http2_static_response.c. */
 #define H3_STATIC_BUDGET_FLOOR      (4u * 1024u * 1024u)
 #define H3_STATIC_BUDGET_FALLBACK   (64u * 1024u * 1024u)  /* memory_limit = -1 */
 #define H3_STATIC_BUDGET_RESERVE_FRAC 8u                   /* hard top = 87.5% */
@@ -135,9 +131,7 @@ static bool h3_static_over_budget(void)
     return h3_static_global_bytes_in_flight >= h3_static_budget_bytes;
 }
 
-/* Suspend the pump for `ms` on a one-shot timer so the reactor keeps draining
- * (and ACKing, which debits the counter) while we wait. Best-effort outside a
- * coroutine. Mirrors worker_dispatch.c's credit sleep. */
+/* Suspend the pump on a one-shot timer so the reactor keeps draining/ACKing. */
 static void h3_static_throttle_sleep(zend_coroutine_t *co, const zend_ulong ms)
 {
     zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
@@ -210,10 +204,7 @@ static void h3_static_pump_entry(void)
 
     while (state->bytes_sent < state->body_length
            && !state->stream->peer_closed) {
-        /* Global cap: hold off starting the next read while the per-worker
-         * in-flight total is over budget. Already-queued bytes keep draining
-         * (and ACKing, which debits) independently, so this can't deadlock —
-         * it only paces this stream against the shared ceiling. */
+        /* over budget: pace this stream; queued bytes keep draining, so no deadlock */
         while (h3_static_over_budget() && !state->stream->peer_closed) {
             h3_static_throttle_sleep(co, H3_STATIC_THROTTLE_POLL_MS);
 

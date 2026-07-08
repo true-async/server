@@ -29,11 +29,8 @@ static uint8_t g_steer_key[16];
 static bool    g_steer_ready  = false;
 static bool    g_steer_active = false;
 
-/* One AES-128-ECB block. Used as a PRF: the input is the CID nonce, the first
- * output byte is the keystream that masks the id. The cipher context is kept
- * thread-local and reset per call instead of new/free'd every time — each
- * reactor thread reuses its own; the handful of contexts are reclaimed at
- * process exit. */
+/* One AES-128-ECB block as a PRF: CID nonce in, keystream byte out. The
+ * cipher context is thread-local and reused, not new/free'd per call. */
 static bool http3_steer_block(const uint8_t in[16], uint8_t out[16])
 {
     static __thread EVP_CIPHER_CTX *ctx = NULL;

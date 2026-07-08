@@ -97,10 +97,8 @@ struct _http3_listener_s {
     int                        port;
     bool                       closed;
 
-    /* Fabricated local sockaddr for the writev_stream path, cached per peer
-     * family at spawn since (host, port) never change afterward — the drain
-     * path copies the matching one instead of re-running inet_pton/htons on
-     * every packet. */
+    /* local sockaddr per peer family, cached at spawn — saves inet_pton
+     * on every packet */
     struct sockaddr_storage    local_v4;
     socklen_t                  local_v4_len;
     struct sockaddr_storage    local_v6;
@@ -1360,9 +1358,7 @@ HashTable *http3_listener_conn_map(http3_listener_t *l)
  * (the symptom: every reply is an Initial-with-ACK, no CRYPTO). */
 extern int ngtcp2_crypto_ossl_init(void);
 
-/* Fabricate the listener's local sockaddr for a given peer family from the
- * bind config. See http3_build_listener_local for the rationale; this is the
- * one-time computation whose result the listener caches. */
+/* One-time local-sockaddr computation the listener caches per peer family. */
 static void http3_listener_compute_local(const char *host, int port,
                                          int peer_family,
                                          struct sockaddr_storage *out,

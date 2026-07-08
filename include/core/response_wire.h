@@ -37,20 +37,15 @@
 
 typedef struct response_wire_s response_wire_t;
 
-/* Message kind on the reverse channel. FULL is the original single-shot shape
- * (everything in one wire at dispose). The STREAM_* kinds carry a streamed
- * response incrementally — same routing, same arena, posted in order on one
- * reactor mailbox (FIFO): one STREAM_HEADERS, any number of STREAM_CHUNKs,
- * one STREAM_END (which may carry trailers). */
+/* FULL = single-shot at dispose. Streamed responses go FIFO on one reactor
+ * mailbox: one STREAM_HEADERS, N STREAM_CHUNKs, one STREAM_END (may carry
+ * trailers). */
 typedef enum {
     RESPONSE_WIRE_FULL = 0,
     RESPONSE_WIRE_STREAM_HEADERS,
     RESPONSE_WIRE_STREAM_CHUNK,
     RESPONSE_WIRE_STREAM_END,
-    /* The stream died mid-flight on the worker (credit timeout, cancelled
-     * handler, dropped fragment): the reactor must RESET the QUIC stream so
-     * the peer sees an abort — a truncated body must never terminate with a
-     * clean FIN that reads as a complete response. */
+    /* stream died mid-flight — the reactor must RESET, not send a clean FIN */
     RESPONSE_WIRE_STREAM_ABORT,
 } response_wire_kind_t;
 
@@ -62,31 +57,24 @@ response_wire_t *response_wire_create(uint32_t reactor_id, int64_t stream_id, vo
 void                 response_wire_set_kind(response_wire_t *rw, response_wire_kind_t kind);
 response_wire_kind_t response_wire_kind(const response_wire_t *rw);
 
-/* Flow-control credit handoff (STREAM_HEADERS only): an opaque
- * stream_credit_t* riding the wire from the worker to the reactor. The wire
- * does not own it — the reactor adopts the ref at apply time (or marks it
- * dead + releases when the stream is already gone). */
+/* Credit handoff (STREAM_HEADERS only): opaque stream_credit_t*, not owned
+ * by the wire — the reactor adopts the ref at apply time. */
 void  response_wire_set_credit(response_wire_t *rw, void *credit);
 void *response_wire_credit(const response_wire_t *rw);
 
-/* STREAM_CHUNK payload handoff: a PERSISTENT zend_string* whose ownership
- * rides the wire (one copy total: handler ZMM -> persistent). The consumer
- * takes it; a drop site must take + release it — the wire itself is a pure
- * malloc TU and cannot. */
+/* STREAM_CHUNK payload: a persistent zend_string* whose ownership rides the
+ * wire; a drop site must take + release it (this TU cannot). */
 void  response_wire_set_chunk(response_wire_t *rw, void *persistent_str);
 void *response_wire_take_chunk(response_wire_t *rw);
 
-/* Builders — copy bytes into the arena. set_status replaces; add_header
- * appends; set_body replaces (FULL wires only; streamed bodies ride
- * STREAM_CHUNK wires). All accept non-NUL-terminated spans; the pair
- * builders return false on allocation failure (the wire stays freeable). */
+/* Builders — copy bytes into the arena; pair builders return false on
+ * allocation failure. set_body is FULL wires only. */
 void response_wire_set_status(response_wire_t *rw, int status);
 bool response_wire_add_header(response_wire_t *rw,
                               const char *name_ptr, size_t name_len,
                               const char *value_ptr, size_t value_len);
 bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len);
-/* Trailers mirror headers: appended pairs, delivered by the transport after
- * the last body byte (H2 trailer HEADERS / nghttp3 submit_trailers at EOF). */
+/* Trailers mirror headers; the transport delivers them after the last body byte. */
 bool response_wire_add_trailer(response_wire_t *rw,
                                const char *name_ptr, size_t name_len,
                                const char *value_ptr, size_t value_len);

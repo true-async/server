@@ -188,9 +188,8 @@ const http_encoder_vtable_t http_compression_gzip_vt = {
     .destroy = gz_destroy,
 };
 
-/* One-shot whole-buffer gzip compress — see http_compression_request.h. Sizes
- * the output via deflateBound and finishes in a single deflate() pass, so it
- * never needs the streaming NEED_OUTPUT loop above. */
+/* One-shot gzip compress: deflateBound sizes the output, single deflate()
+ * pass — no need for the streaming loop above. */
 zend_string *http_compression_gzip_deflate_buffer(const char *in, size_t in_len,
                                                    int level)
 {

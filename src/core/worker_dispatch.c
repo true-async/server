@@ -25,9 +25,6 @@
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 
-/* Streaming reverse-path flow control: how many un-acked bytes a stream may
- * have in flight before append_chunk parks the producer coroutine, and how
- * often a parked producer re-reads the credit counter. */
 #define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
 #define WORKER_CREDIT_POLL_MS      2
 
@@ -64,23 +61,13 @@ typedef struct {
     bool                    skip_handler;  /* synthetic 404 already populated */
     bool                    is_head;       /* suppress the body on render */
 
-    /* gRPC classification (once, at dispatch — the transports do the same). */
     bool                    is_grpc;
 
-    /* Streaming reverse path: STREAM_HEADERS posted on the first
-     * append_chunk; STREAM_END posted by mark_ended (idempotent). When
-     * stream_started, dispose skips the buffered FULL render.
-     * stream_failed = the stream died mid-flight (credit timeout /
-     * cancellation / dropped wire) — the terminal wire becomes
-     * STREAM_ABORT so the peer sees a reset, not a clean FIN. */
     bool                    stream_started;
     bool                    stream_ended;
-    bool                    stream_failed;
+    bool                    stream_failed;  /* terminal wire becomes STREAM_ABORT */
 
-    /* Flow control (step 3): `credit` is shared with the reactor (see
-     * stream_credit.h); posted_bytes is worker-local. In-flight =
-     * posted_bytes - acked; append parks over WORKER_STREAM_INFLIGHT_CAP. */
-    stream_credit_t        *credit;
+    stream_credit_t        *credit;         /* shared with the reactor */
     uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
@@ -195,8 +182,7 @@ static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp)
     } ZEND_HASH_FOREACH_END();
 }
 
-/* Flatten the trailer map (setTrailer / gRPC grpc-status) onto a wire — flat
- * string pairs, same discipline as http3_stream_capture_trailers locally. */
+/* Flatten the response trailer map onto the wire. */
 static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
 {
     HashTable *const trailers = http_response_get_trailers(resp);
@@ -217,9 +203,7 @@ static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
     } ZEND_HASH_FOREACH_END();
 }
 
-/* Hand a wire to the reverse channel; the sink owns it in every outcome.
- * A failed STREAM_* delivery marks the stream failed (terminal wire becomes
- * an ABORT — see response_wire_kind_t). */
+/* The sink owns the wire in every outcome. */
 static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
 {
     const response_wire_kind_t kind = response_wire_kind(rw);
@@ -228,8 +212,7 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
     if (ctx->sink != NULL) {
         delivered = ctx->sink(rw, ctx->sink_arg);
     } else {
-        /* No sink: nobody adopts a HEADERS wire's credit ref — take it
-         * over so a parked producer cannot hang. */
+        /* nobody adopts the credit ref — release it or the producer hangs */
         stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
 
         zend_string *const orphan_chunk =
@@ -250,22 +233,7 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
     return delivered;
 }
 
-/* ---------------------------------------------------------------------
- * Streaming reverse path (worker side of #80 D3, streaming leg).
- *
- * The worker's HttpResponse gets these stream ops so send()/writeMessage()
- * work under the pool: each op flattens its payload into a STREAM_* wire
- * and posts it to the originating reactor. Ordering is the mailbox FIFO;
- * the reactor applies HEADERS (streaming submit), CHUNKs (chunk_queue),
- * END (trailers + EOF) or ABORT (reset — the stream failed mid-flight).
- * Backpressure: append_chunk parks the producer coroutine on the shared
- * credit block (stream_credit.h) while > WORKER_STREAM_INFLIGHT_CAP bytes
- * are un-acked, so it suspends INSIDE the op — BACKPRESSURE is never
- * reported outward (same discipline as the local H2/H3 ops).
- * ------------------------------------------------------------------- */
-/* Suspend the producer coroutine for `ms` on a one-shot timer so the worker
- * loop keeps draining while we wait for credit. Best-effort: bails silently
- * outside a coroutine (flush stays best-effort, mirroring the local path). */
+/* Suspend the producer for `ms` on a one-shot timer; no-op outside a coroutine. */
 static void worker_credit_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
 {
     zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
@@ -281,8 +249,7 @@ static void worker_credit_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
     ZEND_ASYNC_WAKER_DESTROY(co);
 }
 
-/* Park the producer until in-flight drops under the cap, the stream dies,
- * or the write timeout elapses. Returns false when the stream is dead. */
+/* Park until in-flight < cap; false = stream dead. */
 static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
 {
     if (ctx->credit == NULL) {
@@ -319,8 +286,6 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
             return false;   /* peer stopped reading — treat as dead */
         }
 
-        /* Back off while no progress (idle peer burns fewer timer allocs);
-         * snap back the moment ACKs move. */
         const uint64_t acked = stream_credit_acked(ctx->credit);
 
         if (acked == last_acked) {
@@ -344,9 +309,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* First send(): the response just committed — flatten status + headers
-     * into the STREAM_HEADERS wire that opens the stream on the reactor,
-     * carrying the shared credit block (the reactor adopts one ref). */
+    /* first send(): open the stream; the reactor adopts one credit ref */
     if (!ctx->stream_started) {
         response_wire_t *const hw =
             response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
@@ -386,9 +349,6 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
     worker_wire_post(ctx, cw);
     zend_string_release(chunk);   /* bytes copied into the wire arena */
 
-    /* Flow control: account the bytes, then park until the reactor retires
-     * enough of the backlog (peer ACKs) — mirrors the local path suspending
-     * on write_event, but over the thread boundary via the credit block. */
     ctx->posted_bytes += chunk_len;
 
     if (!worker_stream_wait_credit(ctx)) {
@@ -399,8 +359,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
     return HTTP_STREAM_APPEND_OK;
 }
 
-/* Advisory for HttpResponse::sendable(): true while append_chunk would not
- * park (room under the in-flight cap and the stream is alive). */
+/* sendable() advisory: true while append_chunk would not park. */
 static bool worker_stream_sendable(void *vctx)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
@@ -452,12 +411,7 @@ static const http_response_stream_ops_t worker_stream_ops = {
     .get_wait_event = NULL,   /* backpressure parks inside append_chunk */
 };
 
-/* gRPC finish ops (grpc_call_finish seam) — the worker-side delivery
- * actions; what to send is decided in src/grpc/grpc_call.c. */
-
-/* grpc-web in-body trailer frame. Streamed reply: one more CHUNK + END.
- * Zero-message reply: the frame becomes the buffered body — the FULL wire
- * rendered right after grpc_call_finish carries it. Consumes the ref. */
+/* grpc-web in-body trailer frame; consumes the ref. */
 static void worker_grpc_append_frame_and_end(void *vctx, zend_string *frame)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
@@ -480,9 +434,7 @@ static void worker_grpc_end_stream(void *vctx)
     worker_stream_mark_ended(vctx);
 }
 
-/* Trailers-Only: grpc_call_finish already promoted the trailers into the
- * initial HEADERS; dispose renders + posts the FULL wire right after this
- * returns, so there is nothing left to commit here. */
+/* Trailers-Only: dispose posts the FULL wire right after this returns. */
 static void worker_grpc_commit(void *vctx)
 {
     (void)vctx;
@@ -545,8 +497,7 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     if (!Z_ISUNDEF(ctx->response_zv)) {
         zend_object *const resp = Z_OBJ(ctx->response_zv);
 
-        /* A gRPC outcome is expressed as grpc-status on a 200, not as an
-         * HTTP 500 — grpc_call_ensure_status maps the exception below. */
+        /* gRPC maps exceptions to grpc-status, not HTTP 500 */
         if (coroutine->exception != NULL && !ctx->is_grpc
             && !http_response_is_committed(resp)) {
             http_response_reset_to_error(resp, 500, "Internal Server Error");
@@ -560,18 +511,13 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             http_response_set_committed(resp);
         }
 
-        /* Delivery shape. gRPC policy decides via grpc_call_finish; a plain
-         * streamed response just needs its END (idempotent — a handler that
-         * called end() already posted it). A response that never streamed is
-         * the buffered FULL wire, exactly as before. */
         if (ctx->is_grpc) {
             grpc_call_finish(resp, &worker_grpc_finish_ops, ctx);
         } else if (http_response_is_streaming(resp)) {
             worker_stream_mark_ended(ctx);
         }
 
-        /* A started stream must ALWAYS get a terminal wire (grpc finish can
-         * fail mid-way; the reactor's reader would park forever). Idempotent. */
+        /* a started stream must always get a terminal wire */
         if (ctx->stream_started && !ctx->stream_ended) {
             worker_stream_mark_ended(ctx);
         }
@@ -584,9 +530,7 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             }
         }
 
-        /* Detach the ops: a handler may have kept $response alive beyond
-         * this dispose; ctx dies below, so a late send() must throw the
-         * standard "not available" instead of touching freed memory. */
+        /* ctx dies below; a late send() on a kept $response must throw, not UAF */
         http_response_replace_stream_ops(resp, NULL, NULL);
     }
 
@@ -629,8 +573,6 @@ bool worker_dispatch_request(http_server_object *server,
     void *const    conn       = req->reactor_conn;
     const bool     is_head    = http_request_method_is_head(req);
 
-    /* gRPC classification — once, through the same seam the transports
-     * use (content-type mode gated on a registered addGrpcHandler). */
     HashTable *const handlers = http_server_get_protocol_handlers(server);
     const grpc_mode_t grpc_mode = grpc_classify(req, handlers);
     const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
@@ -660,8 +602,6 @@ bool worker_dispatch_request(http_server_object *server,
     object_init_ex(&ctx->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(ctx->response_zv), "3.0");
 
-    /* Streaming reverse path: send()/writeMessage() flatten into STREAM_*
-     * wires posted through the sink instead of throwing. */
     http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
                                      &worker_stream_ops, ctx);
 

@@ -195,12 +195,8 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
     s->refcount++;   /* worker-borrow ref; dropped by the consumed apply */
 
     if (UNEXPECTED(!worker_inbox_post(inbox, s->request))) {
-        /* Hard backpressure: the worker inbox is at capacity and the request
-         * was not handed off. Undo the dispatch bookkeeping so the normal
-         * teardown reclaims it (s->dispatched=false => reactor teardown frees
-         * the fields). Then RESET the stream with H3_REQUEST_REJECTED so the
-         * client learns immediately the request was refused WITHOUT processing
-         * — safe to retry elsewhere — instead of hanging until its QUIC PTO. */
+        /* inbox full: undo the dispatch bookkeeping, RESET with
+         * H3_REQUEST_REJECTED so the client can retry instead of hanging */
         s->refcount--;
         s->dispatched = false;
 
@@ -238,9 +234,7 @@ void http3_reactor_apply_response(void *arg)
     http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
 
     if (c == NULL || c->closed || c->nghttp3_conn == NULL) {
-        /* The stream is already gone, so nobody will adopt a HEADERS
-         * wire's credit ref — take it over: unblock the parked producer
-         * and drop the reactor-side ref here. */
+        /* stream gone: nobody adopts the credit ref — unblock the producer */
         stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
 
         zend_string *const orphan_chunk =
@@ -254,10 +248,7 @@ void http3_reactor_apply_response(void *arg)
         return;
     }
 
-    /* Coalesce output: several wires for one connection often land in one
-     * mailbox batch — mark the conn dirty and flush ONCE in the reactor's
-     * drain epilogue (same discipline as the steer feed / recvmmsg tick)
-     * instead of a full send-path walk per wire. */
+    /* mark dirty + flush once in the drain epilogue, not per wire */
     switch (response_wire_kind(rw)) {
         case RESPONSE_WIRE_FULL:
         case RESPONSE_WIRE_STREAM_HEADERS:
@@ -268,9 +259,6 @@ void http3_reactor_apply_response(void *arg)
             break;
 
         case RESPONSE_WIRE_STREAM_CHUNK: {
-            /* Validate-and-drop: the stream may have died (peer RST) or the
-             * HEADERS submit may have failed (no ring) since the worker
-             * posted this chunk. */
             zend_string *const chunk =
                 (zend_string *)response_wire_take_chunk(rw);
 
@@ -406,10 +394,6 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     HashTable *handlers = http_server_get_protocol_handlers(server);
     zend_async_scope_t *scope = http_server_get_scope(server);
 
-    /* gRPC (issue #4): classify ONCE through the shared seam (content-type
-     * mode gated on a registered addGrpcHandler); grpc-web carries trailers
-     * in-body. The handler pick below uses the shared precedence, so a
-     * gRPC-only server still dispatches. */
     const grpc_mode_t grpc_mode = grpc_classify(s->request, handlers);
 
     s->is_grpc = grpc_mode != GRPC_MODE_NONE;
@@ -462,8 +446,6 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_response_install_stream_ops(Z_OBJ(s->response_zv),
                                      &h3_stream_ops, s);
 
-    /* gRPC: response defaults (content-type + delivery mode) live in the
-     * gRPC layer; the mode stamp is what finish/writeMessage read back. */
     if (s->is_grpc) {
         grpc_call_init_response(Z_OBJ(s->response_zv), grpc_mode);
     }
@@ -787,12 +769,8 @@ static bool h3_arm_sendfile(http3_connection_t *c, http3_stream_t *s)
     return true;
 }
 
-/* End a streamed reply: capture the response trailer map for the data
- * reader's EOF submit (no-op when the map is empty), then resume so the
- * reader drains to EOF. The capture must happen here, while response_zv is
- * still alive — the data reader runs async, after dispose frees the zvals.
- * Shared by the dispose streaming branch and the gRPC finish ops (void *ctx
- * so it slots into grpc_finish_ops_t.end_stream directly). */
+/* End a streamed reply. Trailers must be captured here, while response_zv
+ * is still alive — the data reader runs after dispose frees the zvals. */
 static void h3_stream_finish_streaming(void *ctx)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
@@ -808,12 +786,7 @@ static void h3_stream_finish_streaming(void *ctx)
     }
 }
 
-/* gRPC finish ops (grpc_call_finish seam) — the transport-specific wire
- * actions; what to send is decided in src/grpc/grpc_call.c. */
-
-/* Append one body frame (consumes the ref) and end the stream. Works for
- * streamed and zero-message replies — append_chunk commits HEADERS + inits
- * the chunk queue on first use. */
+/* Append one gRPC frame (consumes the ref) and end the stream. */
 static void h3_grpc_append_frame_and_end(void *ctx, zend_string *frame)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
@@ -918,9 +891,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             (void)http3_stream_submit_response(c, s, false);
         } else {
             H3T(s->stream_id, "5.buffered_submit");
-            /* A buffered response can carry a trailer map too (setTrailer
-             * without streaming) — capture now, while response_zv is alive;
-             * the data reader submits at EOF. */
+            /* capture trailers while response_zv is alive */
             http3_stream_capture_trailers(s);
             (void)http3_stream_submit_response(c, s, false);
         }

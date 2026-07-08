@@ -91,21 +91,15 @@ struct http_request_t {
     /* Body */
     zend_string *body;
 
-    /* gRPC deframer cursor — advanced by HttpRequest::readMessage() as it
-     * extracts each 5-byte-length-prefixed message. For a buffered request it
-     * indexes `body`; for a streaming request (body_streaming) it indexes the
-     * grpc_reassembly buffer below. Zero-initialised (memset on alloc). */
+    /* readMessage() deframer cursor: indexes `body` (buffered),
+     * grpc_reassembly (streaming) or grpc_text_body (web-text) */
     size_t       grpc_read_offset;
 
-    /* gRPC incremental reassembly buffer for streaming requests: readMessage()
-     * appends popped body-stream chunks here until a full length-prefixed
-     * message is available, so messages that span DATA frames are handled.
-     * Empty {NULL,0} until first use; freed in http_request_destroy. */
+    /* streaming reassembly of chunks into whole gRPC messages;
+     * freed in http_request_destroy */
     smart_str    grpc_reassembly;
 
-    /* grpc-web-text: the base64-decoded request body, materialized lazily on
-     * the first readMessage() (the deframer cursor then indexes THIS buffer,
-     * not `body`). NULL until first use; freed in http_request_destroy. */
+    /* grpc-web-text: lazily base64-decoded body; freed in http_request_destroy */
     zend_string *grpc_text_body;
 
     /* Body-progress event.
@@ -216,9 +210,8 @@ struct http_request_t {
     void                     *body_h2_session;
     int32_t                   body_h2_stream_id;
 
-    /* H3 mirror of the pair above: the owning http3_connection_t and QUIC
-     * stream id, set when the streaming policy engages. http_body_stream_pop
-     * grants deferred QUIC flow-control credit through these (issue #26). */
+    /* H3 mirror of the pair above; http_body_stream_pop grants deferred
+     * QUIC credit through these */
     void                     *body_h3_conn;
     int64_t                   body_h3_stream_id;
     size_t                    body_h3_uncredited;  /* drained, not yet flushed */

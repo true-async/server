@@ -121,12 +121,8 @@ struct _http3_stream_s {
     size_t            chunk_read_offset;    /* bytes already handed from queue[chunk_read_idx] */
     size_t            chunk_ack_credit;     /* leftover acked bytes not yet applied to head release */
 
-    /* Static-file delivery global memory cap (http3_static_response.c).
-     * tracks_static_bytes latches on only for the static pump's stream; while
-     * set, each queued chunk is added to the per-worker in-flight counter on
-     * push and debited on ACK. static_inflight is this stream's running share,
-     * debited in one shot at teardown to reconcile any chunk freed off the ACK
-     * path (submit failure, connection close). */
+    /* static-file memory cap: charged on push, debited on ACK, reconciled
+     * at teardown (http3_static_response.c) */
     bool              tracks_static_bytes;
     size_t            static_inflight;
 
@@ -135,23 +131,13 @@ struct _http3_stream_s {
      * queue empties instead of NGHTTP3_ERR_WOULDBLOCK. */
     bool              streaming_ended;
 
-    /* gRPC (issue #4). is_grpc: the request is application/grpc — route to
-     * the addGrpcHandler callable, default grpc-status (web/web-text
-     * delivery is the response's grpc_mode stamp, not stream state).
-     * has_trailers / trailers_submitted mirror http2_stream_t: the data
-     * reader sets NO_END_STREAM + submits nghttp3 trailers once at EOF. */
     bool              is_grpc;
     bool              has_trailers;
     bool              trailers_submitted;
 
-    /* Response trailers captured in dispose (while response_zv is alive) and
-     * submitted by the data reader at true EOF — nghttp3 requires the trailer
-     * submit AFTER the last DATA stamps NO_END_STREAM, but response_zv is
-     * freed by then. trailer_nv is a malloc'd nghttp3_nv[] whose name/
-     * value point into trailer_bytes; both freed in http3_stream_release.
-     * void* keeps nghttp3 out of this header. Canonical consumer: gRPC
-     * (grpc-status / grpc-message), but any streaming response with a
-     * trailer map is delivered this way. */
+    /* Trailers captured in dispose (response_zv still alive), submitted by
+     * the data reader at true EOF. malloc'd nghttp3_nv[] pointing into
+     * trailer_bytes; freed in http3_stream_release. */
     void             *trailer_nv;
     size_t            trailer_count;
     char             *trailer_bytes;
@@ -163,11 +149,8 @@ struct _http3_stream_s {
      * unwinds cleanly with HttpException(499). */
     bool              peer_closed;
 
-    /* Reverse-path flow control (#80 step 3): the worker's credit block,
-     * adopted from the STREAM_HEADERS wire. void* keeps core headers out
-     * of this one; the reactor advances acked on peer ACK, marks dead on
-     * stream death, releases its ref at teardown. NULL for local /
-     * buffered streams. */
+    /* worker's stream_credit_t*, adopted from the STREAM_HEADERS wire;
+     * NULL for local/buffered streams */
     void             *wire_credit;
 
     /* Trigger event the handler awaits on under flow-control

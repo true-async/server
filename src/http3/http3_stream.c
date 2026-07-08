@@ -177,16 +177,9 @@ void http3_stream_release(http3_stream_t *s)
         s->wire_credit = NULL;
     }
 
-    /* Inbound streaming (issue #26): the request can outlive this stream —
-     * a handler coroutine holds its own request ref and may still be
-     * draining the chunk queue. Sever the raw connection pointer NOW so a
-     * later http_body_stream_pop cannot call http3_request_body_consume on
-     * a freed connection (the conn dies right after this on the
-     * connection-free force-release path), and wake a consumer parked on
-     * the queue if the body never completed. Local mode only —
-     * body_h3_conn is never set under the reactor pool. The slab (and thus
-     * s->request) is guaranteed alive here: the request refcount keeps the
-     * slot allocated until http_request_destroy. */
+    /* The request can outlive the stream (handler holds its own ref). Sever
+     * body_h3_conn so a later pop can't touch a freed connection, and wake
+     * a parked consumer if the body never completed. */
     if (s->request != NULL && s->request->body_h3_conn != NULL) {
         s->request->body_h3_conn = NULL;
 

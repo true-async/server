@@ -46,8 +46,7 @@ grpc_mode_t grpc_request_mode(const http_request_t *req)
         return GRPC_MODE_NONE;
     }
 
-    /* Past "application/grpc" — the suffix picks the variant. Web-text
-     * before web: "-web" is a prefix of "-web-text". */
+    /* "-web" is a prefix of "-web-text" — check web-text first */
     val += grpc_len;
     len -= grpc_len;
 
@@ -102,14 +101,9 @@ static bool b64_decode_append(smart_str *out, const char *in, size_t len)
 
 zend_string *grpc_web_text_decode(const char *in, const size_t len)
 {
-    /* The body is a CONCATENATION of independently base64-encoded frames,
-     * each with its own '='-padding (that is what grpc-web clients and our
-     * own encoder emit). PHP's non-strict decoder does not reset its 6-bit
-     * group at padding, so a single pass garbles everything after the first
-     * block whose byte length is not a multiple of 3 — decode block-wise,
-     * splitting after each padding run. Blocks that need no padding
-     * (len % 3 == 0) leave the bit stream 4-char aligned, so letting them
-     * merge into the next block is correct. */
+    /* The body concatenates independently base64-encoded frames, each with
+     * its own '='-padding; PHP's decoder does not reset at padding, so a
+     * single pass garbles the tail — decode block-wise at each padding run. */
     smart_str out = {0};
     size_t    start = 0;
 
@@ -287,8 +281,6 @@ int grpc_deframe_next(const char *buf, size_t len, size_t *cursor,
 int grpc_message_inflate(const http_request_t *req,
                          const char *in, size_t in_len, zend_string **out)
 {
-    /* Compressed flag set → the algorithm is named by grpc-encoding. gRPC's
-     * baseline is gzip; anything else is unsupported here. */
     zval *enc = (req->headers != NULL)
         ? zend_hash_str_find(req->headers, "grpc-encoding",
                              sizeof("grpc-encoding") - 1)

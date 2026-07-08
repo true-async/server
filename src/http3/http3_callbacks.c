@@ -372,12 +372,8 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
-/* Splice whatever h3_recv_data_cb already buffered for this stream into the
- * body queue as one chunk, then flip body_streaming so subsequent chunks
- * push directly. Invoked from HttpRequest::readBody()/readMessage() for the
- * "buffered → stream" upgrade (Case 2). Idempotent. The pre-upgrade bytes
- * were already credited eagerly; re-crediting them on pop merely over-grants
- * window, which QUIC permits. */
+/* "Buffered → stream" upgrade: splice buffered bytes into the queue, flip
+ * body_streaming. Idempotent. */
 static void http3_request_body_upgrade(http_request_t *req)
 {
     if (req->body_streaming) {
@@ -410,24 +406,16 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
-    /* Reactor mode: defer dispatch to h3_end_stream_cb. The reactor must
-     * not write into the request after hand-off, so the body is assembled
-     * (persistent) before the worker gets the pointer — buffered, not
-     * streamed (the body queue is same-thread by contract). */
+    /* Reactor mode: defer dispatch to h3_end_stream_cb — the body must be
+     * fully assembled before hand-off (body queue is same-thread only). */
     if (c != NULL && http3_listener_reactor_ctx(c->listener) != NULL) {
         return 0;
     }
 
-    /* Streaming body mode (issue #26). Three-case policy by Content-Length
-     * — mirror of H2 cb_on_frame_recv:
-     *   CL == 0 (unknown) or CL >= AUTO → stream immediately
-     *   SMALL <= CL < AUTO → buffer + install upgrade hook
-     *   CL <  SMALL → buffer, never stream. */
+    /* Content-Length policy, mirror of H2 cb_on_frame_recv. grpc-web-text
+     * stays buffered: readMessage() base64-decodes the assembled body. */
     if (c != NULL && c->view != NULL && c->view->body_streaming_enabled
         && s->request != NULL
-        /* grpc-web-text is buffered by protocol nature: readMessage()
-         * base64-decodes the ASSEMBLED body; a streamed queue would leave
-         * req->body NULL and silently lose the call. */
         && !grpc_request_is_grpc_web_text(s->request)) {
         http_request_t *const r = s->request;
 
@@ -452,10 +440,8 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
-/* Grant QUIC flow-control credit for `len` request-body bytes.
- * nghttp3_conn_read_stream's consumed count deliberately EXCLUDES DATA
- * payload (deferred-consume contract) — the application must extend the
- * stream + connection windows itself once it has taken the bytes. */
+/* nghttp3's consumed count excludes DATA payload (deferred-consume contract)
+ * — the application extends the windows itself. */
 static void h3_extend_body_window(http3_connection_t *c, const int64_t stream_id,
                                   const size_t len)
 {
@@ -475,18 +461,13 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
     if (UNEXPECTED(s == NULL || s->rejected)) {
-        /* Bytes still count against the peer's window — return the credit
-         * so an already-rejected stream cannot wedge the connection cap. */
+        /* return the credit so a rejected stream can't wedge the connection cap */
         h3_extend_body_window(c, stream_id, datalen);
         return 0;
     }
 
-    /* Streaming mode (issue #26) — push the chunk into the per-request
-     * queue instead of accumulating into body_buf. Credit is NOT granted
-     * here: http_body_stream_pop extends the window as the handler drains
-     * (http3_request_body_consume), which is the backpressure. The cap
-     * bounds only the LIVE (queued, un-drained) bytes — a long-lived
-     * client-streaming body is legitimately unbounded in total. */
+    /* Streaming: no credit here — http_body_stream_pop extends the window
+     * as the handler drains; that is the backpressure. */
     if (s->request != NULL && s->request->body_streaming) {
         http_request_t *const req = s->request;
         size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
@@ -542,9 +523,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
 
     smart_str_appendl(&s->body_buf, (const char *)data, datalen);
 
-    /* Buffered mode consumes the bytes right here — return the window
-     * immediately so an upload larger than the initial stream window
-     * (256 KiB default) keeps flowing. */
+    /* buffered mode consumes right here — return the window immediately */
     h3_extend_body_window(c, stream_id, datalen);
     return 0;
 }
@@ -562,10 +541,8 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
  * pointer alive until h3_acked_stream_data_cb fires (the peer ACK'd
  * the bytes). Releasing earlier is a UAF — under packet loss nghttp3
  * retransmits from the same iov, so a freed zend_string would crash. */
-/* True-EOF epilogue shared by the reader's streaming and buffered branches:
- * submit the captured trailers (nghttp3 requires the submit after the last
- * DATA) and keep the sending side open with NO_END_STREAM so the trailer
- * HEADERS carry the fin instead of the final DATA. No-op without a capture. */
+/* True-EOF: submit captured trailers (must follow the last DATA); the trailer
+ * HEADERS carry the fin. No-op without a capture. */
 static void h3_read_data_eof_trailers(nghttp3_conn *conn, http3_stream_t *s,
                                       uint32_t *pflags)
 {
@@ -617,8 +594,6 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
             if (s->streaming_ended) {
                 *pflags |= NGHTTP3_DATA_FLAG_EOF;
 
-                /* The trailer nv was captured in dispose (response_zv is
-                 * gone by the time the reader runs). */
                 h3_read_data_eof_trailers(conn, s, pflags);
                 return 0;
             }
@@ -635,9 +610,7 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
         return 1;
     }
 
-    /* Buffered REST path — single-slice semantics, plus the trailer submit
-     * at EOF (a buffered response with a trailer map: worker-rendered
-     * response_wire or a local setTrailer without streaming). */
+    /* buffered path — single slice, trailer submit at EOF */
     if (s->response_body == NULL) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
         h3_read_data_eof_trailers(conn, s, pflags);
@@ -658,9 +631,7 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
     vec[0].len  = remaining;
     s->response_body_offset += remaining;
 
-    /* With trailers pending, hand the final slice without EOF — the submit
-     * must FOLLOW the last DATA, so the next invocation (remaining == 0)
-     * performs it. Without trailers keep the one-call fast path. */
+    /* trailers pending: no EOF on the final slice — the submit must follow it */
     if (s->trailer_nv == NULL) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
     }
@@ -728,15 +699,8 @@ static inline bool h3_nv_push(h3_nv_buf_t *b,
  *   - Streaming (HttpResponse::send loop): chunk_queue is the body
  *     source; we skip the body copy entirely. Caller has already
  *     primed the queue with the first chunk by the time we run. */
-/* Capture the response trailer map into a malloc'd nghttp3_nv[] + backing
- * byte buffer on the stream. Called from dispose while response_zv is still
- * alive; the data reader submits it at true EOF, because
- * nghttp3_conn_submit_trailers must follow the last DATA (which stamps
- * NO_END_STREAM) yet response_zv is freed by then. malloc (not emalloc) — the
- * data reader runs outside a request memory context. No-op when there are no
- * trailers or a capture already exists. Freed in http3_stream_release. */
-/* Shared malloc'd trailer capture (s->trailer_nv/count/bytes): init sizes
- * the buffers, add packs one pair, callers iterate their own source. */
+/* Trailer capture: malloc'd (the data reader runs outside a request memory
+ * context, after response_zv is freed); released in http3_stream_release. */
 typedef struct {
     nghttp3_nv *nv;
     char       *bytes;
@@ -949,10 +913,8 @@ headers_done:
     return false;
 }
 
-/* Copy the wire's trailer pairs into the stream's malloc'd capture — the
- * wire dies right after the apply, and the data reader submits at true EOF
- * (same fields http3_stream_capture_trailers fills on the local path).
- * No-op when the wire has no trailers or a capture already exists. */
+/* Copy the wire's trailers into the stream's capture — the wire dies right
+ * after the apply. */
 void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *rw)
 {
     const size_t tcount = response_wire_trailer_count(rw);
@@ -1049,17 +1011,12 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
         nvi++;
     }
 
-    /* Body source. FULL: single-slice from response_body. STREAM_HEADERS:
-     * prime the chunk ring — the data reader parks on WOULDBLOCK until the
-     * first STREAM_CHUNK apply pushes bytes (or STREAM_END fires EOF). */
     const bool streaming =
         response_wire_kind(rw) == RESPONSE_WIRE_STREAM_HEADERS;
 
     if (streaming) {
         h3_chunk_queue_init(s);
-        /* Adopt the worker's credit ref: acked advances in
-         * h3_acked_stream_data_cb, dead on stream death, release at
-         * teardown. */
+        /* adopt the worker's credit ref; released at teardown */
         s->wire_credit = response_wire_credit(rw);
     } else {
         size_t      blen = 0;
@@ -1101,10 +1058,7 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
     }
 
     if (streaming) {
-        /* The reader was never registered; make sure late STREAM_CHUNK /
-         * STREAM_END applies see a dead stream and drop, and unblock a
-         * producer parked on credit. The teardown release still runs, so
-         * only mark here. */
+        /* reader never registered — late applies must see a dead stream */
         s->streaming_ended = true;
 
         if (s->wire_credit != NULL) {
@@ -1126,8 +1080,7 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
  * the caller suspends on write_event, which extend_max_stream_data_cb
  * fires when the peer extends the window via MAX_STREAM_DATA.
  * ------------------------------------------------------------------- */
-/* Lazily create the streaming chunk ring. Idempotent. A non-NULL queue is
- * what flips the data reader into its streaming branch. */
+/* Idempotent; a non-NULL queue flips the data reader into streaming mode. */
 void h3_chunk_queue_init(http3_stream_t *s)
 {
     if (s->chunk_queue != NULL) {
@@ -1144,9 +1097,7 @@ void h3_chunk_queue_init(http3_stream_t *s)
     s->chunk_ack_credit    = 0;
 }
 
-/* Enqueue a chunk (takes the ref). Grows the ring if full — compact head→0
- * first to avoid unbounded growth on long-lived streams. Compaction shifts
- * head, read_idx, and tail by the same delta. */
+/* Takes the ref. Compacts before growing so long-lived streams stay bounded. */
 void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk)
 {
     if (s->chunk_queue_tail == s->chunk_queue_cap) {
@@ -1189,9 +1140,6 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* First send() — lazy queue + HEADERS commit (submit_response with
-     * the streaming data_reader). The data_reader reads the chunk we
-     * are about to enqueue. */
     const bool first_call = s->chunk_queue == NULL;
 
     if (first_call) {
@@ -1201,8 +1149,7 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
     const size_t chunk_len = ZSTR_LEN(chunk);
     h3_chunk_queue_push(s, chunk);
 
-    /* Static delivery: credit this chunk to the per-worker in-flight cap.
-     * The ACK path debits it; teardown reconciles any leftover. */
+    /* static delivery: charge the per-worker in-flight cap; ACK path debits */
     if (s->tracks_static_bytes) {
         s->static_inflight += chunk_len;
         h3_static_account_alloc(chunk_len);
@@ -1385,11 +1332,8 @@ static void http3_finalize_request_body(http3_stream_t *s)
     http_request_t *const req = s->request;
     ZEND_ASSERT(req != NULL);
 
-    /* Streaming mode (issue #26): no smart_str to move — close the queue
-     * so a parked readBody()/readMessage() consumer sees EOF, and fire
-     * body_event too: a handler suspended in awaitBody() (dispatched at
-     * headers, fin not yet seen) waits on THAT event, not the queue's
-     * data event. Mirrors the H1 parser's explicit streaming-mode fire. */
+    /* Streaming: close the queue (parked consumer sees EOF) and fire
+     * body_event — awaitBody() waits on that, not the queue's data event. */
     if (req->body_streaming) {
         http_body_stream_close(req);
         req->complete   = true;
@@ -1492,8 +1436,7 @@ static void h3_stream_mark_peer_closed(http3_stream_t *s)
         stream_credit_mark_dead((stream_credit_t *)s->wire_credit);
     }
 
-    /* A consumer parked in readBody()/readMessage() on a streamed body
-     * must wake too: RST before fin means the body will never complete. */
+    /* RST before fin: wake a parked body consumer, the body never completes */
     if (s->request != NULL && s->request->body_streaming
         && !s->fin_received) {
         http_body_stream_error(s->request);
@@ -1584,8 +1527,7 @@ static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
-    /* Reverse-path flow control: retire the acked bytes so a worker
-     * producer parked on the credit cap resumes. */
+    /* retire acked bytes so a worker producer parked on credit resumes */
     if (s->wire_credit != NULL) {
         stream_credit_ack((stream_credit_t *)s->wire_credit, datalen);
     }
@@ -2044,10 +1986,8 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags,
     return 0;
 }
 
-/* Deferred inbound flow control (issue #26): called from
- * http_body_stream_pop on the connection's own thread as the handler
- * drains queued body chunks. Extends the QUIC windows and drives the
- * socket so the MAX_STREAM_DATA actually reaches the peer. */
+/* Called from http_body_stream_pop as the handler drains: extends the QUIC
+ * windows and drives the socket so MAX_STREAM_DATA reaches the peer. */
 void http3_request_body_consume(http_request_t *req, const size_t len,
                                 const bool queue_empty)
 {
@@ -2057,9 +1997,7 @@ void http3_request_body_consume(http_request_t *req, const size_t len,
         return;
     }
 
-    /* Coalesce: a drain_out per ~1.2 KB chunk is a full send-path walk.
-     * Flush at 64 KiB, or when the queue just emptied (the consumer is
-     * about to wait — the peer may need the window to send more). */
+    /* coalesce: flush at 64 KiB or when the queue just emptied */
     req->body_h3_uncredited += len;
 
     if (req->body_h3_uncredited < 64 * 1024 && !queue_empty) {
@@ -2210,8 +2148,7 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
     return 0;
 }
 
-/* RESET_STREAM and STOP_SENDING both mean the peer will send no more request
- * data on this stream — shut the read side down in nghttp3 either way. */
+/* RESET_STREAM / STOP_SENDING: no more request data — shut the read side. */
 static int h3_shutdown_stream_read(http3_connection_t *c, int64_t stream_id)
 {
     if (c == NULL || c->nghttp3_conn == NULL) {

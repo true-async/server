@@ -148,11 +148,8 @@ void thread_mailbox_keepalive(thread_mailbox_t *mb, const bool enable)
     }
 }
 
-/* ---------------------------------------------------------------------------
- * reactor_cmd_t mailbox. Mirrors the void* mailbox above; the only difference
- * is the ring carries the command POD by value, so post copies it in and the
- * drain hands back a scratch array of reactor_cmd_t rather than void*.
- * ------------------------------------------------------------------------- */
+/* reactor_cmd_t mailbox — mirrors the void* mailbox above, ring carries the
+ * POD by value. */
 
 struct thread_cmd_mailbox_s {
     thread_cmd_mpsc_t          *queue;

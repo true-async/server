@@ -15,22 +15,10 @@
 
 #include "Zend/zend_atomic.h"
 
-/*
- * Per-stream flow-control credit for the reactor/worker streaming reverse
- * path (#80, step 3). Pure malloc-domain, atomics only — the ONLY object the
- * two threads touch concurrently, so neither side ever dereferences the
- * other's Zend state.
- *
- * Protocol: the worker creates the block (two refs), attaches it to the
- * STREAM_HEADERS wire, and thereafter tracks posted-bytes locally. When
- * posted - acked exceeds its cap, the producer coroutine sleeps on a short
- * timer and re-reads `acked` — no cross-thread event objects. The reactor
- * (owner of the second ref) advances `acked` as the QUIC peer acknowledges
- * stream bytes, and sets `dead` when the stream dies (RST / connection
- * close / failed submit) so a waiting producer unblocks into the standard
- * stream-dead path. Each side releases its ref exactly once; the last
- * release frees the block.
- */
+/* Per-stream flow-control credit shared worker↔reactor. Malloc + atomics
+ * only — the one object both threads touch. Worker creates it with two refs
+ * (one per side); reactor advances `acked` on peer ACK and sets `dead` on
+ * stream death; last release frees. */
 
 typedef struct {
     zend_atomic_int64 acked;   /* bytes the reactor has retired (peer ACK) */
@@ -60,8 +48,7 @@ static inline void stream_credit_release(stream_credit_t *sc)
     }
 }
 
-/* Reactor thread ONLY (single writer) — load+store instead of fetch-add is
- * safe because nothing else ever writes `acked`. */
+/* Reactor thread only — single writer, so load+store beats fetch-add. */
 static inline void stream_credit_ack(stream_credit_t *sc, const uint64_t bytes)
 {
     zend_atomic_int64_store_ex(&sc->acked,
@@ -79,8 +66,7 @@ static inline void stream_credit_mark_dead(stream_credit_t *sc)
     zend_atomic_int_store_ex(&sc->dead, 1);
 }
 
-/* Drop-site helper, NULL-safe. Mark dead BEFORE release — a parked producer
- * must observe `dead` before the block can vanish. */
+/* NULL-safe. Dead must be set before release so a parked producer sees it. */
 static inline void stream_credit_abandon(stream_credit_t *sc)
 {
     if (sc != NULL) {

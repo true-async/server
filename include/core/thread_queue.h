@@ -76,12 +76,8 @@ bool   thread_spsc_dequeue(thread_spsc_t *q, void **item);
 size_t thread_spsc_drain(thread_spsc_t *q, void **items, size_t max);
 size_t thread_spsc_count(const thread_spsc_t *q);
 
-/* ------------------------------------------------------------------ */
-/* MPSC carrying reactor_cmd_t BY VALUE — many producers, single       */
-/* consumer. Same bounded/lock-free contract as the void* MPSC, but    */
-/* the fixed-size command POD is stored in the ring itself, so the hot */
-/* worker->reactor path enqueues without a per-message malloc.         */
-/* ------------------------------------------------------------------ */
+/* MPSC carrying reactor_cmd_t by value — same bounded/lock-free contract as
+ * the void* MPSC, no per-message malloc. */
 
 typedef struct reactor_cmd_s   reactor_cmd_t;   /* core/reactor_cmd.h */
 typedef struct thread_cmd_mpsc_s thread_cmd_mpsc_t;

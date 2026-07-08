@@ -269,12 +269,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getBody)
 }
 
 /* {{{ proto HttpRequest::readMessage(): ?string
- *
- * Deframe and return the next gRPC message from the request body (one
- * 5-byte-length-prefixed frame), advancing an internal cursor. Returns
- * null once no complete message remains — call once for a unary RPC, loop
- * for client-streaming. The returned bytes are the raw (protobuf) message;
- * decoding stays in PHP userland. */
+ * Next gRPC message from the request body; null when none remain. */
 ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
@@ -290,9 +285,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
     bool         compressed = false;
     int          rc;
 
-    /* grpc-web-text: the body is the base64-encoded frame stream. Decode
-     * once (lazily) and deframe from the decoded buffer — buffered-only,
-     * which matches the protocol (grpc-web clients can't stream requests). */
+    /* grpc-web-text: decode the base64 body once, deframe from the result */
     const bool web_text = grpc_request_is_grpc_web_text(req);
 
     if (web_text && req->grpc_text_body == NULL) {
@@ -310,9 +303,6 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
         }
     }
 
-    /* Middle-band request (SMALL <= Content-Length < AUTO): the parser
-     * buffered so far; upgrade to the streaming queue on first read so
-     * incremental deframing works there too (mirror of readBody Case 2). */
     if (!web_text && !req->body_streaming && req->body_upgrade_to_stream != NULL) {
         req->body_upgrade_to_stream(req);
     }
@@ -323,14 +313,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
                                &req->grpc_read_offset,
                                GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
     } else if (req->body_streaming) {
-        /* True full-duplex path: accumulate popped body-stream chunks into
-         * grpc_reassembly until one length-prefixed message is framed, then
-         * deframe it — a handler can readMessage() while the client is still
-         * sending. Suspends between chunks. Enabled when the server ran with
-         * setBodyStreamingEnabled(true) and the request qualified. */
-
-        /* Drop the previous message's consumed prefix so the buffer holds
-         * only the not-yet-deframed tail (bounds memory on long streams). */
+        /* Full-duplex: accumulate chunks into grpc_reassembly, suspend
+         * between them. Drop the consumed prefix first to bound memory. */
         if (req->grpc_read_offset > 0 && req->grpc_reassembly.s != NULL) {
             const size_t total  = ZSTR_LEN(req->grpc_reassembly.s);
             const size_t remain = req->grpc_read_offset < total
@@ -441,12 +425,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
 }
 
 /* {{{ proto HttpRequest::getGrpcTimeout(): ?float
- *
- * The gRPC call deadline parsed from the `grpc-timeout` request header, in
- * seconds (fractional), or null when the client sent none / it was
- * malformed. The server does not itself abort the handler when the deadline
- * elapses (the client enforces its own deadline); a handler can read this
- * and bound its own work against it. */
+ * grpc-timeout header in seconds, or null. The server does not enforce it. */
 ZEND_METHOD(TrueAsync_HttpRequest, getGrpcTimeout)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);

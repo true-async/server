@@ -456,14 +456,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
             body_cap = HTTP2_MAX_BODY_SIZE;
         }
 
-        /* Cap the LIVE (queued, not-yet-drained) bytes, not the cumulative
-         * total. body_bytes_consumed is monotonic, so the old
-         * consumed+queued check RST'd long client-streaming / bidi streams
-         * once their *total* passed max_body_size — even when the handler
-         * drained every chunk (issue #4 §4.3). A streaming body is
-         * legitimately unbounded in total; max_body_size now bounds only the
-         * in-flight buffer (backpressure), matching readBody()/readMessage()
-         * consumers that keep up with the peer. */
+        /* cap the LIVE (queued) bytes, not the cumulative total — a
+         * streaming body is legitimately unbounded in total */
         if (req->body_bytes_queued + len > body_cap) {
             return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
         }
@@ -548,11 +542,8 @@ static void finalize_request_body(http2_stream_t *stream)
         return;
     }
 
-    /* Streaming mode (issue #26): no smart_str to finalize — close the
-     * queue so a parked readBody()/readMessage() consumer sees EOF, and
-     * fire body_event too: a handler suspended in awaitBody() (dispatched
-     * at headers, END_STREAM not yet seen) waits on THAT event, not the
-     * queue's data event. Mirrors the H1 parser's streaming-mode fire. */
+    /* Streaming: close the queue (parked consumer sees EOF) and fire
+     * body_event — awaitBody() waits on that, not the queue's data event. */
     if (req->body_streaming) {
         http_body_stream_close(req);
         req->complete = true;
@@ -631,12 +622,10 @@ static int cb_on_frame_recv(nghttp2_session *ng,
              *   CL == 0 (chunked) or CL >= AUTO → stream immediately
              *   SMALL <= CL < AUTO → buffer + install upgrade hook
              *   CL <  SMALL → buffer, never stream. */
+            /* grpc-web-text stays buffered: readMessage() decodes the
+             * assembled body */
             if (session->conn != NULL && session->conn->view != NULL
                 && session->conn->view->body_streaming_enabled
-                /* grpc-web-text is buffered by protocol nature:
-                 * readMessage() base64-decodes the ASSEMBLED body; a
-                 * streamed queue would leave req->body NULL and silently
-                 * lose the call. */
                 && !grpc_request_is_grpc_web_text(stream->request)) {
                 http_request_t *r = stream->request;
 
@@ -1494,12 +1483,7 @@ bool http2_session_want_write(const http2_session_t *session)
  * Response submission
  * ------------------------------------------------------------------------- */
 
-/* Extract response trailers (name => value zend_string map) from the PHP
- * HttpResponse and submit them via nghttp2_submit_trailer. Shared by the
- * buffered (unary) commit — which submits eagerly before its drain — and
- * the streaming path, which submits lazily at true EOF (h2_dp_mark_eof)
- * once every queued DATA chunk has drained. No-op when the response has no
- * trailers. Canonical gRPC consumer: grpc-status / grpc-message. */
+/* Submit the response trailer map via nghttp2_submit_trailer. No-op when empty. */
 void http2_session_submit_response_trailers(http2_session_t *session,
                                             const uint32_t stream_id,
                                             zend_object *response_obj)
@@ -1543,14 +1527,9 @@ void http2_session_submit_response_trailers(http2_session_t *session,
     if (heap != NULL) { efree(heap); }
 }
 
-/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending) on the
- * provider's data_flags.
- *
- * Streaming responses submit their trailers HERE — at true EOF, inside
- * nghttp2's send loop, after every queued DATA chunk has drained.
- * Submitting earlier (while data is still queued) makes nghttp2 drop the
- * pending DATA. The buffered/unary path submits eagerly in its commit, so
- * it is excluded via the chunk_queue check; run at most once per stream. */
+/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending). Streaming
+ * trailers submit HERE, at true EOF — submitting while DATA is still queued
+ * makes nghttp2 drop the pending DATA. */
 static inline void h2_dp_mark_eof(http2_stream_t *stream,
                                   uint32_t *data_flags)
 {

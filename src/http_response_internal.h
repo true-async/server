@@ -59,9 +59,8 @@ typedef struct {
     bool             streaming;         /* send() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — send() now throws, sse* re-entry is allowed */
 
-    /* gRPC delivery mode (grpc_mode_t), stamped by grpc_call_init_response
-     * at dispatch. writeMessage / grpc_call_finish read it to pick the
-     * per-frame transform (grpc-web-text base64). 0 = not a gRPC call. */
+    /* grpc_mode_t stamped at dispatch; picks the per-frame transform.
+     * 0 = not a gRPC call. */
     uint8_t          grpc_mode;
 
     /* Compression module state (issue #8). Opaque ptr — owned by the

@@ -259,10 +259,8 @@ bool reactor_pool_exec(reactor_pool_t *rp, const int idx, const reactor_exec_fn 
         return false;
     }
 
-    /* The envelope is copied into the ring by value, so `done` cannot be an
-     * embedded atomic — the reactor would ack the ring's copy. Keep the atomic
-     * on our stack and hand the reactor a pointer to it; we block on it below,
-     * so the frame outlives the reactor's store. */
+    /* `done` can't ride the ring by value — the reactor would ack the copy.
+     * Stack atomic + pointer; we block below, so the frame outlives the store. */
     zend_atomic_int done;
     ZEND_ATOMIC_INT_INIT(&done, 0);
 
