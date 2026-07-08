@@ -532,7 +532,13 @@ jobs:
         working-directory: http-server
         run: |
           ulimit -c unlimited
+          # opcache.protect_memory=1 (a run-tests default) is process-global
+          # mprotect toggled outside the compile lock; the threaded worker pool
+          # shares one address space so it races across workers and SIGBUS on
+          # SHM writes. Off here — production defaults it off and real
+          # compilation is serialized by the SHM lock.
           /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            -d opcache.protect_memory=0 \
             -P -q -j"$(nproc)" \
             -g FAIL,BORK,LEAK,XLEAK \
             --no-progress \

@@ -41,7 +41,7 @@
  * static-build codegen (genif.sh) can discover it; see the comment there. */
 #include "php_true_async_server.h"
 
-#define PHP_HTTP_SERVER_VERSION "0.9.2"
+#define PHP_HTTP_SERVER_VERSION "0.9.3"
 
 /*
  * ==========================================================================

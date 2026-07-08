@@ -77,6 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivery. H3 response-trailer capture/submit is now generic — any streaming
   response with a trailer map is delivered, not just gRPC (parity with H2).
 
+## [0.9.3] - 2026-07-07
+
+### Fixed
+- **Clean pool shutdown no longer leaks or crashes (#93).** On `Async\graceful_shutdown()` the pool parent now disposes the per-worker completion futures it owns from `submit_internal()`, so their cross-thread wakeup triggers no longer linger armed on the parent reactor (loop-alive assert on debug / leaked libuv handle on release). Also fixes a use-after-free from double-disposing the parent's `all_done` wait event (the waker already disposes it) — a hard crash on macOS ARM64 release. Requires php-async ≥ 0.7.9 for the race-safe `remote_future_dispose`. New tests: `055`–`057`.
+
+### CI
+- Disable `opcache.protect_memory` in the phpt suite — its process-global `mprotect` races across the threaded worker pool (false SIGBUS); it defaults off in production and real compilation is serialized by the SHM lock.
+- Collect and upload symbolicated crash backtraces on test failure (macOS DiagnosticReports).
+
 ## [0.9.2] - 2026-07-03
 
 ### Added
