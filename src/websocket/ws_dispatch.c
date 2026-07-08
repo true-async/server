@@ -82,6 +82,17 @@ typedef struct {
     char                       *buf;
 } ws_pending_write_t;
 
+/* Destroy a request the reject path owns, first severing the h1 parser's
+ * borrow (parser->request) so a later read tick can't read it freed via
+ * http_parser_is_complete. Mirrors the h1 dispatch spawn-fail path. */
+static void ws_reject_destroy_request(http_connection_t *conn, http_request_t *req)
+{
+    if (conn->parser != NULL) {
+        http_parser_clear_request(conn->parser);
+    }
+    http_request_destroy(req);
+}
+
 bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
 {
     /* Cheapest probe first — no Upgrade header → not our concern. */
@@ -100,7 +111,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
     if (handler == NULL) {
         zend_string *resp = build_error_response(426,
             "Sec-WebSocket-Version: 13\r\n");
-        if (resp == NULL) { conn->keep_alive = false; http_request_destroy(req); return true; }
+        if (resp == NULL) { conn->keep_alive = false; ws_reject_destroy_request(conn, req); return true; }
         char *buf = emalloc(ZSTR_LEN(resp));
         memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
         size_t len = ZSTR_LEN(resp);
@@ -110,7 +121,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         }
 
         /* Reject path owns req (no HttpRequest object wraps it here). */
-        http_request_destroy(req);
+        ws_reject_destroy_request(conn, req);
         return true;
     }
 
@@ -125,7 +136,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
             default:                              status = 400; extra = NULL; break;
         }
         zend_string *resp = build_error_response(status, extra);
-        if (resp == NULL) { conn->keep_alive = false; http_request_destroy(req); return true; }
+        if (resp == NULL) { conn->keep_alive = false; ws_reject_destroy_request(conn, req); return true; }
         char *buf = emalloc(ZSTR_LEN(resp));
         memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
         size_t len = ZSTR_LEN(resp);
@@ -135,7 +146,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         }
 
         /* Reject path owns req (no HttpRequest object wraps it here). */
-        http_request_destroy(req);
+        ws_reject_destroy_request(conn, req);
         return true;
     }
 
@@ -146,14 +157,14 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         "sec-websocket-key", sizeof("sec-websocket-key") - 1);
     if (UNEXPECTED(key_zv == NULL || Z_TYPE_P(key_zv) != IS_STRING)) {
         conn->keep_alive = false;
-        http_request_destroy(req);
+        ws_reject_destroy_request(conn, req);
         return true;
     }
     char accept_value[WS_ACCEPT_LEN];
     if (ws_handshake_compute_accept(Z_STRVAL_P(key_zv), Z_STRLEN_P(key_zv),
                                     accept_value) != 0) {
         conn->keep_alive = false;
-        http_request_destroy(req);
+        ws_reject_destroy_request(conn, req);
         return true;
     }
 
@@ -198,6 +209,10 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         zval_ptr_dtor(&ctx->upgrade_zv);
         efree(ctx);
         conn->keep_alive = false;
+        /* req was freed with request_zv; sever the parser's borrow. */
+        if (conn->parser != NULL) {
+            http_parser_clear_request(conn->parser);
+        }
         return true;
     }
 
@@ -423,6 +438,11 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         w->session = NULL;
     }
 
+    /* Capture w->committed before the dtor below: releasing websocket_zv may
+     * drop w's last ref and free it, so reading w->committed at teardown time
+     * (further down) would be a use-after-free. */
+    const bool w_committed = (w != NULL) && w->committed;
+
     zval_ptr_dtor(&ctx->request_zv);
     zval_ptr_dtor(&ctx->websocket_zv);
     zval_ptr_dtor(&ctx->upgrade_zv);
@@ -430,6 +450,14 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     conn->keep_alive = false;
     conn->current_request = NULL;
+
+    /* request_zv's dtor above may have freed the http_request the h1 parser
+     * still borrows (parser->request). Sever it exactly as the h1 dispatch
+     * path does (http_connection.c) — otherwise a later read tick reads a
+     * freed request via http_parser_is_complete. */
+    if (conn->parser != NULL) {
+        http_parser_clear_request(conn->parser);
+    }
 
     ZEND_ASSERT(conn->handler_refcount > 0);
     conn->handler_refcount--;
@@ -444,7 +472,7 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * NOT for the reject / never-committed path: there an async 4xx write
      * is in flight and its completion callback (ws_pending_write_complete_cb)
      * owns teardown — destroying here would free conn under that write. */
-    if (w != NULL && w->committed) {
+    if (w_committed) {
         if (conn->handler_refcount == 0) {
             http_connection_destroy(conn);
         } else {
