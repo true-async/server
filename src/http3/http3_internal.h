@@ -195,6 +195,13 @@ void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk);
 int  h3_stream_append_chunk(void *ctx, zend_string *chunk);
 void h3_stream_mark_ended(void *ctx);
 
+/* Per-worker global memory accounting for HTTP/3 static delivery
+ * (http3_static_response.c). append_chunk credits queued bytes via _alloc
+ * when the stream tracks static bytes; the ACK path and teardown debit them.
+ * Bounds total static read-ahead across concurrent streams (mirrors H2). */
+void h3_static_account_alloc(size_t n);
+void h3_static_account_debit(size_t n);
+
 /* Static-file body delivery for HTTP/3. Wired into h3_stream_ops via
  * the .send_static_response slot. See http3_static_response.c for the
  * lifecycle contract. */

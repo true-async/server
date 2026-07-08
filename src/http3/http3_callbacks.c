@@ -275,7 +275,11 @@ static int h3_begin_headers_cb(nghttp3_conn *conn, int64_t stream_id,
      * (it does not fire stream_close on remaining streams). */
     if (c != NULL) {
         s->conn = c;
+        s->list_prev = NULL;
         s->list_next = c->streams_head;
+        if (c->streams_head != NULL) {
+            c->streams_head->list_prev = s;
+        }
         c->streams_head = s;
     }
 
@@ -1194,7 +1198,15 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
         h3_chunk_queue_init(s);
     }
 
+    const size_t chunk_len = ZSTR_LEN(chunk);
     h3_chunk_queue_push(s, chunk);
+
+    /* Static delivery: credit this chunk to the per-worker in-flight cap.
+     * The ACK path debits it; teardown reconciles any leftover. */
+    if (s->tracks_static_bytes) {
+        s->static_inflight += chunk_len;
+        h3_static_account_alloc(chunk_len);
+    }
 
     /* Telemetry — match the H1/H2 vantage so operators see one
      * unified streaming-load picture across protocols. */
@@ -1597,6 +1609,11 @@ static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
         zend_string_release(head);
         s->chunk_queue[s->chunk_queue_head] = NULL;
         s->chunk_queue_head++;
+
+        if (s->tracks_static_bytes) {
+            s->static_inflight -= (hlen <= s->static_inflight) ? hlen : s->static_inflight;
+            h3_static_account_debit(hlen);
+        }
     }
 
     return 0;
@@ -1935,7 +1952,11 @@ static int http3_hq_recv_stream_data(http3_connection_t *c, ngtcp2_conn *qconn,
 
         (void)ngtcp2_conn_set_stream_user_data(qconn, stream_id, s);
         s->conn         = c;
+        s->list_prev    = NULL;
         s->list_next    = c->streams_head;
+        if (c->streams_head != NULL) {
+            c->streams_head->list_prev = s;
+        }
         c->streams_head = s;
     }
 
@@ -2189,13 +2210,10 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
     return 0;
 }
 
-static int stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
-                           uint64_t final_size, uint64_t app_error_code,
-                           void *user_data, void *stream_user_data)
+/* RESET_STREAM and STOP_SENDING both mean the peer will send no more request
+ * data on this stream — shut the read side down in nghttp3 either way. */
+static int h3_shutdown_stream_read(http3_connection_t *c, int64_t stream_id)
 {
-    (void)conn; (void)final_size; (void)app_error_code; (void)stream_user_data;
-    http3_connection_t *const c = (http3_connection_t *)user_data;
-
     if (c == NULL || c->nghttp3_conn == NULL) {
         return 0;
     }
@@ -2208,23 +2226,20 @@ static int stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
     return 0;
 }
 
+static int stream_reset_cb(ngtcp2_conn *conn, int64_t stream_id,
+                           uint64_t final_size, uint64_t app_error_code,
+                           void *user_data, void *stream_user_data)
+{
+    (void)conn; (void)final_size; (void)app_error_code; (void)stream_user_data;
+    return h3_shutdown_stream_read((http3_connection_t *)user_data, stream_id);
+}
+
 static int stream_stop_sending_cb(ngtcp2_conn *conn, int64_t stream_id,
                                   uint64_t app_error_code,
                                   void *user_data, void *stream_user_data)
 {
     (void)conn; (void)app_error_code; (void)stream_user_data;
-    http3_connection_t *const c = (http3_connection_t *)user_data;
-
-    if (c == NULL || c->nghttp3_conn == NULL) {
-        return 0;
-    }
-
-    if (nghttp3_conn_shutdown_stream_read(
-            (nghttp3_conn *)c->nghttp3_conn, stream_id) != 0) {
-        return NGTCP2_ERR_CALLBACK_FAILURE;
-    }
-
-    return 0;
+    return h3_shutdown_stream_read((http3_connection_t *)user_data, stream_id);
 }
 
 static int extend_max_remote_streams_bidi_cb(ngtcp2_conn *conn,

@@ -160,6 +160,15 @@ int http3_listener_local_port(const http3_listener_t *listener);
 void http3_listener_destroy(http3_listener_t *listener);
 
 struct sockaddr;
+struct sockaddr_storage;
+
+/* Copy the listener's cached fabricated local sockaddr for the given peer
+ * family into *out (see http3_build_listener_local). Read-only after spawn. */
+void http3_listener_local_sockaddr(const http3_listener_t *listener,
+                                   int peer_family,
+                                   struct sockaddr_storage *out,
+                                   socklen_t *out_len);
+
 /* Synchronous best-effort UDP send. On Linux (raw-fd path) issues one
  * sendmsg(MSG_DONTWAIT). On other platforms (incl. Windows) falls back
  * to the libuv udp_try_send / udp_sendto pair (the legacy code path);

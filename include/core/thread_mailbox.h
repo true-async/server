@@ -66,4 +66,26 @@ void thread_mailbox_keepalive(thread_mailbox_t *mb, bool enable);
 /* Approximate number of queued items. */
 size_t thread_mailbox_count(const thread_mailbox_t *mb);
 
+/* ---------------------------------------------------------------------------
+ * reactor_cmd_t mailbox — same wakeup/backpressure contract as the void*
+ * mailbox above, but the command POD travels through the ring by value (no
+ * per-message malloc on the hot worker->reactor path). Used by reactor_pool;
+ * the void* mailbox stays for the opaque-pointer consumers (WebSocket, etc.).
+ * ------------------------------------------------------------------------- */
+
+typedef struct reactor_cmd_s        reactor_cmd_t;   /* core/reactor_cmd.h */
+typedef struct thread_cmd_mailbox_s thread_cmd_mailbox_t;
+
+/* Drain callback: a batch of 1..batch commands, on the consumer's reactor
+ * thread. The array is consumer-private scratch, valid only for the call. */
+typedef void (*thread_cmd_mailbox_drain_fn)(reactor_cmd_t *items, size_t count, void *arg);
+
+thread_cmd_mailbox_t *thread_cmd_mailbox_create(size_t capacity, size_t batch,
+                                                thread_cmd_mailbox_drain_fn on_drain, void *arg);
+void thread_cmd_mailbox_free(thread_cmd_mailbox_t *mb);
+/* Producer side — any thread. Copies *cmd in; false if full. */
+bool thread_cmd_mailbox_post(thread_cmd_mailbox_t *mb, const reactor_cmd_t *cmd);
+void thread_cmd_mailbox_keepalive(thread_cmd_mailbox_t *mb, bool enable);
+size_t thread_cmd_mailbox_count(const thread_cmd_mailbox_t *mb);
+
 #endif /* THREAD_MAILBOX_H */

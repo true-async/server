@@ -97,6 +97,15 @@ struct _http3_listener_s {
     int                        port;
     bool                       closed;
 
+    /* Fabricated local sockaddr for the writev_stream path, cached per peer
+     * family at spawn since (host, port) never change afterward — the drain
+     * path copies the matching one instead of re-running inet_pton/htons on
+     * every packet. */
+    struct sockaddr_storage    local_v4;
+    socklen_t                  local_v4_len;
+    struct sockaddr_storage    local_v6;
+    socklen_t                  local_v6_len;
+
     /* DCID → http3_connection_t* routing table. Every conn appears under
      * one or two keys (server SCID + client's original DCID) so both
      * retransmitted Initials and post-handshake short-header packets
@@ -1351,6 +1360,52 @@ HashTable *http3_listener_conn_map(http3_listener_t *l)
  * (the symptom: every reply is an Initial-with-ACK, no CRYPTO). */
 extern int ngtcp2_crypto_ossl_init(void);
 
+/* Fabricate the listener's local sockaddr for a given peer family from the
+ * bind config. See http3_build_listener_local for the rationale; this is the
+ * one-time computation whose result the listener caches. */
+static void http3_listener_compute_local(const char *host, int port,
+                                         int peer_family,
+                                         struct sockaddr_storage *out,
+                                         socklen_t *out_len)
+{
+    memset(out, 0, sizeof(*out));
+
+    if (host == NULL) host = (peer_family == AF_INET6) ? "::" : "0.0.0.0";
+
+    if (peer_family == AF_INET6) {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
+        s6->sin6_family = AF_INET6;
+        s6->sin6_port   = htons((uint16_t)port);
+
+        if (inet_pton(AF_INET6, host, &s6->sin6_addr) != 1) {
+            inet_pton(AF_INET6, "::1", &s6->sin6_addr);
+        }
+        *out_len = sizeof(*s6);
+    } else {
+        struct sockaddr_in *s4 = (struct sockaddr_in *)out;
+        s4->sin_family = AF_INET;
+        s4->sin_port   = htons((uint16_t)port);
+
+        if (inet_pton(AF_INET, host, &s4->sin_addr) != 1) {
+            s4->sin_addr.s_addr = htonl(INADDR_ANY);
+        }
+        *out_len = sizeof(*s4);
+    }
+}
+
+void http3_listener_local_sockaddr(const http3_listener_t *l, int peer_family,
+                                   struct sockaddr_storage *out,
+                                   socklen_t *out_len)
+{
+    if (peer_family == AF_INET6) {
+        memcpy(out, &l->local_v6, sizeof(*out));
+        *out_len = l->local_v6_len;
+    } else {
+        memcpy(out, &l->local_v4, sizeof(*out));
+        *out_len = l->local_v4_len;
+    }
+}
+
 http3_listener_t *http3_listener_spawn(const char *host, int port,
                                        void *ssl_ctx, void *server_obj,
                                        const http3_reactor_ctx_t *reactor_ctx)
@@ -1364,6 +1419,10 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     listener->fd          = -1;
     listener->host        = estrdup(host);
     listener->port        = port;
+    http3_listener_compute_local(listener->host, port, AF_INET,
+                                 &listener->local_v4, &listener->local_v4_len);
+    http3_listener_compute_local(listener->host, port, AF_INET6,
+                                 &listener->local_v6, &listener->local_v6_len);
     listener->ssl_ctx     = ssl_ctx;
     listener->server_obj  = server_obj;
     listener->reactor_ctx = reactor_ctx;

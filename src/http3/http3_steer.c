@@ -30,27 +30,30 @@ static bool    g_steer_ready  = false;
 static bool    g_steer_active = false;
 
 /* One AES-128-ECB block. Used as a PRF: the input is the CID nonce, the first
- * output byte is the keystream that masks the id. Cold path only (CID mint and
- * conn_map misses) — the per-call EVP context is dwarfed by the stateless-reset
- * HMAC the miss path already pays, and pairs alloc/free so it is leak-clean. */
+ * output byte is the keystream that masks the id. The cipher context is kept
+ * thread-local and reset per call instead of new/free'd every time — each
+ * reactor thread reuses its own; the handful of contexts are reclaimed at
+ * process exit. */
 static bool http3_steer_block(const uint8_t in[16], uint8_t out[16])
 {
-    EVP_CIPHER_CTX *const ctx = EVP_CIPHER_CTX_new();
+    static __thread EVP_CIPHER_CTX *ctx = NULL;
 
     if (ctx == NULL) {
-        return false;
+        ctx = EVP_CIPHER_CTX_new();
+
+        if (ctx == NULL) {
+            return false;
+        }
+    } else {
+        EVP_CIPHER_CTX_reset(ctx);
     }
 
     int outl = 0;
-    const bool ok =
-        EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, g_steer_key, NULL) == 1
+
+    return EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, g_steer_key, NULL) == 1
         && EVP_CIPHER_CTX_set_padding(ctx, 0) == 1
         && EVP_EncryptUpdate(ctx, out, &outl, in, 16) == 1
         && outl == 16;
-
-    EVP_CIPHER_CTX_free(ctx);
-
-    return ok;
 }
 
 /* Keystream byte for a 7-byte nonce: AES(key, nonce || zero-pad)[0]. */

@@ -141,39 +141,14 @@ void http3_debug_logger(void *user_data, const char *fmt, ...)
  * The proper plumbing for this is `zend_async_udp_sockname`, which is
  * not yet available; until it lands we fabricate the sockaddr from the
  * bind config so at least it is stable across calls. peer_family lets us produce v4 / v6 to match
- * the inbound datagram. Returns 0 on success. */
+ * the inbound datagram. The result is precomputed once per family at listener
+ * spawn; this just copies the cached value. Returns 0 on success. */
 int http3_build_listener_local(const http3_listener_t *l,
                                int peer_family,
                                struct sockaddr_storage *out,
                                socklen_t *out_len)
 {
-    memset(out, 0, sizeof(*out));
-    const char *host = http3_listener_host(l);
-    const int port = http3_listener_port(l);
-
-    if (host == NULL) host = (peer_family == AF_INET6) ? "::" : "0.0.0.0";
-
-    if (peer_family == AF_INET6) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)out;
-        s6->sin6_family = AF_INET6;
-        s6->sin6_port   = htons((uint16_t)port);
-
-        if (inet_pton(AF_INET6, host, &s6->sin6_addr) != 1) {
-            /* Listener bound to v4-only host but peer is v6 — use ::1. */
-            inet_pton(AF_INET6, "::1", &s6->sin6_addr);
-        }
-        *out_len = sizeof(*s6);
-    } else {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)out;
-        s4->sin_family = AF_INET;
-        s4->sin_port   = htons((uint16_t)port);
-
-        if (inet_pton(AF_INET, host, &s4->sin_addr) != 1) {
-            s4->sin_addr.s_addr = htonl(INADDR_ANY);
-        }
-        *out_len = sizeof(*s4);
-    }
-
+    http3_listener_local_sockaddr(l, peer_family, out, out_len);
     return 0;
 }
 

@@ -121,6 +121,15 @@ struct _http3_stream_s {
     size_t            chunk_read_offset;    /* bytes already handed from queue[chunk_read_idx] */
     size_t            chunk_ack_credit;     /* leftover acked bytes not yet applied to head release */
 
+    /* Static-file delivery global memory cap (http3_static_response.c).
+     * tracks_static_bytes latches on only for the static pump's stream; while
+     * set, each queued chunk is added to the per-worker in-flight counter on
+     * push and debited on ACK. static_inflight is this stream's running share,
+     * debited in one shot at teardown to reconcile any chunk freed off the ACK
+     * path (submit failure, connection close). */
+    bool              tracks_static_bytes;
+    size_t            static_inflight;
+
     /* Set by h3_stream_ops.mark_ended (handler called $res->end() on a
      * streaming response). Tells the data_reader to flag EOF when the
      * queue empties instead of NGHTTP3_ERR_WOULDBLOCK. */
@@ -195,8 +204,10 @@ struct _http3_stream_s {
      * stream nghttp3_conn_del would otherwise orphan (no stream_close
      * callback fires for streams still alive when the conn is torn
      * down — without the walk, each such stream leaks its request +
-     * headers + zend_strings). */
+     * headers + zend_strings). Doubly linked for O(1) unlink in release().
+     * list_prev is live-only; the pool freelist reuses list_next alone. */
     http3_stream_t   *list_next;
+    http3_stream_t   *list_prev;
 
     /* hq-interop only (HTTP/0.9-over-QUIC). Request-line accumulator,
      * lazily allocated on the first stream byte; freed in release. h3

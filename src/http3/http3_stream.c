@@ -22,6 +22,10 @@
 #include "http_body_stream.h"   /* sever body_h3_conn + wake a parked consumer */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
 
+/* Static-delivery memory accounting (http3_static_response.c). Declared here
+ * rather than via the heavy http3_internal.h — teardown only needs the debit. */
+extern void h3_static_account_debit(size_t n);
+
 
 static void http3_stream_release_via_request(http_request_t *req);
 
@@ -159,6 +163,13 @@ void http3_stream_release(http3_stream_t *s)
         s->chunk_queue = NULL;
     }
 
+    /* Static delivery: one-shot reconcile of any in-flight bytes not debited on
+     * the ACK path (chunks freed above, or on a submit-failure branch). */
+    if (s->tracks_static_bytes && s->static_inflight > 0) {
+        h3_static_account_debit(s->static_inflight);
+        s->static_inflight = 0;
+    }
+
     /* Reverse-path credit: the stream is going away — unblock a parked
      * producer, then drop the reactor's ref. */
     if (s->wire_credit != NULL) {
@@ -208,13 +219,14 @@ void http3_stream_release(http3_stream_t *s)
 
     /* Unlink from the owning connection's live-stream list. */
     if (s->conn != NULL) {
-        http3_stream_t **p = &s->conn->streams_head;
-        while (*p != NULL && *p != s) {
-            p = &(*p)->list_next;
+        if (s->list_prev != NULL) {
+            s->list_prev->list_next = s->list_next;
+        } else {
+            s->conn->streams_head = s->list_next;
         }
 
-        if (*p == s) {
-            *p = s->list_next;
+        if (s->list_next != NULL) {
+            s->list_next->list_prev = s->list_prev;
         }
 
         s->conn = NULL;

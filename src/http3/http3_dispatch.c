@@ -195,11 +195,23 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
     s->refcount++;   /* worker-borrow ref; dropped by the consumed apply */
 
     if (UNEXPECTED(!worker_inbox_post(inbox, s->request))) {
-        /* Backpressure: the request was not handed off. Undo so the normal
+        /* Hard backpressure: the worker inbox is at capacity and the request
+         * was not handed off. Undo the dispatch bookkeeping so the normal
          * teardown reclaims it (s->dispatched=false => reactor teardown frees
-         * the fields). */
+         * the fields). Then RESET the stream with H3_REQUEST_REJECTED so the
+         * client learns immediately the request was refused WITHOUT processing
+         * — safe to retry elsewhere — instead of hanging until its QUIC PTO. */
         s->refcount--;
         s->dispatched = false;
+
+        if (c->ngtcp2_conn != NULL) {
+            (void)ngtcp2_conn_shutdown_stream_write(
+                (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
+                NGHTTP3_H3_REQUEST_REJECTED);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
+        }
+
         return;
     }
 
