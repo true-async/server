@@ -46,7 +46,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **Compression** | gzip (zlib-ng / zlib), Brotli, zstd — response encoding + inbound decode across H1/H2/H3. Server-side preference `zstd > br > gzip`; per-codec level setters. See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
 | ✅ Ready | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure — 246/246 Autobahn conformance |
 | ✅ Ready | **SSE (Server-Sent Events)** | `text/event-stream` framing (WHATWG §9.2) over H1/H2/H3 via `HttpResponse::sseStart/sseEvent/sseComment/sseRetry` |
-| ✅ Ready | **gRPC** | Over HTTP/2 **and** HTTP/3 via `addGrpcHandler()` — unary + all streaming shapes incl. full-duplex bidi (`readMessage`/`writeMessage`), `grpc-status`/`grpc-message` trailers + Trailers-Only, `grpc-timeout`, per-message gzip, grpc-web (binary, in-body `0x80` trailer frame) |
+| ✅ Ready | **gRPC** | Over HTTP/2 **and** HTTP/3 via `addGrpcHandler()` — unary + all streaming shapes incl. full-duplex bidi (`readMessage`/`writeMessage`), `grpc-status`/`grpc-message` trailers + Trailers-Only, `grpc-timeout`, per-message gzip, grpc-web + grpc-web-text (in-body `0x80` trailer frame; per-frame base64 for web-text), works under the reactor pool |
 
 ### Development Progress
 
@@ -306,10 +306,10 @@ $server->addGrpcHandler(function ($request, $response) {
 
 Unary and all three streaming shapes use this one API; `grpc-status` /
 `grpc-message` ride real HTTP trailers (or the in-body `0x80` frame for
-grpc-web), uncaught exceptions map to `13 INTERNAL`, inbound
-`grpc-encoding: gzip` messages inflate transparently, and
-`writeMessage($msg, compress: true)` gzips replies. The client's deadline is
-exposed via `$request->getGrpcTimeout()`.
+grpc-web, base64-encoded per frame for grpc-web-text), uncaught exceptions
+map to `13 INTERNAL`, inbound `grpc-encoding: gzip` messages inflate
+transparently, and `writeMessage($msg, compress: true)` gzips replies. The
+client's deadline is exposed via `$request->getGrpcTimeout()`.
 
 Working examples live under [`examples/`](examples/):
 [`minimal-server.php`](examples/minimal-server.php),

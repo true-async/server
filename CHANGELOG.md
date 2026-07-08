@@ -68,6 +68,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffered body bytes — now `h3_recv_data_cb` returns the credit as it
   consumes them.
 
+- **Three latent use-after-frees found under ASAN** (masked by the Zend
+  arena in normal runs): the WebSocket dispose read `w->committed` after
+  the zval dtor could free `w`; `http_log_server_stop` awaited a write
+  request that its own completion callback frees (now drains by yielding
+  to the reactor and re-polling); the WebSocket reject / spawn-fail paths
+  freed a request the H1 parser still borrowed via `parser->request`.
+
+### Performance
+
+- **HTTP/3 reactor-pool hot paths** (reactor review follow-up): reactor
+  commands travel the mailbox by value (no malloc/free per message),
+  O(1) intrusive stream unlink, listener local sockaddr cached per peer
+  family, thread-local cipher context in CID steering, and a per-worker
+  memory budget for H3 static delivery (ported from H2). Hard
+  backpressure on a full worker inbox now RESETs the stream with
+  `H3_REQUEST_REJECTED` instead of silently dropping the request.
+
 ### Changed
 
 - **gRPC layering: call-lifecycle policy extracted out of the transports (#4).**
@@ -825,8 +842,31 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/true-async/server/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/true-async/server/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/true-async/server/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/true-async/server/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/true-async/server/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/true-async/server/compare/v0.7.3...v0.8.0
+[0.7.2]: https://github.com/true-async/server/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/true-async/server/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/true-async/server/compare/v0.6.7...v0.7.0
+[0.6.7]: https://github.com/true-async/server/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/true-async/server/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/true-async/server/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/true-async/server/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/true-async/server/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/true-async/server/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/true-async/server/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/true-async/server/compare/v0.5.3...v0.6.0
+[0.5.3]: https://github.com/true-async/server/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/true-async/server/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/true-async/server/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/true-async/server/compare/v0.4.2...v0.5.0
+[0.4.0]: https://github.com/true-async/server/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/true-async/server/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/true-async/server/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/true-async/server/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/true-async/server/compare/v0.1.5...v0.2.0
 [0.1.0]: https://github.com/true-async/server/releases/tag/v0.1.0
