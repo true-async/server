@@ -59,6 +59,10 @@ typedef struct {
     bool             streaming;         /* send() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — send() now throws, sse* re-entry is allowed */
 
+    /* grpc_mode_t stamped at dispatch; picks the per-frame transform.
+     * 0 = not a gRPC call. */
+    uint8_t          grpc_mode;
+
     /* Compression module state (issue #8). Opaque ptr — owned by the
      * compression TU; allocated by http_compression_attach at dispatch
      * and freed by http_compression_state_free at object dtor. */
@@ -105,6 +109,9 @@ void                                 http_response_replace_stream_ops(zend_objec
 
 void *http_response_get_compression_slot(zend_object *obj);
 void  http_response_set_compression_slot(zend_object *obj, void *p);
+
+void    http_response_set_grpc_mode(zend_object *obj, uint8_t mode);
+uint8_t http_response_get_grpc_mode(zend_object *obj);
 
 http_send_file_request_t *http_response_take_send_file(zend_object *obj);
 bool                       http_response_has_send_file(zend_object *obj);

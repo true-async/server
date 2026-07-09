@@ -46,7 +46,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **Compression** | gzip (zlib-ng / zlib), Brotli, zstd — response encoding + inbound decode across H1/H2/H3. Server-side preference `zstd > br > gzip`; per-codec level setters. See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
 | ✅ Ready | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure — 246/246 Autobahn conformance |
 | ✅ Ready | **SSE (Server-Sent Events)** | `text/event-stream` framing (WHATWG §9.2) over H1/H2/H3 via `HttpResponse::sseStart/sseEvent/sseComment/sseRetry` |
-| 📋 Planned | **gRPC** | Built on HTTP/2, unary and streaming RPC |
+| ✅ Ready | **gRPC** | Over HTTP/2 **and** HTTP/3 via `addGrpcHandler()` — unary + all streaming shapes incl. full-duplex bidi (`readMessage`/`writeMessage`), `grpc-status`/`grpc-message` trailers + Trailers-Only, `grpc-timeout`, per-message gzip, grpc-web + grpc-web-text (in-body `0x80` trailer frame; per-frame base64 for web-text), works under the reactor pool |
 
 ### Development Progress
 
@@ -57,7 +57,7 @@ HTTP/2     ████████████████████  100%
 HTTP/3     ████████████████████  100%
 WebSocket  ████████████████████  100%
 SSE        ████████████████████  100%
-gRPC       ░░░░░░░░░░░░░░░░░░░░    0%
+gRPC       ████████████████████  100%
 ```
 
 All ten ship-gates of the HTTP/3 plan (transport, TLS 1.3, request/response, streaming, lifecycle + drain, Alt-Svc, compliance smoke, fuzzing) are merged. Open items are post-ship performance follow-ups — `recvmmsg` inbound batching and Linux GSO outbound coalescing — that require upstream TrueAsync API extensions, plus optional ECN/pacing.
@@ -284,6 +284,32 @@ $server->addHttpHandler(function ($request, $response) {
 `sseEvent()` formats WHATWG §9.2 records (multiline `data` is split, single-line
 fields are CR/LF-validated); `sseComment('')` emits a `:` heartbeat to hold the
 connection open through proxy idle timeouts. The stream is never compressed.
+
+### gRPC
+
+Requests with an `application/grpc*` content-type route to the callable
+registered via `addGrpcHandler()` — over HTTP/2 and HTTP/3 alike, next to the
+regular HTTP handlers on the same listener:
+
+```php
+$server->addGrpcHandler(function ($request, $response) {
+    // Full-duplex: each readMessage() suspends until the next message
+    // arrives (returns null at end-of-stream), writeMessage() replies
+    // immediately — no need to wait for the request stream to finish.
+    while (($msg = $request->readMessage()) !== null) {
+        $response->writeMessage('echo:' . $msg);
+    }
+
+    $response->setTrailer('grpc-status', '0');   // implicit on clean return
+});
+```
+
+Unary and all three streaming shapes use this one API; `grpc-status` /
+`grpc-message` ride real HTTP trailers (or the in-body `0x80` frame for
+grpc-web, base64-encoded per frame for grpc-web-text), uncaught exceptions
+map to `13 INTERNAL`, inbound `grpc-encoding: gzip` messages inflate
+transparently, and `writeMessage($msg, compress: true)` gzips replies. The
+client's deadline is exposed via `$request->getGrpcTimeout()`.
 
 Working examples live under [`examples/`](examples/):
 [`minimal-server.php`](examples/minimal-server.php),

@@ -23,6 +23,7 @@
 #endif
 
 #include "core/thread_queue.h"
+#include "core/reactor_cmd.h"
 
 #if !defined(__cplusplus) || __cplusplus < 201103L
 # error "thread_queue.cc requires a C++11 compiler"
@@ -261,6 +262,73 @@ size_t thread_spsc_drain(thread_spsc_t *q, void **items, const size_t max)
 }
 
 size_t thread_spsc_count(const thread_spsc_t *q)
+{
+    return q->count.load(std::memory_order_acquire);
+}
+
+/* ------------------------------------------------------------------ */
+/* MPSC of reactor_cmd_t by value — moodycamel::ConcurrentQueue        */
+/* ------------------------------------------------------------------ */
+
+struct thread_cmd_mpsc_s {
+    moodycamel::ConcurrentQueue<reactor_cmd_t> q;
+    std::atomic<size_t>                        count;
+    size_t                                     capacity;
+
+    explicit thread_cmd_mpsc_s(const size_t cap) : q(cap), count(0), capacity(cap) {}
+
+    static void *operator new(const size_t sz) { return aligned_new(sz, alignof(thread_cmd_mpsc_s)); }
+    static void  operator delete(void *p) noexcept { aligned_delete(p); }
+};
+
+thread_cmd_mpsc_t *thread_cmd_mpsc_create(const size_t capacity)
+{
+    if (capacity == 0) {
+        return nullptr;
+    }
+
+    try {
+        return new thread_cmd_mpsc_s(capacity);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void thread_cmd_mpsc_free(thread_cmd_mpsc_t *q)
+{
+    delete q;
+}
+
+bool thread_cmd_mpsc_enqueue(thread_cmd_mpsc_t *q, const reactor_cmd_t *cmd)
+{
+    size_t prev;
+    if (!cap_reserve(q->count, q->capacity, prev)) {
+        return false;
+    }
+
+    if (!q->q.try_enqueue(*cmd)) {
+        q->count.fetch_sub(1, std::memory_order_release);
+        return false;
+    }
+
+    return true;
+}
+
+size_t thread_cmd_mpsc_drain(thread_cmd_mpsc_t *q, reactor_cmd_t *out, const size_t max)
+{
+    if (max == 0) {
+        return 0;
+    }
+
+    const size_t n = q->q.try_dequeue_bulk(out, max);
+    if (n != 0) {
+        q->count.fetch_sub(n, std::memory_order_acq_rel);
+    }
+
+    return n;
+}
+
+size_t thread_cmd_mpsc_count(const thread_cmd_mpsc_t *q)
 {
     return q->count.load(std::memory_order_acquire);
 }

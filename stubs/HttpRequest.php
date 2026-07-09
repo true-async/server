@@ -195,4 +195,29 @@ final class HttpRequest
      * @throws \Exception if the body stream errored (peer reset, size cap).
      */
     public function readBody(int $maxLen = 65536): ?string {}
+
+    /**
+     * Deframe and return the next gRPC message from the request body.
+     *
+     * Extracts one 5-byte-length-prefixed message and advances an internal
+     * cursor. Returns null once no complete message remains — call once for
+     * a unary RPC, loop for client-streaming. The returned bytes are the
+     * raw protobuf message; decode it in userland (ext/protobuf).
+     *
+     * @return string|null Next message, or null when none remains.
+     * @throws \Exception if a framed message exceeds the size limit.
+     */
+    public function readMessage(): ?string {}
+
+    /**
+     * The gRPC call deadline from the `grpc-timeout` header, in seconds.
+     *
+     * Returns the (fractional) number of seconds the client is willing to
+     * wait, or null when no `grpc-timeout` was sent. The server does not
+     * auto-abort the handler on it — the client enforces its own deadline —
+     * but a handler can honor it against its own operations.
+     *
+     * @return float|null Deadline in seconds, or null when absent.
+     */
+    public function getGrpcTimeout(): ?float {}
 }

@@ -284,6 +284,13 @@ int http2_session_submit_trailer(http2_session_t *session,
                                  const http2_header_view_t *trailers,
                                  size_t trailers_len);
 
+/* Extract the PHP HttpResponse's trailer map and submit it via
+ * http2_session_submit_trailer. No-op when the response has no trailers.
+ * Used by the buffered commit (eager) and the streaming EOF path (lazy). */
+void http2_session_submit_response_trailers(http2_session_t *session,
+                                            uint32_t stream_id,
+                                            zend_object *response_obj);
+
 /* Feed peer bytes into the nghttp2 state machine.
  *
  * @param data         Buffer of ciphertext-decrypted / plaintext bytes.

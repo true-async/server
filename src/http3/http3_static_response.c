@@ -72,6 +72,81 @@
 
 #define H3_STATIC_READ_CHUNK_BYTES (16u * 1024u)
 
+/* Per-worker static-delivery memory cap across concurrent streams.
+ * Formula and clamps mirror http2_static_response.c. */
+#define H3_STATIC_BUDGET_FLOOR      (4u * 1024u * 1024u)
+#define H3_STATIC_BUDGET_FALLBACK   (64u * 1024u * 1024u)  /* memory_limit = -1 */
+#define H3_STATIC_BUDGET_RESERVE_FRAC 8u                   /* hard top = 87.5% */
+#define H3_STATIC_THROTTLE_POLL_MS  2u                     /* pump re-check cadence */
+
+/* 0 = not yet initialised (h3_static_budget_init_once). */
+ZEND_TLS size_t h3_static_budget_bytes           = 0;
+ZEND_TLS size_t h3_static_global_bytes_in_flight = 0;
+ZEND_TLS size_t h3_static_global_high_water      = 0;
+
+static void h3_static_budget_init_once(void)
+{
+    if (h3_static_budget_bytes != 0) {
+        return;
+    }
+
+    const zend_long limit = PG(memory_limit);
+    size_t budget;
+
+    if (limit <= 0) {
+        budget = H3_STATIC_BUDGET_FALLBACK;
+    } else {
+        const size_t mem = (size_t)limit;
+        const size_t reserve = mem / H3_STATIC_BUDGET_RESERVE_FRAC;
+        const size_t hard_top = mem > reserve ? mem - reserve : mem;
+
+        budget = mem / 4u;
+        if (budget > hard_top) { budget = hard_top; }
+    }
+
+    if (budget < H3_STATIC_BUDGET_FLOOR) { budget = H3_STATIC_BUDGET_FLOOR; }
+
+    h3_static_budget_bytes = budget;
+}
+
+void h3_static_account_alloc(const size_t n)
+{
+    h3_static_global_bytes_in_flight += n;
+
+    if (h3_static_global_bytes_in_flight > h3_static_global_high_water) {
+        h3_static_global_high_water = h3_static_global_bytes_in_flight;
+    }
+}
+
+void h3_static_account_debit(const size_t n)
+{
+    /* Clamp: the one-shot teardown remainder can overlap chunks already
+     * debited on the ACK path if a release raced, so never underflow. */
+    h3_static_global_bytes_in_flight -=
+        (n <= h3_static_global_bytes_in_flight) ? n : h3_static_global_bytes_in_flight;
+}
+
+static bool h3_static_over_budget(void)
+{
+    return h3_static_global_bytes_in_flight >= h3_static_budget_bytes;
+}
+
+/* Suspend the pump on a one-shot timer so the reactor keeps draining/ACKing. */
+static void h3_static_throttle_sleep(zend_coroutine_t *co, const zend_ulong ms)
+{
+    zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    t->base.start(&t->base);
+    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    ZEND_ASYNC_WAKER_DESTROY(co);
+}
+
 typedef struct {
     http3_stream_t              *stream;
     http3_connection_t          *conn;
@@ -115,17 +190,30 @@ static void h3_static_finalize(h3_static_state_t *state)
  * backpressure inside append_chunk; bails on stream death. */
 static void h3_static_pump_entry(void)
 {
-    const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
     h3_static_state_t *state = (h3_static_state_t *)co->extended_data;
 
     if (state == NULL || state->stream == NULL || state->conn == NULL) {
         return;
     }
 
+    h3_static_budget_init_once();
+    state->stream->tracks_static_bytes = true;
+
     char *buf = emalloc(H3_STATIC_READ_CHUNK_BYTES);
 
     while (state->bytes_sent < state->body_length
            && !state->stream->peer_closed) {
+        /* over budget: pace this stream; queued bytes keep draining, so no deadlock */
+        while (h3_static_over_budget() && !state->stream->peer_closed) {
+            h3_static_throttle_sleep(co, H3_STATIC_THROTTLE_POLL_MS);
+
+            if (EG(exception) != NULL) {
+                zend_clear_exception();
+                break;
+            }
+        }
+
         const uint64_t remaining = state->body_length - state->bytes_sent;
         const size_t want = remaining < H3_STATIC_READ_CHUNK_BYTES
                                 ? (size_t)remaining

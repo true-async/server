@@ -14,6 +14,7 @@
 #include "Zend/zend_async_API.h"
 #include "core/thread_mailbox.h"
 #include "core/thread_queue.h"
+#include "core/reactor_cmd.h"
 
 /* The mailbox pointer lives in the trigger event's persistent extra area so the
  * drain callback can recover it from the event alone (see thread_mailbox_create). */
@@ -139,6 +140,124 @@ size_t thread_mailbox_count(const thread_mailbox_t *mb)
 }
 
 void thread_mailbox_keepalive(thread_mailbox_t *mb, const bool enable)
+{
+    if (enable) {
+        mb->trigger->base.start(&mb->trigger->base);
+    } else {
+        mb->trigger->base.stop(&mb->trigger->base);
+    }
+}
+
+/* reactor_cmd_t mailbox — mirrors the void* mailbox above, ring carries the
+ * POD by value. */
+
+struct thread_cmd_mailbox_s {
+    thread_cmd_mpsc_t          *queue;
+    zend_async_trigger_event_t *trigger;
+    thread_cmd_mailbox_drain_fn on_drain;
+    void                       *arg;
+    reactor_cmd_t              *batch_buf;
+    size_t                      batch;
+};
+
+static void cmd_mailbox_on_signal(zend_async_event_t *event, zend_async_event_callback_t *callback,
+                                  void *result, zend_object *exception)
+{
+    (void) callback;
+    (void) result;
+    (void) exception;
+
+    thread_cmd_mailbox_t *mb = *(thread_cmd_mailbox_t **) ((char *) event + event->extra_offset);
+
+    for (;;) {
+        const size_t n = thread_cmd_mpsc_drain(mb->queue, mb->batch_buf, mb->batch);
+        if (n == 0) {
+            break;
+        }
+
+        mb->on_drain(mb->batch_buf, n, mb->arg);
+    }
+}
+
+thread_cmd_mailbox_t *thread_cmd_mailbox_create(const size_t capacity, const size_t batch,
+                                                thread_cmd_mailbox_drain_fn on_drain, void *arg)
+{
+    if (capacity == 0 || batch == 0 || on_drain == NULL) {
+        return NULL;
+    }
+
+    thread_cmd_mailbox_t *mb = pecalloc(1, sizeof(*mb), 0);
+
+    mb->on_drain  = on_drain;
+    mb->arg       = arg;
+    mb->batch     = batch;
+    mb->batch_buf = pemalloc(batch * sizeof(reactor_cmd_t), 0);
+    mb->queue     = thread_cmd_mpsc_create(capacity);
+
+    if (mb->queue == NULL) {
+        goto fail;
+    }
+
+    mb->trigger = ZEND_ASYNC_NEW_TRIGGER_EVENT_EX(sizeof(thread_cmd_mailbox_t *));
+    if (mb->trigger == NULL) {
+        goto fail;
+    }
+
+    *(thread_cmd_mailbox_t **) ((char *) &mb->trigger->base + mb->trigger->base.extra_offset) = mb;
+
+    zend_async_event_callback_t *cb = ZEND_ASYNC_EVENT_CALLBACK(cmd_mailbox_on_signal);
+    mb->trigger->base.add_callback(&mb->trigger->base, cb);
+
+    return mb;
+
+fail:
+    if (mb->trigger != NULL) {
+        ZEND_ASYNC_EVENT_SET_CLOSED(&mb->trigger->base);
+        mb->trigger->base.dispose(&mb->trigger->base);
+    }
+
+    if (mb->queue != NULL) {
+        thread_cmd_mpsc_free(mb->queue);
+    }
+
+    pefree(mb->batch_buf, 0);
+    pefree(mb, 0);
+    return NULL;
+}
+
+void thread_cmd_mailbox_free(thread_cmd_mailbox_t *mb)
+{
+    if (mb == NULL) {
+        return;
+    }
+
+    if (mb->trigger != NULL) {
+        ZEND_ASYNC_EVENT_SET_CLOSED(&mb->trigger->base);
+        mb->trigger->base.dispose(&mb->trigger->base);
+    }
+
+    thread_cmd_mpsc_free(mb->queue);
+    pefree(mb->batch_buf, 0);
+    pefree(mb, 0);
+}
+
+bool thread_cmd_mailbox_post(thread_cmd_mailbox_t *mb, const reactor_cmd_t *cmd)
+{
+    if (UNEXPECTED(!thread_cmd_mpsc_enqueue(mb->queue, cmd))) {
+        return false;
+    }
+
+    mb->trigger->trigger(mb->trigger);
+
+    return true;
+}
+
+size_t thread_cmd_mailbox_count(const thread_cmd_mailbox_t *mb)
+{
+    return thread_cmd_mpsc_count(mb->queue);
+}
+
+void thread_cmd_mailbox_keepalive(thread_cmd_mailbox_t *mb, const bool enable)
 {
     if (enable) {
         mb->trigger->base.start(&mb->trigger->base);

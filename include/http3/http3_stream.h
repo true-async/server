@@ -121,10 +121,26 @@ struct _http3_stream_s {
     size_t            chunk_read_offset;    /* bytes already handed from queue[chunk_read_idx] */
     size_t            chunk_ack_credit;     /* leftover acked bytes not yet applied to head release */
 
+    /* static-file memory cap: charged on push, debited on ACK, reconciled
+     * at teardown (http3_static_response.c) */
+    bool              tracks_static_bytes;
+    size_t            static_inflight;
+
     /* Set by h3_stream_ops.mark_ended (handler called $res->end() on a
      * streaming response). Tells the data_reader to flag EOF when the
      * queue empties instead of NGHTTP3_ERR_WOULDBLOCK. */
     bool              streaming_ended;
+
+    bool              is_grpc;
+    bool              has_trailers;
+    bool              trailers_submitted;
+
+    /* Trailers captured in dispose (response_zv still alive), submitted by
+     * the data reader at true EOF. malloc'd nghttp3_nv[] pointing into
+     * trailer_bytes; freed in http3_stream_release. */
+    void             *trailer_nv;
+    size_t            trailer_count;
+    char             *trailer_bytes;
 
     /* Set by h3_stream_close_cb / h3_reset_stream_cb when nghttp3
      * tears down stream state on a peer RST. After this point any
@@ -132,6 +148,10 @@ struct _http3_stream_s {
      * and any further append_chunk must short-circuit so the handler
      * unwinds cleanly with HttpException(499). */
     bool              peer_closed;
+
+    /* worker's stream_credit_t*, adopted from the STREAM_HEADERS wire;
+     * NULL for local/buffered streams */
+    void             *wire_credit;
 
     /* Trigger event the handler awaits on under flow-control
      * backpressure. The data_reader fires it (lazily) when ngtcp2
@@ -167,8 +187,10 @@ struct _http3_stream_s {
      * stream nghttp3_conn_del would otherwise orphan (no stream_close
      * callback fires for streams still alive when the conn is torn
      * down — without the walk, each such stream leaks its request +
-     * headers + zend_strings). */
+     * headers + zend_strings). Doubly linked for O(1) unlink in release().
+     * list_prev is live-only; the pool freelist reuses list_next alone. */
     http3_stream_t   *list_next;
+    http3_stream_t   *list_prev;
 
     /* hq-interop only (HTTP/0.9-over-QUIC). Request-line accumulator,
      * lazily allocated on the first stream byte; freed in release. h3

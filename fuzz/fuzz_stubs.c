@@ -125,6 +125,22 @@ __attribute__((weak)) void h2_session_schedule_emit(struct http2_session_t *sess
     (void)session;
 }
 
+/* Real impl in http_response_server_api.c (not linked here); the caller
+ * treats NULL as "no trailers". */
+__attribute__((weak)) HashTable *http_response_get_trailers(zend_object *obj)
+{
+    (void)obj;
+    return NULL;
+}
+
+/* Real impl in src/grpc/grpc.c (not linked here); "not web-text" keeps the
+ * body-streaming gate inert. */
+__attribute__((weak)) bool grpc_request_is_grpc_web_text(const struct http_request_t *req)
+{
+    (void)req;
+    return false;
+}
+
 /* h2_static_account_debit lives in http2_static_response.c (not linked
  * into the fuzz harness). The inline release wrappers in
  * include/http2/http2_stream.h call it from drain paths in http2_session.c

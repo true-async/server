@@ -18,7 +18,15 @@
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
+#include "zend_exceptions.h"                 /* zend_clear_exception */
+#include "http_response_internal.h"          /* http_response_replace_stream_ops */
+#include "core/stream_credit.h"              /* per-stream flow-control credit */
+#include "grpc/grpc.h"                       /* grpc_classify */
+#include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
+
+#define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
+#define WORKER_CREDIT_POLL_MS      2
 
 #include <string.h>
 
@@ -52,6 +60,15 @@ typedef struct {
 
     bool                    skip_handler;  /* synthetic 404 already populated */
     bool                    is_head;       /* suppress the body on render */
+
+    bool                    is_grpc;
+
+    bool                    stream_started;
+    bool                    stream_ended;
+    bool                    stream_failed;  /* terminal wire becomes STREAM_ABORT */
+
+    stream_credit_t        *credit;         /* shared with the reactor */
+    uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
 /* Handler coroutine body: run the registered user handler with (request, response). */
@@ -68,11 +85,8 @@ static void worker_dispatch_entry(void)
     }
 
     HashTable *const handlers = http_server_get_protocol_handlers(ctx->server);
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
+    zend_fcall_t *const fcall =
+        http_protocol_pick_handler(handlers, ctx->is_grpc);
 
     if (fcall == NULL) {
         return;
@@ -123,6 +137,315 @@ static void worker_dispatch_entry(void)
     zval_ptr_dtor(&retval);
 }
 
+/* Flatten status + H2/H3-allowed headers of the response onto a wire. */
+static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp)
+{
+    int status = http_response_get_status(resp);
+
+    if (UNEXPECTED(status <= 0)) {
+        status = 200;
+    }
+
+    response_wire_set_status(rw, status);
+
+    HashTable *const headers = http_response_get_headers(resp);
+
+    if (headers == NULL) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *values;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
+        if (UNEXPECTED(name == NULL)) {
+            continue;
+        }
+
+        if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) {
+            continue;
+        }
+
+        if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
+            response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                     Z_STRVAL_P(values), Z_STRLEN_P(values));
+        } else if (Z_TYPE_P(values) == IS_ARRAY) {
+            zval *v;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
+                if (Z_TYPE_P(v) != IS_STRING) {
+                    continue;
+                }
+
+                response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                         Z_STRVAL_P(v), Z_STRLEN_P(v));
+            } ZEND_HASH_FOREACH_END();
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
+/* Flatten the response trailer map onto the wire. */
+static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
+{
+    HashTable *const trailers = http_response_get_trailers(resp);
+
+    if (trailers == NULL) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+        if (UNEXPECTED(name == NULL) || Z_TYPE_P(val) != IS_STRING) {
+            continue;
+        }
+
+        response_wire_add_trailer(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                  Z_STRVAL_P(val), Z_STRLEN_P(val));
+    } ZEND_HASH_FOREACH_END();
+}
+
+/* The sink owns the wire in every outcome. */
+static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
+{
+    const response_wire_kind_t kind = response_wire_kind(rw);
+    bool delivered = false;
+
+    if (ctx->sink != NULL) {
+        delivered = ctx->sink(rw, ctx->sink_arg);
+    } else {
+        /* nobody adopts the credit ref — release it or the producer hangs */
+        stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+        zend_string *const orphan_chunk =
+            (zend_string *)response_wire_take_chunk(rw);
+
+        if (orphan_chunk != NULL) {
+            zend_string_release(orphan_chunk);
+        }
+
+        response_wire_free(rw);
+    }
+
+    if (!delivered && kind != RESPONSE_WIRE_FULL) {
+        ctx->stream_failed = true;
+        http_server_on_worker_wire_dropped(ctx->counters);
+    }
+
+    return delivered;
+}
+
+/* Suspend the producer for `ms` on a one-shot timer; no-op outside a coroutine. */
+static void worker_credit_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
+{
+    zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    t->base.start(&t->base);
+    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    ZEND_ASYNC_WAKER_DESTROY(co);
+}
+
+/* Park until in-flight < cap; false = stream dead. */
+static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
+{
+    if (ctx->credit == NULL) {
+        return true;
+    }
+
+    const uint32_t timeout_ms =
+        http_server_get_write_timeout_s(ctx->server) * 1000u;
+    uint64_t waited_ms  = 0;
+    uint64_t poll_ms    = WORKER_CREDIT_POLL_MS;
+    uint64_t last_acked = stream_credit_acked(ctx->credit);
+
+    while (ctx->posted_bytes - stream_credit_acked(ctx->credit)
+               >= WORKER_STREAM_INFLIGHT_CAP) {
+        if (stream_credit_is_dead(ctx->credit)) {
+            return false;
+        }
+
+        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+            return true;   /* can't suspend — degrade to unbounded */
+        }
+
+        worker_credit_sleep_ms(co, poll_ms);
+
+        if (EG(exception) != NULL) {
+            return false;   /* cancelled while parked */
+        }
+
+        waited_ms += poll_ms;
+
+        if (timeout_ms > 0 && waited_ms >= timeout_ms) {
+            return false;   /* peer stopped reading — treat as dead */
+        }
+
+        const uint64_t acked = stream_credit_acked(ctx->credit);
+
+        if (acked == last_acked) {
+            poll_ms = poll_ms < 32 ? poll_ms * 2 : 32;
+        } else {
+            last_acked = acked;
+            poll_ms    = WORKER_CREDIT_POLL_MS;
+        }
+    }
+
+    return true;
+}
+
+static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (UNEXPECTED(ctx->stream_ended || ctx->stream_failed)
+        || (ctx->credit != NULL && stream_credit_is_dead(ctx->credit))) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* first send(): open the stream; the reactor adopts one credit ref */
+    if (!ctx->stream_started) {
+        response_wire_t *const hw =
+            response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+        if (UNEXPECTED(hw == NULL)) {
+            zend_string_release(chunk);
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
+
+        ctx->credit = stream_credit_create();   /* NULL degrades to unbounded */
+
+        response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
+        response_wire_set_credit(hw, ctx->credit);
+        worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv));
+        worker_wire_post(ctx, hw);
+        ctx->stream_started = true;
+    }
+
+    response_wire_t *const cw =
+        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+    if (UNEXPECTED(cw == NULL)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    response_wire_set_kind(cw, RESPONSE_WIRE_STREAM_CHUNK);
+
+    /* one copy: ZMM -> persistent; the reactor adopts the ref into its ring */
+    zend_string *const pchunk =
+        zend_string_init(ZSTR_VAL(chunk), ZSTR_LEN(chunk), 1);
+
+    response_wire_set_chunk(cw, pchunk);
+
+    const size_t chunk_len = ZSTR_LEN(chunk);
+
+    worker_wire_post(ctx, cw);
+    zend_string_release(chunk);   /* bytes copied into the wire arena */
+
+    ctx->posted_bytes += chunk_len;
+
+    if (!worker_stream_wait_credit(ctx)) {
+        ctx->stream_failed = true;   /* credit timeout / cancelled while parked */
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    return HTTP_STREAM_APPEND_OK;
+}
+
+/* sendable() advisory: true while append_chunk would not park. */
+static bool worker_stream_sendable(void *vctx)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (ctx->stream_ended) {
+        return false;
+    }
+
+    if (ctx->credit == NULL) {
+        return true;
+    }
+
+    return !stream_credit_is_dead(ctx->credit)
+           && ctx->posted_bytes - stream_credit_acked(ctx->credit)
+                  < WORKER_STREAM_INFLIGHT_CAP;
+}
+
+static void worker_stream_mark_ended(void *vctx)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (!ctx->stream_started || ctx->stream_ended) {
+        return;
+    }
+
+    ctx->stream_ended = true;
+
+    response_wire_t *const ew =
+        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+    if (UNEXPECTED(ew == NULL)) {
+        return;
+    }
+
+    if (ctx->stream_failed) {
+        response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_ABORT);
+    } else {
+        response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_END);
+        worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv));
+    }
+
+    worker_wire_post(ctx, ew);
+}
+
+static const http_response_stream_ops_t worker_stream_ops = {
+    .append_chunk   = worker_stream_append_chunk,
+    .sendable       = worker_stream_sendable,
+    .mark_ended     = worker_stream_mark_ended,
+    .get_wait_event = NULL,   /* backpressure parks inside append_chunk */
+};
+
+/* grpc-web in-body trailer frame; consumes the ref. */
+static void worker_grpc_append_frame_and_end(void *vctx, zend_string *frame)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
+        /* append_chunk consumes the ref (success or failure). */
+        if (worker_stream_append_chunk(ctx, frame) == HTTP_STREAM_APPEND_OK) {
+            worker_stream_mark_ended(ctx);
+        }
+
+        return;
+    }
+
+    http_response_static_set_body_str(Z_OBJ(ctx->response_zv), frame);
+    zend_string_release(frame);
+}
+
+static void worker_grpc_end_stream(void *vctx)
+{
+    worker_stream_mark_ended(vctx);
+}
+
+/* Trailers-Only: dispose posts the FULL wire right after this returns. */
+static void worker_grpc_commit(void *vctx)
+{
+    (void)vctx;
+}
+
+static const grpc_finish_ops_t worker_grpc_finish_ops = {
+    .append_frame_and_end = worker_grpc_append_frame_and_end,
+    .end_stream           = worker_grpc_end_stream,
+    .commit               = worker_grpc_commit,
+};
+
 /* Flatten the committed HttpResponse into a response_wire. Buffered only.
  * Returns NULL on allocation failure. */
 static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
@@ -136,44 +459,8 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         return NULL;
     }
 
-    int status = http_response_get_status(resp);
-
-    if (UNEXPECTED(status <= 0)) {
-        status = 200;
-    }
-
-    response_wire_set_status(rw, status);
-
-    HashTable *const headers = http_response_get_headers(resp);
-
-    if (headers != NULL) {
-        zend_string *name;
-        zval        *values;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
-            if (UNEXPECTED(name == NULL)) {
-                continue;
-            }
-
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) {
-                continue;
-            }
-
-            if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                         Z_STRVAL_P(values), Z_STRLEN_P(values));
-            } else if (Z_TYPE_P(values) == IS_ARRAY) {
-                zval *v;
-                ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
-                    if (Z_TYPE_P(v) != IS_STRING) {
-                        continue;
-                    }
-
-                    response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                             Z_STRVAL_P(v), Z_STRLEN_P(v));
-                } ZEND_HASH_FOREACH_END();
-            }
-        } ZEND_HASH_FOREACH_END();
-    }
+    worker_wire_copy_head(rw, resp);
+    worker_wire_copy_trailers(rw, resp);
 
     /* http_response_get_body_str returns a borrowed reference; the bytes are
      * copied into the arena, so nothing to release. HEAD carries the headers
@@ -182,12 +469,12 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         zend_string *const body = http_response_get_body_str(resp);
 
         if (body != NULL && ZSTR_LEN(body) > 0) {
-            response_wire_set_body(rw, ZSTR_VAL(body), ZSTR_LEN(body), true);
+            response_wire_set_body(rw, ZSTR_VAL(body), ZSTR_LEN(body));
         } else {
-            response_wire_set_body(rw, NULL, 0, true);
+            response_wire_set_body(rw, NULL, 0);
         }
     } else {
-        response_wire_set_body(rw, NULL, 0, true);
+        response_wire_set_body(rw, NULL, 0);
     }
 
     return rw;
@@ -210,23 +497,46 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     if (!Z_ISUNDEF(ctx->response_zv)) {
         zend_object *const resp = Z_OBJ(ctx->response_zv);
 
-        if (coroutine->exception != NULL && !http_response_is_committed(resp)) {
+        /* gRPC maps exceptions to grpc-status, not HTTP 500 */
+        if (coroutine->exception != NULL && !ctx->is_grpc
+            && !http_response_is_committed(resp)) {
             http_response_reset_to_error(resp, 500, "Internal Server Error");
+        }
+
+        if (ctx->is_grpc) {
+            grpc_call_ensure_status(resp, coroutine->exception != NULL);
         }
 
         if (!http_response_is_committed(resp)) {
             http_response_set_committed(resp);
         }
 
-        response_wire_t *const rw = worker_render_response(ctx);
+        if (ctx->is_grpc) {
+            grpc_call_finish(resp, &worker_grpc_finish_ops, ctx);
+        } else if (http_response_is_streaming(resp)) {
+            worker_stream_mark_ended(ctx);
+        }
 
-        if (rw != NULL) {
-            if (ctx->sink != NULL) {
-                ctx->sink(rw, ctx->sink_arg);   /* sink owns rw now */
-            } else {
-                response_wire_free(rw);
+        /* a started stream must always get a terminal wire */
+        if (ctx->stream_started && !ctx->stream_ended) {
+            worker_stream_mark_ended(ctx);
+        }
+
+        if (!ctx->stream_started) {
+            response_wire_t *const rw = worker_render_response(ctx);
+
+            if (rw != NULL) {
+                worker_wire_post(ctx, rw);   /* sink owns rw now */
             }
         }
+
+        /* ctx dies below; a late send() on a kept $response must throw, not UAF */
+        http_response_replace_stream_ops(resp, NULL, NULL);
+    }
+
+    if (ctx->credit != NULL) {
+        stream_credit_release(ctx->credit);   /* worker-side ref */
+        ctx->credit = NULL;
     }
 
     if (!Z_ISUNDEF(ctx->request_zv)) {
@@ -263,6 +573,10 @@ bool worker_dispatch_request(http_server_object *server,
     void *const    conn       = req->reactor_conn;
     const bool     is_head    = http_request_method_is_head(req);
 
+    HashTable *const handlers = http_server_get_protocol_handlers(server);
+    const grpc_mode_t grpc_mode = grpc_classify(req, handlers);
+    const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
+
     zval *const req_obj = http_request_create_from_parsed(req);
 
     if (UNEXPECTED(req_obj == NULL)) {
@@ -280,6 +594,7 @@ bool worker_dispatch_request(http_server_object *server,
     ctx->sink       = sink;
     ctx->sink_arg   = sink_arg;
     ctx->is_head    = is_head;
+    ctx->is_grpc    = is_grpc;
 
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
     efree(req_obj);                 /* the heap zval wrapper, not the object */
@@ -287,14 +602,16 @@ bool worker_dispatch_request(http_server_object *server,
     object_init_ex(&ctx->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(ctx->response_zv), "3.0");
 
+    http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
+                                     &worker_stream_ops, ctx);
+
+    if (is_grpc) {
+        grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_mode);
+    }
+
     /* No handler registered: synthesise a 404 so the sink still fires with a
      * response instead of leaving the stream hanging. */
-    HashTable *const handlers = http_server_get_protocol_handlers(server);
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
+    zend_fcall_t *const fcall = http_protocol_pick_handler(handlers, is_grpc);
 
     if (fcall == NULL) {
         http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);

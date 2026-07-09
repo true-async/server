@@ -33,6 +33,9 @@
 #include <openssl/bio.h>
 #endif
 #include "http1/http_parser.h"   /* http_request_t */
+#include "grpc/grpc.h"           /* grpc_classify */
+#include "grpc/grpc_call.h"      /* gRPC call lifecycle policy */
+#include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 #include "static/static_handler.h"
 #include "http_send_file.h"
 #include "http_response_internal.h"
@@ -97,6 +100,16 @@ extern const http_response_stream_ops_t h2_stream_ops;
 /* Forward decl so dispose can call mark_ended on a stream whose
  * handler skipped $res->end(). Defined further down. */
 static void h2_stream_mark_ended(void *ctx);
+
+static int  h2_stream_append_chunk(void *ctx, zend_string *chunk);
+static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame);
+static void h2_grpc_commit(void *ctx);
+
+static const grpc_finish_ops_t h2_grpc_finish_ops = {
+    .append_frame_and_end = h2_grpc_append_frame_and_end,
+    .end_stream           = h2_stream_mark_ended,
+    .commit               = h2_grpc_commit,
+};
 
 /* Suspend the current handler coroutine until either
  *  - stream->write_event fires (cb_on_frame_recv saw WINDOW_UPDATE
@@ -220,6 +233,13 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         return;
     }
 #endif
+
+    const grpc_mode_t grpc_mode = grpc_classify(
+        stream->request,
+        http_server_get_protocol_handlers(self->conn->server));
+    const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
+    stream->is_grpc = is_grpc;
+
     /* Static-only deployments register a static mount but no PHP
      * handler — the static dispatch path below claims the request
      * before we ever check conn->handler. The PHP-handler-required
@@ -227,7 +247,7 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     const bool has_static_mount =
         http_static_handler_count(self->conn->server) > 0;
 
-    if (self->conn->handler == NULL && !has_static_mount) {
+    if (self->conn->handler == NULL && !has_static_mount && !is_grpc) {
         return;
     }
 
@@ -272,6 +292,10 @@ static void http2_strategy_dispatch(struct http_request_t *request,
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
     }
 
+    if (is_grpc) {
+        grpc_call_init_response(Z_OBJ(stream->response_zv), grpc_mode);
+    }
+
     /* Static-handler dispatch (issue #13). Identical policy to the
      * H1 site in http_connection_dispatch_request:
      *   HARD_ZERO   — FSM owns the request; on_hard_zero_armed has
@@ -305,7 +329,7 @@ static void http2_strategy_dispatch(struct http_request_t *request,
      * guard would silently return and the stream would hang until
      * the client times out. Mirrors the H1 path in
      * http_connection_dispatch_request. */
-    if (self->conn->handler == NULL && !stream->skip_handler) {
+    if (self->conn->handler == NULL && !stream->skip_handler && !is_grpc) {
         http_response_static_set_status(Z_OBJ(stream->response_zv), 404);
         http_response_static_set_header(Z_OBJ(stream->response_zv),
             "content-type", 12, "text/plain; charset=utf-8", 25);
@@ -393,7 +417,19 @@ static void http2_handler_coroutine_entry(void)
         return;
     }
 
-    if (conn->handler == NULL) { return; }
+    zend_fcall_t *handler = conn->handler;
+
+    if (stream->is_grpc) {
+        zend_fcall_t *grpc_handler = http_protocol_get_handler(
+            http_server_get_protocol_handlers(conn->server),
+            HTTP_PROTOCOL_GRPC);
+
+        if (grpc_handler != NULL) {
+            handler = grpc_handler;
+        }
+    }
+
+    if (handler == NULL) { return; }
 
     const bool stamps = http_server_sample_stamps_enabled(conn->view);
 
@@ -432,7 +468,7 @@ static void http2_handler_coroutine_entry(void)
 
     zend_fcall_info fci = {
         .size           = sizeof(zend_fcall_info),
-        .function_name  = conn->handler->fci.function_name,
+        .function_name  = handler->fci.function_name,
         .retval         = &retval,
         .params         = params,
         .object         = NULL,
@@ -447,7 +483,7 @@ static void http2_handler_coroutine_entry(void)
     volatile bool bailout = false;
     zend_try
     {
-        zend_call_function(&fci, &conn->handler->fci_cache);
+        zend_call_function(&fci, &handler->fci_cache);
     }
 
     zend_catch
@@ -534,6 +570,7 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * HttpException and parse-error cancellation behave identically
      * on both protocols. */
     if (coroutine->exception != NULL && conn != NULL &&
+        !stream->is_grpc &&
         !Z_ISUNDEF(stream->response_zv) &&
         !http_response_is_committed(Z_OBJ(stream->response_zv))) {
         zval rv, *code_zv, *msg_zv;
@@ -563,6 +600,12 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_response_set_committed(Z_OBJ(stream->response_zv));
     }
 
+    /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
+    if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
+        grpc_call_ensure_status(Z_OBJ(stream->response_zv),
+                                coroutine->exception != NULL);
+    }
+
     /* sendFile() handoff (issue #13). Take the descriptor before
      * the streaming/buffered branch so the FSM owns delivery; the
      * regular zval-dtor + refcount tail runs from h2_sendfile_on_done
@@ -578,7 +621,11 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     const bool is_streaming = !Z_ISUNDEF(stream->response_zv)
                               && http_response_is_streaming(Z_OBJ(stream->response_zv));
 
-    if (is_streaming) {
+    if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
+        /* Delivery shape is gRPC policy — grpc_call_finish decides. */
+        grpc_call_finish(Z_OBJ(stream->response_zv),
+                         &h2_grpc_finish_ops, stream);
+    } else if (is_streaming) {
         if (!stream->streaming_ended) {
             h2_stream_mark_ended(stream);
         }
@@ -1014,36 +1061,8 @@ static bool http2_commit_stream_response(http_connection_t *conn,
     /* Trailers. Must be queued BEFORE the drain loop so
      * the data_provider sees has_trailers=true on the final DATA
      * slice and emits NO_END_STREAM instead of END_STREAM. */
-    HashTable *trailers = http_response_get_trailers(response_obj);
-
-    if (trailers != NULL && zend_hash_num_elements(trailers) > 0) {
-        http2_header_view_t tr_scratch[HTTP2_NV_SCRATCH];
-        http2_header_view_t *tr_view = tr_scratch;
-        http2_header_view_t *tr_heap = NULL;
-        const size_t tr_count = zend_hash_num_elements(trailers);
-
-        if (tr_count > HTTP2_NV_SCRATCH) {
-            tr_heap = emalloc(tr_count * sizeof(*tr_heap));
-            tr_view = tr_heap;
-        }
-
-        size_t ti = 0;
-        zend_string *tn;
-        zval        *tv;
-        ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, tn, tv) {
-            if (tn == NULL || Z_TYPE_P(tv) != IS_STRING) { continue; }
-            tr_view[ti].name      = ZSTR_VAL(tn);
-            tr_view[ti].name_len  = ZSTR_LEN(tn);
-            tr_view[ti].value     = Z_STRVAL_P(tv);
-            tr_view[ti].value_len = Z_STRLEN_P(tv);
-            ti++;
-        } ZEND_HASH_FOREACH_END();
-
-        (void)http2_session_submit_trailer(self->session, stream->stream_id,
-                                           tr_view, ti);
-
-        if (tr_heap != NULL) { efree(tr_heap); }
-    }
+    http2_session_submit_response_trailers(self->session, stream->stream_id,
+                                           response_obj);
 
     /* GOAWAY after response+trailers so it bundles with the final DATA
      * in one writev. drain_submitted guards multi-stream double-GOAWAY. */
@@ -1648,6 +1667,32 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk)
     http2_session_emit(stream->session);
 
     return HTTP_STREAM_APPEND_OK;
+}
+
+/* Append one gRPC frame (consumes the ref) and end the stream. */
+static void h2_grpc_append_frame_and_end(void *ctx, zend_string *frame)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
+    /* conn may be torn down already; append_chunk derefs it unchecked */
+    if (http2_session_get_conn(stream->session) == NULL) {
+        zend_string_release(frame);
+        return;
+    }
+
+    (void)h2_stream_append_chunk(stream, frame);   /* consumes the ref */
+    h2_stream_mark_ended(stream);
+}
+
+/* Buffered commit — the Trailers-Only shape. */
+static void h2_grpc_commit(void *ctx)
+{
+    http2_stream_t    *stream = (http2_stream_t *)ctx;
+    http_connection_t *conn   = http2_session_get_conn(stream->session);
+
+    if (conn != NULL && !Z_ISUNDEF(stream->response_zv)) {
+        (void)http2_commit_stream_response(conn, stream);
+    }
 }
 
 static void h2_stream_mark_ended(void *ctx)

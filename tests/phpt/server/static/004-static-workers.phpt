@@ -46,7 +46,7 @@ $server->addStaticHandler(
     (new StaticHandler('/static/', $root))->disableIndex()
 );
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     /* Workers need a moment to thread up + bind. */
     usleep(400000);
 
@@ -63,10 +63,7 @@ spawn(function () use ($port) {
      * worker that serves the file body byte-exact. */
     echo "hits=", ($hits === 16 ? 'all' : (string) $hits), "\n";
     echo "done\n";
-    /* Issue #11: clean cross-thread shutdown is a follow-up; SIGKILL
-     * exits without running PHP shutdown so worker threads cannot
-     * deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

@@ -13,10 +13,10 @@
 #include "php.h"
 #include "php_streams.h"
 #include "Zend/zend_enum.h"
+#include "Zend/zend_exceptions.h"   /* zend_clear_exception */
 #include "Zend/zend_async_API.h"
 
 #include "log/http_log.h"
-#include "core/http_connection_internal.h"   /* async_io_req_await */
 #include "../../stubs/LogSeverity.php_arginfo.h"
 
 #include <stdarg.h>
@@ -63,6 +63,11 @@ static void                 *g_formatter_ud = NULL;
  * sink that lost them. */
 
 #define HTTP_LOG_PENDING_MAX (64u * 1024u)
+
+/* Stop-time drain of in-flight log writes: yield to the reactor in short beats
+ * until the writer is idle, bounded so a wedged sink can't pin teardown. */
+#define HTTP_LOG_STOP_DRAIN_SLEEP_MS  1u
+#define HTTP_LOG_STOP_DRAIN_MAX_SPINS 3000u   /* ~3s ceiling → leak-fallback */
 
 struct http_log_writer_cb {
     zend_async_event_callback_t  base;
@@ -540,6 +545,23 @@ void http_log_server_start(http_log_state_t *state,
     state->severity   = severity;
 }
 
+/* Yield to the reactor so a pending write completion can land. Best-effort. */
+static void http_log_stop_yield(zend_coroutine_t *co)
+{
+    zend_async_timer_event_t *const t =
+        ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)HTTP_LOG_STOP_DRAIN_SLEEP_MS, false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    t->base.start(&t->base);
+    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    ZEND_ASYNC_WAKER_DESTROY(co);
+}
+
 void http_log_server_stop(http_log_state_t *state)
 {
     if (state == NULL) {
@@ -548,18 +570,17 @@ void http_log_server_stop(http_log_state_t *state)
 
     state->severity = HTTP_LOG_OFF;
 
-    /* Drain in-flight writes before tearing down — closing the io
-     * with reqs still pending would UAF on completion. writer_complete_cb
-     * fires from inside the await, kicks any pending coalesced bytes,
-     * and we loop until idle. Requires a coroutine context, which the
-     * normal HttpServer::stop() path provides. */
+    /* Drain in-flight writes before teardown. Must NOT async_io_req_await:
+     * writer_complete_cb frees the req before the awaiter re-reads it (UAF
+     * under ASAN) — yield to the reactor and re-poll instead. */
     if (state->async_io != NULL && state->writer_cb != NULL
         && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
-        while (state->writer_cb->active_req != NULL) {
-            zend_async_io_req_t *req = state->writer_cb->active_req;
-            (void)async_io_req_await(req, state->async_io,
-                                     /* timeout_ms */ 0, HTTP_IO_REQ_WRITE,
-                                     /* log_state */ NULL);
+        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+        unsigned spins = 0;
+
+        while (state->writer_cb->active_req != NULL
+               && spins++ < HTTP_LOG_STOP_DRAIN_MAX_SPINS) {
+            http_log_stop_yield(co);
         }
     }
 

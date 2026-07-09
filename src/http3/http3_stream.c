@@ -18,7 +18,13 @@
 #include "http3/http3_stream.h"
 #include "http3/http3_stream_pool.h"
 #include "http3_connection.h"   /* http3_connection_t — list ownership at teardown */
+#include "core/stream_credit.h" /* reverse-path flow control — teardown release */
+#include "http_body_stream.h"   /* sever body_h3_conn + wake a parked consumer */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
+
+/* Static-delivery memory accounting (http3_static_response.c). Declared here
+ * rather than via the heavy http3_internal.h — teardown only needs the debit. */
+extern void h3_static_account_debit(size_t n);
 
 
 static void http3_stream_release_via_request(http_request_t *req);
@@ -157,6 +163,43 @@ void http3_stream_release(http3_stream_t *s)
         s->chunk_queue = NULL;
     }
 
+    /* Static delivery: one-shot reconcile of any in-flight bytes not debited on
+     * the ACK path (chunks freed above, or on a submit-failure branch). */
+    if (s->tracks_static_bytes && s->static_inflight > 0) {
+        h3_static_account_debit(s->static_inflight);
+        s->static_inflight = 0;
+    }
+
+    /* Reverse-path credit: the stream is going away — unblock a parked
+     * producer, then drop the reactor's ref. */
+    if (s->wire_credit != NULL) {
+        stream_credit_abandon((stream_credit_t *)s->wire_credit);
+        s->wire_credit = NULL;
+    }
+
+    /* The request can outlive the stream (handler holds its own ref). Sever
+     * body_h3_conn so a later pop can't touch a freed connection, and wake
+     * a parked consumer if the body never completed. */
+    if (s->request != NULL && s->request->body_h3_conn != NULL) {
+        s->request->body_h3_conn = NULL;
+
+        if (!s->fin_received) {
+            http_body_stream_error(s->request);
+        }
+    }
+
+    /* Trailer capture (malloc'd in http3_stream_capture_trailers). Held
+     * until teardown so the nv stays valid through the async trailer submit. */
+    if (s->trailer_nv != NULL) {
+        free(s->trailer_nv);
+        s->trailer_nv = NULL;
+    }
+
+    if (s->trailer_bytes != NULL) {
+        free(s->trailer_bytes);
+        s->trailer_bytes = NULL;
+    }
+
     if (s->write_event != NULL) {
         zend_async_event_t *ev = &s->write_event->base;
 
@@ -169,13 +212,14 @@ void http3_stream_release(http3_stream_t *s)
 
     /* Unlink from the owning connection's live-stream list. */
     if (s->conn != NULL) {
-        http3_stream_t **p = &s->conn->streams_head;
-        while (*p != NULL && *p != s) {
-            p = &(*p)->list_next;
+        if (s->list_prev != NULL) {
+            s->list_prev->list_next = s->list_next;
+        } else {
+            s->conn->streams_head = s->list_next;
         }
 
-        if (*p == s) {
-            *p = s->list_next;
+        if (s->list_next != NULL) {
+            s->list_next->list_prev = s->list_prev;
         }
 
         s->conn = NULL;

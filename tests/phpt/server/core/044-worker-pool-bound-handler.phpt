@@ -62,7 +62,7 @@ $server  = new HttpServer($config);
 $handler = new BoundHandler();
 $server->addHttpHandler($handler->handle(...));   // closure bound to $handler
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     /* Workers need a moment to thread up + bind. */
     usleep(400000);
 
@@ -77,8 +77,7 @@ spawn(function () use ($port) {
 
     echo "bound_handler_ok=", ($ok === 16 ? 1 : 0), "\n";
     echo "done\n";
-    /* SIGKILL — skip PHP shutdown so worker threads can't deadlock exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

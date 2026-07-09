@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **gRPC over HTTP/2 and HTTP/3 (#4).** Requests whose content-type begins with
+  `application/grpc` route to the callable registered via
+  `HttpServer::addGrpcHandler()`; everything else is untouched, so gRPC and
+  regular HTTP handlers coexist on one listener.
+  - **All four RPC shapes** — unary, server-streaming, client-streaming and
+    true full-duplex bidi: `HttpRequest::readMessage()` deframes the request
+    stream incrementally (5-byte length-prefix framing, 16 MiB per-message cap),
+    `HttpResponse::writeMessage()` frames replies; the handler starts on
+    HEADERS, before the body finishes.
+  - **Trailers**: `grpc-status`/`grpc-message` ride real HTTP trailers on both
+    transports (nghttp2 trailer HEADERS; `nghttp3_conn_submit_trailers` at true
+    EOF on H3 — verified with a real aioquic client). `grpc-status: 0` is
+    defaulted on success, `13 INTERNAL` on an uncaught handler exception, and a
+    handler that writes no messages gets the canonical Trailers-Only reply.
+  - **grpc-web (binary)**: `application/grpc-web` calls carry their trailers
+    in-body as a `0x80`-flagged frame, on H2 and H3.
+  - **Per-message gzip**: inbound `grpc-encoding: gzip` messages inflate
+    transparently in `readMessage()`; `writeMessage(..., compress: true)`
+    emits compressed frames.
+  - **`grpc-timeout`** request header parsed and exposed via
+    `HttpRequest::getGrpcTimeout()`.
+  - **grpc-web-text**: `application/grpc-web-text` calls carry base64 both
+    directions — `readMessage()` decodes the request transparently, every
+    response frame (messages + the trailer frame) goes out independently
+    base64-encoded.
+  - **Works under the reactor pool** (`TRUE_ASYNC_SERVER_REACTOR_POOL=1`) —
+    gRPC rides the generic streaming reverse path below; no gRPC-specific
+    code in the reactor/worker split.
+
+- **Reactor-pool streaming reverse path (#80).** Under
+  `TRUE_ASYNC_SERVER_REACTOR_POOL=1` a worker response is no longer
+  buffered-only:
+  - `send()`/`writeMessage()`/SSE stream across the thread boundary — the
+    worker posts STREAM_HEADERS / STREAM_CHUNK / STREAM_END wires in FIFO
+    order; the reactor feeds its existing chunk ring and submits native
+    trailers at true EOF (so `setTrailer()` works under the pool, buffered
+    or streamed).
+  - **Credit-based backpressure**: a per-stream credit block (atomics,
+    malloc-domain) paces the producer — over 1 MiB un-acked in flight the
+    handler coroutine parks and resumes as the QUIC peer acknowledges
+    bytes, so a slow client cannot flood the shared reactor mailbox. Peer
+    RST / connection close unparks it into the standard stream-dead path
+    (`send()` throws 499).
+
+- **HTTP/3 streaming request bodies (#26 policy on H3).** With
+  `setBodyStreamingEnabled(true)` the H3 dispatch now applies the same
+  three-case Content-Length policy as HTTP/2, so `readBody()` and
+  incremental `readMessage()` (true full-duplex gRPC) work over HTTP/3.
+  QUIC flow-control credit is deferred: the window refills as the handler
+  drains chunks, bounding un-read bytes by `max_body_size`.
+
+### Fixed
+
+- **HTTP/3 uploads larger than the initial stream window (256 KiB default)
+  stalled forever.** `nghttp3_conn_read_stream`'s consumed count excludes
+  DATA payload by contract, and nothing extended the QUIC windows for
+  buffered body bytes — now `h3_recv_data_cb` returns the credit as it
+  consumes them.
+
+- **Three latent use-after-frees found under ASAN** (masked by the Zend
+  arena in normal runs): the WebSocket dispose read `w->committed` after
+  the zval dtor could free `w`; `http_log_server_stop` awaited a write
+  request that its own completion callback frees (now drains by yielding
+  to the reactor and re-polling); the WebSocket reject / spawn-fail paths
+  freed a request the H1 parser still borrowed via `parser->request`.
+
+### Performance
+
+- **HTTP/3 reactor-pool hot paths** (reactor review follow-up): reactor
+  commands travel the mailbox by value (no malloc/free per message),
+  O(1) intrusive stream unlink, listener local sockaddr cached per peer
+  family, thread-local cipher context in CID steering, and a per-worker
+  memory budget for H3 static delivery (ported from H2). Hard
+  backpressure on a full worker inbox now RESETs the stream with
+  `H3_REQUEST_REJECTED` instead of silently dropping the request.
+
+### Changed
+
+- **gRPC layering: call-lifecycle policy extracted out of the transports (#4).**
+  `src/grpc/grpc_call.c` owns response defaults, outcome → `grpc-status` and
+  delivery shape (grpc-web in-body frame / streaming EOF / Trailers-Only);
+  HTTP/2 and HTTP/3 provide a 3-op wire vtable and stay gRPC-agnostic on
+  delivery. H3 response-trailer capture/submit is now generic — any streaming
+  response with a trailer map is delivered, not just gRPC (parity with H2).
+
 ## [0.9.3] - 2026-07-07
 
 ### Fixed
@@ -755,8 +842,31 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/true-async/server/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/true-async/server/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/true-async/server/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/true-async/server/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/true-async/server/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/true-async/server/compare/v0.7.3...v0.8.0
+[0.7.2]: https://github.com/true-async/server/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/true-async/server/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/true-async/server/compare/v0.6.7...v0.7.0
+[0.6.7]: https://github.com/true-async/server/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/true-async/server/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/true-async/server/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/true-async/server/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/true-async/server/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/true-async/server/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/true-async/server/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/true-async/server/compare/v0.5.3...v0.6.0
+[0.5.3]: https://github.com/true-async/server/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/true-async/server/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/true-async/server/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/true-async/server/compare/v0.4.2...v0.5.0
+[0.4.0]: https://github.com/true-async/server/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/true-async/server/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/true-async/server/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/true-async/server/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/true-async/server/compare/v0.1.5...v0.2.0
 [0.1.0]: https://github.com/true-async/server/releases/tag/v0.1.0

@@ -32,6 +32,7 @@
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
 #include "core/response_wire.h"
+#include "core/stream_credit.h"
 #include "log/http_log.h"
 #ifndef PHP_WIN32
 #include <dirent.h>
@@ -1545,14 +1546,15 @@ ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler)
         return;
     }
 
-    /* Store handler - will be used when gRPC support is implemented */
     http_protocol_add_handler_internal(
         INTERNAL_FUNCTION_PARAM_PASSTHRU,
         &server->protocol_handlers,
         HTTP_PROTOCOL_GRPC,
         Z_OBJ_P(ZEND_THIS)
     );
-    server->view.protocol_mask |= HTTP_PROTO_MASK_GRPC;
+
+    /* gRPC rides h2 — a gRPC-only server must still accept h2c/h2 ALPN */
+    server->view.protocol_mask |= HTTP_PROTO_MASK_GRPC | HTTP_PROTO_MASK_HTTP2;
 }
 /* }}} */
 
@@ -1825,7 +1827,12 @@ static void http_server_accept_callback(
         handler = http_protocol_get_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2);
     }
 
-    if (UNEXPECTED(handler == NULL && server->static_handler_count == 0)) {
+    /* gRPC-only servers register no h1/h2 handler — accept anyway */
+    const bool accept_grpc =
+        http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_GRPC);
+
+    if (UNEXPECTED(handler == NULL && server->static_handler_count == 0
+                   && !accept_grpc)) {
         closesocket(client_fd);
         return;
     }
@@ -1931,10 +1938,7 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
             fflush(stderr);
             zend_clear_exception();
         } else {
-            /* Clean exit — the normal path when a worker retires on reload
-             * (paired with the "worker shutting down" line above) or on a
-             * graceful stop. A clean exit while the server should still be
-             * running would instead point at a swallowed bailout. */
+            /* normal on reload/stop; while running points at a swallowed bailout */
             fprintf(stderr,
                 "[true-async-server] worker exited\n");
             fflush(stderr);
@@ -2554,20 +2558,50 @@ static void http_server_reactor_pool_down(http_server_object *server)
  * reverse channel; ownership of `rw` transfers to the reactor apply on success.
  * On failure (no pool / full mailbox) drop it — the client times out and the
  * slab is still reclaimed by the consumed that follows. */
-static void http_server_worker_response_sink(response_wire_t *rw, void *arg)
+static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
 {
     (void)arg;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
-    if (g_reactor_pool != NULL
-        && reactor_pool_post_exec(g_reactor_pool,
-                                  (int)response_wire_reactor_id(rw),
-                                  http3_reactor_apply_response, rw)) {
-        return;   /* the reactor owns rw now */
+    if (g_reactor_pool != NULL) {
+        const int reactor = (int)response_wire_reactor_id(rw);
+
+        if (reactor_pool_post_exec(g_reactor_pool, reactor,
+                                   http3_reactor_apply_response, rw)) {
+            return true;   /* the reactor owns rw now */
+        }
+
+        /* STREAM_* wires are ordered fragments — dropping one corrupts the
+         * stream. Retry ~100 ms on a full mailbox, then fail fast (→ ABORT). */
+        if (response_wire_kind(rw) != RESPONSE_WIRE_FULL) {
+            for (int attempt = 0; attempt < 100; attempt++) {
+#ifdef PHP_WIN32
+                Sleep(1);
+#else
+                const struct timespec ts = { 0, 1000000 };   /* 1 ms */
+                nanosleep(&ts, NULL);
+#endif
+
+                if (reactor_pool_post_exec(g_reactor_pool, reactor,
+                                           http3_reactor_apply_response, rw)) {
+                    return true;
+                }
+            }
+        }
     }
 #endif
 
+    /* undeliverable: nobody adopts the credit ref — unblock the producer */
+    stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+    zend_string *const orphan_chunk = (zend_string *)response_wire_take_chunk(rw);
+
+    if (orphan_chunk != NULL) {
+        zend_string_release(orphan_chunk);
+    }
+
     response_wire_free(rw);
+    return false;
 }
 
 /* Suspend the current coroutine for `ms` on a one-shot timer; lets the worker
@@ -2963,16 +2997,13 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         RETURN_FALSE;
     }
 
-    /* Require at least one handler that serves HTTP requests (h1 or h2),
-     * OR at least one static mount. h2-only deployments use
-     * addHttp2Handler; dual-protocol deployments use addHttpHandler;
-     * static-only deployments use addStaticHandler (issue #13). */
     if (!http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP1) &&
         !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_HTTP2) &&
+        !http_protocol_has_handler(&server->protocol_handlers, HTTP_PROTOCOL_GRPC) &&
         server->static_handler_count == 0) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "No HTTP handler registered. Call addHttpHandler(), "
-            "addHttp2Handler(), or addStaticHandler() first", 0);
+            "addHttp2Handler(), addGrpcHandler(), or addStaticHandler() first", 0);
         RETURN_FALSE;
     }
 

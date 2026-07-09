@@ -14,6 +14,7 @@
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "http_body_stream.h"
+#include "grpc/grpc.h"
 #include "core/async_plain_event.h"
 #include "log/trace_context.h"
 #include "Zend/zend_async_API.h"
@@ -265,6 +266,178 @@ ZEND_METHOD(TrueAsync_HttpRequest, getBody)
     }
 
     http_request_retval_str(return_value, intern->request->body);
+}
+
+/* {{{ proto HttpRequest::readMessage(): ?string
+ * Next gRPC message from the request body; null when none remain. */
+ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_request_t *req = intern->request;
+
+    if (req == NULL) {
+        RETURN_NULL();
+    }
+
+    zend_string *msg = NULL;
+    bool         compressed = false;
+    int          rc;
+
+    /* grpc-web-text: decode the base64 body once, deframe from the result */
+    const bool web_text = grpc_request_is_grpc_web_text(req);
+
+    if (web_text && req->grpc_text_body == NULL) {
+        if (req->body == NULL) {
+            RETURN_NULL();
+        }
+
+        req->grpc_text_body =
+            grpc_web_text_decode(ZSTR_VAL(req->body), ZSTR_LEN(req->body));
+
+        if (req->grpc_text_body == NULL) {
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "malformed base64 in grpc-web-text request body", 0);
+            RETURN_NULL();
+        }
+    }
+
+    if (!web_text && !req->body_streaming && req->body_upgrade_to_stream != NULL) {
+        req->body_upgrade_to_stream(req);
+    }
+
+    if (web_text) {
+        rc = grpc_deframe_next(ZSTR_VAL(req->grpc_text_body),
+                               ZSTR_LEN(req->grpc_text_body),
+                               &req->grpc_read_offset,
+                               GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+    } else if (req->body_streaming) {
+        /* Full-duplex: accumulate chunks into grpc_reassembly, suspend
+         * between them. Drop the consumed prefix first to bound memory. */
+        if (req->grpc_read_offset > 0 && req->grpc_reassembly.s != NULL) {
+            const size_t total  = ZSTR_LEN(req->grpc_reassembly.s);
+            const size_t remain = req->grpc_read_offset < total
+                                 ? total - req->grpc_read_offset : 0;
+            if (remain > 0) {
+                memmove(ZSTR_VAL(req->grpc_reassembly.s),
+                        ZSTR_VAL(req->grpc_reassembly.s) + req->grpc_read_offset,
+                        remain);
+            }
+            ZSTR_LEN(req->grpc_reassembly.s) = remain;
+            ZSTR_VAL(req->grpc_reassembly.s)[remain] = '\0';
+            req->grpc_read_offset = 0;
+        }
+
+        for (;;) {
+            const char  *buf = req->grpc_reassembly.s
+                             ? ZSTR_VAL(req->grpc_reassembly.s) : "";
+            const size_t len = req->grpc_reassembly.s
+                             ? ZSTR_LEN(req->grpc_reassembly.s) : 0;
+
+            rc = grpc_deframe_next(buf, len, &req->grpc_read_offset,
+                                   GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+
+            if (rc != 0) {
+                break;   /* 1 = message extracted, -1 = protocol error */
+            }
+
+            /* Incomplete frame — pull the next body chunk, or wait / EOF. */
+            zend_string *chunk = http_body_stream_pop(req);
+
+            if (chunk != NULL) {
+                smart_str_append(&req->grpc_reassembly, chunk);
+                zend_string_release(chunk);
+                continue;
+            }
+
+            if (req->body_eof) {
+                if (UNEXPECTED(req->body_error)) {
+                    zend_throw_exception(http_server_runtime_exception_ce,
+                        "gRPC request body stream error", 0);
+                    RETURN_THROWS();
+                }
+                RETURN_NULL();   /* client half-closed, no more messages */
+            }
+
+            if (req->body_data_event == NULL) {
+                req->body_data_event = async_plain_event_new();
+                if (req->body_data_event == NULL) {
+                    RETURN_NULL();
+                }
+            }
+
+            zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+            if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+                RETURN_NULL();
+            }
+            if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+                return;
+            }
+            zend_async_resume_when(co, req->body_data_event, false,
+                                   zend_async_waker_callback_resolve, NULL);
+            ZEND_ASYNC_SUSPEND();
+            zend_async_waker_clean(co);
+
+            if (EG(exception) != NULL) {
+                return;
+            }
+        }
+    } else {
+        /* Buffered: deframe from the fully-received body via the cursor. */
+        if (req->body == NULL) {
+            RETURN_NULL();
+        }
+        rc = grpc_deframe_next(ZSTR_VAL(req->body), ZSTR_LEN(req->body),
+                               &req->grpc_read_offset,
+                               GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
+    }
+
+    if (rc < 0) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "gRPC message length exceeds the maximum allowed size", 0);
+        RETURN_NULL();
+    }
+
+    if (rc == 0) {
+        /* No complete message left at the cursor. */
+        RETURN_NULL();
+    }
+
+    if (compressed) {
+#ifdef HAVE_HTTP_COMPRESSION
+        /* Per-message compression: decode per grpc-encoding (gzip). */
+        zend_string *inflated = NULL;
+
+        if (grpc_message_inflate(req, ZSTR_VAL(msg), ZSTR_LEN(msg),
+                                 &inflated) == 0) {
+            zend_string_release(msg);
+            RETURN_STR(inflated);
+        }
+#endif
+        zend_string_release(msg);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "unsupported or invalid gRPC message compression", 0);
+        RETURN_NULL();
+    }
+
+    RETURN_STR(msg);
+}
+
+/* {{{ proto HttpRequest::getGrpcTimeout(): ?float
+ * grpc-timeout header in seconds, or null. The server does not enforce it. */
+ZEND_METHOD(TrueAsync_HttpRequest, getGrpcTimeout)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const uint64_t ns = grpc_parse_timeout_ns(intern->request);
+
+    if (ns == 0) {
+        RETURN_NULL();
+    }
+
+    RETURN_DOUBLE((double)ns / 1000000000.0);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, hasBody)

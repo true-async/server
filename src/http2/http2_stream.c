@@ -15,6 +15,7 @@
 #include "Zend/zend_async_API.h"    /* zend_async_trigger_event_t dispose */
 #include "http2/http2_stream.h"
 #include "http1/http_parser.h"     /* http_request_destroy */
+#include "http_body_stream.h"      /* sever body_h2_session at teardown */
 
 /*
  * Stream lifecycle.
@@ -130,6 +131,18 @@ void http2_stream_release(http2_stream_t *stream)
      * fires later on the wrapper's final release. */
     zval_ptr_dtor(&stream->request_zv);
     zval_ptr_dtor(&stream->response_zv);
+
+    /* The request can outlive this stream (wrapper ref) — sever the raw
+     * session pointer so a later http_body_stream_pop cannot call
+     * nghttp2_session_consume on a freed session, and wake a consumer
+     * parked on a body that will never complete. Mirrors the H3 fix. */
+    if (stream->request != NULL && stream->request->body_h2_session != NULL) {
+        stream->request->body_h2_session = NULL;
+
+        if (stream->request->body_streaming && !stream->request->complete) {
+            http_body_stream_error(stream->request);
+        }
+    }
 
     /* Drop our own request refcount. Either races to 0 with the
      * wrapper above (slot freed via callback), or stays positive

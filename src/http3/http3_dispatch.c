@@ -24,6 +24,9 @@
 #include "http_connection.h"               /* http_handler_log_bailout */
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
+#include "core/stream_credit.h"             /* reverse-path flow control */
+#include "grpc/grpc.h"                      /* gRPC request classification */
+#include "grpc/grpc_call.h"                 /* gRPC call lifecycle policy */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
 
@@ -192,11 +195,19 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
     s->refcount++;   /* worker-borrow ref; dropped by the consumed apply */
 
     if (UNEXPECTED(!worker_inbox_post(inbox, s->request))) {
-        /* Backpressure: the request was not handed off. Undo so the normal
-         * teardown reclaims it (s->dispatched=false => reactor teardown frees
-         * the fields). */
+        /* inbox full: undo the dispatch bookkeeping, RESET with
+         * H3_REQUEST_REJECTED so the client can retry instead of hanging */
         s->refcount--;
         s->dispatched = false;
+
+        if (c->ngtcp2_conn != NULL) {
+            (void)ngtcp2_conn_shutdown_stream_write(
+                (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
+                NGHTTP3_H3_REQUEST_REJECTED);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
+        }
+
         return;
     }
 
@@ -222,11 +233,84 @@ void http3_reactor_apply_response(void *arg)
     http3_stream_t *const s = (http3_stream_t *)response_wire_conn(rw);
     http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
 
-    if (c != NULL && !c->closed && c->nghttp3_conn != NULL) {
-        if (http3_stream_submit_response_wire(c, s, rw)) {
-            http3_connection_drain_out(c);
-            http3_connection_arm_timer(c);
+    if (c == NULL || c->closed || c->nghttp3_conn == NULL) {
+        /* stream gone: nobody adopts the credit ref — unblock the producer */
+        stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+        zend_string *const orphan_chunk =
+            (zend_string *)response_wire_take_chunk(rw);
+
+        if (orphan_chunk != NULL) {
+            zend_string_release(orphan_chunk);
         }
+
+        response_wire_free(rw);
+        return;
+    }
+
+    /* mark dirty + flush once in the drain epilogue, not per wire */
+    switch (response_wire_kind(rw)) {
+        case RESPONSE_WIRE_FULL:
+        case RESPONSE_WIRE_STREAM_HEADERS:
+            if (http3_stream_submit_response_wire(c, s, rw)) {
+                http3_listener_mark_flush(c->listener, c);
+                http3_listener_queue_epilogue_flush(c->listener);
+            }
+            break;
+
+        case RESPONSE_WIRE_STREAM_CHUNK: {
+            zend_string *const chunk =
+                (zend_string *)response_wire_take_chunk(rw);
+
+            if (chunk == NULL) {
+                break;
+            }
+
+            if (s->peer_closed || s->streaming_ended || s->chunk_queue == NULL) {
+                zend_string_release(chunk);
+                break;
+            }
+
+            h3_chunk_queue_push(s, chunk);
+            http_server_on_stream_send(c->counters, ZSTR_LEN(chunk));
+
+            (void)nghttp3_conn_resume_stream(
+                (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
+            break;
+        }
+
+        case RESPONSE_WIRE_STREAM_END:
+            if (s->peer_closed || s->streaming_ended || s->chunk_queue == NULL) {
+                break;
+            }
+
+            http3_stream_adopt_wire_trailers(s, rw);
+            s->streaming_ended = true;
+
+            (void)nghttp3_conn_resume_stream(
+                (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
+            break;
+
+        case RESPONSE_WIRE_STREAM_ABORT:
+            if (s->peer_closed || s->streaming_ended) {
+                break;
+            }
+
+            s->streaming_ended = true;
+
+            if (c->ngtcp2_conn != NULL) {
+                (void)ngtcp2_conn_shutdown_stream_write(
+                    (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
+                    NGHTTP3_H3_INTERNAL_ERROR);
+            }
+
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
+            break;
     }
 
     response_wire_free(rw);
@@ -310,15 +394,11 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     HashTable *handlers = http_server_get_protocol_handlers(server);
     zend_async_scope_t *scope = http_server_get_scope(server);
 
-    /* Pick the user handler. addHttpHandler stores it as HTTP1; H2 has
-     * its own slot. Try H1 first, then HTTP2 as a fallback so a server
-     * registered only via addHttp2Handler still services H3. Symmetric
-     * to how H2 strategy resolves it. */
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
+    const grpc_mode_t grpc_mode = grpc_classify(s->request, handlers);
 
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
+    s->is_grpc = grpc_mode != GRPC_MODE_NONE;
+
+    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, s->is_grpc);
 
     /* Static-only deployments register a mount but no PHP handler — the
      * static gate below claims the request before any handler is needed.
@@ -365,6 +445,10 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * dispose. */
     http_response_install_stream_ops(Z_OBJ(s->response_zv),
                                      &h3_stream_ops, s);
+
+    if (s->is_grpc) {
+        grpc_call_init_response(Z_OBJ(s->response_zv), grpc_mode);
+    }
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* Attach compression state. Server pointer comes from
@@ -491,6 +575,14 @@ static void h3_handler_coroutine_entry(void)
 
     if (fcall == NULL) {
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
+    }
+
+    /* gRPC streams route to the addGrpcHandler callable. */
+    if (s->is_grpc) {
+        zend_fcall_t *g = http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC);
+        if (g != NULL) {
+            fcall = g;
+        }
     }
 
     if (fcall == NULL) return;
@@ -677,6 +769,50 @@ static bool h3_arm_sendfile(http3_connection_t *c, http3_stream_t *s)
     return true;
 }
 
+/* End a streamed reply. Trailers must be captured here, while response_zv
+ * is still alive — the data reader runs after dispose frees the zvals. */
+static void h3_stream_finish_streaming(void *ctx)
+{
+    http3_stream_t *s = (http3_stream_t *)ctx;
+
+    http3_stream_capture_trailers(s);
+
+    H3T(s->stream_id, s->streaming_ended ? "5.streaming_already_ended"
+                                         : "5.streaming_resume");
+    if (!s->streaming_ended) {
+        s->streaming_ended = true;
+        (void)nghttp3_conn_resume_stream((nghttp3_conn *)s->conn->nghttp3_conn,
+                                         s->stream_id);
+    }
+}
+
+/* Append one gRPC frame (consumes the ref) and end the stream. */
+static void h3_grpc_append_frame_and_end(void *ctx, zend_string *frame)
+{
+    http3_stream_t *s = (http3_stream_t *)ctx;
+
+    (void)h3_stream_ops.append_chunk(s, frame);   /* consumes the ref */
+
+    h3_stream_finish_streaming(s);
+}
+
+/* Buffered commit — single HEADERS + fin (the Trailers-Only shape). */
+static void h3_grpc_commit(void *ctx)
+{
+    http3_stream_t     *s = (http3_stream_t *)ctx;
+    http3_connection_t *c = s->conn;
+
+    if (c != NULL && !c->closed && c->nghttp3_conn != NULL) {
+        (void)http3_stream_submit_response(c, s, false);
+    }
+}
+
+static const grpc_finish_ops_t h3_grpc_finish_ops = {
+    .append_frame_and_end = h3_grpc_append_frame_and_end,
+    .end_stream           = h3_stream_finish_streaming,
+    .commit               = h3_grpc_commit,
+};
+
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 {
     http3_stream_t *s = (http3_stream_t *)coroutine->extended_data;
@@ -703,7 +839,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * the H2 dispose path's exception → status policy in spirit, but
      * trimmed: we don't rewrite arbitrary 4xx/5xx codes from the
      * exception code field — keep the policy minimal. */
-    if (coroutine->exception != NULL && !Z_ISUNDEF(s->response_zv)
+    if (coroutine->exception != NULL && !s->is_grpc && !Z_ISUNDEF(s->response_zv)
         && !http_response_is_committed(Z_OBJ(s->response_zv))) {
         http_response_reset_to_error(Z_OBJ(s->response_zv), 500,
                                      "Internal Server Error");
@@ -712,6 +848,12 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     if (!Z_ISUNDEF(s->response_zv)
         && !http_response_is_committed(Z_OBJ(s->response_zv))) {
         http_response_set_committed(Z_OBJ(s->response_zv));
+    }
+
+    /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
+    if (s->is_grpc && !Z_ISUNDEF(s->response_zv)) {
+        grpc_call_ensure_status(Z_OBJ(s->response_zv),
+                                coroutine->exception != NULL);
     }
 
     /* Streaming-vs-buffered decision (mirror of H2 dispose).
@@ -729,14 +871,11 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     if (c != NULL && !c->closed && c->nghttp3_conn != NULL
         && !Z_ISUNDEF(s->response_zv)) {
-        if (is_streaming) {
-            H3T(s->stream_id, s->streaming_ended ? "5.streaming_already_ended"
-                                                 : "5.streaming_resume");
-            if (!s->streaming_ended) {
-                s->streaming_ended = true;
-                (void)nghttp3_conn_resume_stream(
-                    (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
-            }
+        if (s->is_grpc) {
+            /* Delivery shape is gRPC policy — grpc_call_finish decides. */
+            grpc_call_finish(Z_OBJ(s->response_zv), &h3_grpc_finish_ops, s);
+        } else if (is_streaming) {
+            h3_stream_finish_streaming(s);
         } else if (http_response_has_send_file(Z_OBJ(s->response_zv))) {
             /* sendFile: hand off to the static pump. On success it owns the
              * stream + response until on_done runs the tail — the pump
@@ -752,6 +891,8 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             (void)http3_stream_submit_response(c, s, false);
         } else {
             H3T(s->stream_id, "5.buffered_submit");
+            /* capture trailers while response_zv is alive */
+            http3_stream_capture_trailers(s);
             (void)http3_stream_submit_response(c, s, false);
         }
     } else {

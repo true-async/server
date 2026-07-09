@@ -38,7 +38,7 @@ $server->addStaticHandler(
     (new StaticHandler('/static/', $root))->disableIndex()
 );
 
-spawn(function () use ($path, $root) {
+spawn(function () use ($path, $root, $server) {
     usleep(400000);  // let the pool thread up and adopt the shared fd
 
     $hits = 0;
@@ -57,9 +57,7 @@ spawn(function () use ($path, $root) {
     @rmdir($root);
     @unlink($path);
 
-    /* Issue #11: clean cross-thread shutdown is a follow-up. SIGKILL skips
-     * PHP shutdown so worker threads cannot deadlock on exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

@@ -43,7 +43,7 @@ $server->addHttpHandler(function ($req, $res) {
     );
 });
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     usleep(400000);
     $hits_with_boot = 0;
     for ($i = 0; $i < 8; $i++) {
@@ -55,7 +55,7 @@ spawn(function () use ($port) {
     }
     echo "boot_hits>=1=", ($hits_with_boot >= 1 ? 1 : 0), "\n";
     echo "done\n";
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

@@ -19,6 +19,7 @@
 #include "php_http_server.h"
 #include "http_response_internal.h"
 #include "smart_str_scalable.h"
+#include "grpc/grpc.h"
 
 #ifdef HAVE_HTTP_COMPRESSION
 # include "compression/http_compression_response.h"
@@ -54,6 +55,25 @@ static inline bool response_check_closed(const http_response_object *response)
     if (response->streaming) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot modify response — headers already committed by send()", 0);
+        return true;
+    }
+
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return true;
+    }
+
+    return false;
+}
+
+/* Trailers go out after the body, so setting them post-commit is legal;
+ * only end() and sendFile() sealing forbid them. */
+static inline bool response_check_trailer_sealed(const http_response_object *response)
+{
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot set trailers after end() has been called", 0);
         return true;
     }
 
@@ -439,6 +459,60 @@ static inline void ensure_trailers_table(http_response_object *response)
     }
 }
 
+/* Fold trailers into headers and clear the table (gRPC Trailers-Only reply). */
+void http_response_promote_trailers_to_headers(zend_object *obj)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    if (response->trailers == NULL
+        || zend_hash_num_elements(response->trailers) == 0) {
+        return;
+    }
+
+    zend_string *name;
+    zval        *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(response->trailers, name, val) {
+        if (name == NULL || Z_TYPE_P(val) != IS_STRING) {
+            continue;
+        }
+        zval copy;
+        ZVAL_STR_COPY(&copy, Z_STR_P(val));
+        zend_hash_update(response->headers, name, &copy);
+    } ZEND_HASH_FOREACH_END();
+
+    zend_hash_clean(response->trailers);
+}
+
+/* grpc-web moved the trailers in-body; the HTTP trailer emission must find nothing. */
+void http_response_clear_trailers(zend_object *obj)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    if (response->trailers != NULL) {
+        zend_hash_clean(response->trailers);
+    }
+}
+
+/* grpc-status is mandatory on the wire, even on success (0). */
+void http_response_ensure_grpc_status(zend_object *obj, int status)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    ensure_trailers_table(response);
+
+    if (zend_hash_str_exists(response->trailers, "grpc-status",
+                             sizeof("grpc-status") - 1)) {
+        return;
+    }
+
+    char buf[16];
+    const int len = snprintf(buf, sizeof(buf), "%d", status);
+    zval v;
+    ZVAL_STRINGL(&v, buf, len);
+    zend_hash_str_update(response->trailers, "grpc-status",
+                         sizeof("grpc-status") - 1, &v);
+}
+
 /* {{{ proto HttpResponse::setTrailer(string $name, string $value): static */
 ZEND_METHOD(TrueAsync_HttpResponse, setTrailer)
 {
@@ -452,7 +526,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailer)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_closed(response)) {
+    if (response_check_trailer_sealed(response)) {
         return;
     }
 
@@ -482,7 +556,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailers)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_closed(response)) {
+    if (response_check_trailer_sealed(response)) {
         return;
     }
 
@@ -513,7 +587,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, resetTrailers)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_closed(response)) {
+    if (response_check_trailer_sealed(response)) {
         return;
     }
 
@@ -939,6 +1013,102 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
+/* {{{ proto HttpResponse::writeMessage(string $message, bool $compress = false): static
+ * Stream one gRPC length-prefixed message; first call commits, like send(). */
+ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
+{
+    zend_string *message;
+    bool         compress = false;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(message)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(compress)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response already closed — cannot writeMessage() after end()", 0);
+        return;
+    }
+
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return;
+    }
+
+    if (response->stream_ops == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response streaming is not available on this response", 0);
+        return;
+    }
+
+    /* grpc-encoding must ride the initial HEADERS — declare before commit */
+    zend_string *payload = message;
+    bool         gzipped = false;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (compress) {
+        zend_string *gz = grpc_message_deflate_gzip(
+            ZSTR_VAL(message), ZSTR_LEN(message));
+
+        if (gz != NULL) {
+            payload = gz;
+            gzipped = true;
+
+            if (!response->streaming) {
+                zval enc;
+                ZVAL_STRING(&enc, "gzip");
+                zend_hash_str_update(response->headers, "grpc-encoding",
+                                     sizeof("grpc-encoding") - 1, &enc);
+            }
+        }
+    }
+#else
+    (void)compress;
+#endif
+
+    if (!response->streaming) {
+        response->streaming = true;
+        response->committed = true;
+        response->headers_sent = true;
+    }
+
+    /* append_chunk consumes the ref */
+    zend_string *framed = grpc_frame_message(
+        ZSTR_VAL(payload), ZSTR_LEN(payload), gzipped);
+
+    if (gzipped) {
+        zend_string_release(payload);   /* framed copied it; drop the gz buffer */
+    }
+
+    /* grpc-web-text: each frame is base64-encoded independently */
+    if (response->grpc_mode == GRPC_MODE_WEB_TEXT) {
+        zend_string *const b64 =
+            grpc_web_text_encode(ZSTR_VAL(framed), ZSTR_LEN(framed));
+
+        zend_string_release(framed);
+        framed = b64;
+    }
+
+    const int rc = response->stream_ops->append_chunk(
+        response->stream_ctx, framed);
+
+    if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        zend_throw_exception_ex(http_exception_ce, 499,
+            "stream closed by peer");
+        return;
+    }
+
+    (void)rc;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::sendable(): bool
  *
  * Advisory, non-blocking backpressure check. Returns true when send()
@@ -1159,6 +1329,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->closed = false;
     response->committed = false;
     response->streaming = false;
+    response->grpc_mode = 0;
     response->stream_ops = NULL;
     response->stream_ctx = NULL;
     response->compression_state = NULL;
@@ -1256,6 +1427,16 @@ void http_response_replace_stream_ops(zend_object *obj,
     http_response_object *r = http_response_from_obj(obj);
     r->stream_ops = ops;
     r->stream_ctx = ctx;
+}
+
+void http_response_set_grpc_mode(zend_object *obj, const uint8_t mode)
+{
+    http_response_from_obj(obj)->grpc_mode = mode;
+}
+
+uint8_t http_response_get_grpc_mode(zend_object *obj)
+{
+    return http_response_from_obj(obj)->grpc_mode;
 }
 
 smart_str *http_response_get_body_smart_str(zend_object *obj)

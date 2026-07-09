@@ -16,9 +16,7 @@ if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
  * workers' completion. Each worker re-binds the same TCP listener;
  * the kernel load-balances accept() across them via SO_REUSEPORT.
  *
- * This test only verifies the spin-up + serve path. Clean cross-thread
- * shutdown via $server->stop() on the parent is a follow-up — the test
- * exits hard after collecting responses. */
+ * Verifies spin-up + serve, then exits via $server->stop(). */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -41,7 +39,7 @@ $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setBody('worker-tid=' . (function_exists('zend_thread_id') ? zend_thread_id() : '0'));
 });
 
-spawn(function () use ($port) {
+spawn(function () use ($port, $server) {
     /* Workers need a moment to thread up + bind. */
     usleep(400000);
 
@@ -56,10 +54,7 @@ spawn(function () use ($port) {
     }
     echo "got_responses=", ($hits >= 1 ? 1 : 0), "\n";
     echo "done\n";
-    /* Clean cross-thread broadcast is a follow-up (issue #11). Kill the
-     * whole process — phpt only checks stdout up to this point. SIGKILL
-     * skips PHP shutdown so worker threads can't deadlock the exit. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

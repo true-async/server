@@ -91,6 +91,17 @@ struct http_request_t {
     /* Body */
     zend_string *body;
 
+    /* readMessage() deframer cursor: indexes `body` (buffered),
+     * grpc_reassembly (streaming) or grpc_text_body (web-text) */
+    size_t       grpc_read_offset;
+
+    /* streaming reassembly of chunks into whole gRPC messages;
+     * freed in http_request_destroy */
+    smart_str    grpc_reassembly;
+
+    /* grpc-web-text: lazily base64-decoded body; freed in http_request_destroy */
+    zend_string *grpc_text_body;
+
     /* Body-progress event.
      * Lazily created by awaitBody() on the first suspend; notified by
      * the parser on body_complete once the event-loop read path lands.
@@ -198,6 +209,12 @@ struct http_request_t {
      * these fields. body_h3_stream is the matching ngtcp2 hook. */
     void                     *body_h2_session;
     int32_t                   body_h2_stream_id;
+
+    /* H3 mirror of the pair above; http_body_stream_pop grants deferred
+     * QUIC credit through these */
+    void                     *body_h3_conn;
+    int64_t                   body_h3_stream_id;
+    size_t                    body_h3_uncredited;  /* drained, not yet flushed */
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 

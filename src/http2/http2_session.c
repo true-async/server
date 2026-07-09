@@ -26,6 +26,7 @@
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
+#include "grpc/grpc.h"            /* web-text is buffered-only (policy gate) */
 
 #include <string.h>
 
@@ -455,7 +456,9 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
             body_cap = HTTP2_MAX_BODY_SIZE;
         }
 
-        if (req->body_bytes_consumed + req->body_bytes_queued + len > body_cap) {
+        /* cap the LIVE (queued) bytes, not the cumulative total — a
+         * streaming body is legitimately unbounded in total */
+        if (req->body_bytes_queued + len > body_cap) {
             return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
         }
 
@@ -539,11 +542,21 @@ static void finalize_request_body(http2_stream_t *stream)
         return;
     }
 
-    /* Streaming mode (issue #26): no smart_str to finalize, just close
-     * the queue so a parked readBody() consumer sees EOF. */
+    /* Streaming: close the queue (parked consumer sees EOF) and fire
+     * body_event — awaitBody() waits on that, not the queue's data event. */
     if (req->body_streaming) {
         http_body_stream_close(req);
         req->complete = true;
+
+        if (req->body_event != NULL) {
+            zend_async_trigger_event_t *trig =
+                (zend_async_trigger_event_t *)req->body_event;
+
+            if (trig->trigger != NULL) {
+                trig->trigger(trig);
+            }
+        }
+
         return;
     }
 
@@ -609,8 +622,11 @@ static int cb_on_frame_recv(nghttp2_session *ng,
              *   CL == 0 (chunked) or CL >= AUTO → stream immediately
              *   SMALL <= CL < AUTO → buffer + install upgrade hook
              *   CL <  SMALL → buffer, never stream. */
+            /* grpc-web-text stays buffered: readMessage() decodes the
+             * assembled body */
             if (session->conn != NULL && session->conn->view != NULL
-                && session->conn->view->body_streaming_enabled) {
+                && session->conn->view->body_streaming_enabled
+                && !grpc_request_is_grpc_web_text(stream->request)) {
                 http_request_t *r = stream->request;
 
                 if (r->content_length == 0
@@ -1467,12 +1483,68 @@ bool http2_session_want_write(const http2_session_t *session)
  * Response submission
  * ------------------------------------------------------------------------- */
 
-/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending) on the
- * provider's data_flags. */
-static inline void h2_dp_mark_eof(const http2_stream_t *stream,
+/* Submit the response trailer map via nghttp2_submit_trailer. No-op when empty. */
+void http2_session_submit_response_trailers(http2_session_t *session,
+                                            const uint32_t stream_id,
+                                            zend_object *response_obj)
+{
+    if (response_obj == NULL) {
+        return;
+    }
+
+    HashTable *trailers = http_response_get_trailers(response_obj);
+
+    if (trailers == NULL || zend_hash_num_elements(trailers) == 0) {
+        return;
+    }
+
+    http2_header_view_t scratch[HTTP2_NV_SCRATCH];
+    http2_header_view_t *view = scratch;
+    http2_header_view_t *heap = NULL;
+    const size_t count = zend_hash_num_elements(trailers);
+
+    if (count > HTTP2_NV_SCRATCH) {
+        heap = emalloc(count * sizeof(*heap));
+        view = heap;
+    }
+
+    size_t n = 0;
+    zend_string *name;
+    zval        *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(trailers, name, val) {
+        if (name == NULL || Z_TYPE_P(val) != IS_STRING) { continue; }
+        view[n].name      = ZSTR_VAL(name);
+        view[n].name_len  = ZSTR_LEN(name);
+        view[n].value     = Z_STRVAL_P(val);
+        view[n].value_len = Z_STRLEN_P(val);
+        n++;
+    } ZEND_HASH_FOREACH_END();
+
+    if (n > 0) {
+        (void)http2_session_submit_trailer(session, stream_id, view, n);
+    }
+
+    if (heap != NULL) { efree(heap); }
+}
+
+/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending). Streaming
+ * trailers submit HERE, at true EOF — submitting while DATA is still queued
+ * makes nghttp2 drop the pending DATA. */
+static inline void h2_dp_mark_eof(http2_stream_t *stream,
                                   uint32_t *data_flags)
 {
     *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+
+    if (stream->chunk_queue != NULL && !stream->trailers_submitted) {
+        stream->trailers_submitted = true;
+
+        if (!Z_ISUNDEF(stream->response_zv)) {
+            http2_session_submit_response_trailers(
+                stream->session, stream->stream_id,
+                Z_OBJ(stream->response_zv));
+        }
+    }
+
     if (stream->has_trailers) {
         *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
     }

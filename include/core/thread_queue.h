@@ -76,6 +76,21 @@ bool   thread_spsc_dequeue(thread_spsc_t *q, void **item);
 size_t thread_spsc_drain(thread_spsc_t *q, void **items, size_t max);
 size_t thread_spsc_count(const thread_spsc_t *q);
 
+/* MPSC carrying reactor_cmd_t by value — same bounded/lock-free contract as
+ * the void* MPSC, no per-message malloc. */
+
+typedef struct reactor_cmd_s   reactor_cmd_t;   /* core/reactor_cmd.h */
+typedef struct thread_cmd_mpsc_s thread_cmd_mpsc_t;
+
+thread_cmd_mpsc_t *thread_cmd_mpsc_create(size_t capacity);
+void               thread_cmd_mpsc_free(thread_cmd_mpsc_t *q);
+
+/* Copies *cmd into the ring. Returns false when full. */
+bool   thread_cmd_mpsc_enqueue(thread_cmd_mpsc_t *q, const reactor_cmd_t *cmd);
+/* Drains up to `max` commands into `out` (an array of `max` reactor_cmd_t). */
+size_t thread_cmd_mpsc_drain(thread_cmd_mpsc_t *q, reactor_cmd_t *out, size_t max);
+size_t thread_cmd_mpsc_count(const thread_cmd_mpsc_t *q);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

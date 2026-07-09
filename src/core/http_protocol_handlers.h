@@ -31,6 +31,10 @@ zend_fcall_t* http_protocol_get_handler(HashTable *handlers,
 /* Check if handler exists */
 bool http_protocol_has_handler(HashTable *handlers, http_protocol_type_t protocol);
 
+/* The one shared handler precedence for every dispatch site: gRPC (when
+ * classified) → HTTP1 → HTTP2. NULL when nothing matches. */
+zend_fcall_t *http_protocol_pick_handler(HashTable *handlers, bool is_grpc);
+
 /* Remove handler from HashTable */
 void http_protocol_remove_handler(HashTable *handlers, http_protocol_type_t protocol);
 

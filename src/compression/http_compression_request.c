@@ -47,10 +47,14 @@
 
 #include <string.h>
 
-static int decode_gzip(http_request_t *req, size_t cap)
+/* Inflate one gzip/zlib member; the shared inflate loop + zip-bomb guard.
+ * 0 = ok (*out owned by caller), -1 = malformed, -2 = exceeds max_out. */
+int http_compression_gzip_inflate_buffer(const char *in, size_t in_len,
+                                         size_t max_out, zend_string **out)
 {
-    if (req->body == NULL || ZSTR_LEN(req->body) == 0) {
-        return HTTP_DECODE_OK;  /* nothing to decode */
+    if (in_len == 0) {
+        *out = ZSTR_EMPTY_ALLOC();
+        return 0;
     }
 
     ZS s;
@@ -59,19 +63,19 @@ static int decode_gzip(http_request_t *req, size_t cap)
      * gzip and zlib streams gracefully — robust against clients that
      * mis-label deflate as gzip in the wild). */
     if (ZS_INFLATE_INIT2(&s, 15 + 32) != Z_OK) {
-        return HTTP_DECODE_MALFORMED;
+        return -1;
     }
 
-    /* Output buffer. Initial 4 KiB, doubles on demand up to `cap`. */
+    /* Output buffer. Initial 4 KiB, doubles on demand up to `max_out`. */
     size_t out_cap = 4096;
 
-    if (cap > 0 && cap < out_cap) out_cap = cap;
-    zend_string *out = zend_string_alloc(out_cap, 0);
+    if (max_out > 0 && max_out < out_cap) out_cap = max_out;
+    zend_string *buf = zend_string_alloc(out_cap, 0);
     size_t produced = 0;
 
-    s.next_in   = (void *)(uintptr_t)ZSTR_VAL(req->body);
-    s.avail_in  = (unsigned)ZSTR_LEN(req->body);
-    s.next_out  = (unsigned char *)ZSTR_VAL(out);
+    s.next_in   = (void *)(uintptr_t)in;
+    s.avail_in  = (unsigned)in_len;
+    s.next_out  = (unsigned char *)ZSTR_VAL(buf);
     s.avail_out = (unsigned)out_cap;
 
     int rc;
@@ -83,27 +87,26 @@ static int decode_gzip(http_request_t *req, size_t cap)
 
         if (rc != Z_OK) {
             ZS_INFLATE_END(&s);
-            zend_string_release(out);
-            return HTTP_DECODE_MALFORMED;
+            zend_string_release(buf);
+            return -1;
         }
-        /* Need more output. Cap-aware grow: never above `cap`. */
+        /* Need more output. Cap-aware grow: never above `max_out`. */
         if (s.avail_out == 0) {
             size_t new_cap = out_cap * 2;
 
-            if (cap > 0 && new_cap > cap) {
-                new_cap = cap;
+            if (max_out > 0 && new_cap > max_out) {
+                new_cap = max_out;
             }
 
             if (new_cap == out_cap) {
                 /* Already at cap and inflate still wants room → bomb. */
                 ZS_INFLATE_END(&s);
-                zend_string_release(out);
-                return HTTP_DECODE_TOO_LARGE;
+                zend_string_release(buf);
+                return -2;
             }
 
-            zend_string *grown = zend_string_realloc(out, new_cap, 0);
-            out = grown;
-            s.next_out  = (unsigned char *)ZSTR_VAL(out) + produced;
+            buf = zend_string_realloc(buf, new_cap, 0);
+            s.next_out  = (unsigned char *)ZSTR_VAL(buf) + produced;
             s.avail_out = (unsigned)(new_cap - produced);
             out_cap = new_cap;
         }
@@ -113,14 +116,31 @@ static int decode_gzip(http_request_t *req, size_t cap)
 
     /* Right-size + NUL-terminate. */
     if (produced != out_cap) {
-        out = zend_string_truncate(out, produced, 0);
+        buf = zend_string_truncate(buf, produced, 0);
     }
 
-    ZSTR_VAL(out)[produced] = '\0';
+    ZSTR_VAL(buf)[produced] = '\0';
+
+    *out = buf;
+    return 0;
+}
+
+static int decode_gzip(http_request_t *req, size_t cap)
+{
+    if (req->body == NULL || ZSTR_LEN(req->body) == 0) {
+        return HTTP_DECODE_OK;  /* nothing to decode */
+    }
+
+    zend_string *out = NULL;
+    const int rc = http_compression_gzip_inflate_buffer(
+        ZSTR_VAL(req->body), ZSTR_LEN(req->body), cap, &out);
+
+    if (rc == -2) return HTTP_DECODE_TOO_LARGE;
+    if (rc != 0)  return HTTP_DECODE_MALFORMED;
 
     body_release(req->body);
     req->body = out;
-    req->content_length = produced;
+    req->content_length = ZSTR_LEN(out);
     return HTTP_DECODE_OK;
 }
 

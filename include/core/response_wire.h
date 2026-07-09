@@ -37,33 +37,63 @@
 
 typedef struct response_wire_s response_wire_t;
 
+/* FULL = single-shot at dispose. Streamed responses go FIFO on one reactor
+ * mailbox: one STREAM_HEADERS, N STREAM_CHUNKs, one STREAM_END (may carry
+ * trailers). */
+typedef enum {
+    RESPONSE_WIRE_FULL = 0,
+    RESPONSE_WIRE_STREAM_HEADERS,
+    RESPONSE_WIRE_STREAM_CHUNK,
+    RESPONSE_WIRE_STREAM_END,
+    /* stream died mid-flight — the reactor must RESET, not send a clean FIN */
+    RESPONSE_WIRE_STREAM_ABORT,
+} response_wire_kind_t;
+
 /* Create an empty response wire. routing identifies the origin stream the
  * reactor must send on (echoed from the request_wire). status starts unset (0).
  * Returns NULL on allocation failure. */
 response_wire_t *response_wire_create(uint32_t reactor_id, int64_t stream_id, void *conn);
 
-/* Builders — copy bytes into the arena. set_status replaces; add_header
- * appends; set_body replaces. All accept non-NUL-terminated spans. The header
- * builders return false on allocation failure (the wire stays usable/freeable).
- * `complete` is false when more body will be streamed to the reactor separately
- * after this hand-off. */
+void                 response_wire_set_kind(response_wire_t *rw, response_wire_kind_t kind);
+response_wire_kind_t response_wire_kind(const response_wire_t *rw);
+
+/* Credit handoff (STREAM_HEADERS only): opaque stream_credit_t*, not owned
+ * by the wire — the reactor adopts the ref at apply time. */
+void  response_wire_set_credit(response_wire_t *rw, void *credit);
+void *response_wire_credit(const response_wire_t *rw);
+
+/* STREAM_CHUNK payload: a persistent zend_string* whose ownership rides the
+ * wire; a drop site must take + release it (this TU cannot). */
+void  response_wire_set_chunk(response_wire_t *rw, void *persistent_str);
+void *response_wire_take_chunk(response_wire_t *rw);
+
+/* Builders — copy bytes into the arena; pair builders return false on
+ * allocation failure. set_body is FULL wires only. */
 void response_wire_set_status(response_wire_t *rw, int status);
 bool response_wire_add_header(response_wire_t *rw,
                               const char *name_ptr, size_t name_len,
                               const char *value_ptr, size_t value_len);
-bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len, bool complete);
+bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len);
+/* Trailers mirror headers; the transport delivers them after the last body byte. */
+bool response_wire_add_trailer(response_wire_t *rw,
+                               const char *name_ptr, size_t name_len,
+                               const char *value_ptr, size_t value_len);
 
 /* Accessors. Returned pointers are valid until response_wire_free; *len
  * receives the span length. body returns NULL with *len = 0 when unset. */
 int         response_wire_status(const response_wire_t *rw);
 const char *response_wire_body(const response_wire_t *rw, size_t *len);
-bool        response_wire_body_complete(const response_wire_t *rw);
 
 size_t response_wire_header_count(const response_wire_t *rw);
 /* Resolve header `index` (0-based). Returns false for an out-of-range index. */
 bool response_wire_header_at(const response_wire_t *rw, size_t index,
                              const char **name_ptr, size_t *name_len,
                              const char **value_ptr, size_t *value_len);
+
+size_t response_wire_trailer_count(const response_wire_t *rw);
+bool response_wire_trailer_at(const response_wire_t *rw, size_t index,
+                              const char **name_ptr, size_t *name_len,
+                              const char **value_ptr, size_t *value_len);
 
 uint32_t response_wire_reactor_id(const response_wire_t *rw);
 int64_t  response_wire_stream_id(const response_wire_t *rw);
