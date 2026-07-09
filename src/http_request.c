@@ -314,19 +314,28 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
                                GRPC_MAX_RECV_MESSAGE, &compressed, &msg);
     } else if (req->body_streaming) {
         /* Full-duplex: accumulate chunks into grpc_reassembly, suspend
-         * between them. Drop the consumed prefix first to bound memory. */
+         * between them. Drop the consumed prefix only once it dominates
+         * the buffer — compacting on every call re-moves the whole tail
+         * per extracted message, O(messages × backlog); the half-buffer
+         * threshold keeps each byte moved at most once (amortized) while
+         * still bounding the buffer at ~2× live data. */
         if (req->grpc_read_offset > 0 && req->grpc_reassembly.s != NULL) {
             const size_t total  = ZSTR_LEN(req->grpc_reassembly.s);
             const size_t remain = req->grpc_read_offset < total
                                  ? total - req->grpc_read_offset : 0;
-            if (remain > 0) {
+
+            if (remain == 0) {
+                ZSTR_LEN(req->grpc_reassembly.s) = 0;
+                ZSTR_VAL(req->grpc_reassembly.s)[0] = '\0';
+                req->grpc_read_offset = 0;
+            } else if (req->grpc_read_offset >= remain) {
                 memmove(ZSTR_VAL(req->grpc_reassembly.s),
                         ZSTR_VAL(req->grpc_reassembly.s) + req->grpc_read_offset,
                         remain);
+                ZSTR_LEN(req->grpc_reassembly.s) = remain;
+                ZSTR_VAL(req->grpc_reassembly.s)[remain] = '\0';
+                req->grpc_read_offset = 0;
             }
-            ZSTR_LEN(req->grpc_reassembly.s) = remain;
-            ZSTR_VAL(req->grpc_reassembly.s)[remain] = '\0';
-            req->grpc_read_offset = 0;
         }
 
         for (;;) {
