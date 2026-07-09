@@ -974,6 +974,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
         return;
     }
 
+    /* HEAD must carry no body (RFC 9110 §9.3.2); drop the chunk. */
+    if (response->is_head) {
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
     /* First send() — lock headers and switch to streaming mode.
      * After this, setBody / setHeader / setStatusCode throw. */
     if (!response->streaming) {
@@ -1013,17 +1018,72 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 }
 /* }}} */
 
-/* {{{ proto HttpResponse::writeMessage(string $message, bool $compress = false): static
- * Stream one gRPC length-prefixed message; first call commits, like send(). */
+/* {{{ proto HttpResponse::setGrpcEncoding(string $encoding): static
+ * Declare the response message encoding (grpc-encoding header) before the
+ * first writeMessage(). Mirrors grpc-java setCompression / C++
+ * set_compression_algorithm: enabling compression is a per-call decision;
+ * per-message the wire only allows *skipping* it. */
+ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding)
+{
+    zend_string *encoding;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(encoding)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->grpc_mode == GRPC_MODE_NONE) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "setGrpcEncoding() is only available on gRPC responses", 0);
+        return;
+    }
+
+    if (response->closed || response->streaming || response->headers_sent) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "setGrpcEncoding() must be called before the first writeMessage()", 0);
+        return;
+    }
+
+    if (zend_string_equals_literal_ci(encoding, "identity")) {
+        response->grpc_compress = false;
+        zend_hash_str_del(response->headers, "grpc-encoding",
+                          sizeof("grpc-encoding") - 1);
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
+    if (!zend_string_equals_literal_ci(encoding, "gzip")) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Unsupported grpc-encoding \"%s\" (supported: gzip, identity)",
+            ZSTR_VAL(encoding));
+        return;
+    }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    response->grpc_compress = true;
+
+    zval enc;
+    ZVAL_STRING(&enc, "gzip");
+    zend_hash_str_update(response->headers, "grpc-encoding",
+                         sizeof("grpc-encoding") - 1, &enc);
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+#else
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "gzip grpc-encoding requires the compression module", 0);
+#endif
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::writeMessage(string $message): static
+ * Stream one gRPC length-prefixed message; first call commits, like send().
+ * Compressed automatically when setGrpcEncoding('gzip') was declared. */
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 {
     zend_string *message;
-    bool         compress = false;
 
-    ZEND_PARSE_PARAMETERS_START(1, 2)
+    ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(message)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_BOOL(compress)
     ZEND_PARSE_PARAMETERS_END();
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
@@ -1046,29 +1106,21 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
-    /* grpc-encoding must ride the initial HEADERS — declare before commit */
     zend_string *payload = message;
     bool         gzipped = false;
 
 #ifdef HAVE_HTTP_COMPRESSION
-    if (compress) {
+    if (response->grpc_compress) {
         zend_string *gz = grpc_message_deflate_gzip(
             ZSTR_VAL(message), ZSTR_LEN(message));
 
+        /* deflate failure → identity for this message (compressed-flag 0),
+         * which the spec permits under a declared encoding */
         if (gz != NULL) {
             payload = gz;
             gzipped = true;
-
-            if (!response->streaming) {
-                zval enc;
-                ZVAL_STRING(&enc, "gzip");
-                zend_hash_str_update(response->headers, "grpc-encoding",
-                                     sizeof("grpc-encoding") - 1, &enc);
-            }
         }
     }
-#else
-    (void)compress;
 #endif
 
     if (!response->streaming) {

@@ -66,6 +66,7 @@
 #include "http3_internal.h"
 #include "http3_listener.h"
 #include "http3/http3_stream.h"
+#include "core/async_plain_event.h"   /* throttle wake for parked pumps */
 
 #include <errno.h>
 #include <string.h>
@@ -77,12 +78,20 @@
 #define H3_STATIC_BUDGET_FLOOR      (4u * 1024u * 1024u)
 #define H3_STATIC_BUDGET_FALLBACK   (64u * 1024u * 1024u)  /* memory_limit = -1 */
 #define H3_STATIC_BUDGET_RESERVE_FRAC 8u                   /* hard top = 87.5% */
-#define H3_STATIC_THROTTLE_POLL_MS  2u                     /* pump re-check cadence */
+#define H3_STATIC_RESUME_NUM        4u
+#define H3_STATIC_RESUME_DEN        5u                     /* resume below 80% */
+#define H3_STATIC_THROTTLE_TICK_MS  100u                   /* defensive re-check */
 
 /* 0 = not yet initialised (h3_static_budget_init_once). */
 ZEND_TLS size_t h3_static_budget_bytes           = 0;
 ZEND_TLS size_t h3_static_global_bytes_in_flight = 0;
 ZEND_TLS size_t h3_static_global_high_water      = 0;
+
+/* Hysteresis wake for over-budget pumps: parked coroutines suspend on this
+ * plain event; account_debit fires it once usage drops below the resume
+ * threshold (mirror of the H2 static throttled-list kick). */
+ZEND_TLS zend_async_event_t *h3_static_throttle_event = NULL;
+ZEND_TLS bool                h3_static_global_throttled = false;
 
 static void h3_static_budget_init_once(void)
 {
@@ -124,6 +133,15 @@ void h3_static_account_debit(const size_t n)
      * debited on the ACK path if a release raced, so never underflow. */
     h3_static_global_bytes_in_flight -=
         (n <= h3_static_global_bytes_in_flight) ? n : h3_static_global_bytes_in_flight;
+
+    /* hysteresis: wake every parked pump once usage falls below 80% */
+    if (h3_static_global_throttled
+        && h3_static_global_bytes_in_flight
+               < h3_static_budget_bytes * H3_STATIC_RESUME_NUM
+                                        / H3_STATIC_RESUME_DEN) {
+        h3_static_global_throttled = false;
+        async_plain_event_fire(h3_static_throttle_event);
+    }
 }
 
 static bool h3_static_over_budget(void)
@@ -131,20 +149,38 @@ static bool h3_static_over_budget(void)
     return h3_static_global_bytes_in_flight >= h3_static_budget_bytes;
 }
 
-/* Suspend the pump on a one-shot timer so the reactor keeps draining/ACKing. */
-static void h3_static_throttle_sleep(zend_coroutine_t *co, const zend_ulong ms)
+/* Park the pump until the debit path fires the throttle event (plus a
+ * defensive tick so peer_closed is still noticed if nothing drains). */
+static void h3_static_throttle_park(zend_coroutine_t *co)
 {
-    zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
+    if (h3_static_throttle_event == NULL) {
+        h3_static_throttle_event = async_plain_event_new();
 
-    if (UNEXPECTED(t == NULL)) {
-        zend_clear_exception();
+        if (UNEXPECTED(h3_static_throttle_event == NULL)) {
+            return;   /* no event — the caller's loop degrades to a spin */
+        }
+    }
+
+    h3_static_global_throttled = true;
+
+    if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
         return;
     }
 
-    t->base.start(&t->base);
-    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    zend_async_resume_when(co, h3_static_throttle_event, false,
+                           zend_async_waker_callback_resolve, NULL);
+
+    zend_async_timer_event_t *const t =
+        ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)H3_STATIC_THROTTLE_TICK_MS, false);
+
+    if (t != NULL) {
+        t->base.start(&t->base);
+        zend_async_resume_when(co, &t->base, true,
+                               zend_async_waker_callback_resolve, NULL);
+    }
+
     ZEND_ASYNC_SUSPEND();
-    ZEND_ASYNC_WAKER_DESTROY(co);
+    zend_async_waker_clean(co);
 }
 
 typedef struct {
@@ -204,9 +240,10 @@ static void h3_static_pump_entry(void)
 
     while (state->bytes_sent < state->body_length
            && !state->stream->peer_closed) {
-        /* over budget: pace this stream; queued bytes keep draining, so no deadlock */
+        /* over budget: park until the debit path wakes us; queued bytes keep
+         * draining, so no deadlock */
         while (h3_static_over_budget() && !state->stream->peer_closed) {
-            h3_static_throttle_sleep(co, H3_STATIC_THROTTLE_POLL_MS);
+            h3_static_throttle_park(co);
 
             if (EG(exception) != NULL) {
                 zend_clear_exception();

@@ -64,14 +64,10 @@ grpc_mode_t grpc_request_mode(const http_request_t *req)
     return GRPC_MODE_NATIVE;
 }
 
-bool grpc_request_is_grpc_web_text(const http_request_t *req)
-{
-    return grpc_request_mode(req) == GRPC_MODE_WEB_TEXT;
-}
-
 grpc_mode_t grpc_classify(const http_request_t *req, HashTable *handlers)
 {
-    const grpc_mode_t mode = grpc_request_mode(req);
+    /* mode was stamped at headers-complete; here we only gate on a handler */
+    const grpc_mode_t mode = (grpc_mode_t)req->grpc_mode;
 
     if (mode == GRPC_MODE_NONE
         || !http_protocol_has_handler(handlers, HTTP_PROTOCOL_GRPC)) {
@@ -220,6 +216,12 @@ uint64_t grpc_parse_timeout_ns(const http_request_t *req)
         case 'u': unit_ns =                1000ULL;  break;
         case 'n': unit_ns =                   1ULL;  break;
         default:  return 0;
+    }
+
+    /* 8 digits × the hour factor exceeds uint64 — clamp instead of wrapping
+     * to a bogus small deadline. */
+    if (value > UINT64_MAX / unit_ns) {
+        return UINT64_MAX;
     }
 
     return value * unit_ns;

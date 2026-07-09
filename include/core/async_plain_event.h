@@ -21,4 +21,9 @@ static zend_always_inline void async_plain_event_fire(zend_async_event_t *event)
     }
 }
 
+/* Suspend `co` for `ms` on a one-shot timer; the worker loop keeps draining
+ * (mailbox, scheduler) meanwhile. Leaves a resume exception in EG for the
+ * caller to inspect or clear (a create failure is cleared internally). */
+void async_coroutine_sleep_ms(zend_coroutine_t *co, zend_ulong ms);
+
 #endif /* ASYNC_PLAIN_EVENT_H */

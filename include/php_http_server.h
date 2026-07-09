@@ -1126,6 +1126,10 @@ zend_string *http_response_format_static_head(zend_object *obj,
                                               bool include_inline_body);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
 void http_response_set_protocol_version(zend_object *obj, const char *version);
+/* RFC 9110 §9.3.2 — HEAD responses must not carry a body; send() drops
+ * chunks silently when set. Stamped at dispatch wherever the request is
+ * known. */
+void http_response_set_head(zend_object *obj, bool is_head);
 bool http_response_is_closed(zend_object *obj);
 
 /* HTTP/2 strategy uses these to build frames without going through

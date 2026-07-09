@@ -25,9 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     handler that writes no messages gets the canonical Trailers-Only reply.
   - **grpc-web (binary)**: `application/grpc-web` calls carry their trailers
     in-body as a `0x80`-flagged frame, on H2 and H3.
-  - **Per-message gzip**: inbound `grpc-encoding: gzip` messages inflate
-    transparently in `readMessage()`; `writeMessage(..., compress: true)`
-    emits compressed frames.
+  - **gzip message encoding**: inbound `grpc-encoding: gzip` messages inflate
+    transparently in `readMessage()`; `setGrpcEncoding('gzip')` declared
+    before the first `writeMessage()` compresses every reply frame (per-call
+    declaration, mirroring grpc-go/java/C++ — a compressed frame without a
+    declared encoding cannot be expressed).
   - **`grpc-timeout`** request header parsed and exposed via
     `HttpRequest::getGrpcTimeout()`.
   - **grpc-web-text**: `application/grpc-web-text` calls carry base64 both

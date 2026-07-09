@@ -215,6 +215,13 @@ struct http_request_t {
     void                     *body_h3_conn;
     int64_t                   body_h3_stream_id;
     size_t                    body_h3_uncredited;  /* drained, not yet flushed */
+
+    /* Bytes spliced into the queue by a buffered→streaming upgrade whose
+     * flow-control credit was already returned while they sat in the
+     * transport's buffer (H2 buffered consume / H3 immediate extend).
+     * http_body_stream_pop drains this before granting new credit so the
+     * same bytes are never credited twice. */
+    size_t                    body_precredited;
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 
@@ -235,6 +242,10 @@ struct http_request_t {
     bool         body_streaming;
     bool         body_eof;
     bool         body_error;
+
+    /* grpc_mode_t stamped once at headers-complete; body policy derives
+     * from it (http_request_body_must_buffer / _size_uncapped). */
+    uint8_t      grpc_mode;
     /* TODO(issue #26 backpressure): set true when on_body trips
      * llhttp_pause; readBody clears it via llhttp_resume below the
      * low-water mark. Unused by the MVP — see TODO in on_body. */

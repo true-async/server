@@ -17,6 +17,7 @@
 #include "Zend/zend_async_API.h"
 
 #include "log/http_log.h"
+#include "core/async_plain_event.h"   /* drain-flush wakeup */
 #include "../../stubs/LogSeverity.php_arginfo.h"
 
 #include <stdarg.h>
@@ -64,10 +65,9 @@ static void                 *g_formatter_ud = NULL;
 
 #define HTTP_LOG_PENDING_MAX (64u * 1024u)
 
-/* Stop-time drain of in-flight log writes: yield to the reactor in short beats
- * until the writer is idle, bounded so a wedged sink can't pin teardown. */
-#define HTTP_LOG_STOP_DRAIN_SLEEP_MS  1u
-#define HTTP_LOG_STOP_DRAIN_MAX_SPINS 3000u   /* ~3s ceiling → leak-fallback */
+/* Ceiling on the stop-time flush wait; a wedged sink past this leaks rather
+ * than pinning teardown. */
+#define HTTP_LOG_STOP_DRAIN_BUDGET_MS 3000u
 
 struct http_log_writer_cb {
     zend_async_event_callback_t  base;
@@ -77,6 +77,10 @@ struct http_log_writer_cb {
     char                        *pending_buf;
     size_t                       pending_len;
     size_t                       pending_cap;
+    /* Fired by writer_complete_cb once the write chain fully drains, so
+     * http_log_server_stop can wait for flush without polling. Same thread
+     * as the completion, so a plain (non-uv) event suffices. */
+    zend_async_event_t          *drain_event;
 };
 
 /* ------------------------------------------------------------------------ */
@@ -260,6 +264,11 @@ static void writer_complete_cb(
     }
 
     writer_kick_next(cb);
+
+    /* Chain fully drained — wake a stop() waiting to flush before teardown. */
+    if (cb->drain_event != NULL && cb->active_req == NULL) {
+        async_plain_event_fire(cb->drain_event);
+    }
 }
 
 static void writer_callback_dispose(
@@ -525,6 +534,7 @@ void http_log_server_start(http_log_state_t *state,
     cb->pending_buf  = NULL;
     cb->pending_len  = 0;
     cb->pending_cap  = 0;
+    cb->drain_event  = NULL;
 
     if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
         efree(cb);
@@ -545,23 +555,6 @@ void http_log_server_start(http_log_state_t *state,
     state->severity   = severity;
 }
 
-/* Yield to the reactor so a pending write completion can land. Best-effort. */
-static void http_log_stop_yield(zend_coroutine_t *co)
-{
-    zend_async_timer_event_t *const t =
-        ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)HTTP_LOG_STOP_DRAIN_SLEEP_MS, false);
-
-    if (UNEXPECTED(t == NULL)) {
-        zend_clear_exception();
-        return;
-    }
-
-    t->base.start(&t->base);
-    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
-    ZEND_ASYNC_SUSPEND();
-    ZEND_ASYNC_WAKER_DESTROY(co);
-}
-
 void http_log_server_stop(http_log_state_t *state)
 {
     if (state == NULL) {
@@ -570,17 +563,36 @@ void http_log_server_stop(http_log_state_t *state)
 
     state->severity = HTTP_LOG_OFF;
 
-    /* Drain in-flight writes before teardown. Must NOT async_io_req_await:
-     * writer_complete_cb frees the req before the awaiter re-reads it (UAF
-     * under ASAN) — yield to the reactor and re-poll instead. */
+    /* Flush the in-flight write chain before teardown. We wait on a plain
+     * event fired by writer_complete_cb (same thread) rather than awaiting
+     * the io req directly — the completion frees the req, so awaiting it is
+     * a UAF. A timer caps the wait so a wedged write falls to the leak path. */
     if (state->async_io != NULL && state->writer_cb != NULL
+        && state->writer_cb->active_req != NULL
         && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
         zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
-        unsigned spins = 0;
+        http_log_writer_cb_t *const cb = state->writer_cb;
 
-        while (state->writer_cb->active_req != NULL
-               && spins++ < HTTP_LOG_STOP_DRAIN_MAX_SPINS) {
-            http_log_stop_yield(co);
+        if (cb->drain_event == NULL) {
+            cb->drain_event = async_plain_event_new();
+        }
+
+        /* Same thread: no completion can fire between this check and SUSPEND,
+         * so no lost wakeup. drain_event only fires once the chain is empty. */
+        if (cb->drain_event != NULL && ZEND_ASYNC_WAKER_NEW(co) != NULL) {
+            zend_async_resume_when(co, cb->drain_event, false,
+                                   zend_async_waker_callback_resolve, NULL);
+            zend_async_event_t *const timer =
+                &ZEND_ASYNC_NEW_TIMER_EVENT(
+                    (zend_ulong)HTTP_LOG_STOP_DRAIN_BUDGET_MS, false)->base;
+            zend_async_resume_when(co, timer, true,
+                                   zend_async_waker_callback_timeout, NULL);
+            ZEND_ASYNC_SUSPEND();
+            zend_async_waker_clean(co);
+
+            if (EG(exception)) {
+                zend_clear_exception();   /* budget elapsed → leak path below */
+            }
         }
     }
 
@@ -608,6 +620,10 @@ void http_log_server_stop(http_log_state_t *state)
 
         if (cb->pending_buf != NULL) {
             efree(cb->pending_buf);
+        }
+
+        if (cb->drain_event != NULL) {
+            cb->drain_event->dispose(cb->drain_event);
         }
 
         efree(cb);

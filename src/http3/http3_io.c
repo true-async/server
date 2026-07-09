@@ -257,7 +257,7 @@ void http3_connection_drain_out(http3_connection_t *c)
      * the path. */
     struct sockaddr_storage local_addr;
     socklen_t local_addr_len = 0;
-    http3_build_listener_local(c->listener, c->peer.ss_family,
+    http3_listener_local_sockaddr(c->listener, c->peer.ss_family,
                                &local_addr, &local_addr_len);
     ngtcp2_path_storage ps;
     ngtcp2_path_storage_init(&ps,
@@ -654,7 +654,7 @@ void http3_connection_emit_close(http3_connection_t *c)
 
     struct sockaddr_storage local_addr;
     socklen_t local_addr_len = 0;
-    http3_build_listener_local(c->listener, c->peer.ss_family,
+    http3_listener_local_sockaddr(c->listener, c->peer.ss_family,
                                &local_addr, &local_addr_len);
     ngtcp2_path_storage ps = {0};
     ngtcp2_path_storage_init(&ps,

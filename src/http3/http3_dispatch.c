@@ -29,6 +29,7 @@
 #include "grpc/grpc_call.h"                 /* gRPC call lifecycle policy */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
+#include "core/worker_dispatch.h"           /* response_wire_discard */
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -234,17 +235,8 @@ void http3_reactor_apply_response(void *arg)
     http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
 
     if (c == NULL || c->closed || c->nghttp3_conn == NULL) {
-        /* stream gone: nobody adopts the credit ref — unblock the producer */
-        stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
-
-        zend_string *const orphan_chunk =
-            (zend_string *)response_wire_take_chunk(rw);
-
-        if (orphan_chunk != NULL) {
-            zend_string_release(orphan_chunk);
-        }
-
-        response_wire_free(rw);
+        /* stream gone: abandon credit / release chunk — unblock the producer */
+        response_wire_discard(rw);
         return;
     }
 
@@ -331,6 +323,8 @@ static bool http3_reactor_try_static(http3_connection_t *c, http3_stream_t *s,
 
     object_init_ex(&s->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
+    http_response_set_head(Z_OBJ(s->response_zv),
+                           http_request_method_is_head(s->request));
 
     const http_static_result_t rc = http_static_try_serve_mounts(
         (const http_static_handler_t *const *)rctx->static_mounts,
@@ -439,6 +433,8 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
 
     object_init_ex(&s->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
+    http_response_set_head(Z_OBJ(s->response_zv),
+                           http_request_method_is_head(s->request));
     /* Wire the streaming vtable so HttpResponse::send() in the
      * handler enqueues into our chunk_queue. setBody/end (REST) handlers
      * never touch this; they go through the buffered submit_response in
@@ -571,19 +567,7 @@ static void h3_handler_coroutine_entry(void)
     }
 
     HashTable *handlers = http_server_get_protocol_handlers(server);
-    zend_fcall_t *fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);
-
-    if (fcall == NULL) {
-        fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP2);
-    }
-
-    /* gRPC streams route to the addGrpcHandler callable. */
-    if (s->is_grpc) {
-        zend_fcall_t *g = http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC);
-        if (g != NULL) {
-            fcall = g;
-        }
-    }
+    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, s->is_grpc);
 
     if (fcall == NULL) return;
 

@@ -38,6 +38,12 @@ typedef struct http_server_object http_server_object;
  * the stream (STREAM_* fragments must never be dropped silently). */
 typedef bool (*worker_response_sink_fn)(response_wire_t *rw, void *sink_arg);
 
+/* Discard an undeliverable wire: abandon its credit (marks the producer's
+ * stream dead), release the owned chunk, free the wire. Zend-side companion
+ * to response_wire_free — every drop site must go through this so a new
+ * owned field can't leak from a forgotten copy. */
+void response_wire_discard(response_wire_t *rw);
+
 /* Take ownership of `req` (a persistent reactor-built or ZMM request, refcount
  * 1), wrap it in an HttpRequest on THIS (worker) thread, spawn the user handler
  * coroutine in `scope`, and when it finishes render the HttpResponse into a

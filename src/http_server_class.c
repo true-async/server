@@ -33,6 +33,7 @@
 #include "core/worker_registry.h"
 #include "core/response_wire.h"
 #include "core/stream_credit.h"
+#include "core/async_plain_event.h"   /* async_coroutine_sleep_ms */
 #include "log/http_log.h"
 #ifndef PHP_WIN32
 #include <dirent.h>
@@ -1412,9 +1413,8 @@ ZEND_METHOD(TrueAsync_HttpServer, addHttpHandler)
     /* addHttpHandler registers a handler for plain HTTP requests.
      * Historically this serves both HTTP/1 and HTTP/2 on the same port
      * (curl --http1.1 and curl --http2 both end up in the same PHP
-     * callback). Enable both bits so dual-protocol listeners keep
-     * working; h2-only deployments use addHttp2Handler exclusively. */
-    server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2;
+     * callback); h2-only deployments use addHttp2Handler exclusively. */
+    server->view.protocol_mask |= http_protocol_registration_mask(HTTP_PROTOCOL_HTTP1);
 }
 /* }}} */
 
@@ -1509,7 +1509,7 @@ ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler)
         HTTP_PROTOCOL_WEBSOCKET,
         Z_OBJ_P(ZEND_THIS)
     );
-    server->view.protocol_mask |= HTTP_PROTO_MASK_WS;
+    server->view.protocol_mask |= http_protocol_registration_mask(HTTP_PROTOCOL_WEBSOCKET);
 }
 /* }}} */
 
@@ -1531,7 +1531,7 @@ ZEND_METHOD(TrueAsync_HttpServer, addHttp2Handler)
         HTTP_PROTOCOL_HTTP2,
         Z_OBJ_P(ZEND_THIS)
     );
-    server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP2;
+    server->view.protocol_mask |= http_protocol_registration_mask(HTTP_PROTOCOL_HTTP2);
 }
 /* }}} */
 
@@ -1553,8 +1553,7 @@ ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler)
         Z_OBJ_P(ZEND_THIS)
     );
 
-    /* gRPC rides h2 — a gRPC-only server must still accept h2c/h2 ALPN */
-    server->view.protocol_mask |= HTTP_PROTO_MASK_GRPC | HTTP_PROTO_MASK_HTTP2;
+    server->view.protocol_mask |= http_protocol_registration_mask(HTTP_PROTOCOL_GRPC);
 }
 /* }}} */
 
@@ -2552,55 +2551,189 @@ static void http_server_reactor_pool_down(http_server_object *server)
 #endif
 }
 
+#ifdef HAVE_HTTP_SERVER_HTTP3
+/* Deferred-wire retry (per worker thread). A full reactor mailbox never
+ * blocks the worker: the wire is parked in a thread-local FIFO and a hidden
+ * one-shot timer retries the post on the next tick, so other coroutines
+ * keep running while the reactor drains. Order is preserved (head blocks
+ * the queue) and each wire gets ~100 ms before it is discarded —
+ * response_wire_discard marks the producer's credit dead, the same failure
+ * signal the old blocking retry produced. */
+typedef struct pending_wire_s {
+    response_wire_t       *rw;
+    uint64_t               deadline_ns;
+    int                    reactor;
+    struct pending_wire_s *next;
+} pending_wire_t;
+
+ZEND_TLS pending_wire_t *pending_wire_head  = NULL;
+ZEND_TLS pending_wire_t *pending_wire_tail  = NULL;
+ZEND_TLS bool            pending_wire_armed = false;
+
+#define PENDING_WIRE_RETRY_MS    1u
+#define PENDING_WIRE_TTL_NS      (100ull * 1000000ull)
+
+static bool pending_wire_arm_timer(void);
+
+static void pending_wire_flush(void)
+{
+    const uint64_t now = zend_hrtime();
+
+    while (pending_wire_head != NULL) {
+        pending_wire_t *const n = pending_wire_head;
+
+        const bool posted = g_reactor_pool != NULL
+            && reactor_pool_post_exec(g_reactor_pool, n->reactor,
+                                      http3_reactor_apply_response, n->rw);
+
+        if (!posted) {
+            if (g_reactor_pool != NULL && now < n->deadline_ns) {
+                break;   /* mailbox still full — keep order, retry next tick */
+            }
+            response_wire_discard(n->rw);   /* expired / pool gone → ABORT */
+        }
+
+        pending_wire_head = n->next;
+
+        if (pending_wire_head == NULL) {
+            pending_wire_tail = NULL;
+        }
+
+        pefree(n, 1);
+    }
+
+    if (pending_wire_head != NULL && !pending_wire_arm_timer()) {
+        /* can't schedule another tick — fail the whole queue now */
+        while (pending_wire_head != NULL) {
+            pending_wire_t *const n = pending_wire_head;
+            response_wire_discard(n->rw);
+            pending_wire_head = n->next;
+            pefree(n, 1);
+        }
+        pending_wire_tail = NULL;
+    }
+}
+
+static void pending_wire_timer_fn(zend_async_event_t *event,
+                                  zend_async_event_callback_t *callback,
+                                  void *result, zend_object *exception)
+{
+    (void)event; (void)callback; (void)result;
+
+    pending_wire_armed = false;   /* one-shot: fired (auto-closes) */
+
+    if (exception != NULL) {
+        return;   /* loop teardown — flush would re-arm on a dying reactor */
+    }
+
+    pending_wire_flush();
+}
+
+static bool pending_wire_arm_timer(void)
+{
+    if (pending_wire_armed) {
+        return true;
+    }
+
+    zend_async_timer_event_t *const t =
+        ZEND_ASYNC_NEW_TIMER_EVENT(PENDING_WIRE_RETRY_MS, /*periodic*/ false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return false;
+    }
+
+    zend_async_event_callback_t *const cb =
+        ZEND_ASYNC_EVENT_CALLBACK(pending_wire_timer_fn);
+
+    if (UNEXPECTED(cb == NULL || !t->base.add_callback(&t->base, cb))) {
+        if (cb != NULL) {
+            ZEND_ASYNC_EVENT_CALLBACK_RELEASE(cb);
+        }
+        t->base.dispose(&t->base);
+        return false;
+    }
+
+    if (UNEXPECTED(!t->base.start(&t->base))) {
+        zend_async_callbacks_remove(&t->base, cb);
+        t->base.dispose(&t->base);
+        return false;
+    }
+
+    pending_wire_armed = true;
+    return true;
+}
+
+static bool pending_wire_defer(response_wire_t *rw, int reactor)
+{
+    pending_wire_t *const n = pemalloc(sizeof(*n), 1);
+
+    n->rw          = rw;
+    n->reactor     = reactor;
+    n->deadline_ns = zend_hrtime() + PENDING_WIRE_TTL_NS;
+    n->next        = NULL;
+
+    if (pending_wire_tail != NULL) {
+        pending_wire_tail->next = n;
+    } else {
+        pending_wire_head = n;
+    }
+    pending_wire_tail = n;
+
+    if (!pending_wire_arm_timer()) {
+        /* unlink what we just queued; caller discards the wire */
+        if (pending_wire_head == n) {
+            pending_wire_head = NULL;
+            pending_wire_tail = NULL;
+        } else {
+            pending_wire_t *p = pending_wire_head;
+            while (p->next != n) {
+                p = p->next;
+            }
+            p->next = NULL;
+            pending_wire_tail = p;
+        }
+        pefree(n, 1);
+        return false;
+    }
+
+    return true;
+}
+#endif /* HAVE_HTTP_SERVER_HTTP3 */
+
 /* Worker response sink: post the rendered response back to the originating
- * reactor for nghttp3 encode + send. Runs on the worker thread (from
- * the handler coroutine's dispose). reactor_id (echoed on the wire) selects the
- * reverse channel; ownership of `rw` transfers to the reactor apply on success.
- * On failure (no pool / full mailbox) drop it — the client times out and the
- * slab is still reclaimed by the consumed that follows. */
+ * reactor for nghttp3 encode + send. Runs on the worker thread (handler
+ * coroutine or its dispose). reactor_id (echoed on the wire) selects the
+ * reverse channel; ownership of `rw` transfers to the reactor apply on
+ * success. A FULL wire that doesn't fit is dropped (the client times out);
+ * STREAM_* wires are ordered fragments, so they defer to the hidden retry
+ * timer instead — never blocking the worker thread. */
 static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
 {
     (void)arg;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     if (g_reactor_pool != NULL) {
-        const int reactor = (int)response_wire_reactor_id(rw);
+        const int  reactor   = (int)response_wire_reactor_id(rw);
+        const bool is_stream = response_wire_kind(rw) != RESPONSE_WIRE_FULL;
 
-        if (reactor_pool_post_exec(g_reactor_pool, reactor,
-                                   http3_reactor_apply_response, rw)) {
+        /* Once anything is deferred, stream wires queue behind it so
+         * fragments never overtake each other. FULL wires are whole
+         * responses on their own streams — always try directly. */
+        if ((!is_stream || pending_wire_head == NULL)
+            && reactor_pool_post_exec(g_reactor_pool, reactor,
+                                      http3_reactor_apply_response, rw)) {
             return true;   /* the reactor owns rw now */
         }
 
-        /* STREAM_* wires are ordered fragments — dropping one corrupts the
-         * stream. Retry ~100 ms on a full mailbox, then fail fast (→ ABORT). */
-        if (response_wire_kind(rw) != RESPONSE_WIRE_FULL) {
-            for (int attempt = 0; attempt < 100; attempt++) {
-#ifdef PHP_WIN32
-                Sleep(1);
-#else
-                const struct timespec ts = { 0, 1000000 };   /* 1 ms */
-                nanosleep(&ts, NULL);
-#endif
-
-                if (reactor_pool_post_exec(g_reactor_pool, reactor,
-                                           http3_reactor_apply_response, rw)) {
-                    return true;
-                }
-            }
+        if (is_stream && pending_wire_defer(rw, reactor)) {
+            return true;   /* parked; retried by the timer, ~100 ms TTL */
         }
     }
 #endif
 
-    /* undeliverable: nobody adopts the credit ref — unblock the producer */
-    stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
-
-    zend_string *const orphan_chunk = (zend_string *)response_wire_take_chunk(rw);
-
-    if (orphan_chunk != NULL) {
-        zend_string_release(orphan_chunk);
-    }
-
-    response_wire_free(rw);
+    /* undeliverable: abandoning the credit unblocks the producer */
+    response_wire_discard(rw);
     return false;
 }
 
@@ -2608,17 +2741,7 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
  * loop keep draining (mailbox, scheduler) while we wait. */
 static void hot_reload_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
 {
-    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
-
-    if (UNEXPECTED(t == NULL)) {
-        zend_clear_exception();
-        return;
-    }
-
-    t->base.start(&t->base);
-    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
-    ZEND_ASYNC_SUSPEND();
-    ZEND_ASYNC_WAKER_DESTROY(co);
+    async_coroutine_sleep_ms(co, ms);
 
     if (EG(exception)) {
         zend_clear_exception();
@@ -5369,23 +5492,8 @@ static zend_object *http_server_transfer_obj(
              * dispatch a parsed request to user code; without this, the
              * loaded handler sits in the HashTable but plain HTTP/1
              * requests are silently dropped on each worker thread. */
-            switch (transit->entries[i].protocol) {
-                case HTTP_PROTOCOL_HTTP1:
-                    dst_obj->view.protocol_mask |=
-                        HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2;
-                    break;
-                case HTTP_PROTOCOL_HTTP2:
-                    dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_HTTP2;
-                    break;
-                case HTTP_PROTOCOL_WEBSOCKET:
-                    dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_WS;
-                    break;
-                case HTTP_PROTOCOL_GRPC:
-                    dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_GRPC;
-                    break;
-                default:
-                    break;
-            }
+            dst_obj->view.protocol_mask |=
+                http_protocol_registration_mask(transit->entries[i].protocol);
         }
     }
 

@@ -134,24 +134,6 @@ void http3_debug_logger(void *user_data, const char *fmt, ...)
     http_logf_debug(st, "h3.ngtcp2 %s", buf);
 }
 
-/* Build a sockaddr_storage from the listener's bound (host, port).
- *
- * ngtcp2_path matching is strict: the local addr passed to read_pkt /
- * writev_stream must be the same value on every call after server_new.
- * The proper plumbing for this is `zend_async_udp_sockname`, which is
- * not yet available; until it lands we fabricate the sockaddr from the
- * bind config so at least it is stable across calls. peer_family lets us produce v4 / v6 to match
- * the inbound datagram. The result is precomputed once per family at listener
- * spawn; this just copies the cached value. Returns 0 on success. */
-int http3_build_listener_local(const http3_listener_t *l,
-                               int peer_family,
-                               struct sockaddr_storage *out,
-                               socklen_t *out_len)
-{
-    http3_listener_local_sockaddr(l, peer_family, out, out_len);
-    return 0;
-}
-
 /* ------------------------------------------------------------------------
  * TLS attach (per-connection SSL bound to ngtcp2 via crypto_ossl)
  * ------------------------------------------------------------------------ */
@@ -316,11 +298,11 @@ static http3_connection_t *http3_connection_accept(
     orig_dcid.datalen = c->original_dcidlen;
 
     /* Stable local sockaddr derived from the listener bind config. See
-     * http3_build_listener_local() — works around the missing
+     * http3_listener_local_sockaddr() — works around the missing
      * zend_async_udp_sockname API. */
     struct sockaddr_storage local_addr;
     socklen_t local_addr_len = 0;
-    http3_build_listener_local(listener, peer->sa_family, &local_addr, &local_addr_len);
+    http3_listener_local_sockaddr(listener, peer->sa_family, &local_addr, &local_addr_len);
 
     ngtcp2_path path = {
         .local  = { .addr = (struct sockaddr *)&local_addr, .addrlen = local_addr_len },
@@ -738,12 +720,12 @@ bool http3_connection_dispatch(
      * subsequent packets advance the handshake or carry 1-RTT data.
      *
      * Same fabricated local addr as accept / drain — see
-     * http3_build_listener_local() for the rationale. The path remote is the
+     * http3_listener_local_sockaddr() for the rationale. The path remote is the
      * datagram's actual source (not conn->peer) so ngtcp2 sees a migrated /
      * NAT-rebound client (RFC 9000 §9); identical to conn->peer otherwise. */
     struct sockaddr_storage local_addr;
     socklen_t local_addr_len = 0;
-    http3_build_listener_local(listener, peer->sa_family,
+    http3_listener_local_sockaddr(listener, peer->sa_family,
                                &local_addr, &local_addr_len);
 
     ngtcp2_path_storage ps = {0};

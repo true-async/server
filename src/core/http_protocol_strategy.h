@@ -130,6 +130,25 @@ typedef uint32_t http_protocol_mask_t;
 #define HTTP_PROTO_MASK_HAS(mask, type) (((mask) & (1u << (type))) != 0)
 
 /*
+ * Mask bits a registered handler of `type` enables. The single source for
+ * the protocol→mask rule — used both by the addXHandler methods at
+ * registration and by the worker-side transit rebuild, so the two can't
+ * drift (a plain HTTP handler serves h1+h2 on one port; gRPC rides h2).
+ */
+static zend_always_inline http_protocol_mask_t
+http_protocol_registration_mask(http_protocol_type_t type)
+{
+    switch (type) {
+        case HTTP_PROTOCOL_HTTP1:
+            return HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2;
+        case HTTP_PROTOCOL_GRPC:
+            return HTTP_PROTO_MASK_GRPC | HTTP_PROTO_MASK_HTTP2;
+        default:
+            return (http_protocol_mask_t)(1u << type);
+    }
+}
+
+/*
  * Sentinel returned internally when the byte prefix matches no
  * protocol the server accepts (e.g. HTTP/2 preface on a listener with
  * h2 disabled). Routes the caller to that protocol's error path —

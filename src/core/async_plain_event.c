@@ -11,6 +11,7 @@
 #endif
 
 #include "php.h"
+#include "Zend/zend_exceptions.h"   /* zend_clear_exception */
 #include "Zend/zend_async_API.h"
 #include "core/async_plain_event.h"
 
@@ -50,6 +51,21 @@ static bool plain_dispose(zend_async_event_t *event)
     zend_async_callbacks_free(event);
     pefree(event, 0);
     return true;
+}
+
+void async_coroutine_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
+{
+    zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
+
+    if (UNEXPECTED(t == NULL)) {
+        zend_clear_exception();
+        return;
+    }
+
+    t->base.start(&t->base);
+    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    ZEND_ASYNC_WAKER_DESTROY(co);
 }
 
 zend_async_event_t *async_plain_event_new(void)

@@ -26,7 +26,6 @@
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
-#include "grpc/grpc.h"            /* web-text is buffered-only (policy gate) */
 
 #include <string.h>
 
@@ -384,6 +383,9 @@ static void http2_request_body_upgrade(http_request_t *req)
         zend_string *initial = stream->request_body_buf.s;
         stream->request_body_buf.s = NULL;
 
+        /* the buffered branch already consumed these bytes — pop must not
+         * credit them a second time */
+        req->body_precredited += ZSTR_LEN(initial);
         http_body_stream_push(req, initial);
         zend_string_release(initial);
     }
@@ -444,8 +446,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 #endif
 
     /* Streaming mode (issue #26) — push the chunk into the per-request
-     * queue instead of accumulating into stream->request_body_buf. The
-     * cumulative max_body_size cap still applies as a hard ceiling.
+     * queue instead of accumulating into stream->request_body_buf.
      * Backpressure: no_auto_window_update is set; peer credit is granted
      * per chunk in http_body_stream_pop after the handler drains it. */
     if (stream->request != NULL && stream->request->body_streaming) {
@@ -456,9 +457,12 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
             body_cap = HTTP2_MAX_BODY_SIZE;
         }
 
-        /* cap the LIVE (queued) bytes, not the cumulative total — a
-         * streaming body is legitimately unbounded in total */
-        if (req->body_bytes_queued + len > body_cap) {
+        /* Live bytes cap memory for everyone; the cumulative cap is the
+         * operator's max_body_size contract, waived only for gRPC. */
+        if (req->body_bytes_queued + len > body_cap
+            || (!http_request_body_size_uncapped(req)
+                && req->body_bytes_consumed + req->body_bytes_queued + len
+                       > body_cap)) {
             return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
         }
 
@@ -617,16 +621,16 @@ static int cb_on_frame_recv(nghttp2_session *ng,
                 http_request_parse_trace_context(stream->request);
             }
 
+            http_request_classify_protocols(stream->request);
+
             /* Streaming body mode (issue #26). Three-case policy by
              * Content-Length, see H1 parser for the full doc:
              *   CL == 0 (chunked) or CL >= AUTO → stream immediately
              *   SMALL <= CL < AUTO → buffer + install upgrade hook
              *   CL <  SMALL → buffer, never stream. */
-            /* grpc-web-text stays buffered: readMessage() decodes the
-             * assembled body */
             if (session->conn != NULL && session->conn->view != NULL
                 && session->conn->view->body_streaming_enabled
-                && !grpc_request_is_grpc_web_text(stream->request)) {
+                && !http_request_body_must_buffer(stream->request)) {
                 http_request_t *r = stream->request;
 
                 if (r->content_length == 0
