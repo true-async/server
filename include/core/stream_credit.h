@@ -26,7 +26,7 @@ typedef struct {
     zend_atomic_int   dead;    /* stream died — producer must stop waiting */
     zend_atomic_int   refs;
     zend_atomic_ptr   waker;      /* worker-owned trigger the reactor signals */
-    zend_atomic_int   waker_busy; /* a signaller is inside trigger() */
+    zend_atomic_int   waker_busy; /* count of signallers inside trigger() (0 = idle) */
 } stream_credit_t;
 
 static inline stream_credit_t *stream_credit_create(void)
@@ -71,11 +71,11 @@ static inline void stream_credit_mark_dead(stream_credit_t *sc)
     zend_atomic_int_store_ex(&sc->dead, 1);
 }
 
-/* Signal the parked producer from any thread. busy brackets the load+trigger
- * so stream_credit_clear_waker can't dispose the event mid-signal. */
+/* busy brackets load+trigger so clear_waker can't dispose the event mid-signal;
+ * seq-cst makes it a StoreLoad fence. Counter (not flag) survives overlap. */
 static inline void stream_credit_wake(stream_credit_t *sc)
 {
-    zend_atomic_int_store_ex(&sc->waker_busy, 1);
+    zend_atomic_int_inc(&sc->waker_busy);
 
     zend_async_trigger_event_t *const t =
         (zend_async_trigger_event_t *)zend_atomic_ptr_load_ex(&sc->waker);
@@ -84,7 +84,7 @@ static inline void stream_credit_wake(stream_credit_t *sc)
         t->trigger(t);
     }
 
-    zend_atomic_int_store_ex(&sc->waker_busy, 0);
+    zend_atomic_int_dec(&sc->waker_busy);
 }
 
 /* Worker thread: publish/retract the park trigger. clear must complete

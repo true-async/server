@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: 4d389377f8768c3f1faf3593872627ba44c80676 */
+ * Stub hash: bd0900669aec1532653cb9890d00beba15244f08 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -163,6 +163,12 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_setMaxInflightRequests
 
 #define arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setReactorMailboxCapacity, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, slots, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getReactorMailboxCapacity arginfo_class_TrueAsync_HttpServerConfig_getWorkers
 
 #define arginfo_class_TrueAsync_HttpServerConfig_setHttp3SocketBufferBytes arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
 
@@ -350,6 +356,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3MaxConcurrentStreams);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3MaxConcurrentStreams);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setReactorMailboxCapacity);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getReactorMailboxCapacity);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3SocketBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3SocketBufferBytes);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTlsBufferBytes);
@@ -467,6 +475,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3MaxConcurrentStreams, arginfo_class_TrueAsync_HttpServerConfig_getHttp3MaxConcurrentStreams, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_setHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget, arginfo_class_TrueAsync_HttpServerConfig_getHttp3PeerConnectionBudget, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setReactorMailboxCapacity, arginfo_class_TrueAsync_HttpServerConfig_setReactorMailboxCapacity, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getReactorMailboxCapacity, arginfo_class_TrueAsync_HttpServerConfig_getReactorMailboxCapacity, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setHttp3SocketBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_setHttp3SocketBufferBytes, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getHttp3SocketBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_getHttp3SocketBufferBytes, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setTlsBufferBytes, arginfo_class_TrueAsync_HttpServerConfig_setTlsBufferBytes, ZEND_ACC_PUBLIC)

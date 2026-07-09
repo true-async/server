@@ -101,7 +101,7 @@ PHP_FUNCTION(_http_server_reactor_pool_selftest)
         RETURN_FALSE;
     }
 
-    reactor_pool_t *const rp = reactor_pool_create((int)reactors);
+    reactor_pool_t *const rp = reactor_pool_create((int)reactors, 0);
 
     if (rp == NULL) {
         RETURN_FALSE;
@@ -277,7 +277,7 @@ PHP_FUNCTION(_http_server_reactor_pool_exec_selftest)
         RETURN_FALSE;
     }
 
-    reactor_pool_t *const rp = reactor_pool_create((int)reactors);
+    reactor_pool_t *const rp = reactor_pool_create((int)reactors, 0);
 
     if (rp == NULL) {
         RETURN_FALSE;
@@ -362,7 +362,7 @@ PHP_FUNCTION(_http_server_reactor_post_exec_selftest)
         RETURN_FALSE;
     }
 
-    reactor_pool_t *const rp = reactor_pool_create((int)reactors);
+    reactor_pool_t *const rp = reactor_pool_create((int)reactors, 0);
 
     if (rp == NULL) {
         RETURN_FALSE;
@@ -1005,7 +1005,7 @@ PHP_FUNCTION(_http_server_reactor_h3_listener_selftest)
     ZEND_PARSE_PARAMETERS_NONE();
 
 #if defined(HAVE_HTTP_SERVER_HTTP3) && !defined(PHP_WIN32)
-    reactor_pool_t *const rp = reactor_pool_create(1);
+    reactor_pool_t *const rp = reactor_pool_create(1, 0);
 
     if (rp == NULL) {
         RETURN_FALSE;

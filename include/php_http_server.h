@@ -243,6 +243,7 @@ struct _http_server_config_t {
     uint32_t http3_peer_connection_budget;
     uint32_t http3_socket_buffer_bytes;
     uint32_t tls_buffer_bytes;        /* CT-out BIO ring size, record-aligned (#29) */
+    uint32_t reactor_mailbox_capacity; /* per-reactor inbound depth; 0 = default (#106) */
     bool     http3_alt_svc_enabled;
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
@@ -548,6 +549,13 @@ http_server_config_t *http_server_get_config         (http_server_object *server
  * (http_connection_t, http3_connection_t, mp_processor_t) cache the
  * result at create time. Returns &http_log_state_default for NULL. */
 struct http_log_state *http_server_get_log_state(http_server_object *server);
+
+/* Post a non-wire reactor op (H3 stream-slot release) onto the worker's ordered
+ * reverse-path retry FIFO — shared with response wires so it can never overtake
+ * a still-parked wire of the same stream, and never busy-spins the worker.
+ * Retries until accepted or the pool is gone. Returns false only if no retry
+ * timer can be armed, so the caller can fall back. Worker thread only. */
+bool http_worker_reactor_post_release(int reactor, void (*fn)(void *arg), void *arg);
 
 /* Admission-reject predicate. True when the server is overloaded and
  * the caller should short-circuit the request (H1: 503, H2:
