@@ -758,6 +758,25 @@ static void ws_session_on_msg_recv_callback(wslay_event_context_ptr ctx,
         data = zend_string_init((const char *)arg->msg, arg->msg_length, 0);
     }
 
+    /* FIFO cap: a stalled consumer + flooding peer must not grow the queue
+     * without bound. Close 1013 (try again later) and latch overflow so
+     * feed() tears the session down. */
+    if (s->recv_queue_cap > 0
+        && s->recv_queue_bytes + ZSTR_LEN(data) > s->recv_queue_cap) {
+        zend_string_release(data);
+        s->recv_overflow = 1;
+
+        if (s->close_code == 0) {
+            s->close_code = 1013;
+        }
+
+        (void)wslay_event_queue_close(ctx, 1013, NULL, 0);
+        ws_session_mark_peer_closed(s);
+        return;
+    }
+
+    s->recv_queue_bytes += ZSTR_LEN(data);
+
     ws_pending_message_t *node = emalloc(sizeof(*node));
     node->next   = NULL;
     node->binary = (arg->opcode == WSLAY_BINARY_FRAME);
@@ -952,6 +971,10 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
     }
     wslay_event_config_set_max_recv_msg_length(s->ctx, max_msg);
 
+    /* Inbound FIFO byte cap: 8× the per-message cap — room for a burst,
+     * bounded against a consumer that never recv()s. */
+    s->recv_queue_cap = (size_t)max_msg * 8;
+
     /* H1/wss: wire the transport drain hook so a producer blocked over the
      * high-water mark in send() is woken when the batched queue drains.
      * transport_ctx == conn marks the H1 binding; H2 binds to a stream and
@@ -1063,6 +1086,14 @@ ws_pending_message_t *ws_session_recv_pop(ws_session_t *session)
         session->recv_tail = NULL;
     }
     node->next = NULL;
+
+    /* Return the popped payload's bytes to the FIFO budget. */
+    if (node->data != NULL) {
+        const size_t n = ZSTR_LEN(node->data);
+        session->recv_queue_bytes -= n <= session->recv_queue_bytes
+                                     ? n : session->recv_queue_bytes;
+    }
+
     return node;
 }
 
@@ -1128,6 +1159,12 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
             session->close_code = wslay_event_get_status_code_sent(session->ctx);
         }
         ws_session_mark_peer_closed(session);
+        return -1;
+    }
+
+    /* Inbound FIFO overflowed its byte cap: the 1013 close queued in
+     * on_msg_recv was flushed by the drive above; tear the transport down. */
+    if (session->recv_overflow) {
         return -1;
     }
 #ifdef HAVE_HTTP_COMPRESSION

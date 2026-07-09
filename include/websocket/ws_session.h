@@ -163,6 +163,16 @@ typedef struct ws_session_t {
     ws_pending_message_t *recv_head;
     ws_pending_message_t *recv_tail;
 
+    /* Inbound FIFO memory backstop. The transport read loop never pauses,
+     * so a handler that stops recv()'ing while the peer keeps sending would
+     * grow the FIFO without bound (issue: ingress backpressure is out of
+     * scope of the outbound plan). recv_queue_bytes tracks queued payload;
+     * past recv_queue_cap (8× the per-message cap) the session closes 1013
+     * and recv_overflow makes feed() return -1 (transport teardown). */
+    size_t   recv_queue_bytes;
+    size_t   recv_queue_cap;
+    unsigned recv_overflow : 1;
+
     /* Trigger event that wakes a waiter blocked in recv() when a
      * message lands or the connection closes. Lazy — created on the
      * first recv() that finds the FIFO empty. */
