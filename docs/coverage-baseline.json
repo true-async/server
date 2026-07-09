@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 19578,
-      "hit": 15792
+      "total": 19717,
+      "hit": 16041
     },
     "functions": {
-      "total": 1333,
-      "hit": 1192
+      "total": 1340,
+      "hit": 1208
     }
   },
   "files": {
@@ -73,7 +73,7 @@
     "src/compression/http_compression_response.c": {
       "lines": {
         "total": 254,
-        "hit": 209
+        "hit": 211
       },
       "functions": {
         "total": 18,
@@ -132,8 +132,8 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 1050,
-        "hit": 787
+        "total": 1053,
+        "hit": 790
       },
       "functions": {
         "total": 64,
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 357,
-        "hit": 262
+        "hit": 263
       },
       "functions": {
         "total": 22,
@@ -183,7 +183,7 @@
     "src/core/http_protocol_handlers.c": {
       "lines": {
         "total": 80,
-        "hit": 64
+        "hit": 69
       },
       "functions": {
         "total": 14,
@@ -203,7 +203,7 @@
     "src/core/http_protocol_strategy.h": {
       "lines": {
         "total": 6,
-        "hit": 2
+        "hit": 4
       },
       "functions": {
         "total": 0,
@@ -232,12 +232,12 @@
     },
     "src/core/response_wire.c": {
       "lines": {
-        "total": 110,
-        "hit": 99
+        "total": 150,
+        "hit": 143
       },
       "functions": {
-        "total": 23,
-        "hit": 20
+        "total": 25,
+        "hit": 24
       }
     },
     "src/core/thread_mailbox.c": {
@@ -262,12 +262,12 @@
     },
     "src/core/worker_dispatch.c": {
       "lines": {
-        "total": 287,
-        "hit": 194
+        "total": 324,
+        "hit": 246
       },
       "functions": {
-        "total": 15,
-        "hit": 10
+        "total": 16,
+        "hit": 13
       }
     },
     "src/core/worker_inbox.c": {
@@ -283,11 +283,11 @@
     "src/core/worker_registry.c": {
       "lines": {
         "total": 86,
-        "hit": 53
+        "hit": 56
       },
       "functions": {
         "total": 10,
-        "hit": 5
+        "hit": 6
       }
     },
     "src/formats/multipart_parser.c": {
@@ -392,8 +392,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 833,
-        "hit": 661
+        "total": 836,
+        "hit": 664
       },
       "functions": {
         "total": 48,
@@ -413,17 +413,17 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 877,
-        "hit": 689
+        "hit": 713
       },
       "functions": {
         "total": 47,
-        "hit": 38
+        "hit": 40
       }
     },
     "src/http3/http3_connection.c": {
       "lines": {
         "total": 377,
-        "hit": 307
+        "hit": 308
       },
       "functions": {
         "total": 12,
@@ -432,18 +432,18 @@
     },
     "src/http3/http3_dispatch.c": {
       "lines": {
-        "total": 352,
-        "hit": 257
+        "total": 409,
+        "hit": 327
       },
       "functions": {
-        "total": 16,
-        "hit": 15
+        "total": 20,
+        "hit": 19
       }
     },
     "src/http3/http3_io.c": {
       "lines": {
         "total": 275,
-        "hit": 238
+        "hit": 245
       },
       "functions": {
         "total": 8,
@@ -453,11 +453,11 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 653,
-        "hit": 474
+        "hit": 492
       },
       "functions": {
         "total": 44,
-        "hit": 41
+        "hit": 42
       }
     },
     "src/http3/http3_packet.c": {
@@ -483,16 +483,16 @@
     "src/http3/http3_steer.c": {
       "lines": {
         "total": 40,
-        "hit": 35
+        "hit": 40
       },
       "functions": {
         "total": 7,
-        "hit": 6
+        "hit": 7
       }
     },
     "src/http3/http3_stream.c": {
       "lines": {
-        "total": 83,
+        "total": 82,
         "hit": 79
       },
       "functions": {
@@ -663,7 +663,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2182,
-        "hit": 1498
+        "hit": 1507
       },
       "functions": {
         "total": 114,
