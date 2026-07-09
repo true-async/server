@@ -2,11 +2,11 @@
   "totals": {
     "lines": {
       "total": 19578,
-      "hit": 15903
+      "hit": 15827
     },
     "functions": {
       "total": 1333,
-      "hit": 1200
+      "hit": 1194
     }
   },
   "files": {
@@ -183,7 +183,7 @@
     "src/core/http_protocol_handlers.c": {
       "lines": {
         "total": 80,
-        "hit": 69
+        "hit": 64
       },
       "functions": {
         "total": 14,
@@ -203,7 +203,7 @@
     "src/core/http_protocol_strategy.h": {
       "lines": {
         "total": 6,
-        "hit": 4
+        "hit": 2
       },
       "functions": {
         "total": 0,
@@ -233,11 +233,11 @@
     "src/core/response_wire.c": {
       "lines": {
         "total": 110,
-        "hit": 103
+        "hit": 99
       },
       "functions": {
         "total": 23,
-        "hit": 22
+        "hit": 20
       }
     },
     "src/core/thread_mailbox.c": {
@@ -263,11 +263,11 @@
     "src/core/worker_dispatch.c": {
       "lines": {
         "total": 287,
-        "hit": 206
+        "hit": 194
       },
       "functions": {
         "total": 15,
-        "hit": 11
+        "hit": 10
       }
     },
     "src/core/worker_inbox.c": {
@@ -283,11 +283,11 @@
     "src/core/worker_registry.c": {
       "lines": {
         "total": 86,
-        "hit": 56
+        "hit": 53
       },
       "functions": {
         "total": 10,
-        "hit": 6
+        "hit": 5
       }
     },
     "src/formats/multipart_parser.c": {
@@ -423,7 +423,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 877,
-        "hit": 713
+        "hit": 695
       },
       "functions": {
         "total": 47,
@@ -443,7 +443,7 @@
     "src/http3/http3_dispatch.c": {
       "lines": {
         "total": 352,
-        "hit": 276
+        "hit": 275
       },
       "functions": {
         "total": 16,
@@ -463,11 +463,11 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 653,
-        "hit": 501
+        "hit": 475
       },
       "functions": {
         "total": 44,
-        "hit": 42
+        "hit": 41
       }
     },
     "src/http3/http3_packet.c": {
@@ -493,11 +493,11 @@
     "src/http3/http3_steer.c": {
       "lines": {
         "total": 40,
-        "hit": 40
+        "hit": 35
       },
       "functions": {
         "total": 7,
-        "hit": 7
+        "hit": 6
       }
     },
     "src/http3/http3_stream.c": {
