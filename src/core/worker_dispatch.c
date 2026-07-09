@@ -19,7 +19,8 @@
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
 #include "zend_exceptions.h"                 /* zend_clear_exception */
-#include "http_response_internal.h"          /* http_response_replace_stream_ops */
+#include "http_response_internal.h"          /* http_response_replace_stream_ops, take_send_file */
+#include "http_send_file.h"                  /* http_send_file_request_t (sendFile marshalling) */
 #include "core/stream_credit.h"              /* per-stream flow-control credit */
 #include "grpc/grpc.h"                       /* grpc_classify */
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
@@ -486,6 +487,51 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
     return rw;
 }
 
+/* Marshal $response->sendFile() into a SEND_FILE wire: path + option snapshot
+ * as raw bytes; the reactor re-opens the path and runs the sendfile engine
+ * (#105). Returns NULL on allocation failure; borrows sf. */
+static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx,
+                                                const http_send_file_request_t *sf)
+{
+    response_wire_t *const rw =
+        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+
+    if (rw == NULL) {
+        return NULL;
+    }
+
+    response_wire_set_kind(rw, RESPONSE_WIRE_SEND_FILE);
+
+    const http_send_file_options_t *const o = &sf->opts;
+    response_wire_send_file_t wsf = {
+        .path              = ZSTR_VAL(sf->path),
+        .path_len          = ZSTR_LEN(sf->path),
+        .content_type      = o->content_type  ? ZSTR_VAL(o->content_type)  : NULL,
+        .content_type_len  = o->content_type  ? ZSTR_LEN(o->content_type)  : 0,
+        .download_name     = o->download_name ? ZSTR_VAL(o->download_name) : NULL,
+        .download_name_len = o->download_name ? ZSTR_LEN(o->download_name) : 0,
+        .cache_control     = o->cache_control ? ZSTR_VAL(o->cache_control) : NULL,
+        .cache_control_len = o->cache_control ? ZSTR_LEN(o->cache_control) : 0,
+        .status            = o->status,
+        .disposition       = o->disposition,
+        .disposition_set   = o->disposition_set,
+        .etag              = o->etag,
+        .last_modified     = o->last_modified,
+        .accept_ranges     = o->accept_ranges,
+        .precompressed     = o->precompressed,
+        .conditional       = o->conditional,
+        .delete_after_send = o->delete_after_send,
+        .is_head           = ctx->is_head,
+    };
+
+    if (!response_wire_set_send_file(rw, &wsf)) {
+        response_wire_free(rw);
+        return NULL;
+    }
+
+    return rw;
+}
+
 /* Coroutine dispose: commit the response (or derive a 500 from an unhandled
  * exception), render it into a response_wire, hand it to the sink, and drop the
  * per-request state. */
@@ -499,6 +545,15 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     /* Un-bracket the in-flight request (--active), paired with the
      * on_request_dispatch in worker_dispatch_request. */
     http_server_on_request_dispose(ctx->counters);
+
+    /* A thrown handler exception becomes a response (derived 500 below, or
+     * a grpc-status / aborted stream) — mark it consumed on both escalation
+     * paths so it isn't rethrown into EG and trip a premature graceful
+     * shutdown of the worker (#101; see http_handler_coroutine_dispose). */
+    if (coroutine->exception != NULL) {
+        ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
+        ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
+    }
 
     if (!Z_ISUNDEF(ctx->response_zv)) {
         zend_object *const resp = Z_OBJ(ctx->response_zv);
@@ -529,7 +584,20 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
         }
 
         if (!ctx->stream_started) {
-            response_wire_t *const rw = worker_render_response(ctx);
+            /* sendFile() seals the response: marshal path + opts to the
+             * reactor, which opens the file and runs the sendfile engine.
+             * Falls through to the buffered render when absent (#105). */
+            http_send_file_request_t *const sf =
+                ctx->is_grpc ? NULL : http_response_take_send_file(resp);
+
+            response_wire_t *rw;
+
+            if (sf != NULL) {
+                rw = worker_render_send_file(ctx, sf);
+                http_send_file_request_free(sf);
+            } else {
+                rw = worker_render_response(ctx);
+            }
 
             if (rw != NULL) {
                 worker_wire_post(ctx, rw);   /* sink owns rw now */

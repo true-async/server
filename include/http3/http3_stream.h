@@ -182,6 +182,10 @@ struct _http3_stream_s {
      * Once dispatch fires, the handler coroutine bumps to 2. */
     unsigned          refcount;
 
+    /* Owned by a reactor listener; fixed at creation. Release reads this
+     * rather than s->conn, which teardown nulls before force-releasing. */
+    bool              reactor_owned;
+
     /* Intrusive link in the owning connection's live-stream list. The
      * connection walks this list at teardown to force-release any
      * stream nghttp3_conn_del would otherwise orphan (no stream_close
