@@ -69,6 +69,7 @@ extern void http3_listener_unmark_flush(http3_listener_t *l,
 extern void *http3_listener_ssl_ctx(http3_listener_t *l);
 extern const char *http3_listener_host(const http3_listener_t *l);
 extern int http3_listener_port(const http3_listener_t *l);
+extern http_server_counters_t *http3_listener_local_counters(http3_listener_t *l);
 
 /* ------------------------------------------------------------------------
  * Process-wide one-shot helpers
@@ -236,7 +237,11 @@ static http3_connection_t *http3_connection_accept(
     {
         http_server_object *srv =
             (http_server_object *)http3_listener_server_obj(listener);
-        c->counters  = http_server_counters(srv);
+        /* Reactor mode (srv == NULL): use the listener's own counters slice,
+         * not the shared dummy — that one is bumped non-atomically from every
+         * reactor thread at once. */
+        c->counters  = srv != NULL ? http_server_counters(srv)
+                                   : http3_listener_local_counters(listener);
         c->view      = http_server_view(srv);
         c->log_state = http_server_get_log_state(srv);
     }

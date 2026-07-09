@@ -202,6 +202,12 @@ struct _http3_listener_s {
 
     http3_listener_stats_t     stats;
 
+    /* Reactor-mode counters slice. With server_obj == NULL (reactor spawn)
+     * conns must not cache the process-wide dummy: several reactor threads
+     * would race non-atomic ++ on one shared cache line. This slice is
+     * touched only by this listener's own reactor thread. */
+    http_server_counters_t     local_counters;
+
     /* Reactor watchdog rate-limit gate: hrtime of the last
      * slow-tick WARN we emitted. Kept off the stats snapshot — it is
      * internal throttle state, not a counter. */
@@ -891,6 +897,11 @@ void *http3_listener_ssl_ctx(http3_listener_t *l)
 void *http3_listener_server_obj(const http3_listener_t *l)
 {
     return l != NULL ? l->server_obj : NULL;
+}
+
+http_server_counters_t *http3_listener_local_counters(http3_listener_t *l)
+{
+    return &l->local_counters;
 }
 
 const http3_reactor_ctx_t *http3_listener_reactor_ctx(const http3_listener_t *l)
