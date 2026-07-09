@@ -507,7 +507,6 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     deps/llhttp/api.c
     deps/llhttp/http.c
     src/http_server.c
-    src/http_server_exceptions.c
     src/http_server_config.c
     src/http_server_class.c
     src/core/http_connection.c
@@ -538,9 +537,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/http_mime.c
     src/http_date.c
     src/http_etag.c
-    src/http_conditional.c
     src/http_range.c
-    src/fs_util.c
     src/http_rfc5987.c
     src/http_precompressed.c
     src/http_param_parse.c
