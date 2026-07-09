@@ -187,7 +187,30 @@ struct http_request_t {
     uint8_t      trace_id[16];
     uint8_t      span_id[8];
     uint8_t      trace_flags;
-    bool         has_trace;
+
+    /* Per-request bit flags, parked here to fill the padding hole after
+     * trace_flags (7 bytes before the next pointer). Single-owner request
+     * (handed off by ownership, never mutated concurrently) → non-atomic
+     * bit RMW is safe. */
+    bool         chunked        : 1;
+    bool         keep_alive     : 1;
+    bool         complete       : 1;
+    bool         use_multipart  : 1;
+    bool         body_streaming : 1;
+    bool         body_eof       : 1;
+    bool         body_error     : 1;
+    /* TODO(issue #26 backpressure): set true when on_body trips llhttp_pause;
+     * readBody clears it via llhttp_resume below the low-water mark. Unused
+     * by the MVP — see TODO in on_body. */
+    bool         body_paused    : 1;
+    /* W3C Trace Context present (see trace_id/span_id/trace_flags above). */
+    bool         has_trace      : 1;
+    /* Allocation domain of reactor-produced fields (method/uri/headers + the
+     * headers HashTable + the struct block). false = ZMM (worker-built,
+     * default), true = persistent malloc (reactor-built) → those frees go
+     * through pefree, flag-aware. Body/worker-derived fields stay ZMM. */
+    bool         persistent     : 1;
+
     zend_string *traceparent_raw;
     zend_string *tracestate_raw;
 
@@ -232,31 +255,13 @@ struct http_request_t {
     int64_t      reactor_stream_id;
     uint32_t     reactor_id;
 
-    /* 1-byte fields clustered */
+    /* 1-byte scalars. The bool flag cluster lives up next to trace_flags,
+     * packed into what was tail padding (see there). */
     uint8_t      http_major;
     uint8_t      http_minor;
-    bool         chunked;
-    bool         keep_alive;
-    bool         complete;
-    bool         use_multipart;
-    bool         body_streaming;
-    bool         body_eof;
-    bool         body_error;
-
     /* grpc_mode_t stamped once at headers-complete; body policy derives
      * from it (http_request_body_must_buffer / _size_uncapped). */
     uint8_t      grpc_mode;
-    /* TODO(issue #26 backpressure): set true when on_body trips
-     * llhttp_pause; readBody clears it via llhttp_resume below the
-     * low-water mark. Unused by the MVP — see TODO in on_body. */
-    bool         body_paused;
-
-    /* Allocation domain of reactor-produced fields
-     * (method/uri/headers + the headers HashTable + the struct block).
-     * false = ZMM (worker-built, default), true = persistent malloc
-     * (reactor-built) → those frees go through pefree, flag-aware. Body
-     * and worker-derived fields (path/query/post/files) stay ZMM. */
-    bool         persistent;
 };
 
 /* Single chunk node in the streaming body queue (linked list).
