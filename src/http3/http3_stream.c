@@ -94,12 +94,14 @@ static void http3_stream_release_via_request(http_request_t *req)
         s->conn != NULL ? http3_listener_reactor_ctx(s->conn->listener) : NULL;
 
     if (rctx != NULL) {
-        /* Bounded mailbox; the reactor drains continuously, so a brief spin on
-         * a transient full queue is safe and never deadlocks (the reactor never
-         * blocks on the worker). */
-        while (!reactor_pool_post_exec(rctx->pool, rctx->reactor_id,
-                                       http3_reactor_consumed_apply, s)) {
-            /* retry */
+        /* Hand the release back via the worker's ordered FIFO — no busy-spin,
+         * stays behind any parked wire of this stream. The fallback only fires
+         * when no timer can be armed (stopping loop), where the FIFO is empty. */
+        if (!http_worker_reactor_post_release(rctx->reactor_id,
+                                              http3_reactor_consumed_apply, s)) {
+            while (!reactor_pool_post_exec(rctx->pool, rctx->reactor_id,
+                                           http3_reactor_consumed_apply, s)) {
+            }
         }
 
         return;

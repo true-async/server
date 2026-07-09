@@ -546,6 +546,18 @@ final class HttpServerConfig
     public function getHttp3PeerConnectionBudget(): int {}
 
     /**
+     * Per-reactor inbound command-mailbox depth (reactor pool / HTTP/3).
+     * 0 = engine default. Valid: 0, or 64 .. 1048576.
+     *
+     * @param int $slots
+     * @return static
+     */
+    public function setReactorMailboxCapacity(int $slots): static {}
+
+    /** @return int */
+    public function getReactorMailboxCapacity(): int {}
+
+    /**
      * UDP socket receive/send buffer size (bytes) for HTTP/3 listeners.
      * Absorbs inbound bursts so they don't overflow into RcvbufErrors.
      * 0 = leave the OS default. The kernel clamps to net.core.{r,w}mem_max

@@ -85,6 +85,9 @@ struct _http_server_shared_config_t {
     uint32_t                http3_socket_buffer_bytes;
     uint32_t                tls_buffer_bytes;
 
+    /* per-reactor inbound command-mailbox depth; 0 = engine default (#106) */
+    uint32_t                reactor_mailbox_capacity;
+
     /* WS knobs — see http_server_config_t for semantics. */
     uint32_t                ws_max_message_size;
     uint32_t                ws_max_frame_size;
@@ -192,6 +195,8 @@ static void http_server_config_populate_from_shared(
  * per-IP throttle set it explicitly via setHttp3PeerConnectionBudget(). */
 #define DEFAULT_HTTP3_PEER_BUDGET             0u
 #define HTTP3_PEER_BUDGET_MAX                 4096u
+#define REACTOR_MAILBOX_CAP_MIN               64u                    /* = reactor drain batch */
+#define REACTOR_MAILBOX_CAP_MAX               (1u << 20)             /* 1,048,576 */
 #define DEFAULT_HTTP3_SOCKET_BUFFER_BYTES     (8u * 1024u * 1024u)   /* 8 MiB */
 #define HTTP3_SOCKET_BUFFER_MAX               (256u * 1024u * 1024u) /* 256 MiB */
 
@@ -421,6 +426,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->http3_max_concurrent_streams = DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS;
     config->http3_peer_connection_budget = DEFAULT_HTTP3_PEER_BUDGET;
     config->http3_socket_buffer_bytes = DEFAULT_HTTP3_SOCKET_BUFFER_BYTES;
+    config->reactor_mailbox_capacity = 0;   /* 0 = engine default */
     config->tls_buffer_bytes = DEFAULT_TLS_BUFFER_BYTES;
     config->ws_max_message_size  = DEFAULT_WS_MAX_MESSAGE_SIZE;
     config->ws_max_frame_size    = DEFAULT_WS_MAX_FRAME_SIZE;
@@ -1709,6 +1715,39 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3PeerConnectionBudget)
     RETURN_LONG((zend_long)config->http3_peer_connection_budget);
 }
 
+/* proto HttpServerConfig::setReactorMailboxCapacity(int $slots): static
+ *
+ * Per-reactor inbound command-mailbox depth (reactor pool / HTTP/3). 0 = engine
+ * default. Valid: 0, or 64 .. 1048576. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setReactorMailboxCapacity)
+{
+    zend_long n;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(n)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) { return; }
+
+    if (n != 0 && (n < REACTOR_MAILBOX_CAP_MIN || (zend_ulong)n > REACTOR_MAILBOX_CAP_MAX)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "ReactorMailboxCapacity must be 0 (default) or between 64 and 1048576", 0);
+        return;
+    }
+
+    config->reactor_mailbox_capacity = (uint32_t)n;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getReactorMailboxCapacity(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getReactorMailboxCapacity)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_LONG((zend_long)config->reactor_mailbox_capacity);
+}
+
 /* proto HttpServerConfig::setHttp3SocketBufferBytes(int $bytes): static
  *
  * UDP socket receive/send buffer for HTTP/3 listeners. Absorbs inbound
@@ -2823,6 +2862,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->http3_max_concurrent_streams = 0;
     config->http3_peer_connection_budget = 0;
     config->http3_socket_buffer_bytes = 0;
+    config->reactor_mailbox_capacity = 0;
     config->tls_buffer_bytes = 0;
     config->ws_max_message_size          = 0;
     config->ws_max_frame_size            = 0;
@@ -2986,6 +3026,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
     shared->http3_peer_connection_budget = src->http3_peer_connection_budget;
     shared->http3_socket_buffer_bytes = src->http3_socket_buffer_bytes;
+    shared->reactor_mailbox_capacity = src->reactor_mailbox_capacity;
     shared->tls_buffer_bytes = src->tls_buffer_bytes;
     shared->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     shared->http3_pacing                 = src->http3_pacing;
@@ -3154,6 +3195,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_max_concurrent_streams = src->http3_max_concurrent_streams;
     dst->http3_peer_connection_budget = src->http3_peer_connection_budget;
     dst->http3_socket_buffer_bytes = src->http3_socket_buffer_bytes;
+    dst->reactor_mailbox_capacity = src->reactor_mailbox_capacity;
     dst->tls_buffer_bytes = src->tls_buffer_bytes;
     dst->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     dst->http3_pacing                 = src->http3_pacing;

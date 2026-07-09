@@ -43,10 +43,11 @@
 typedef struct reactor_pool_s reactor_pool_t;
 
 /* Stand up `reactors` transport reactor threads and block until each has
- * entered its loop (or failed to). Returns NULL on bad arguments, if the
- * ThreadPool API is unavailable, or if no reactor came up (a PHP exception may
- * be set). Call on the parent thread. */
-reactor_pool_t *reactor_pool_create(int reactors);
+ * entered its loop (or failed to). `mailbox_capacity` sizes each reactor's
+ * inbound command mailbox (0 = built-in default). Returns NULL on bad arguments,
+ * if the ThreadPool API is unavailable, or if no reactor came up (a PHP
+ * exception may be set). Call on the parent thread. */
+reactor_pool_t *reactor_pool_create(int reactors, size_t mailbox_capacity);
 
 /* Number of reactor threads that came up. */
 int reactor_pool_count(const reactor_pool_t *rp);

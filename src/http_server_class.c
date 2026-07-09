@@ -2459,7 +2459,10 @@ static void http_server_reactor_pool_up(http_server_object *server, const int wo
     const int cores    = http_server_online_cpus();
     const int reactors = workers < cores ? workers : cores;
 
-    server->reactor_pool = reactor_pool_create(reactors);
+    const http_server_config_t *const cfg = http_server_get_config(server);
+    const size_t mailbox_cap = cfg != NULL ? (size_t)cfg->reactor_mailbox_capacity : 0;
+
+    server->reactor_pool = reactor_pool_create(reactors, mailbox_cap);
 
     if (server->reactor_pool == NULL) {
         /* reactor_pool_create may set a PHP error on hard failures; clear it
@@ -2552,86 +2555,94 @@ static void http_server_reactor_pool_down(http_server_object *server)
 }
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
-/* Deferred-wire retry (per worker thread). A full reactor mailbox never
- * blocks the worker: the wire is parked in a thread-local FIFO and a hidden
- * one-shot timer retries the post on the next tick, so other coroutines
- * keep running while the reactor drains. Order is preserved (head blocks
- * the queue) and each wire gets ~100 ms before it is discarded —
- * response_wire_discard marks the producer's credit dead, the same failure
- * signal the old blocking retry produced. */
-typedef struct pending_wire_s {
-    response_wire_t       *rw;
+/* Per-worker FIFO of reverse-path posts that didn't fit the reactor mailbox; a
+ * 1 ms timer retries in order so the worker never blocks and a slot release
+ * can't overtake a wire of its stream. discard runs on give-up (NULL = drop);
+ * deadline_ns 0 = retry while the pool lives (releases), else a ~100 ms TTL. */
+typedef struct pending_post_s {
+    reactor_exec_fn        fn;
+    void                  *arg;
+    void                 (*discard)(void *arg);
     uint64_t               deadline_ns;
     int                    reactor;
-    struct pending_wire_s *next;
-} pending_wire_t;
+    struct pending_post_s *next;
+} pending_post_t;
 
-ZEND_TLS pending_wire_t *pending_wire_head  = NULL;
-ZEND_TLS pending_wire_t *pending_wire_tail  = NULL;
-ZEND_TLS bool            pending_wire_armed = false;
+ZEND_TLS pending_post_t *pending_post_head  = NULL;
+ZEND_TLS pending_post_t *pending_post_tail  = NULL;
+ZEND_TLS bool            pending_post_armed = false;
 
 #define PENDING_WIRE_RETRY_MS    1u
 #define PENDING_WIRE_TTL_NS      (100ull * 1000000ull)
 
-static bool pending_wire_arm_timer(void);
+static bool pending_post_arm_timer(void);
 
-static void pending_wire_flush(void)
+static void pending_discard_wire(void *arg)
+{
+    response_wire_discard((response_wire_t *)arg);
+}
+
+static void pending_post_flush(void)
 {
     const uint64_t now = zend_hrtime();
 
-    while (pending_wire_head != NULL) {
-        pending_wire_t *const n = pending_wire_head;
+    while (pending_post_head != NULL) {
+        pending_post_t *const n = pending_post_head;
 
         const bool posted = g_reactor_pool != NULL
-            && reactor_pool_post_exec(g_reactor_pool, n->reactor,
-                                      http3_reactor_apply_response, n->rw);
+            && reactor_pool_post_exec(g_reactor_pool, n->reactor, n->fn, n->arg);
 
         if (!posted) {
-            if (g_reactor_pool != NULL && now < n->deadline_ns) {
+            if (g_reactor_pool != NULL
+                && (n->deadline_ns == 0 || now < n->deadline_ns)) {
                 break;   /* mailbox still full — keep order, retry next tick */
             }
-            response_wire_discard(n->rw);   /* expired / pool gone → ABORT */
+            if (n->discard != NULL) {
+                n->discard(n->arg);   /* expired / pool gone → drop */
+            }
         }
 
-        pending_wire_head = n->next;
+        pending_post_head = n->next;
 
-        if (pending_wire_head == NULL) {
-            pending_wire_tail = NULL;
+        if (pending_post_head == NULL) {
+            pending_post_tail = NULL;
         }
 
         pefree(n, 1);
     }
 
-    if (pending_wire_head != NULL && !pending_wire_arm_timer()) {
+    if (pending_post_head != NULL && !pending_post_arm_timer()) {
         /* can't schedule another tick — fail the whole queue now */
-        while (pending_wire_head != NULL) {
-            pending_wire_t *const n = pending_wire_head;
-            response_wire_discard(n->rw);
-            pending_wire_head = n->next;
+        while (pending_post_head != NULL) {
+            pending_post_t *const n = pending_post_head;
+            if (n->discard != NULL) {
+                n->discard(n->arg);
+            }
+            pending_post_head = n->next;
             pefree(n, 1);
         }
-        pending_wire_tail = NULL;
+        pending_post_tail = NULL;
     }
 }
 
-static void pending_wire_timer_fn(zend_async_event_t *event,
+static void pending_post_timer_fn(zend_async_event_t *event,
                                   zend_async_event_callback_t *callback,
                                   void *result, zend_object *exception)
 {
     (void)event; (void)callback; (void)result;
 
-    pending_wire_armed = false;   /* one-shot: fired (auto-closes) */
+    pending_post_armed = false;   /* one-shot: fired (auto-closes) */
 
     if (exception != NULL) {
         return;   /* loop teardown — flush would re-arm on a dying reactor */
     }
 
-    pending_wire_flush();
+    pending_post_flush();
 }
 
-static bool pending_wire_arm_timer(void)
+static bool pending_post_arm_timer(void)
 {
-    if (pending_wire_armed) {
+    if (pending_post_armed) {
         return true;
     }
 
@@ -2644,7 +2655,7 @@ static bool pending_wire_arm_timer(void)
     }
 
     zend_async_event_callback_t *const cb =
-        ZEND_ASYNC_EVENT_CALLBACK(pending_wire_timer_fn);
+        ZEND_ASYNC_EVENT_CALLBACK(pending_post_timer_fn);
 
     if (UNEXPECTED(cb == NULL || !t->base.add_callback(&t->base, cb))) {
         if (cb != NULL) {
@@ -2660,38 +2671,42 @@ static bool pending_wire_arm_timer(void)
         return false;
     }
 
-    pending_wire_armed = true;
+    pending_post_armed = true;
     return true;
 }
 
-static bool pending_wire_defer(response_wire_t *rw, int reactor)
+static bool pending_post_defer(reactor_exec_fn fn, void *arg,
+                               void (*discard)(void *arg), int reactor,
+                               uint64_t deadline_ns)
 {
-    pending_wire_t *const n = pemalloc(sizeof(*n), 1);
+    pending_post_t *const n = pemalloc(sizeof(*n), 1);
 
-    n->rw          = rw;
+    n->fn          = fn;
+    n->arg         = arg;
+    n->discard     = discard;
     n->reactor     = reactor;
-    n->deadline_ns = zend_hrtime() + PENDING_WIRE_TTL_NS;
+    n->deadline_ns = deadline_ns;
     n->next        = NULL;
 
-    if (pending_wire_tail != NULL) {
-        pending_wire_tail->next = n;
+    if (pending_post_tail != NULL) {
+        pending_post_tail->next = n;
     } else {
-        pending_wire_head = n;
+        pending_post_head = n;
     }
-    pending_wire_tail = n;
+    pending_post_tail = n;
 
-    if (!pending_wire_arm_timer()) {
-        /* unlink what we just queued; caller discards the wire */
-        if (pending_wire_head == n) {
-            pending_wire_head = NULL;
-            pending_wire_tail = NULL;
+    if (!pending_post_arm_timer()) {
+        /* unlink what we just queued; caller handles the drop */
+        if (pending_post_head == n) {
+            pending_post_head = NULL;
+            pending_post_tail = NULL;
         } else {
-            pending_wire_t *p = pending_wire_head;
+            pending_post_t *p = pending_post_head;
             while (p->next != n) {
                 p = p->next;
             }
             p->next = NULL;
-            pending_wire_tail = p;
+            pending_post_tail = p;
         }
         pefree(n, 1);
         return false;
@@ -2720,13 +2735,15 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
         /* Once anything is deferred, stream wires queue behind it so
          * fragments never overtake each other. FULL wires are whole
          * responses on their own streams — always try directly. */
-        if ((!is_stream || pending_wire_head == NULL)
+        if ((!is_stream || pending_post_head == NULL)
             && reactor_pool_post_exec(g_reactor_pool, reactor,
                                       http3_reactor_apply_response, rw)) {
             return true;   /* the reactor owns rw now */
         }
 
-        if (is_stream && pending_wire_defer(rw, reactor)) {
+        if (is_stream && pending_post_defer(http3_reactor_apply_response, rw,
+                                            pending_discard_wire, reactor,
+                                            zend_hrtime() + PENDING_WIRE_TTL_NS)) {
             return true;   /* parked; retried by the timer, ~100 ms TTL */
         }
     }
@@ -2735,6 +2752,27 @@ static bool http_server_worker_response_sink(response_wire_t *rw, void *arg)
     /* undeliverable: abandoning the credit unblocks the producer */
     response_wire_discard(rw);
     return false;
+}
+
+/* Post a non-wire reactor op (H3 slot release) via the same ordered FIFO, no
+ * TTL. False only if no retry timer can be armed, so the caller can fall back. */
+bool http_worker_reactor_post_release(int reactor, void (*fn)(void *arg), void *arg)
+{
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    if (g_reactor_pool == NULL) {
+        return false;
+    }
+
+    if (pending_post_head == NULL
+        && reactor_pool_post_exec(g_reactor_pool, reactor, fn, arg)) {
+        return true;
+    }
+
+    return pending_post_defer(fn, arg, /*discard*/ NULL, reactor, /*deadline*/ 0);
+#else
+    (void)reactor; (void)fn; (void)arg;
+    return false;
+#endif
 }
 
 /* Suspend the current coroutine for `ms` on a one-shot timer; lets the worker
@@ -2747,6 +2785,23 @@ static void hot_reload_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
         zend_clear_exception();
     }
 }
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+/* Flush deferred reverse posts before the worker loop dies — a parked slot
+ * release must land or the reactor's slab keeps a live slot. Bounded. */
+static void pending_post_drain(zend_coroutine_t *co)
+{
+    for (int spin = 0; spin < 400 && pending_post_head != NULL; spin++) {
+        pending_post_flush();
+
+        if (pending_post_head != NULL && co != NULL) {
+            hot_reload_sleep_ms(co, 5);
+        }
+    }
+}
+#else
+static void pending_post_drain(zend_coroutine_t *co) { (void)co; }
+#endif
 
 /* Reactor fence bookkeeping (#93): the decrement that reaches zero fires the
  * retiring worker's trigger — from a reactor thread, or from the worker itself
@@ -2828,6 +2883,9 @@ static void http_server_worker_inbox_retire(http_server_object *server)
             hot_reload_sleep_ms(co, 5);
         }
     }
+
+    /* land reverse posts those residual requests deferred (esp. slot releases) */
+    pending_post_drain(co);
 
     http_logf_info(&server->log_state, "reload.inbox retired depth=%zu",
                    worker_inbox_depth(server->worker_inbox));

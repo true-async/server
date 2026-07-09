@@ -26,7 +26,8 @@
 #endif
 
 /* Inbound mailbox sizing. Bounded so a stalled reactor backpressures producers
- * rather than growing unbounded. */
+ * rather than growing unbounded. REACTOR_MAILBOX_CAPACITY is the default depth;
+ * HttpServerConfig::setReactorMailboxCapacity() overrides it per pool. */
 #define REACTOR_MAILBOX_CAPACITY 1024
 #define REACTOR_MAILBOX_BATCH      64
 
@@ -51,8 +52,9 @@ typedef struct {
 
 struct reactor_pool_s {
     zend_async_thread_pool_t *tp;
-    reactor_ctx_t            *ctx;     /* [count] */
+    reactor_ctx_t            *ctx;              /* [count] */
     int                       count;
+    size_t                    mailbox_capacity; /* per-reactor inbound depth */
 };
 
 /* See reactor_pool_set_drain_epilogue. Process-wide, set once on the parent
@@ -129,7 +131,7 @@ static void reactor_loop_handler(zend_async_event_t *event, void *vctx)
     (void)event;
     reactor_ctx_t *const rc = (reactor_ctx_t *)vctx;
 
-    thread_cmd_mailbox_t *const mb = thread_cmd_mailbox_create(REACTOR_MAILBOX_CAPACITY,
+    thread_cmd_mailbox_t *const mb = thread_cmd_mailbox_create(rc->pool->mailbox_capacity,
                                                               REACTOR_MAILBOX_BATCH,
                                                               reactor_drain, rc);
 
@@ -156,7 +158,7 @@ static void reactor_loop_handler(zend_async_event_t *event, void *vctx)
     zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_DONE);
 }
 
-reactor_pool_t *reactor_pool_create(const int reactors)
+reactor_pool_t *reactor_pool_create(const int reactors, const size_t mailbox_capacity)
 {
     if (reactors <= 0) {
         return NULL;
@@ -183,6 +185,12 @@ reactor_pool_t *reactor_pool_create(const int reactors)
     rp->tp    = tp;
     rp->ctx   = pecalloc((size_t)reactors, sizeof(reactor_ctx_t), 0);
     rp->count = 0;
+    /* 0 = default; never below the batch, or try_enqueue can't accept and the
+     * reverse path wedges. */
+    rp->mailbox_capacity = mailbox_capacity > 0 ? mailbox_capacity : REACTOR_MAILBOX_CAPACITY;
+    if (rp->mailbox_capacity < REACTOR_MAILBOX_BATCH) {
+        rp->mailbox_capacity = REACTOR_MAILBOX_BATCH;
+    }
 
     for (int i = 0; i < reactors; i++) {
         rp->ctx[i].pool     = rp;
