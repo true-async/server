@@ -408,6 +408,13 @@ const char *http_parse_error_reason(http_parse_error_t err);
  * not each duplicate the domain branch. */
 void http_request_init_headers(http_request_t *req);
 
+/* Store one header into req->headers, combining duplicate names per
+ * RFC 9110 §5.3 ("; " for cookie — RFC 9113 §8.2.3 / RFC 9114 §4.2.1;
+ * ", " otherwise). Borrows `name`; takes ownership of `value`. Shared by
+ * the H1 parser and the H2/H3 header callbacks. */
+void http_request_store_header(http_request_t *req, zend_string *name,
+                               zend_string *value);
+
 /* Bump request refcount. Used by H2/H3 stream layers right at dispatch
  * time so the stream can keep writing body bytes / fire body_event
  * post-dispatch while the PHP HttpRequest object independently owns

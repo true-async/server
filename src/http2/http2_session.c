@@ -126,9 +126,9 @@ static void store_header_value(http_request_t *req,
 
     zend_string *val_str = zend_string_init(value, valuelen, req->persistent);
 
-    zval tmp;
-    ZVAL_STR(&tmp, val_str);
-    zend_hash_update(req->headers, name_str, &tmp);
+    /* RFC 9110 §5.3 duplicate-combine ("; " for cookie crumbs,
+     * RFC 9113 §8.2.3). */
+    http_request_store_header(req, name_str, val_str);
 
     if (name_owned) {
         zend_string_release(name_str);

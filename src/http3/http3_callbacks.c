@@ -40,6 +40,7 @@
 #include "http3_steer.h"                   /* CID steering encode */
 #include "core/response_wire.h"            /* response_wire_* (reverse path) */
 #include "core/stream_credit.h"            /* reverse-path flow control */
+#include "http_known_strings.h"            /* interned common header names */
 #include "http_body_stream.h"              /* streaming request body (issue #26) */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
@@ -170,19 +171,29 @@ static void h3_ensure_headers_table(http_request_t *req)
 }
 
 static void h3_store_header_value(http_request_t *req,
-                                  const char *name, size_t namelen,
-                                  const char *value, size_t valuelen)
+                                  const char *name, const size_t namelen,
+                                  const char *value, const size_t valuelen)
 {
     h3_ensure_headers_table(req);
 
-    zend_string *name_str = zend_string_init(name, namelen, req->persistent);
-    zend_string *val_str  = zend_string_init(value, valuelen, req->persistent);
+    /* Common names reuse the process-wide interned zend_string — zero
+     * allocation, precomputed hash. Mirrors the H2 store_header_value. */
+    zend_string *name_str = http_known_header_lookup(name, namelen);
+    const bool name_owned = (name_str == NULL);
 
-    zval tmp;
-    ZVAL_STR(&tmp, val_str);
-    zend_hash_update(req->headers, name_str, &tmp);
+    if (name_owned) {
+        name_str = zend_string_init(name, namelen, req->persistent);
+    }
 
-    zend_string_release(name_str);
+    zend_string *val_str = zend_string_init(value, valuelen, req->persistent);
+
+    /* RFC 9110 §5.3 duplicate-combine ("; " for cookie crumbs,
+     * RFC 9114 §4.2.1). */
+    http_request_store_header(req, name_str, val_str);
+
+    if (name_owned) {
+        zend_string_release(name_str);
+    }
 }
 
 static void http3_finalize_request_body(http3_stream_t *s);

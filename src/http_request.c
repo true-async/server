@@ -958,6 +958,39 @@ void http_request_init_headers(http_request_t *req)
     zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
 }
 
+/* Store one request header, combining duplicate names per RFC 9110 §5.3:
+ * values append in arrival order, "cookie" joins with "; " (HPACK/QPACK
+ * crumb reassembly, RFC 9113 §8.2.3 / RFC 9114 §4.2.1), everything else
+ * with ", ". Borrows `name`; takes ownership of `value`. */
+void http_request_store_header(http_request_t *req, zend_string *name,
+                               zend_string *value)
+{
+    zval *const existing = zend_hash_find(req->headers, name);
+
+    if (existing == NULL) {
+        zval zv;
+        ZVAL_STR(&zv, value);
+        zend_hash_add_new(req->headers, name, &zv);
+        return;
+    }
+
+    const char *const sep =
+        zend_string_equals_literal(name, "cookie") ? "; " : ", ";
+    zend_string *const old = Z_STR_P(existing);
+    const size_t len = ZSTR_LEN(old) + 2 + ZSTR_LEN(value);
+    zend_string *const combined = zend_string_alloc(len, req->persistent);
+
+    memcpy(ZSTR_VAL(combined), ZSTR_VAL(old), ZSTR_LEN(old));
+    memcpy(ZSTR_VAL(combined) + ZSTR_LEN(old), sep, 2);
+    memcpy(ZSTR_VAL(combined) + ZSTR_LEN(old) + 2,
+           ZSTR_VAL(value), ZSTR_LEN(value));
+    ZSTR_VAL(combined)[len] = '\0';
+
+    zend_string_release(value);
+    zend_string_release(old);
+    ZVAL_STR(existing, combined);
+}
+
 /* Helper: Create HttpRequest object wrapping an already-parsed
  * http_request_t. The object takes ownership; on free_obj it will
  * call http_request_destroy(req). */

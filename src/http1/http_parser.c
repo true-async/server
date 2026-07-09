@@ -395,14 +395,10 @@ static void save_current_header(http1_parser_t *parser)
         name = interned;
     }
 
-    /* Store in HashTable as zval */
-    /* RFC 7230 Section 3.2.2: combine duplicate headers with comma */
-    zval *existing = zend_hash_find(req->headers, name);
-    /* Parse important headers BEFORE the hash insert/combine — once
-     * we hit the `existing` branch below `value` gets released, and
-     * the old code kept reading from it afterwards (UAF caught by
-     * libFuzzer on a duplicate-Connection input; AddressSanitizer
-     * SEGV in strncasecmp at src/http1/http_parser.c:314). */
+    /* Parse important headers BEFORE the store — store_header releases
+     * `value` on the duplicate-combine branch, and the old code kept
+     * reading from it afterwards (UAF caught by libFuzzer on a
+     * duplicate-Connection input; AddressSanitizer SEGV in strncasecmp). */
     if (zend_string_equals_literal(name, "content-length")) {
         /* RFC 9110 §8.6 strict numeric form (no sign/whitespace/junk).
          * Bare strtoul silently turned "-1" into UINT_MAX and accepted
@@ -464,21 +460,8 @@ static void save_current_header(http1_parser_t *parser)
         }
     }
 
-    if (existing) {
-        /* Combine with existing value: "old, new" */
-        zend_string *combined = zend_string_concat3(
-            Z_STRVAL_P(existing), Z_STRLEN_P(existing),
-            ", ", 2,
-            ZSTR_VAL(value), ZSTR_LEN(value)
-        );
-        zend_string_release(value);
-        zend_string_release(Z_STR_P(existing));
-        ZVAL_STR(existing, combined);
-    } else {
-        zval zv;
-        ZVAL_STR(&zv, value);
-        zend_hash_add_new(req->headers, name, &zv);
-    }
+    /* RFC 9110 §5.3 duplicate-combine ("; " for cookie). */
+    http_request_store_header(req, name, value);
 
     /* Release name string (value is now owned by HashTable) */
     zend_string_release(name);
