@@ -70,6 +70,12 @@ ngtcp2_tstamp http3_ts_now(void);
  * once from PHP_HTTP3_REACTOR_BUDGET_MS (default 10 ms); cached thereafter. */
 uint64_t http3_reactor_budget_ns(void);
 
+/* Cached env escape hatches (getenv scans environ; these sat on the
+ * accept / Initial path). One-shot per process. */
+bool     http3_env_bench_fc(void);
+bool     http3_env_disable_retry(void);
+uint64_t http3_env_idle_timeout_ms(void);
+
 /* Secure random bytes via OpenSSL. Returns true on success. Callers MUST
  * propagate false: a silent zero-fill fallback would produce all-zero
  * SCIDs and all-zero stateless-reset tokens, both of which are

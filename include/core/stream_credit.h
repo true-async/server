@@ -95,12 +95,25 @@ static inline void stream_credit_set_waker(stream_credit_t *sc,
     zend_atomic_ptr_store_ex(&sc->waker, t);
 }
 
+/* Spin-wait hint: keep the core polite (SMT sibling + power) while the
+ * reactor finishes an in-flight trigger(). The wait is a few instructions
+ * long; a descheduled reactor is the only way it stretches. */
+static inline void stream_credit_spin_pause(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
 static inline void stream_credit_clear_waker(stream_credit_t *sc)
 {
     zend_atomic_ptr_store_ex(&sc->waker, NULL);
 
     /* wait out a signal that loaded the pointer just before the NULL store */
     while (zend_atomic_int_load_ex(&sc->waker_busy) != 0) {
+        stream_credit_spin_pause();
     }
 }
 

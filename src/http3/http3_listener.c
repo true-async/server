@@ -476,7 +476,9 @@ static void h3_reactor_tick_record(http3_listener_t *l, uint64_t dt_ns,
  * datagrams per recvmmsg syscall, capped at 16 batches per poll wakeup.
  * h2o picks the same 10-batch limit (lib/http3/common.c:819) — a larger
  * batch starves QUIC ACK feedback because all ACKs in the batch are
- * deferred until handler returns. Stack buffers (~16 KiB), zero heap. */
+ * deferred until handler returns. Stack buffers, zero heap — with UDP_GRO
+ * the recv slots are 10 × 24 KiB (~240 KiB frame, plus drain_out's 96 KiB
+ * GSO batch below it); runs on a full pthread stack, never a fiber. */
 static void http3_listener_poll_cb(zend_async_event_t *event,
                                    zend_async_event_callback_t *cb,
                                    void *result, zend_object *exception)

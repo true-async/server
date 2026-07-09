@@ -41,6 +41,15 @@ zend_class_entry *http_request_ce;
  */
 typedef struct {
     http_request_t *request;
+
+    /* Repeat-call caches. getHeaders() rebuilds a PHP array (and, for a
+     * reactor-built persistent request, deep-copies every string) on every
+     * call; getBody() deep-copies a persistent body on every call. Both
+     * results are immutable once req->complete, so the first post-complete
+     * call is cached here. CoW protects the array from user mutation. */
+    zval            headers_cache;   /* IS_UNDEF until cached */
+    zend_string    *body_cache;      /* NULL until cached (persistent body only) */
+
     zend_object     std;
 } http_request_object;
 
@@ -65,6 +74,8 @@ static zend_object* http_request_create_object(zend_class_entry *ce)
 
     intern->std.handlers = &http_request_object_handlers;
     intern->request = NULL;
+    ZVAL_UNDEF(&intern->headers_cache);
+    intern->body_cache = NULL;
 
     return &intern->std;
 }
@@ -80,6 +91,13 @@ static void http_request_free_object(zend_object *object)
     if (intern->request) {
         http_request_destroy(intern->request);
         intern->request = NULL;
+    }
+
+    zval_ptr_dtor(&intern->headers_cache);
+
+    if (intern->body_cache != NULL) {
+        zend_string_release(intern->body_cache);
+        intern->body_cache = NULL;
     }
 
     zend_object_std_dtor(&intern->std);
@@ -253,7 +271,17 @@ ZEND_METHOD(TrueAsync_HttpRequest, getHeaders)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
+    if (!Z_ISUNDEF(intern->headers_cache)) {
+        RETURN_COPY(&intern->headers_cache);
+    }
+
     http_request_retval_ht(return_value, intern->request->headers);
+
+    /* Headers are final once the request is complete (trailers included) —
+     * cache the built array so repeat calls stop re-copying. */
+    if (intern->request->complete && Z_TYPE_P(return_value) == IS_ARRAY) {
+        ZVAL_COPY(&intern->headers_cache, return_value);
+    }
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getBody)
@@ -261,11 +289,23 @@ ZEND_METHOD(TrueAsync_HttpRequest, getBody)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
+    if (intern->body_cache != NULL) {
+        RETURN_STR_COPY(intern->body_cache);
+    }
+
     if (!intern->request->body) {
         RETURN_EMPTY_STRING();
     }
 
     http_request_retval_str(return_value, intern->request->body);
+
+    /* Only the persistent (reactor-built) body pays a deep copy per call —
+     * cache that one; the ZMM path is already a refcounted addref. */
+    if (intern->request->complete
+        && (GC_FLAGS(intern->request->body) & IS_STR_PERSISTENT)
+        && Z_TYPE_P(return_value) == IS_STRING) {
+        intern->body_cache = zend_string_copy(Z_STR_P(return_value));
+    }
 }
 
 /* {{{ proto HttpRequest::readMessage(): ?string

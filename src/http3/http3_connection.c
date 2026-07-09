@@ -108,6 +108,55 @@ ngtcp2_tstamp http3_ts_now(void)
     return (ngtcp2_tstamp) zend_hrtime();
 }
 
+/* Env escape hatches, read once per process — getenv scans environ
+ * linearly and these sat on the accept / Initial path. Tests set them
+ * before the server starts, so one-shot caching is safe. */
+bool http3_env_bench_fc(void)
+{
+    static int v = -1;
+
+    if (v < 0) {
+        v = getenv("PHP_HTTP3_BENCH_FC") != NULL ? 1 : 0;
+    }
+
+    return v == 1;
+}
+
+bool http3_env_disable_retry(void)
+{
+    static int v = -1;
+
+    if (v < 0) {
+        v = getenv("PHP_HTTP3_DISABLE_RETRY") != NULL ? 1 : 0;
+    }
+
+    return v == 1;
+}
+
+/* PHP_HTTP3_IDLE_TIMEOUT_MS override; 0 = unset/invalid. */
+uint64_t http3_env_idle_timeout_ms(void)
+{
+    static int      init = 0;
+    static uint64_t ms   = 0;
+
+    if (!init) {
+        const char *env = getenv("PHP_HTTP3_IDLE_TIMEOUT_MS");
+
+        if (env != NULL && *env != '\0') {
+            char *end = NULL;
+            unsigned long v = strtoul(env, &end, 10);
+
+            if (end != env && *end == '\0' && v > 0 && v <= UINT32_MAX) {
+                ms = (uint64_t)v;
+            }
+        }
+
+        init = 1;
+    }
+
+    return ms;
+}
+
 /* Bridges ngtcp2's variadic log_printf into http_log at DEBUG. Volume
  * is high (one line per frame); installed only when DEBUG is active.
  * ngtcp2 passes the conn's user_data here, which we set to the
@@ -354,7 +403,7 @@ static http3_connection_t *http3_connection_accept(
     uint64_t streams_bidi = cfg_streams != 0 ? (uint64_t)cfg_streams : 100;
     uint64_t idle_ms      = cfg_idle_ms != 0 ? (uint64_t)cfg_idle_ms : 30000;
 
-    if (getenv("PHP_HTTP3_BENCH_FC") != NULL) {
+    if (http3_env_bench_fc()) {
         /* Bench escape hatch: raises window + streams to bench-grade
          * values regardless of config. Composes on top of the new API
          * so existing bench harnesses keep working unchanged. */
@@ -365,15 +414,10 @@ static http3_connection_t *http3_connection_accept(
     /* Idle-timeout env override stays for ops, but the cap now matches
      * the config-API ceiling (UINT32_MAX) — same shape as the setter. */
     {
-        const char *env = getenv("PHP_HTTP3_IDLE_TIMEOUT_MS");
+        const uint64_t env_ms = http3_env_idle_timeout_ms();
 
-        if (env != NULL && *env != '\0') {
-            char *end = NULL;
-            unsigned long ms = strtoul(env, &end, 10);
-
-            if (end != env && *end == '\0' && ms > 0 && ms <= UINT32_MAX) {
-                idle_ms = (uint64_t)ms;
-            }
+        if (env_ms > 0) {
+            idle_ms = env_ms;
         }
     }
 
@@ -388,7 +432,7 @@ static http3_connection_t *http3_connection_accept(
     params.initial_max_streams_bidi = streams_bidi;
     params.initial_max_streams_uni  = 3;
 
-    if (getenv("PHP_HTTP3_BENCH_FC") != NULL) {
+    if (http3_env_bench_fc()) {
         params.initial_max_streams_uni = 100;
     }
 
@@ -625,8 +669,7 @@ bool http3_connection_dispatch(
          * the embedded h3client test harness which is single-shot and
          * does not implement the Retry round-trip. NEVER set in
          * production: it re-opens the §8.1.2 amplification gap. */
-        const bool retry_disabled =
-            getenv("PHP_HTTP3_DISABLE_RETRY") != NULL;
+        const bool retry_disabled = http3_env_disable_retry();
 
         if (retry_key != NULL && !retry_disabled) {
             if (hd.tokenlen == 0) {

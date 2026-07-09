@@ -1630,7 +1630,7 @@ bool http3_connection_init_h3(http3_connection_t *c)
             bidi_cap = (uint64_t)cfg_streams;
         }
 
-        if (getenv("PHP_HTTP3_BENCH_FC") != NULL) {
+        if (http3_env_bench_fc()) {
             bidi_cap = 1000000ull;
         }
     }
