@@ -39,7 +39,6 @@ set(CORE_SOURCES
     src/http_server.c
     src/http_server_class.c
     src/http_server_config.c
-    src/http_server_exceptions.c
     src/http_request.c
     src/http_response.c
     src/grpc/grpc.c
@@ -49,9 +48,7 @@ set(CORE_SOURCES
     src/http_mime.c
     src/http_date.c
     src/http_etag.c
-    src/http_conditional.c
     src/http_range.c
-    src/fs_util.c
     src/http_rfc5987.c
     src/http_precompressed.c
     src/http_param_parse.c
