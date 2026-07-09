@@ -223,6 +223,109 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
  * lookup is the validate-and-drop point: free the wire and return. On success,
  * QPACK-encode + submit, then drain it out on this tick. Takes ownership of the
  * wire. */
+typedef struct { http3_connection_t *conn; http3_stream_t *stream; } h3_sendfile_user_t;
+
+extern void http3_connection_drain_out(http3_connection_t *);
+extern void http3_connection_arm_timer(http3_connection_t *);
+
+/* Rebuild a PHP-side sendFile request from the flat wire snapshot. The
+ * reactor owns the returned req; http_send_file_dispatch frees it. */
+static http_send_file_request_t *h3_send_file_req_from_wire(const response_wire_send_file_t *w)
+{
+    http_send_file_request_t *const req = ecalloc(1, sizeof(*req));
+
+    req->path = zend_string_init(w->path, w->path_len, 0);
+
+    if (w->content_type != NULL) {
+        req->opts.content_type = zend_string_init(w->content_type, w->content_type_len, 0);
+    }
+    if (w->download_name != NULL) {
+        req->opts.download_name = zend_string_init(w->download_name, w->download_name_len, 0);
+    }
+    if (w->cache_control != NULL) {
+        req->opts.cache_control = zend_string_init(w->cache_control, w->cache_control_len, 0);
+    }
+
+    req->opts.status            = w->status;
+    req->opts.disposition       = w->disposition;
+    req->opts.disposition_set   = w->disposition_set;
+    req->opts.etag              = w->etag;
+    req->opts.last_modified     = w->last_modified;
+    req->opts.accept_ranges     = w->accept_ranges;
+    req->opts.precompressed     = w->precompressed;
+    req->opts.conditional       = w->conditional;
+    req->opts.delete_after_send = w->delete_after_send;
+
+    return req;
+}
+
+/* Retire the reactor-side response object and flush. The slab slot is
+ * reclaimed by the normal pool release (nghttp3 close + worker consumed),
+ * which needs response_zv UNDEF — so dtor it here. */
+static void h3_reactor_sendfile_cleanup(http3_connection_t *c, http3_stream_t *s)
+{
+    if (!Z_ISUNDEF(s->response_zv)) {
+        zval_ptr_dtor(&s->response_zv);
+        ZVAL_UNDEF(&s->response_zv);
+    }
+
+    if (c != NULL && !c->closed) {
+        http3_connection_drain_out(c);
+        http3_connection_arm_timer(c);
+    }
+}
+
+/* Pump completion for a pooled sendFile. Does NOT release the stream — the
+ * base (nghttp3) + worker-borrow refs already cover its lifetime. */
+static void h3_reactor_sendfile_on_done(void *user, int status)
+{
+    (void)status;
+    h3_sendfile_user_t *const u = (h3_sendfile_user_t *)user;
+    http3_connection_t *const c = u->conn;
+    http3_stream_t     *const s = u->stream;
+    efree(u);
+
+    h3_reactor_sendfile_cleanup(c, s);
+}
+
+/* SEND_FILE apply: rebuild a reactor-side response + request from the wire and
+ * run the shared sendfile engine (same call as the non-pool H3 path). The
+ * engine opens the file here and owns/closes the fd. On dispatch failure the
+ * response carries a 500 — submit it before retiring the object. */
+static void h3_reactor_apply_send_file(http3_connection_t *c, http3_stream_t *s,
+                                       response_wire_t *rw)
+{
+    response_wire_send_file_t w;
+
+    if (!response_wire_get_send_file(rw, &w)) {
+        return;
+    }
+
+    object_init_ex(&s->response_zv, http_response_ce);
+    http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
+    http_response_set_head(Z_OBJ(s->response_zv), w.is_head);
+    /* The engine drives delivery through the protocol op — same ops the
+     * non-pool H3 dispatch installs (send_static_response = the pump). */
+    http_response_install_stream_ops(Z_OBJ(s->response_zv), &h3_stream_ops, s);
+
+    http_send_file_request_t *const req = h3_send_file_req_from_wire(&w);
+
+    h3_sendfile_user_t *const u = ecalloc(1, sizeof(*u));
+    u->conn   = c;
+    u->stream = s;
+
+    if (http_send_file_dispatch(s->request, Z_OBJ(s->response_zv), req,
+                                h3_reactor_sendfile_on_done, u)) {
+        return;   /* pump owns delivery; on_done retires the response object */
+    }
+
+    /* dispatch failed: the response carries a synthesized 500. on_done was
+     * not fired, so we own u; submit the error, then retire the object. */
+    efree(u);
+    (void)http3_stream_submit_response(c, s, false);
+    h3_reactor_sendfile_cleanup(c, s);
+}
+
 void http3_reactor_apply_response(void *arg)
 {
     response_wire_t *const rw = (response_wire_t *)arg;
@@ -302,6 +405,10 @@ void http3_reactor_apply_response(void *arg)
 
             http3_listener_mark_flush(c->listener, c);
             http3_listener_queue_epilogue_flush(c->listener);
+            break;
+
+        case RESPONSE_WIRE_SEND_FILE:
+            h3_reactor_apply_send_file(c, s, rw);
             break;
     }
 
@@ -711,12 +818,8 @@ static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
  * separate coroutine and submits the response asynchronously, reading
  * s->response_zv live — so the dispose must NOT drop the response zval or
  * release the stream when it hands off; the deferred tail does that from
- * on_done once the pump finishes. Mirrors H2 h2_sendfile_arm/on_done. */
-typedef struct {
-    http3_connection_t *conn;
-    http3_stream_t     *stream;
-} h3_sendfile_user_t;
-
+ * on_done once the pump finishes. Mirrors H2 h2_sendfile_arm/on_done.
+ * (h3_sendfile_user_t is declared near http3_reactor_apply_response.) */
 static void h3_sendfile_on_done(void *user, int status)
 {
     (void)status;
@@ -817,6 +920,15 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     /* In-flight bracket (paired with on_request_dispatch). */
     if (c != NULL) http_server_on_request_dispose(c->counters);
+
+    /* A thrown handler exception becomes a response (derived 500 below, or
+     * a grpc-status / aborted stream) — mark it consumed on both escalation
+     * paths so it isn't rethrown into EG and trip a premature graceful
+     * shutdown of the whole worker (#101; see http_handler_coroutine_dispose). */
+    if (coroutine->exception != NULL) {
+        ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
+        ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
+    }
 
     /* If the handler threw and never committed a response, derive a
      * 500 from the exception so the peer gets *something*. Mirrors

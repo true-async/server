@@ -53,8 +53,8 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
      * workers, so the parser builds the request in the persistent (malloc)
      * domain — it crosses the reactor->worker thread boundary. NULL reactor ctx
      * (the default) keeps the ZMM fast path. */
-    s->request->persistent =
-        (http3_listener_reactor_ctx(conn->listener) != NULL);
+    s->reactor_owned = (http3_listener_reactor_ctx(conn->listener) != NULL);
+    s->request->persistent = s->reactor_owned;
     /* PHP zvals start UNDEF; dispatch fills them right before spawning
      * the handler coroutine. */
     ZVAL_UNDEF(&s->request_zv);
@@ -118,11 +118,10 @@ void http3_stream_release(http3_stream_t *s)
         return;
     }
 
-    /* Capture reactor mode before the unlink below nulls s->conn. In reactor
-     * mode the request's lifetime is the worker's (it freed the request fields
-     * on its own thread); the slab slot is the reactor's to reclaim here. */
-    const bool reactor_mode =
-        s->conn != NULL && http3_listener_reactor_ctx(s->conn->listener) != NULL;
+    /* Reactor mode: the worker owns the request's lifetime; the slab slot is
+     * ours to reclaim. Read the stable flag, not s->conn — teardown nulls
+     * s->conn before releasing, which would misclassify the stream. */
+    const bool reactor_mode = s->reactor_owned;
 
     /* Stream-side cleanup. After this point no H3 callback or
      * coroutine should reach into the slot — only an outstanding PHP

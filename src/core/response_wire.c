@@ -51,6 +51,20 @@ struct response_wire_s {
     wire_header_t *trailers;
     size_t         trailer_count;
     size_t         trailer_cap;
+
+    /* SEND_FILE payload. String spans live in the arena; *_present flags
+     * distinguish an unset field from a zero-length one. */
+    struct {
+        size_t   path_off,  path_len;
+        size_t   ct_off,    ct_len;
+        size_t   dn_off,    dn_len;
+        size_t   cc_off,    cc_len;
+        bool     ct_present, dn_present, cc_present;
+        int      status;
+        uint8_t  disposition;
+        bool     disposition_set, etag, last_modified, accept_ranges,
+                 precompressed, conditional, delete_after_send, is_head;
+    } sf;
 };
 
 /* Copy `len` bytes into the arena, growing it as needed. Returns the byte
@@ -140,6 +154,79 @@ void *response_wire_take_chunk(response_wire_t *rw)
     void *c = rw->chunk;
     rw->chunk = NULL;
     return c;
+}
+
+bool response_wire_set_send_file(response_wire_t *rw,
+                                 const response_wire_send_file_t *sf)
+{
+    const size_t path_off = arena_append(rw, sf->path, sf->path_len);
+
+    if (path_off == SIZE_MAX) {
+        return false;
+    }
+
+    rw->sf.path_off = path_off;
+    rw->sf.path_len = sf->path_len;
+
+#define WIRE_SF_STR(field, off_m, len_m, present_m)                         \
+    if (sf->field != NULL) {                                                \
+        const size_t o = arena_append(rw, sf->field, sf->field##_len);      \
+        if (o == SIZE_MAX) {                                                 \
+            return false;                                                    \
+        }                                                                   \
+        rw->sf.off_m = o;                                                    \
+        rw->sf.len_m = sf->field##_len;                                      \
+        rw->sf.present_m = true;                                            \
+    } else {                                                                \
+        rw->sf.present_m = false;                                           \
+    }
+
+    WIRE_SF_STR(content_type,  ct_off, ct_len, ct_present)
+    WIRE_SF_STR(download_name, dn_off, dn_len, dn_present)
+    WIRE_SF_STR(cache_control, cc_off, cc_len, cc_present)
+#undef WIRE_SF_STR
+
+    rw->sf.status            = sf->status;
+    rw->sf.disposition       = sf->disposition;
+    rw->sf.disposition_set   = sf->disposition_set;
+    rw->sf.etag              = sf->etag;
+    rw->sf.last_modified     = sf->last_modified;
+    rw->sf.accept_ranges     = sf->accept_ranges;
+    rw->sf.precompressed     = sf->precompressed;
+    rw->sf.conditional       = sf->conditional;
+    rw->sf.delete_after_send = sf->delete_after_send;
+    rw->sf.is_head           = sf->is_head;
+
+    return true;
+}
+
+bool response_wire_get_send_file(const response_wire_t *rw,
+                                 response_wire_send_file_t *out)
+{
+    if (rw->kind != RESPONSE_WIRE_SEND_FILE) {
+        return false;
+    }
+
+    out->path              = rw->arena + rw->sf.path_off;
+    out->path_len          = rw->sf.path_len;
+    out->content_type      = rw->sf.ct_present ? rw->arena + rw->sf.ct_off : NULL;
+    out->content_type_len  = rw->sf.ct_present ? rw->sf.ct_len : 0;
+    out->download_name     = rw->sf.dn_present ? rw->arena + rw->sf.dn_off : NULL;
+    out->download_name_len = rw->sf.dn_present ? rw->sf.dn_len : 0;
+    out->cache_control     = rw->sf.cc_present ? rw->arena + rw->sf.cc_off : NULL;
+    out->cache_control_len = rw->sf.cc_present ? rw->sf.cc_len : 0;
+    out->status            = rw->sf.status;
+    out->disposition       = rw->sf.disposition;
+    out->disposition_set   = rw->sf.disposition_set;
+    out->etag              = rw->sf.etag;
+    out->last_modified     = rw->sf.last_modified;
+    out->accept_ranges     = rw->sf.accept_ranges;
+    out->precompressed     = rw->sf.precompressed;
+    out->conditional       = rw->sf.conditional;
+    out->delete_after_send = rw->sf.delete_after_send;
+    out->is_head           = rw->sf.is_head;
+
+    return true;
 }
 
 void response_wire_set_status(response_wire_t *rw, const int status)

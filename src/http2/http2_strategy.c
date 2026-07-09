@@ -565,6 +565,15 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         http_server_on_request_dispose(conn->counters);
     }
 
+    /* A thrown handler exception becomes a response (derived below, or a
+     * grpc-status / aborted stream) — mark it consumed on both escalation
+     * paths so it isn't rethrown into EG and trip a premature graceful
+     * shutdown of the whole worker (#101; see http_handler_coroutine_dispose). */
+    if (coroutine->exception != NULL) {
+        ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
+        ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
+    }
+
     /* If the handler threw and never committed, derive a response
      * from the exception (code → status, message → body). Same
      * policy as the HTTP/1 dispose path in

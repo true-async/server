@@ -47,7 +47,32 @@ typedef enum {
     RESPONSE_WIRE_STREAM_END,
     /* stream died mid-flight — the reactor must RESET, not send a clean FIN */
     RESPONSE_WIRE_STREAM_ABORT,
+    /* handler called $response->sendFile(): the reactor opens the path and
+     * runs the sendfile engine (ETag/Range/304/MIME) — see #105. */
+    RESPONSE_WIRE_SEND_FILE,
 } response_wire_kind_t;
+
+/* Flat, PHP-free snapshot of a sendFile() request marshalled worker->reactor.
+ * String fields are raw byte spans; a NULL ptr means "unset" (the reactor
+ * skips that header / derives it). On set the caller's pointers are copied
+ * into the wire arena; on get they point into the arena (valid until
+ * response_wire_free). Scalars mirror http_send_file_options_t. */
+typedef struct {
+    const char *path;              size_t path_len;
+    const char *content_type;      size_t content_type_len;
+    const char *download_name;     size_t download_name_len;
+    const char *cache_control;     size_t cache_control_len;
+    int      status;
+    uint8_t  disposition;
+    bool     disposition_set;
+    bool     etag;
+    bool     last_modified;
+    bool     accept_ranges;
+    bool     precompressed;
+    bool     conditional;
+    bool     delete_after_send;
+    bool     is_head;
+} response_wire_send_file_t;
 
 /* Create an empty response wire. routing identifies the origin stream the
  * reactor must send on (echoed from the request_wire). status starts unset (0).
@@ -66,6 +91,15 @@ void *response_wire_credit(const response_wire_t *rw);
  * wire; a drop site must take + release it (this TU cannot). */
 void  response_wire_set_chunk(response_wire_t *rw, void *persistent_str);
 void *response_wire_take_chunk(response_wire_t *rw);
+
+/* SEND_FILE payload. set copies path + option strings into the arena and
+ * stores the scalars; returns false on allocation failure. get reconstructs
+ * the snapshot with pointers into the arena; returns false when the wire is
+ * not a SEND_FILE. */
+bool response_wire_set_send_file(response_wire_t *rw,
+                                 const response_wire_send_file_t *sf);
+bool response_wire_get_send_file(const response_wire_t *rw,
+                                 response_wire_send_file_t *out);
 
 /* Builders — copy bytes into the arena; pair builders return false on
  * allocation failure. set_body is FULL wires only. */

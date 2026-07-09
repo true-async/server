@@ -2635,6 +2635,17 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         conn->current_request = NULL;
     }
 
+    /* A thrown handler exception becomes a response (derived 500 below, or
+     * an aborted stream if already committed) — mark it consumed so neither
+     * async_coroutine_finalize nor coroutine_object_destroy rethrows it into
+     * EG and trips a premature graceful shutdown of the whole worker. The two
+     * escalation paths gate on different flags (EXCEPTION_HANDLED vs
+     * EXC_CAUGHT), so set both (#101). */
+    if (coroutine->exception != NULL) {
+        ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
+        ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
+    }
+
     /* Bailout firewall path: handler longjmp'd out via zend_bailout
      * (see http_handler_coroutine_entry). PHP-VM state is tainted but
      * the response object itself is just a C struct — safe to reset. */
