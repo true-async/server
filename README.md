@@ -308,8 +308,9 @@ Unary and all three streaming shapes use this one API; `grpc-status` /
 `grpc-message` ride real HTTP trailers (or the in-body `0x80` frame for
 grpc-web, base64-encoded per frame for grpc-web-text), uncaught exceptions
 map to `13 INTERNAL`, inbound `grpc-encoding: gzip` messages inflate
-transparently, and `writeMessage($msg, compress: true)` gzips replies. The
-client's deadline is exposed via `$request->getGrpcTimeout()`.
+transparently, and `setGrpcEncoding('gzip')` before the first message gzips
+every reply frame. The client's deadline is exposed via
+`$request->getGrpcTimeout()`.
 
 Working examples live under [`examples/`](examples/):
 [`minimal-server.php`](examples/minimal-server.php),

@@ -11,11 +11,12 @@ if (!function_exists('gzencode')) die('skip zlib ext not available');
 ?>
 --FILE--
 <?php
-/* Per-message compression both directions: the client sends a gzip-compressed
- * message (flag=1, grpc-encoding: gzip); readMessage() transparently inflates
- * it. The handler replies with writeMessage(..., compress: true), so the
- * response message carries the compressed flag + grpc-encoding: gzip and the
- * client gzdecodes it. Payload is 10 KB so the inflate grow-loop is used. */
+/* Compression both directions: the client sends a gzip-compressed message
+ * (flag=1, grpc-encoding: gzip); readMessage() transparently inflates it.
+ * The handler declares setGrpcEncoding('gzip') before the first message, so
+ * the response carries grpc-encoding: gzip + the per-frame compressed flag
+ * and the client gzdecodes it. Payload is 10 KB so the inflate grow-loop is
+ * used. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -36,7 +37,8 @@ $server->addGrpcHandler(function($req, $resp) {
     $msg   = $req->readMessage();               // auto-inflated
     $empty = $req->readMessage();               // compressed empty message -> ""
     $tail  = ($empty === '') ? ':empty-ok' : ':empty-bad';
-    $resp->writeMessage('echo:' . $msg . $tail, true);  // gzip the reply
+    $resp->setGrpcEncoding('gzip');
+    $resp->writeMessage('echo:' . $msg . $tail);        // compressed automatically
 });
 
 $client = spawn(function() use ($port, $server) {

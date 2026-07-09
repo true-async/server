@@ -179,24 +179,35 @@ final class HttpResponse
     public function send(string $chunk): static {}
 
     /**
-     * Frame and stream one gRPC message.
+     * Declare the gRPC response message encoding.
      *
-     * Prepends the 5-byte gRPC length prefix (identity encoding) to
-     * $message and streams it as a single gRPC message. Activates
-     * streaming mode on the first call, exactly like send(). Call once for
-     * a unary reply, repeatedly for server-streaming. Pass the already
-     * protobuf-encoded bytes; the grpc-status is carried separately via
-     * setTrailer() (defaults to 0 when unset).
+     * Must be called before the first writeMessage() — the encoding rides
+     * the initial HEADERS as the grpc-encoding header, and every subsequent
+     * writeMessage() compresses automatically. Supported: "gzip" and
+     * "identity" (the default; clears a previous declaration). Enabling
+     * compression is per-call by design — a compressed message without a
+     * declared encoding is a gRPC protocol error, so it cannot be expressed.
      *
-     * Pass $compress = true to gzip this message (sets the per-message
-     * compressed flag and, on the first message, the grpc-encoding: gzip
-     * response header). Falls back to identity when gzip is not built in.
-     *
-     * @param string $message Protobuf-encoded message bytes.
-     * @param bool $compress Gzip this message (grpc-encoding: gzip).
+     * @param string $encoding "gzip" or "identity".
      * @return static
      */
-    public function writeMessage(string $message, bool $compress = false): static {}
+    public function setGrpcEncoding(string $encoding): static {}
+
+    /**
+     * Frame and stream one gRPC message.
+     *
+     * Prepends the 5-byte gRPC length prefix to $message and streams it as
+     * a single gRPC message. Activates streaming mode on the first call,
+     * exactly like send(). Call once for a unary reply, repeatedly for
+     * server-streaming. Pass the already protobuf-encoded bytes; the
+     * grpc-status is carried separately via setTrailer() (defaults to 0
+     * when unset). Compressed automatically when setGrpcEncoding('gzip')
+     * was declared.
+     *
+     * @param string $message Protobuf-encoded message bytes.
+     * @return static
+     */
+    public function writeMessage(string $message): static {}
 
     /**
      * Advisory, non-blocking backpressure check for streaming responses.

@@ -281,6 +281,13 @@ bool reactor_pool_exec(reactor_pool_t *rp, const int idx, const reactor_exec_fn 
 
     /* Acquire: pair with the reactor's release store once fn has run. */
     while (zend_atomic_int_load_ex(&done) == 0) {
+        if (zend_atomic_int_load_ex(&rc->phase) == REACTOR_PHASE_DONE) {
+            /* Loop exited: mailbox_free discards still-queued cmds (they can
+             * never run — no stack UAF), it runs before the DONE store. One
+             * final check catches a cmd that executed in the last drain. */
+            return zend_atomic_int_load_ex(&done) != 0;
+        }
+
         reactor_pool_msleep();
     }
 

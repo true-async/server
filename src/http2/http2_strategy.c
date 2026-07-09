@@ -267,6 +267,8 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     object_init_ex(&stream->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(stream->response_zv),
                                        self->conn->http_version);
+    http_response_set_head(Z_OBJ(stream->response_zv),
+                           http_request_method_is_head(stream->request));
 
     /* Let HttpResponse::send() reach this stream's chunk queue via
      * the vtable. Ops installed once at dispatch;

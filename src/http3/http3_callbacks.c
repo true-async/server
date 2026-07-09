@@ -41,7 +41,6 @@
 #include "core/response_wire.h"            /* response_wire_* (reverse path) */
 #include "core/stream_credit.h"            /* reverse-path flow control */
 #include "http_body_stream.h"              /* streaming request body (issue #26) */
-#include "grpc/grpc.h"                     /* web-text is buffered-only (policy gate) */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 
 #include <ngtcp2/ngtcp2_crypto.h>          /* ngtcp2_crypto_* callback ptrs */
@@ -387,6 +386,9 @@ static void http3_request_body_upgrade(http_request_t *req)
         zend_string *const initial = s->body_buf.s;
         s->body_buf.s = NULL;
 
+        /* the buffered branch already extended the window for these bytes —
+         * pop must not credit them a second time */
+        req->body_precredited += ZSTR_LEN(initial);
         http_body_stream_push(req, initial);
         zend_string_release(initial);
     }
@@ -406,17 +408,20 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
+    if (s->request != NULL) {
+        http_request_classify_protocols(s->request);
+    }
+
     /* Reactor mode: defer dispatch to h3_end_stream_cb — the body must be
      * fully assembled before hand-off (body queue is same-thread only). */
     if (c != NULL && http3_listener_reactor_ctx(c->listener) != NULL) {
         return 0;
     }
 
-    /* Content-Length policy, mirror of H2 cb_on_frame_recv. grpc-web-text
-     * stays buffered: readMessage() base64-decodes the assembled body. */
+    /* Content-Length policy, mirror of H2 cb_on_frame_recv. */
     if (c != NULL && c->view != NULL && c->view->body_streaming_enabled
         && s->request != NULL
-        && !grpc_request_is_grpc_web_text(s->request)) {
+        && !http_request_body_must_buffer(s->request)) {
         http_request_t *const r = s->request;
 
         r->body_h3_conn      = c;
@@ -476,7 +481,12 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
             body_cap = HTTP3_MAX_BODY_BYTES;
         }
 
-        if (UNEXPECTED(req->body_bytes_queued + datalen > body_cap)) {
+        /* Live bytes cap memory for everyone; the cumulative cap is the
+         * operator's max_body_size contract, waived only for gRPC. */
+        if (UNEXPECTED(req->body_bytes_queued + datalen > body_cap
+                       || (!http_request_body_size_uncapped(req)
+                           && req->body_bytes_consumed + req->body_bytes_queued
+                                  + datalen > body_cap))) {
             http3_packet_stats_t *const stats = c != NULL
                 ? http3_listener_packet_stats(c->listener) : NULL;
 
@@ -1527,9 +1537,10 @@ static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
-    /* retire acked bytes so a worker producer parked on credit resumes */
+    /* retire acked bytes; wake a producer parked on credit */
     if (s->wire_credit != NULL) {
         stream_credit_ack((stream_credit_t *)s->wire_credit, datalen);
+        stream_credit_wake((stream_credit_t *)s->wire_credit);
     }
 
     s->chunk_ack_credit += datalen;

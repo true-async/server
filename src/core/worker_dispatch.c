@@ -26,7 +26,6 @@
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 
 #define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
-#define WORKER_CREDIT_POLL_MS      2
 
 #include <string.h>
 
@@ -68,6 +67,7 @@ typedef struct {
     bool                    stream_failed;  /* terminal wire becomes STREAM_ABORT */
 
     stream_credit_t        *credit;         /* shared with the reactor */
+    zend_async_trigger_event_t *credit_wake; /* worker-owned; reactor signals it */
     uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
@@ -203,6 +203,21 @@ static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
     } ZEND_HASH_FOREACH_END();
 }
 
+void response_wire_discard(response_wire_t *rw)
+{
+    /* nobody adopts the credit ref — release it or the producer hangs */
+    stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
+    zend_string *const orphan_chunk =
+        (zend_string *)response_wire_take_chunk(rw);
+
+    if (orphan_chunk != NULL) {
+        zend_string_release(orphan_chunk);
+    }
+
+    response_wire_free(rw);
+}
+
 /* The sink owns the wire in every outcome. */
 static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
 {
@@ -212,17 +227,7 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
     if (ctx->sink != NULL) {
         delivered = ctx->sink(rw, ctx->sink_arg);
     } else {
-        /* nobody adopts the credit ref — release it or the producer hangs */
-        stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
-
-        zend_string *const orphan_chunk =
-            (zend_string *)response_wire_take_chunk(rw);
-
-        if (orphan_chunk != NULL) {
-            zend_string_release(orphan_chunk);
-        }
-
-        response_wire_free(rw);
+        response_wire_discard(rw);
     }
 
     if (!delivered && kind != RESPONSE_WIRE_FULL) {
@@ -233,23 +238,9 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
     return delivered;
 }
 
-/* Suspend the producer for `ms` on a one-shot timer; no-op outside a coroutine. */
-static void worker_credit_sleep_ms(zend_coroutine_t *co, const zend_ulong ms)
-{
-    zend_async_timer_event_t *const t = ZEND_ASYNC_NEW_TIMER_EVENT(ms, false);
-
-    if (UNEXPECTED(t == NULL)) {
-        zend_clear_exception();
-        return;
-    }
-
-    t->base.start(&t->base);
-    zend_async_resume_when(co, &t->base, true, zend_async_waker_callback_resolve, NULL);
-    ZEND_ASYNC_SUSPEND();
-    ZEND_ASYNC_WAKER_DESTROY(co);
-}
-
-/* Park until in-flight < cap; false = stream dead. */
+/* Park until in-flight < cap; false = stream dead. Suspends on a trigger the
+ * reactor signals per ack; a write-timeout timer bounds a peer that stops
+ * ACKing. */
 static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
 {
     if (ctx->credit == NULL) {
@@ -258,9 +249,6 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
 
     const uint32_t timeout_ms =
         http_server_get_write_timeout_s(ctx->server) * 1000u;
-    uint64_t waited_ms  = 0;
-    uint64_t poll_ms    = WORKER_CREDIT_POLL_MS;
-    uint64_t last_acked = stream_credit_acked(ctx->credit);
 
     while (ctx->posted_bytes - stream_credit_acked(ctx->credit)
                >= WORKER_STREAM_INFLIGHT_CAP) {
@@ -274,25 +262,37 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
             return true;   /* can't suspend — degrade to unbounded */
         }
 
-        worker_credit_sleep_ms(co, poll_ms);
+        if (ctx->credit_wake == NULL) {
+            ctx->credit_wake = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+            if (UNEXPECTED(ctx->credit_wake == NULL)) {
+                zend_clear_exception();
+                return true;   /* no waker — degrade to unbounded */
+            }
+
+            stream_credit_set_waker(ctx->credit, ctx->credit_wake);
+            continue;   /* re-check: an ack may have landed pre-publish */
+        }
+
+        if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
+            return false;
+        }
+
+        zend_async_resume_when(co, &ctx->credit_wake->base, false,
+                               zend_async_waker_callback_resolve, NULL);
+
+        if (timeout_ms > 0) {
+            zend_async_event_t *const timer =
+                &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)timeout_ms, false)->base;
+            zend_async_resume_when(co, timer, true,
+                                   zend_async_waker_callback_timeout, NULL);
+        }
+
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
 
         if (EG(exception) != NULL) {
-            return false;   /* cancelled while parked */
-        }
-
-        waited_ms += poll_ms;
-
-        if (timeout_ms > 0 && waited_ms >= timeout_ms) {
-            return false;   /* peer stopped reading — treat as dead */
-        }
-
-        const uint64_t acked = stream_credit_acked(ctx->credit);
-
-        if (acked == last_acked) {
-            poll_ms = poll_ms < 32 ? poll_ms * 2 : 32;
-        } else {
-            last_acked = acked;
-            poll_ms    = WORKER_CREDIT_POLL_MS;
+            return false;   /* write timeout or cancelled while parked */
         }
     }
 
@@ -324,8 +324,14 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
         response_wire_set_credit(hw, ctx->credit);
         worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv));
-        worker_wire_post(ctx, hw);
         ctx->stream_started = true;
+
+        /* headers undeliverable → the stream never opened; don't copy and
+         * post a chunk wire the reactor would only throw away */
+        if (UNEXPECTED(!worker_wire_post(ctx, hw))) {
+            zend_string_release(chunk);
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
     }
 
     response_wire_t *const cw =
@@ -535,8 +541,20 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     }
 
     if (ctx->credit != NULL) {
+        if (ctx->credit_wake != NULL) {
+            /* retract the waker (fences out an in-flight reactor signal)
+             * before disposing its uv_async on this thread */
+            stream_credit_clear_waker(ctx->credit);
+        }
+
         stream_credit_release(ctx->credit);   /* worker-side ref */
         ctx->credit = NULL;
+    }
+
+    if (ctx->credit_wake != NULL) {
+        ZEND_ASYNC_EVENT_SET_CLOSED(&ctx->credit_wake->base);
+        ctx->credit_wake->base.dispose(&ctx->credit_wake->base);
+        ctx->credit_wake = NULL;
     }
 
     if (!Z_ISUNDEF(ctx->request_zv)) {
@@ -601,6 +619,7 @@ bool worker_dispatch_request(http_server_object *server,
 
     object_init_ex(&ctx->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(ctx->response_zv), "3.0");
+    http_response_set_head(Z_OBJ(ctx->response_zv), is_head);
 
     http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
                                      &worker_stream_ops, ctx);

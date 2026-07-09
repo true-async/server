@@ -12,6 +12,8 @@
 
 #include "php.h"
 #include "http_protocol_handlers.h"
+#include "http1/http_parser.h"   /* http_request_t */
+#include "grpc/grpc.h"           /* grpc_request_mode */
 
 /* {{{ http_protocol_type_to_string */
 const char* http_protocol_type_to_string(http_protocol_type_t type)
@@ -126,6 +128,23 @@ bool http_protocol_has_handler(HashTable *handlers, http_protocol_type_t protoco
     return zend_hash_str_exists(handlers, protocol_str, strlen(protocol_str));
 }
 /* }}} */
+
+/* {{{ http_request_classify_protocols */
+void http_request_classify_protocols(http_request_t *req)
+{
+    req->grpc_mode = (uint8_t)grpc_request_mode(req);
+}
+/* }}} */
+
+bool http_request_body_must_buffer(const http_request_t *req)
+{
+    return req->grpc_mode == GRPC_MODE_WEB_TEXT;
+}
+
+bool http_request_body_size_uncapped(const http_request_t *req)
+{
+    return req->grpc_mode != GRPC_MODE_NONE;
+}
 
 /* {{{ http_protocol_pick_handler */
 zend_fcall_t *http_protocol_pick_handler(HashTable *handlers, const bool is_grpc)

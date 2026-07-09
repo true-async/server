@@ -100,22 +100,31 @@ zend_string *http_body_stream_pop(http_request_t *req)
     req->body_bytes_consumed += ZSTR_LEN(data);
 
     /* Flow-control credit: grant peer permission to send another len bytes
-     * now that PHP has actually drained them. h_session_schedule_emit pushes
-     * the resulting WINDOW_UPDATE on the wire. */
+     * now that PHP has actually drained them — minus any prefix that was
+     * already credited while buffered pre-upgrade (body_precredited). */
+    size_t credit = ZSTR_LEN(data);
+
+    if (req->body_precredited > 0) {
+        const size_t skip = credit < req->body_precredited
+            ? credit : req->body_precredited;
+        req->body_precredited -= skip;
+        credit -= skip;
+    }
+
 #ifdef HAVE_HTTP2
-    if (req->body_h2_session != NULL) {
+    if (req->body_h2_session != NULL && credit > 0) {
         http2_session_t *s = req->body_h2_session;
-        (void)nghttp2_session_consume(s->ng, req->body_h2_stream_id,
-                                      ZSTR_LEN(data));
+        (void)nghttp2_session_consume(s->ng, req->body_h2_stream_id, credit);
         h2_session_schedule_emit(s);
     }
 #endif
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     /* Same discipline over QUIC: return window credit for the drained bytes
-     * (coalesced inside consume). */
+     * (coalesced inside consume; called even at credit==0 so a queue-empty
+     * pop still flushes previously coalesced credit). */
     if (req->body_h3_conn != NULL) {
-        http3_request_body_consume(req, ZSTR_LEN(data),
+        http3_request_body_consume(req, credit,
                                    req->body_queue_head == NULL);
     }
 #endif

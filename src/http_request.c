@@ -286,7 +286,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
     int          rc;
 
     /* grpc-web-text: decode the base64 body once, deframe from the result */
-    const bool web_text = grpc_request_is_grpc_web_text(req);
+    const bool web_text = (req->grpc_mode == GRPC_MODE_WEB_TEXT);
 
     if (web_text && req->grpc_text_body == NULL) {
         if (req->body == NULL) {

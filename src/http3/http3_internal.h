@@ -82,15 +82,6 @@ void http3_ensure_ossl_crypto_init(void);
 /* ngtcp2 log_printf-compatible bridge into http_log at DEBUG. */
 void http3_debug_logger(void *user_data, const char *fmt, ...);
 
-/* Build a sockaddr_storage from the listener's bound (host, port).
- * Required because the reactor doesn't yet expose the actual bound
- * sockname; ngtcp2_path matching is strict so we must reproduce the
- * same value on every read/write. peer_family selects v4/v6. */
-int http3_build_listener_local(const http3_listener_t *l,
-                               int peer_family,
-                               struct sockaddr_storage *out,
-                               socklen_t *out_len);
-
 
 /* ===== Packet/timer machinery (defined in http3_io.c) ===== */
 

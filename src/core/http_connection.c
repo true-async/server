@@ -2262,6 +2262,8 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     /* Create HttpResponse PHP object */
     object_init_ex(&ctx->response_zv, http_response_ce);
     http_response_set_protocol_version(Z_OBJ(ctx->response_zv), conn->http_version);
+    http_response_set_head(Z_OBJ(ctx->response_zv),
+                           http_request_method_is_head(req));
 
     /* Install the HTTP/1 streaming vtable. send() on the response
      * activates chunked framing on first call; handlers that stick to

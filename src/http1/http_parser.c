@@ -20,6 +20,7 @@
 #include "core/body_pool.h"
 #include "log/trace_context.h"
 #include "http_body_stream.h"
+#include "core/http_protocol_handlers.h"   /* http_request_classify_protocols */
 
 #include <string.h>
 #ifndef PHP_WIN32
@@ -663,13 +664,16 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         }
     }
 
+    http_request_classify_protocols(req);
+
     /* Streaming body mode (issue #26). Three-case policy by Content-Length:
      *   CL >= AUTO_THRESHOLD or CL == 0 (chunked) → stream immediately;
      *   CL >= SMALL but < AUTO → buffer, upgrade if readBody is called;
      *   CL <  SMALL                       → buffer, never upgrade.
      * Multipart bypasses streaming entirely (no current use case for
      * raw-multipart streaming; see plan §5 edge-case). */
-    if (!req->use_multipart && parser->conn != NULL && parser->conn->view != NULL
+    if (!req->use_multipart && !http_request_body_must_buffer(req)
+        && parser->conn != NULL && parser->conn->view != NULL
         && parser->conn->view->body_streaming_enabled) {
         if (req->content_length == 0
             || req->content_length >= HTTP_BODY_STREAM_AUTO_THRESHOLD) {

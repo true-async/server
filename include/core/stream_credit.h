@@ -14,6 +14,7 @@
 #include <stdbool.h>
 
 #include "Zend/zend_atomic.h"
+#include "Zend/zend_async_API.h"   /* zend_async_trigger_event_t */
 
 /* Per-stream flow-control credit shared worker↔reactor. Malloc + atomics
  * only — the one object both threads touch. Worker creates it with two refs
@@ -24,6 +25,8 @@ typedef struct {
     zend_atomic_int64 acked;   /* bytes the reactor has retired (peer ACK) */
     zend_atomic_int   dead;    /* stream died — producer must stop waiting */
     zend_atomic_int   refs;
+    zend_atomic_ptr   waker;      /* worker-owned trigger the reactor signals */
+    zend_atomic_int   waker_busy; /* a signaller is inside trigger() */
 } stream_credit_t;
 
 static inline stream_credit_t *stream_credit_create(void)
@@ -37,6 +40,8 @@ static inline stream_credit_t *stream_credit_create(void)
     ZEND_ATOMIC_INT64_INIT(&sc->acked, 0);
     ZEND_ATOMIC_INT_INIT(&sc->dead, 0);
     ZEND_ATOMIC_INT_INIT(&sc->refs, 2);   /* worker ctx + reactor stream */
+    ZEND_ATOMIC_PTR_INIT(&sc->waker, NULL);
+    ZEND_ATOMIC_INT_INIT(&sc->waker_busy, 0);
 
     return sc;
 }
@@ -66,11 +71,46 @@ static inline void stream_credit_mark_dead(stream_credit_t *sc)
     zend_atomic_int_store_ex(&sc->dead, 1);
 }
 
-/* NULL-safe. Dead must be set before release so a parked producer sees it. */
+/* Signal the parked producer from any thread. busy brackets the load+trigger
+ * so stream_credit_clear_waker can't dispose the event mid-signal. */
+static inline void stream_credit_wake(stream_credit_t *sc)
+{
+    zend_atomic_int_store_ex(&sc->waker_busy, 1);
+
+    zend_async_trigger_event_t *const t =
+        (zend_async_trigger_event_t *)zend_atomic_ptr_load_ex(&sc->waker);
+
+    if (t != NULL) {
+        t->trigger(t);
+    }
+
+    zend_atomic_int_store_ex(&sc->waker_busy, 0);
+}
+
+/* Worker thread: publish/retract the park trigger. clear must complete
+ * before the worker disposes the event. */
+static inline void stream_credit_set_waker(stream_credit_t *sc,
+                                           zend_async_trigger_event_t *t)
+{
+    zend_atomic_ptr_store_ex(&sc->waker, t);
+}
+
+static inline void stream_credit_clear_waker(stream_credit_t *sc)
+{
+    zend_atomic_ptr_store_ex(&sc->waker, NULL);
+
+    /* wait out a signal that loaded the pointer just before the NULL store */
+    while (zend_atomic_int_load_ex(&sc->waker_busy) != 0) {
+    }
+}
+
+/* NULL-safe. Dead must be set before release so a parked producer sees it;
+ * wake so it sees it NOW instead of at its next timeout. */
 static inline void stream_credit_abandon(stream_credit_t *sc)
 {
     if (sc != NULL) {
         stream_credit_mark_dead(sc);
+        stream_credit_wake(sc);
         stream_credit_release(sc);
     }
 }

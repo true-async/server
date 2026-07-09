@@ -34,6 +34,11 @@ void http_response_set_socket(zend_object *obj, php_socket_t fd)
     http_response_from_obj(obj)->socket_fd = fd;
 }
 
+void http_response_set_head(zend_object *obj, bool is_head)
+{
+    http_response_from_obj(obj)->is_head = is_head;
+}
+
 void http_response_set_protocol_version(zend_object *obj, const char *version)
 {
     http_response_object *response = http_response_from_obj(obj);

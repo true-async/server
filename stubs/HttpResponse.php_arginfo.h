@@ -68,9 +68,12 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sen
 	ZEND_ARG_TYPE_INFO(0, chunk, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_setGrpcEncoding, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, encoding, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_writeMessage, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
-	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, compress, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sendable, 0, 0, _IS_BOOL, 0)
@@ -156,6 +159,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getProtocolName);
 ZEND_METHOD(TrueAsync_HttpResponse, getProtocolVersion);
 ZEND_METHOD(TrueAsync_HttpResponse, write);
 ZEND_METHOD(TrueAsync_HttpResponse, send);
+ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding);
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage);
 ZEND_METHOD(TrueAsync_HttpResponse, sendable);
 ZEND_METHOD(TrueAsync_HttpResponse, setNoCompression);
@@ -196,6 +200,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, getProtocolVersion, arginfo_class_TrueAsync_HttpResponse_getProtocolVersion, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, write, arginfo_class_TrueAsync_HttpResponse_write, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, send, arginfo_class_TrueAsync_HttpResponse_send, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, setGrpcEncoding, arginfo_class_TrueAsync_HttpResponse_setGrpcEncoding, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, writeMessage, arginfo_class_TrueAsync_HttpResponse_writeMessage, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sendable, arginfo_class_TrueAsync_HttpResponse_sendable, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setNoCompression, arginfo_class_TrueAsync_HttpResponse_setNoCompression, ZEND_ACC_PUBLIC)

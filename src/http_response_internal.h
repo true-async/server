@@ -58,10 +58,13 @@ typedef struct {
     bool             committed;
     bool             streaming;         /* send() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — send() now throws, sse* re-entry is allowed */
+    bool             is_head;            /* HEAD: send() drops chunks (RFC 9110 §9.3.2) */
 
     /* grpc_mode_t stamped at dispatch; picks the per-frame transform.
      * 0 = not a gRPC call. */
     uint8_t          grpc_mode;
+
+    bool             grpc_compress;   /* setGrpcEncoding('gzip') declared */
 
     /* Compression module state (issue #8). Opaque ptr — owned by the
      * compression TU; allocated by http_compression_attach at dispatch
