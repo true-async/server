@@ -1,8 +1,23 @@
 # Known issue — SIGSEGV during pool reload when the bootloader spawns a long‑lived coroutine (#93)
 
-Status: reload **deadlock** is fixed (see "Fix that shipped"). The **intermittent
-crash** it exposes is now **root-caused and filed as an ext/async bug**:
-[true-async/php-async#176](https://github.com/true-async/php-async/issues/176).
+Status: **RESOLVED (2026-07-09).** Both halves are fixed in php-async / TrueAsync
+ABI **v0.24.0** and verified here after rebuild+reinstall:
+- reload **deadlock** — fixed by `937bcfe` (sync-worker graceful-shutdown backstop).
+- intermittent **SIGSEGV** (cross-thread run_time_cache UAF, #176) — fixed by
+  `0cbdfe8` "deep-copy nested closures per worker" (PR #180). `thread.c` now
+  `thread_persist_copy_xlat`'s `dynamic_func_defs` per worker, so nested closures
+  are no longer shared across worker arenas.
+
+**Verification:** the synthetic stress harness below (2 workers, persistent nested
+closure `while(true){delay()}`, hot-reload rotation) ran **30/30 clean** on the
+v0.24.0 build (`up=v1; after=v2; stopped=clean`, zero rc 139/134) — versus ~50%
+SIGSEGV pre-fix. No server-repo change required; the environment just needed
+php ≥ v0.24.0. Original investigation trail retained below for reference.
+
+---
+
+_Historical (pre-fix):_ the intermittent crash was **root-caused and filed as an
+ext/async bug** [true-async/php-async#176](https://github.com/true-async/php-async/issues/176).
 
 **Root cause (confirmed — code + ASAN + gdb):** `async_thread_create_closure`
 (`thread.c`) does `memcpy(&func, copy->func, sizeof(zend_op_array))` — a *shallow*
