@@ -813,9 +813,9 @@ static void http_log_state_refresh_gate(http_log_state_t *state)
     state->severity = floor;
 }
 
-/* Build one sink onto a zeroed slot: cast the stream to an fd, wrap it in
- * async io, and attach the coalescing writer. Returns false (sink left
- * inactive, floor OFF) on any failure. */
+/* Build one sink onto a zeroed slot: borrow the stream's async IO handle and
+ * attach the coalescing writer. Returns false (sink left inactive, floor OFF)
+ * on any failure. */
 static bool http_log_sink_start(http_log_sink_t *sink,
                                 http_log_severity_t severity,
                                 http_log_formatter_fn formatter,
@@ -831,9 +831,6 @@ static bool http_log_sink_start(http_log_sink_t *sink,
         return false;
     }
 
-    /* CAST_INTERNAL keeps the stream owning the fd. Non-fd streams
-     * (php://memory, user wrappers) fail the cast — disable rather
-     * than silently no-op. */
     php_stream *stream = NULL;
     php_stream_from_zval_no_verify(stream, stream_zv);
 
@@ -841,28 +838,18 @@ static bool http_log_sink_start(http_log_sink_t *sink,
         return false;
     }
 
-    int fd = -1;
-    int rc = php_stream_cast(stream, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
-                             (void *)&fd, 0);
+    /* Ask the stream for its async IO handle (true_async integration): the
+     * stream get-or-creates a zend_async_io_t and owns its lifetime, so the
+     * writer never touches a raw fd and any stream type that implements the
+     * option (file, socket, pipe) works. We only borrow the handle to write
+     * through and detach our callback at stop. */
+    zend_async_io_t *io = NULL;
+    int rc = php_stream_set_option(stream, PHP_STREAM_OPTION_ASYNC_IO, 0, &io);
 
-    if (rc != SUCCESS || fd < 0) {
+    if (rc != PHP_STREAM_OPTION_RETURN_OK || io == NULL) {
         fprintf(stderr,
-                "http_server: log stream has no underlying fd; "
-                "sink disabled (use file or php://stderr)\n");
-        return false;
-    }
-
-    /* PRESERVE_FD: the php_stream still owns the descriptor; without
-     * this flag ZEND_ASYNC_IO_CLOSE would close someone else's fd. */
-    zend_async_io_t *io = ZEND_ASYNC_IO_CREATE(
-        (zend_file_descriptor_t)fd,
-        ZEND_ASYNC_IO_TYPE_FILE,
-        ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
-
-    if (io == NULL) {
-        fprintf(stderr,
-                "http_server: failed to wrap log stream fd into async io; "
-                "sink disabled\n");
+                "http_server: log stream has no async IO handle; "
+                "sink disabled (use a file/socket/pipe stream)\n");
         return false;
     }
 
@@ -871,10 +858,7 @@ static bool http_log_sink_start(http_log_sink_t *sink,
                                      sizeof(http_log_writer_cb_t));
 
     if (cb == NULL) {
-        if (io->event.dispose != NULL) {
-            io->event.dispose(&io->event);
-        }
-
+        /* io belongs to the stream — leave it, just bail out. */
         fprintf(stderr, "http_server: failed to allocate log writer cb\n");
         return false;
     }
@@ -889,12 +873,7 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     cb->drain_event  = NULL;
 
     if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
-        efree(cb);
-
-        if (io->event.dispose != NULL) {
-            io->event.dispose(&io->event);
-        }
-
+        efree(cb);   /* io belongs to the stream — leave it */
         fprintf(stderr, "http_server: failed to attach log writer cb\n");
         return false;
     }
@@ -984,16 +963,11 @@ static void http_log_sink_stop(http_log_sink_t *sink)
         efree(cb);
     }
 
-    if (sink->async_io != NULL) {
-        zend_async_io_t *io = sink->async_io;
-        sink->async_io = NULL;
-        ZEND_ASYNC_IO_CLOSE(io);
-        /* Stream io types are disposed by libuv via uv_close; FILE has
-         * no uv_close path so we drop our reference explicitly. */
-        if (io->event.dispose != NULL) {
-            io->event.dispose(&io->event);
-        }
-    }
+    /* The async IO handle belongs to the stream (get-or-create via
+     * PHP_STREAM_OPTION_ASYNC_IO) — we only detached our writer callback
+     * above. Dropping our stream ref lets the stream dispose the io when its
+     * last ref goes; nothing for us to close here. */
+    sink->async_io = NULL;
 
     if (sink->stream_set) {
         zval_ptr_dtor(&sink->stream_zv);
