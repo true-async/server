@@ -52,7 +52,15 @@ http_log_state_t  http_log_state_default = {
     .sink_count = 0,
 };
 
-#define HTTP_LOG_PENDING_MAX (64u * 1024u)
+/* Per-sink ring of formatted-but-unwritten bytes. Fixed capacity (a burst past
+ * it drops, drop-counted); the writer drains it to the stream's async IO one
+ * write at a time. Flush is kicked when the ring reaches the high-water mark or
+ * the periodic flush timer ticks — so low-rate emits coalesce into fewer
+ * syscalls while a burst never stalls the producer. CAP is a power of two so
+ * the wrap is a mask. */
+#define HTTP_LOG_RING_CAP          65536u   /* 64 KiB */
+#define HTTP_LOG_FLUSH_HIGH_WATER  32768u   /* flush once >= 32 KiB buffered */
+#define HTTP_LOG_FLUSH_INTERVAL_MS 200u
 
 /* Ceiling on the total stop-time flush wait across all sinks; a wedged sink
  * past this leaks rather than pinning teardown. */
@@ -68,14 +76,27 @@ struct http_log_writer_cb {
     http_log_sink_t             *sink;
     zend_async_io_req_t         *active_req;
     char                        *active_buf;
-    char                        *pending_buf;
-    size_t                       pending_len;
-    size_t                       pending_cap;
+    /* Ring of formatted bytes awaiting write. emit appends here (never
+     * suspends); the completion chain, the high-water kick, and the flush
+     * timer drain it. head = next append offset, len = buffered bytes. */
+    char                        *ring;
+    uint32_t                     ring_head;
+    uint32_t                     ring_len;
+    /* Periodic flush timer (lifetime of the sink): coalesces low-rate emits
+     * into fewer writes without leaving them buffered indefinitely. */
+    zend_async_event_t          *flush_timer;
+    zend_async_event_callback_t *flush_timer_cb;
     /* Fired by writer_complete_cb once the write chain fully drains, so
      * http_log_server_stop can wait for flush without polling. Same thread
      * as the completion, so a plain (non-uv) event suffices. */
     zend_async_event_t          *drain_event;
 };
+
+/* Flush-timer callback: points back to the writer it drains. */
+typedef struct {
+    zend_async_event_callback_t  base;
+    http_log_writer_cb_t        *writer;
+} http_log_flush_timer_cb_t;
 
 /* ------------------------------------------------------------------------ */
 
@@ -545,9 +566,9 @@ static void emit_fallback_stderr(http_log_sink_t *sink, const char *reason)
             (unsigned long long)sink->dropped_total);
 }
 
-/* Async file-writer transport. Keeps one ZEND_ASYNC_IO_WRITE in flight;
- * further emits coalesce into the pending buffer and are flushed by the
- * completion callback. Never suspends the calling coroutine. */
+/* Per-sink async writer: emit appends formatted bytes to a fixed ring; a single
+ * ZEND_ASYNC_IO_WRITE at a time drains the ring, kicked at the high-water mark,
+ * on the flush timer, and after each write completes. emit never suspends. */
 
 static void writer_kick_next(http_log_writer_cb_t *cb);
 
@@ -589,7 +610,7 @@ static void writer_complete_cb(
     writer_kick_next(cb);
 
     /* Chain fully drained — wake a stop() waiting to flush before teardown. */
-    if (cb->drain_event != NULL && cb->active_req == NULL) {
+    if (cb->drain_event != NULL && cb->active_req == NULL && cb->ring_len == 0) {
         async_plain_event_fire(cb->drain_event);
     }
 }
@@ -604,85 +625,167 @@ static void writer_callback_dispose(
      * and frees this struct). */
 }
 
-static void writer_kick_next(http_log_writer_cb_t *cb)
+/* Append formatted bytes to the ring; a burst past its capacity drops. */
+static void writer_ring_append(http_log_writer_cb_t *cb, const char *src, size_t len)
 {
-    /* sink->async_io is NULL once the sink was stopped — pending bytes are
-     * then unflushable; drop them silently here. */
-    if (cb->sink == NULL || cb->sink->async_io == NULL
-        || cb->pending_len == 0) {
+    if (len == 0) {
         return;
     }
 
-    char  *buf = cb->pending_buf;
-    size_t len = cb->pending_len;
+    if (len > (size_t)(HTTP_LOG_RING_CAP - cb->ring_len)) {
+        if (cb->sink != NULL) {
+            cb->sink->dropped_total++;
+        }
 
-    cb->pending_buf = NULL;
-    cb->pending_len = 0;
-    cb->pending_cap = 0;
+        emit_fallback_stderr(cb->sink, "ring overflow");
+        return;
+    }
 
-    cb->active_buf = buf;
-    cb->active_req = ZEND_ASYNC_IO_WRITE(cb->sink->async_io, buf, len);
+    uint32_t head  = cb->ring_head;
+    uint32_t first = HTTP_LOG_RING_CAP - head;   /* room before the wrap */
+
+    if (len <= first) {
+        memcpy(cb->ring + head, src, len);
+    } else {
+        memcpy(cb->ring + head, src, first);
+        memcpy(cb->ring, src + first, len - first);
+    }
+
+    cb->ring_head = (uint32_t)((head + len) & (HTTP_LOG_RING_CAP - 1));
+    cb->ring_len += (uint32_t)len;
+}
+
+static void writer_kick_next(http_log_writer_cb_t *cb)
+{
+    /* sink->async_io is NULL once the sink was stopped; a write already in
+     * flight re-kicks itself on completion. */
+    if (cb->sink == NULL || cb->sink->async_io == NULL
+        || cb->active_req != NULL || cb->ring_len == 0) {
+        return;
+    }
+
+    /* Drain one contiguous run of the ring. libuv holds the buffer until
+     * completion, so copy it out and free the ring space immediately — the
+     * producer can keep appending while this write is in flight. */
+    uint32_t read_pos = (uint32_t)((cb->ring_head - cb->ring_len)
+                                   & (HTTP_LOG_RING_CAP - 1));
+    uint32_t contig   = HTTP_LOG_RING_CAP - read_pos;
+    uint32_t chunk    = cb->ring_len < contig ? cb->ring_len : contig;
+
+    char *out = emalloc(chunk);
+    memcpy(out, cb->ring + read_pos, chunk);
+    cb->ring_len -= chunk;
+
+    cb->active_buf = out;
+    cb->active_req = ZEND_ASYNC_IO_WRITE(cb->sink->async_io, out, chunk);
 
     if (UNEXPECTED(cb->active_req == NULL)) {
-        efree(buf);
+        efree(out);
         cb->active_buf = NULL;
         cb->sink->dropped_total++;
         emit_fallback_stderr(cb->sink, "async write submit failed");
     }
 }
 
-static void writer_append_pending(http_log_writer_cb_t *cb,
-                                  const char *src, size_t len)
+/* Flush timer: fires every HTTP_LOG_FLUSH_INTERVAL_MS for the sink's lifetime;
+ * kick_next is a no-op when the ring is empty or a write is in flight. */
+static void writer_flush_timer_fn(zend_async_event_t *event,
+                                  zend_async_event_callback_t *callback,
+                                  void *result, zend_object *exception)
 {
-    if (cb->pending_len + len > HTTP_LOG_PENDING_MAX) {
-        if (cb->sink != NULL) {
-            cb->sink->dropped_total++;
-        }
+    (void)event; (void)result; (void)exception;
+    http_log_flush_timer_cb_t *tcb = (http_log_flush_timer_cb_t *)callback;
 
-        emit_fallback_stderr(cb->sink, "pending overflow");
+    if (tcb->writer != NULL) {
+        writer_kick_next(tcb->writer);
+    }
+}
+
+static void writer_flush_timer_dispose(zend_async_event_callback_t *callback,
+                                       zend_async_event_t *event)
+{
+    (void)event;
+    efree(callback);
+}
+
+/* Create + start the periodic flush timer. Best-effort: on failure the writer
+ * still flushes at the high-water mark and after each completion. */
+static void writer_flush_timer_create(http_log_writer_cb_t *cb)
+{
+    zend_async_timer_event_t *t = ZEND_ASYNC_NEW_TIMER_EVENT(
+        (zend_ulong)HTTP_LOG_FLUSH_INTERVAL_MS, /*periodic*/ true);
+
+    if (UNEXPECTED(t == NULL)) {
+        return;
+    }
+    ZEND_ASYNC_TIMER_SET_MULTISHOT(t);   /* survive periodic fires */
+
+    http_log_flush_timer_cb_t *tcb = (http_log_flush_timer_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(writer_flush_timer_fn, sizeof(*tcb));
+
+    if (UNEXPECTED(tcb == NULL)) {
+        t->base.dispose(&t->base);
         return;
     }
 
-    if (cb->pending_len + len > cb->pending_cap) {
-        size_t new_cap = cb->pending_cap == 0 ? 1024 : cb->pending_cap;
-        while (new_cap < cb->pending_len + len) {
-            new_cap *= 2;
-        }
+    tcb->base.dispose = writer_flush_timer_dispose;
+    tcb->writer       = cb;
 
-        cb->pending_buf = erealloc(cb->pending_buf, new_cap);
-        cb->pending_cap = new_cap;
+    if (!t->base.add_callback(&t->base, &tcb->base)) {
+        efree(tcb);
+        t->base.dispose(&t->base);
+        return;
     }
 
-    memcpy(cb->pending_buf + cb->pending_len, src, len);
-    cb->pending_len += len;
+    if (!t->base.start(&t->base)) {
+        zend_async_callbacks_remove(&t->base, &tcb->base);
+        t->base.dispose(&t->base);
+        return;
+    }
+
+    cb->flush_timer    = &t->base;
+    cb->flush_timer_cb = &tcb->base;
 }
 
-/* Hand one already-formatted record to a sink's transport. */
+/* Stop + dispose the flush timer, nulling the callback's back-pointer first so
+ * a tick queued before teardown can't deref the writer being freed. */
+static void writer_flush_timer_destroy(http_log_writer_cb_t *cb)
+{
+    if (cb->flush_timer_cb != NULL) {
+        ((http_log_flush_timer_cb_t *)cb->flush_timer_cb)->writer = NULL;
+
+        if (cb->flush_timer != NULL) {
+            zend_async_callbacks_remove(cb->flush_timer, cb->flush_timer_cb);
+        } else if (cb->flush_timer_cb->dispose != NULL) {
+            cb->flush_timer_cb->dispose(cb->flush_timer_cb, NULL);
+        }
+
+        cb->flush_timer_cb = NULL;
+    }
+
+    if (cb->flush_timer != NULL) {
+        if (cb->flush_timer->loop_ref_count > 0) {
+            cb->flush_timer->stop(cb->flush_timer);
+        }
+        cb->flush_timer->dispose(cb->flush_timer);
+        cb->flush_timer = NULL;
+    }
+}
+
+/* Hand one already-formatted record to a sink: append to the ring and flush
+ * now if it crossed the high-water mark (otherwise the timer will). */
 static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t len)
 {
     http_log_writer_cb_t *cb = sink->writer_cb;
 
-    if (cb == NULL || sink->async_io == NULL) {
+    if (cb == NULL || sink->async_io == NULL || cb->ring == NULL) {
         return;
     }
 
-    if (cb->active_req != NULL) {
-        writer_append_pending(cb, buf, len);
-        return;
-    }
+    writer_ring_append(cb, buf, len);
 
-    /* libuv keeps the buffer pointer until completion — copy to a
-     * heap slot the completion callback will free. */
-    char *out = emalloc(len);
-    memcpy(out, buf, len);
-    cb->active_buf = out;
-    cb->active_req = ZEND_ASYNC_IO_WRITE(sink->async_io, out, len);
-
-    if (UNEXPECTED(cb->active_req == NULL)) {
-        efree(out);
-        cb->active_buf = NULL;
-        sink->dropped_total++;
-        emit_fallback_stderr(sink, "async write submit failed");
+    if (cb->ring_len >= HTTP_LOG_FLUSH_HIGH_WATER) {
+        writer_kick_next(cb);
     }
 }
 
@@ -863,20 +966,25 @@ static bool http_log_sink_start(http_log_sink_t *sink,
         return false;
     }
 
-    cb->base.dispose = writer_callback_dispose;
-    cb->sink         = sink;
-    cb->active_req   = NULL;
-    cb->active_buf   = NULL;
-    cb->pending_buf  = NULL;
-    cb->pending_len  = 0;
-    cb->pending_cap  = 0;
-    cb->drain_event  = NULL;
+    cb->base.dispose   = writer_callback_dispose;
+    cb->sink           = sink;
+    cb->active_req     = NULL;
+    cb->active_buf     = NULL;
+    cb->ring           = emalloc(HTTP_LOG_RING_CAP);
+    cb->ring_head      = 0;
+    cb->ring_len       = 0;
+    cb->flush_timer    = NULL;
+    cb->flush_timer_cb = NULL;
+    cb->drain_event    = NULL;
 
     if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
+        efree(cb->ring);
         efree(cb);   /* io belongs to the stream — leave it */
         fprintf(stderr, "http_server: failed to attach log writer cb\n");
         return false;
     }
+
+    writer_flush_timer_create(cb);   /* best-effort periodic flush */
 
     ZVAL_COPY(&sink->stream_zv, stream_zv);
     sink->stream_set     = true;
@@ -895,13 +1003,20 @@ static bool http_log_sink_start(http_log_sink_t *sink,
 static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
 {
     if (budget_ms == 0 || sink->async_io == NULL || sink->writer_cb == NULL
-        || sink->writer_cb->active_req == NULL
         || ZEND_ASYNC_CURRENT_COROUTINE == NULL) {
         return;
     }
 
     zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
     http_log_writer_cb_t *const cb = sink->writer_cb;
+
+    /* Kick a write so buffered-but-unflushed bytes start draining, then wait
+     * for the completion chain to empty the ring. */
+    writer_kick_next(cb);
+
+    if (cb->active_req == NULL) {
+        return;   /* nothing buffered or in flight */
+    }
 
     if (cb->drain_event == NULL) {
         cb->drain_event = async_plain_event_new();
@@ -934,6 +1049,7 @@ static void http_log_sink_stop(http_log_sink_t *sink)
     if (UNEXPECTED(sink->writer_cb != NULL
                    && sink->writer_cb->active_req != NULL)) {
         emit_fallback_stderr(sink, "teardown with in-flight write — leaking sink");
+        writer_flush_timer_destroy(sink->writer_cb);   /* stop the zombie tick */
         sink->writer_cb      = NULL;
         sink->async_io       = NULL;
         sink->stream_set     = false;
@@ -946,14 +1062,16 @@ static void http_log_sink_stop(http_log_sink_t *sink)
         http_log_writer_cb_t *cb = sink->writer_cb;
         sink->writer_cb = NULL;
 
+        writer_flush_timer_destroy(cb);
+
         if (sink->async_io != NULL
             && sink->async_io->event.del_callback != NULL) {
             sink->async_io->event.del_callback(&sink->async_io->event,
                                                &cb->base);
         }
 
-        if (cb->pending_buf != NULL) {
-            efree(cb->pending_buf);
+        if (cb->ring != NULL) {
+            efree(cb->ring);
         }
 
         if (cb->drain_event != NULL) {

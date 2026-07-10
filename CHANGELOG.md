@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     'stream'=>$res, 'format'=>'plain'|'logfmt'|'json'|'pretty',
     'level'=>LogSeverity::…], …])` declares up to 8 sinks (invalid specs throw at
     config time); `setLogSeverity()`/`setLogStream()` stay as single-stream sugar.
+    Each sink writes through the stream's own async IO handle and batches records
+    in a per-sink ring buffer flushed at a 32 KiB high-water mark or a 200 ms
+    timer, so a burst of logs coalesces into far fewer write syscalls while the
+    emit call itself never blocks.
   - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
     OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
     Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with
