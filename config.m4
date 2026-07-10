@@ -98,6 +98,16 @@ PHP_ARG_ENABLE([coverage],
   [no])
 
 if test "$PHP_HTTP_SERVER" != "no"; then
+  dnl Hard ZTS requirement: worker/reactor pools run PHP threads
+  dnl (Async\ThreadPool) and the core uses TSRM mutexes. Fail here with a
+  dnl clear message instead of deep in compilation (tsrm_mutex_* undefined).
+  AC_MSG_CHECKING([for ZTS (thread-safe) PHP])
+  if test "$PHP_THREAD_SAFETY" = "yes"; then
+    AC_MSG_RESULT([yes])
+  else
+    AC_MSG_ERROR([true_async_server requires a ZTS PHP build (--enable-zts); NTS is not supported])
+  fi
+
   dnl Check for required headers
   AC_CHECK_HEADERS([sys/socket.h netinet/in.h arpa/inet.h execinfo.h])
 

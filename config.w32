@@ -9,6 +9,12 @@ ARG_ENABLE('zstd',              'Enable zstd backend (requires libzstd)',     'y
 
 if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
+    // Hard ZTS requirement: worker/reactor pools run PHP threads and the
+    // core uses TSRM mutexes — fail configure, not compilation.
+    if (PHP_ZTS != "yes") {
+        ERROR("true_async_server requires a ZTS PHP build; NTS is not supported");
+    }
+
     // Subdir paths MUST use backslashes — confutils.js ADD_SOURCES() splits
     // on '\\' to derive (dirname, filename); forward slashes leave dirname
     // empty and the .obj lands in build-dir root while the linker looks for
