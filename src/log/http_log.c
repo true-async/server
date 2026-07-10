@@ -105,6 +105,207 @@ static const char *severity_text(http_log_severity_t s)
     }
 }
 
+/* Bounded string builder over the formatter's fixed output buffer. Every
+ * append is capped at cap-1 and keeps the buffer NUL-terminated, so a record
+ * that overruns the buffer truncates instead of writing past it. `len` is the
+ * byte count the formatter returns (excludes the NUL). */
+typedef struct {
+    char   *buf;
+    size_t  cap;
+    size_t  len;
+} log_sbuf_t;
+
+static void sb_init(log_sbuf_t *sb, char *buf, size_t cap)
+{
+    sb->buf = buf;
+    sb->cap = cap;
+    sb->len = 0;
+    if (cap > 0) {
+        buf[0] = '\0';
+    }
+}
+
+static void sb_write(log_sbuf_t *sb, const char *s, size_t n)
+{
+    for (size_t i = 0; i < n && sb->len + 1 < sb->cap; i++) {
+        sb->buf[sb->len++] = s[i];
+    }
+    if (sb->len < sb->cap) {
+        sb->buf[sb->len] = '\0';
+    }
+}
+
+static void sb_putc(log_sbuf_t *sb, char c)
+{
+    sb_write(sb, &c, 1);
+}
+
+static void sb_puts(log_sbuf_t *sb, const char *s)
+{
+    sb_write(sb, s, strlen(s));
+}
+
+static void sb_printf(log_sbuf_t *sb, const char *fmt, ...)
+{
+    if (sb->len + 1 >= sb->cap) {
+        return;
+    }
+
+    size_t avail = sb->cap - sb->len;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(sb->buf + sb->len, avail, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) {
+        return;
+    }
+
+    sb->len += ((size_t)n >= avail) ? avail - 1 : (size_t)n;
+}
+
+static void sb_put_hex(log_sbuf_t *sb, const uint8_t *bytes, size_t n)
+{
+    static const char hexd[] = "0123456789abcdef";
+
+    for (size_t i = 0; i < n; i++) {
+        sb_putc(sb, hexd[bytes[i] >> 4]);
+        sb_putc(sb, hexd[bytes[i] & 0x0f]);
+    }
+}
+
+/* JSON string per RFC 8259: quote and escape the mandatory controls. */
+static void sb_put_json_str(log_sbuf_t *sb, const char *s, size_t n)
+{
+    sb_putc(sb, '"');
+
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        switch (c) {
+            case '"':  sb_puts(sb, "\\\""); break;
+            case '\\': sb_puts(sb, "\\\\"); break;
+            case '\n': sb_puts(sb, "\\n");  break;
+            case '\r': sb_puts(sb, "\\r");  break;
+            case '\t': sb_puts(sb, "\\t");  break;
+            case '\b': sb_puts(sb, "\\b");  break;
+            case '\f': sb_puts(sb, "\\f");  break;
+            default:
+                if (c < 0x20) {
+                    sb_printf(sb, "\\u%04x", c);
+                } else {
+                    sb_putc(sb, (char)c);
+                }
+        }
+    }
+
+    sb_putc(sb, '"');
+}
+
+/* logfmt value: bare when it has no separator/quote/control, else double-
+ * quoted with \" and \\ escaped (Grafana/logfmt reader compatible). */
+static void sb_put_logfmt_val(log_sbuf_t *sb, const char *s, size_t n)
+{
+    bool quote = (n == 0);
+
+    for (size_t i = 0; i < n && !quote; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '"' || c == '=' || (unsigned char)c < 0x20) {
+            quote = true;
+        }
+    }
+
+    if (!quote) {
+        sb_write(sb, s, n);
+        return;
+    }
+
+    sb_putc(sb, '"');
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '"' || s[i] == '\\') {
+            sb_putc(sb, '\\');
+        }
+        sb_putc(sb, s[i]);
+    }
+    sb_putc(sb, '"');
+}
+
+static size_t format_iso8601(uint64_t ts_ns, char *out, size_t out_len)
+{
+    /* ISO-8601 UTC timestamp, ms precision. */
+    time_t   sec = (time_t)(ts_ns / 1000000000ULL);
+    uint32_t ms  = (uint32_t)((ts_ns % 1000000000ULL) / 1000000ULL);
+    struct tm tm_buf;
+#ifdef PHP_WIN32
+    gmtime_s(&tm_buf, &sec);
+#else
+    gmtime_r(&sec, &tm_buf);
+#endif
+
+    int n = snprintf(out, out_len, "%04d-%02d-%02dT%02d:%02d:%02d.%03uZ",
+                     tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+
+    return (n < 0) ? 0 : (size_t)n;
+}
+
+typedef enum {
+    LOG_STYLE_PLAIN,
+    LOG_STYLE_LOGFMT,
+    LOG_STYLE_JSON,
+} log_style_t;
+
+/* Single attribute-iteration helper shared by every formatter; the styles
+ * differ only in the key/value separators and per-value rendering. plain and
+ * logfmt lead each pair with a space; json separates with commas and quotes
+ * keys. String values: plain is raw (with "(null)"), logfmt conditionally
+ * quotes, json always JSON-escapes. */
+static void sb_put_attrs(log_sbuf_t *sb, const http_log_record_t *rec,
+                         log_style_t style)
+{
+    for (size_t i = 0; i < rec->attrs_count; i++) {
+        const http_log_attr_t *a = &rec->attrs[i];
+
+        if (style == LOG_STYLE_JSON) {
+            if (i > 0) {
+                sb_putc(sb, ',');
+            }
+            sb_put_json_str(sb, a->key, strlen(a->key));
+            sb_putc(sb, ':');
+        } else {
+            sb_putc(sb, ' ');
+            sb_puts(sb, a->key);
+            sb_putc(sb, '=');
+        }
+
+        switch (a->type) {
+            case HTTP_LOG_ATTR_STR: {
+                const char *v = a->v.s;
+                if (style == LOG_STYLE_JSON) {
+                    sb_put_json_str(sb, v != NULL ? v : "", v != NULL ? strlen(v) : 0);
+                } else if (style == LOG_STYLE_LOGFMT) {
+                    sb_put_logfmt_val(sb, v != NULL ? v : "", v != NULL ? strlen(v) : 0);
+                } else {
+                    sb_puts(sb, v != NULL ? v : "(null)");
+                }
+                break;
+            }
+            case HTTP_LOG_ATTR_I64:
+                sb_printf(sb, "%lld", (long long)a->v.i64);
+                break;
+            case HTTP_LOG_ATTR_U64:
+                sb_printf(sb, "%llu", (unsigned long long)a->v.u64);
+                break;
+            case HTTP_LOG_ATTR_BOOL:
+                sb_puts(sb, a->v.b ? "true" : "false");
+                break;
+            case HTTP_LOG_ATTR_F64:
+                sb_printf(sb, "%g", a->v.f64);
+                break;
+        }
+    }
+}
+
 size_t http_log_format_plain(const http_log_record_t *rec,
                              char *buf, size_t buf_len, void *ud)
 {
@@ -114,84 +315,94 @@ size_t http_log_format_plain(const http_log_record_t *rec,
         return 0;
     }
 
-    /* ISO-8601 UTC timestamp, ms precision. */
-    time_t sec = (time_t)(rec->timestamp_ns / 1000000000ULL);
-    uint32_t ms = (uint32_t)((rec->timestamp_ns % 1000000000ULL) / 1000000ULL);
-    struct tm tm_buf;
-#ifdef PHP_WIN32
-    gmtime_s(&tm_buf, &sec);
-#else
-    gmtime_r(&sec, &tm_buf);
-#endif
+    log_sbuf_t sb;
+    sb_init(&sb, buf, buf_len);
 
     char ts[40];
-    snprintf(ts, sizeof ts, "%04d-%02d-%02dT%02d:%02d:%02d.%03uZ",
-             tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-             tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+    format_iso8601(rec->timestamp_ns, ts, sizeof ts);
 
-    int prefix = snprintf(buf, buf_len, "%s %s %.*s",
-                          ts, severity_text(rec->severity),
-                          (int)rec->body_len,
-                          rec->body != NULL ? rec->body : "");
+    sb_puts(&sb, ts);
+    sb_putc(&sb, ' ');
+    sb_puts(&sb, severity_text(rec->severity));
+    sb_putc(&sb, ' ');
+    if (rec->body != NULL) {
+        sb_write(&sb, rec->body, rec->body_len);
+    }
 
-    if (prefix < 0) {
+    sb_put_attrs(&sb, rec, LOG_STYLE_PLAIN);
+    sb_putc(&sb, '\n');
+
+    return sb.len;
+}
+
+/* logfmt: ts=… level=… msg=… key=value …  (one line, parses in Grafana). */
+size_t http_log_format_logfmt(const http_log_record_t *rec,
+                              char *buf, size_t buf_len, void *ud)
+{
+    (void)ud;
+
+    if (buf_len < 2) {
         return 0;
     }
 
-    size_t written = (size_t)prefix;
+    log_sbuf_t sb;
+    sb_init(&sb, buf, buf_len);
 
-    if (written >= buf_len) {
-        written = buf_len - 1;
+    char ts[40];
+    format_iso8601(rec->timestamp_ns, ts, sizeof ts);
+
+    sb_printf(&sb, "ts=%s level=%s msg=", ts, severity_text(rec->severity));
+    sb_put_logfmt_val(&sb, rec->body != NULL ? rec->body : "", rec->body_len);
+
+    sb_put_attrs(&sb, rec, LOG_STYLE_LOGFMT);
+    sb_putc(&sb, '\n');
+
+    return sb.len;
+}
+
+/* JSON, one object per line, OTel Logs field names. Attributes is omitted when
+ * empty; TraceId/SpanId only when the record carries a trace context. */
+size_t http_log_format_json(const http_log_record_t *rec,
+                            char *buf, size_t buf_len, void *ud)
+{
+    (void)ud;
+
+    if (buf_len < 2) {
+        return 0;
     }
 
-    for (size_t i = 0; i < rec->attrs_count && written < buf_len - 1; i++) {
-        const http_log_attr_t *a = &rec->attrs[i];
-        int n = 0;
-        switch (a->type) {
-            case HTTP_LOG_ATTR_STR:
-                n = snprintf(buf + written, buf_len - written, " %s=%s",
-                             a->key,
-                             a->v.s != NULL ? a->v.s : "(null)");
-                break;
-            case HTTP_LOG_ATTR_I64:
-                n = snprintf(buf + written, buf_len - written, " %s=%lld",
-                             a->key, (long long)a->v.i64);
-                break;
-            case HTTP_LOG_ATTR_U64:
-                n = snprintf(buf + written, buf_len - written, " %s=%llu",
-                             a->key, (unsigned long long)a->v.u64);
-                break;
-            case HTTP_LOG_ATTR_BOOL:
-                n = snprintf(buf + written, buf_len - written, " %s=%s",
-                             a->key, a->v.b ? "true" : "false");
-                break;
-            case HTTP_LOG_ATTR_F64:
-                n = snprintf(buf + written, buf_len - written, " %s=%g",
-                             a->key, a->v.f64);
-                break;
-        }
+    log_sbuf_t sb;
+    sb_init(&sb, buf, buf_len);
 
-        if (n < 0) {
-            break;
-        }
+    char ts[40];
+    format_iso8601(rec->timestamp_ns, ts, sizeof ts);
 
-        written += (size_t)n;
+    sb_printf(&sb, "{\"Timestamp\":\"%s\",\"SeverityNumber\":%d,\"SeverityText\":",
+              ts, (int)rec->severity);
+    sb_put_json_str(&sb, severity_text(rec->severity),
+                    strlen(severity_text(rec->severity)));
 
-        if (written >= buf_len) {
-            written = buf_len - 1;
-            break;
-        }
+    sb_puts(&sb, ",\"Body\":");
+    sb_put_json_str(&sb, rec->body != NULL ? rec->body : "", rec->body_len);
+
+    if (rec->attrs_count > 0) {
+        sb_puts(&sb, ",\"Attributes\":{");
+        sb_put_attrs(&sb, rec, LOG_STYLE_JSON);
+        sb_putc(&sb, '}');
     }
 
-    if (written < buf_len - 1) {
-        buf[written++] = '\n';
+    if (rec->has_trace) {
+        sb_puts(&sb, ",\"TraceId\":\"");
+        sb_put_hex(&sb, rec->trace_id, sizeof rec->trace_id);
+        sb_puts(&sb, "\",\"SpanId\":\"");
+        sb_put_hex(&sb, rec->span_id, sizeof rec->span_id);
+        sb_putc(&sb, '"');
     }
 
-    if (written < buf_len) {
-        buf[written] = '\0';
-    }
+    sb_putc(&sb, '}');
+    sb_putc(&sb, '\n');
 
-    return written;
+    return sb.len;
 }
 
 /* Rate-limited (~1/sec per sink) stderr notice when a sink's transport

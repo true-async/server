@@ -31,6 +31,7 @@
 #include "core/async_plain_event.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "log/http_log.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -1186,6 +1187,71 @@ PHP_FUNCTION(_http_server_stats_slab_snapshot)
     }
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_log_format_selftest, 0, 1,
+                                        MAY_BE_STRING | MAY_BE_FALSE)
+    ZEND_ARG_TYPE_INFO(0, style, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+/* Format a fixed canonical record (issue #5, B2) with the named formatter and
+ * return the bytes, so the phpt goldens plain/logfmt/json output — including
+ * space/quote/newline escaping and the json-only trace fields — with no server
+ * or coroutine. false on an unknown style. */
+PHP_FUNCTION(_http_log_format_selftest)
+{
+    char  *style;
+    size_t style_len;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(style, style_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_log_formatter_fn fmt;
+
+    if (style_len == 5 && memcmp(style, "plain", 5) == 0) {
+        fmt = http_log_format_plain;
+    } else if (style_len == 6 && memcmp(style, "logfmt", 6) == 0) {
+        fmt = http_log_format_logfmt;
+    } else if (style_len == 4 && memcmp(style, "json", 4) == 0) {
+        fmt = http_log_format_json;
+    } else {
+        RETURN_FALSE;
+    }
+
+    const http_log_attr_t attrs[] = {
+        { .key = "path", .type = HTTP_LOG_ATTR_STR,  .v.s   = "/a b" },
+        { .key = "tag",  .type = HTTP_LOG_ATTR_STR,  .v.s   = "v\"1" },
+        { .key = "line", .type = HTTP_LOG_ATTR_STR,  .v.s   = "a\nb" },
+        { .key = "n",    .type = HTTP_LOG_ATTR_I64,  .v.i64 = -7 },
+        { .key = "sz",   .type = HTTP_LOG_ATTR_U64,  .v.u64 = 4294967296ULL },
+        { .key = "ok",   .type = HTTP_LOG_ATTR_BOOL, .v.b   = true },
+        { .key = "r",    .type = HTTP_LOG_ATTR_F64,  .v.f64 = 1.5 },
+    };
+
+    http_log_record_t rec = {
+        .state        = NULL,
+        .timestamp_ns = 1704067200123000000ULL,   /* 2024-01-01T00:00:00.123Z */
+        .severity     = HTTP_LOG_INFO,
+        .tmpl         = "user login",
+        .body         = "user login",
+        .body_len     = sizeof("user login") - 1,
+        .attrs        = attrs,
+        .attrs_count  = sizeof attrs / sizeof attrs[0],
+        .has_trace    = true,
+    };
+
+    for (uint8_t i = 0; i < sizeof rec.trace_id; i++) {
+        rec.trace_id[i] = i;
+    }
+    for (uint8_t i = 0; i < sizeof rec.span_id; i++) {
+        rec.span_id[i] = i;
+    }
+
+    char   buf[2048];
+    size_t n = fmt(&rec, buf, sizeof buf, NULL);
+
+    RETURN_STRINGL(buf, n);
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
@@ -1198,6 +1264,7 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_h3_listener_selftest, arginfo_reactor_h3_listener_selftest)
     ZEND_FE(_http_server_stats_registry_selftest, arginfo_stats_registry_selftest)
     ZEND_FE(_http_server_stats_slab_snapshot, arginfo_stats_slab_snapshot)
+    ZEND_FE(_http_log_format_selftest, arginfo_log_format_selftest)
     PHP_FE_END
 };
 

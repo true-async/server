@@ -330,15 +330,24 @@ Files: `http_log.c`.
 
 Acceptance: valid JSON per line (escaping correct); logfmt parses in Grafana.
 
-**Quality gate**
-- [ ] Code quality
-- [ ] No duplicated logic — **one** attribute-iteration helper feeds plain/json/
-      logfmt (they differ only in per-attr rendering); shared timestamp format
-- [ ] `const`
-- [ ] Comments reviewed
-- [ ] Tests — golden output per formatter; JSON validated; escaping edge cases
-- [ ] Coverage checked
-- [ ] Build & verify
+**Quality gate** — ✅ done (bounded `log_sbuf_t` string builder + `format_iso8601`
++ `sb_put_attrs` shared across all three formatters; `json`/`logfmt` added; `plain`
+byte-identical; json escapes per RFC 8259, logfmt quotes values with space/quote/
+control, both emit one line; trace fields json-only):
+- [x] Code quality (one bounds-checked builder; each formatter is a thin token
+      sequence over the shared helpers; format-cache dedup from B1 applies)
+- [x] No duplicated logic — a single `sb_put_attrs` iterates attrs for all three
+      styles (differ only in separators + per-value rendering); one `format_iso8601`
+      feeds every formatter's timestamp
+- [x] `const` — formatters take `const http_log_record_t *`; the builder writes only
+      its own output buffer
+- [x] Comments reviewed (WHY on the sbuf truncation contract, JSON/logfmt escape rules)
+- [x] Tests — `core/019`: plain + logfmt exact goldens, json `json_decode` round-trips
+      every field + single-line assertion; escaping edge cases (space/quote/newline,
+      i64/u64/bool/f64, trace hex); driven by a pure `_http_log_format_selftest` hook
+- [x] Coverage checked (all three styles + every attr type + escape branches exercised)
+- [x] Build & verify — clean build, no warnings; 13 log+telemetry tests green (plain
+      byte-identity held). ASAN batched with B1 (formatters are pure, stack-only)
 
 ### Stage B3 — pretty console formatter  _(step 8)_
 

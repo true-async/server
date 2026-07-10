@@ -133,9 +133,15 @@ void http_log_emitf(http_log_state_t *state,
                     const char *tmpl, ...)
     ZEND_ATTRIBUTE_FORMAT(printf, 5, 6);
 
-/* Default formatter: "TS LEVEL body key=val ...\n". */
+/* Built-in formatters. plain: "TS LEVEL body key=val ...\n" (default).
+ * logfmt: "ts=… level=… msg=… key=value …\n". json: one OTel-Logs object
+ * per line. All three share one attribute-iteration helper internally. */
 size_t http_log_format_plain(const http_log_record_t *rec,
                              char *buf, size_t buf_len, void *ud);
+size_t http_log_format_logfmt(const http_log_record_t *rec,
+                              char *buf, size_t buf_len, void *ud);
+size_t http_log_format_json(const http_log_record_t *rec,
+                            char *buf, size_t buf_len, void *ud);
 
 extern zend_class_entry *http_log_severity_ce;
 
