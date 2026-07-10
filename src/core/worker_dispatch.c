@@ -81,7 +81,8 @@ static void worker_dispatch_entry(void)
 
     /* Synthetic 404 (no handler) still counts as a served request. */
     if (ctx->skip_handler) {
-        http_server_count_request(ctx->counters);
+        http_server_count_request(ctx->counters,
+                                  http_response_get_status(Z_OBJ(ctx->response_zv)));
         return;
     }
 
@@ -125,7 +126,8 @@ static void worker_dispatch_entry(void)
 
     /* Stamp end before the retval dtor so destructor time is not charged as
      * service time. */
-    http_server_count_request(ctx->counters);
+    http_server_count_request(ctx->counters,
+                              http_response_get_status(Z_OBJ(ctx->response_zv)));
 
     if (ctx->stamps) {
         const uint64_t end_ns = zend_hrtime();

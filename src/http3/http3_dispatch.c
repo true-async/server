@@ -659,7 +659,8 @@ static void h3_handler_coroutine_entry(void)
      * synchronous body (inline small file or 4xx). Skip the user handler;
      * dispose runs the buffered commit. Mirrors http2_handler_coroutine_entry. */
     if (s->skip_handler) {
-        http_server_count_request(s->conn->counters);
+        http_server_count_request(s->conn->counters,
+                                  http_response_get_status(Z_OBJ(s->response_zv)));
         return;
     }
 
@@ -693,7 +694,8 @@ static void h3_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(s->conn->counters);
+            http_server_count_request(s->conn->counters,
+                                      http_response_get_status(Z_OBJ(s->response_zv)));
 
             if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
             return;
@@ -747,7 +749,8 @@ static void h3_handler_coroutine_entry(void)
      * service time. Same discipline as H1/H2 handler entries. Stamps
      * and the sample call are gated on sample_stamps_enabled;
      * total_requests is still bumped. */
-    http_server_count_request(s->conn->counters);
+    http_server_count_request(s->conn->counters,
+                              http_response_get_status(Z_OBJ(s->response_zv)));
 
     if (s->request != NULL && server != NULL && stamps) {
         s->request->end_ns = zend_hrtime();

@@ -383,6 +383,15 @@ void http_connection_destroy(http_connection_t *conn)
      * timing carried on the connection itself. Safe with server == NULL. */
     http_server_on_connection_close(conn->server);
 
+    /* Per-protocol gauge release, mirroring the inc at protocol detection.
+     * A WebSocket connection was counted as h1 at ALPN, so map it back. */
+    if (conn->protocol_detected) {
+        const http_protocol_type_t gauge_proto =
+            conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET
+                ? HTTP_PROTOCOL_HTTP1 : conn->protocol_type;
+        http_server_conn_active_dec(conn->counters, gauge_proto);
+    }
+
     /* Detach the persistent read callback first. If we let
      * ZEND_ASYNC_IO_CLOSE dispose the event with our callback still in
      * the list, a late read-completion notify could fire the callback
@@ -2477,7 +2486,8 @@ void http_handler_coroutine_entry(void)
      * counters / keepalive / drain / Alt-Svc work converges in one
      * place. */
     if (ctx->skip_php_handler) {
-        http_server_count_request(conn->counters);
+        http_server_count_request(conn->counters,
+                                  http_response_get_status(Z_OBJ(ctx->response_zv)));
 
         if (req && stamps) {
             req->end_ns = zend_hrtime();
@@ -2504,7 +2514,8 @@ void http_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(conn->counters);
+            http_server_count_request(conn->counters,
+                                      http_response_get_status(Z_OBJ(ctx->response_zv)));
 
             if (req && stamps) req->end_ns = zend_hrtime();
             return;  /* Skip handler call; dispose emits the response. */
@@ -2582,7 +2593,8 @@ void http_handler_coroutine_entry(void)
      * the measurement is still meaningful, work was done.
      * Skipped when no consumer is active (sample_stamps_enabled == false);
      * total_requests is still bumped via http_server_count_request. */
-    http_server_count_request(conn->counters);
+    http_server_count_request(conn->counters,
+                              http_response_get_status(Z_OBJ(ctx->response_zv)));
 
     if (req && stamps) {
         req->end_ns = zend_hrtime();

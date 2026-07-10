@@ -415,7 +415,8 @@ static void http2_handler_coroutine_entry(void)
      * dispose runs the normal buffered commit and the wire frames go
      * out the same way they would for any handler-set response. */
     if (stream->skip_handler) {
-        http_server_count_request(conn->counters);
+        http_server_count_request(conn->counters,
+                                  http_response_get_status(Z_OBJ(stream->response_zv)));
         return;
     }
 
@@ -455,7 +456,8 @@ static void http2_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(conn->counters);
+            http_server_count_request(conn->counters,
+                                      http_response_get_status(Z_OBJ(stream->response_zv)));
 
             if (stamps) stream->request->end_ns = zend_hrtime();
             return;
@@ -512,7 +514,8 @@ static void http2_handler_coroutine_entry(void)
      * time. Matches the HTTP/1 handler-coroutine discipline. Stamps and
      * the sample call are skipped when no consumer (CoDel/telemetry) is
      * active; total_requests is still bumped. */
-    http_server_count_request(conn->counters);
+    http_server_count_request(conn->counters,
+                              http_response_get_status(Z_OBJ(stream->response_zv)));
 
     if (stream->request != NULL && stamps) {
         stream->request->end_ns = zend_hrtime();

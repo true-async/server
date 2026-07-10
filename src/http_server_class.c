@@ -4903,6 +4903,13 @@ static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
     add_assoc_long(arr, "total_requests",         (zend_long)c->total_requests);
     add_assoc_long(arr, "active_requests",        (zend_long)c->active_requests);
     add_assoc_long(arr, "requests_shed_total",    (zend_long)c->requests_shed_total);
+    add_assoc_long(arr, "responses_2xx_total",    (zend_long)c->responses_2xx_total);
+    add_assoc_long(arr, "responses_3xx_total",    (zend_long)c->responses_3xx_total);
+    add_assoc_long(arr, "responses_4xx_total",    (zend_long)c->responses_4xx_total);
+    add_assoc_long(arr, "responses_5xx_total",    (zend_long)c->responses_5xx_total);
+    add_assoc_long(arr, "conns_active_h1",        (zend_long)c->conns_active_h1);
+    add_assoc_long(arr, "conns_active_h2",        (zend_long)c->conns_active_h2);
+    add_assoc_long(arr, "conns_active_h3",        (zend_long)c->conns_active_h3);
     add_assoc_long(arr, "streaming_responses_total",             (zend_long)c->streaming_responses_total);
     add_assoc_long(arr, "stream_send_calls_total",               (zend_long)c->stream_send_calls_total);
     add_assoc_long(arr, "stream_bytes_sent_total",               (zend_long)c->stream_bytes_sent_total);

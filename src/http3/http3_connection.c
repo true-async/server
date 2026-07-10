@@ -553,6 +553,11 @@ static http3_connection_t *http3_connection_accept(
      * looked up) cannot be observed. */
     http3_listener_track_connection(listener, c);
 
+    /* Count the connection once it is fully established and tracked — the
+     * mid-create failure paths above efree directly and never reach the
+     * matching dec in http3_connection_free. */
+    http_server_conn_active_inc(c->counters, HTTP_PROTOCOL_HTTP3);
+
     return c;
 }
 
@@ -965,6 +970,10 @@ void http3_connection_free(http3_connection_t *conn)
      * end). */
     http3_listener_peer_dec(conn->listener,
                             (const struct sockaddr *)&conn->admit_peer);
+
+    /* Release the per-protocol gauge slot claimed at create. The closed
+     * guard above makes this run exactly once per connection. */
+    http_server_conn_active_dec(conn->counters, HTTP_PROTOCOL_HTTP3);
 
     conn->closed = true;
 

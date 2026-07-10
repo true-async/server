@@ -233,7 +233,7 @@ static bool engine_emit_error_via_op(engine_state_t *state, int status, const ch
 	http_response_set_content_length(response_obj, (uint64_t)body_len);
 	http_response_set_connection(response_obj, engine_keep_alive(state));
 
-	if (state->cfg.counters != NULL) { http_server_count_request(state->cfg.counters); }
+	if (state->cfg.counters != NULL) { http_server_count_request(state->cfg.counters, http_response_get_status(response_obj)); }
 	return engine_delegate_to_protocol(state, NULL, 0, 0, true);
 }
 
@@ -370,7 +370,7 @@ static void engine_handle_stat(engine_state_t *state)
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
 				http_response_set_connection(response_obj, engine_keep_alive(state));
 
-				if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+				if (cfg->counters != NULL) { http_server_count_request(cfg->counters, http_response_get_status(response_obj)); }
 
 				if (!engine_delegate_to_protocol(state, NULL, 0, 0, true)) {
 					engine_finalize(state, -1);
@@ -460,7 +460,7 @@ static void engine_handle_stat(engine_state_t *state)
 	zend_async_io_t *file_io = state->file_io;
 
 	if (not_modified) {
-		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+		if (cfg->counters != NULL) { http_server_count_request(cfg->counters, http_response_get_status(response_obj)); }
 
 		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			engine_finalize(state, -1);
@@ -470,7 +470,7 @@ static void engine_handle_stat(engine_state_t *state)
 	}
 
 	if (state->is_head || state->st.st_size == 0) {
-		if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+		if (cfg->counters != NULL) { http_server_count_request(cfg->counters, http_response_get_status(response_obj)); }
 
 		if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, 0, 0, true))) {
 			engine_finalize(state, -1);
@@ -494,7 +494,7 @@ static void engine_handle_stat(engine_state_t *state)
 			http_response_static_set_body_str(response_obj, body);
 			zend_string_release(body);
 
-			if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+			if (cfg->counters != NULL) { http_server_count_request(cfg->counters, http_response_get_status(response_obj)); }
 
 			if (UNEXPECTED(!engine_delegate_to_protocol(state, NULL, 0, 0, true))) {
 				engine_finalize(state, -1);
@@ -507,7 +507,7 @@ static void engine_handle_stat(engine_state_t *state)
 
 	const uint64_t body_offset = state->is_range ? state->range_first : 0;
 
-	if (cfg->counters != NULL) { http_server_count_request(cfg->counters); }
+	if (cfg->counters != NULL) { http_server_count_request(cfg->counters, http_response_get_status(response_obj)); }
 
 	if (UNEXPECTED(!engine_delegate_to_protocol(state, file_io, body_offset, body_len, false))) {
 		engine_finalize(state, -1);

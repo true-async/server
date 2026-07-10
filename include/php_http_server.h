@@ -788,6 +788,21 @@ typedef struct {
      * the rest of the hot counters. Read by getStats / __debugInfo. */
     uint64_t total_requests;
 
+    /* Final response status class, bumped exactly once per served request
+     * alongside total_requests (see http_server_count_request). Every
+     * request lands in one bucket, so the four sum to total_requests. */
+    uint64_t responses_2xx_total;
+    uint64_t responses_3xx_total;
+    uint64_t responses_4xx_total;
+    uint64_t responses_5xx_total;
+
+    /* Active-connection gauge split by negotiated protocol (++ once the
+     * protocol is detected / on H3 conn open, -- at conn close). Sum of
+     * the three tracks the protocol-agnostic active_connections. */
+    uint64_t conns_active_h1;
+    uint64_t conns_active_h2;
+    uint64_t conns_active_h3;
+
     /* StaticHandler hard-zero hits — bumped on every successful
      * dispatch into the no-coroutine FSM (open → stat → headers →
      * sendfile → close, bypassing the PHP coroutine entirely). The
@@ -1017,9 +1032,48 @@ static zend_always_inline void http_server_on_tls_io(http_server_counters_t *c,
  * sample_stamps_enabled is false and the full sojourn/service sample is
  * skipped. Caller passes its cached counters slice (conn->counters) —
  * never NULL, falls back to http_server_counters_dummy. */
-static zend_always_inline void http_server_count_request(http_server_counters_t *c)
+static zend_always_inline void http_server_count_request(http_server_counters_t *c, int status)
 {
     c->total_requests++;
+
+    /* Classify into exactly one bucket so the four reconcile with
+     * total_requests. Anything below 300 (incl. an unset/0 status, which
+     * the wire normalises to 200) counts as 2xx. */
+    if (status >= 500) {
+        c->responses_5xx_total++;
+    } else if (status >= 400) {
+        c->responses_4xx_total++;
+    } else if (status >= 300) {
+        c->responses_3xx_total++;
+    } else {
+        c->responses_2xx_total++;
+    }
+}
+
+/* Active-connection gauge, split by negotiated protocol. inc fires once
+ * the protocol is known (ALPN / H3 open); dec fires at connection close.
+ * The caller passes the SAME protocol to both — an H1 connection that
+ * upgrades to WebSocket maps back to h1 so the gauge stays balanced. */
+static zend_always_inline void http_server_conn_active_inc(http_server_counters_t *c,
+                                                           http_protocol_type_t proto)
+{
+    switch (proto) {
+        case HTTP_PROTOCOL_HTTP1: c->conns_active_h1++; break;
+        case HTTP_PROTOCOL_HTTP2: c->conns_active_h2++; break;
+        case HTTP_PROTOCOL_HTTP3: c->conns_active_h3++; break;
+        default: break;
+    }
+}
+
+static zend_always_inline void http_server_conn_active_dec(http_server_counters_t *c,
+                                                           http_protocol_type_t proto)
+{
+    switch (proto) {
+        case HTTP_PROTOCOL_HTTP1: if (c->conns_active_h1) c->conns_active_h1--; break;
+        case HTTP_PROTOCOL_HTTP2: if (c->conns_active_h2) c->conns_active_h2--; break;
+        case HTTP_PROTOCOL_HTTP3: if (c->conns_active_h3) c->conns_active_h3--; break;
+        default: break;
+    }
 }
 
 /* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are

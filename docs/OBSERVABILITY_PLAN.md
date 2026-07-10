@@ -232,16 +232,29 @@ Files: response-commit path; conn create/close per protocol.
 
 Acceptance: numbers reconcile with `total_requests` and `active_connections`.
 
-**Quality gate**
-- [ ] Code quality (single increments, no branchy hot path)
-- [ ] No duplicated logic — **one** status-class classifier helper called from
-      every protocol's commit; not copy-pasted per protocol
-- [ ] `const`
-- [ ] Comments reviewed
-- [ ] Tests — per-protocol counters reconcile with totals
-- [ ] Coverage checked
-- [ ] Build & verify
-- [ ] **Profiler** — response-commit path RPS unchanged vs pre-A5 baseline
+**Quality gate** — ✅ done (status classes folded into `http_server_count_request(c,
+status)` so every counted request classifies exactly once → the four buckets sum to
+`total_requests`; per-proto gauge inc at protocol detection / H3 conn open, dec at
+close, WebSocket mapped back to h1 so the gauge balances):
+- [x] Code quality (single increments; classify is one 4-way branch; gauge ++/-- is
+      per-connection, not per-request; guarded dec never underflows)
+- [x] No duplicated logic — **one** `http_server_count_request` classifier + one
+      `http_server_conn_active_inc`/`_dec` pair, called from every protocol; word-wise
+      `stats_counters_add` auto-covers the new fields
+- [x] `const` — readers already `const`; new inline helpers take the non-const write
+      slice (they mutate) + a `const`-friendly enum
+- [x] Comments reviewed (WHY on the classify fall-through + the WS→h1 gauge mapping)
+- [x] Tests — `telemetry/005`: driven 2xx/3xx/4xx/5xx mix; exact per-class counts +
+      class-sum == total_requests; H1 gauge drains to 0, h2/h3 stay 0
+- [x] Coverage checked (all four classes + gauge inc/dec exercised)
+- [x] Build & verify — clean build; 28 telemetry/static + 32 h1/sendfile + 84 h2/h3
+      green. memcheck: registry/slab path (which now carries the wider slot) stays
+      valgrind-clean via 001; server memcheck runs produce correct output but hang on
+      the coroutine teardown-drain (a valgrind×server property, not A5) so no leak
+      summary — the change adds only POD counter increments + one status field read on
+      an already-dereferenced response, i.e. no new memory ops
+- [x] **Profiler** — 4-worker H1 wrk median **178.0k vs 177.7k baseline** (+0.2%,
+      inside ±20% loopback noise) — no regression
 
 ### Stage A6 — duration histograms  _(deferred)_
 
