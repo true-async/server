@@ -56,8 +56,9 @@ typedef struct {
  * stay includable from C++ TUs. */
 typedef struct http_log_state http_log_state_t_fwd;
 typedef struct {
-    /* Originating sink — always non-NULL after http_log_emitf has
-     * built the record. Writer dispatches through this. */
+    /* Originating logger state — always non-NULL after http_log_emitf
+     * has built the record. Carries per-server context (e.g. worker_id)
+     * for formatters; the fan-out picks the sink, not this field. */
     struct http_log_state *state;
 
     uint64_t              timestamp_ns;     /* wall-clock, ns since UNIX epoch */
@@ -74,9 +75,33 @@ typedef struct {
     bool     has_trace;
 } http_log_record_t;
 
-typedef void   (*http_log_writer_fn)(const http_log_record_t *rec, void *ud);
 typedef size_t (*http_log_formatter_fn)(const http_log_record_t *rec,
                                         char *buf, size_t buf_len, void *ud);
+
+typedef struct http_log_writer_cb http_log_writer_cb_t;
+
+/* One logging destination: a severity floor, a formatter, and an async
+ * transport. A record fans out to every sink whose floor admits it, each
+ * rendering with its own formatter. Sinks are independent — one failing
+ * (drop-counted, rate-limited stderr notice) never blocks the others. B1
+ * ships a single transport, the async file writer below; B5 adds more. */
+typedef struct http_log_sink {
+    http_log_severity_t       severity_floor;
+    http_log_formatter_fn     formatter;
+    void                     *formatter_ud;
+
+    /* Async file-writer transport: one write in flight, later emits
+     * coalesce into pending (writer_cb). Owns its own drop counter and
+     * stderr-fallback rate-limit so a drop is attributed to this sink. */
+    bool                      stream_set;
+    zval                      stream_zv;
+    zend_async_io_t          *async_io;
+    http_log_writer_cb_t     *writer_cb;
+    uint64_t                  dropped_total;
+    uint64_t                  last_fallback_sec;
+} http_log_sink_t;
+
+#define HTTP_LOG_MAX_SINKS 8
 
 /* Per-server logger state. Embedded inside http_server_object; long-
  * lived structures (http_connection_t, mp_processor_t,
@@ -84,19 +109,14 @@ typedef size_t (*http_log_formatter_fn)(const http_log_record_t *rec,
  * the emit hot path. Multi-thread multi-server is correct because
  * each conn carries its own server's state pointer.
  *
- * `severity` is the first field by intent: the macro hot-path reads
- * it through the state pointer. The other fields are touched only by
- * http_log.c. */
-typedef struct http_log_writer_cb http_log_writer_cb_t;
-
+ * `severity` is the first field by intent: the macro hot-path reads it
+ * through the state pointer. It holds the minimum floor across all sinks,
+ * so a level below every sink short-circuits in one branch. The sinks
+ * themselves are touched only by http_log.c. */
 typedef struct http_log_state {
     http_log_severity_t       severity;
-    bool                      stream_set;
-    zval                      stream_zv;
-    zend_async_io_t          *async_io;
-    http_log_writer_cb_t     *writer_cb;
-    uint64_t                  dropped_total;
-    uint64_t                  last_fallback_sec;
+    uint8_t                   sink_count;
+    http_log_sink_t           sinks[HTTP_LOG_MAX_SINKS];
 } http_log_state_t;
 
 /* Global OFF-sentinel. Used as the fallback target when a connection
@@ -104,11 +124,6 @@ typedef struct http_log_state {
  * so emits drop silently instead of UAFing. severity is OFF so the
  * gate short-circuits without touching anything else. */
 extern http_log_state_t http_log_state_default;
-
-/* Replaces the process-wide writer/formatter. Used by extensions
- * that route emits into their own pipeline (OTel exporter etc.). */
-void http_log_set_writer(http_log_writer_fn fn, void *ud);
-void http_log_set_formatter(http_log_formatter_fn fn, void *ud);
 
 /* The level gate is re-checked inside, so a call site that skips
  * the http_logf_* macro is still correct (just slower). */

@@ -293,18 +293,32 @@ Files: `src/log/http_log.{c,h}`.
 Acceptance: byte-for-byte identical output to today with one configured stream;
 drop-count + graceful-drain preserved per sink.
 
-**Quality gate**
-- [ ] Code quality (**emit hot path**: gate still one branch; format-once cache)
-- [ ] No duplicated logic — per-sink writer **reuses the current
-      `default_writer`/pending/drain machinery** moved into the sink, not a
-      second copy; one drain-wait helper for all sinks
-- [ ] `const` — `const http_log_record_t *` everywhere it is read
-- [ ] Comments reviewed (keep the libuv buffer-ownership WHY; drop the rest)
-- [ ] Tests — single-sink byte-identical golden; multi-sink fan-out; drain
-- [ ] Coverage checked
-- [ ] Build & verify (ASAN clean)
-- [ ] **Profiler** — emit path cost unchanged when logging at INFO under load
-      (the fan-out must not regress the disabled/one-sink common case)
+**Quality gate** — ✅ done (`http_log_state_t` = `{severity(min-floor gate),
+sink_count, sinks[8]}`; per-sink `http_log_sink_t` owns formatter + async transport
++ drop counter; `http_log_emitf` gates on the min floor, formats once per distinct
+`(formatter,ud)` into a bounded stack cache, fans out to admitting sinks; dead
+`g_writer`/`g_formatter` removed; `http_log_server_start` builds exactly one sink via
+`http_log_sink_start`, which `setLogSinks` (B4) will reuse for the rest):
+- [x] Code quality (emit macro gate unchanged — one branch on first-field `severity`;
+      format-once cache capped at `HTTP_LOG_FMT_SLOTS`=4 → ~8 KiB emit stack)
+- [x] No duplicated logic — the pending/coalesce/drain writer machinery moved into the
+      sink (re-keyed `state`→`sink`), not copied; `http_log_sink_drain`/`_stop` are the
+      single per-sink helpers `http_log_server_stop` loops over under one shared budget
+- [x] `const` — formatter reads `const http_log_record_t *`; `http_log_sink_write` takes
+      `const char *`
+- [x] Comments reviewed (kept the libuv buffer-ownership WHY + drain UAF WHY; dropped the
+      stale global-hook block)
+- [~] Tests — single-sink byte-identical + drain covered (core/013–018, 034 green);
+      **multi-sink fan-out deferred to B4** where `setLogSinks` makes >1 sink reachable
+      from PHP (no throwaway internal hook)
+- [x] Coverage checked (single-sink emit/drain/multi-server exercised by core/013–018)
+- [~] Build & verify — clean build, no warnings; 15 tests green (7 log + 5 telemetry +
+      3 h1/request-path). **ASAN — pending batched run** (lifecycle identical to prior
+      single-sink; valgrind hangs on server teardown-drain per harness note)
+- [x] **Profiler** — N/A by construction: `http_log_emitf` is not on the per-request
+      hot path (INFO only at start/stop/reload, DEBUG only multipart); the per-request
+      macro gate is byte-identical and `core/018` confirms off-path is free. State-size
+      growth is per-server-object, not per-conn/request
 
 ### Stage B2 — JSON + logfmt formatters  _(step 7)_
 

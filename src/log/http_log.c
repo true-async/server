@@ -34,44 +34,32 @@
 # include <windows.h>
 #endif
 
-/* The state argument threaded through emit/writer is the per-server
- * log_state cached on long-lived structures (conn, mp_processor,
- * h3_connection). Multi-thread multi-server is correct by
- * construction — no globals describe "the active server".
- *
- * The writer/formatter hooks below are set once at MINIT by C
- * extensions (e.g. an OTel exporter) and are effectively read-only
- * during request processing — process-wide statics for those. */
+/* The state argument threaded through emit is the per-server log_state
+ * cached on long-lived structures (conn, mp_processor, h3_connection).
+ * Multi-thread multi-server is correct by construction — no globals
+ * describe "the active server", and each sink owns its own transport. */
 
 zend_class_entry *http_log_severity_ce = NULL;
 
 http_log_state_t  http_log_state_default = {
-    .severity          = HTTP_LOG_OFF,
-    .stream_set        = false,
-    .async_io          = NULL,
-    .writer_cb         = NULL,
-    .dropped_total     = 0,
-    .last_fallback_sec = 0,
+    .severity   = HTTP_LOG_OFF,
+    .sink_count = 0,
 };
-
-static http_log_writer_fn    g_writer       = NULL;
-static void                 *g_writer_ud    = NULL;
-static http_log_formatter_fn g_formatter    = NULL;
-static void                 *g_formatter_ud = NULL;
-
-/* Drop counter + stderr-fallback rate-limit live on the per-server
- * state (see http_log_state_t in http_log.h) — drops belong to the
- * sink that lost them. */
 
 #define HTTP_LOG_PENDING_MAX (64u * 1024u)
 
-/* Ceiling on the stop-time flush wait; a wedged sink past this leaks rather
- * than pinning teardown. */
+/* Ceiling on the total stop-time flush wait across all sinks; a wedged sink
+ * past this leaks rather than pinning teardown. */
 #define HTTP_LOG_STOP_DRAIN_BUDGET_MS 3000u
+
+/* Distinct formatters cached per emit before fan-out. The built-in set is
+ * plain/json/logfmt/pretty, so a real config never overflows; this also
+ * bounds the emit-path stack to ~8 KiB of format buffers. */
+#define HTTP_LOG_FMT_SLOTS 4
 
 struct http_log_writer_cb {
     zend_async_event_callback_t  base;
-    http_log_state_t            *state;
+    http_log_sink_t             *sink;
     zend_async_io_req_t         *active_req;
     char                        *active_buf;
     char                        *pending_buf;
@@ -206,24 +194,24 @@ size_t http_log_format_plain(const http_log_record_t *rec,
     return written;
 }
 
-/* Rate-limited (~1/sec per sink) stderr notice when the configured
- * sink fails. Never re-enters the logger. */
-static void emit_fallback_stderr(http_log_state_t *state, const char *reason)
+/* Rate-limited (~1/sec per sink) stderr notice when a sink's transport
+ * fails. Never re-enters the logger. */
+static void emit_fallback_stderr(http_log_sink_t *sink, const char *reason)
 {
     uint64_t now_sec = now_realtime_ns() / 1000000000ULL;
 
-    if (state == NULL || now_sec == state->last_fallback_sec) {
+    if (sink == NULL || now_sec == sink->last_fallback_sec) {
         return;
     }
 
-    state->last_fallback_sec = now_sec;
+    sink->last_fallback_sec = now_sec;
     fprintf(stderr, "http_server log sink failed: %s, dropped=%llu\n",
             reason != NULL ? reason : "(unknown)",
-            (unsigned long long)state->dropped_total);
+            (unsigned long long)sink->dropped_total);
 }
 
-/* Default writer keeps one ZEND_ASYNC_IO_WRITE in flight; further
- * emits coalesce into the pending buffer and are flushed by the
+/* Async file-writer transport. Keeps one ZEND_ASYNC_IO_WRITE in flight;
+ * further emits coalesce into the pending buffer and are flushed by the
  * completion callback. Never suspends the calling coroutine. */
 
 static void writer_kick_next(http_log_writer_cb_t *cb);
@@ -246,11 +234,11 @@ static void writer_complete_cb(
     zend_async_io_req_t *req = cb->active_req;
 
     if (UNEXPECTED(req->exception != NULL)) {
-        if (cb->state != NULL) {
-            cb->state->dropped_total++;
+        if (cb->sink != NULL) {
+            cb->sink->dropped_total++;
         }
 
-        emit_fallback_stderr(cb->state, "write completion exception");
+        emit_fallback_stderr(cb->sink, "write completion exception");
         OBJ_RELEASE(req->exception);
         req->exception = NULL;
     }
@@ -277,15 +265,15 @@ static void writer_callback_dispose(
 {
     (void)event;
     (void)callback;
-    /* Memory is owned by the embedding state (http_log_server_stop
-     * detaches and frees this struct). */
+    /* Memory is owned by the embedding sink (http_log_sink_stop detaches
+     * and frees this struct). */
 }
 
 static void writer_kick_next(http_log_writer_cb_t *cb)
 {
-    /* state->async_io is NULL once the embedding state was stopped —
-     * pending bytes are then unflushable; drop them silently here. */
-    if (cb->state == NULL || cb->state->async_io == NULL
+    /* sink->async_io is NULL once the sink was stopped — pending bytes are
+     * then unflushable; drop them silently here. */
+    if (cb->sink == NULL || cb->sink->async_io == NULL
         || cb->pending_len == 0) {
         return;
     }
@@ -298,13 +286,13 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
     cb->pending_cap = 0;
 
     cb->active_buf = buf;
-    cb->active_req = ZEND_ASYNC_IO_WRITE(cb->state->async_io, buf, len);
+    cb->active_req = ZEND_ASYNC_IO_WRITE(cb->sink->async_io, buf, len);
 
     if (UNEXPECTED(cb->active_req == NULL)) {
         efree(buf);
         cb->active_buf = NULL;
-        cb->state->dropped_total++;
-        emit_fallback_stderr(cb->state, "async write submit failed");
+        cb->sink->dropped_total++;
+        emit_fallback_stderr(cb->sink, "async write submit failed");
     }
 }
 
@@ -312,11 +300,11 @@ static void writer_append_pending(http_log_writer_cb_t *cb,
                                   const char *src, size_t len)
 {
     if (cb->pending_len + len > HTTP_LOG_PENDING_MAX) {
-        if (cb->state != NULL) {
-            cb->state->dropped_total++;
+        if (cb->sink != NULL) {
+            cb->sink->dropped_total++;
         }
 
-        emit_fallback_stderr(cb->state, "pending overflow");
+        emit_fallback_stderr(cb->sink, "pending overflow");
         return;
     }
 
@@ -334,57 +322,33 @@ static void writer_append_pending(http_log_writer_cb_t *cb,
     cb->pending_len += len;
 }
 
-static void default_writer(const http_log_record_t *rec, void *ud)
+/* Hand one already-formatted record to a sink's transport. */
+static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t len)
 {
-    (void)ud;
-    http_log_state_t     *state = rec->state;
-    http_log_writer_cb_t *cb    = state->writer_cb;
+    http_log_writer_cb_t *cb = sink->writer_cb;
 
-    if (cb == NULL || state->async_io == NULL) {
-        /* The state was activated but lost its sink (mid-stop race
-         * shouldn't happen single-thread, but defensive). */
-        return;
-    }
-
-    char buf[2048];
-    http_log_formatter_fn fmt =
-        g_formatter != NULL ? g_formatter : http_log_format_plain;
-    size_t n = fmt(rec, buf, sizeof buf, g_formatter_ud);
-
-    if (n == 0) {
+    if (cb == NULL || sink->async_io == NULL) {
         return;
     }
 
     if (cb->active_req != NULL) {
-        writer_append_pending(cb, buf, n);
+        writer_append_pending(cb, buf, len);
         return;
     }
 
     /* libuv keeps the buffer pointer until completion — copy to a
      * heap slot the completion callback will free. */
-    char *out = emalloc(n);
-    memcpy(out, buf, n);
+    char *out = emalloc(len);
+    memcpy(out, buf, len);
     cb->active_buf = out;
-    cb->active_req = ZEND_ASYNC_IO_WRITE(state->async_io, out, n);
+    cb->active_req = ZEND_ASYNC_IO_WRITE(sink->async_io, out, len);
 
     if (UNEXPECTED(cb->active_req == NULL)) {
         efree(out);
         cb->active_buf = NULL;
-        state->dropped_total++;
-        emit_fallback_stderr(state, "async write submit failed");
+        sink->dropped_total++;
+        emit_fallback_stderr(sink, "async write submit failed");
     }
-}
-
-void http_log_set_writer(http_log_writer_fn fn, void *ud)
-{
-    g_writer = fn;
-    g_writer_ud = ud;
-}
-
-void http_log_set_formatter(http_log_formatter_fn fn, void *ud)
-{
-    g_formatter = fn;
-    g_formatter_ud = ud;
 }
 
 void http_log_emitf(http_log_state_t *state,
@@ -393,10 +357,10 @@ void http_log_emitf(http_log_state_t *state,
                     const char *tmpl, ...)
 {
     /* Re-check the gate: callers via the macro have already gated, but
-     * direct API users haven't. */
+     * direct API users haven't. state->severity is the min sink floor. */
     if (state == NULL || state->severity == HTTP_LOG_OFF
         || sev == HTTP_LOG_OFF || (int)sev < (int)state->severity
-        || tmpl == NULL) {
+        || tmpl == NULL || state->sink_count == 0) {
         return;
     }
 
@@ -426,28 +390,65 @@ void http_log_emitf(http_log_state_t *state,
         .has_trace    = false,
     };
 
-    http_log_writer_fn w = g_writer != NULL ? g_writer : default_writer;
-    w(&rec, g_writer_ud);
+    /* Format once per distinct (formatter, ud), then fan out to every sink
+     * whose floor admits sev. A cache miss past HTTP_LOG_FMT_SLOTS just
+     * reformats into the last slot — correct, only un-deduped. */
+    struct { http_log_formatter_fn fn; void *ud; size_t len; } meta[HTTP_LOG_FMT_SLOTS];
+    char fbuf[HTTP_LOG_FMT_SLOTS][2048];
+    int  slots = 0;
+
+    for (uint8_t i = 0; i < state->sink_count; i++) {
+        http_log_sink_t *sink = &state->sinks[i];
+
+        if (sink->severity_floor == HTTP_LOG_OFF
+            || (int)sev < (int)sink->severity_floor) {
+            continue;
+        }
+
+        int s = -1;
+        for (int k = 0; k < slots; k++) {
+            if (meta[k].fn == sink->formatter && meta[k].ud == sink->formatter_ud) {
+                s = k;
+                break;
+            }
+        }
+
+        char  *buf;
+        size_t len;
+
+        if (s >= 0) {
+            buf = fbuf[s];
+            len = meta[s].len;
+        } else if (slots < HTTP_LOG_FMT_SLOTS) {
+            s = slots++;
+            meta[s].fn  = sink->formatter;
+            meta[s].ud  = sink->formatter_ud;
+            meta[s].len = sink->formatter(&rec, fbuf[s], sizeof fbuf[s],
+                                          sink->formatter_ud);
+            buf = fbuf[s];
+            len = meta[s].len;
+        } else {
+            buf = fbuf[HTTP_LOG_FMT_SLOTS - 1];
+            len = sink->formatter(&rec, buf, sizeof fbuf[0], sink->formatter_ud);
+        }
+
+        if (len == 0) {
+            continue;
+        }
+
+        http_log_sink_write(sink, buf, len);
+    }
 }
 
 void http_log_state_init(http_log_state_t *state)
 {
-    state->severity          = HTTP_LOG_OFF;
-    state->stream_set        = false;
-    state->async_io          = NULL;
-    state->writer_cb         = NULL;
-    state->dropped_total     = 0;
-    state->last_fallback_sec = 0;
-    ZVAL_UNDEF(&state->stream_zv);
+    memset(state, 0, sizeof *state);
+    state->severity   = HTTP_LOG_OFF;
+    state->sink_count = 0;
 }
 
 void http_log_minit(void)
 {
-    g_writer        = NULL;
-    g_writer_ud     = NULL;
-    g_formatter     = NULL;
-    g_formatter_ud  = NULL;
-
     http_log_severity_ce = register_class_TrueAsync_LogSeverity();
 }
 
@@ -456,23 +457,43 @@ void http_log_mshutdown(void)
     /* HttpServer instances own their own state; nothing global to free. */
 }
 
-void http_log_server_start(http_log_state_t *state,
-                           http_log_severity_t severity,
-                           zval *stream_zv)
+/* Recompute the fast gate: the lowest floor across all live sinks, so a
+ * severity below every sink short-circuits in the macro's single branch. */
+static void http_log_state_refresh_gate(http_log_state_t *state)
 {
-    if (state == NULL) {
-        return;
+    http_log_severity_t floor = HTTP_LOG_OFF;
+
+    for (uint8_t i = 0; i < state->sink_count; i++) {
+        http_log_severity_t f = state->sinks[i].severity_floor;
+
+        if (f == HTTP_LOG_OFF) {
+            continue;
+        }
+
+        if (floor == HTTP_LOG_OFF || (int)f < (int)floor) {
+            floor = f;
+        }
     }
 
-    /* Drain a stale sink so re-activation with a new stream doesn't leak. */
-    if (state->stream_set || state->async_io != NULL || state->writer_cb != NULL) {
-        http_log_server_stop(state);
-    }
+    state->severity = floor;
+}
+
+/* Build one sink onto a zeroed slot: cast the stream to an fd, wrap it in
+ * async io, and attach the coalescing writer. Returns false (sink left
+ * inactive, floor OFF) on any failure. */
+static bool http_log_sink_start(http_log_sink_t *sink,
+                                http_log_severity_t severity,
+                                http_log_formatter_fn formatter,
+                                void *formatter_ud,
+                                zval *stream_zv)
+{
+    memset(sink, 0, sizeof *sink);
+    sink->severity_floor = HTTP_LOG_OFF;
+    ZVAL_UNDEF(&sink->stream_zv);
 
     if (severity == HTTP_LOG_OFF || stream_zv == NULL
         || Z_TYPE_P(stream_zv) != IS_RESOURCE) {
-        state->severity = HTTP_LOG_OFF;
-        return;
+        return false;
     }
 
     /* CAST_INTERNAL keeps the stream owning the fd. Non-fd streams
@@ -482,8 +503,7 @@ void http_log_server_start(http_log_state_t *state,
     php_stream_from_zval_no_verify(stream, stream_zv);
 
     if (stream == NULL) {
-        state->severity = HTTP_LOG_OFF;
-        return;
+        return false;
     }
 
     int fd = -1;
@@ -493,9 +513,8 @@ void http_log_server_start(http_log_state_t *state,
     if (rc != SUCCESS || fd < 0) {
         fprintf(stderr,
                 "http_server: log stream has no underlying fd; "
-                "logger disabled (use file or php://stderr)\n");
-        state->severity = HTTP_LOG_OFF;
-        return;
+                "sink disabled (use file or php://stderr)\n");
+        return false;
     }
 
     /* PRESERVE_FD: the php_stream still owns the descriptor; without
@@ -508,9 +527,8 @@ void http_log_server_start(http_log_state_t *state,
     if (io == NULL) {
         fprintf(stderr,
                 "http_server: failed to wrap log stream fd into async io; "
-                "logger disabled\n");
-        state->severity = HTTP_LOG_OFF;
-        return;
+                "sink disabled\n");
+        return false;
     }
 
     http_log_writer_cb_t *cb = (http_log_writer_cb_t *)
@@ -523,12 +541,11 @@ void http_log_server_start(http_log_state_t *state,
         }
 
         fprintf(stderr, "http_server: failed to allocate log writer cb\n");
-        state->severity = HTTP_LOG_OFF;
-        return;
+        return false;
     }
 
     cb->base.dispose = writer_callback_dispose;
-    cb->state        = state;
+    cb->sink         = sink;
     cb->active_req   = NULL;
     cb->active_buf   = NULL;
     cb->pending_buf  = NULL;
@@ -544,78 +561,81 @@ void http_log_server_start(http_log_state_t *state,
         }
 
         fprintf(stderr, "http_server: failed to attach log writer cb\n");
-        state->severity = HTTP_LOG_OFF;
-        return;
+        return false;
     }
 
-    ZVAL_COPY(&state->stream_zv, stream_zv);
-    state->stream_set = true;
-    state->async_io   = io;
-    state->writer_cb  = cb;
-    state->severity   = severity;
+    ZVAL_COPY(&sink->stream_zv, stream_zv);
+    sink->stream_set     = true;
+    sink->async_io       = io;
+    sink->writer_cb      = cb;
+    sink->formatter      = formatter != NULL ? formatter : http_log_format_plain;
+    sink->formatter_ud   = formatter_ud;
+    sink->severity_floor = severity;
+    return true;
 }
 
-void http_log_server_stop(http_log_state_t *state)
+/* Wait up to budget_ms for a sink's in-flight write chain to drain. Waits on
+ * a plain event fired by writer_complete_cb (same thread) rather than the io
+ * req directly — the completion frees the req, so awaiting it is a UAF. A
+ * timer caps the wait so a wedged write falls to the leak path in stop. */
+static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
 {
-    if (state == NULL) {
+    if (budget_ms == 0 || sink->async_io == NULL || sink->writer_cb == NULL
+        || sink->writer_cb->active_req == NULL
+        || ZEND_ASYNC_CURRENT_COROUTINE == NULL) {
         return;
     }
 
-    state->severity = HTTP_LOG_OFF;
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    http_log_writer_cb_t *const cb = sink->writer_cb;
 
-    /* Flush the in-flight write chain before teardown. We wait on a plain
-     * event fired by writer_complete_cb (same thread) rather than awaiting
-     * the io req directly — the completion frees the req, so awaiting it is
-     * a UAF. A timer caps the wait so a wedged write falls to the leak path. */
-    if (state->async_io != NULL && state->writer_cb != NULL
-        && state->writer_cb->active_req != NULL
-        && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
-        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
-        http_log_writer_cb_t *const cb = state->writer_cb;
-
-        if (cb->drain_event == NULL) {
-            cb->drain_event = async_plain_event_new();
-        }
-
-        /* Same thread: no completion can fire between this check and SUSPEND,
-         * so no lost wakeup. drain_event only fires once the chain is empty. */
-        if (cb->drain_event != NULL && ZEND_ASYNC_WAKER_NEW(co) != NULL) {
-            zend_async_resume_when(co, cb->drain_event, false,
-                                   zend_async_waker_callback_resolve, NULL);
-            zend_async_event_t *const timer =
-                &ZEND_ASYNC_NEW_TIMER_EVENT(
-                    (zend_ulong)HTTP_LOG_STOP_DRAIN_BUDGET_MS, false)->base;
-            zend_async_resume_when(co, timer, true,
-                                   zend_async_waker_callback_timeout, NULL);
-            ZEND_ASYNC_SUSPEND();
-            zend_async_waker_clean(co);
-
-            if (EG(exception)) {
-                zend_clear_exception();   /* budget elapsed → leak path below */
-            }
-        }
+    if (cb->drain_event == NULL) {
+        cb->drain_event = async_plain_event_new();
     }
 
-    /* No coroutine to drain on — leak the cb/io/stream rather than
+    /* Same thread: no completion can fire between this check and SUSPEND,
+     * so no lost wakeup. drain_event only fires once the chain is empty. */
+    if (cb->drain_event != NULL && ZEND_ASYNC_WAKER_NEW(co) != NULL) {
+        zend_async_resume_when(co, cb->drain_event, false,
+                               zend_async_waker_callback_resolve, NULL);
+        zend_async_event_t *const timer =
+            &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)budget_ms, false)->base;
+        zend_async_resume_when(co, timer, true,
+                               zend_async_waker_callback_timeout, NULL);
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
+
+        if (EG(exception)) {
+            zend_clear_exception();   /* budget elapsed → leak path below */
+        }
+    }
+}
+
+/* Tear a single sink down: free the writer cb, close the io, drop the stream
+ * ref. Assumes the caller already drained (or budgeted the drain away). */
+static void http_log_sink_stop(http_log_sink_t *sink)
+{
+    /* No coroutine drained the write — leak the cb/io/stream rather than
      * tear them down with a libuv thread-pool write still in flight. */
-    if (UNEXPECTED(state->writer_cb != NULL
-                   && state->writer_cb->active_req != NULL)) {
-        emit_fallback_stderr(state, "teardown with in-flight write — leaking sink");
-        state->writer_cb  = NULL;
-        state->async_io   = NULL;
-        state->stream_set = false;
-        ZVAL_UNDEF(&state->stream_zv);
+    if (UNEXPECTED(sink->writer_cb != NULL
+                   && sink->writer_cb->active_req != NULL)) {
+        emit_fallback_stderr(sink, "teardown with in-flight write — leaking sink");
+        sink->writer_cb      = NULL;
+        sink->async_io       = NULL;
+        sink->stream_set     = false;
+        sink->severity_floor = HTTP_LOG_OFF;
+        ZVAL_UNDEF(&sink->stream_zv);
         return;
     }
 
-    if (state->writer_cb != NULL) {
-        http_log_writer_cb_t *cb = state->writer_cb;
-        state->writer_cb = NULL;
+    if (sink->writer_cb != NULL) {
+        http_log_writer_cb_t *cb = sink->writer_cb;
+        sink->writer_cb = NULL;
 
-        if (state->async_io != NULL
-            && state->async_io->event.del_callback != NULL) {
-            state->async_io->event.del_callback(&state->async_io->event,
-                                                &cb->base);
+        if (sink->async_io != NULL
+            && sink->async_io->event.del_callback != NULL) {
+            sink->async_io->event.del_callback(&sink->async_io->event,
+                                               &cb->base);
         }
 
         if (cb->pending_buf != NULL) {
@@ -629,9 +649,9 @@ void http_log_server_stop(http_log_state_t *state)
         efree(cb);
     }
 
-    if (state->async_io != NULL) {
-        zend_async_io_t *io = state->async_io;
-        state->async_io = NULL;
+    if (sink->async_io != NULL) {
+        zend_async_io_t *io = sink->async_io;
+        sink->async_io = NULL;
         ZEND_ASYNC_IO_CLOSE(io);
         /* Stream io types are disposed by libuv via uv_close; FILE has
          * no uv_close path so we drop our reference explicitly. */
@@ -640,9 +660,62 @@ void http_log_server_stop(http_log_state_t *state)
         }
     }
 
-    if (state->stream_set) {
-        zval_ptr_dtor(&state->stream_zv);
-        state->stream_set = false;
-        ZVAL_UNDEF(&state->stream_zv);
+    if (sink->stream_set) {
+        zval_ptr_dtor(&sink->stream_zv);
+        sink->stream_set = false;
+        ZVAL_UNDEF(&sink->stream_zv);
     }
+
+    sink->severity_floor = HTTP_LOG_OFF;
+}
+
+void http_log_server_start(http_log_state_t *state,
+                           http_log_severity_t severity,
+                           zval *stream_zv)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    /* Drain a stale config so re-activation with a new stream doesn't leak. */
+    if (state->sink_count > 0) {
+        http_log_server_stop(state);
+    }
+
+    state->sink_count = 0;
+    state->severity   = HTTP_LOG_OFF;
+
+    /* B1: exactly one sink (the plain-formatted stream). setLogSinks (B4)
+     * fills the rest of the array through this same http_log_sink_start. */
+    if (http_log_sink_start(&state->sinks[0], severity,
+                            http_log_format_plain, NULL, stream_zv)) {
+        state->sink_count = 1;
+        http_log_state_refresh_gate(state);
+    }
+}
+
+void http_log_server_stop(http_log_state_t *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    state->severity = HTTP_LOG_OFF;   /* stop new emits immediately */
+
+    /* One shared budget bounds the total drain wait across sinks: each waits
+     * on its own drain_event, and an absolute deadline keeps the sum capped
+     * even when several sinks have writes in flight. */
+    uint64_t start_ns = now_realtime_ns();
+
+    for (uint8_t i = 0; i < state->sink_count; i++) {
+        uint64_t elapsed_ms = (now_realtime_ns() - start_ns) / 1000000ULL;
+        uint32_t budget = elapsed_ms >= HTTP_LOG_STOP_DRAIN_BUDGET_MS
+                        ? 0u
+                        : (uint32_t)(HTTP_LOG_STOP_DRAIN_BUDGET_MS - elapsed_ms);
+
+        http_log_sink_drain(&state->sinks[i], budget);
+        http_log_sink_stop(&state->sinks[i]);
+    }
+
+    state->sink_count = 0;
 }
