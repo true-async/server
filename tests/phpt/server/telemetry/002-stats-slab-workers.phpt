@@ -33,6 +33,7 @@ $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setReadTimeout(5)
     ->setWriteTimeout(5)
+    ->setStatsEnabled(true)
     ->setWorkers($workers);
 
 $server = new HttpServer($config);

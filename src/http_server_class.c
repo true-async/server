@@ -3125,9 +3125,12 @@ static int http_server_start_pool(http_server_object *server,
     http_server_reactor_pool_up(server, workers);
 
     /* Per-worker stats slab (issue #5): one slot per worker, ready before any
-     * worker claims one. Not gated behind the reactor pool — telemetry applies
-     * to plain pool mode too. */
-    g_stats_registry = http_stats_registry_create(workers);
+     * worker claims one. Opt-in via setStatsEnabled; not gated behind the
+     * reactor pool — telemetry applies to plain pool mode too. */
+    const http_server_config_t *const stats_cfg = http_server_get_config(server);
+    if (stats_cfg != NULL && stats_cfg->stats_enabled) {
+        g_stats_registry = http_stats_registry_create(workers);
+    }
 
     pool_await_state_t *st = ecalloc(1, sizeof(*st));
     st->pending = workers;

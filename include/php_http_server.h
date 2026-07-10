@@ -247,6 +247,7 @@ struct _http_server_config_t {
     bool     http3_alt_svc_enabled;
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
+    bool     stats_enabled;           /* issue #5: opt-in getStats() aggregate */
 
     /* WebSocket knobs: message/frame caps + ping
      * cadence + pong deadline. See HttpServerConfig::setWs* setters. */

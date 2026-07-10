@@ -636,6 +636,20 @@ final class HttpServerConfig
     /** @return bool */
     public function isRequestScope(): bool {}
 
+    /**
+     * Opt into the cross-worker statistics aggregate (issue #5). Off by
+     * default: with it off no stats slab is allocated and
+     * {@see HttpServer::getStats()} throws. Distinct from trace-context
+     * telemetry. Fixed at server start.
+     *
+     * @param bool $enabled
+     * @return static
+     */
+    public function setStatsEnabled(bool $enabled): static {}
+
+    /** @return bool */
+    public function getStatsEnabled(): bool {}
+
     // === HTTP body compression (issue #8) ===
 
     /**

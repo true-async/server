@@ -124,6 +124,7 @@ struct _http_server_shared_config_t {
     bool                    http3_alt_svc_enabled;
     bool                    http3_pacing;
     bool                    request_scope;
+    bool                    stats_enabled;   /* issue #5: opt-in getStats() */
 };
 
 /* Forward declarations for shared-config lifecycle helpers */
@@ -1943,6 +1944,36 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, isRequestScope)
     RETURN_BOOL(config->request_scope);
 }
 
+/* {{{ proto HttpServerConfig::setStatsEnabled(bool $enabled): static
+ *
+ * Opt into the cross-worker statistics aggregate (issue #5). Off by default:
+ * with it off, no stats slab is allocated and HttpServer::getStats() throws.
+ * Distinct from telemetry_enabled (W3C trace-context ingestion). Fixed at
+ * start() like the other config. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled)
+{
+    bool enabled;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    config->stats_enabled = enabled;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, getStatsEnabled)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_BOOL(config->stats_enabled);
+}
+
 /* ==========================================================================
  * HTTP body compression knobs (issue #8). Editable until the config is
  * locked — see HttpServer::__construct. The MIME whitelist setter
@@ -3031,6 +3062,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     shared->http3_pacing                 = src->http3_pacing;
     shared->request_scope                = src->request_scope;
+    shared->stats_enabled                = src->stats_enabled;
     shared->write_buffer_size  = src->write_buffer_size;
 
     shared->http2_enabled              = src->http2_enabled;
@@ -3200,6 +3232,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     dst->http3_pacing                 = src->http3_pacing;
     dst->request_scope                = src->request_scope;
+    dst->stats_enabled                = src->stats_enabled;
     dst->write_buffer_size  = src->write_buffer_size;
 
     dst->http2_enabled              = src->http2_enabled;
