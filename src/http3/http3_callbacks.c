@@ -382,6 +382,42 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
+/* Persistent body builder for reactor-owned streams. Geometric growth,
+ * capacity tracked on the stream (zend_string has no spare-capacity
+ * notion of its own). Finalize hands the string to req->body as-is. */
+static void h3_body_pbuf_append(http3_stream_t *s, const uint8_t *data,
+                                const size_t len)
+{
+    const size_t used = s->body_pstr != NULL ? ZSTR_LEN(s->body_pstr) : 0;
+
+    if (s->body_pstr == NULL) {
+        size_t cap = s->request->content_length;
+
+        if (cap < len) {
+            cap = len;
+        }
+
+        if (cap < 4096) {
+            cap = 4096;
+        }
+
+        s->body_pstr = zend_string_alloc(cap, 1);
+        s->body_pstr_cap = cap;
+    } else if (used + len > s->body_pstr_cap) {
+        size_t cap = s->body_pstr_cap * 2;
+
+        if (cap < used + len) {
+            cap = used + len;
+        }
+
+        s->body_pstr = zend_string_realloc(s->body_pstr, cap, 1);
+        s->body_pstr_cap = cap;
+    }
+
+    memcpy(ZSTR_VAL(s->body_pstr) + used, data, len);
+    ZSTR_LEN(s->body_pstr) = used + len;
+}
+
 /* "Buffered → stream" upgrade: splice buffered bytes into the queue, flip
  * body_streaming. Idempotent. */
 static void http3_request_body_upgrade(http_request_t *req)
@@ -521,8 +557,9 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
-    const size_t current = s->body_buf.s != NULL
-        ? ZSTR_LEN(s->body_buf.s) : 0;
+    const size_t current = s->request->persistent
+        ? (s->body_pstr != NULL ? ZSTR_LEN(s->body_pstr) : 0)
+        : (s->body_buf.s != NULL ? ZSTR_LEN(s->body_buf.s) : 0);
 
     if (UNEXPECTED(SIZE_MAX - current < datalen
      || current + datalen > HTTP3_MAX_BODY_BYTES)) {
@@ -536,13 +573,19 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
         return 0;
     }
 
-    /* Pre-size on first append if the peer told us Content-Length. */
-    if (s->body_buf.s == NULL && s->request->content_length > 0
-        && s->request->content_length <= HTTP3_MAX_BODY_BYTES) {
-        smart_str_alloc(&s->body_buf, s->request->content_length, 0);
-    }
+    if (s->request->persistent) {
+        /* Reactor mode: build persistent from the first byte — the body
+         * crosses to a worker thread and finalize hands it over uncopied. */
+        h3_body_pbuf_append(s, data, datalen);
+    } else {
+        /* Pre-size on first append if the peer told us Content-Length. */
+        if (s->body_buf.s == NULL && s->request->content_length > 0
+            && s->request->content_length <= HTTP3_MAX_BODY_BYTES) {
+            smart_str_alloc(&s->body_buf, s->request->content_length, 0);
+        }
 
-    smart_str_appendl(&s->body_buf, (const char *)data, datalen);
+        smart_str_appendl(&s->body_buf, (const char *)data, datalen);
+    }
 
     /* buffered mode consumes right here — return the window immediately */
     h3_extend_body_window(c, stream_id, datalen);
@@ -1376,23 +1419,18 @@ static void http3_finalize_request_body(http3_stream_t *s)
         return;
     }
 
-    /* Move the assembled body bytes into the request. smart_str leaves
-     * a NUL-terminated zend_string with refcount 1; we transfer that
-     * ownership to req->body and clear our handle. */
-    if (s->body_buf.s != NULL) {
+    /* Move the assembled body bytes into the request — both builders leave
+     * a refcount-1 zend_string whose ownership transfers to req->body. */
+    if (s->body_pstr != NULL) {
+        /* Reactor mode: built persistent from the first byte — zero-copy
+         * hand-off; the worker reads it on its own thread. */
+        ZSTR_VAL(s->body_pstr)[ZSTR_LEN(s->body_pstr)] = '\0';
+        req->body = s->body_pstr;
+        s->body_pstr = NULL;
+    } else if (s->body_buf.s != NULL) {
         smart_str_0(&s->body_buf);
-
-        if (req->persistent) {
-            /* Reactor mode: the worker reads req->body on its own thread,
-             * so copy the ZMM smart_str into a persistent (malloc) zend_string
-             * and drop the builder. getBody() deep-copies it back into ZMM. */
-            req->body = zend_string_init(ZSTR_VAL(s->body_buf.s),
-                                         ZSTR_LEN(s->body_buf.s), 1);
-            smart_str_free(&s->body_buf);
-        } else {
-            req->body = s->body_buf.s;
-            s->body_buf.s = NULL;        /* request now owns the storage */
-        }
+        req->body = s->body_buf.s;
+        s->body_buf.s = NULL;            /* request now owns the storage */
     }
 
     req->complete = true;

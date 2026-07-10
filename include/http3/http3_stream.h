@@ -58,6 +58,12 @@ struct _http3_stream_s {
      * this builder is cleared. */
     smart_str         body_buf;
 
+    /* Reactor-mode body builder: persistent from the first byte (the
+     * assembled body crosses to a worker thread), manual capacity since
+     * smart_str is ZMM-only. Handed to req->body at finalize, no copy. */
+    zend_string      *body_pstr;
+    size_t            body_pstr_cap;
+
     /* Cumulative decoded-header bytes across HEADERS frames. nghttp3
      * already enforces SETTINGS_MAX_FIELD_SECTION_SIZE; we keep our
      * own counter as a belt-and-braces cap. */

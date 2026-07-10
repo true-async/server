@@ -133,6 +133,11 @@ void http3_stream_release(http3_stream_t *s)
 
     smart_str_free(&s->body_buf);
 
+    if (s->body_pstr != NULL) {
+        zend_string_release(s->body_pstr);
+        s->body_pstr = NULL;
+    }
+
     if (s->response_body != NULL) {
         zend_string_release(s->response_body);
         s->response_body = NULL;
