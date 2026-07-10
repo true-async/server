@@ -26,6 +26,12 @@
 #include <time.h>
 
 #ifdef PHP_WIN32
+# include <io.h>       /* _isatty */
+#else
+# include <unistd.h>   /* isatty */
+#endif
+
+#ifdef PHP_WIN32
 /* winsock2.h must precede windows.h on Windows whenever a TU may end
  * up linked against networking headers from neighbouring code (project
  * convention). We don't need sockets here, but the include order is
@@ -249,17 +255,25 @@ static size_t format_iso8601(uint64_t ts_ns, char *out, size_t out_len)
     return (n < 0) ? 0 : (size_t)n;
 }
 
+/* ANSI SGR codes; one table drives the pretty level badge colour (below). */
+#define ANSI_RESET  "\x1b[0m"
+#define ANSI_DIM    "\x1b[2m"
+#define ANSI_RED    "\x1b[31m"
+#define ANSI_GREEN  "\x1b[32m"
+#define ANSI_YELLOW "\x1b[33m"
+
 typedef enum {
     LOG_STYLE_PLAIN,
     LOG_STYLE_LOGFMT,
     LOG_STYLE_JSON,
+    LOG_STYLE_PRETTY,   /* plain layout, keys dimmed with ANSI */
 } log_style_t;
 
 /* Single attribute-iteration helper shared by every formatter; the styles
- * differ only in the key/value separators and per-value rendering. plain and
- * logfmt lead each pair with a space; json separates with commas and quotes
- * keys. String values: plain is raw (with "(null)"), logfmt conditionally
- * quotes, json always JSON-escapes. */
+ * differ only in the key/value separators and per-value rendering. plain,
+ * logfmt and pretty lead each pair with a space (pretty dims the key); json
+ * separates with commas and quotes keys. String values: plain/pretty are raw
+ * (with "(null)"), logfmt conditionally quotes, json always JSON-escapes. */
 static void sb_put_attrs(log_sbuf_t *sb, const http_log_record_t *rec,
                          log_style_t style)
 {
@@ -272,6 +286,12 @@ static void sb_put_attrs(log_sbuf_t *sb, const http_log_record_t *rec,
             }
             sb_put_json_str(sb, a->key, strlen(a->key));
             sb_putc(sb, ':');
+        } else if (style == LOG_STYLE_PRETTY) {
+            sb_putc(sb, ' ');
+            sb_puts(sb, ANSI_DIM);
+            sb_puts(sb, a->key);
+            sb_puts(sb, ANSI_RESET);
+            sb_putc(sb, '=');
         } else {
             sb_putc(sb, ' ');
             sb_puts(sb, a->key);
@@ -403,6 +423,110 @@ size_t http_log_format_json(const http_log_record_t *rec,
     sb_putc(&sb, '\n');
 
     return sb.len;
+}
+
+/* Fixed-width level badges + colours, indexed by pretty_level_idx. */
+static const struct {
+    const char *badge;   /* 5 columns, padded, so fields stay aligned */
+    const char *color;
+} pretty_level_style[] = {
+    { "DEBUG", ANSI_DIM },
+    { "INFO ", ANSI_GREEN },
+    { "WARN ", ANSI_YELLOW },
+    { "ERROR", ANSI_RED },
+};
+
+static int pretty_level_idx(http_log_severity_t s)
+{
+    switch (s) {
+        case HTTP_LOG_DEBUG: return 0;
+        case HTTP_LOG_WARN:  return 2;
+        case HTTP_LOG_ERROR: return 3;
+        case HTTP_LOG_INFO:
+        default:             return 1;
+    }
+}
+
+static void format_clock(uint64_t ts_ns, char *out, size_t out_len)
+{
+    time_t   sec = (time_t)(ts_ns / 1000000000ULL);
+    uint32_t ms  = (uint32_t)((ts_ns % 1000000000ULL) / 1000000ULL);
+    struct tm tm_buf;
+#ifdef PHP_WIN32
+    gmtime_s(&tm_buf, &sec);
+#else
+    gmtime_r(&sec, &tm_buf);
+#endif
+
+    snprintf(out, out_len, "%02d:%02d:%02d.%03u",
+             tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+}
+
+/* Pretty console line: "HH:MM:SS.mmm  LEVEL  message  key=val …". Colour is
+ * decided once at sink build and passed through `ud` (non-NULL = colour on);
+ * with it off the output is plain text with no escape codes, safe for a file. */
+size_t http_log_format_pretty(const http_log_record_t *rec,
+                              char *buf, size_t buf_len, void *ud)
+{
+    const bool color = (ud != NULL);
+
+    if (buf_len < 2) {
+        return 0;
+    }
+
+    log_sbuf_t sb;
+    sb_init(&sb, buf, buf_len);
+
+    char clock[16];
+    format_clock(rec->timestamp_ns, clock, sizeof clock);
+    const int idx = pretty_level_idx(rec->severity);
+
+    if (color) {
+        sb_puts(&sb, ANSI_DIM);
+    }
+    sb_puts(&sb, clock);
+    if (color) {
+        sb_puts(&sb, ANSI_RESET);
+    }
+
+    sb_puts(&sb, "  ");
+    if (color) {
+        sb_puts(&sb, pretty_level_style[idx].color);
+    }
+    sb_puts(&sb, pretty_level_style[idx].badge);
+    if (color) {
+        sb_puts(&sb, ANSI_RESET);
+    }
+
+    sb_puts(&sb, "  ");
+    if (rec->body != NULL) {
+        sb_write(&sb, rec->body, rec->body_len);
+    }
+
+    sb_put_attrs(&sb, rec, color ? LOG_STYLE_PRETTY : LOG_STYLE_PLAIN);
+    sb_putc(&sb, '\n');
+
+    return sb.len;
+}
+
+/* Colour decision for a pretty sink, resolved once against the target fd:
+ * NO_COLOR disables (https://no-color.org, wins for accessibility), else
+ * CLICOLOR_FORCE enables, else colour follows whether the fd is a TTY. */
+bool http_log_color_for_fd(int fd)
+{
+    if (getenv("NO_COLOR") != NULL) {
+        return false;
+    }
+
+    if (getenv("CLICOLOR_FORCE") != NULL) {
+        return true;
+    }
+
+#ifdef PHP_WIN32
+    return _isatty(fd) != 0;
+#else
+    return isatty(fd) != 0;
+#endif
 }
 
 /* Rate-limited (~1/sec per sink) stderr notice when a sink's transport

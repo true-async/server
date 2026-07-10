@@ -135,13 +135,21 @@ void http_log_emitf(http_log_state_t *state,
 
 /* Built-in formatters. plain: "TS LEVEL body key=val ...\n" (default).
  * logfmt: "ts=… level=… msg=… key=value …\n". json: one OTel-Logs object
- * per line. All three share one attribute-iteration helper internally. */
+ * per line. pretty: "HH:MM:SS.mmm  LEVEL  body key=val …\n" for consoles —
+ * colour is decided once at sink build and passed via the formatter's `ud`
+ * (non-NULL = colour on). All four share one attribute-iteration helper. */
 size_t http_log_format_plain(const http_log_record_t *rec,
                              char *buf, size_t buf_len, void *ud);
 size_t http_log_format_logfmt(const http_log_record_t *rec,
                               char *buf, size_t buf_len, void *ud);
 size_t http_log_format_json(const http_log_record_t *rec,
                             char *buf, size_t buf_len, void *ud);
+size_t http_log_format_pretty(const http_log_record_t *rec,
+                              char *buf, size_t buf_len, void *ud);
+
+/* Resolve whether a pretty sink writing to `fd` should colour: NO_COLOR off,
+ * else CLICOLOR_FORCE on, else follows isatty(fd). Called once at sink build. */
+bool http_log_color_for_fd(int fd);
 
 extern zend_class_entry *http_log_severity_ce;
 

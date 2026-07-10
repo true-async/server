@@ -360,15 +360,25 @@ Files: `http_log.c`.
 
 Acceptance: colored on a TTY, plain with `NO_COLOR`, no escape codes to a file.
 
-**Quality gate**
-- [ ] Code quality (TTY/`NO_COLOR` decided once at sink build, not per record)
-- [ ] No duplicated logic — **reuse the B2 attribute-iteration helper**; colors
-      from one `static const` ANSI table, not inline literals per level
-- [ ] `const` — ANSI table `static const`; level→color lookup const
-- [ ] Comments reviewed
-- [ ] Tests — color forced on/off; NO_COLOR honored; file path has no escapes
-- [ ] Coverage checked
-- [ ] Build & verify
+**Quality gate** — ✅ done (`http_log_format_pretty`: dim clock + colour badge +
+dim keys via the shared `sb_put_attrs` `LOG_STYLE_PRETTY`; colour resolved once by
+`http_log_color_for_fd` and threaded through the formatter's `ud`, so it's decided
+at sink build not per record; `[worker#/scope]` bracket deferred to B4 with the
+worker_id stamp):
+- [x] Code quality (colour is a per-sink `ud` flag decided at build; the record path
+      only reads it — no getenv/isatty per emit)
+- [x] No duplicated logic — pretty reuses `sb_put_attrs` (new `LOG_STYLE_PRETTY` just
+      dims the key; values fall through the plain renderer); badge+colour come from one
+      `static const pretty_level_style[]` table, not per-level literals
+- [x] `const` — `pretty_level_style[]` is `static const`; `pretty_level_idx` is a pure
+      lookup; formatter takes `const http_log_record_t *`
+- [x] Comments reviewed (WHY on the colour-via-ud decision + NO_COLOR precedence)
+- [x] Tests — `core/020`: colour off = exact escape-free golden, colour on = exact
+      ANSI golden; `_http_log_color_decide` asserts bare-nonTTY=off, NO_COLOR=off,
+      CLICOLOR_FORCE=on, NO_COLOR-wins-over-FORCE
+- [x] Coverage checked (both colour paths + all three env branches exercised)
+- [x] Build & verify — clean build, no warnings; 13 log+telemetry green. ASAN batched
+      with B1 (formatter is pure, stack-only)
 
 ### Stage B4 — `setLogSinks` config  _(step 9)_
 

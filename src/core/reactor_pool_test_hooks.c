@@ -35,6 +35,12 @@
 
 #include <stdint.h>
 #include <string.h>
+#ifndef PHP_WIN32
+# include <unistd.h>   /* STDOUT_FILENO */
+#endif
+#ifndef STDOUT_FILENO
+# define STDOUT_FILENO 1
+#endif
 
 /* Defined in src/http_request.c; wraps an http_request_t in an HttpRequest zval. */
 extern zval *http_request_create_from_parsed(http_request_t *req);
@@ -1190,22 +1196,28 @@ PHP_FUNCTION(_http_server_stats_slab_snapshot)
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_log_format_selftest, 0, 1,
                                         MAY_BE_STRING | MAY_BE_FALSE)
     ZEND_ARG_TYPE_INFO(0, style, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, color, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
-/* Format a fixed canonical record (issue #5, B2) with the named formatter and
- * return the bytes, so the phpt goldens plain/logfmt/json output — including
- * space/quote/newline escaping and the json-only trace fields — with no server
- * or coroutine. false on an unknown style. */
+/* Format a fixed canonical record (issue #5, B2/B3) with the named formatter
+ * and return the bytes, so the phpt goldens plain/logfmt/json/pretty output —
+ * including space/quote/newline escaping, the json-only trace fields, and the
+ * pretty colour on/off paths — with no server or coroutine. `color` feeds the
+ * pretty formatter's ud. false on an unknown style. */
 PHP_FUNCTION(_http_log_format_selftest)
 {
-    char  *style;
-    size_t style_len;
+    char       *style;
+    size_t      style_len;
+    zend_bool   color = 0;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    ZEND_PARSE_PARAMETERS_START(1, 2)
         Z_PARAM_STRING(style, style_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(color)
     ZEND_PARSE_PARAMETERS_END();
 
     http_log_formatter_fn fmt;
+    void                 *fmt_ud = NULL;
 
     if (style_len == 5 && memcmp(style, "plain", 5) == 0) {
         fmt = http_log_format_plain;
@@ -1213,6 +1225,9 @@ PHP_FUNCTION(_http_log_format_selftest)
         fmt = http_log_format_logfmt;
     } else if (style_len == 4 && memcmp(style, "json", 4) == 0) {
         fmt = http_log_format_json;
+    } else if (style_len == 6 && memcmp(style, "pretty", 6) == 0) {
+        fmt    = http_log_format_pretty;
+        fmt_ud = color ? (void *)1 : NULL;
     } else {
         RETURN_FALSE;
     }
@@ -1247,9 +1262,22 @@ PHP_FUNCTION(_http_log_format_selftest)
     }
 
     char   buf[2048];
-    size_t n = fmt(&rec, buf, sizeof buf, NULL);
+    size_t n = fmt(&rec, buf, sizeof buf, fmt_ud);
 
     RETURN_STRINGL(buf, n);
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_log_color_decide, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+/* Resolve the pretty-sink colour decision (issue #5, B3) against the current
+ * environment on a non-TTY fd, so the phpt can assert NO_COLOR / CLICOLOR_FORCE
+ * are honoured without needing a real terminal. */
+PHP_FUNCTION(_http_log_color_decide)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    RETURN_BOOL(http_log_color_for_fd(STDOUT_FILENO));
 }
 
 static const zend_function_entry reactor_pool_test_functions[] = {
@@ -1265,6 +1293,7 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_stats_registry_selftest, arginfo_stats_registry_selftest)
     ZEND_FE(_http_server_stats_slab_snapshot, arginfo_stats_slab_snapshot)
     ZEND_FE(_http_log_format_selftest, arginfo_log_format_selftest)
+    ZEND_FE(_http_log_color_decide, arginfo_log_color_decide)
     PHP_FE_END
 };
 
