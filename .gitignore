@@ -135,3 +135,4 @@ fuzz/leak-*
 fuzz/timeout-*
 fuzz/oom-*
 *~
+.serena/
