@@ -31,6 +31,7 @@
 #include "core/reactor_pool.h"
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
+#include "core/stats_registry.h"
 #include "core/response_wire.h"
 #include "core/stream_credit.h"
 #include "core/async_plain_event.h"   /* async_coroutine_sleep_ms */
@@ -2173,6 +2174,13 @@ static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
  * One per process, shared across all threads. */
 static worker_registry_t *g_worker_registry = NULL;
 
+/* Process-wide per-worker statistics slab (issue #5, A1). Created by the pool
+ * parent sized to the worker count; each worker claims a slot (A2); the
+ * telemetry API walks it lock-free. NULL outside pool mode — a single-worker
+ * server reads its own embedded counters instead. Gating on setStatsEnabled
+ * lands in A3; A1 always allocates it. */
+static http_stats_registry_t *g_stats_registry = NULL;
+
 /* Process-wide reactor pool handle. The pool itself is owned by the parent's
  * http_server_object; this global lets a worker thread reach it to post
  * responses back over the reverse channel (reactor_pool_post_exec), addressed by
@@ -3040,6 +3048,11 @@ static int http_server_start_pool(http_server_object *server,
      * publish into. */
     http_server_reactor_pool_up(server, workers);
 
+    /* Per-worker stats slab (issue #5): one slot per worker, ready before any
+     * worker claims one. Not gated behind the reactor pool — telemetry applies
+     * to plain pool mode too. */
+    g_stats_registry = http_stats_registry_create(workers);
+
     pool_await_state_t *st = ecalloc(1, sizeof(*st));
     st->pending = workers;
     st->all_done = create_server_wait_event();
@@ -3138,6 +3151,13 @@ cleanup:
      * reactor pool: this releases the H3 listeners the gated reactors own,
      * frees the worker registry, and stops the reactor loops. */
     http_server_reactor_pool_down(server);
+
+    /* Workers have quiesced — free the stats slab after them (no claim/retire
+     * can race the free now). */
+    if (g_stats_registry != NULL) {
+        http_stats_registry_free(g_stats_registry);
+        g_stats_registry = NULL;
+    }
 
     if (st->all_done != NULL) {
         st->all_done->dispose(st->all_done);

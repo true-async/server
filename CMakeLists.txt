@@ -83,6 +83,8 @@ set(CORE_SUBSYSTEM_SOURCES
     src/core/worker_inbox.c
     # Worker registry (issue #80, B3): atomic table of per-worker inboxes.
     src/core/worker_registry.c
+    # Statistics registry (issue #5, A1): per-worker counter slab for telemetry.
+    src/core/stats_registry.c
 )
 
 # TLS sources — only compiled when OpenSSL is present. Both files

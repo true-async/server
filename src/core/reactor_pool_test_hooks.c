@@ -27,6 +27,7 @@
 #include "core/worker_dispatch.h"
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
+#include "core/stats_registry.h"
 #include "core/async_plain_event.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
@@ -1072,6 +1073,95 @@ PHP_FUNCTION(_http_server_reactor_h3_listener_selftest)
 #endif
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_stats_registry_selftest, 0, 1,
+                                        MAY_BE_ARRAY | MAY_BE_FALSE)
+    ZEND_ARG_TYPE_INFO(0, capacity, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+/* Exercise the per-worker stats slab (issue #5, A1) with no server or coroutine:
+ * claim every slot (indices distinct and in range), confirm a full slab refuses a
+ * further claim, write+read a counter through a slot, then retire a slot and
+ * confirm it drops from the active count, reads inactive, and is recycled — with
+ * its counters zeroed — by the next claim. Returns a summary the phpt asserts, or
+ * false on a bad capacity. */
+PHP_FUNCTION(_http_server_stats_registry_selftest)
+{
+    zend_long capacity = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(capacity)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (capacity <= 0) {
+        RETURN_FALSE;
+    }
+
+    http_stats_registry_t *const reg = http_stats_registry_create((int)capacity);
+
+    if (reg == NULL) {
+        RETURN_FALSE;
+    }
+
+    const int cap = http_stats_registry_capacity(reg);
+
+    int  *const idxs = ecalloc((size_t)cap, sizeof(*idxs));
+    bool *const seen = ecalloc((size_t)cap, sizeof(*seen));
+    int  claimed  = 0;
+    bool distinct = true;
+
+    for (int i = 0; i < cap; i++) {
+        const int idx = http_stats_registry_claim(reg);
+
+        if (idx < 0 || idx >= cap || seen[idx]) {
+            distinct = false;
+            break;
+        }
+
+        seen[idx]       = true;
+        idxs[claimed++] = idx;
+    }
+
+    const bool overflow_refused = (http_stats_registry_claim(reg) == -1);
+    const int  count_full       = http_stats_registry_count(reg);
+
+    /* Write a counter through a slot, read it back through a fresh at(). */
+    http_stats_registry_at(reg, idxs[0])->counters.total_requests = 0xABCDEF;
+    const bool write_read_ok =
+        (http_stats_registry_at(reg, idxs[0])->counters.total_requests == 0xABCDEF);
+    const bool active0 =
+        http_stats_slot_active(http_stats_registry_at(reg, idxs[0]));
+
+    /* Retire slot 0: it drops from the active count and reads inactive. */
+    const bool retire_ok     = http_stats_registry_retire(reg, idxs[0]);
+    const int  count_retired = http_stats_registry_count(reg);
+    const bool inactive0     =
+        !http_stats_slot_active(http_stats_registry_at(reg, idxs[0]));
+
+    /* Reclaim: the next claim reuses the freed slot with its counters zeroed. */
+    const int  reidx           = http_stats_registry_claim(reg);
+    const bool recycle_idx_ok  = (reidx == idxs[0]);
+    const bool recycled_zeroed =
+        (http_stats_registry_at(reg, reidx)->counters.total_requests == 0);
+
+    array_init(return_value);
+    add_assoc_long(return_value, "capacity", cap);
+    add_assoc_long(return_value, "claimed", claimed);
+    add_assoc_bool(return_value, "distinct", distinct);
+    add_assoc_bool(return_value, "overflow_refused", overflow_refused);
+    add_assoc_long(return_value, "count_full", count_full);
+    add_assoc_bool(return_value, "write_read_ok", write_read_ok);
+    add_assoc_bool(return_value, "active0", active0);
+    add_assoc_bool(return_value, "retire_ok", retire_ok);
+    add_assoc_long(return_value, "count_retired", count_retired);
+    add_assoc_bool(return_value, "inactive0", inactive0);
+    add_assoc_bool(return_value, "recycle_idx_ok", recycle_idx_ok);
+    add_assoc_bool(return_value, "recycled_zeroed", recycled_zeroed);
+
+    efree(idxs);
+    efree(seen);
+    http_stats_registry_free(reg);
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
@@ -1082,6 +1172,7 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_worker_registry_selftest, arginfo_worker_registry_selftest)
     ZEND_FE(_http_server_worker_registry_route_selftest, arginfo_worker_registry_route_selftest)
     ZEND_FE(_http_server_reactor_h3_listener_selftest, arginfo_reactor_h3_listener_selftest)
+    ZEND_FE(_http_server_stats_registry_selftest, arginfo_stats_registry_selftest)
     PHP_FE_END
 };
 
