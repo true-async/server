@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Observability — telemetry metrics + logging redesign (#5).** Metrics are
+  read through a plain PHP array (no embedded exporters); logs fan out to
+  pluggable sinks.
+  - **Cross-worker stats (`HttpServer::getStats()`).** Opt-in via
+    `HttpServerConfig::setStatsEnabled(true)`. Each pool worker owns one slot in
+    a process-wide, cache-line-aligned counter slab and bumps it lock-free (no
+    atomics on the hot path); `getStats()` walks the slab from any thread and
+    returns `{enabled, workers, totals}`. Totals include `total_requests`,
+    per-status-class `responses_2xx/3xx/4xx/5xx_total` (each request classified
+    exactly once, so the four sum to `total_requests`), and per-protocol active
+    gauges `conns_active_h1/h2/h3`. Throws when stats are disabled.
+  - **Multi-sink logging.** A log record now fans out to several sinks at once,
+    each with its own severity floor and formatter; the fast gate is the minimum
+    floor across sinks, and one failing sink (drop-counted) never blocks the
+    others. Emit formats once per distinct formatter before fan-out.
+  - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
+    OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
+    Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with
+    quoting; `pretty` is a coloured console line
+    (`HH:MM:SS.mmm  LEVEL  message  key=val …`) whose colour is decided once at
+    sink build from the target fd, honouring `NO_COLOR` / `CLICOLOR_FORCE`.
+
 - **gRPC over HTTP/2 and HTTP/3 (#4).** Requests whose content-type begins with
   `application/grpc` route to the callable registered via
   `HttpServer::addGrpcHandler()`; everything else is untouched, so gRPC and
