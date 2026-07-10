@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-10
+
 ### Added
 
 - **gRPC over HTTP/2 and HTTP/3 (#4).** Requests whose content-type begins with
@@ -62,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   QUIC flow-control credit is deferred: the window refills as the handler
   drains chunks, bounding un-read bytes by `max_body_size`.
 
+- **WebSocket permessage-deflate honours `server_max_window_bits` (RFC 7692).**
+  The negotiation response now reflects the client's window-bits offer instead
+  of always advertising the maximum, so peers that cap the window interoperate.
+
 ### Fixed
 
 - **HTTP/3 uploads larger than the initial stream window (256 KiB default)
@@ -77,6 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the reactor and re-polling); the WebSocket reject / spawn-fail paths
   freed a request the H1 parser still borrowed via `parser->request`.
 
+- **Duplicate request headers are now combined per RFC 9110 §5.3** across
+  HTTP/1.1, HTTP/2 and HTTP/3 (shared `http_request_store_header`; `Cookie`
+  joined with `"; "`, others with `", "`), instead of the last value winning.
+
+- **Inbound WebSocket message FIFO is bounded** (8× `max_message_size`); a peer
+  that floods faster than the handler drains is closed with 1013 rather than
+  growing the queue without limit.
+
+- **Reactor-spawned listeners get their own per-listener counters slice**,
+  fixing a telemetry race where sibling reactors shared one dummy counter.
+
 ### Performance
 
 - **HTTP/3 reactor-pool hot paths** (reactor review follow-up): reactor
@@ -87,7 +104,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backpressure on a full worker inbox now RESETs the stream with
   `H3_REQUEST_REJECTED` instead of silently dropping the request.
 
+- **HTTP/3 reactor-mode request bodies are built persistent from the first
+  byte** and the wire body is adopted on the reactor instead of re-copied,
+  removing a per-request copy on the reactor↔worker path.
+
+- **gRPC `readMessage` reassembly compaction is amortized** instead of shifting
+  the buffer on every frame, and assorted hot-path micro-cleanups from the
+  transport audit (getenv cache, spin-pause, cached `getHeaders`/`getBody`).
+
 ### Changed
+
+- **Configure fails fast on a non-ZTS (NTS) PHP** — the threaded worker pool
+  requires ZTS/TSRM by design; the build now errors early instead of producing
+  a broken extension.
+
 
 - **gRPC layering: call-lifecycle policy extracted out of the transports (#4).**
   `src/grpc/grpc_call.c` owns response defaults, outcome → `grpc-status` and
@@ -844,7 +874,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/true-async/server/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/true-async/server/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/true-async/server/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/true-async/server/compare/v0.9.0...v0.9.1
