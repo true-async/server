@@ -108,6 +108,11 @@ bool response_wire_add_header(response_wire_t *rw,
                               const char *name_ptr, size_t name_len,
                               const char *value_ptr, size_t value_len);
 bool response_wire_set_body(response_wire_t *rw, const char *ptr, size_t len);
+/* Adopt the body's backing store: a persistent zend_string the worker
+ * built once; the caller (reactor) takes the ref and reads it in place —
+ * no re-copy into a fresh string. NULL when unset/empty or already taken.
+ * Returned as void* to keep zend types out of this header. */
+void *response_wire_take_body_str(response_wire_t *rw);
 /* Trailers mirror headers; the transport delivers them after the last body byte. */
 bool response_wire_add_trailer(response_wire_t *rw,
                                const char *name_ptr, size_t name_len,

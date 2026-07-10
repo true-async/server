@@ -977,12 +977,12 @@ void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *
  * (rendered by a worker, handed back over the reverse channel) instead of from
  * the per-stream HttpResponse zval. Runs ON THE REACTOR thread. The wire's
  * headers were already filtered to the H2/H3-allowed set on the worker, so no
- * re-filter here. The body is copied into a stream-owned zend_string because the
- * data_reader walks it asynchronously, outliving the wire (freed by the caller
- * right after this returns). nghttp3 copies the nv bytes at submit time, so the
- * wire's header spans only need to live across this call. */
+ * re-filter here. The body's persistent zend_string is adopted off the wire
+ * (take_body_str) — the data_reader walks it asynchronously, outliving the wire
+ * (freed by the caller right after this returns). nghttp3 copies the nv bytes at
+ * submit time, so the wire's header spans only need to live across this call. */
 bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
-                                       const response_wire_t *rw)
+                                       response_wire_t *rw)
 {
     if (c == NULL || s == NULL || rw == NULL || c->nghttp3_conn == NULL) {
         return false;
@@ -1040,12 +1040,16 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
         /* adopt the worker's credit ref; released at teardown */
         s->wire_credit = response_wire_credit(rw);
     } else {
-        size_t      blen = 0;
-        const char *body = response_wire_body(rw, &blen);
+        /* Adopt the worker-built persistent body — the data reader walks it
+         * in place; released (flag-aware) in http3_stream_release. */
+        zend_string *const body =
+            (zend_string *)response_wire_take_body_str(rw);
 
-        if (body != NULL && blen > 0) {
-            s->response_body        = zend_string_init(body, blen, 0);
+        if (body != NULL && ZSTR_LEN(body) > 0) {
+            s->response_body        = body;
             s->response_body_offset = 0;
+        } else if (body != NULL) {
+            zend_string_release(body);
         }
 
         http3_stream_adopt_wire_trailers(s, rw);

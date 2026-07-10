@@ -160,11 +160,12 @@ bool http3_stream_submit_response(http3_connection_t *c,
  * the data reader submits them at true EOF. */
 void http3_stream_capture_trailers(http3_stream_t *s);
 
-/* Submit a worker-rendered response_wire (reactor thread). FULL = buffered;
- * STREAM_HEADERS = streaming reader over the chunk ring. */
+/* Submit a worker-rendered response_wire (reactor thread). FULL = buffered
+ * (adopts the wire's persistent body string); STREAM_HEADERS = streaming
+ * reader over the chunk ring. */
 typedef struct response_wire_s response_wire_t;
 bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
-                                       const response_wire_t *rw);
+                                       response_wire_t *rw);
 
 /* Copy a wire's trailer pairs into the stream's malloc'd trailer capture
  * (STREAM_END apply / buffered FULL submit). Reactor thread. */

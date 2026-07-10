@@ -6,7 +6,9 @@
   +----------------------------------------------------------------------+
 
   Flat response representation for the reactor/worker split (#80, D3).
-  See include/core/response_wire.h. Pure malloc-domain — no PHP, no ZMM.
+  See include/core/response_wire.h. Malloc-domain only — no ZMM: the body
+  rides as a persistent zend_string so the reactor can adopt the ref
+  instead of re-copying the bytes; everything else lives in the arena.
   The return-path mirror of request_wire.
 */
 
@@ -14,6 +16,7 @@
 # include <config.h>
 #endif
 
+#include "php.h"   /* zend_string — persistent body carrier */
 #include "core/response_wire.h"
 
 #include <stdlib.h>
@@ -41,8 +44,10 @@ struct response_wire_s {
     size_t  arena_len;
     size_t  arena_cap;
 
-    size_t  body_off, body_len;
-    bool    body_set;
+    /* FULL body: one persistent zend_string built on the worker; the
+     * reactor adopts the ref via take_body_str (no re-copy). Owned by the
+     * wire until taken. */
+    zend_string *body_str;
 
     wire_header_t *headers;
     size_t         header_count;
@@ -294,17 +299,20 @@ bool response_wire_add_trailer(response_wire_t *rw,
 
 bool response_wire_set_body(response_wire_t *rw, const char *ptr, const size_t len)
 {
-    const size_t off = arena_append(rw, ptr, len);
-
-    if (off == SIZE_MAX) {
-        return false;
+    if (ptr == NULL || len == 0) {
+        return true;   /* empty body — nothing to carry */
     }
 
-    rw->body_off = off;
-    rw->body_len = len;
-    rw->body_set = true;
+    rw->body_str = zend_string_init(ptr, len, 1);
 
     return true;
+}
+
+void *response_wire_take_body_str(response_wire_t *rw)
+{
+    zend_string *const s = rw->body_str;
+    rw->body_str = NULL;
+    return s;
 }
 
 int response_wire_status(const response_wire_t *rw)
@@ -314,13 +322,13 @@ int response_wire_status(const response_wire_t *rw)
 
 const char *response_wire_body(const response_wire_t *rw, size_t *len)
 {
-    if (!rw->body_set || rw->body_len == 0) {
+    if (rw->body_str == NULL) {
         *len = 0;
-        return rw->body_set ? rw->arena + rw->body_off : NULL;
+        return NULL;
     }
 
-    *len = rw->body_len;
-    return rw->arena + rw->body_off;
+    *len = ZSTR_LEN(rw->body_str);
+    return ZSTR_VAL(rw->body_str);
 }
 
 size_t response_wire_header_count(const response_wire_t *rw)
@@ -388,6 +396,10 @@ void response_wire_free(response_wire_t *rw)
 {
     if (rw == NULL) {
         return;
+    }
+
+    if (rw->body_str != NULL) {
+        zend_string_release(rw->body_str);
     }
 
     free(rw->arena);
