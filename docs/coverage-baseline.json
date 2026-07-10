@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 19830,
-      "hit": 16186
+      "total": 19858,
+      "hit": 16208
     },
     "functions": {
-      "total": 1350,
-      "hit": 1219
+      "total": 1352,
+      "hit": 1221
     }
   },
   "files": {
@@ -232,11 +232,11 @@
     },
     "src/core/response_wire.c": {
       "lines": {
-        "total": 150,
-        "hit": 143
+        "total": 153,
+        "hit": 142
       },
       "functions": {
-        "total": 25,
+        "total": 26,
         "hit": 24
       }
     },
@@ -412,12 +412,12 @@
     },
     "src/http3/http3_callbacks.c": {
       "lines": {
-        "total": 879,
-        "hit": 718
+        "total": 901,
+        "hit": 741
       },
       "functions": {
-        "total": 47,
-        "hit": 40
+        "total": 48,
+        "hit": 42
       }
     },
     "src/http3/http3_connection.c": {
@@ -453,7 +453,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 655,
-        "hit": 503
+        "hit": 502
       },
       "functions": {
         "total": 45,
@@ -492,8 +492,8 @@
     },
     "src/http3/http3_stream.c": {
       "lines": {
-        "total": 84,
-        "hit": 79
+        "total": 87,
+        "hit": 80
       },
       "functions": {
         "total": 4,
