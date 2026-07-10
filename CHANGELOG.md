@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-10
+
+### Fixed
+
+- **Windows build broken by the gRPC code.** `src/grpc/grpc.c` included POSIX
+  `<strings.h>` unconditionally (for `strncasecmp`), which MSVC does not ship
+  (`fatal error C1083`). The include is now guarded with `#ifndef PHP_WIN32`
+  like the rest of the tree — on Windows `strncasecmp` comes from PHP's
+  `zend_config.w32.h`. Linux/macOS are unaffected.
+
 ## [0.10.0] - 2026-07-10
 
 ### Added
@@ -874,7 +884,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/true-async/server/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/true-async/server/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/true-async/server/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/true-async/server/compare/v0.9.1...v0.9.2

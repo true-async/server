@@ -18,7 +18,9 @@
 #include "core/http_protocol_handlers.h"
 
 #include <string.h>
-#include <strings.h>
+#ifndef PHP_WIN32
+# include <strings.h>            /* strncasecmp */
+#endif
 
 #ifdef HAVE_HTTP_COMPRESSION
 #  include "compression/http_compression_request.h"
