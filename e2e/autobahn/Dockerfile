@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         autoconf automake libtool autoconf-archive bison build-essential re2c pkg-config \
-        libxml2-dev libsqlite3-dev libonig-dev \
+        libxml2-dev libsqlite3-dev libonig-dev zlib1g-dev \
         wget ca-certificates git cmake ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
