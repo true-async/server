@@ -73,7 +73,7 @@ RUN set -eux; cd php-src; \
         --with-openssl \
         --with-config-file-path=/etc \
         --with-config-file-scan-dir=/etc/php.d \
-        --disable-debug --disable-zts; \
+        --disable-debug --enable-zts; \
     make -j"$(nproc)" >/dev/null; make install; \
     mkdir -p /etc/php.d; echo "opcache.enable_cli=1" > /etc/php.d/opcache.ini; \
     ldconfig
