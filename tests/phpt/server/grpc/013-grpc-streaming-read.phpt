@@ -89,6 +89,13 @@ $client = spawn(function () use ($port, $server, $sizes) {
     echo "count=", count($replies), "\n";
     echo "replies=", implode(',', $replies), "\n";
 
+    if (count($replies) === 0) {
+        /* Flake forensics (~1/200: empty response within max-time): dump the
+         * curl verbose into the failing output so the next occurrence is
+         * diagnosable straight from the CI diff. */
+        echo "--- curl verbose ---\n", $verbose, "\n";
+    }
+
     $server->stop();
 });
 
