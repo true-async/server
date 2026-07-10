@@ -157,9 +157,24 @@ void http_log_state_init(http_log_state_t *state);
 void http_log_minit(void);
 void http_log_mshutdown(void);
 
-/* `stream_zv` must be an IS_RESOURCE zval wrapping a php_stream;
- * the state takes a refcount on it until stop. Severity == OFF or
- * a NULL/IS_NULL stream leaves the logger inactive. */
+/* One sink to build at server start. `stream_zv` is an IS_RESOURCE zval
+ * wrapping a php_stream (the state takes a refcount until stop); `formatter`
+ * NULL defaults to plain; `formatter_ud` feeds the formatter (pretty colour
+ * flag). A spec whose level is OFF or whose stream is unusable is skipped. */
+typedef struct {
+    http_log_severity_t    level;
+    http_log_formatter_fn  formatter;
+    void                  *formatter_ud;
+    zval                  *stream_zv;
+} http_log_sink_spec_t;
+
+/* Activate the logger with an explicit list of sinks (cap HTTP_LOG_MAX_SINKS;
+ * extra specs are ignored). Replaces any prior config. */
+void http_log_server_start_sinks(http_log_state_t *state,
+                                  const http_log_sink_spec_t *specs, int n);
+
+/* Single-stream sugar: one plain sink from severity + stream_zv. Severity ==
+ * OFF or a NULL/IS_NULL stream leaves the logger inactive. */
 void http_log_server_start(http_log_state_t *state,
                            http_log_severity_t severity,
                            zval *stream_zv);

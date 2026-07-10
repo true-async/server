@@ -962,6 +962,27 @@ final class HttpServerConfig
     public function getLogStream(): mixed {}
 
     /**
+     * Configure multiple log sinks — each a destination with its own format
+     * and severity. A record fans out to every sink whose level admits it, so
+     * you can e.g. write JSON to a file and a coloured console at once. Given,
+     * this overrides the setLogSeverity()/setLogStream() single-stream sugar.
+     *
+     * Each element is an array:
+     *   - 'type'   => 'stream' | 'stdout' | 'stderr'  (required)
+     *   - 'stream' => resource                         (required for 'stream')
+     *   - 'format' => 'plain' | 'logfmt' | 'json' | 'pretty'  (default 'plain')
+     *   - 'level'  => LogSeverity                      (required)
+     *
+     * 'pretty' auto-decides colour from the target (NO_COLOR / CLICOLOR_FORCE /
+     * isatty). At most 8 sinks. Invalid specs throw at call time. File rotation,
+     * syslog, journald and network transports arrive in a later stage.
+     *
+     * @param array $sinks List of sink spec arrays (see above).
+     * @return static
+     */
+    public function setLogSinks(array $sinks): static {}
+
+    /**
      * Enable or disable telemetry. When enabled, the server parses
      * incoming traceparent / tracestate headers (W3C Trace Context) and
      * attaches them to the request — accessible via HttpRequest API.

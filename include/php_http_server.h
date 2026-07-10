@@ -307,6 +307,12 @@ struct _http_server_config_t {
      * gates traceparent/tracestate ingestion (Step 5). */
     int      log_severity;
     zval     log_stream;
+    /* setLogSinks() spec array (#5, B4): a validated, normalized PHP array of
+     * [type_int, format_int, level_int, stream_resource|null]. IS_UNDEF when
+     * unset — the logger then falls back to the log_severity/log_stream sugar.
+     * Not frozen into the worker snapshot; applied at start on parent/standalone
+     * like log_stream. */
+    zval     log_sinks;
     bool     telemetry_enabled;
 
     /* Hot-reload triggers (issue #93) — consumed by the pool parent only

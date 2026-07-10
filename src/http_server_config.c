@@ -2798,6 +2798,129 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getLogStream)
 }
 /* }}} */
 
+/* Validate one sink spec array; returns false (with an exception thrown) on any
+ * violation. Keys: type=stream|stdout|stderr (stream requires a php_stream
+ * 'stream' resource); optional format=plain|logfmt|json|pretty; required
+ * level=LogSeverity. See http_server_start_logging for how they build sinks. */
+static bool log_sink_spec_valid(zval *elem)
+{
+    if (Z_TYPE_P(elem) != IS_ARRAY) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): each sink must be an array", 0);
+        return false;
+    }
+
+    HashTable *spec = Z_ARRVAL_P(elem);
+
+    zval *ztype = zend_hash_str_find(spec, "type", sizeof("type") - 1);
+    if (ztype == NULL || Z_TYPE_P(ztype) != IS_STRING) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): each sink needs a string 'type'", 0);
+        return false;
+    }
+
+    const char  *t  = Z_STRVAL_P(ztype);
+    const size_t tl = Z_STRLEN_P(ztype);
+    const bool is_stream = (tl == 6 && memcmp(t, "stream", 6) == 0);
+    const bool is_std    = (tl == 6 && (memcmp(t, "stdout", 6) == 0
+                                        || memcmp(t, "stderr", 6) == 0));
+
+    if (!is_stream && !is_std) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): 'type' must be one of stream|stdout|stderr", 0);
+        return false;
+    }
+
+    if (is_stream) {
+        zval *zs = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
+        php_stream *st = NULL;
+
+        if (zs != NULL && Z_TYPE_P(zs) == IS_RESOURCE) {
+            php_stream_from_zval_no_verify(st, zs);
+        }
+
+        if (st == NULL) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "setLogSinks(): type 'stream' requires a php_stream 'stream' resource", 0);
+            return false;
+        }
+    }
+
+    zval *zfmt = zend_hash_str_find(spec, "format", sizeof("format") - 1);
+    if (zfmt != NULL) {
+        if (Z_TYPE_P(zfmt) != IS_STRING) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "setLogSinks(): 'format' must be a string", 0);
+            return false;
+        }
+
+        const char  *f  = Z_STRVAL_P(zfmt);
+        const size_t fl = Z_STRLEN_P(zfmt);
+        const bool ok = (fl == 5 && memcmp(f, "plain",  5) == 0)
+                     || (fl == 6 && memcmp(f, "logfmt", 6) == 0)
+                     || (fl == 4 && memcmp(f, "json",   4) == 0)
+                     || (fl == 6 && memcmp(f, "pretty", 6) == 0);
+
+        if (!ok) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "setLogSinks(): 'format' must be one of plain|logfmt|json|pretty", 0);
+            return false;
+        }
+    }
+
+    zval *zlvl = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+    if (zlvl == NULL || Z_TYPE_P(zlvl) != IS_OBJECT
+        || !instanceof_function(Z_OBJCE_P(zlvl), http_log_severity_ce)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): each sink needs a LogSeverity 'level'", 0);
+        return false;
+    }
+
+    return true;
+}
+
+/* {{{ proto HttpServerConfig::setLogSinks(array $sinks): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSinks)
+{
+    zval *sinks_zv;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(sinks_zv)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    HashTable      *ht    = Z_ARRVAL_P(sinks_zv);
+    const uint32_t  count = zend_hash_num_elements(ht);
+
+    if (count > HTTP_LOG_MAX_SINKS) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "setLogSinks(): at most %d sinks, got %u", HTTP_LOG_MAX_SINKS, count);
+        return;
+    }
+
+    zval *elem;
+    ZEND_HASH_FOREACH_VAL(ht, elem) {
+        if (!log_sink_spec_valid(elem)) {
+            return;   /* exception already thrown */
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    if (Z_TYPE(config->log_sinks) != IS_UNDEF) {
+        zval_ptr_dtor(&config->log_sinks);
+        ZVAL_UNDEF(&config->log_sinks);
+    }
+
+    ZVAL_COPY(&config->log_sinks, sinks_zv);
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
 /* {{{ proto HttpServerConfig::setTelemetryEnabled(bool $enabled): static */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTelemetryEnabled)
 {
@@ -2915,6 +3038,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->is_locked = false;
     config->log_severity = 0;          /* HTTP_LOG_OFF */
     ZVAL_UNDEF(&config->log_stream);
+    ZVAL_UNDEF(&config->log_sinks);
     ZVAL_UNDEF(&config->bootloader);
     config->telemetry_enabled = false;
     config->body_streaming_enabled = false;
@@ -2981,6 +3105,11 @@ static void http_server_config_free(zend_object *obj)
     if (Z_TYPE(config->log_stream) != IS_UNDEF) {
         zval_ptr_dtor(&config->log_stream);
         ZVAL_UNDEF(&config->log_stream);
+    }
+
+    if (Z_TYPE(config->log_sinks) != IS_UNDEF) {
+        zval_ptr_dtor(&config->log_sinks);
+        ZVAL_UNDEF(&config->log_sinks);
     }
 
     if (Z_TYPE(config->hot_reload_paths) != IS_UNDEF) {

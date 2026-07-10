@@ -20,10 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     per-status-class `responses_2xx/3xx/4xx/5xx_total` (each request classified
     exactly once, so the four sum to `total_requests`), and per-protocol active
     gauges `conns_active_h1/h2/h3`. Throws when stats are disabled.
-  - **Multi-sink logging.** A log record now fans out to several sinks at once,
-    each with its own severity floor and formatter; the fast gate is the minimum
-    floor across sinks, and one failing sink (drop-counted) never blocks the
-    others. Emit formats once per distinct formatter before fan-out.
+  - **Multi-sink logging (`HttpServerConfig::setLogSinks()`).** A log record now
+    fans out to several sinks at once, each with its own severity floor and
+    formatter; the fast gate is the minimum floor across sinks, and one failing
+    sink (drop-counted) never blocks the others. Emit formats once per distinct
+    formatter before fan-out. `setLogSinks([['type'=>'stream'|'stdout'|'stderr',
+    'stream'=>$res, 'format'=>'plain'|'logfmt'|'json'|'pretty',
+    'level'=>LogSeverity::…], …])` declares up to 8 sinks (invalid specs throw at
+    config time); `setLogSeverity()`/`setLogStream()` stay as single-stream sugar.
   - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
     OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
     Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with

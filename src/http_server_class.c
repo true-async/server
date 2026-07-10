@@ -17,6 +17,7 @@
 #include "main/php_network.h"           /* php_socket_t, SOCK_ERR, closesocket, php_socket_errno */
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_hrtime.h"
+#include "Zend/zend_enum.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
@@ -1231,6 +1232,135 @@ http_server_config_t *http_server_get_config(http_server_object *server)
 http_log_state_t *http_server_get_log_state(http_server_object *server)
 {
     return server != NULL ? &server->log_state : &http_log_state_default;
+}
+
+/* Resolve the pretty-colour ud for a sink writing to `stream_zv`: cast to fd
+ * and let http_log_color_for_fd decide (NO_COLOR / CLICOLOR_FORCE / isatty). */
+static void *http_server_pretty_color_ud(zval *stream_zv)
+{
+    if (stream_zv == NULL) {
+        return NULL;
+    }
+
+    php_stream *s = NULL;
+    php_stream_from_zval_no_verify(s, stream_zv);
+
+    if (s == NULL) {
+        return NULL;
+    }
+
+    int fd = -1;
+    if (php_stream_cast(s, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
+                        (void *)&fd, 0) != SUCCESS || fd < 0) {
+        return NULL;
+    }
+
+    return http_log_color_for_fd(fd) ? (void *)1 : NULL;
+}
+
+static http_log_formatter_fn http_server_log_formatter(zval *spec, void *stream_zv,
+                                                       void **ud_out)
+{
+    *ud_out = NULL;
+
+    zval *zfmt = zend_hash_str_find(Z_ARRVAL_P(spec), "format", sizeof("format") - 1);
+    if (zfmt == NULL) {
+        return http_log_format_plain;
+    }
+
+    const char  *f  = Z_STRVAL_P(zfmt);
+    const size_t fl = Z_STRLEN_P(zfmt);
+
+    if (fl == 6 && memcmp(f, "logfmt", 6) == 0) {
+        return http_log_format_logfmt;
+    }
+    if (fl == 4 && memcmp(f, "json", 4) == 0) {
+        return http_log_format_json;
+    }
+    if (fl == 6 && memcmp(f, "pretty", 6) == 0) {
+        *ud_out = http_server_pretty_color_ud((zval *)stream_zv);
+        return http_log_format_pretty;
+    }
+
+    return http_log_format_plain;
+}
+
+/* Translate the config's log sinks (or the log_severity/log_stream sugar) into
+ * http_log_sink_spec_t and activate the logger. Specs are validated at
+ * setLogSinks() time, so reads here are unchecked. stdout/stderr sinks open a
+ * php:// stream held only until http_log_server_start_sinks takes its own ref. */
+static void http_server_start_logging(http_server_object *server,
+                                      http_server_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return;
+    }
+
+    http_log_sink_spec_t specs[HTTP_LOG_MAX_SINKS];
+    zval                 opened[HTTP_LOG_MAX_SINKS];   /* php://std* we opened */
+    int                  n = 0;
+
+    for (int i = 0; i < HTTP_LOG_MAX_SINKS; i++) {
+        ZVAL_UNDEF(&opened[i]);
+    }
+
+    if (Z_TYPE(cfg->log_sinks) == IS_ARRAY
+        && zend_hash_num_elements(Z_ARRVAL(cfg->log_sinks)) > 0) {
+
+        zval *elem;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(cfg->log_sinks), elem) {
+            if (n >= HTTP_LOG_MAX_SINKS) {
+                break;
+            }
+
+            HashTable *spec  = Z_ARRVAL_P(elem);
+            zval      *ztype = zend_hash_str_find(spec, "type", sizeof("type") - 1);
+            const char *t    = Z_STRVAL_P(ztype);
+            zval      *stream_zv;
+
+            if (Z_STRLEN_P(ztype) == 6 && memcmp(t, "stream", 6) == 0) {
+                stream_zv = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
+            } else {
+                const char *dev = (t[3] == 'o') ? "php://stdout" : "php://stderr";
+                php_stream *s = php_stream_open_wrapper(dev, "wb", 0, NULL);
+
+                if (s == NULL) {
+                    continue;
+                }
+
+                php_stream_to_zval(s, &opened[n]);
+                stream_zv = &opened[n];
+            }
+
+            void *ud = NULL;
+            http_log_formatter_fn fmt =
+                http_server_log_formatter(elem, stream_zv, &ud);
+
+            zval *zlvl = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+            zval *backing = zend_enum_fetch_case_value(Z_OBJ_P(zlvl));
+
+            specs[n].level        = (http_log_severity_t)Z_LVAL_P(backing);
+            specs[n].formatter    = fmt;
+            specs[n].formatter_ud = ud;
+            specs[n].stream_zv    = stream_zv;
+            n++;
+        } ZEND_HASH_FOREACH_END();
+
+    } else if (cfg->log_severity != 0 && Z_TYPE(cfg->log_stream) != IS_UNDEF) {
+        specs[0].level        = (http_log_severity_t)cfg->log_severity;
+        specs[0].formatter    = http_log_format_plain;
+        specs[0].formatter_ud = NULL;
+        specs[0].stream_zv    = &cfg->log_stream;
+        n = 1;
+    }
+
+    http_log_server_start_sinks(&server->log_state, specs, n);
+
+    for (int i = 0; i < HTTP_LOG_MAX_SINKS; i++) {
+        if (Z_TYPE(opened[i]) != IS_UNDEF) {
+            zval_ptr_dtor(&opened[i]);
+        }
+    }
 }
 
 void http_server_trigger_drain(http_server_object *server)
@@ -3038,11 +3168,7 @@ static int http_server_start_pool(http_server_object *server,
     /* The pool parent gets its own log lifecycle: reload() reports through it
      * (issue #93), and pool-mode start/stop become visible like worker ones. */
     if (boot_cfg != NULL) {
-        zval *log_stream = (Z_TYPE(boot_cfg->log_stream) != IS_UNDEF)
-                         ? &boot_cfg->log_stream : NULL;
-        http_log_server_start(&server->log_state,
-                              (http_log_severity_t)boot_cfg->log_severity,
-                              log_stream);
+        http_server_start_logging(server, boot_cfg);
         http_logf_info(&server->log_state, "server.start mode=pool workers=%d",
                        workers);
     }
@@ -3929,11 +4055,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     {
         http_server_config_t *cfg = http_server_config_from_obj(Z_OBJ(server->config));
-        zval *log_stream = (Z_TYPE(cfg->log_stream) != IS_UNDEF)
-                         ? &cfg->log_stream : NULL;
-        http_log_server_start(&server->log_state,
-                              (http_log_severity_t)cfg->log_severity,
-                              log_stream);
+        http_server_start_logging(server, cfg);
         http_logf_info(&server->log_state,
                        "server.start backlog=%d max_connections=%d",
                        server->backlog, server->max_connections);

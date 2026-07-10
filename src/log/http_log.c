@@ -1004,15 +1004,14 @@ static void http_log_sink_stop(http_log_sink_t *sink)
     sink->severity_floor = HTTP_LOG_OFF;
 }
 
-void http_log_server_start(http_log_state_t *state,
-                           http_log_severity_t severity,
-                           zval *stream_zv)
+void http_log_server_start_sinks(http_log_state_t *state,
+                                  const http_log_sink_spec_t *specs, int n)
 {
     if (state == NULL) {
         return;
     }
 
-    /* Drain a stale config so re-activation with a new stream doesn't leak. */
+    /* Drain a stale config so re-activation doesn't leak. */
     if (state->sink_count > 0) {
         http_log_server_stop(state);
     }
@@ -1020,13 +1019,33 @@ void http_log_server_start(http_log_state_t *state,
     state->sink_count = 0;
     state->severity   = HTTP_LOG_OFF;
 
-    /* B1: exactly one sink (the plain-formatted stream). setLogSinks (B4)
-     * fills the rest of the array through this same http_log_sink_start. */
-    if (http_log_sink_start(&state->sinks[0], severity,
-                            http_log_format_plain, NULL, stream_zv)) {
-        state->sink_count = 1;
-        http_log_state_refresh_gate(state);
+    if (n > HTTP_LOG_MAX_SINKS) {
+        n = HTTP_LOG_MAX_SINKS;
     }
+
+    for (int i = 0; i < n; i++) {
+        if (http_log_sink_start(&state->sinks[state->sink_count],
+                                specs[i].level, specs[i].formatter,
+                                specs[i].formatter_ud, specs[i].stream_zv)) {
+            state->sink_count++;
+        }
+    }
+
+    http_log_state_refresh_gate(state);
+}
+
+void http_log_server_start(http_log_state_t *state,
+                           http_log_severity_t severity,
+                           zval *stream_zv)
+{
+    const http_log_sink_spec_t spec = {
+        .level        = severity,
+        .formatter    = http_log_format_plain,
+        .formatter_ud = NULL,
+        .stream_zv    = stream_zv,
+    };
+
+    http_log_server_start_sinks(state, &spec, 1);
 }
 
 void http_log_server_stop(http_log_state_t *state)

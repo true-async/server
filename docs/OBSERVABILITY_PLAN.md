@@ -391,15 +391,30 @@ in `http_log_server_start`.
 
 Acceptance: multiple sinks active at once, each with its own format + level.
 
-**Quality gate**
-- [ ] Code quality (validate sink specs at config time, fail loud)
-- [ ] No duplicated logic — sugar setters **build a one-element sink array**
-      through the same path as `setLogSinks`; no parallel single-sink code
-- [ ] `const`
-- [ ] Comments reviewed
-- [ ] Tests — 3 sinks / 3 formats / distinct levels; invalid spec rejected
-- [ ] Coverage checked
-- [ ] Build & verify
+**Quality gate** — ✅ done (`setLogSinks(array)` on `HttpServerConfig`; each spec
+`{type:stream|stdout|stderr, stream?, format?, level}` validated at config time via
+`log_sink_spec_valid`; `http_server_start_logging` translates specs→`http_log_sink_spec_t`
+and calls the B1 `http_log_server_start_sinks`; `type:stream` scope for B4, file/syslog/
+journal/tcp deferred to B5):
+- [x] Code quality (`log_sink_spec_valid` rejects bad type/format/level/missing stream
+      with a clear `InvalidArgument`; >8 sinks rejected; reads at start are unchecked
+      because config-time validated)
+- [x] No duplicated logic — `http_log_server_start` is now a 1-spec wrapper over
+      `http_log_server_start_sinks`; the sugar path synthesizes one spec and runs the
+      **same** build loop as multi-sink; stdout/stderr open a `php://` stream fed through
+      the identical `http_log_sink_start`
+- [x] `const` — `http_log_server_start_sinks` takes `const http_log_sink_spec_t *`;
+      formatter resolution is a pure lookup
+- [x] Comments reviewed (WHY on spec-validated-so-unchecked reads + the php://std* ref
+      hand-off)
+- [x] Tests — `core/021`: 3 stream sinks (json/logfmt/pretty) at DEBUG/INFO/ERROR — same
+      record fans out to json+logfmt, the ERROR sink filters INFO out (empty), and 4
+      invalid specs (bad type/format, missing level, missing stream) each throw; manual
+      smoke of stdout+stderr sinks (pretty/logfmt) verified
+- [x] Coverage checked (multi-sink fan-out, per-sink level+format, all three types,
+      validation branches)
+- [x] Build & verify — clean build, no warnings; 9 log tests green; stdout/stderr smoke
+      clean (exit 0). ASAN batched with B1
 
 ### Stage B5 — external transports (incremental)  _(step 10 — ⚠ profiler)_
 
