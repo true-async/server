@@ -65,6 +65,26 @@ printf '\x00\x00\x00\x00\x03aaa\x00\x00\x00\x00\x02bb' | curl --http2-prior-know
   http://127.0.0.1:8080/echo.Echo/Stream | xxd
 ```
 
+## Hot reload
+
+| File | What it shows |
+|---|---|
+| [`reload-server.php`](reload-server.php) | Rotate the worker pool to pick up new code without dropping connections. |
+
+Reload needs the worker pool (`setWorkers() > 1`). The bootloader is re-run on
+replacement workers, so edits apply atomically per rotation:
+
+```bash
+php examples/reload-server.php          # prints the pool-parent pid
+curl 127.0.0.1:8080/                    # version=v1 boot=<id>
+echo v2 > examples/app-version.txt      # "change the app"
+kill -HUP <pool-parent-pid>             # SIGHUP rotates the pool
+curl 127.0.0.1:8080/                    # version=v2, fresh boot id, zero downtime
+```
+
+Triggers: `enableReloadOnSignal()` (SIGHUP, prod), `enableHotReload([dirs])`
+(filesystem watcher, dev), or `$server->reload()` (programmatic).
+
 ## Other demos
 
 | File | What it shows |

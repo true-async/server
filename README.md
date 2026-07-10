@@ -312,12 +312,14 @@ transparently, and `setGrpcEncoding('gzip')` before the first message gzips
 every reply frame. The client's deadline is exposed via
 `$request->getGrpcTimeout()`.
 
-Working examples live under [`examples/`](examples/):
-[`minimal-server.php`](examples/minimal-server.php),
-[`demo-server.php`](examples/demo-server.php),
-[`sse-server.php`](examples/sse-server.php),
-[`multi-worker.php`](examples/multi-worker.php),
-[`multi-worker-manual.php`](examples/multi-worker-manual.php).
+Working examples live under [`examples/`](examples/) — see the
+[**examples README**](examples/README.md) for how to run each and connect:
+
+- **HTTP** — [`minimal-server.php`](examples/minimal-server.php), [`demo-server.php`](examples/demo-server.php), [`sse-server.php`](examples/sse-server.php)
+- **WebSocket** — [`ws-echo-server.php`](examples/ws-echo-server.php), [`ws-chat-server.php`](examples/ws-chat-server.php)
+- **gRPC** — [`grpc-greeter-server.php`](examples/grpc-greeter-server.php), [`grpc-stream-server.php`](examples/grpc-stream-server.php)
+- **Hot reload** — [`reload-server.php`](examples/reload-server.php)
+- **Worker pool** — [`multi-worker.php`](examples/multi-worker.php), [`multi-worker-manual.php`](examples/multi-worker-manual.php)
 
 ---
 
