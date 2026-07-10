@@ -38,6 +38,9 @@
 /* Defined in src/http_request.c; wraps an http_request_t in an HttpRequest zval. */
 extern zval *http_request_create_from_parsed(http_request_t *req);
 
+/* Defined in src/http_server_class.c; snapshots the per-worker stats slab. */
+extern int http_server_stats_slab_snapshot(uint64_t *out, int max);
+
 #ifdef PHP_WIN32
 # include <windows.h>
 #else
@@ -1162,6 +1165,27 @@ PHP_FUNCTION(_http_server_stats_registry_selftest)
     http_stats_registry_free(reg);
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_stats_slab_snapshot, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* Snapshot the process-wide stats slab (issue #5, A2): one entry per active
+ * worker slot carrying that slot's total_requests. Called by the phpt from the
+ * parent coroutine while a pool serves — proving each worker bumps its own slab
+ * slot (not an embedded counter). Empty array when no slab exists. */
+PHP_FUNCTION(_http_server_stats_slab_snapshot)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    uint64_t  totals[256];
+    const int n = http_server_stats_slab_snapshot(totals, 256);
+
+    array_init(return_value);
+
+    for (int i = 0; i < n; i++) {
+        add_next_index_long(return_value, (zend_long)totals[i]);
+    }
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
@@ -1173,6 +1197,7 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_worker_registry_route_selftest, arginfo_worker_registry_route_selftest)
     ZEND_FE(_http_server_reactor_h3_listener_selftest, arginfo_reactor_h3_listener_selftest)
     ZEND_FE(_http_server_stats_registry_selftest, arginfo_stats_registry_selftest)
+    ZEND_FE(_http_server_stats_slab_snapshot, arginfo_stats_slab_snapshot)
     PHP_FE_END
 };
 

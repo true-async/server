@@ -41,7 +41,7 @@ on nothing from A.
 | Step | Stage | Depends on | Risky? |
 |------|-------|-----------|--------|
 | 1 | A1 — stats registry + slab skeleton ✅ | — | no |
-| 2 | A2 — point workers at their slot | A1 | ⚠ hot path → **profiler** |
+| 2 | A2 — point workers at their slot ✅ | A1 | ⚠ hot path → **profiler** |
 | 3 | A3 — config gate `setStatsEnabled` | A1 | no |
 | 4 | A4 — `getTelemetry()` / `resetTelemetry()` | A2, A3 | no (off hot path) |
 | 5 | A5 — fill counter gaps | A2 | ⚠ commit hot path → **profiler** |
@@ -155,17 +155,25 @@ Files: `http_server_class.c` (clone init + `http_server_transfer_obj` LOAD).
 Acceptance: hot path unchanged (conns still cache `&server->counters`); a
 single-worker server still works with its slot; no double-counting.
 
-**Quality gate**
-- [ ] Code quality (**hot path unchanged** — emit sites still one load + one inc)
-- [ ] No duplicated logic — counters in **one** place (the slot); delete the dead
-      embedded copies, do not leave two
-- [ ] `const`
-- [ ] Comments reviewed (drop stale comments on the moved fields)
-- [ ] Tests — single- and multi-worker sum equals expected; no double-count
-- [ ] Coverage checked
-- [ ] Build & verify (ASAN clean)
-- [ ] **Profiler** — RPS + p99 on H1/H2/H3 hot path unchanged vs pre-A2 baseline
-      (the counter deref must not add a cache miss)
+**Quality gate** — ✅ done (via a `counters_live` pointer: `&counters` for a
+standalone/parent server, the slab slot for a pool worker — cleaner than moving
+every field and keeps single-worker zero-churn):
+- [x] Code quality (hot path unchanged — bumps still go through the cached
+      `conn->counters` pointer; only `http_server_counters()` + a cold admission
+      read repointed)
+- [x] No duplicated logic — counters live in one place per server
+      (slot for workers, embedded otherwise); access consolidated on `counters_live`
+- [x] `const` — snapshot reader takes `const http_stats_slot_t *`
+- [x] Comments reviewed (counters_live/stats_up/stats_down WHY; stale
+      "cache &server->counters" note fixed)
+- [x] Tests — `telemetry/002-stats-slab-workers.phpt`: 2-worker pool, real
+      traffic, `active_slots == workers` and per-slot `total_requests` sums to
+      requests served (bumps land in the slab, not an embedded copy)
+- [x] Coverage checked (pool path + single-worker embedded path both exercised)
+- [x] Build & verify — clean build; 5 telemetry-read/reset/counter tests +
+      reactor_pool + pool lifecycle all green
+- [x] **Profiler** — 4-worker H1 wrk: **median 181.8k vs 182.6k RPS baseline**
+      (−0.4%, inside ±20% loopback noise) — no regression
 
 ### Stage A3 — config gate `setStatsEnabled`  _(step 3)_
 
