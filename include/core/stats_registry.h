@@ -36,9 +36,7 @@ extern "C" {
  * count is known up front). Each slot is cache-line aligned so adjacent workers
  * writing their own counters never false-share.
  *
- * Threading: create()/free() on the parent (pool bring-up / teardown, after
- * workers quiesce); claim()/retire() from a worker on its own thread; at()/
- * capacity()/count() from any thread.
+ * Per-function comments state the thread each call belongs to.
  */
 
 /* Cache-line size for slot padding. 64 B covers x86-64 and arm64. */
@@ -51,8 +49,8 @@ extern "C" {
 typedef struct {
     _Alignas(HTTP_STATS_CACHELINE)
     zend_atomic_int        active;      /* 1 = claimed & live, 0 = free */
-    int                    worker_id;   /* slot index, used as the label */
-    http_server_counters_t counters;    /* per-worker hot counter slice */
+    int                    worker_id;   /* == slot index; emitted as the label */
+    http_server_counters_t counters;
 } http_stats_slot_t;
 
 typedef struct http_stats_registry_s http_stats_registry_t;
