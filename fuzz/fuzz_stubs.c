@@ -37,6 +37,40 @@ __attribute__((weak)) void http_request_init_headers(http_request_t *req)
     zend_hash_init(req->headers, HTTP_HEADERS_INITIAL_SIZE, NULL, ZVAL_PTR_DTOR, 0);
 }
 
+/* http_request_store_header also lives in http_request.c. save_current_header
+ * routes every parsed header through it, and the duplicate-combine branch is
+ * exactly where libFuzzer once caught a UAF — the stub must run the real
+ * logic, not a no-op. Mirror of the src/http_request.c implementation. */
+__attribute__((weak)) void http_request_store_header(http_request_t *req,
+                                                     zend_string *name,
+                                                     zend_string *value)
+{
+    zval *const existing = zend_hash_find(req->headers, name);
+
+    if (existing == NULL) {
+        zval zv;
+        ZVAL_STR(&zv, value);
+        zend_hash_add_new(req->headers, name, &zv);
+        return;
+    }
+
+    const char *const sep =
+        zend_string_equals_literal(name, "cookie") ? "; " : ", ";
+    zend_string *const old = Z_STR_P(existing);
+    const size_t len = ZSTR_LEN(old) + 2 + ZSTR_LEN(value);
+    zend_string *const combined = zend_string_alloc(len, req->persistent);
+
+    memcpy(ZSTR_VAL(combined), ZSTR_VAL(old), ZSTR_LEN(old));
+    memcpy(ZSTR_VAL(combined) + ZSTR_LEN(old), sep, 2);
+    memcpy(ZSTR_VAL(combined) + ZSTR_LEN(old) + 2,
+           ZSTR_VAL(value), ZSTR_LEN(value));
+    ZSTR_VAL(combined)[len] = '\0';
+
+    zend_string_release(value);
+    zend_string_release(old);
+    ZVAL_STR(existing, combined);
+}
+
 /* Server-level telemetry hooks invoked by h2 session/strategy TUs.
  * All NULL-safe in production; here they're no-ops since fuzz has
  * no server object to count against. */
