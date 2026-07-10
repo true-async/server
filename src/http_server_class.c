@@ -4896,6 +4896,114 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
 }
 /* }}} */
 
+/* Emit one counters slice as assoc entries (issue #5, A4). Shared by every
+ * worker entry and the summed totals block. */
+static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
+{
+    add_assoc_long(arr, "total_requests",         (zend_long)c->total_requests);
+    add_assoc_long(arr, "active_requests",        (zend_long)c->active_requests);
+    add_assoc_long(arr, "requests_shed_total",    (zend_long)c->requests_shed_total);
+    add_assoc_long(arr, "streaming_responses_total",             (zend_long)c->streaming_responses_total);
+    add_assoc_long(arr, "stream_send_calls_total",               (zend_long)c->stream_send_calls_total);
+    add_assoc_long(arr, "stream_bytes_sent_total",               (zend_long)c->stream_bytes_sent_total);
+    add_assoc_long(arr, "stream_send_backpressure_events_total", (zend_long)c->stream_send_backpressure_events_total);
+    add_assoc_long(arr, "worker_wire_dropped_total",             (zend_long)c->worker_wire_dropped_total);
+    add_assoc_long(arr, "h2_streams_active",       (zend_long)c->h2_streams_active);
+    add_assoc_long(arr, "h2_streams_opened_total", (zend_long)c->h2_streams_opened_total);
+    add_assoc_long(arr, "h2_streams_reset_by_peer_total", (zend_long)c->h2_streams_reset_by_peer_total);
+    add_assoc_long(arr, "h2_streams_refused_total",(zend_long)c->h2_streams_refused_total);
+    add_assoc_long(arr, "h2_goaway_recv_total",    (zend_long)c->h2_goaway_recv_total);
+    add_assoc_long(arr, "h2_goaway_sent_total",    (zend_long)c->h2_goaway_sent_total);
+    add_assoc_long(arr, "h2_data_recv_bytes_total",(zend_long)c->h2_data_recv_bytes_total);
+    add_assoc_long(arr, "h2_data_sent_bytes_total",(zend_long)c->h2_data_sent_bytes_total);
+    add_assoc_long(arr, "h1_connection_close_sent_total", (zend_long)c->h1_connection_close_sent_total);
+    add_assoc_long(arr, "h3_goaway_sent_total",    (zend_long)c->h3_goaway_sent_total);
+    add_assoc_long(arr, "tls_bytes_plaintext_in_total",   (zend_long)c->tls_bytes_plaintext_in_total);
+    add_assoc_long(arr, "tls_bytes_plaintext_out_total",  (zend_long)c->tls_bytes_plaintext_out_total);
+    add_assoc_long(arr, "tls_bytes_ciphertext_in_total",  (zend_long)c->tls_bytes_ciphertext_in_total);
+    add_assoc_long(arr, "tls_bytes_ciphertext_out_total", (zend_long)c->tls_bytes_ciphertext_out_total);
+    add_assoc_long(arr, "static_zero_coroutine_total",    (zend_long)c->static_zero_coroutine_total);
+    add_assoc_long(arr, "static_cache_hits_total",   (zend_long)c->static_cache_hits_total);
+    add_assoc_long(arr, "static_cache_misses_total", (zend_long)c->static_cache_misses_total);
+}
+
+/* Field-wise accumulate into the totals block. The slice is a POD of 64-bit
+ * counters (every field is uint64_t or size_t == 8 bytes on our targets), so a
+ * word-wise add covers every field and stays correct when A5 adds more. */
+static void stats_counters_add(http_server_counters_t *acc, const http_server_counters_t *c)
+{
+    uint64_t       *dst = (uint64_t *)acc;
+    const uint64_t *src = (const uint64_t *)c;
+
+    for (size_t i = 0; i < sizeof(*acc) / sizeof(uint64_t); i++) {
+        dst[i] += src[i];
+    }
+}
+
+/* {{{ proto HttpServer::getStats(): array
+ *
+ * Cross-worker statistics aggregate (issue #5). Opt-in: throws when
+ * setStatsEnabled(true) was not set. Returns
+ *   { enabled: true, workers: { <id>: {..counters..}, ... }, totals: {..} }
+ * In pool mode it walks the shared slab, reading each worker's slot lock-free
+ * (no CAS); a slot mid-retire is skipped, so the aggregate can be stale by one
+ * worker — acceptable for statistics. A single-worker server reports its own
+ * counters as the sole worker. */
+ZEND_METHOD(TrueAsync_HttpServer, getStats)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *const server = Z_HTTP_SERVER_P(ZEND_THIS);
+    const http_server_config_t *const cfg = http_server_get_config(server);
+
+    if (cfg == NULL || !cfg->stats_enabled) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Statistics are not enabled — call HttpServerConfig::setStatsEnabled(true)", 0);
+        RETURN_THROWS();
+    }
+
+    http_server_counters_t totals;
+    memset(&totals, 0, sizeof(totals));
+
+    zval workers;
+    array_init(&workers);
+
+    if (g_stats_registry != NULL) {
+        const int cap = http_stats_registry_capacity(g_stats_registry);
+
+        for (int i = 0; i < cap; i++) {
+            const http_stats_slot_t *const slot = http_stats_registry_at(g_stats_registry, i);
+
+            if (!http_stats_slot_active(slot)) {
+                continue;
+            }
+
+            zval w;
+            array_init(&w);
+            stats_counters_to_zval(&w, &slot->counters);
+            add_index_zval(&workers, (zend_long)slot->worker_id, &w);
+            stats_counters_add(&totals, &slot->counters);
+        }
+    } else {
+        /* Single-worker / non-pool: the server's own counters are the one slot. */
+        zval w;
+        array_init(&w);
+        stats_counters_to_zval(&w, server->counters_live);
+        add_index_zval(&workers, 0, &w);
+        stats_counters_add(&totals, server->counters_live);
+    }
+
+    array_init(return_value);
+    add_assoc_bool(return_value, "enabled", true);
+    add_assoc_zval(return_value, "workers", &workers);
+
+    zval totals_zv;
+    array_init(&totals_zv);
+    stats_counters_to_zval(&totals_zv, &totals);
+    add_assoc_zval(return_value, "totals", &totals_zv);
+}
+/* }}} */
+
 /* {{{ proto HttpServer::getConfig(): HttpServerConfig */
 ZEND_METHOD(TrueAsync_HttpServer, getConfig)
 {

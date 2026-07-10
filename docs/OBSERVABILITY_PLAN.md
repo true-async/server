@@ -42,8 +42,8 @@ on nothing from A.
 |------|-------|-----------|--------|
 | 1 | A1 — stats registry + slab skeleton ✅ | — | no |
 | 2 | A2 — point workers at their slot ✅ | A1 | ⚠ hot path → **profiler** |
-| 3 | A3 — config gate `setStatsEnabled` | A1 | no |
-| 4 | A4 — `getTelemetry()` / `resetTelemetry()` | A2, A3 | no (off hot path) |
+| 3 | A3 — config gate `setStatsEnabled` ✅ | A1 | no |
+| 4 | A4 — `getStats()` aggregate ✅ (new method; `getTelemetry`/`resetTelemetry` kept as-is) | A2, A3 | no (off hot path) |
 | 5 | A5 — fill counter gaps | A2 | ⚠ commit hot path → **profiler** |
 | 6 | B1 — single → multi-sink (internal) | — | ⚠ emit hot path → **profiler** |
 | 7 | B2 — JSON + logfmt formatters | B1 | no |
@@ -185,15 +185,15 @@ Files: `http_server_config.c`, `stubs/HttpServerConfig.php` (+ arginfo regen).
 
 Acceptance: default off; enabling before `start()` allocates the slab.
 
-**Quality gate**
-- [ ] Code quality
-- [ ] No duplicated logic — **reuse the existing setter/getter pattern** in
-      `http_server_config.c`
-- [ ] `const`
-- [ ] Comments reviewed
-- [ ] Tests — config round-trip; default-off asserted
-- [ ] Coverage checked
-- [ ] Build & verify
+**Quality gate** — ✅ done (flag on both the mutable config and the frozen
+worker config; slab creation gated in `start_pool`):
+- [x] Code quality (mirrors `setRequestScope`, `config_check_locked` guard)
+- [x] No duplicated logic — reused the config setter/getter pattern
+- [x] `const` — `const http_server_config_t *` for the `start_pool` gate read
+- [x] Comments reviewed
+- [x] Tests — `telemetry/003`: round-trip, default-off, no slab when disabled
+- [x] Coverage checked
+- [x] Build & verify (green)
 
 ### Stage A4 — `getTelemetry()` / `resetTelemetry()`  _(step 4)_
 
@@ -207,16 +207,20 @@ Files: `http_server_class.c`; stub docs in `stubs/HttpServer.php`.
 Acceptance: called from any thread; disabled → exception; sums match a
 single-worker baseline.
 
-**Quality gate**
-- [ ] Code quality (no lock on the read path — assert by inspection)
-- [ ] No duplicated logic — **reuse the array-building pattern of
-      `getRuntimeStats`** (`http_server_class.c:4959`); one slot→zval helper
-      shared by `workers` and `totals`
-- [ ] `const` — `const http_stats_slot_t *` for the read/sum helper
-- [ ] Comments reviewed (document the "stale-by-one aggregate is fine" WHY once)
-- [ ] Tests — disabled throws; enabled sums; reset zeroes; multi-worker aggregate
-- [ ] Coverage checked
-- [ ] Build & verify
+**Quality gate** — ✅ done (implemented as a **new** `getStats()` method that
+throws when disabled + returns `{enabled, workers, totals}` — `getTelemetry()`
+stays a per-server view so its tests/contract are untouched):
+- [x] Code quality (early throw + `RETURN_THROWS`; no lock on the read path)
+- [x] No duplicated logic — one `stats_counters_to_zval` helper feeds both the
+      per-worker entries and `totals`; word-wise `stats_counters_add` stays
+      correct as A5 adds fields
+- [x] `const` — `const http_stats_slot_t *`, `const http_server_config_t *`,
+      `const http_server_counters_t *` on the readers
+- [x] Comments reviewed ("stale-by-one aggregate is fine" WHY documented once)
+- [x] Tests — `telemetry/004`: disabled throws; single-worker fallback; 2-worker
+      pool aggregate with `totals.total_requests` == requests served
+- [x] Coverage checked (both getStats branches + throw)
+- [x] Build & verify — clean; 8 config/telemetry regression tests green
 
 ### Stage A5 — fill counter gaps  _(step 5 — ⚠ profiler)_
 
