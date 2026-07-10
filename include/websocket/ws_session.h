@@ -328,7 +328,9 @@ void ws_session_notify_writable(ws_session_t *session);
  * after ws_session_init* and BEFORE the first ws_session_feed(). Returns
  * false on allocation failure (caller tears the connection down).
  */
-bool ws_session_enable_pmce(ws_session_t *session);
+/* server_bits: deflate window for OUR compressor, 9..15 — the negotiated
+ * server_max_window_bits (15 when the offer didn't pin one). */
+bool ws_session_enable_pmce(ws_session_t *session, int server_bits);
 
 /*
  * Compress one outbound message body per RFC 7692 §7.2.1: raw-deflate

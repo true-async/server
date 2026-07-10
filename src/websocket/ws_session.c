@@ -653,21 +653,23 @@ static int pmce_inflate_msg(ws_session_t *s,
     return 0;
 }
 
-bool ws_session_enable_pmce(ws_session_t *s)
+bool ws_session_enable_pmce(ws_session_t *s, const int server_bits)
 {
     if (s->pmce_enabled) {
         return true;
     }
-    if (s->ctx == NULL) {
+    if (s->ctx == NULL || server_bits < 9 || server_bits > 15) {
         return false;
     }
 
     ZS *const def = ecalloc(1, sizeof(ZS));
     ZS *const inf = ecalloc(1, sizeof(ZS));
 
-    /* windowBits -15 = raw deflate stream, no zlib/gzip wrapper. */
+    /* Negative windowBits = raw deflate stream, no zlib/gzip wrapper.
+     * server_bits < 15 honours the peer's server_max_window_bits cap
+     * (RFC 7692 §7.1.2.1) — our back-references stay inside its window. */
     if (ZS_DEFLATE_INIT2(def, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                         -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+                         -server_bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         efree(def);
         efree(inf);
         return false;

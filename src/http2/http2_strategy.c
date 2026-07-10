@@ -1843,9 +1843,9 @@ static const ws_transport_ops_t ws_h2_transport = {
  * Deferred until the first WS I/O (so the handler may reject() first).
  * Sets BOTH stream->ws_session and w->session. */
 bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
-                     const char *subprotocol, bool deflate)
+                     const char *subprotocol, const int deflate_bits)
 {
-    (void)deflate;
+    (void)deflate_bits;
     if (stream->ws_session != NULL) {
         return true;   /* already accepted */
     }
@@ -1877,13 +1877,23 @@ bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
         nhv++;
     }
 #ifdef HAVE_HTTP_COMPRESSION
-    if (deflate) {
-        static const char ext[] = "permessage-deflate; "
-            "server_no_context_takeover; client_no_context_takeover";
+    char ext_buf[128];
+
+    if (deflate_bits > 0) {
+        /* Mirror the H1 101: no_context_takeover both ways; a below-default
+         * window echoes the honoured server_max_window_bits cap. */
+        int n = snprintf(ext_buf, sizeof(ext_buf), "permessage-deflate; "
+            "server_no_context_takeover; client_no_context_takeover");
+
+        if (deflate_bits < 15) {
+            n += snprintf(ext_buf + n, sizeof(ext_buf) - (size_t)n,
+                          "; server_max_window_bits=%d", deflate_bits);
+        }
+
         hv[nhv].name      = "sec-websocket-extensions";
         hv[nhv].name_len  = sizeof("sec-websocket-extensions") - 1;
-        hv[nhv].value     = ext;
-        hv[nhv].value_len = sizeof(ext) - 1;
+        hv[nhv].value     = ext_buf;
+        hv[nhv].value_len = (size_t)n;
         nhv++;
     }
 #endif
@@ -1903,7 +1913,8 @@ bool http2_ws_accept(http2_stream_t *stream, websocket_object *w,
 
 #ifdef HAVE_HTTP_COMPRESSION
     /* Enable the codec before replaying any buffered DATA below. */
-    if (deflate && !ws_session_enable_pmce(stream->ws_session)) {
+    if (deflate_bits > 0
+        && !ws_session_enable_pmce(stream->ws_session, deflate_bits)) {
         return false;
     }
 #endif

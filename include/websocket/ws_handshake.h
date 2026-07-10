@@ -75,8 +75,9 @@ int ws_handshake_compute_accept(const char *client_key, size_t client_key_len,
  *
  * Includes mandatory headers (Upgrade, Connection, Sec-WebSocket-Accept)
  * and, if `subprotocol` is non-NULL, Sec-WebSocket-Protocol. When
- * `deflate` is true, advertises the negotiated permessage-deflate
- * extension (RFC 7692) with server+client no_context_takeover. The
+ * `deflate_bits` > 0, advertises the negotiated permessage-deflate
+ * extension (RFC 7692) with server+client no_context_takeover; a value
+ * below 15 additionally echoes `server_max_window_bits=N`. The
  * `accept` argument is the 28-char output of ws_handshake_compute_accept.
  *
  * Returns NULL on allocation failure. Caller owns the returned string
@@ -84,15 +85,16 @@ int ws_handshake_compute_accept(const char *client_key, size_t client_key_len,
  */
 zend_string *ws_handshake_build_101_response(const char *accept,
                                              const char *subprotocol,
-                                             bool deflate);
+                                             int deflate_bits);
 
 /*
- * Does the request offer permessage-deflate (RFC 7692)? Scans the
- * Sec-WebSocket-Extensions header for a "permessage-deflate" extension
- * token. Read-only. Returns false when the header is absent, the
- * extension is not offered, or the offer pins a server_max_window_bits
- * smaller than our fixed window (which we cannot honour, so we decline).
+ * Negotiate permessage-deflate (RFC 7692) against the request's
+ * Sec-WebSocket-Extensions offer list. Read-only. Returns the server
+ * deflate window bits to use — 15 for a plain offer, 9..14 when the
+ * offer pins server_max_window_bits (we honour it via deflateInit2) —
+ * or 0 to decline (header absent, extension not offered, or every
+ * offer demands bits our zlib cannot produce: raw deflate min is 9).
  */
-bool ws_pmce_offered(const http_request_t *req);
+int ws_pmce_negotiate(const http_request_t *req);
 
 #endif /* WS_HANDSHAKE_H */

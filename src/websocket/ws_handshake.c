@@ -185,7 +185,7 @@ int ws_handshake_compute_accept(const char *client_key, size_t client_key_len,
 
 zend_string *ws_handshake_build_101_response(const char *accept,
                                              const char *subprotocol,
-                                             bool deflate)
+                                             const int deflate_bits)
 {
     /* Status line + 4 mandatory headers come to ~140 bytes; subprotocol
      * adds ~30 + token. One smart_str grow is enough — preallocate. */
@@ -210,12 +210,21 @@ zend_string *ws_handshake_build_101_response(const char *accept,
         smart_str_appends(&buf, "\r\n");
     }
 
-    if (deflate) {
+    if (deflate_bits > 0) {
         /* no_context_takeover both ways → we reset the deflate/inflate
-         * streams per message (RFC 7692 §7.1.1). We do not negotiate a
-         * reduced window; both sides stay at the default 15. */
+         * streams per message (RFC 7692 §7.1.1). Below-default window
+         * bits are echoed so the peer knows we honoured its cap. */
         smart_str_appends(&buf, "Sec-WebSocket-Extensions: permessage-deflate; "
-            "server_no_context_takeover; client_no_context_takeover\r\n");
+            "server_no_context_takeover; client_no_context_takeover");
+
+        if (deflate_bits < 15) {
+            char bits[40];
+            const int n = snprintf(bits, sizeof(bits),
+                                   "; server_max_window_bits=%d", deflate_bits);
+            smart_str_appendl(&buf, bits, (size_t)n);
+        }
+
+        smart_str_appends(&buf, "\r\n");
     }
 
     smart_str_appends(&buf, "\r\n");
@@ -224,14 +233,14 @@ zend_string *ws_handshake_build_101_response(const char *accept,
     return buf.s;
 }
 
-bool ws_pmce_offered(const http_request_t *req)
+int ws_pmce_negotiate(const http_request_t *req)
 {
     size_t ext_len = 0;
     const char *ext = header_lookup(req, "sec-websocket-extensions",
                                     sizeof("sec-websocket-extensions") - 1,
                                     &ext_len);
     if (ext == NULL) {
-        return false;
+        return 0;
     }
 
     /* Walk the comma-separated offer list. Each offer is "name; params". */
@@ -257,9 +266,12 @@ bool ws_pmce_offered(const http_request_t *req)
             continue;
         }
 
-        /* Matched. Decline only if it pins server_max_window_bits below our
-         * fixed window of 15 — we always deflate with the full window. */
+        /* Matched. A pinned server_max_window_bits is honoured by running
+         * our deflater at that window (RFC 7692 §7.1.2.1); only bits our
+         * zlib cannot produce (raw deflate minimum is 9) decline this
+         * offer — the walk then tries the client's next fallback offer. */
         bool acceptable = true;
+        int  bits = 15;
         size_t q = p;
         while (q < offer_end) {
             if (ext[q] == ';') q++;
@@ -288,16 +300,23 @@ bool ws_pmce_offered(const http_request_t *req)
             if (pe - ps == sizeof("server_max_window_bits") - 1 &&
                 strncasecmp(ext + ps, "server_max_window_bits",
                             sizeof("server_max_window_bits") - 1) == 0 &&
-                val >= 0 && val < 15) {
-                acceptable = false;
-                break;
+                val >= 0) {
+                if (val >= 9 && val <= 15) {
+                    if ((int)val < bits) {
+                        bits = (int)val;
+                    }
+                } else {
+                    /* 8 (zlib can't) or out-of-range — decline this offer. */
+                    acceptable = false;
+                    break;
+                }
             }
         }
 
         if (acceptable) {
-            return true;
+            return bits;
         }
     }
 
-    return false;
+    return 0;
 }
