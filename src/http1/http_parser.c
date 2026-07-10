@@ -477,7 +477,10 @@ static void save_current_header(http1_parser_t *parser)
  * the "buffered → stream" upgrade (Case 2). Idempotent. */
 static void http1_request_body_upgrade(http_request_t *req)
 {
-    if (req->body_streaming) {
+    /* Request already complete: the body is fully buffered in req->body and
+     * no EOF will ever reach the streaming queue — upgrading now would park
+     * the reader forever. Stay buffered (see http2_request_body_upgrade). */
+    if (req->body_streaming || req->complete) {
         return;
     }
 

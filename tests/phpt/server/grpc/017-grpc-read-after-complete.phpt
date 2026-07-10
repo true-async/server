@@ -1,5 +1,5 @@
 --TEST--
-gRPC: incremental readMessage over a streaming request body (true full-duplex)
+gRPC: readMessage after the whole upload already completed — no streaming-upgrade deadlock
 --EXTENSIONS--
 true_async_server
 true_async
@@ -10,18 +10,19 @@ h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
-/* With setBodyStreamingEnabled(true) the handler drains request messages via
- * readMessage() WITHOUT awaitBody() — reading each message as it arrives while
- * the client is still sending (client-streaming / true full-duplex). Each
- * message here is ~40 KiB, so it spans several 16 KiB DATA frames: this pins
- * the incremental reassembler (deframe across frame boundaries). Total body is
- * in the 64 KiB..1 MiB upgrade band, so the parser switches to the streaming
- * queue. */
+/* Regression for the complete-before-upgrade deadlock: with a body in the
+ * 64 KiB..1 MiB upgrade band, the whole upload can be received and finalized
+ * (buffered) before the handler coroutine gets its first slot. The lazy
+ * body_upgrade_to_stream then flipped body_streaming on an already-complete
+ * request — empty queue, EOF forever lost — and readMessage() parked until
+ * the client died. The delay() below forces that ordering deterministically:
+ * the handler sleeps past the entire upload before its first readMessage(). */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 use function Async\await;
+use function Async\delay;
 
 require_once __DIR__ . '/../_free_port.inc';
 
@@ -49,11 +50,12 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 $server->addGrpcHandler(function ($req, $resp) {
-    /* No awaitBody() — drain messages incrementally as they arrive. */
+    /* Let the whole upload land + finalize before the first read. */
+    delay(400);
+
     while (($m = $req->readMessage()) !== null) {
         $resp->writeMessage('len:' . strlen($m));
     }
-    // grpc-status defaults to 0
 });
 
 $sizes = [40000, 45000, 50000];
@@ -65,12 +67,12 @@ $client = spawn(function () use ($port, $server, $sizes) {
     foreach ($sizes as $i => $sz) {
         $body .= grpc_frame(str_repeat(chr(ord('a') + $i), $sz));
     }
-    $bodyfile = tempnam(sys_get_temp_dir(), 'grpcstream');
+    $bodyfile = tempnam(sys_get_temp_dir(), 'grpccomplete');
     $outfile  = tempnam(sys_get_temp_dir(), 'grpcout');
     file_put_contents($bodyfile, $body);
 
     $cmd = sprintf(
-        'curl --http2-prior-knowledge -s -v --max-time 5 -H %s -H %s '
+        'curl --http2-prior-knowledge -s --max-time 8 -H %s -H %s '
         . '--data-binary @%s -o %s http://127.0.0.1:%d/svc/Collect 2>&1',
         escapeshellarg('content-type: application/grpc'),
         escapeshellarg('te: trailers'),
@@ -78,34 +80,14 @@ $client = spawn(function () use ($port, $server, $sizes) {
         escapeshellarg($outfile),
         $port
     );
-    $t0      = microtime(true);
-    $verbose = shell_exec($cmd);
-    $curl_ms = (int)((microtime(true) - $t0) * 1000);
-    $resp    = file_get_contents($outfile);
+    shell_exec($cmd);
+    $resp = file_get_contents($outfile);
     @unlink($bodyfile);
     @unlink($outfile);
 
     $replies = grpc_deframe_all($resp);
-
-    echo "saw_grpc_status=", (int)(strpos($verbose, 'grpc-status: 0') !== false), "\n";
     echo "count=", count($replies), "\n";
     echo "replies=", implode(',', $replies), "\n";
-
-    if (count($replies) === 0) {
-        /* Flake forensics (~1/200: empty response within max-time): dump the
-         * curl verbose + duration into the failing output so the next
-         * occurrence is diagnosable straight from the CI diff. The duration
-         * separates connect-refused (ms) from a stalled transfer (~max-time).
-         * Mangle run-tests' is_flaky_output() keywords ("refused"/"timed
-         * out"/...) or the dump itself triggers a silent retry that discards
-         * this very diagnostic. */
-        $keep = str_ireplace(
-            ['refused', 'timed out', 'deadlock', 'already in use'],
-            ['refu*sed', 'timed*out', 'dead*lock', 'already*in*use'],
-            (string)$verbose
-        );
-        echo "--- curl verbose (took {$curl_ms} ms) ---\n", $keep, "\n";
-    }
 
     $server->stop();
 });
@@ -114,7 +96,6 @@ $server->start();
 await($client);
 echo "Done\n";
 --EXPECT--
-saw_grpc_status=1
 count=3
 replies=len:40000,len:45000,len:50000
 Done

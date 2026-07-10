@@ -422,7 +422,10 @@ static void h3_body_pbuf_append(http3_stream_t *s, const uint8_t *data,
  * body_streaming. Idempotent. */
 static void http3_request_body_upgrade(http_request_t *req)
 {
-    if (req->body_streaming) {
+    /* Request already complete: body finalized into req->body, no EOF will
+     * ever reach the streaming queue — upgrading now would park the reader
+     * forever. Stay buffered (see http2_request_body_upgrade). */
+    if (req->body_streaming || req->complete) {
         return;
     }
 

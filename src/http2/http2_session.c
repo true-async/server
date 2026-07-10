@@ -371,7 +371,12 @@ static int cb_on_header(nghttp2_session *ng,
  * Idempotent. */
 static void http2_request_body_upgrade(http_request_t *req)
 {
-    if (req->body_streaming) {
+    /* Request already complete: the whole body arrived (and was finalized
+     * into req->body) before the handler's first read — there is nothing
+     * left to stream and nobody will ever signal EOF on the queue, so
+     * flipping body_streaming here would park the reader forever. Stay
+     * buffered; callers fall back to the req->body cursor path. */
+    if (req->body_streaming || req->complete) {
         return;
     }
 
