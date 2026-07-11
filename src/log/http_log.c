@@ -559,6 +559,214 @@ bool http_log_color_for_fd(int fd)
 #endif
 }
 
+/* Compiled user template: literal runs and placeholders as a flat segment
+ * list over one private copy of the template text. Compiled once at sink
+ * build; the render is a straight walk with no parsing or allocation. */
+
+#define LOG_TMPL_MAX_SEGS 24
+
+typedef enum {
+    TMPL_LIT,     /* literal bytes (also unknown placeholders, verbatim) */
+    TMPL_TS,      /* len == 0 → ISO-8601; else a date()-style pattern */
+    TMPL_LEVEL,
+    TMPL_MSG,
+    TMPL_ATTRS,
+    TMPL_TRACE,
+    TMPL_SPAN,
+} log_tmpl_kind_t;
+
+typedef struct {
+    uint8_t  kind;
+    uint16_t off;    /* into log_tmpl_t.text */
+    uint16_t len;
+} log_tmpl_seg_t;
+
+typedef struct {
+    int            nsegs;
+    log_tmpl_seg_t segs[LOG_TMPL_MAX_SEGS];
+    char           text[];
+} log_tmpl_t;
+
+static bool tmpl_push(log_tmpl_t *t, log_tmpl_kind_t kind,
+                      size_t off, size_t len)
+{
+    if (t->nsegs >= LOG_TMPL_MAX_SEGS) {
+        return false;
+    }
+
+    t->segs[t->nsegs].kind = (uint8_t)kind;
+    t->segs[t->nsegs].off  = (uint16_t)off;
+    t->segs[t->nsegs].len  = (uint16_t)len;
+    t->nsegs++;
+    return true;
+}
+
+static const struct { const char *kw; log_tmpl_kind_t kind; } tmpl_fields[] = {
+    { "ts", TMPL_TS },       { "level", TMPL_LEVEL }, { "msg", TMPL_MSG },
+    { "attrs", TMPL_ATTRS }, { "trace", TMPL_TRACE }, { "span", TMPL_SPAN },
+};
+
+void *http_log_template_parse(const char *tmpl, size_t len)
+{
+    if (len == 0 || len > HTTP_LOG_TEMPLATE_MAX) {
+        return NULL;
+    }
+
+    log_tmpl_t *t = emalloc(sizeof *t + len);
+    t->nsegs = 0;
+    memcpy(t->text, tmpl, len);
+
+    bool   ok = true;
+    size_t i  = 0;
+
+    while (ok && i < len) {
+        const size_t lit = i;
+        while (i < len && t->text[i] != '{') {
+            i++;
+        }
+        if (i > lit) {
+            ok = tmpl_push(t, TMPL_LIT, lit, i - lit);
+        }
+        if (!ok || i >= len) {
+            break;
+        }
+
+        size_t close = i + 1;
+        while (close < len && t->text[close] != '}') {
+            close++;
+        }
+        if (close >= len) {   /* unmatched '{' — the rest is literal */
+            ok = tmpl_push(t, TMPL_LIT, i, len - i);
+            break;
+        }
+
+        const char *name = t->text + i + 1;
+        size_t      nlen = close - (i + 1);
+        size_t      colon = 0;
+        while (colon < nlen && name[colon] != ':') {
+            colon++;
+        }
+
+        log_tmpl_kind_t kind  = TMPL_LIT;
+        bool            known = false;
+
+        for (size_t k = 0; k < sizeof tmpl_fields / sizeof tmpl_fields[0]; k++) {
+            if (strlen(tmpl_fields[k].kw) == colon
+                && memcmp(tmpl_fields[k].kw, name, colon) == 0) {
+                kind  = tmpl_fields[k].kind;
+                known = true;
+                break;
+            }
+        }
+
+        if (!known) {
+            ok = tmpl_push(t, TMPL_LIT, i, close - i + 1);   /* verbatim */
+        } else if (kind == TMPL_TS && colon < nlen) {
+            ok = tmpl_push(t, TMPL_TS, i + 1 + colon + 1, nlen - colon - 1);
+        } else {
+            ok = tmpl_push(t, kind, 0, 0);
+        }
+
+        i = close + 1;
+    }
+
+    if (!ok) {
+        efree(t);
+        return NULL;
+    }
+
+    return t;
+}
+
+/* Render the timestamp with a PHP date()-style pattern (subset: Y y m d H i
+ * s v); any other character passes through literally. */
+static void tmpl_put_ts(log_sbuf_t *sb, uint64_t ts_ns,
+                        const char *pat, size_t n)
+{
+    const time_t   sec = (time_t)(ts_ns / 1000000000ULL);
+    const uint32_t ms  = (uint32_t)((ts_ns % 1000000000ULL) / 1000000ULL);
+    struct tm tm_buf;
+#ifdef PHP_WIN32
+    gmtime_s(&tm_buf, &sec);
+#else
+    gmtime_r(&sec, &tm_buf);
+#endif
+
+    for (size_t i = 0; i < n; i++) {
+        switch (pat[i]) {
+            case 'Y': sb_printf(sb, "%04d", tm_buf.tm_year + 1900); break;
+            case 'y': sb_printf(sb, "%02d", (tm_buf.tm_year + 1900) % 100); break;
+            case 'm': sb_printf(sb, "%02d", tm_buf.tm_mon + 1); break;
+            case 'd': sb_printf(sb, "%02d", tm_buf.tm_mday); break;
+            case 'H': sb_printf(sb, "%02d", tm_buf.tm_hour); break;
+            case 'i': sb_printf(sb, "%02d", tm_buf.tm_min); break;
+            case 's': sb_printf(sb, "%02d", tm_buf.tm_sec); break;
+            case 'v': sb_printf(sb, "%03u", ms); break;
+            default:  sb_putc(sb, pat[i]);
+        }
+    }
+}
+
+size_t http_log_format_template(const http_log_record_t *rec,
+                                char *buf, size_t buf_len, void *ud)
+{
+    if (ud == NULL) {
+        return http_log_format_plain(rec, buf, buf_len, NULL);
+    }
+
+    if (buf_len < 2) {
+        return 0;
+    }
+
+    const log_tmpl_t *t = (const log_tmpl_t *)ud;
+    log_sbuf_t sb;
+    sb_init(&sb, buf, buf_len);
+
+    for (int i = 0; i < t->nsegs; i++) {
+        const log_tmpl_seg_t *seg = &t->segs[i];
+
+        switch ((log_tmpl_kind_t)seg->kind) {
+            case TMPL_LIT:
+                sb_write(&sb, t->text + seg->off, seg->len);
+                break;
+            case TMPL_TS:
+                if (seg->len == 0) {
+                    char ts[40];
+                    format_iso8601(rec->timestamp_ns, ts, sizeof ts);
+                    sb_puts(&sb, ts);
+                } else {
+                    tmpl_put_ts(&sb, rec->timestamp_ns,
+                                t->text + seg->off, seg->len);
+                }
+                break;
+            case TMPL_LEVEL:
+                sb_puts(&sb, severity_text(rec->severity));
+                break;
+            case TMPL_MSG:
+                if (rec->body != NULL) {
+                    sb_write(&sb, rec->body, rec->body_len);
+                }
+                break;
+            case TMPL_ATTRS:
+                sb_put_attrs(&sb, rec, LOG_STYLE_PLAIN);
+                break;
+            case TMPL_TRACE:
+                if (rec->has_trace) {
+                    sb_put_hex(&sb, rec->trace_id, sizeof rec->trace_id);
+                }
+                break;
+            case TMPL_SPAN:
+                if (rec->has_trace) {
+                    sb_put_hex(&sb, rec->span_id, sizeof rec->span_id);
+                }
+                break;
+        }
+    }
+
+    sb_putc(&sb, '\n');
+    return sb.len;
+}
+
 #define HTTP_LOG_SYSLOG_APPNAME "php-http-server"
 
 /* RFC 5424 facility keyword → numeric code, or -1 if unknown. */
@@ -773,11 +981,61 @@ static void *formatter_ud_syslog(HashTable *spec, zval *stream_zv)
     return (void *)(intptr_t)fac;
 }
 
-static const http_log_formatter_def_t fmt_plain  = { "plain",  http_log_format_plain,  NULL };
-static const http_log_formatter_def_t fmt_logfmt = { "logfmt", http_log_format_logfmt, NULL };
-static const http_log_formatter_def_t fmt_json   = { "json",   http_log_format_json,   NULL };
-static const http_log_formatter_def_t fmt_pretty = { "pretty", http_log_format_pretty, formatter_ud_pretty };
-static const http_log_formatter_def_t fmt_syslog = { "syslog", http_log_format_syslog, formatter_ud_syslog };
+/* template compiles its 'template' spec key once at sink build; the compiled
+ * block is owned by the sink (freed via free_ud at stop). */
+static bool formatter_validate_template(HashTable *spec)
+{
+    zval *zt = zend_hash_str_find(spec, "template", sizeof("template") - 1);
+
+    if (zt == NULL || Z_TYPE_P(zt) != IS_STRING || Z_STRLEN_P(zt) == 0
+        || Z_STRLEN_P(zt) > HTTP_LOG_TEMPLATE_MAX) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "setLogSinks(): format 'template' requires a 'template' string "
+            "(1..%d bytes)", HTTP_LOG_TEMPLATE_MAX);
+        return false;
+    }
+
+    void *t = http_log_template_parse(Z_STRVAL_P(zt), Z_STRLEN_P(zt));
+
+    if (t == NULL) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "setLogSinks(): 'template' has too many segments (max %d)",
+            LOG_TMPL_MAX_SEGS);
+        return false;
+    }
+
+    efree(t);
+    return true;
+}
+
+static void *formatter_ud_template(HashTable *spec, zval *stream_zv)
+{
+    (void)stream_zv;
+
+    zval *zt = spec != NULL
+        ? zend_hash_str_find(spec, "template", sizeof("template") - 1) : NULL;
+
+    if (zt == NULL || Z_TYPE_P(zt) != IS_STRING) {
+        return NULL;   /* render falls back to plain */
+    }
+
+    return http_log_template_parse(Z_STRVAL_P(zt), Z_STRLEN_P(zt));
+}
+
+static void formatter_ud_efree(void *ud)
+{
+    efree(ud);
+}
+
+static const http_log_formatter_def_t fmt_plain    = { "plain",    http_log_format_plain,    NULL, NULL, NULL };
+static const http_log_formatter_def_t fmt_logfmt   = { "logfmt",   http_log_format_logfmt,   NULL, NULL, NULL };
+static const http_log_formatter_def_t fmt_json     = { "json",     http_log_format_json,     NULL, NULL, NULL };
+static const http_log_formatter_def_t fmt_pretty   = { "pretty",   http_log_format_pretty,   NULL, formatter_ud_pretty, NULL };
+static const http_log_formatter_def_t fmt_syslog   = { "syslog",   http_log_format_syslog,   NULL, formatter_ud_syslog, NULL };
+static const http_log_formatter_def_t fmt_template = { "template", http_log_format_template,
+                                                       formatter_validate_template,
+                                                       formatter_ud_template,
+                                                       formatter_ud_efree };
 
 /* --- built-in sink types --- */
 
@@ -1333,6 +1591,7 @@ void http_log_minit(void)
     http_log_register_formatter(&fmt_json);
     http_log_register_formatter(&fmt_pretty);
     http_log_register_formatter(&fmt_syslog);
+    http_log_register_formatter(&fmt_template);
 
     http_log_register_sink_type(&sink_type_stream);
     http_log_register_sink_type(&sink_type_stdout);
@@ -1366,21 +1625,19 @@ static void http_log_state_refresh_gate(http_log_state_t *state)
     state->severity = floor;
 }
 
-/* Build one sink onto a zeroed slot: borrow the stream's async IO handle and
- * attach the coalescing writer. Returns false (sink left inactive, floor OFF)
- * on any failure. */
+/* Build one sink onto a zeroed slot from its spec: borrow the stream's async
+ * IO handle and attach the coalescing writer. Returns false (sink left
+ * inactive, floor OFF) on any failure — the caller then owns spec's ud. */
 static bool http_log_sink_start(http_log_sink_t *sink,
-                                http_log_severity_t severity,
-                                http_log_formatter_fn formatter,
-                                void *formatter_ud,
-                                zval *stream_zv,
-                                http_log_write_mode_t write_mode)
+                                const http_log_sink_spec_t *spec)
 {
     memset(sink, 0, sizeof *sink);
     sink->severity_floor = HTTP_LOG_OFF;
     ZVAL_UNDEF(&sink->stream_zv);
 
-    if (severity == HTTP_LOG_OFF || stream_zv == NULL
+    zval *stream_zv = spec->stream_zv;
+
+    if (spec->level == HTTP_LOG_OFF || stream_zv == NULL
         || Z_TYPE_P(stream_zv) != IS_RESOURCE) {
         return false;
     }
@@ -1445,7 +1702,7 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     cb->active_req     = NULL;
     cb->active_buf     = NULL;
     cb->io_owned       = io_owned;
-    cb->mode           = write_mode;
+    cb->mode           = spec->write_mode;
     cb->ring           = emalloc(HTTP_LOG_RING_CAP);
     cb->ring_head      = 0;
     cb->ring_len       = 0;
@@ -1468,12 +1725,14 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     writer_flush_timer_create(cb);   /* best-effort periodic flush */
 
     ZVAL_COPY(&sink->stream_zv, stream_zv);
-    sink->stream_set     = true;
-    sink->async_io       = io;
-    sink->writer_cb      = cb;
-    sink->formatter      = formatter != NULL ? formatter : http_log_format_plain;
-    sink->formatter_ud   = formatter_ud;
-    sink->severity_floor = severity;
+    sink->stream_set        = true;
+    sink->async_io          = io;
+    sink->writer_cb         = cb;
+    sink->formatter         = spec->formatter != NULL ? spec->formatter
+                                                      : http_log_format_plain;
+    sink->formatter_ud      = spec->formatter_ud;
+    sink->formatter_ud_free = spec->formatter_ud_free;
+    sink->severity_floor    = spec->level;
     return true;
 }
 
@@ -1539,6 +1798,14 @@ static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
  * ref. Assumes the caller already drained (or budgeted the drain away). */
 static void http_log_sink_stop(http_log_sink_t *sink)
 {
+    /* The formatter ud is ours regardless of the transport's fate — the
+     * formatter only runs inside emit, never from an in-flight write. */
+    if (sink->formatter_ud_free != NULL && sink->formatter_ud != NULL) {
+        sink->formatter_ud_free(sink->formatter_ud);
+    }
+    sink->formatter_ud      = NULL;
+    sink->formatter_ud_free = NULL;
+
     /* No coroutine drained the write — leak the cb/io/stream rather than
      * tear them down with a libuv thread-pool write still in flight. */
     if (UNEXPECTED(sink->writer_cb != NULL
@@ -1619,11 +1886,11 @@ void http_log_server_start_sinks(http_log_state_t *state,
     }
 
     for (int i = 0; i < n; i++) {
-        if (http_log_sink_start(&state->sinks[state->sink_count],
-                                specs[i].level, specs[i].formatter,
-                                specs[i].formatter_ud, specs[i].stream_zv,
-                                specs[i].write_mode)) {
+        if (http_log_sink_start(&state->sinks[state->sink_count], &specs[i])) {
             state->sink_count++;
+        } else if (specs[i].formatter_ud_free != NULL
+                   && specs[i].formatter_ud != NULL) {
+            specs[i].formatter_ud_free(specs[i].formatter_ud);
         }
     }
 

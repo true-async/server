@@ -1295,17 +1295,19 @@ static void http_server_start_logging(http_server_object *server,
             specs[n].formatter    = fdef != NULL ? fdef->fn : http_log_format_plain;
             specs[n].formatter_ud = (fdef != NULL && fdef->make_ud != NULL)
                                   ? fdef->make_ud(spec, &opened[n]) : NULL;
+            specs[n].formatter_ud_free = fdef != NULL ? fdef->free_ud : NULL;
             specs[n].stream_zv    = &opened[n];
             specs[n].write_mode   = mode;
             n++;
         } ZEND_HASH_FOREACH_END();
 
     } else if (cfg->log_severity != 0 && Z_TYPE(cfg->log_stream) != IS_UNDEF) {
-        specs[0].level        = (http_log_severity_t)cfg->log_severity;
-        specs[0].formatter    = http_log_format_plain;
-        specs[0].formatter_ud = NULL;
-        specs[0].stream_zv    = &cfg->log_stream;
-        specs[0].write_mode   = HTTP_LOG_WRITE_STREAM;
+        specs[0].level             = (http_log_severity_t)cfg->log_severity;
+        specs[0].formatter         = http_log_format_plain;
+        specs[0].formatter_ud      = NULL;
+        specs[0].formatter_ud_free = NULL;
+        specs[0].stream_zv         = &cfg->log_stream;
+        specs[0].write_mode        = HTTP_LOG_WRITE_STREAM;
         n = 1;
     }
 

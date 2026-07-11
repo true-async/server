@@ -103,6 +103,7 @@ typedef struct http_log_sink {
     http_log_severity_t       severity_floor;
     http_log_formatter_fn     formatter;
     void                     *formatter_ud;
+    void                    (*formatter_ud_free)(void *ud);
 
     /* Async file-writer transport: one write in flight, later emits
      * coalesce into pending (writer_cb). Owns its own drop counter and
@@ -161,6 +162,20 @@ size_t http_log_format_json(const http_log_record_t *rec,
 size_t http_log_format_pretty(const http_log_record_t *rec,
                               char *buf, size_t buf_len, void *ud);
 
+/* User-template line: `ud` is a compiled template from
+ * http_log_template_parse. Placeholders: {ts} (ISO-8601) / {ts:PATTERN}
+ * (PHP date()-style subset: Y y m d H i s v), {level}, {msg}, {attrs},
+ * {trace}, {span}; anything else is literal. NULL ud falls back to plain. */
+size_t http_log_format_template(const http_log_record_t *rec,
+                                char *buf, size_t buf_len, void *ud);
+
+#define HTTP_LOG_TEMPLATE_MAX 256
+
+/* Compile a template into the segment list http_log_format_template renders.
+ * Returns an efree()-able block, or NULL when the template is empty, too
+ * long, or has too many segments. */
+void *http_log_template_parse(const char *tmpl, size_t len);
+
 /* Bare RFC 5424 syslog message ("<PRI>1 TS HOST APP PROCID - - MSG"); the
  * transport frames it (octet-count on a stream, one datagram on UDP/unix).
  * `ud` carries the syslog facility (0..23, default user=1). */
@@ -181,10 +196,17 @@ int http_log_syslog_facility(const char *name, size_t len);
 typedef struct {
     const char            *name;
     http_log_formatter_fn  fn;
+    /* Config-time validation of formatter-specific spec keys (e.g. template's
+     * 'template' string); throws and returns false. NULL = none. */
+    bool (*validate)(HashTable *spec);
     /* Resolve per-sink formatter state from the (validated) spec and the
      * resolved transport stream — e.g. pretty's colour flag, syslog's
-     * facility. NULL when the formatter carries no state. */
+     * facility, template's compiled segments. NULL when the formatter
+     * carries no state. */
     void *(*make_ud)(HashTable *spec, zval *stream_zv);
+    /* Release a make_ud result at sink stop. NULL when ud is not owned
+     * (flag/scalar uds). Called only on a non-NULL ud. */
+    void (*free_ud)(void *ud);
 } http_log_formatter_def_t;
 
 typedef struct {
@@ -234,6 +256,7 @@ typedef struct {
     http_log_severity_t    level;
     http_log_formatter_fn  formatter;
     void                  *formatter_ud;
+    void                 (*formatter_ud_free)(void *ud);   /* owned ud, or NULL */
     zval                  *stream_zv;
     http_log_write_mode_t  write_mode;
 } http_log_sink_spec_t;

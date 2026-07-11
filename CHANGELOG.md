@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (built-ins register through the same seam). Validation error messages list
     whatever is actually registered. The `syslog` formatter is now also
     name-addressable (`'format'=>'syslog'`) on stream sinks.
+  - **`template` formatter — user-controlled line layout.** `['format' =>
+    'template', 'template' => '{ts:Y-m-d H:i:s.v} [{level}] {msg}{attrs}']`
+    renders each record through a custom template: `{ts}` (ISO-8601) or
+    `{ts:PATTERN}` with a PHP `date()`-style subset (`Y y m d H i s v`),
+    `{level}`, `{msg}`, `{attrs}`, `{trace}`, `{span}`; everything else is
+    literal (unknown placeholders pass through verbatim). The template is
+    compiled once when the sink starts, so the per-record render stays a flat
+    segment walk. Bad templates throw at `setLogSinks()` time.
   - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
     OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
     Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with

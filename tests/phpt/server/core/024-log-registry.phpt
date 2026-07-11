@@ -32,7 +32,7 @@ foreach ([
 echo "Done\n";
 --EXPECT--
 types: stream|stdout|stderr|syslog
-formatters: plain|logfmt|json|pretty|syslog
+formatters: plain|logfmt|json|pretty|syslog|template
 bad-type: setLogSinks(): 'type' must be one of stream|stdout|stderr|syslog
-bad-format: setLogSinks(): 'format' must be one of plain|logfmt|json|pretty|syslog
+bad-format: setLogSinks(): 'format' must be one of plain|logfmt|json|pretty|syslog|template
 Done

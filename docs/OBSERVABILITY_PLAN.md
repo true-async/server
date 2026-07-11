@@ -490,6 +490,30 @@ bodies → one `http_logf_at`, `format_clock` → slice of `format_iso8601`.
 - [x] Build & verify — core+telemetry green
 - Profiler N/A — emit path unchanged (one branch on mode per record)
 
+#### B5f — `template` formatter (user-controlled line layout) ✅
+
+User request: control the console text format (e.g. `Y-m-d` dates). New
+built-in `'format'=>'template'` + `'template'=>'{ts:Y-m-d H:i:s.v} [{level}]
+{msg}{attrs}'`. Placeholders {ts}/{ts:PATTERN} (date()-subset Y y m d H i s v),
+{level}, {msg}, {attrs}, {trace}, {span}; unknown → literal. Compiled ONCE at
+sink build into a flat segment list (`http_log_template_parse`, one emalloc
+block, segs point into a private copy); render is a straight walk. To carry
+the owned ud the formatter registry def gained `validate` (config-time key
+check) and `free_ud` (ownership); `http_log_sink_start` now takes the spec
+struct; sink stop / failed start free the ud.
+
+- [x] Code quality — parse at build, zero parsing/alloc on the emit path
+- [x] No duplicated logic — renders via the shared sb_*/sb_put_attrs/
+      format_iso8601 helpers; registry seam extended, not bypassed
+- [x] `const` — compiled template read as const in render; field table static
+- [x] Comments reviewed
+- [x] Tests — core/026 (4 goldens incl. date pattern + literal fallbacks,
+      2 config rejects, e2e через stream sink); 024 lists updated
+- [x] Coverage checked
+- [x] Build & verify — 71 core+telemetry green; targeted valgrind on
+      parse/render/reject path: 0 leaks, 0 errors
+- Profiler N/A — same emit path; template render ≈ plain render cost
+
 ### Stage B6 — structured access log  _(step 11 — ⚠ profiler)_
 
 Goal: per-request event (method, path, status, bytes, duration, protocol,

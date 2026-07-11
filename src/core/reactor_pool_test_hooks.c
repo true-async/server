@@ -1197,28 +1197,34 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_log_format_selftest, 0, 1,
                                         MAY_BE_STRING | MAY_BE_FALSE)
     ZEND_ARG_TYPE_INFO(0, style, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, color, _IS_BOOL, 0, "false")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, template, IS_STRING, 0, "\"\"")
 ZEND_END_ARG_INFO()
 
 /* Format a fixed canonical record (issue #5, B2/B3) with the named formatter
  * and return the bytes, so the phpt goldens plain/logfmt/json/pretty output —
  * including space/quote/newline escaping, the json-only trace fields, and the
  * pretty colour on/off paths — with no server or coroutine. `color` feeds the
- * pretty formatter's ud. false on an unknown style. */
+ * pretty formatter's ud; `template` the template formatter's. false on an
+ * unknown style or an uncompilable template. */
 PHP_FUNCTION(_http_log_format_selftest)
 {
     char       *style;
     size_t      style_len;
     zend_bool   color = 0;
+    char       *tmpl_arg = NULL;
+    size_t      tmpl_len = 0;
 
-    ZEND_PARSE_PARAMETERS_START(1, 2)
+    ZEND_PARSE_PARAMETERS_START(1, 3)
         Z_PARAM_STRING(style, style_len)
         Z_PARAM_OPTIONAL
         Z_PARAM_BOOL(color)
+        Z_PARAM_STRING(tmpl_arg, tmpl_len)
     ZEND_PARSE_PARAMETERS_END();
 
     /* Resolve through the formatter registry — the same lookup setLogSinks
      * uses — so the goldens also cover the plugin seam. ud stays hook-built
-     * (make_ud wants a sink spec): pretty = colour flag, syslog = facility. */
+     * (make_ud wants a sink spec): pretty = colour flag, syslog = facility,
+     * template = compiled template (freed below). */
     const http_log_formatter_def_t *fdef =
         http_log_formatter_by_name(style, style_len);
 
@@ -1226,13 +1232,20 @@ PHP_FUNCTION(_http_log_format_selftest)
         RETURN_FALSE;
     }
 
-    http_log_formatter_fn fmt    = fdef->fn;
-    void                 *fmt_ud = NULL;
+    http_log_formatter_fn fmt      = fdef->fn;
+    void                 *fmt_ud   = NULL;
+    bool                  ud_owned = false;
 
     if (style_len == 6 && memcmp(style, "pretty", 6) == 0) {
         fmt_ud = color ? (void *)1 : NULL;
     } else if (style_len == 6 && memcmp(style, "syslog", 6) == 0) {
         fmt_ud = (void *)(intptr_t)1;   /* facility = user */
+    } else if (style_len == 8 && memcmp(style, "template", 8) == 0) {
+        fmt_ud = http_log_template_parse(tmpl_arg, tmpl_len);
+        if (fmt_ud == NULL) {
+            RETURN_FALSE;
+        }
+        ud_owned = true;
     }
 
     const http_log_attr_t attrs[] = {
@@ -1266,6 +1279,10 @@ PHP_FUNCTION(_http_log_format_selftest)
 
     char   buf[2048];
     size_t n = fmt(&rec, buf, sizeof buf, fmt_ud);
+
+    if (ud_owned) {
+        efree(fmt_ud);
+    }
 
     RETURN_STRINGL(buf, n);
 }

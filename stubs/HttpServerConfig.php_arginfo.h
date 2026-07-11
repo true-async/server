@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: 58e8f657707a1a66797c3200e98b94951efee86f */
+ * Stub hash: 415c384c11994ae1c41a9c5e8125c12d75576778 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")

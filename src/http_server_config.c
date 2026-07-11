@@ -2843,12 +2843,19 @@ static bool log_sink_spec_valid(zval *elem)
             return false;
         }
 
-        if (http_log_formatter_by_name(Z_STRVAL_P(zfmt), Z_STRLEN_P(zfmt)) == NULL) {
+        const http_log_formatter_def_t *fdef =
+            http_log_formatter_by_name(Z_STRVAL_P(zfmt), Z_STRLEN_P(zfmt));
+
+        if (fdef == NULL) {
             char names[256];
             http_log_formatter_names(names, sizeof names);
             zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
                 "setLogSinks(): 'format' must be one of %s", names);
             return false;
+        }
+
+        if (fdef->validate != NULL && !fdef->validate(spec)) {
+            return false;   /* exception thrown by the formatter */
         }
     }
 

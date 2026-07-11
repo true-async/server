@@ -970,15 +970,21 @@ final class HttpServerConfig
      * Each element is an array:
      *   - 'type'     => 'stream' | 'stdout' | 'stderr' | 'syslog'  (required)
      *   - 'stream'   => resource               (required for 'stream')
-     *   - 'target'   => 'tcp://host:port'      (required for 'syslog')
+     *   - 'target'   => 'tcp://host:port' | 'udp://host:port' | 'udg:///dev/log'
+     *                                          (required for 'syslog')
      *   - 'facility' => 'user' | 'daemon' | 'local0'..'local7' | …  (syslog, default 'user')
-     *   - 'format'   => 'plain' | 'logfmt' | 'json' | 'pretty'  (default 'plain'; ignored for syslog)
+     *   - 'format'   => 'plain' | 'logfmt' | 'json' | 'pretty' | 'template'
+     *                                          (default 'plain'; ignored for syslog)
+     *   - 'template' => string                 (required for format 'template')
      *   - 'level'    => LogSeverity            (required)
      *
      * 'pretty' auto-decides colour from the target (NO_COLOR / CLICOLOR_FORCE /
-     * isatty). 'syslog' emits RFC 5424 with RFC 6587 octet framing over TCP. At
-     * most 8 sinks. Invalid specs throw at call time. Local/UDP syslog, file
-     * rotation and journald arrive in later stages.
+     * isatty). 'syslog' emits RFC 5424: octet-framed (RFC 6587) over TCP, one
+     * record per datagram on udp/udg. 'template' renders each record through a
+     * custom line layout: {ts} (ISO-8601) or {ts:PATTERN} (date()-style subset
+     * Y y m d H i s v, e.g. '{ts:Y-m-d H:i:s.v}'), {level}, {msg}, {attrs},
+     * {trace}, {span}; any other text is literal. At most 8 sinks. Invalid
+     * specs throw at call time.
      *
      * @param array $sinks List of sink spec arrays (see above).
      * @return static
