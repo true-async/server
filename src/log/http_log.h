@@ -117,6 +117,13 @@ typedef struct http_log_sink {
     void                     *formatter_ud;
     void                    (*formatter_ud_free)(void *ud);
 
+    /* PHP-callback delivery (sink type 'php' / onLog): the record is handed
+     * to userland as an array; no formatter, no stream transport. The fcc is
+     * resolved once at sink build. */
+    bool                      is_php;
+    zval                      php_cb;
+    zend_fcall_info_cache     php_fcc;
+
     /* Async file-writer transport: one write in flight, later emits
      * coalesce into pending (writer_cb). Owns its own drop counter and
      * stderr-fallback rate-limit so a drop is attributed to this sink. */
@@ -253,6 +260,10 @@ typedef struct {
     /* Non-NULL forces this formatter (the spec's 'format' is ignored) —
      * how syslog pins its wire format. NULL → the spec's 'format' picks. */
     const http_log_formatter_def_t *pinned_formatter;
+    /* true = records are delivered to the spec's 'callback' as a PHP array
+     * instead of being formatted and written to a stream; `open` is unused
+     * (may be NULL). The onLog seam. */
+    bool php_delivery;
 } http_log_sink_type_t;
 
 /* false when the registry is full or the name is already taken. */
@@ -289,6 +300,7 @@ typedef struct {
     void                  *formatter_ud;
     void                 (*formatter_ud_free)(void *ud);   /* owned ud, or NULL */
     zval                  *stream_zv;
+    zval                  *php_cb;    /* non-NULL → PHP-callback sink */
     http_log_write_mode_t  write_mode;
 } http_log_sink_spec_t;
 

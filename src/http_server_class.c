@@ -1270,8 +1270,33 @@ static void http_server_start_logging(http_server_object *server,
                 http_log_sink_type_by_name(Z_STRVAL_P(ztype), Z_STRLEN_P(ztype));
             http_log_write_mode_t mode = HTTP_LOG_WRITE_STREAM;
 
-            if (type == NULL || !type->open(spec, &opened[n], &mode)) {
-                continue;   /* open failure (e.g. unreachable target) skips the sink */
+            if (type == NULL) {
+                continue;
+            }
+
+            if (type->php_delivery) {
+                zval *zlvl_p = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+                zval *zcat_p = zend_hash_str_find(spec, "category", sizeof("category") - 1);
+
+                memset(&specs[n], 0, sizeof specs[n]);
+                specs[n].level         = (http_log_severity_t)
+                    Z_LVAL_P(zend_enum_fetch_case_value(Z_OBJ_P(zlvl_p)));
+                specs[n].category_mask = zcat_p != NULL
+                    ? http_log_category_mask(Z_STRVAL_P(zcat_p), Z_STRLEN_P(zcat_p))
+                    : HTTP_LOG_CAT_APP;
+                specs[n].php_cb        = zend_hash_str_find(spec, "callback",
+                                                            sizeof("callback") - 1);
+                n++;
+                continue;
+            }
+
+            if (!type->open(spec, &opened[n], &mode)) {
+                /* Unreachable target, or a parent-opened 'stream' resource
+                 * that cannot cross into this worker thread (use 'file'). */
+                fprintf(stderr,
+                        "http_server: log sink type '%s' skipped (open failed)\n",
+                        Z_STRVAL_P(ztype));
+                continue;
             }
 
             const http_log_formatter_def_t *fdef = type->pinned_formatter;
@@ -1301,6 +1326,7 @@ static void http_server_start_logging(http_server_object *server,
                                   ? fdef->make_ud(spec, &opened[n]) : NULL;
             specs[n].formatter_ud_free = fdef != NULL ? fdef->free_ud : NULL;
             specs[n].stream_zv    = &opened[n];
+            specs[n].php_cb       = NULL;
             specs[n].write_mode   = mode;
             n++;
         } ZEND_HASH_FOREACH_END();
@@ -1312,6 +1338,7 @@ static void http_server_start_logging(http_server_object *server,
         specs[0].formatter_ud      = NULL;
         specs[0].formatter_ud_free = NULL;
         specs[0].stream_zv         = &cfg->log_stream;
+        specs[0].php_cb            = NULL;
         specs[0].write_mode        = HTTP_LOG_WRITE_STREAM;
         n = 1;
     }

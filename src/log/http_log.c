@@ -945,7 +945,8 @@ bool http_log_register_formatter(const http_log_formatter_def_t *def)
 
 bool http_log_register_sink_type(const http_log_sink_type_t *type)
 {
-    if (type == NULL || type->name == NULL || type->open == NULL
+    if (type == NULL || type->name == NULL
+        || (type->open == NULL && !type->php_delivery)
         || g_sink_type_count >= HTTP_LOG_REG_SLOTS
         || http_log_sink_type_by_name(type->name, strlen(type->name)) != NULL) {
         return false;
@@ -1176,6 +1177,44 @@ static bool syslog_target_mode(const zval *ztarget, http_log_write_mode_t *mode)
     return false;
 }
 
+/* 'file' opens its own append-mode stream from a path — the type that works
+ * under a worker pool, where a parent-opened 'stream' resource cannot cross
+ * into worker threads (each worker's start_logging reopens the path). */
+static bool sink_validate_file(HashTable *spec)
+{
+    zval *zp = zend_hash_str_find(spec, "path", sizeof("path") - 1);
+
+    if (zp == NULL || Z_TYPE_P(zp) != IS_STRING || Z_STRLEN_P(zp) == 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): type 'file' requires a non-empty 'path' string", 0);
+        return false;
+    }
+
+    return true;
+}
+
+static bool sink_open_file(HashTable *spec, zval *out,
+                           http_log_write_mode_t *mode)
+{
+    (void)mode;
+
+    zval *zp = zend_hash_str_find(spec, "path", sizeof("path") - 1);
+
+    if (zp == NULL || Z_TYPE_P(zp) != IS_STRING) {
+        return false;
+    }
+
+    php_stream *s = php_stream_open_wrapper(Z_STRVAL_P(zp), "ab",
+                                            REPORT_ERRORS, NULL);
+
+    if (s == NULL) {
+        return false;
+    }
+
+    php_stream_to_zval(s, out);
+    return true;
+}
+
 static bool sink_validate_syslog(HashTable *spec)
 {
     zval *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
@@ -1228,10 +1267,27 @@ static bool sink_open_syslog(HashTable *spec, zval *out,
     return true;
 }
 
-static const http_log_sink_type_t sink_type_stream = { "stream", sink_validate_stream, sink_open_stream, NULL };
-static const http_log_sink_type_t sink_type_stdout = { "stdout", NULL, sink_open_stdout, NULL };
-static const http_log_sink_type_t sink_type_stderr = { "stderr", NULL, sink_open_stderr, NULL };
-static const http_log_sink_type_t sink_type_syslog = { "syslog", sink_validate_syslog, sink_open_syslog, &fmt_syslog };
+/* 'php' delivers each record to the spec's 'callback' as an array — the
+ * onLog seam userland exporters (OTLP etc.) build on. */
+static bool sink_validate_php(HashTable *spec)
+{
+    zval *zcb = zend_hash_str_find(spec, "callback", sizeof("callback") - 1);
+
+    if (zcb == NULL || !zend_is_callable(zcb, 0, NULL)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): type 'php' requires a callable 'callback'", 0);
+        return false;
+    }
+
+    return true;
+}
+
+static const http_log_sink_type_t sink_type_stream = { "stream", sink_validate_stream, sink_open_stream, NULL, false };
+static const http_log_sink_type_t sink_type_file   = { "file",   sink_validate_file,   sink_open_file,   NULL, false };
+static const http_log_sink_type_t sink_type_stdout = { "stdout", NULL, sink_open_stdout, NULL, false };
+static const http_log_sink_type_t sink_type_stderr = { "stderr", NULL, sink_open_stderr, NULL, false };
+static const http_log_sink_type_t sink_type_syslog = { "syslog", sink_validate_syslog, sink_open_syslog, &fmt_syslog, false };
+static const http_log_sink_type_t sink_type_php    = { "php",    sink_validate_php,    NULL, NULL, true };
 
 /* ------------------------------------------------------------------------ */
 
@@ -1574,6 +1630,86 @@ void http_log_emitf(http_log_state_t *state,
     log_dispatch_record(state, &rec);
 }
 
+/* Re-entrancy guard for PHP-callback sinks: a callback that itself logs
+ * would recurse through dispatch forever. While inside a callback, php
+ * sinks are skipped (stream sinks still receive the nested record). */
+ZEND_TLS bool in_php_log_cb = false;
+
+/* Deliver one record to a php sink as an array:
+ * {timestamp_ns, severity, severity_text, category, message,
+ *  attrs: {k: v, …}, trace_id?, span_id?}. A callback exception is absorbed
+ * (drop-counted, rate-limited stderr notice) — it never kills the worker. */
+static void log_deliver_php(http_log_sink_t *sink, const http_log_record_t *rec)
+{
+    if (in_php_log_cb) {
+        return;
+    }
+
+    zval arr;
+    array_init(&arr);
+    add_assoc_long(&arr, "timestamp_ns", (zend_long)rec->timestamp_ns);
+    add_assoc_long(&arr, "severity", (zend_long)rec->severity);
+    add_assoc_string(&arr, "severity_text", severity_text(rec->severity));
+    add_assoc_string(&arr, "category",
+                     rec->category == HTTP_LOG_CAT_ACCESS ? "access" : "app");
+    add_assoc_stringl(&arr, "message", rec->body != NULL ? rec->body : "",
+                      rec->body_len);
+
+    zval attrs;
+    array_init(&attrs);
+    for (size_t i = 0; i < rec->attrs_count; i++) {
+        const http_log_attr_t *a = &rec->attrs[i];
+
+        switch (a->type) {
+            case HTTP_LOG_ATTR_STR:
+                add_assoc_string(&attrs, a->key, a->v.s != NULL ? a->v.s : "");
+                break;
+            case HTTP_LOG_ATTR_I64:
+                add_assoc_long(&attrs, a->key, (zend_long)a->v.i64);
+                break;
+            case HTTP_LOG_ATTR_U64:
+                add_assoc_long(&attrs, a->key, (zend_long)a->v.u64);
+                break;
+            case HTTP_LOG_ATTR_BOOL:
+                add_assoc_bool(&attrs, a->key, a->v.b);
+                break;
+            case HTTP_LOG_ATTR_F64:
+                add_assoc_double(&attrs, a->key, a->v.f64);
+                break;
+        }
+    }
+    add_assoc_zval(&arr, "attrs", &attrs);
+
+    if (rec->has_trace) {
+        char hex[33];
+        log_sbuf_t sb;
+
+        sb_init(&sb, hex, sizeof hex);
+        sb_put_hex(&sb, rec->trace_id, sizeof rec->trace_id);
+        add_assoc_string(&arr, "trace_id", hex);
+
+        sb_init(&sb, hex, sizeof hex);
+        sb_put_hex(&sb, rec->span_id, sizeof rec->span_id);
+        add_assoc_string(&arr, "span_id", hex);
+    }
+
+    zval retval;
+    ZVAL_UNDEF(&retval);
+
+    in_php_log_cb = true;
+    zend_call_known_fcc(&sink->php_fcc, &retval, 1, &arr, NULL);
+    in_php_log_cb = false;
+
+    if (UNEXPECTED(EG(exception) != NULL)) {
+        sink->dropped_total++;
+        emit_fallback_stderr(sink, "onLog callback threw — exception absorbed");
+        zend_clear_exception();
+    }
+
+    zval_ptr_dtor(&retval);
+    zval_ptr_dtor(&arr);
+}
+
 /* Shared fan-out behind emitf and emit_access: format once per distinct
  * (formatter, ud), then hand the bytes to every sink whose floor and
  * category mask admit the record. A cache miss past HTTP_LOG_FMT_SLOTS just
@@ -1591,6 +1727,11 @@ static void log_dispatch_record(http_log_state_t *state,
         if (sink->severity_floor == HTTP_LOG_OFF
             || (int)rec->severity < (int)sink->severity_floor
             || (sink->category_mask & rec->category) == 0) {
+            continue;
+        }
+
+        if (sink->is_php) {
+            log_deliver_php(sink, rec);
             continue;
         }
 
@@ -1732,9 +1873,11 @@ void http_log_minit(void)
     http_log_register_formatter(&fmt_template);
 
     http_log_register_sink_type(&sink_type_stream);
+    http_log_register_sink_type(&sink_type_file);
     http_log_register_sink_type(&sink_type_stdout);
     http_log_register_sink_type(&sink_type_stderr);
     http_log_register_sink_type(&sink_type_syslog);
+    http_log_register_sink_type(&sink_type_php);
 }
 
 void http_log_mshutdown(void)
@@ -1782,11 +1925,39 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     memset(sink, 0, sizeof *sink);
     sink->severity_floor = HTTP_LOG_OFF;
     ZVAL_UNDEF(&sink->stream_zv);
+    ZVAL_UNDEF(&sink->php_cb);
+
+    if (spec->level == HTTP_LOG_OFF) {
+        return false;
+    }
+
+    /* PHP-callback sink: no formatter, no transport — resolve the fcc once
+     * and deliver records as arrays from the dispatch loop. */
+    if (spec->php_cb != NULL) {
+        char *err = NULL;
+
+        if (!zend_is_callable_ex(spec->php_cb, NULL, 0, NULL,
+                                 &sink->php_fcc, &err)) {
+            if (err != NULL) {
+                efree(err);
+            }
+            return false;
+        }
+        if (err != NULL) {
+            efree(err);
+        }
+
+        ZVAL_COPY(&sink->php_cb, spec->php_cb);
+        sink->is_php            = true;
+        sink->category_mask     = spec->category_mask != 0 ? spec->category_mask
+                                                           : HTTP_LOG_CAT_APP;
+        sink->severity_floor    = spec->level;
+        return true;
+    }
 
     zval *stream_zv = spec->stream_zv;
 
-    if (spec->level == HTTP_LOG_OFF || stream_zv == NULL
-        || Z_TYPE_P(stream_zv) != IS_RESOURCE) {
+    if (stream_zv == NULL || Z_TYPE_P(stream_zv) != IS_RESOURCE) {
         return false;
     }
 
@@ -1948,6 +2119,14 @@ static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
  * ref. Assumes the caller already drained (or budgeted the drain away). */
 static void http_log_sink_stop(http_log_sink_t *sink)
 {
+    if (sink->is_php) {
+        zval_ptr_dtor(&sink->php_cb);
+        ZVAL_UNDEF(&sink->php_cb);
+        sink->is_php         = false;
+        sink->severity_floor = HTTP_LOG_OFF;
+        return;
+    }
+
     /* The formatter ud is ours regardless of the transport's fate — the
      * formatter only runs inside emit, never from an in-flight write. */
     if (sink->formatter_ud_free != NULL && sink->formatter_ud != NULL) {

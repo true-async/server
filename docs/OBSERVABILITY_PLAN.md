@@ -549,25 +549,46 @@ everywhere. An access sink forces `sample_stamps_enabled` (third consumer).
       the honest price of the enabled feature; further cuts need a
       formatter rewrite (not taken).
 
-### Stage B7 — `onLog` PHP hook (+ userland OTLP)  _(step 12)_
+### Stage B7 — `onLog` PHP hook (+ userland OTLP) ✅ _(step 12)_
 
-Goal: `onLog(callable)` — record delivered to userland (sink type `php`). OTLP-
-logs export is done in userland on top of `onLog`, **not** an embedded client.
+Shipped: sink type `php` through the registry (`php_delivery` type kind — no
+stream; the spec's callable is resolved to an fcc once at sink build) +
+`HttpServerConfig::onLog(callable, ?LogSeverity level = INFO, category='all')`
+sugar that appends the equivalent spec. Records arrive as arrays
+(`timestamp_ns/severity/severity_text/category/message/attrs/trace_id/span_id`)
+from inside the same fan-out (`log_dispatch_record`). A `ZEND_TLS` re-entrancy
+guard keeps a logging callback from recursing into itself (stream sinks still
+get the nested record); a callback exception is absorbed (drop-counted,
+rate-limited notice).
 
-Files: `http_server_class.c`, `stubs/HttpServer.php`.
+- [x] Code quality — fcc resolved once; delivery inside the dispatch loop
+- [x] No duplicated logic — php sink is a delivery variant inside the one
+      fan-out, not a second logging path
+- [x] `const`
+- [x] Comments reviewed
+- [x] Tests — core/029: records for diagnostics + access, thrown exception
+      absorbed mid-stream, invalid callback rejected at config time
+- [x] Coverage checked
+- [x] Build & verify — 134 tests green
 
-Acceptance: userland callback receives structured records; exceptions in it are
-absorbed, never kill the worker.
+#### B7b — pool-mode logging fix + `file` sink ✅
 
-**Quality gate**
-- [ ] Code quality (callback invoked safely; exception absorbed like other hooks)
-- [ ] No duplicated logic — the `php` sink is another `transport_write_fn`, not a
-      bypass around the fan-out
-- [ ] `const`
-- [ ] Comments reviewed
-- [ ] Tests — userland callback receives records; exception absorbed
-- [ ] Coverage checked
-- [ ] Build & verify
+Bug found while benchmarking B6: the frozen config snapshot carried NO
+logging fields, so pool workers never logged anything. Fixed: sink specs are
+flattened into `http_server_shared_config_t` as persistent strings (+ level
+backing value) at freeze and rebuilt into the worker's spec array at LOAD.
+`stream`/`php` sinks cannot cross threads (resource/closure) — skipped at
+freeze with a stderr notice when workers>1; new sink type
+`['type'=>'file','path'=>…]` reopens the path per worker (append mode) and is
+the pool-friendly file transport. phpt core/028 (2-worker pool, 4 requests →
+4 access records in the shared file).
+
+**ASAN/UBSAN (batched B1–B7):** core+telemetry under
+`scripts/test-with-sanitizers.sh` — sanitizer-reported errors: **0**. The 17
+failing tests are all the documented vfork-interceptor × uv_spawn false-SEGV
+(`memset @ 0x10007fff8000`) / ASAN-slowdown class on pool/exec tests — not
+extension bugs. Release build restored (`nm -D | grep -c __asan` = 0), full
+suite re-verified green.
 
 ---
 

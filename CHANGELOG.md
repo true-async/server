@@ -52,6 +52,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     HTTP/2 and HTTP/3. Off by default: without an access sink the cost is
     one predicted branch per request; with one, the peer address is resolved
     once per connection and timestamp rendering caches the current second.
+  - **`onLog` / `php` sink — records to userland (B7).**
+    `HttpServerConfig::onLog(callable, ?LogSeverity, category='all')` (sugar
+    for `['type'=>'php','callback'=>…]`) delivers every admitted record to a
+    PHP callback as a structured array (`timestamp_ns`, `severity`,
+    `severity_text`, `category`, `message`, `attrs`, `trace_id`/`span_id`) —
+    the seam userland exporters (OTLP etc.) build on. A callback exception is
+    absorbed (drop-counted), never kills the worker; a callback that itself
+    logs does not recurse.
+  - **`file` sink + logging now works under the worker pool.** New
+    `['type'=>'file','path'=>…]` sink: each pool worker reopens the path
+    itself (append mode). Previously NO logging configuration crossed into
+    pool workers at all — the frozen config snapshot dropped it; sink specs
+    are now flattened into the snapshot and rebuilt per worker, so
+    `file`/`stdout`/`stderr`/`syslog` sinks (and the access log) work with
+    `setWorkers(N)`. `stream` (a parent-opened resource) and `php` (a
+    closure) cannot cross threads: they stay active on the parent and are
+    skipped in workers with a start-time notice.
   - **Sink-type / formatter registry (plugin seam).** `setLogSinks()` resolves
     `'type'` and `'format'` names through a registry instead of hardcoded
     lists; another extension can add its own sink type or formatter at MINIT

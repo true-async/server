@@ -997,6 +997,25 @@ final class HttpServerConfig
     public function setLogSinks(array $sinks): static {}
 
     /**
+     * Deliver every admitted log record to a PHP callback — sugar for a
+     * setLogSinks() entry of ['type' => 'php', 'callback' => $callback].
+     * The callback receives one array per record:
+     *   ['timestamp_ns' => int, 'severity' => int, 'severity_text' => string,
+     *    'category' => 'app'|'access', 'message' => string,
+     *    'attrs' => array, 'trace_id' => ?string, 'span_id' => ?string]
+     * Userland exporters (e.g. OTLP) build on this. An exception thrown by
+     * the callback is absorbed (drop-counted), never kills the worker; a
+     * callback that logs does not recurse into itself. Appends to any sinks
+     * already configured.
+     *
+     * @param callable $callback Receives the record array.
+     * @param LogSeverity|null $level Minimum severity (default INFO).
+     * @param string $category 'app' | 'access' | 'all' (default 'all').
+     * @return static
+     */
+    public function onLog(callable $callback, ?LogSeverity $level = null, string $category = 'all'): static {}
+
+    /**
      * Enable or disable telemetry. When enabled, the server parses
      * incoming traceparent / tracestate headers (W3C Trace Context) and
      * attaches them to the request — accessible via HttpRequest API.
