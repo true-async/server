@@ -987,9 +987,11 @@ void http3_listener_set_steer(http3_listener_t *l, http3_steer_group_t *g)
 
 /* Per-reactor-thread list of listeners that took a forwarded datagram in the
  * current mailbox drain batch. Built by http3_steer_feed_fn, drained once by
- * http3_reactor_steer_flush_epilogue at batch end. __thread: each reactor has
- * its own, no locking, and a listener only ever appears on its owner reactor. */
-static __thread http3_listener_t *tls_steer_flush_head = NULL;
+ * http3_reactor_steer_flush_epilogue at batch end. Thread-local: each reactor
+ * has its own, no locking, and a listener only ever appears on its owner
+ * reactor. ZEND_TLS expands to static + the compiler's TLS keyword
+ * (__declspec(thread) on MSVC, __thread on GCC/Clang). */
+ZEND_TLS http3_listener_t *tls_steer_flush_head = NULL;
 
 /* Reactor drain epilogue (registered via reactor_pool_set_drain_epilogue):
  * flush every listener that took a forwarded datagram this batch, exactly once.

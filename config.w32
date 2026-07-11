@@ -77,7 +77,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "http3_dispatch.c " +
         "http3_stream.c " +
         "http3_stream_pool.c " +
-        "http3_static_response.c ";
+        "http3_static_response.c " +
+        "http3_steer.c ";
 
     var http_server_formats =
         "multipart_parser.c " +

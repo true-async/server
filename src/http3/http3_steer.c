@@ -17,6 +17,14 @@
 #include <string.h>
 #include <openssl/evp.h>
 
+/* Compiler TLS keyword without pulling in php.h (this TU stays runtime-free,
+ * so ZEND_TLS is not available here). */
+#ifdef _MSC_VER
+# define STEER_TLS __declspec(thread)
+#else
+# define STEER_TLS __thread
+#endif
+
 /* Secure random bytes (defined in http3_connection.c). Forward-declared here
  * rather than pulling in the heavy http3_internal.h (php.h + ngtcp2 + nghttp3)
  * so this TU stays runtime-free and unit-testable in isolation. */
@@ -33,7 +41,7 @@ static bool    g_steer_active = false;
  * cipher context is thread-local and reused, not new/free'd per call. */
 static bool http3_steer_block(const uint8_t in[16], uint8_t out[16])
 {
-    static __thread EVP_CIPHER_CTX *ctx = NULL;
+    static STEER_TLS EVP_CIPHER_CTX *ctx = NULL;
 
     if (ctx == NULL) {
         ctx = EVP_CIPHER_CTX_new();
