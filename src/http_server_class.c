@@ -1234,61 +1234,11 @@ http_log_state_t *http_server_get_log_state(http_server_object *server)
     return server != NULL ? &server->log_state : &http_log_state_default;
 }
 
-/* Resolve the pretty-colour ud for a sink writing to `stream_zv`: cast to fd
- * and let http_log_color_for_fd decide (NO_COLOR / CLICOLOR_FORCE / isatty). */
-static void *http_server_pretty_color_ud(zval *stream_zv)
-{
-    if (stream_zv == NULL) {
-        return NULL;
-    }
-
-    php_stream *s = NULL;
-    php_stream_from_zval_no_verify(s, stream_zv);
-
-    if (s == NULL) {
-        return NULL;
-    }
-
-    int fd = -1;
-    if (php_stream_cast(s, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
-                        (void *)&fd, 0) != SUCCESS || fd < 0) {
-        return NULL;
-    }
-
-    return http_log_color_for_fd(fd) ? (void *)1 : NULL;
-}
-
-static http_log_formatter_fn http_server_log_formatter(zval *spec, void *stream_zv,
-                                                       void **ud_out)
-{
-    *ud_out = NULL;
-
-    zval *zfmt = zend_hash_str_find(Z_ARRVAL_P(spec), "format", sizeof("format") - 1);
-    if (zfmt == NULL) {
-        return http_log_format_plain;
-    }
-
-    const char  *f  = Z_STRVAL_P(zfmt);
-    const size_t fl = Z_STRLEN_P(zfmt);
-
-    if (fl == 6 && memcmp(f, "logfmt", 6) == 0) {
-        return http_log_format_logfmt;
-    }
-    if (fl == 4 && memcmp(f, "json", 4) == 0) {
-        return http_log_format_json;
-    }
-    if (fl == 6 && memcmp(f, "pretty", 6) == 0) {
-        *ud_out = http_server_pretty_color_ud((zval *)stream_zv);
-        return http_log_format_pretty;
-    }
-
-    return http_log_format_plain;
-}
-
 /* Translate the config's log sinks (or the log_severity/log_stream sugar) into
  * http_log_sink_spec_t and activate the logger. Specs are validated at
- * setLogSinks() time, so reads here are unchecked. stdout/stderr sinks open a
- * php:// stream held only until http_log_server_start_sinks takes its own ref. */
+ * setLogSinks() time, so reads here are unchecked; each sink's transport and
+ * formatter come from the sink-type / formatter registry (http_log.c). opened[]
+ * holds the per-sink stream ref only until start_sinks takes its own. */
 static void http_server_start_logging(http_server_object *server,
                                       http_server_config_t *cfg)
 {
@@ -1297,7 +1247,7 @@ static void http_server_start_logging(http_server_object *server,
     }
 
     http_log_sink_spec_t specs[HTTP_LOG_MAX_SINKS];
-    zval                 opened[HTTP_LOG_MAX_SINKS];   /* php://std* we opened */
+    zval                 opened[HTTP_LOG_MAX_SINKS];
     int                  n = 0;
 
     for (int i = 0; i < HTTP_LOG_MAX_SINKS; i++) {
@@ -1315,73 +1265,36 @@ static void http_server_start_logging(http_server_object *server,
 
             HashTable *spec  = Z_ARRVAL_P(elem);
             zval      *ztype = zend_hash_str_find(spec, "type", sizeof("type") - 1);
-            const char *t    = Z_STRVAL_P(ztype);
-            zval      *stream_zv;
 
-            if (Z_STRLEN_P(ztype) == 6 && memcmp(t, "syslog", 6) == 0) {
-                /* Connect a TCP client stream to the syslog target; write RFC
-                 * 5424 (octet-framed) through it. Validated at config time. */
-                zval        *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
-                zend_string *xerr    = NULL;
-                int          xcode   = 0;
-                php_stream  *s = php_stream_xport_create(
-                    Z_STRVAL_P(ztarget), Z_STRLEN_P(ztarget), 0,
-                    STREAM_XPORT_CLIENT | STREAM_XPORT_CONNECT,
-                    NULL, NULL, NULL, &xerr, &xcode);
+            const http_log_sink_type_t *type =
+                http_log_sink_type_by_name(Z_STRVAL_P(ztype), Z_STRLEN_P(ztype));
 
-                if (xerr != NULL) {
-                    zend_string_release(xerr);
-                }
-                if (s == NULL) {
-                    continue;   /* target unreachable — skip this sink */
-                }
-                php_stream_to_zval(s, &opened[n]);
-
-                int   fac  = 1;   /* user */
-                zval *zfac = zend_hash_str_find(spec, "facility", sizeof("facility") - 1);
-                if (zfac != NULL) {
-                    fac = http_log_syslog_facility(Z_STRVAL_P(zfac), Z_STRLEN_P(zfac));
-                    if (fac < 0) {
-                        fac = 1;
-                    }
-                }
-
-                zval *zlvl_s   = zend_hash_str_find(spec, "level", sizeof("level") - 1);
-                zval *backing_s = zend_enum_fetch_case_value(Z_OBJ_P(zlvl_s));
-
-                specs[n].level        = (http_log_severity_t)Z_LVAL_P(backing_s);
-                specs[n].formatter    = http_log_format_syslog;
-                specs[n].formatter_ud = (void *)(intptr_t)fac;
-                specs[n].stream_zv    = &opened[n];
-                n++;
-                continue;
+            if (type == NULL || !type->open(spec, &opened[n])) {
+                continue;   /* open failure (e.g. unreachable target) skips the sink */
             }
 
-            if (Z_STRLEN_P(ztype) == 6 && memcmp(t, "stream", 6) == 0) {
-                stream_zv = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
-            } else {
-                const char *dev = (t[3] == 'o') ? "php://stdout" : "php://stderr";
-                php_stream *s = php_stream_open_wrapper(dev, "wb", 0, NULL);
+            const http_log_formatter_def_t *fdef = type->pinned_formatter;
 
-                if (s == NULL) {
-                    continue;
+            if (fdef == NULL) {
+                zval *zfmt = zend_hash_str_find(spec, "format", sizeof("format") - 1);
+
+                if (zfmt != NULL) {
+                    fdef = http_log_formatter_by_name(Z_STRVAL_P(zfmt),
+                                                      Z_STRLEN_P(zfmt));
                 }
-
-                php_stream_to_zval(s, &opened[n]);
-                stream_zv = &opened[n];
+                if (fdef == NULL) {
+                    fdef = http_log_formatter_by_name("plain", sizeof("plain") - 1);
+                }
             }
 
-            void *ud = NULL;
-            http_log_formatter_fn fmt =
-                http_server_log_formatter(elem, stream_zv, &ud);
-
-            zval *zlvl = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+            zval *zlvl    = zend_hash_str_find(spec, "level", sizeof("level") - 1);
             zval *backing = zend_enum_fetch_case_value(Z_OBJ_P(zlvl));
 
             specs[n].level        = (http_log_severity_t)Z_LVAL_P(backing);
-            specs[n].formatter    = fmt;
-            specs[n].formatter_ud = ud;
-            specs[n].stream_zv    = stream_zv;
+            specs[n].formatter    = fdef != NULL ? fdef->fn : http_log_format_plain;
+            specs[n].formatter_ud = (fdef != NULL && fdef->make_ud != NULL)
+                                  ? fdef->make_ud(spec, &opened[n]) : NULL;
+            specs[n].stream_zv    = &opened[n];
             n++;
         } ZEND_HASH_FOREACH_END();
 

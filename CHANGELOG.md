@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RFC 6587 octet-counted framing over TCP, so a receiver splits records
     correctly even when a message carries an embedded newline. PRI packs the
     configured facility with the severity mapped to syslog levels.
+  - **Sink-type / formatter registry (plugin seam).** `setLogSinks()` resolves
+    `'type'` and `'format'` names through a registry instead of hardcoded
+    lists; another extension can add its own sink type or formatter at MINIT
+    via `http_log_register_sink_type()` / `http_log_register_formatter()`
+    (built-ins register through the same seam). Validation error messages list
+    whatever is actually registered. The `syslog` formatter is now also
+    name-addressable (`'format'=>'syslog'`) on stream sinks.
   - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
     OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
     Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with

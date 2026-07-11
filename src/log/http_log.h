@@ -155,6 +155,50 @@ size_t http_log_format_syslog(const http_log_record_t *rec,
 /* RFC 5424 facility keyword (e.g. "user", "daemon", "local0") → code, or -1. */
 int http_log_syslog_facility(const char *name, size_t len);
 
+/*
+ * Sink-type / formatter registry — the plugin seam. Built-ins register here
+ * at MINIT (http_log_minit); another extension adds its own by calling the
+ * register functions from its MINIT (after this module's). Registration is
+ * MINIT-only and therefore single-threaded; the def structs must be static
+ * (the registry stores the pointers, not copies).
+ */
+
+typedef struct {
+    const char            *name;
+    http_log_formatter_fn  fn;
+    /* Resolve per-sink formatter state from the (validated) spec and the
+     * resolved transport stream — e.g. pretty's colour flag, syslog's
+     * facility. NULL when the formatter carries no state. */
+    void *(*make_ud)(HashTable *spec, zval *stream_zv);
+} http_log_formatter_def_t;
+
+typedef struct {
+    const char *name;
+    /* Config-time validation beyond the common keys (type/format/level);
+     * throws and returns false on violation. NULL = nothing extra. */
+    bool (*validate)(HashTable *spec);
+    /* Resolve the sink's transport into stream_out as an owned zval ref
+     * (released by the caller after the sink takes its own). false = skip
+     * this sink (e.g. target unreachable). Runs at server start. */
+    bool (*open)(HashTable *spec, zval *stream_out);
+    /* Non-NULL forces this formatter (the spec's 'format' is ignored) —
+     * how syslog pins its wire format. NULL → the spec's 'format' picks. */
+    const http_log_formatter_def_t *pinned_formatter;
+} http_log_sink_type_t;
+
+/* false when the registry is full or the name is already taken. */
+bool http_log_register_formatter(const http_log_formatter_def_t *def);
+bool http_log_register_sink_type(const http_log_sink_type_t *type);
+
+const http_log_formatter_def_t *http_log_formatter_by_name(const char *name,
+                                                           size_t len);
+const http_log_sink_type_t *http_log_sink_type_by_name(const char *name,
+                                                       size_t len);
+
+/* "a|b|c" join of registered names, for error messages. */
+void http_log_sink_type_names(char *buf, size_t cap);
+void http_log_formatter_names(char *buf, size_t cap);
+
 /* Resolve whether a pretty sink writing to `fd` should colour: NO_COLOR off,
  * else CLICOLOR_FORCE on, else follows isatty(fd). Called once at sink build. */
 bool http_log_color_for_fd(int fd);

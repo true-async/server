@@ -1216,23 +1216,23 @@ PHP_FUNCTION(_http_log_format_selftest)
         Z_PARAM_BOOL(color)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_log_formatter_fn fmt;
+    /* Resolve through the formatter registry — the same lookup setLogSinks
+     * uses — so the goldens also cover the plugin seam. ud stays hook-built
+     * (make_ud wants a sink spec): pretty = colour flag, syslog = facility. */
+    const http_log_formatter_def_t *fdef =
+        http_log_formatter_by_name(style, style_len);
+
+    if (fdef == NULL) {
+        RETURN_FALSE;
+    }
+
+    http_log_formatter_fn fmt    = fdef->fn;
     void                 *fmt_ud = NULL;
 
-    if (style_len == 5 && memcmp(style, "plain", 5) == 0) {
-        fmt = http_log_format_plain;
-    } else if (style_len == 6 && memcmp(style, "logfmt", 6) == 0) {
-        fmt = http_log_format_logfmt;
-    } else if (style_len == 4 && memcmp(style, "json", 4) == 0) {
-        fmt = http_log_format_json;
-    } else if (style_len == 6 && memcmp(style, "pretty", 6) == 0) {
-        fmt    = http_log_format_pretty;
+    if (style_len == 6 && memcmp(style, "pretty", 6) == 0) {
         fmt_ud = color ? (void *)1 : NULL;
     } else if (style_len == 6 && memcmp(style, "syslog", 6) == 0) {
-        fmt    = http_log_format_syslog;
         fmt_ud = (void *)(intptr_t)1;   /* facility = user */
-    } else {
-        RETURN_FALSE;
     }
 
     const http_log_attr_t attrs[] = {
@@ -1283,6 +1283,26 @@ PHP_FUNCTION(_http_log_color_decide)
     RETURN_BOOL(http_log_color_for_fd(STDOUT_FILENO));
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_log_registry_names, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* Snapshot the sink-type / formatter registry (issue #5, B5d) as
+ * {'types' => [...], 'formatters' => [...]} so a phpt can assert the
+ * built-ins registered and the pipe-joined error lists match. */
+PHP_FUNCTION(_http_log_registry_names)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    char types[256];
+    char formatters[256];
+    http_log_sink_type_names(types, sizeof types);
+    http_log_formatter_names(formatters, sizeof formatters);
+
+    array_init(return_value);
+    add_assoc_string(return_value, "types", types);
+    add_assoc_string(return_value, "formatters", formatters);
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
@@ -1297,6 +1317,7 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_stats_slab_snapshot, arginfo_stats_slab_snapshot)
     ZEND_FE(_http_log_format_selftest, arginfo_log_format_selftest)
     ZEND_FE(_http_log_color_decide, arginfo_log_color_decide)
+    ZEND_FE(_http_log_registry_names, arginfo_log_registry_names)
     PHP_FE_END
 };
 

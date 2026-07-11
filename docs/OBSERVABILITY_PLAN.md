@@ -441,6 +441,30 @@ isolated (drop-counted, others unaffected).
 - [ ] **Profiler** — the sink write must not stall the reactor loop; measure
       reactor tick latency under sustained log volume per transport
 
+#### B5d — sink-type / formatter registry (plugin seam) ✅
+
+Name→behaviour resolution for `setLogSinks()` moved from hardcoded if-chains
+(config validation + server-start translation) into a registry in `http_log.c`:
+`http_log_register_sink_type()` (`{name, validate, open, pinned_formatter}`)
+and `http_log_register_formatter()` (`{name, fn, make_ud}`). Built-ins
+(stream/stdout/stderr/syslog; plain/logfmt/json/pretty/syslog) register at
+MINIT through the same seam a plugin extension would use; a pinned formatter
+is how syslog forces its wire format. Error messages list registered names.
+GELF / Fluent / OTLP / generic tcp-udp arrive as plugins on this seam, not in
+core (user decision).
+
+- [x] Code quality — registry consulted in exactly two places (validate,
+      translate); MINIT-only registration, so lock-free lookups
+- [x] No duplicated logic — both former if-chains deleted; the format-selftest
+      hook resolves via the registry too
+- [x] `const` — defs are `static const`, registry stores `const` pointers
+- [x] Comments reviewed
+- [x] Tests — `core/024-log-registry.phpt` (built-in names, registry-driven
+      reject messages); 019–023 exercise resolution end-to-end
+- [x] Coverage checked
+- [x] Build & verify — full core+telemetry suite green
+- Profiler N/A — registry lookups run at config/start time, not on emit
+
 ### Stage B6 — structured access log  _(step 11 — ⚠ profiler)_
 
 Goal: per-request event (method, path, status, bytes, duration, protocol,

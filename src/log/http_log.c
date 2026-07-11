@@ -16,6 +16,7 @@
 #include "Zend/zend_exceptions.h"   /* zend_clear_exception */
 #include "Zend/zend_async_API.h"
 
+#include "php_http_server.h"          /* invalid_argument exception ce */
 #include "log/http_log.h"
 #include "core/async_plain_event.h"   /* drain-flush wakeup */
 #include "../../stubs/LogSeverity.php_arginfo.h"
@@ -643,6 +644,262 @@ size_t http_log_format_syslog(const http_log_record_t *rec,
     return o.len;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Sink-type / formatter registry. Built-ins register in http_log_minit;
+ * plugin extensions add theirs from their own MINIT (single-threaded, so no
+ * locking). The registry stores the caller's static def pointers. */
+
+#define HTTP_LOG_REG_SLOTS 16
+
+static const http_log_formatter_def_t *g_formatters[HTTP_LOG_REG_SLOTS];
+static int                             g_formatter_count = 0;
+static const http_log_sink_type_t     *g_sink_types[HTTP_LOG_REG_SLOTS];
+static int                             g_sink_type_count = 0;
+
+const http_log_formatter_def_t *http_log_formatter_by_name(const char *name,
+                                                           size_t len)
+{
+    for (int i = 0; i < g_formatter_count; i++) {
+        const char *kw = g_formatters[i]->name;
+
+        if (strlen(kw) == len && memcmp(kw, name, len) == 0) {
+            return g_formatters[i];
+        }
+    }
+
+    return NULL;
+}
+
+const http_log_sink_type_t *http_log_sink_type_by_name(const char *name,
+                                                       size_t len)
+{
+    for (int i = 0; i < g_sink_type_count; i++) {
+        const char *kw = g_sink_types[i]->name;
+
+        if (strlen(kw) == len && memcmp(kw, name, len) == 0) {
+            return g_sink_types[i];
+        }
+    }
+
+    return NULL;
+}
+
+bool http_log_register_formatter(const http_log_formatter_def_t *def)
+{
+    if (def == NULL || def->name == NULL || def->fn == NULL
+        || g_formatter_count >= HTTP_LOG_REG_SLOTS
+        || http_log_formatter_by_name(def->name, strlen(def->name)) != NULL) {
+        return false;
+    }
+
+    g_formatters[g_formatter_count++] = def;
+    return true;
+}
+
+bool http_log_register_sink_type(const http_log_sink_type_t *type)
+{
+    if (type == NULL || type->name == NULL || type->open == NULL
+        || g_sink_type_count >= HTTP_LOG_REG_SLOTS
+        || http_log_sink_type_by_name(type->name, strlen(type->name)) != NULL) {
+        return false;
+    }
+
+    g_sink_types[g_sink_type_count++] = type;
+    return true;
+}
+
+void http_log_formatter_names(char *buf, size_t cap)
+{
+    log_sbuf_t sb;
+    sb_init(&sb, buf, cap);
+
+    for (int i = 0; i < g_formatter_count; i++) {
+        if (i > 0) {
+            sb_putc(&sb, '|');
+        }
+        sb_puts(&sb, g_formatters[i]->name);
+    }
+}
+
+void http_log_sink_type_names(char *buf, size_t cap)
+{
+    log_sbuf_t sb;
+    sb_init(&sb, buf, cap);
+
+    for (int i = 0; i < g_sink_type_count; i++) {
+        if (i > 0) {
+            sb_putc(&sb, '|');
+        }
+        sb_puts(&sb, g_sink_types[i]->name);
+    }
+}
+
+/* --- built-in formatter defs --- */
+
+/* pretty carries the colour decision in ud, resolved once against the
+ * sink's stream fd (NO_COLOR / CLICOLOR_FORCE / isatty). */
+static void *formatter_ud_pretty(HashTable *spec, zval *stream_zv)
+{
+    (void)spec;
+
+    php_stream *s = NULL;
+
+    if (stream_zv != NULL) {
+        php_stream_from_zval_no_verify(s, stream_zv);
+    }
+    if (s == NULL) {
+        return NULL;
+    }
+
+    int fd = -1;
+    if (php_stream_cast(s, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
+                        (void *)&fd, 0) != SUCCESS || fd < 0) {
+        return NULL;
+    }
+
+    return http_log_color_for_fd(fd) ? (void *)1 : NULL;
+}
+
+/* syslog carries the facility code in ud (default user=1). */
+static void *formatter_ud_syslog(HashTable *spec, zval *stream_zv)
+{
+    (void)stream_zv;
+
+    int   fac  = 1;
+    zval *zfac = spec != NULL
+        ? zend_hash_str_find(spec, "facility", sizeof("facility") - 1) : NULL;
+
+    if (zfac != NULL && Z_TYPE_P(zfac) == IS_STRING) {
+        const int f = http_log_syslog_facility(Z_STRVAL_P(zfac), Z_STRLEN_P(zfac));
+        if (f >= 0) {
+            fac = f;
+        }
+    }
+
+    return (void *)(intptr_t)fac;
+}
+
+static const http_log_formatter_def_t fmt_plain  = { "plain",  http_log_format_plain,  NULL };
+static const http_log_formatter_def_t fmt_logfmt = { "logfmt", http_log_format_logfmt, NULL };
+static const http_log_formatter_def_t fmt_json   = { "json",   http_log_format_json,   NULL };
+static const http_log_formatter_def_t fmt_pretty = { "pretty", http_log_format_pretty, formatter_ud_pretty };
+static const http_log_formatter_def_t fmt_syslog = { "syslog", http_log_format_syslog, formatter_ud_syslog };
+
+/* --- built-in sink types --- */
+
+static bool sink_validate_stream(HashTable *spec)
+{
+    zval       *zs = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
+    php_stream *st = NULL;
+
+    if (zs != NULL && Z_TYPE_P(zs) == IS_RESOURCE) {
+        php_stream_from_zval_no_verify(st, zs);
+    }
+
+    if (st == NULL) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): type 'stream' requires a php_stream 'stream' resource", 0);
+        return false;
+    }
+
+    return true;
+}
+
+static bool sink_open_stream(HashTable *spec, zval *out)
+{
+    zval *zs = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
+
+    if (zs == NULL || Z_TYPE_P(zs) != IS_RESOURCE) {
+        return false;
+    }
+
+    ZVAL_COPY(out, zs);
+    return true;
+}
+
+static bool sink_open_php_dev(const char *dev, zval *out)
+{
+    php_stream *s = php_stream_open_wrapper(dev, "wb", 0, NULL);
+
+    if (s == NULL) {
+        return false;
+    }
+
+    php_stream_to_zval(s, out);
+    return true;
+}
+
+static bool sink_open_stdout(HashTable *spec, zval *out)
+{
+    (void)spec;
+    return sink_open_php_dev("php://stdout", out);
+}
+
+static bool sink_open_stderr(HashTable *spec, zval *out)
+{
+    (void)spec;
+    return sink_open_php_dev("php://stderr", out);
+}
+
+static bool sink_validate_syslog(HashTable *spec)
+{
+    /* B5: TCP syslog only (octet-framed) — local/udp datagrams land later. */
+    zval *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
+
+    if (ztarget == NULL || Z_TYPE_P(ztarget) != IS_STRING
+        || Z_STRLEN_P(ztarget) <= 6
+        || memcmp(Z_STRVAL_P(ztarget), "tcp://", 6) != 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): type 'syslog' requires a 'tcp://host:port' target", 0);
+        return false;
+    }
+
+    zval *zfac = zend_hash_str_find(spec, "facility", sizeof("facility") - 1);
+
+    if (zfac != NULL
+        && (Z_TYPE_P(zfac) != IS_STRING
+            || http_log_syslog_facility(Z_STRVAL_P(zfac), Z_STRLEN_P(zfac)) < 0)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): syslog 'facility' must be a keyword (user, daemon, local0..7, …)", 0);
+        return false;
+    }
+
+    return true;
+}
+
+static bool sink_open_syslog(HashTable *spec, zval *out)
+{
+    zval *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
+
+    if (ztarget == NULL || Z_TYPE_P(ztarget) != IS_STRING) {
+        return false;
+    }
+
+    zend_string *xerr  = NULL;
+    int          xcode = 0;
+    php_stream  *s = php_stream_xport_create(
+        Z_STRVAL_P(ztarget), Z_STRLEN_P(ztarget), 0,
+        STREAM_XPORT_CLIENT | STREAM_XPORT_CONNECT,
+        NULL, NULL, NULL, &xerr, &xcode);
+
+    if (xerr != NULL) {
+        zend_string_release(xerr);
+    }
+    if (s == NULL) {
+        return false;   /* target unreachable — the sink is skipped */
+    }
+
+    php_stream_to_zval(s, out);
+    return true;
+}
+
+static const http_log_sink_type_t sink_type_stream = { "stream", sink_validate_stream, sink_open_stream, NULL };
+static const http_log_sink_type_t sink_type_stdout = { "stdout", NULL, sink_open_stdout, NULL };
+static const http_log_sink_type_t sink_type_stderr = { "stderr", NULL, sink_open_stderr, NULL };
+static const http_log_sink_type_t sink_type_syslog = { "syslog", sink_validate_syslog, sink_open_syslog, &fmt_syslog };
+
+/* ------------------------------------------------------------------------ */
+
 /* Rate-limited (~1/sec per sink) stderr notice when a sink's transport
  * fails. Never re-enters the logger. */
 static void emit_fallback_stderr(http_log_sink_t *sink, const char *reason)
@@ -981,6 +1238,18 @@ void http_log_state_init(http_log_state_t *state)
 void http_log_minit(void)
 {
     http_log_severity_ce = register_class_TrueAsync_LogSeverity();
+
+    /* Built-ins go through the same registry a plugin extension would use. */
+    http_log_register_formatter(&fmt_plain);
+    http_log_register_formatter(&fmt_logfmt);
+    http_log_register_formatter(&fmt_json);
+    http_log_register_formatter(&fmt_pretty);
+    http_log_register_formatter(&fmt_syslog);
+
+    http_log_register_sink_type(&sink_type_stream);
+    http_log_register_sink_type(&sink_type_stdout);
+    http_log_register_sink_type(&sink_type_stderr);
+    http_log_register_sink_type(&sink_type_syslog);
 }
 
 void http_log_mshutdown(void)
