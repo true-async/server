@@ -48,6 +48,7 @@ http2_stream_t *http2_stream_new(http2_session_t *session,
     stream->request = &stream->_request_storage;
     stream->request->refcount = 1;
     stream->request->release  = http2_stream_release_via_request;
+    stream->request->http_major = 2;   /* llhttp stamps h1; h2/h3 stamp here */
     /* h2 flow-control: readBody / buffered-consume call session_consume()
      * via these fields so peer is granted credit by what PHP actually drained. */
     stream->request->body_h2_session   = session;

@@ -1290,7 +1290,11 @@ static void http_server_start_logging(http_server_object *server,
 
             zval *zlvl    = zend_hash_str_find(spec, "level", sizeof("level") - 1);
             zval *backing = zend_enum_fetch_case_value(Z_OBJ_P(zlvl));
+            zval *zcat    = zend_hash_str_find(spec, "category", sizeof("category") - 1);
 
+            specs[n].category_mask = zcat != NULL
+                ? http_log_category_mask(Z_STRVAL_P(zcat), Z_STRLEN_P(zcat))
+                : HTTP_LOG_CAT_APP;
             specs[n].level        = (http_log_severity_t)Z_LVAL_P(backing);
             specs[n].formatter    = fdef != NULL ? fdef->fn : http_log_format_plain;
             specs[n].formatter_ud = (fdef != NULL && fdef->make_ud != NULL)
@@ -1303,6 +1307,7 @@ static void http_server_start_logging(http_server_object *server,
 
     } else if (cfg->log_severity != 0 && Z_TYPE(cfg->log_stream) != IS_UNDEF) {
         specs[0].level             = (http_log_severity_t)cfg->log_severity;
+        specs[0].category_mask     = HTTP_LOG_CAT_APP;
         specs[0].formatter         = http_log_format_plain;
         specs[0].formatter_ud      = NULL;
         specs[0].formatter_ud_free = NULL;
@@ -1312,6 +1317,12 @@ static void http_server_start_logging(http_server_object *server,
     }
 
     http_log_server_start_sinks(&server->log_state, specs, n);
+
+    /* The access record's duration comes from the request stamps that CoDel/
+     * telemetry normally gate; an access sink is a third consumer. */
+    if (server->log_state.has_access) {
+        server->view.sample_stamps_enabled = true;
+    }
 
     for (int i = 0; i < HTTP_LOG_MAX_SINKS; i++) {
         if (Z_TYPE(opened[i]) != IS_UNDEF) {
@@ -3550,11 +3561,13 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isBodyStreamingEnabled", &retval);
     server->view.body_streaming_enabled = (Z_TYPE(retval) == IS_TRUE);
 
-    /* Stamps drive CoDel sojourn samples and the telemetry aggregate
-     * (sojourn_sum / service_sum / sojourn_max). Drain falls back to a
-     * fresh hrtime when end_ns is 0, so it does not require stamps. */
+    /* Stamps drive CoDel sojourn samples, the telemetry aggregate
+     * (sojourn_sum / service_sum / sojourn_max) and the access-log duration.
+     * Drain falls back to a fresh hrtime when end_ns is 0, so it does not
+     * require stamps. */
     server->view.sample_stamps_enabled =
-        (server->codel_target_ns != 0) || server->view.telemetry_enabled;
+        (server->codel_target_ns != 0) || server->view.telemetry_enabled
+        || server->log_state.has_access;
 
     /* Mirror configured max_body_size into the global parser pool.
      * Both the H1 parser (via http_parser_create on checkout) and the

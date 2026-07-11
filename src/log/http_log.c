@@ -17,6 +17,8 @@
 #include "Zend/zend_async_API.h"
 
 #include "php_http_server.h"          /* invalid_argument exception ce */
+#include "http1/http_parser.h"        /* http_request_t for the access record */
+#include "Zend/zend_hrtime.h"
 #include "log/http_log.h"
 #include "core/async_plain_event.h"   /* drain-flush wakeup */
 #include "../../stubs/LogSeverity.php_arginfo.h"
@@ -264,23 +266,49 @@ static void sb_put_logfmt_val(log_sbuf_t *sb, const char *s, size_t n)
     sb_putc(sb, '"');
 }
 
+/* ISO-8601 UTC timestamp, ms precision: "YYYY-MM-DDTHH:MM:SS.mmmZ" (24
+ * bytes). The gmtime+snprintf for the second part is cached per thread —
+ * under an access-logged load thousands of records share one second, so
+ * the common case is a 20-byte memcpy plus three ms digits. */
+#define ISO8601_LEN 24
+
 static size_t format_iso8601(uint64_t ts_ns, char *out, size_t out_len)
 {
-    /* ISO-8601 UTC timestamp, ms precision. */
-    time_t   sec = (time_t)(ts_ns / 1000000000ULL);
-    uint32_t ms  = (uint32_t)((ts_ns % 1000000000ULL) / 1000000ULL);
-    struct tm tm_buf;
+    ZEND_TLS time_t cached_sec = (time_t)-1;
+    ZEND_TLS char   cached_prefix[21];   /* "YYYY-MM-DDTHH:MM:SS." + NUL */
+
+    if (out_len < ISO8601_LEN + 1) {
+        if (out_len > 0) {
+            out[0] = '\0';
+        }
+        return 0;
+    }
+
+    const time_t   sec = (time_t)(ts_ns / 1000000000ULL);
+    const uint32_t ms  = (uint32_t)((ts_ns % 1000000000ULL) / 1000000ULL);
+
+    if (sec != cached_sec) {
+        struct tm tm_buf;
 #ifdef PHP_WIN32
-    gmtime_s(&tm_buf, &sec);
+        gmtime_s(&tm_buf, &sec);
 #else
-    gmtime_r(&sec, &tm_buf);
+        gmtime_r(&sec, &tm_buf);
 #endif
+        snprintf(cached_prefix, sizeof cached_prefix,
+                 "%04d-%02d-%02dT%02d:%02d:%02d.",
+                 tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                 tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+        cached_sec = sec;
+    }
 
-    int n = snprintf(out, out_len, "%04d-%02d-%02dT%02d:%02d:%02d.%03uZ",
-                     tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+    memcpy(out, cached_prefix, 20);
+    out[20] = (char)('0' + ms / 100);
+    out[21] = (char)('0' + (ms / 10) % 10);
+    out[22] = (char)('0' + ms % 10);
+    out[23] = 'Z';
+    out[24] = '\0';
 
-    return (n < 0) ? 0 : (size_t)n;
+    return ISO8601_LEN;
 }
 
 /* ANSI SGR codes; one table drives the pretty level badge colour (below). */
@@ -787,6 +815,23 @@ int http_log_syslog_facility(const char *name, size_t len)
     }
 
     return -1;
+}
+
+uint8_t http_log_category_mask(const char *name, size_t len)
+{
+    static const struct { const char *kw; uint8_t mask; } table[] = {
+        { "app",    HTTP_LOG_CAT_APP },
+        { "access", HTTP_LOG_CAT_ACCESS },
+        { "all",    HTTP_LOG_CAT_APP | HTTP_LOG_CAT_ACCESS },
+    };
+
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+        if (strlen(table[i].kw) == len && memcmp(table[i].kw, name, len) == 0) {
+            return table[i].mask;
+        }
+    }
+
+    return 0;
 }
 
 /* OTel severity → RFC 5424 syslog severity (0..7). */
@@ -1483,6 +1528,9 @@ static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t l
     }
 }
 
+static void log_dispatch_record(http_log_state_t *state,
+                                const http_log_record_t *rec);
+
 void http_log_emitf(http_log_state_t *state,
                     http_log_severity_t sev,
                     const http_log_attr_t *attrs, size_t attrs_n,
@@ -1514,6 +1562,7 @@ void http_log_emitf(http_log_state_t *state,
         .state        = state,
         .timestamp_ns = now_realtime_ns(),
         .severity     = sev,
+        .category     = HTTP_LOG_CAT_APP,
         .tmpl         = tmpl,
         .body         = body,
         .body_len     = (size_t)n,
@@ -1522,9 +1571,16 @@ void http_log_emitf(http_log_state_t *state,
         .has_trace    = false,
     };
 
-    /* Format once per distinct (formatter, ud), then fan out to every sink
-     * whose floor admits sev. A cache miss past HTTP_LOG_FMT_SLOTS just
-     * reformats into the last slot — correct, only un-deduped. */
+    log_dispatch_record(state, &rec);
+}
+
+/* Shared fan-out behind emitf and emit_access: format once per distinct
+ * (formatter, ud), then hand the bytes to every sink whose floor and
+ * category mask admit the record. A cache miss past HTTP_LOG_FMT_SLOTS just
+ * reformats into the last slot — correct, only un-deduped. */
+static void log_dispatch_record(http_log_state_t *state,
+                                const http_log_record_t *rec)
+{
     struct { http_log_formatter_fn fn; void *ud; size_t len; } meta[HTTP_LOG_FMT_SLOTS];
     char fbuf[HTTP_LOG_FMT_SLOTS][2048];
     int  slots = 0;
@@ -1533,7 +1589,8 @@ void http_log_emitf(http_log_state_t *state,
         http_log_sink_t *sink = &state->sinks[i];
 
         if (sink->severity_floor == HTTP_LOG_OFF
-            || (int)sev < (int)sink->severity_floor) {
+            || (int)rec->severity < (int)sink->severity_floor
+            || (sink->category_mask & rec->category) == 0) {
             continue;
         }
 
@@ -1555,13 +1612,13 @@ void http_log_emitf(http_log_state_t *state,
             s = slots++;
             meta[s].fn  = sink->formatter;
             meta[s].ud  = sink->formatter_ud;
-            meta[s].len = sink->formatter(&rec, fbuf[s], sizeof fbuf[s],
+            meta[s].len = sink->formatter(rec, fbuf[s], sizeof fbuf[s],
                                           sink->formatter_ud);
             buf = fbuf[s];
             len = meta[s].len;
         } else {
             buf = fbuf[HTTP_LOG_FMT_SLOTS - 1];
-            len = sink->formatter(&rec, buf, sizeof fbuf[0], sink->formatter_ud);
+            len = sink->formatter(rec, buf, sizeof fbuf[0], sink->formatter_ud);
         }
 
         if (len == 0) {
@@ -1570,6 +1627,87 @@ void http_log_emitf(http_log_state_t *state,
 
         http_log_sink_write(sink, buf, len);
     }
+}
+
+void http_log_emit_access(http_log_state_t *state,
+                          const http_request_t *req,
+                          zend_object *response_obj,
+                          const char *remote)
+{
+    if (state == NULL || !state->has_access
+        || req == NULL || response_obj == NULL) {
+        return;
+    }
+
+    const char *method = req->method != NULL ? ZSTR_VAL(req->method) : "-";
+    const char *uri    = req->uri != NULL ? ZSTR_VAL(req->uri) : "-";
+    const int   status = http_response_get_status(response_obj);
+    const char *proto  = req->http_major >= 3 ? "h3"
+                       : req->http_major == 2 ? "h2" : "h1";
+
+    http_log_attr_t attrs[8];
+    size_t n = 0;
+
+    attrs[n++] = (http_log_attr_t){ .key = "method", .type = HTTP_LOG_ATTR_STR,
+                                    .v.s = method };
+    attrs[n++] = (http_log_attr_t){ .key = "path", .type = HTTP_LOG_ATTR_STR,
+                                    .v.s = uri };
+    attrs[n++] = (http_log_attr_t){ .key = "status", .type = HTTP_LOG_ATTR_I64,
+                                    .v.i64 = status };
+    attrs[n++] = (http_log_attr_t){ .key = "proto", .type = HTTP_LOG_ATTR_STR,
+                                    .v.s = proto };
+    attrs[n++] = (http_log_attr_t){ .key = "bytes", .type = HTTP_LOG_ATTR_U64,
+                                    .v.u64 = http_response_get_body_len(response_obj) };
+
+    /* Duration from the CoDel/telemetry stamps (start_logging forces them on
+     * when an access sink exists); end_ns may not be stamped yet at this
+     * point in the completion path, so fall back to a fresh hrtime. */
+    if (req->start_ns != 0) {
+        const uint64_t end = req->end_ns != 0 ? req->end_ns : zend_hrtime();
+
+        if (end > req->start_ns) {
+            attrs[n++] = (http_log_attr_t){ .key = "duration_ms",
+                                            .type = HTTP_LOG_ATTR_F64,
+                                            .v.f64 = (double)(end - req->start_ns) / 1e6 };
+        }
+    }
+
+    if (remote != NULL) {
+        attrs[n++] = (http_log_attr_t){ .key = "remote",
+                                        .type = HTTP_LOG_ATTR_STR,
+                                        .v.s = remote };
+    }
+
+    char body[512];
+    int  blen = snprintf(body, sizeof body, "%s %s %d", method, uri, status);
+
+    if (blen < 0) {
+        return;
+    }
+    if ((size_t)blen >= sizeof body) {
+        blen = (int)sizeof body - 1;
+    }
+
+    http_log_record_t rec = {
+        .state        = state,
+        .timestamp_ns = now_realtime_ns(),
+        .severity     = HTTP_LOG_INFO,
+        .category     = HTTP_LOG_CAT_ACCESS,
+        .tmpl         = "access",
+        .body         = body,
+        .body_len     = (size_t)blen,
+        .attrs        = attrs,
+        .attrs_count  = n,
+        .trace_flags  = req->trace_flags,
+        .has_trace    = req->has_trace,
+    };
+
+    if (req->has_trace) {
+        memcpy(rec.trace_id, req->trace_id, sizeof rec.trace_id);
+        memcpy(rec.span_id, req->span_id, sizeof rec.span_id);
+    }
+
+    log_dispatch_record(state, &rec);
 }
 
 void http_log_state_init(http_log_state_t *state)
@@ -1604,25 +1742,35 @@ void http_log_mshutdown(void)
     /* HttpServer instances own their own state; nothing global to free. */
 }
 
-/* Recompute the fast gate: the lowest floor across all live sinks, so a
- * severity below every sink short-circuits in the macro's single branch. */
+/* Recompute the fast gates: `severity` is the lowest floor across app-
+ * admitting sinks (the http_logf_* macros' single branch); `has_access` is
+ * true when some sink admits INFO access records (the per-request branch). */
 static void http_log_state_refresh_gate(http_log_state_t *state)
 {
-    http_log_severity_t floor = HTTP_LOG_OFF;
+    http_log_severity_t floor      = HTTP_LOG_OFF;
+    bool                has_access = false;
 
     for (uint8_t i = 0; i < state->sink_count; i++) {
-        http_log_severity_t f = state->sinks[i].severity_floor;
+        const http_log_sink_t *sink = &state->sinks[i];
+        const http_log_severity_t f = sink->severity_floor;
 
         if (f == HTTP_LOG_OFF) {
             continue;
         }
 
-        if (floor == HTTP_LOG_OFF || (int)f < (int)floor) {
+        if ((sink->category_mask & HTTP_LOG_CAT_APP) != 0
+            && (floor == HTTP_LOG_OFF || (int)f < (int)floor)) {
             floor = f;
+        }
+
+        if ((sink->category_mask & HTTP_LOG_CAT_ACCESS) != 0
+            && (int)f <= (int)HTTP_LOG_INFO) {
+            has_access = true;
         }
     }
 
-    state->severity = floor;
+    state->severity   = floor;
+    state->has_access = has_access;
 }
 
 /* Build one sink onto a zeroed slot from its spec: borrow the stream's async
@@ -1730,6 +1878,8 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     sink->writer_cb         = cb;
     sink->formatter         = spec->formatter != NULL ? spec->formatter
                                                       : http_log_format_plain;
+    sink->category_mask     = spec->category_mask != 0 ? spec->category_mask
+                                                       : HTTP_LOG_CAT_APP;
     sink->formatter_ud      = spec->formatter_ud;
     sink->formatter_ud_free = spec->formatter_ud_free;
     sink->severity_floor    = spec->level;
@@ -1880,6 +2030,7 @@ void http_log_server_start_sinks(http_log_state_t *state,
 
     state->sink_count = 0;
     state->severity   = HTTP_LOG_OFF;
+    state->has_access = false;
 
     if (n > HTTP_LOG_MAX_SINKS) {
         n = HTTP_LOG_MAX_SINKS;
@@ -1918,7 +2069,8 @@ void http_log_server_stop(http_log_state_t *state)
         return;
     }
 
-    state->severity = HTTP_LOG_OFF;   /* stop new emits immediately */
+    state->severity   = HTTP_LOG_OFF;   /* stop new emits immediately */
+    state->has_access = false;
 
     /* One shared budget bounds the total drain wait across sinks: each waits
      * on its own drain_event, and an absolute deadline keeps the sum capped

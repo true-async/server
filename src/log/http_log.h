@@ -38,6 +38,16 @@ typedef enum {
     HTTP_LOG_ATTR_F64,
 } http_log_attr_type_t;
 
+/* Record categories: 'app' = server diagnostics (every http_logf_* macro),
+ * 'access' = the one-per-request access record. A sink admits a record when
+ * its category mask carries the record's bit. The spec key 'category' maps
+ * app (DEFAULT — so enabling diagnostics never silently turns on per-request
+ * logging) | access | all. */
+typedef enum {
+    HTTP_LOG_CAT_APP    = 1u << 0,
+    HTTP_LOG_CAT_ACCESS = 1u << 1,
+} http_log_category_t;
+
 typedef struct {
     const char           *key;
     http_log_attr_type_t  type;
@@ -63,6 +73,7 @@ typedef struct {
 
     uint64_t              timestamp_ns;     /* wall-clock, ns since UNIX epoch */
     http_log_severity_t   severity;
+    uint8_t               category;         /* http_log_category_t bit */
     const char           *tmpl;
     const char           *body;
     size_t                body_len;
@@ -101,6 +112,7 @@ typedef enum {
  * ships a single transport, the async file writer below; B5 adds more. */
 typedef struct http_log_sink {
     http_log_severity_t       severity_floor;
+    uint8_t                   category_mask;   /* http_log_category_t bits */
     http_log_formatter_fn     formatter;
     void                     *formatter_ud;
     void                    (*formatter_ud_free)(void *ud);
@@ -129,7 +141,11 @@ typedef struct http_log_sink {
  * so a level below every sink short-circuits in one branch. The sinks
  * themselves are touched only by http_log.c. */
 typedef struct http_log_state {
+    /* Minimum floor across app-admitting sinks — the http_logf_* gate. */
     http_log_severity_t       severity;
+    /* One-branch gate for the per-request access emit: true when some sink
+     * admits ACCESS records at INFO. */
+    bool                      has_access;
     uint8_t                   sink_count;
     http_log_sink_t           sinks[HTTP_LOG_MAX_SINKS];
 } http_log_state_t;
@@ -139,6 +155,17 @@ typedef struct http_log_state {
  * so emits drop silently instead of UAFing. severity is OFF so the
  * gate short-circuits without touching anything else. */
 extern http_log_state_t http_log_state_default;
+
+/* One structured ACCESS record for a completed request: method, path,
+ * status, proto (from req->http_major), body bytes, duration (when stamps
+ * ran), remote (nullable) and the request's trace context. Gated on
+ * state->has_access — call sites wrap it in UNEXPECTED(has_access) so the
+ * no-access-sink cost is one branch. Severity INFO. */
+struct http_request_t;
+void http_log_emit_access(http_log_state_t *state,
+                          const struct http_request_t *req,
+                          zend_object *response_obj,
+                          const char *remote);
 
 /* The level gate is re-checked inside, so a call site that skips
  * the http_logf_* macro is still correct (just slower). */
@@ -184,6 +211,9 @@ size_t http_log_format_syslog(const http_log_record_t *rec,
 
 /* RFC 5424 facility keyword (e.g. "user", "daemon", "local0") → code, or -1. */
 int http_log_syslog_facility(const char *name, size_t len);
+
+/* 'category' spec keyword → category bits: app | access | all. 0 = unknown. */
+uint8_t http_log_category_mask(const char *name, size_t len);
 
 /*
  * Sink-type / formatter registry — the plugin seam. Built-ins register here
@@ -254,6 +284,7 @@ void http_log_mshutdown(void);
  * flag). A spec whose level is OFF or whose stream is unusable is skipped. */
 typedef struct {
     http_log_severity_t    level;
+    uint8_t                category_mask;   /* 0 → HTTP_LOG_CAT_APP */
     http_log_formatter_fn  formatter;
     void                  *formatter_ud;
     void                 (*formatter_ud_free)(void *ud);   /* owned ud, or NULL */

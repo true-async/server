@@ -976,6 +976,7 @@ final class HttpServerConfig
      *   - 'format'   => 'plain' | 'logfmt' | 'json' | 'pretty' | 'template'
      *                                          (default 'plain'; ignored for syslog)
      *   - 'template' => string                 (required for format 'template')
+     *   - 'category' => 'app' | 'access' | 'all'  (default 'app')
      *   - 'level'    => LogSeverity            (required)
      *
      * 'pretty' auto-decides colour from the target (NO_COLOR / CLICOLOR_FORCE /
@@ -983,8 +984,12 @@ final class HttpServerConfig
      * record per datagram on udp/udg. 'template' renders each record through a
      * custom line layout: {ts} (ISO-8601) or {ts:PATTERN} (date()-style subset
      * Y y m d H i s v, e.g. '{ts:Y-m-d H:i:s.v}'), {level}, {msg}, {attrs},
-     * {trace}, {span}; any other text is literal. At most 8 sinks. Invalid
-     * specs throw at call time.
+     * {trace}, {span}; any other text is literal. 'category' routes record
+     * kinds: 'app' gets server diagnostics, 'access' gets one structured
+     * record per completed request (method, path, status, proto, bytes,
+     * duration_ms, remote, trace context), 'all' gets both — so a JSON
+     * access log and a pretty diagnostics console can coexist. At most 8
+     * sinks. Invalid specs throw at call time.
      *
      * @param array $sinks List of sink spec arrays (see above).
      * @return static

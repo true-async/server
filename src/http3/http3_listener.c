@@ -225,8 +225,8 @@ typedef struct {
     http3_listener_t           *listener;
 } http3_recv_cb_t;
 
-static void format_peer(const struct sockaddr *addr, socklen_t addr_len,
-                        char *out, size_t out_size)
+void http3_format_peer(const struct sockaddr *addr, socklen_t addr_len,
+                       char *out, size_t out_size)
 {
     if (addr == NULL || out_size == 0) {
         if (out_size > 0) out[0] = '\0';
@@ -292,7 +292,7 @@ static void update_peer_cache(http3_listener_t *listener,
         || !sockaddr_same_peer(cur_addr, cur_addr_len,
                                (const struct sockaddr *)&listener->last_peer_addr,
                                listener->last_peer_addr_len)) {
-        format_peer(cur_addr, cur_addr_len,
+        http3_format_peer(cur_addr, cur_addr_len,
                     listener->stats.last_peer, sizeof(listener->stats.last_peer));
 
         if ((size_t)cur_addr_len <= sizeof(listener->last_peer_addr)) {

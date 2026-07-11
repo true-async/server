@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     message carries an embedded newline), while UDP and unix-datagram targets
     send exactly one record per datagram so message boundaries survive. PRI
     packs the configured facility with the severity mapped to syslog levels.
+  - **Structured access log (`'category' => 'access'`).** A sink spec may
+    carry `'category' => 'app' | 'access' | 'all'` (default `'app'`): `app`
+    receives server diagnostics, `access` receives exactly one structured
+    record per completed request — `method`, `path`, `status`, `proto`
+    (h1/h2/h3), `bytes` (response body), `duration_ms`, `remote` (`ip:port`)
+    and the W3C trace context when telemetry parsed one — so a JSON access
+    log and a pretty diagnostics console coexist on one server. Emitted on
+    every completion path (handler return, static handler, compression
+    reject, sendFile engine, reactor-pool worker dispatch) across HTTP/1,
+    HTTP/2 and HTTP/3. Off by default: without an access sink the cost is
+    one predicted branch per request; with one, the peer address is resolved
+    once per connection and timestamp rendering caches the current second.
   - **Sink-type / formatter registry (plugin seam).** `setLogSinks()` resolves
     `'type'` and `'format'` names through a registry instead of hardcoded
     lists; another extension can add its own sink type or formatter at MINIT

@@ -25,6 +25,7 @@
 #include "grpc/grpc.h"                       /* grpc_classify */
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
+#include "log/http_log.h"                    /* access-log emit */
 
 #define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
 
@@ -72,6 +73,21 @@ typedef struct {
     uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
+/* Per-request access record (issue #5, B6). The worker only holds the
+ * request/response zvals; the remote addr lives reactor-side and is omitted
+ * here (the reactor never sees the completed response). */
+static void worker_log_access(worker_dispatch_ctx_t *ctx)
+{
+    http_log_state_t *st = http_server_get_log_state(ctx->server);
+
+    if (EXPECTED(!st->has_access) || Z_ISUNDEF(ctx->request_zv)) {
+        return;
+    }
+
+    http_log_emit_access(st, http_request_from_zobj(Z_OBJ(ctx->request_zv)),
+                         Z_OBJ(ctx->response_zv), NULL);
+}
+
 /* Handler coroutine body: run the registered user handler with (request, response). */
 static void worker_dispatch_entry(void)
 {
@@ -83,6 +99,7 @@ static void worker_dispatch_entry(void)
     if (ctx->skip_handler) {
         http_server_count_request(ctx->counters,
                                   http_response_get_status(Z_OBJ(ctx->response_zv)));
+        worker_log_access(ctx);
         return;
     }
 
@@ -136,6 +153,8 @@ static void worker_dispatch_entry(void)
                                       end_ns - ctx->start_ns,
                                       end_ns);
     }
+
+    worker_log_access(ctx);
 
     zval_ptr_dtor(&retval);
 }

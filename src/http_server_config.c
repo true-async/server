@@ -2859,6 +2859,15 @@ static bool log_sink_spec_valid(zval *elem)
         }
     }
 
+    zval *zcat = zend_hash_str_find(spec, "category", sizeof("category") - 1);
+    if (zcat != NULL
+        && (Z_TYPE_P(zcat) != IS_STRING
+            || http_log_category_mask(Z_STRVAL_P(zcat), Z_STRLEN_P(zcat)) == 0)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): 'category' must be one of app|access|all", 0);
+        return false;
+    }
+
     zval *zlvl = zend_hash_str_find(spec, "level", sizeof("level") - 1);
     if (zlvl == NULL || Z_TYPE_P(zlvl) != IS_OBJECT
         || !instanceof_function(Z_OBJCE_P(zlvl), http_log_severity_ce)) {

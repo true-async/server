@@ -514,26 +514,40 @@ struct; sink stop / failed start free the ud.
       parse/render/reject path: 0 leaks, 0 errors
 - Profiler N/A — same emit path; template render ≈ plain render cost
 
-### Stage B6 — structured access log  _(step 11 — ⚠ profiler)_
+### Stage B6 — structured access log ✅ _(step 11 — ⚠ profiler)_
 
-Goal: per-request event (method, path, status, bytes, duration, protocol,
-remote addr, trace id) through the same pipeline, own category/severity so it
-filters independently. Closes the "JSON access log" item of #5.
+Shipped: `'category' => 'app' (default) | 'access' | 'all'` on the sink spec
+(default `app` so enabling diagnostics never silently turns on per-request
+logging); record carries a category bit; the shared fan-out
+(`log_dispatch_record`, also behind `http_log_emitf`) filters by mask.
+`http_log_emit_access(state, req, response_obj, remote)` builds the record
+(method/path/status/proto/bytes/duration_ms/remote + trace ctx from the
+request); call sites mirror the `http_server_count_request` set exactly:
+H1/H2/H3 handler-entry tails (normal, static-skip, compression-reject),
+send-file engine (6 sites via `cfg.server`), reactor-pool worker dispatch
+(remote omitted — it lives reactor-side). h2/h3 now stamp
+`request->http_major` at stream init, so proto derives from the request
+everywhere. An access sink forces `sample_stamps_enabled` (third consumer).
 
-Files: request-completion path; `http_log.c` (category tag).
-
-Acceptance: one line per request; routable to a different sink than diagnostics.
-
-**Quality gate**
-- [ ] Code quality (built from data already on the request — no re-parse)
-- [ ] No duplicated logic — **reuse the attr/formatter pipeline**; access log is
-      a record with a category, not a second logging path
-- [ ] `const` — request read as `const` while building the event
-- [ ] Comments reviewed
-- [ ] Tests — access-log line across H1/H2/H3; category routing
-- [ ] Coverage checked
-- [ ] Build & verify
-- [ ] **Profiler** — per-request RPS unchanged with access log on vs off
+- [x] Code quality — one emitter; gate = one `UNEXPECTED(has_access)` branch
+- [x] No duplicated logic — same record/attr/formatter/writer pipeline;
+      fan-out extracted once and shared with emitf
+- [x] `const` — request read as `const` while building the event
+- [x] Comments reviewed
+- [x] Tests — core/027 (2 requests → 2 JSON records incl. duration+remote,
+      3-way category routing, invalid category rejected), h2/051 + h3/051
+      (proto=h2/h3 records over real curl-h2c / h3client requests)
+- [x] Coverage checked
+- [x] Build & verify — 132 tests green (core+telemetry+h1+h2+h3/051)
+- [x] **Profiler** — wrk -t4 -c64, medians of 5, single worker, empty
+      handler (worst case): access OFF = baseline within noise (gate is one
+      branch). Access ON (JSON sink to file, ~280 B/record, zero drops):
+      ~41.5k → ~33.5k RPS, ≈ 5–6 µs/record = the JSON render + ring copy.
+      Optimized along the way: remote cached per connection (was
+      getpeername per request, ~4 µs), ISO-8601 second-cache in
+      `format_iso8601` (~1 µs, benefits every formatter). Remaining cost is
+      the honest price of the enabled feature; further cuts need a
+      formatter rewrite (not taken).
 
 ### Stage B7 — `onLog` PHP hook (+ userland OTLP)  _(step 12)_
 

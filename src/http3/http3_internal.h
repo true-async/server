@@ -88,6 +88,10 @@ void http3_ensure_ossl_crypto_init(void);
 /* ngtcp2 log_printf-compatible bridge into http_log at DEBUG. */
 void http3_debug_logger(void *user_data, const char *fmt, ...);
 
+/* "ip:port" / "[ip]:port" render of a peer sockaddr (http3_listener.c). */
+void http3_format_peer(const struct sockaddr *addr, socklen_t addr_len,
+                       char *out, size_t out_size);
+
 
 /* ===== Packet/timer machinery (defined in http3_io.c) ===== */
 

@@ -106,6 +106,11 @@ struct _http_connection_t {
      * instead of UAFing. Same discipline as counters/view. */
     struct http_log_state     *log_state;
 
+    /* Lazily-cached "ip:port" of the peer for the access log — resolved
+     * once (getpeername) on the first logged request, reused for every
+     * later request on this connection. NULL until then. */
+    zend_string               *remote_str;
+
     /* Pointer to the request currently being handled. NULL between
      * requests. Used by the handler coroutine to read/write timing
      * fields on the live request without reaching through

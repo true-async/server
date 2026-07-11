@@ -49,6 +49,7 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
     s->request = &s->_request_storage;
     s->request->refcount = 1;
     s->request->release  = http3_stream_release_via_request;
+    s->request->http_major = 3;   /* llhttp stamps h1; h2/h3 stamp here */
     /* Reactor mode: the listener routes parsed requests to PHP
      * workers, so the parser builds the request in the persistent (malloc)
      * domain — it crosses the reactor->worker thread boundary. NULL reactor ctx

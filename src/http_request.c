@@ -61,6 +61,11 @@ static inline http_request_object* http_request_from_obj(zend_object *obj)
 
 #define Z_HTTP_REQUEST_P(zv) http_request_from_obj(Z_OBJ_P(zv))
 
+http_request_t *http_request_from_zobj(zend_object *obj)
+{
+    return http_request_from_obj(obj)->request;
+}
+
 /* Object handlers */
 static zend_object_handlers http_request_object_handlers;
 

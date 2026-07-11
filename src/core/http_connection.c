@@ -377,6 +377,11 @@ void http_connection_destroy(http_connection_t *conn)
         conn->out_pending_cap = 0;
     }
 
+    if (conn->remote_str != NULL) {
+        zend_string_release(conn->remote_str);
+        conn->remote_str = NULL;
+    }
+
     /* Notify server of close so it can decrement active_connections and
      * maybe resume listeners. Per-request timing is already reported by
      * http_server_on_request_sample from the coroutine entry — no
@@ -2462,6 +2467,27 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
 }
 /* }}} */
 
+/* Per-request access record (issue #5, B6). One branch when no access sink
+ * is configured; the remote addr resolves via getpeername only on the
+ * logging path. */
+static void h1_log_access(http1_request_ctx_t *ctx)
+{
+    http_connection_t *conn = ctx->conn;
+
+    if (EXPECTED(conn->log_state == NULL || !conn->log_state->has_access)) {
+        return;
+    }
+
+    if (conn->remote_str == NULL) {
+        conn->remote_str = http_connection_remote_address(conn);
+    }
+
+    http_log_emit_access(conn->log_state, ctx->request,
+                         Z_OBJ(ctx->response_zv),
+                         conn->remote_str != NULL ? ZSTR_VAL(conn->remote_str)
+                                                  : NULL);
+}
+
 /* {{{ http_handler_coroutine_entry
  *
  * Coroutine body: calls the user's PHP handler with (request, response).
@@ -2497,6 +2523,7 @@ void http_handler_coroutine_entry(void)
                                           req->end_ns);
         }
 
+        h1_log_access(ctx);
         return;
     }
 
@@ -2518,6 +2545,7 @@ void http_handler_coroutine_entry(void)
                                       http_response_get_status(Z_OBJ(ctx->response_zv)));
 
             if (req && stamps) req->end_ns = zend_hrtime();
+            h1_log_access(ctx);
             return;  /* Skip handler call; dispose emits the response. */
         }
     }
@@ -2606,6 +2634,8 @@ void http_handler_coroutine_entry(void)
                                       req->end_ns   - req->start_ns,
                                       req->end_ns);
     }
+
+    h1_log_access(ctx);
 
     zval_ptr_dtor(&retval);
 }

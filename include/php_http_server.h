@@ -1208,6 +1208,10 @@ bool http_response_is_closed(zend_object *obj);
 int            http_response_get_status  (zend_object *obj);
 HashTable     *http_response_get_headers (zend_object *obj);
 HashTable     *http_response_get_trailers(zend_object *obj);
+
+/* Underlying http_request_t of an HttpRequest object — for contexts that
+ * only hold the zval (worker dispatch access-log emit). */
+struct http_request_t *http_request_from_zobj(zend_object *obj);
 const char    *http_response_get_body    (zend_object *obj, size_t *len_out);
 
 /* Default the grpc-status trailer to `status` unless one is already set.

@@ -27,6 +27,7 @@
 #include "core/stream_credit.h"             /* reverse-path flow control */
 #include "grpc/grpc.h"                      /* gRPC request classification */
 #include "grpc/grpc_call.h"                 /* gRPC call lifecycle policy */
+#include "log/http_log.h"                   /* access-log emit */
 #include "static/static_handler.h"         /* http_static_try_serve / count */
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
 #include "core/worker_dispatch.h"           /* response_wire_discard */
@@ -647,6 +648,23 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     ZEND_ASYNC_ENQUEUE_COROUTINE(co);
 }
 
+/* Per-request access record (issue #5, B6); mirrors h1_log_access. */
+static void h3_log_access(http3_stream_t *s)
+{
+    http3_connection_t *c = s->conn;
+
+    if (EXPECTED(c == NULL || c->log_state == NULL
+                 || !c->log_state->has_access)) {
+        return;
+    }
+
+    char remote[128];
+    http3_format_peer((const struct sockaddr *)&c->peer, c->peer_len,
+                      remote, sizeof remote);
+    http_log_emit_access(c->log_state, s->request, Z_OBJ(s->response_zv),
+                         remote[0] != '\0' ? remote : NULL);
+}
+
 static void h3_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -661,6 +679,7 @@ static void h3_handler_coroutine_entry(void)
     if (s->skip_handler) {
         http_server_count_request(s->conn->counters,
                                   http_response_get_status(Z_OBJ(s->response_zv)));
+        h3_log_access(s);
         return;
     }
 
@@ -698,6 +717,7 @@ static void h3_handler_coroutine_entry(void)
                                       http_response_get_status(Z_OBJ(s->response_zv)));
 
             if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
+            h3_log_access(s);
             return;
         }
     }
@@ -760,6 +780,8 @@ static void h3_handler_coroutine_entry(void)
             s->request->end_ns   - s->request->start_ns,
             s->request->end_ns);
     }
+
+    h3_log_access(s);
 
     zval_ptr_dtor(&retval);
 }

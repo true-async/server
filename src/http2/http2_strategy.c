@@ -23,6 +23,7 @@
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
 #include "core/async_plain_event.h"
+#include "log/http_log.h"          /* access-log emit */
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 # include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 # include "websocket/php_websocket.h"      /* websocket_object + http2_ws_accept */
@@ -401,6 +402,23 @@ static void http2_strategy_dispatch(struct http_request_t *request,
  * connection. One coroutine per stream → multiplex works.
  * ------------------------------------------------------------------------- */
 
+/* Per-request access record (issue #5, B6); mirrors h1_log_access. */
+static void h2_log_access(http_connection_t *conn, http2_stream_t *stream)
+{
+    if (EXPECTED(conn->log_state == NULL || !conn->log_state->has_access)) {
+        return;
+    }
+
+    if (conn->remote_str == NULL) {
+        conn->remote_str = http_connection_remote_address(conn);
+    }
+
+    http_log_emit_access(conn->log_state, stream->request,
+                         Z_OBJ(stream->response_zv),
+                         conn->remote_str != NULL ? ZSTR_VAL(conn->remote_str)
+                                                  : NULL);
+}
+
 /* Invokes the user handler with the stream's own (request, response)
  * zvals. All state lives on the stream — multiplexed coroutines
  * never touch a shared conn-level zval. */
@@ -417,6 +435,7 @@ static void http2_handler_coroutine_entry(void)
     if (stream->skip_handler) {
         http_server_count_request(conn->counters,
                                   http_response_get_status(Z_OBJ(stream->response_zv)));
+        h2_log_access(conn, stream);
         return;
     }
 
@@ -460,6 +479,7 @@ static void http2_handler_coroutine_entry(void)
                                       http_response_get_status(Z_OBJ(stream->response_zv)));
 
             if (stamps) stream->request->end_ns = zend_hrtime();
+            h2_log_access(conn, stream);
             return;
         }
     }
@@ -525,6 +545,8 @@ static void http2_handler_coroutine_entry(void)
             stream->request->end_ns   - stream->request->start_ns,
             stream->request->end_ns);
     }
+
+    h2_log_access(conn, stream);
 
     zval_ptr_dtor(&retval);
 }
