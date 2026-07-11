@@ -1228,6 +1228,9 @@ PHP_FUNCTION(_http_log_format_selftest)
     } else if (style_len == 6 && memcmp(style, "pretty", 6) == 0) {
         fmt    = http_log_format_pretty;
         fmt_ud = color ? (void *)1 : NULL;
+    } else if (style_len == 6 && memcmp(style, "syslog", 6) == 0) {
+        fmt    = http_log_format_syslog;
+        fmt_ud = (void *)(intptr_t)1;   /* facility = user */
     } else {
         RETURN_FALSE;
     }

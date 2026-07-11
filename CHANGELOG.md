@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in a per-sink ring buffer flushed at a 32 KiB high-water mark or a 200 ms
     timer, so a burst of logs coalesces into far fewer write syscalls while the
     emit call itself never blocks.
+  - **syslog sink.** `['type'=>'syslog', 'target'=>'tcp://host:port',
+    'facility'=>'local0', 'level'=>…]` ships records as RFC 5424 messages with
+    RFC 6587 octet-counted framing over TCP, so a receiver splits records
+    correctly even when a message carries an embedded newline. PRI packs the
+    configured facility with the severity mapped to syslog levels.
   - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
     OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
     Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with

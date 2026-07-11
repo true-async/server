@@ -2824,10 +2824,11 @@ static bool log_sink_spec_valid(zval *elem)
     const bool is_stream = (tl == 6 && memcmp(t, "stream", 6) == 0);
     const bool is_std    = (tl == 6 && (memcmp(t, "stdout", 6) == 0
                                         || memcmp(t, "stderr", 6) == 0));
+    const bool is_syslog = (tl == 6 && memcmp(t, "syslog", 6) == 0);
 
-    if (!is_stream && !is_std) {
+    if (!is_stream && !is_std && !is_syslog) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "setLogSinks(): 'type' must be one of stream|stdout|stderr", 0);
+            "setLogSinks(): 'type' must be one of stream|stdout|stderr|syslog", 0);
         return false;
     }
 
@@ -2842,6 +2843,29 @@ static bool log_sink_spec_valid(zval *elem)
         if (st == NULL) {
             zend_throw_exception(http_server_invalid_argument_exception_ce,
                 "setLogSinks(): type 'stream' requires a php_stream 'stream' resource", 0);
+            return false;
+        }
+    }
+
+    if (is_syslog) {
+        /* B5: TCP syslog only (octet-framed) — local/udp datagrams land later. */
+        zval *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
+
+        if (ztarget == NULL || Z_TYPE_P(ztarget) != IS_STRING
+            || Z_STRLEN_P(ztarget) <= 6
+            || memcmp(Z_STRVAL_P(ztarget), "tcp://", 6) != 0) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "setLogSinks(): type 'syslog' requires a 'tcp://host:port' target", 0);
+            return false;
+        }
+
+        zval *zfac = zend_hash_str_find(spec, "facility", sizeof("facility") - 1);
+
+        if (zfac != NULL
+            && (Z_TYPE_P(zfac) != IS_STRING
+                || http_log_syslog_facility(Z_STRVAL_P(zfac), Z_STRLEN_P(zfac)) < 0)) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "setLogSinks(): syslog 'facility' must be a keyword (user, daemon, local0..7, …)", 0);
             return false;
         }
     }

@@ -968,14 +968,17 @@ final class HttpServerConfig
      * this overrides the setLogSeverity()/setLogStream() single-stream sugar.
      *
      * Each element is an array:
-     *   - 'type'   => 'stream' | 'stdout' | 'stderr'  (required)
-     *   - 'stream' => resource                         (required for 'stream')
-     *   - 'format' => 'plain' | 'logfmt' | 'json' | 'pretty'  (default 'plain')
-     *   - 'level'  => LogSeverity                      (required)
+     *   - 'type'     => 'stream' | 'stdout' | 'stderr' | 'syslog'  (required)
+     *   - 'stream'   => resource               (required for 'stream')
+     *   - 'target'   => 'tcp://host:port'      (required for 'syslog')
+     *   - 'facility' => 'user' | 'daemon' | 'local0'..'local7' | …  (syslog, default 'user')
+     *   - 'format'   => 'plain' | 'logfmt' | 'json' | 'pretty'  (default 'plain'; ignored for syslog)
+     *   - 'level'    => LogSeverity            (required)
      *
      * 'pretty' auto-decides colour from the target (NO_COLOR / CLICOLOR_FORCE /
-     * isatty). At most 8 sinks. Invalid specs throw at call time. File rotation,
-     * syslog, journald and network transports arrive in a later stage.
+     * isatty). 'syslog' emits RFC 5424 with RFC 6587 octet framing over TCP. At
+     * most 8 sinks. Invalid specs throw at call time. Local/UDP syslog, file
+     * rotation and journald arrive in later stages.
      *
      * @param array $sinks List of sink spec arrays (see above).
      * @return static

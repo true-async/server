@@ -1318,6 +1318,45 @@ static void http_server_start_logging(http_server_object *server,
             const char *t    = Z_STRVAL_P(ztype);
             zval      *stream_zv;
 
+            if (Z_STRLEN_P(ztype) == 6 && memcmp(t, "syslog", 6) == 0) {
+                /* Connect a TCP client stream to the syslog target; write RFC
+                 * 5424 (octet-framed) through it. Validated at config time. */
+                zval        *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
+                zend_string *xerr    = NULL;
+                int          xcode   = 0;
+                php_stream  *s = php_stream_xport_create(
+                    Z_STRVAL_P(ztarget), Z_STRLEN_P(ztarget), 0,
+                    STREAM_XPORT_CLIENT | STREAM_XPORT_CONNECT,
+                    NULL, NULL, NULL, &xerr, &xcode);
+
+                if (xerr != NULL) {
+                    zend_string_release(xerr);
+                }
+                if (s == NULL) {
+                    continue;   /* target unreachable — skip this sink */
+                }
+                php_stream_to_zval(s, &opened[n]);
+
+                int   fac  = 1;   /* user */
+                zval *zfac = zend_hash_str_find(spec, "facility", sizeof("facility") - 1);
+                if (zfac != NULL) {
+                    fac = http_log_syslog_facility(Z_STRVAL_P(zfac), Z_STRLEN_P(zfac));
+                    if (fac < 0) {
+                        fac = 1;
+                    }
+                }
+
+                zval *zlvl_s   = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+                zval *backing_s = zend_enum_fetch_case_value(Z_OBJ_P(zlvl_s));
+
+                specs[n].level        = (http_log_severity_t)Z_LVAL_P(backing_s);
+                specs[n].formatter    = http_log_format_syslog;
+                specs[n].formatter_ud = (void *)(intptr_t)fac;
+                specs[n].stream_zv    = &opened[n];
+                n++;
+                continue;
+            }
+
             if (Z_STRLEN_P(ztype) == 6 && memcmp(t, "stream", 6) == 0) {
                 stream_zv = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
             } else {

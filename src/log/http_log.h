@@ -147,6 +147,14 @@ size_t http_log_format_json(const http_log_record_t *rec,
 size_t http_log_format_pretty(const http_log_record_t *rec,
                               char *buf, size_t buf_len, void *ud);
 
+/* RFC 5424 syslog with RFC 6587 octet-counted framing (for stream/TCP sinks).
+ * `ud` carries the syslog facility (0..23, default user=1). */
+size_t http_log_format_syslog(const http_log_record_t *rec,
+                              char *buf, size_t buf_len, void *ud);
+
+/* RFC 5424 facility keyword (e.g. "user", "daemon", "local0") → code, or -1. */
+int http_log_syslog_facility(const char *name, size_t len);
+
 /* Resolve whether a pretty sink writing to `fd` should colour: NO_COLOR off,
  * else CLICOLOR_FORCE on, else follows isatty(fd). Called once at sink build. */
 bool http_log_color_for_fd(int fd);

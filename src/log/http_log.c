@@ -76,6 +76,10 @@ struct http_log_writer_cb {
     http_log_sink_t             *sink;
     zend_async_io_req_t         *active_req;
     char                        *active_buf;
+    /* true when we created sink->async_io from the stream's fd (socket/pipe);
+     * then we close it at stop. false when we borrowed the stream's own
+     * async-IO handle (file), which the stream disposes. */
+    bool                         io_owned;
     /* Ring of formatted bytes awaiting write. emit appends here (never
      * suspends); the completion chain, the high-water kick, and the flush
      * timer drain it. head = next append offset, len = buffered bytes. */
@@ -550,6 +554,95 @@ bool http_log_color_for_fd(int fd)
 #endif
 }
 
+#define HTTP_LOG_SYSLOG_APPNAME "php-http-server"
+
+/* RFC 5424 facility keyword → numeric code, or -1 if unknown. */
+int http_log_syslog_facility(const char *name, size_t len)
+{
+    static const struct { const char *kw; int code; } table[] = {
+        { "kern", 0 }, { "user", 1 }, { "mail", 2 }, { "daemon", 3 },
+        { "auth", 4 }, { "syslog", 5 }, { "lpr", 6 }, { "news", 7 },
+        { "uucp", 8 }, { "cron", 9 }, { "authpriv", 10 }, { "ftp", 11 },
+        { "local0", 16 }, { "local1", 17 }, { "local2", 18 }, { "local3", 19 },
+        { "local4", 20 }, { "local5", 21 }, { "local6", 22 }, { "local7", 23 },
+    };
+
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+        if (strlen(table[i].kw) == len && memcmp(table[i].kw, name, len) == 0) {
+            return table[i].code;
+        }
+    }
+
+    return -1;
+}
+
+/* OTel severity → RFC 5424 syslog severity (0..7). */
+static int syslog_severity(http_log_severity_t s)
+{
+    switch (s) {
+        case HTTP_LOG_ERROR: return 3;   /* Error */
+        case HTTP_LOG_WARN:  return 4;   /* Warning */
+        case HTTP_LOG_DEBUG: return 7;   /* Debug */
+        case HTTP_LOG_INFO:
+        default:             return 6;   /* Informational */
+    }
+}
+
+/* Local hostname for the syslog HEADER, resolved once. "-" (NILVALUE) if
+ * unavailable. */
+static const char *syslog_hostname(void)
+{
+    static char host[256];
+
+    if (host[0] == '\0') {
+        if (gethostname(host, sizeof host - 1) != 0 || host[0] == '\0') {
+            host[0] = '-';
+            host[1] = '\0';
+        }
+    }
+
+    return host;
+}
+
+/* RFC 5424 message with RFC 6587 octet-counted framing: "LEN SP SYSLOG-MSG",
+ * where SYSLOG-MSG = "<PRI>1 TIMESTAMP HOST APP PROCID - - MSG". PRI packs the
+ * facility (via `ud`, defaulting to user=1) and the mapped severity. The
+ * octet-count frames the record on a stream transport (TCP); MSG carries the
+ * body + attrs. Datagram transports (local/udp) will drop the frame prefix. */
+size_t http_log_format_syslog(const http_log_record_t *rec,
+                              char *buf, size_t buf_len, void *ud)
+{
+    int facility = (int)(intptr_t)ud;
+    if (facility < 0 || facility > 23) {
+        facility = 1;   /* user-level */
+    }
+
+    const int pri = facility * 8 + syslog_severity(rec->severity);
+
+    char ts[40];
+    format_iso8601(rec->timestamp_ns, ts, sizeof ts);
+
+    /* Build the SYSLOG-MSG in a scratch so its byte length prefixes the frame. */
+    char msg[1600];
+    log_sbuf_t m;
+    sb_init(&m, msg, sizeof msg);
+
+    sb_printf(&m, "<%d>1 %s %s %s %ld - - ",
+              pri, ts, syslog_hostname(), HTTP_LOG_SYSLOG_APPNAME,
+              (long)getpid());
+    if (rec->body != NULL) {
+        sb_write(&m, rec->body, rec->body_len);
+    }
+    sb_put_attrs(&m, rec, LOG_STYLE_PLAIN);
+
+    log_sbuf_t o;
+    sb_init(&o, buf, buf_len);
+    sb_printf(&o, "%zu ", m.len);
+    sb_write(&o, msg, m.len);
+
+    return o.len;
+}
+
 /* Rate-limited (~1/sec per sink) stderr notice when a sink's transport
  * fails. Never re-enters the logger. */
 static void emit_fallback_stderr(http_log_sink_t *sink, const char *reason)
@@ -941,19 +1034,39 @@ static bool http_log_sink_start(http_log_sink_t *sink,
         return false;
     }
 
-    /* Ask the stream for its async IO handle (true_async integration): the
-     * stream get-or-creates a zend_async_io_t and owns its lifetime, so the
-     * writer never touches a raw fd and any stream type that implements the
-     * option (file, socket, pipe) works. We only borrow the handle to write
-     * through and detach our callback at stop. */
+    /* Prefer the stream's own async IO handle (true_async integration): the
+     * stream get-or-creates a zend_async_io_t and owns its lifetime, so we just
+     * borrow it. Only file streams implement this — socket streams expose
+     * readiness (PHP_STREAM_OPTION_ASYNC_EVENT_HANDLE) instead — so fall back to
+     * wrapping the stream's fd in an async IO we own. PRESERVE_FD keeps the
+     * descriptor with the stream either way. */
     zend_async_io_t *io = NULL;
+    bool io_owned = false;
     int rc = php_stream_set_option(stream, PHP_STREAM_OPTION_ASYNC_IO, 0, &io);
 
     if (rc != PHP_STREAM_OPTION_RETURN_OK || io == NULL) {
-        fprintf(stderr,
-                "http_server: log stream has no async IO handle; "
-                "sink disabled (use a file/socket/pipe stream)\n");
-        return false;
+        int fd = -1;
+
+        if (php_stream_cast(stream, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
+                            (void *)&fd, 0) != SUCCESS || fd < 0) {
+            fprintf(stderr,
+                    "http_server: log stream has neither an async IO handle nor "
+                    "an fd; sink disabled\n");
+            return false;
+        }
+
+        io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd,
+                                  ZEND_ASYNC_IO_TYPE_FILE,
+                                  ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
+
+        if (io == NULL) {
+            fprintf(stderr,
+                    "http_server: failed to wrap log stream fd into async io; "
+                    "sink disabled\n");
+            return false;
+        }
+
+        io_owned = true;
     }
 
     http_log_writer_cb_t *cb = (http_log_writer_cb_t *)
@@ -961,7 +1074,10 @@ static bool http_log_sink_start(http_log_sink_t *sink,
                                      sizeof(http_log_writer_cb_t));
 
     if (cb == NULL) {
-        /* io belongs to the stream — leave it, just bail out. */
+        if (io_owned && io->event.dispose != NULL) {
+            io->event.dispose(&io->event);
+        }
+
         fprintf(stderr, "http_server: failed to allocate log writer cb\n");
         return false;
     }
@@ -970,6 +1086,7 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     cb->sink           = sink;
     cb->active_req     = NULL;
     cb->active_buf     = NULL;
+    cb->io_owned       = io_owned;
     cb->ring           = emalloc(HTTP_LOG_RING_CAP);
     cb->ring_head      = 0;
     cb->ring_len       = 0;
@@ -979,7 +1096,12 @@ static bool http_log_sink_start(http_log_sink_t *sink,
 
     if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
         efree(cb->ring);
-        efree(cb);   /* io belongs to the stream — leave it */
+        efree(cb);
+
+        if (io_owned && io->event.dispose != NULL) {
+            io->event.dispose(&io->event);
+        }
+
         fprintf(stderr, "http_server: failed to attach log writer cb\n");
         return false;
     }
@@ -1070,6 +1192,18 @@ static void http_log_sink_stop(http_log_sink_t *sink)
                                                &cb->base);
         }
 
+        /* Close the io only when we created it from the stream's fd; a borrowed
+         * handle belongs to the stream, which disposes it with its last ref.
+         * PRESERVE_FD means neither path closes the descriptor itself. */
+        if (cb->io_owned && sink->async_io != NULL) {
+            zend_async_io_t *io = sink->async_io;
+            ZEND_ASYNC_IO_CLOSE(io);
+
+            if (io->event.dispose != NULL) {
+                io->event.dispose(&io->event);
+            }
+        }
+
         if (cb->ring != NULL) {
             efree(cb->ring);
         }
@@ -1081,10 +1215,6 @@ static void http_log_sink_stop(http_log_sink_t *sink)
         efree(cb);
     }
 
-    /* The async IO handle belongs to the stream (get-or-create via
-     * PHP_STREAM_OPTION_ASYNC_IO) — we only detached our writer callback
-     * above. Dropping our stream ref lets the stream dispose the io when its
-     * last ref goes; nothing for us to close here. */
     sink->async_io = NULL;
 
     if (sink->stream_set) {
