@@ -136,3 +136,6 @@ fuzz/timeout-*
 fuzz/oom-*
 *~
 .serena/
+
+# reload-server.php runtime marker
+examples/app-version.txt

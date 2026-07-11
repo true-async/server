@@ -35,6 +35,11 @@ $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setBody('pong');
 });
 
+/* Old workers log "shutting down"/"exited" to stderr from their own threads as
+ * they drain within the grace window — unordered vs the new workers booting and
+ * vs these echoes, so those lines may land after boots=4. EXPECTF trails each
+ * marker with %A to absorb them; do not drop the %A. */
+
 spawn(function () use ($port, $bfile) {
     $curl = static fn (): string => (string) shell_exec(sprintf(
         'curl -s --max-time 2 http://127.0.0.1:%d/ 2>/dev/null', $port));
@@ -73,7 +78,6 @@ spawn(function () use ($port, $bfile) {
 $server->start();
 ?>
 --EXPECTF--
-up=pong
-%A
-boots=4
+up=pong%A
+boots=4%A
 served_after=pong%A
