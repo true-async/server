@@ -465,6 +465,31 @@ core (user decision).
 - [x] Build & verify — full core+telemetry suite green
 - Profiler N/A — registry lookups run at config/start time, not on emit
 
+#### B5e — datagram syslog (udp:// + udg://) + framing moved to the transport ✅
+
+Architecture fix surfaced by the mental-model review: RFC 6587 octet framing
+lived in the *formatter*, but framing is a transport property (the same RFC
+5424 message is octet-framed on TCP and must be one datagram on UDP). Now
+`http_log_write_mode_t` (STREAM / STREAM_FRAMED / DGRAM) rides the sink spec:
+the syslog formatter emits the bare message (also dropped its 1600-byte
+scratch + memcpy), `http_log_sink_write` applies the frame, and the writer's
+DGRAM mode stores a u32 length header in the ring and issues exactly one
+write per record so each record travels as one datagram. Sink-type `open()`
+gained a mode out-param; syslog resolves it from the target scheme
+(tcp→framed stream, udp/udg→datagram). Also deduped: the 8 log-gate macro
+bodies → one `http_logf_at`, `format_clock` → slice of `format_iso8601`.
+
+- [x] Code quality — framing/boundary logic in exactly one layer (writer)
+- [x] No duplicated logic — gate macros ×8→1; clock formatter derives from
+      iso8601; scheme→mode table shared by validate and open
+- [x] `const` — scheme table static const; ring peek takes const cb
+- [x] Comments reviewed — mode semantics documented at the enum
+- [x] Tests — 022 golden (bare message), 023 (TCP framed on the wire),
+      new 025 (UDP + udg: every datagram is one bare RFC 5424 record)
+- [x] Coverage checked
+- [x] Build & verify — core+telemetry green
+- Profiler N/A — emit path unchanged (one branch on mode per record)
+
 ### Stage B6 — structured access log  _(step 11 — ⚠ profiler)_
 
 Goal: per-request event (method, path, status, bytes, duration, protocol,

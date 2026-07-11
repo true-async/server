@@ -81,7 +81,11 @@ struct http_log_writer_cb {
     bool                         io_owned;
     /* Ring of formatted bytes awaiting write. emit appends here (never
      * suspends); the completion chain, the high-water kick, and the flush
-     * timer drain it. head = next append offset, len = buffered bytes. */
+     * timer drain it. head = next append offset, len = buffered bytes.
+     * mode decides the record framing on append and the write granularity
+     * on drain (DGRAM stores a u32 length header before each record so one
+     * record maps to one write). */
+    http_log_write_mode_t        mode;
     char                        *ring;
     uint32_t                     ring_head;
     uint32_t                     ring_len;
@@ -471,19 +475,21 @@ static int pretty_level_idx(http_log_severity_t s)
     }
 }
 
+/* "HH:MM:SS.mmm" — the time-of-day slice of the ISO-8601 timestamp. */
 static void format_clock(uint64_t ts_ns, char *out, size_t out_len)
 {
-    time_t   sec = (time_t)(ts_ns / 1000000000ULL);
-    uint32_t ms  = (uint32_t)((ts_ns % 1000000000ULL) / 1000000ULL);
-    struct tm tm_buf;
-#ifdef PHP_WIN32
-    gmtime_s(&tm_buf, &sec);
-#else
-    gmtime_r(&sec, &tm_buf);
-#endif
+    char ts[40];
+    const size_t n = format_iso8601(ts_ns, ts, sizeof ts);
 
-    snprintf(out, out_len, "%02d:%02d:%02d.%03u",
-             tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+    if (n < 23 || out_len < 13) {
+        if (out_len > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
+
+    memcpy(out, ts + 11, 12);   /* skip "YYYY-MM-DDT" */
+    out[12] = '\0';
 }
 
 /* Pretty console line: "HH:MM:SS.mmm  LEVEL  message  key=val …". Colour is
@@ -601,11 +607,10 @@ static void syslog_hostname_resolve(void)
     }
 }
 
-/* RFC 5424 message with RFC 6587 octet-counted framing: "LEN SP SYSLOG-MSG",
- * where SYSLOG-MSG = "<PRI>1 TIMESTAMP HOST APP PROCID - - MSG". PRI packs the
- * facility (via `ud`, defaulting to user=1) and the mapped severity. The
- * octet-count frames the record on a stream transport (TCP); MSG carries the
- * body + attrs. Datagram transports (local/udp) will drop the frame prefix. */
+/* Bare RFC 5424 message: "<PRI>1 TIMESTAMP HOST APP PROCID - - MSG". PRI packs
+ * the facility (via `ud`, defaulting to user=1) and the mapped severity; MSG
+ * carries the body + attrs. Record framing is the transport's job (see
+ * http_log_write_mode_t): octet-count on a stream, one datagram on UDP/unix. */
 size_t http_log_format_syslog(const http_log_record_t *rec,
                               char *buf, size_t buf_len, void *ud)
 {
@@ -619,25 +624,18 @@ size_t http_log_format_syslog(const http_log_record_t *rec,
     char ts[40];
     format_iso8601(rec->timestamp_ns, ts, sizeof ts);
 
-    /* Build the SYSLOG-MSG in a scratch so its byte length prefixes the frame. */
-    char msg[1600];
-    log_sbuf_t m;
-    sb_init(&m, msg, sizeof msg);
+    log_sbuf_t sb;
+    sb_init(&sb, buf, buf_len);
 
-    sb_printf(&m, "<%d>1 %s %s %s %ld - - ",
+    sb_printf(&sb, "<%d>1 %s %s %s %ld - - ",
               pri, ts, syslog_host, HTTP_LOG_SYSLOG_APPNAME,
               (long)getpid());
     if (rec->body != NULL) {
-        sb_write(&m, rec->body, rec->body_len);
+        sb_write(&sb, rec->body, rec->body_len);
     }
-    sb_put_attrs(&m, rec, LOG_STYLE_PLAIN);
+    sb_put_attrs(&sb, rec, LOG_STYLE_PLAIN);
 
-    log_sbuf_t o;
-    sb_init(&o, buf, buf_len);
-    sb_printf(&o, "%zu ", m.len);
-    sb_write(&o, msg, m.len);
-
-    return o.len;
+    return sb.len;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -801,8 +799,11 @@ static bool sink_validate_stream(HashTable *spec)
     return true;
 }
 
-static bool sink_open_stream(HashTable *spec, zval *out)
+static bool sink_open_stream(HashTable *spec, zval *out,
+                             http_log_write_mode_t *mode)
 {
+    (void)mode;
+
     zval *zs = zend_hash_str_find(spec, "stream", sizeof("stream") - 1);
 
     if (zs == NULL || Z_TYPE_P(zs) != IS_RESOURCE) {
@@ -825,28 +826,62 @@ static bool sink_open_php_dev(const char *dev, zval *out)
     return true;
 }
 
-static bool sink_open_stdout(HashTable *spec, zval *out)
+static bool sink_open_stdout(HashTable *spec, zval *out,
+                             http_log_write_mode_t *mode)
 {
     (void)spec;
+    (void)mode;
     return sink_open_php_dev("php://stdout", out);
 }
 
-static bool sink_open_stderr(HashTable *spec, zval *out)
+static bool sink_open_stderr(HashTable *spec, zval *out,
+                             http_log_write_mode_t *mode)
 {
     (void)spec;
+    (void)mode;
     return sink_open_php_dev("php://stderr", out);
+}
+
+/* Syslog target scheme → writer mode: a TCP stream needs RFC 6587 octet
+ * framing, a datagram transport (udp://, unix udg://) needs one record per
+ * write. NULL when the scheme is unsupported. */
+static const struct {
+    const char            *scheme;
+    size_t                 scheme_len;
+    http_log_write_mode_t  mode;
+} syslog_schemes[] = {
+    { "tcp://", 6, HTTP_LOG_WRITE_STREAM_FRAMED },
+    { "udp://", 6, HTTP_LOG_WRITE_DGRAM },
+    { "udg://", 6, HTTP_LOG_WRITE_DGRAM },   /* unix datagram, e.g. /dev/log */
+};
+
+static bool syslog_target_mode(const zval *ztarget, http_log_write_mode_t *mode)
+{
+    if (ztarget == NULL || Z_TYPE_P(ztarget) != IS_STRING) {
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof syslog_schemes / sizeof syslog_schemes[0]; i++) {
+        if ((size_t)Z_STRLEN_P(ztarget) > syslog_schemes[i].scheme_len
+            && memcmp(Z_STRVAL_P(ztarget), syslog_schemes[i].scheme,
+                      syslog_schemes[i].scheme_len) == 0) {
+            *mode = syslog_schemes[i].mode;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool sink_validate_syslog(HashTable *spec)
 {
-    /* B5: TCP syslog only (octet-framed) — local/udp datagrams land later. */
     zval *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
+    http_log_write_mode_t mode;
 
-    if (ztarget == NULL || Z_TYPE_P(ztarget) != IS_STRING
-        || Z_STRLEN_P(ztarget) <= 6
-        || memcmp(Z_STRVAL_P(ztarget), "tcp://", 6) != 0) {
+    if (!syslog_target_mode(ztarget, &mode)) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "setLogSinks(): type 'syslog' requires a 'tcp://host:port' target", 0);
+            "setLogSinks(): type 'syslog' requires a 'tcp://host:port', "
+            "'udp://host:port' or 'udg:///path' target", 0);
         return false;
     }
 
@@ -863,11 +898,12 @@ static bool sink_validate_syslog(HashTable *spec)
     return true;
 }
 
-static bool sink_open_syslog(HashTable *spec, zval *out)
+static bool sink_open_syslog(HashTable *spec, zval *out,
+                             http_log_write_mode_t *mode)
 {
     zval *ztarget = zend_hash_str_find(spec, "target", sizeof("target") - 1);
 
-    if (ztarget == NULL || Z_TYPE_P(ztarget) != IS_STRING) {
+    if (!syslog_target_mode(ztarget, mode)) {
         return false;
     }
 
@@ -971,24 +1007,11 @@ static void writer_callback_dispose(
      * and frees this struct). */
 }
 
-/* Append formatted bytes to the ring; a burst past its capacity drops. */
-static void writer_ring_append(http_log_writer_cb_t *cb, const char *src, size_t len)
+/* Raw wrap-aware ring primitives; callers account for capacity. */
+static void ring_put(http_log_writer_cb_t *cb, const char *src, uint32_t len)
 {
-    if (len == 0) {
-        return;
-    }
-
-    if (len > (size_t)(HTTP_LOG_RING_CAP - cb->ring_len)) {
-        if (cb->sink != NULL) {
-            cb->sink->dropped_total++;
-        }
-
-        emit_fallback_stderr(cb->sink, "ring overflow");
-        return;
-    }
-
-    uint32_t head  = cb->ring_head;
-    uint32_t first = HTTP_LOG_RING_CAP - head;   /* room before the wrap */
+    const uint32_t head  = cb->ring_head;
+    const uint32_t first = HTTP_LOG_RING_CAP - head;   /* room before the wrap */
 
     if (len <= first) {
         memcpy(cb->ring + head, src, len);
@@ -997,8 +1020,46 @@ static void writer_ring_append(http_log_writer_cb_t *cb, const char *src, size_t
         memcpy(cb->ring, src + first, len - first);
     }
 
-    cb->ring_head = (uint32_t)((head + len) & (HTTP_LOG_RING_CAP - 1));
-    cb->ring_len += (uint32_t)len;
+    cb->ring_head = (head + len) & (HTTP_LOG_RING_CAP - 1);
+    cb->ring_len += len;
+}
+
+static void ring_copy_out(const http_log_writer_cb_t *cb, uint32_t pos,
+                          char *dst, uint32_t len)
+{
+    const uint32_t first = HTTP_LOG_RING_CAP - pos;
+
+    if (len <= first) {
+        memcpy(dst, cb->ring + pos, len);
+    } else {
+        memcpy(dst, cb->ring + pos, first);
+        memcpy(dst + first, cb->ring, len - first);
+    }
+}
+
+/* Append one record (optional frame prefix + payload) atomically: a burst
+ * past the ring's capacity drops the whole record, never half of it. */
+static void writer_ring_append(http_log_writer_cb_t *cb,
+                               const char *pre, size_t pre_len,
+                               const char *src, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+
+    if (pre_len + len > (size_t)(HTTP_LOG_RING_CAP - cb->ring_len)) {
+        if (cb->sink != NULL) {
+            cb->sink->dropped_total++;
+        }
+
+        emit_fallback_stderr(cb->sink, "ring overflow");
+        return;
+    }
+
+    if (pre_len > 0) {
+        ring_put(cb, pre, (uint32_t)pre_len);
+    }
+    ring_put(cb, src, (uint32_t)len);
 }
 
 static void writer_kick_next(http_log_writer_cb_t *cb)
@@ -1010,16 +1071,28 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
         return;
     }
 
-    /* Drain one contiguous run of the ring. libuv holds the buffer until
-     * completion, so copy it out and free the ring space immediately — the
-     * producer can keep appending while this write is in flight. */
+    /* libuv holds the buffer until completion, so copy the chunk out and free
+     * the ring space immediately — the producer can keep appending while the
+     * write is in flight. Stream modes drain everything buffered in one
+     * write; DGRAM sends exactly one record per write so each record travels
+     * as one datagram (the completion chains the next). */
     uint32_t read_pos = (uint32_t)((cb->ring_head - cb->ring_len)
                                    & (HTTP_LOG_RING_CAP - 1));
-    uint32_t contig   = HTTP_LOG_RING_CAP - read_pos;
-    uint32_t chunk    = cb->ring_len < contig ? cb->ring_len : contig;
+    uint32_t chunk;
+
+    if (cb->mode == HTTP_LOG_WRITE_DGRAM) {
+        uint32_t rec_len;
+        ring_copy_out(cb, read_pos, (char *)&rec_len, sizeof rec_len);
+        read_pos = (read_pos + (uint32_t)sizeof rec_len)
+                   & (HTTP_LOG_RING_CAP - 1);
+        cb->ring_len -= (uint32_t)sizeof rec_len;
+        chunk = rec_len;   /* >= 1: append never stores an empty record */
+    } else {
+        chunk = cb->ring_len;
+    }
 
     char *out = emalloc(chunk);
-    memcpy(out, cb->ring + read_pos, chunk);
+    ring_copy_out(cb, read_pos, out, chunk);
     cb->ring_len -= chunk;
 
     cb->active_buf = out;
@@ -1118,8 +1191,9 @@ static void writer_flush_timer_destroy(http_log_writer_cb_t *cb)
     }
 }
 
-/* Hand one already-formatted record to a sink: append to the ring and flush
- * now if it crossed the high-water mark (otherwise the timer will). */
+/* Hand one already-formatted record to a sink: frame it per the writer mode,
+ * append to the ring and flush now if it crossed the high-water mark
+ * (otherwise the timer will). */
 static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t len)
 {
     http_log_writer_cb_t *cb = sink->writer_cb;
@@ -1128,7 +1202,23 @@ static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t l
         return;
     }
 
-    writer_ring_append(cb, buf, len);
+    switch (cb->mode) {
+        case HTTP_LOG_WRITE_STREAM_FRAMED: {
+            char pre[24];   /* RFC 6587 octet count: "LEN SP" */
+            const int pn = snprintf(pre, sizeof pre, "%zu ", len);
+            writer_ring_append(cb, pre, (size_t)pn, buf, len);
+            break;
+        }
+        case HTTP_LOG_WRITE_DGRAM: {
+            const uint32_t rec_len = (uint32_t)len;
+            writer_ring_append(cb, (const char *)&rec_len, sizeof rec_len,
+                               buf, len);
+            break;
+        }
+        case HTTP_LOG_WRITE_STREAM:
+        default:
+            writer_ring_append(cb, NULL, 0, buf, len);
+    }
 
     if (cb->ring_len >= HTTP_LOG_FLUSH_HIGH_WATER) {
         writer_kick_next(cb);
@@ -1283,7 +1373,8 @@ static bool http_log_sink_start(http_log_sink_t *sink,
                                 http_log_severity_t severity,
                                 http_log_formatter_fn formatter,
                                 void *formatter_ud,
-                                zval *stream_zv)
+                                zval *stream_zv,
+                                http_log_write_mode_t write_mode)
 {
     memset(sink, 0, sizeof *sink);
     sink->severity_floor = HTTP_LOG_OFF;
@@ -1354,6 +1445,7 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     cb->active_req     = NULL;
     cb->active_buf     = NULL;
     cb->io_owned       = io_owned;
+    cb->mode           = write_mode;
     cb->ring           = emalloc(HTTP_LOG_RING_CAP);
     cb->ring_head      = 0;
     cb->ring_len       = 0;
@@ -1529,7 +1621,8 @@ void http_log_server_start_sinks(http_log_state_t *state,
     for (int i = 0; i < n; i++) {
         if (http_log_sink_start(&state->sinks[state->sink_count],
                                 specs[i].level, specs[i].formatter,
-                                specs[i].formatter_ud, specs[i].stream_zv)) {
+                                specs[i].formatter_ud, specs[i].stream_zv,
+                                specs[i].write_mode)) {
             state->sink_count++;
         }
     }
@@ -1546,6 +1639,7 @@ void http_log_server_start(http_log_state_t *state,
         .formatter    = http_log_format_plain,
         .formatter_ud = NULL,
         .stream_zv    = stream_zv,
+        .write_mode   = HTTP_LOG_WRITE_STREAM,
     };
 
     http_log_server_start_sinks(state, &spec, 1);

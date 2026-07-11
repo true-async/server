@@ -32,11 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in a per-sink ring buffer flushed at a 32 KiB high-water mark or a 200 ms
     timer, so a burst of logs coalesces into far fewer write syscalls while the
     emit call itself never blocks.
-  - **syslog sink.** `['type'=>'syslog', 'target'=>'tcp://host:port',
-    'facility'=>'local0', 'level'=>…]` ships records as RFC 5424 messages with
-    RFC 6587 octet-counted framing over TCP, so a receiver splits records
-    correctly even when a message carries an embedded newline. PRI packs the
-    configured facility with the severity mapped to syslog levels.
+  - **syslog sink — TCP, UDP and unix datagram.** `['type'=>'syslog',
+    'target'=>'tcp://host:port' | 'udp://host:port' | 'udg:///dev/log',
+    'facility'=>'local0', 'level'=>…]` ships records as RFC 5424 messages. The
+    formatter emits the bare message; framing belongs to the transport: TCP
+    gets RFC 6587 octet-counted framing (a receiver splits records even when a
+    message carries an embedded newline), while UDP and unix-datagram targets
+    send exactly one record per datagram so message boundaries survive. PRI
+    packs the configured facility with the severity mapped to syslog levels.
   - **Sink-type / formatter registry (plugin seam).** `setLogSinks()` resolves
     `'type'` and `'format'` names through a registry instead of hardcoded
     lists; another extension can add its own sink type or formatter at MINIT

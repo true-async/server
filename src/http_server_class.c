@@ -1268,8 +1268,9 @@ static void http_server_start_logging(http_server_object *server,
 
             const http_log_sink_type_t *type =
                 http_log_sink_type_by_name(Z_STRVAL_P(ztype), Z_STRLEN_P(ztype));
+            http_log_write_mode_t mode = HTTP_LOG_WRITE_STREAM;
 
-            if (type == NULL || !type->open(spec, &opened[n])) {
+            if (type == NULL || !type->open(spec, &opened[n], &mode)) {
                 continue;   /* open failure (e.g. unreachable target) skips the sink */
             }
 
@@ -1295,6 +1296,7 @@ static void http_server_start_logging(http_server_object *server,
             specs[n].formatter_ud = (fdef != NULL && fdef->make_ud != NULL)
                                   ? fdef->make_ud(spec, &opened[n]) : NULL;
             specs[n].stream_zv    = &opened[n];
+            specs[n].write_mode   = mode;
             n++;
         } ZEND_HASH_FOREACH_END();
 
@@ -1303,6 +1305,7 @@ static void http_server_start_logging(http_server_object *server,
         specs[0].formatter    = http_log_format_plain;
         specs[0].formatter_ud = NULL;
         specs[0].stream_zv    = &cfg->log_stream;
+        specs[0].write_mode   = HTTP_LOG_WRITE_STREAM;
         n = 1;
     }
 

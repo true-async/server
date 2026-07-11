@@ -80,6 +80,20 @@ typedef size_t (*http_log_formatter_fn)(const http_log_record_t *rec,
 
 typedef struct http_log_writer_cb http_log_writer_cb_t;
 
+/* How the sink's writer turns formatted records into transport writes.
+ * Record framing is a TRANSPORT property, not a formatter one — the same
+ * RFC 5424 message is octet-framed on TCP but must be one datagram on UDP. */
+typedef enum {
+    /* Byte stream: records merge, one write drains everything buffered. */
+    HTTP_LOG_WRITE_STREAM = 0,
+    /* Byte stream with RFC 6587 octet-count framing ("LEN SP MSG") applied
+     * per record, so a receiver splits records even with embedded LFs. */
+    HTTP_LOG_WRITE_STREAM_FRAMED,
+    /* Message boundaries preserved: exactly one record per write, so each
+     * record travels as one datagram (UDP / unix-dgram syslog). */
+    HTTP_LOG_WRITE_DGRAM,
+} http_log_write_mode_t;
+
 /* One logging destination: a severity floor, a formatter, and an async
  * transport. A record fans out to every sink whose floor admits it, each
  * rendering with its own formatter. Sinks are independent — one failing
@@ -147,7 +161,8 @@ size_t http_log_format_json(const http_log_record_t *rec,
 size_t http_log_format_pretty(const http_log_record_t *rec,
                               char *buf, size_t buf_len, void *ud);
 
-/* RFC 5424 syslog with RFC 6587 octet-counted framing (for stream/TCP sinks).
+/* Bare RFC 5424 syslog message ("<PRI>1 TS HOST APP PROCID - - MSG"); the
+ * transport frames it (octet-count on a stream, one datagram on UDP/unix).
  * `ud` carries the syslog facility (0..23, default user=1). */
 size_t http_log_format_syslog(const http_log_record_t *rec,
                               char *buf, size_t buf_len, void *ud);
@@ -178,9 +193,11 @@ typedef struct {
      * throws and returns false on violation. NULL = nothing extra. */
     bool (*validate)(HashTable *spec);
     /* Resolve the sink's transport into stream_out as an owned zval ref
-     * (released by the caller after the sink takes its own). false = skip
-     * this sink (e.g. target unreachable). Runs at server start. */
-    bool (*open)(HashTable *spec, zval *stream_out);
+     * (released by the caller after the sink takes its own) and set the
+     * writer mode (pre-initialised to STREAM — only touch it for framed or
+     * datagram transports). false = skip this sink (e.g. target
+     * unreachable). Runs at server start. */
+    bool (*open)(HashTable *spec, zval *stream_out, http_log_write_mode_t *mode);
     /* Non-NULL forces this formatter (the spec's 'format' is ignored) —
      * how syslog pins its wire format. NULL → the spec's 'format' picks. */
     const http_log_formatter_def_t *pinned_formatter;
@@ -218,6 +235,7 @@ typedef struct {
     http_log_formatter_fn  formatter;
     void                  *formatter_ud;
     zval                  *stream_zv;
+    http_log_write_mode_t  write_mode;
 } http_log_sink_spec_t;
 
 /* Activate the logger with an explicit list of sinks (cap HTTP_LOG_MAX_SINKS;
@@ -234,58 +252,33 @@ void http_log_server_start(http_log_state_t *state,
 /* Idempotent; safe on a never-started state. */
 void http_log_server_stop(http_log_state_t *state);
 
-/* UNEXPECTED-wrapped so the disabled path is one branch and skips
- * body formatting entirely. The state argument is read once into a
- * local — multiple macro arg evaluations are forbidden. */
-#define http_logf_error(state, tmpl, ...) \
+/* Single gate behind every level macro: UNEXPECTED-wrapped so the disabled
+ * path is one branch and skips body formatting entirely. The state argument
+ * is read once into a local — multiple macro arg evaluations are forbidden. */
+#define http_logf_at(state, lvl, attrs, n, tmpl, ...) \
     do { http_log_state_t *_st = (state); \
          if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_ERROR >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_ERROR, NULL, 0, (tmpl), ##__VA_ARGS__); \
-    } while (0)
-#define http_logf_warn(state, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_WARN >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_WARN, NULL, 0, (tmpl), ##__VA_ARGS__); \
-    } while (0)
-#define http_logf_info(state, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_INFO >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_INFO, NULL, 0, (tmpl), ##__VA_ARGS__); \
-    } while (0)
-#define http_logf_debug(state, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_DEBUG >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_DEBUG, NULL, 0, (tmpl), ##__VA_ARGS__); \
+                        && (int)(lvl) >= (int)_st->severity)) \
+             http_log_emitf(_st, (lvl), (attrs), (n), (tmpl), ##__VA_ARGS__); \
     } while (0)
 
-#define http_logf_warn_a(state, attrs, n, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_WARN >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_WARN, (attrs), (n), (tmpl), ##__VA_ARGS__); \
-    } while (0)
+#define http_logf_error(state, tmpl, ...) \
+    http_logf_at((state), HTTP_LOG_ERROR, NULL, 0, (tmpl), ##__VA_ARGS__)
+#define http_logf_warn(state, tmpl, ...) \
+    http_logf_at((state), HTTP_LOG_WARN, NULL, 0, (tmpl), ##__VA_ARGS__)
+#define http_logf_info(state, tmpl, ...) \
+    http_logf_at((state), HTTP_LOG_INFO, NULL, 0, (tmpl), ##__VA_ARGS__)
+#define http_logf_debug(state, tmpl, ...) \
+    http_logf_at((state), HTTP_LOG_DEBUG, NULL, 0, (tmpl), ##__VA_ARGS__)
+
 #define http_logf_error_a(state, attrs, n, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_ERROR >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_ERROR, (attrs), (n), (tmpl), ##__VA_ARGS__); \
-    } while (0)
+    http_logf_at((state), HTTP_LOG_ERROR, (attrs), (n), (tmpl), ##__VA_ARGS__)
+#define http_logf_warn_a(state, attrs, n, tmpl, ...) \
+    http_logf_at((state), HTTP_LOG_WARN, (attrs), (n), (tmpl), ##__VA_ARGS__)
 #define http_logf_info_a(state, attrs, n, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_INFO >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_INFO, (attrs), (n), (tmpl), ##__VA_ARGS__); \
-    } while (0)
+    http_logf_at((state), HTTP_LOG_INFO, (attrs), (n), (tmpl), ##__VA_ARGS__)
 #define http_logf_debug_a(state, attrs, n, tmpl, ...) \
-    do { http_log_state_t *_st = (state); \
-         if (UNEXPECTED(_st != NULL && _st->severity != HTTP_LOG_OFF \
-                        && (int)HTTP_LOG_DEBUG >= (int)_st->severity)) \
-             http_log_emitf(_st, HTTP_LOG_DEBUG, (attrs), (n), (tmpl), ##__VA_ARGS__); \
-    } while (0)
+    http_logf_at((state), HTTP_LOG_DEBUG, (attrs), (n), (tmpl), ##__VA_ARGS__)
 
 #ifdef __cplusplus
 }
