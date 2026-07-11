@@ -409,14 +409,12 @@ static void h2_log_access(http_connection_t *conn, http2_stream_t *stream)
         return;
     }
 
-    if (conn->remote_str == NULL) {
-        conn->remote_str = http_connection_remote_address(conn);
-    }
+    http_access_rec_t rec;
+    char              ip[INET6_ADDRSTRLEN];
 
-    http_log_emit_access(conn->log_state, stream->request,
-                         Z_OBJ(stream->response_zv),
-                         conn->remote_str != NULL ? ZSTR_VAL(conn->remote_str)
-                                                  : NULL);
+    http_request_fill_access_rec(stream->request, Z_OBJ(stream->response_zv),
+                                 &rec, ip, sizeof ip);
+    http_log_emit_access(conn->log_state, &rec);
 }
 
 /* Invokes the user handler with the stream's own (request, response)

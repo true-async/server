@@ -181,6 +181,15 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
     conn->server = server;
     conn->client_fd = socket_fd;
 
+    /* Snapshot the peer while the socket is guaranteed live. One getpeername()
+     * per connection (not per request), no formatting, no allocation. */
+    conn->peer_len = (socklen_t)sizeof(conn->peer);
+
+    if (getpeername(socket_fd, (struct sockaddr *)&conn->peer,
+                    &conn->peer_len) != 0) {
+        conn->peer_len = 0;
+    }
+
     conn->io = ZEND_ASYNC_IO_CREATE(
         (zend_file_descriptor_t)socket_fd,
         ZEND_ASYNC_IO_TYPE_TCP,
@@ -239,40 +248,33 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
 
 /* {{{ http_connection_remote_address
  *
- * Resolve the peer as "host:port" (IPv4) or "[host]:port" (IPv6) via
- * getpeername() on the accepted fd. Returns a fresh zend_string the
- * caller owns, or NULL when there is no IP peer (Unix-socket listener,
- * closed fd, or getpeername failure). Lazy — only reached from
- * WebSocket::getRemoteAddress(), never on the accept hot path. */
+ * Bare peer IP (REMOTE_ADDR form — no port, no brackets) as a fresh
+ * zend_string the caller owns, or NULL when the connection has no IP peer
+ * (Unix-socket listener). Reads the address snapshotted at accept; the port
+ * is a separate accessor, never glued into this string. */
 zend_string *http_connection_remote_address(const http_connection_t *conn)
 {
-    if (conn == NULL) {
+    if (conn == NULL || conn->peer_len == 0) {
         return NULL;
     }
 
-    struct sockaddr_storage ss;
-    socklen_t slen = sizeof(ss);
-    if (getpeername(conn->client_fd, (struct sockaddr *)&ss, &slen) != 0) {
-        return NULL;
+    char         ip[INET6_ADDRSTRLEN];
+    const size_t n = http_sockaddr_ip((const struct sockaddr *)&conn->peer,
+                                      conn->peer_len, ip, sizeof ip);
+
+    return n > 0 ? zend_string_init(ip, n, 0) : NULL;
+}
+/* }}} */
+
+/* {{{ http_connection_remote_port — peer port in host order, 0 when none. */
+uint16_t http_connection_remote_port(const http_connection_t *conn)
+{
+    if (conn == NULL || conn->peer_len == 0) {
+        return 0;
     }
 
-    char ip[INET6_ADDRSTRLEN];
-    char out[INET6_ADDRSTRLEN + 16];
-    ip[0] = '\0';
-
-    if (ss.ss_family == AF_INET) {
-        const struct sockaddr_in *const sin = (const struct sockaddr_in *)&ss;
-        inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-        snprintf(out, sizeof(out), "%s:%u", ip, (unsigned)ntohs(sin->sin_port));
-    } else if (ss.ss_family == AF_INET6) {
-        const struct sockaddr_in6 *const sin6 = (const struct sockaddr_in6 *)&ss;
-        inet_ntop(AF_INET6, &sin6->sin6_addr, ip, sizeof(ip));
-        snprintf(out, sizeof(out), "[%s]:%u", ip, (unsigned)ntohs(sin6->sin6_port));
-    } else {
-        return NULL;  /* AF_UNIX etc. — no host:port */
-    }
-
-    return zend_string_init(out, strlen(out), 0);
+    return http_sockaddr_port((const struct sockaddr *)&conn->peer,
+                              conn->peer_len);
 }
 /* }}} */
 
@@ -377,10 +379,6 @@ void http_connection_destroy(http_connection_t *conn)
         conn->out_pending_cap = 0;
     }
 
-    if (conn->remote_str != NULL) {
-        zend_string_release(conn->remote_str);
-        conn->remote_str = NULL;
-    }
 
     /* Notify server of close so it can decrement active_connections and
      * maybe resume listeners. Per-request timing is already reported by
@@ -2467,9 +2465,8 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
 }
 /* }}} */
 
-/* Per-request access record (issue #5, B6). One branch when no access sink
- * is configured; the remote addr resolves via getpeername only on the
- * logging path. */
+/* Per-request access record (issue #5, B6). One branch when no access sink is
+ * configured. The peer travels on the request, so this is protocol-agnostic. */
 static void h1_log_access(http1_request_ctx_t *ctx)
 {
     http_connection_t *conn = ctx->conn;
@@ -2478,14 +2475,12 @@ static void h1_log_access(http1_request_ctx_t *ctx)
         return;
     }
 
-    if (conn->remote_str == NULL) {
-        conn->remote_str = http_connection_remote_address(conn);
-    }
+    http_access_rec_t rec;
+    char              ip[INET6_ADDRSTRLEN];
 
-    http_log_emit_access(conn->log_state, ctx->request,
-                         Z_OBJ(ctx->response_zv),
-                         conn->remote_str != NULL ? ZSTR_VAL(conn->remote_str)
-                                                  : NULL);
+    http_request_fill_access_rec(ctx->request, Z_OBJ(ctx->response_zv),
+                                 &rec, ip, sizeof ip);
+    http_log_emit_access(conn->log_state, &rec);
 }
 
 /* {{{ http_handler_coroutine_entry

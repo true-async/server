@@ -22,6 +22,8 @@
 #include "php.h"
 #include "zend_smart_str.h"
 #include "Zend/zend_async_API.h"
+#include <main/php_network.h>   /* sockaddr_storage, socklen_t for the peer */
+#include "log/http_log.h"       /* http_access_rec_t */
 
 /* Forward declaration (full type in http_connection.h) */
 typedef struct _http_connection_t http_connection_t;
@@ -248,6 +250,21 @@ struct http_request_t {
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 
+    /* Socket peer, captured once when the request is built (H1/H2 copy it off
+     * the connection, H3 off the QUIC path). Stored raw, formatted on demand —
+     * rendering an address is far more expensive than copying one, and only
+     * getRemoteAddress()/the access log ever need the string.
+     *
+     * It lives on the request, not the connection, because the two consumers
+     * that need it furthest downstream have no connection to reach for: the
+     * pool worker (the connection belongs to the reactor's thread) and the
+     * send-file engine (protocol-agnostic by design). Travelling with the
+     * request, it crosses the reactor->worker mailbox for free.
+     *
+     * peer_len == 0 means "no IP peer" (AF_UNIX listener, or never captured). */
+    struct sockaddr_storage peer;
+    socklen_t               peer_len;
+
     /* Reverse-path routing. Set by the reactor that built the request;
      * echoed onto the response so the reactor resolves which QUIC stream to
      * emit on. All zero on the single-thread path. */
@@ -407,6 +424,15 @@ const char *http_parse_error_reason(http_parse_error_t err);
  * — no-op if the table already exists. Single source of truth so H1/H2/H3 do
  * not each duplicate the domain branch. */
 void http_request_init_headers(http_request_t *req);
+
+/* Fill the logger's access record from a completed request. The record borrows
+ * every pointer, so `ip_buf` (>= INET6_ADDRSTRLEN, backs client.address) must
+ * outlive the emit. Keeping this on the request side is what lets src/log stay
+ * ignorant of requests, responses and protocol versions. */
+void http_request_fill_access_rec(const http_request_t *req,
+                                  zend_object *response_obj,
+                                  http_access_rec_t *rec,
+                                  char *ip_buf, size_t ip_buf_len);
 
 /* Store one header into req->headers, combining duplicate names per
  * RFC 9110 §5.3 ("; " for cookie — RFC 9113 §8.2.3 / RFC 9114 §4.2.1;

@@ -968,8 +968,9 @@ final class HttpServerConfig
      * this overrides the setLogSeverity()/setLogStream() single-stream sugar.
      *
      * Each element is an array:
-     *   - 'type'     => 'stream' | 'stdout' | 'stderr' | 'syslog'  (required)
+     *   - 'type'     => 'stream' | 'file' | 'stdout' | 'stderr' | 'syslog'  (required)
      *   - 'stream'   => resource               (required for 'stream')
+     *   - 'path'     => string                 (required for 'file')
      *   - 'target'   => 'tcp://host:port' | 'udp://host:port' | 'udg:///dev/log'
      *                                          (required for 'syslog')
      *   - 'facility' => 'user' | 'daemon' | 'local0'..'local7' | …  (syslog, default 'user')
@@ -979,41 +980,36 @@ final class HttpServerConfig
      *   - 'category' => 'app' | 'access' | 'all'  (default 'app')
      *   - 'level'    => LogSeverity            (required)
      *
+     * Use 'file' (not 'stream') under a worker pool: each worker reopens the
+     * path itself, whereas a parent-opened stream resource cannot cross into
+     * worker threads.
+     *
      * 'pretty' auto-decides colour from the target (NO_COLOR / CLICOLOR_FORCE /
      * isatty). 'syslog' emits RFC 5424: octet-framed (RFC 6587) over TCP, one
      * record per datagram on udp/udg. 'template' renders each record through a
      * custom line layout: {ts} (ISO-8601) or {ts:PATTERN} (date()-style subset
      * Y y m d H i s v, e.g. '{ts:Y-m-d H:i:s.v}'), {level}, {msg}, {attrs},
      * {trace}, {span}; any other text is literal. 'category' routes record
-     * kinds: 'app' gets server diagnostics, 'access' gets one structured
-     * record per completed request (method, path, status, proto, bytes,
-     * duration_ms, remote, trace context), 'all' gets both — so a JSON
-     * access log and a pretty diagnostics console can coexist. At most 8
-     * sinks. Invalid specs throw at call time.
+     * kinds: 'app' gets server diagnostics, 'access' gets one structured record
+     * per completed request (OpenTelemetry HTTP semconv attributes:
+     * http.request.method, url.path, url.query, http.response.status_code,
+     * network.protocol.version, http.response.body.size,
+     * http.server.request.duration, client.address, client.port, trace
+     * context), 'all' gets both — so a JSON access log and a pretty
+     * diagnostics console can coexist. At most 8 sinks. Invalid specs throw at
+     * call time.
+     *
+     * There is no sink that calls back into PHP. Records are emitted from IO
+     * callbacks and from reactor threads that have no PHP context, so the log
+     * path must not re-enter the VM. To export logs from userland, point a
+     * sink at a file or socket with 'format' => 'json' and drain it from your
+     * own coroutine — which also keeps exporter latency off the request path.
      *
      * @param array $sinks List of sink spec arrays (see above).
      * @return static
      */
     public function setLogSinks(array $sinks): static {}
 
-    /**
-     * Deliver every admitted log record to a PHP callback — sugar for a
-     * setLogSinks() entry of ['type' => 'php', 'callback' => $callback].
-     * The callback receives one array per record:
-     *   ['timestamp_ns' => int, 'severity' => int, 'severity_text' => string,
-     *    'category' => 'app'|'access', 'message' => string,
-     *    'attrs' => array, 'trace_id' => ?string, 'span_id' => ?string]
-     * Userland exporters (e.g. OTLP) build on this. An exception thrown by
-     * the callback is absorbed (drop-counted), never kills the worker; a
-     * callback that logs does not recurse into itself. Appends to any sinks
-     * already configured.
-     *
-     * @param callable $callback Receives the record array.
-     * @param LogSeverity|null $level Minimum severity (default INFO).
-     * @param string $category 'app' | 'access' | 'all' (default 'all').
-     * @return static
-     */
-    public function onLog(callable $callback, ?LogSeverity $level = null, string $category = 'all'): static {}
 
     /**
      * Enable or disable telemetry. When enabled, the server parses

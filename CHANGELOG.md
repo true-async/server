@@ -43,32 +43,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Structured access log (`'category' => 'access'`).** A sink spec may
     carry `'category' => 'app' | 'access' | 'all'` (default `'app'`): `app`
     receives server diagnostics, `access` receives exactly one structured
-    record per completed request — `method`, `path`, `status`, `proto`
-    (h1/h2/h3), `bytes` (response body), `duration_ms`, `remote` (`ip:port`)
-    and the W3C trace context when telemetry parsed one — so a JSON access
-    log and a pretty diagnostics console coexist on one server. Emitted on
-    every completion path (handler return, static handler, compression
-    reject, sendFile engine, reactor-pool worker dispatch) across HTTP/1,
-    HTTP/2 and HTTP/3. Off by default: without an access sink the cost is
-    one predicted branch per request; with one, the peer address is resolved
-    once per connection and timestamp rendering caches the current second.
-  - **`onLog` / `php` sink — records to userland (B7).**
-    `HttpServerConfig::onLog(callable, ?LogSeverity, category='all')` (sugar
-    for `['type'=>'php','callback'=>…]`) delivers every admitted record to a
-    PHP callback as a structured array (`timestamp_ns`, `severity`,
-    `severity_text`, `category`, `message`, `attrs`, `trace_id`/`span_id`) —
-    the seam userland exporters (OTLP etc.) build on. A callback exception is
-    absorbed (drop-counted), never kills the worker; a callback that itself
-    logs does not recurse.
+    record per completed request — so a JSON access log and a pretty
+    diagnostics console coexist on one server. Attributes use the stable
+    OpenTelemetry HTTP semantic conventions, matching the OTel Logs envelope
+    the `json` formatter already emits: `http.request.method`, `url.path`,
+    `url.query`, `http.response.status_code`, `network.protocol.version`
+    (`"1.1"`/`"2"`/`"3"`), `http.response.body.size`,
+    `http.server.request.duration` (seconds, per the spec's unit),
+    `client.address` (bare IP) and `client.port`, plus the W3C trace context
+    when telemetry parsed one — so a collector can interpret the record
+    without a custom mapping. Emitted on every completion path (handler
+    return, static handler, compression reject, sendFile engine, reactor-pool
+    worker dispatch) across HTTP/1, HTTP/2 and HTTP/3, including under a
+    worker pool. Off by default: without an access sink the cost is one
+    predicted branch per request.
+  - **No sink calls back into PHP, by design.** Records are emitted from libuv
+    IO-completion callbacks, connection teardown, error paths and the HTTP/3
+    reactor threads — a bare thread pool with no TSRM context — so the logging
+    path must not re-enter the VM. To export logs from userland, point a sink
+    at a file or socket with `'format' => 'json'` and drain it from your own
+    coroutine; that is the async-appender shape, and it also keeps exporter
+    latency off the request path and gives you batching. Extensions register
+    native destinations through `http_log_register_sink_type()`.
   - **`file` sink + logging now works under the worker pool.** New
     `['type'=>'file','path'=>…]` sink: each pool worker reopens the path
     itself (append mode). Previously NO logging configuration crossed into
     pool workers at all — the frozen config snapshot dropped it; sink specs
     are now flattened into the snapshot and rebuilt per worker, so
     `file`/`stdout`/`stderr`/`syslog` sinks (and the access log) work with
-    `setWorkers(N)`. `stream` (a parent-opened resource) and `php` (a
-    closure) cannot cross threads: they stay active on the parent and are
-    skipped in workers with a start-time notice.
+    `setWorkers(N)`. `stream` (a parent-opened resource) cannot cross threads:
+    it stays active on the parent and is skipped in workers with a start-time
+    notice.
   - **Sink-type / formatter registry (plugin seam).** `setLogSinks()` resolves
     `'type'` and `'format'` names through a registry instead of hardcoded
     lists; another extension can add its own sink type or formatter at MINIT
@@ -90,6 +95,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     quoting; `pretty` is a coloured console line
     (`HH:MM:SS.mmm  LEVEL  message  key=val …`) whose colour is decided once at
     sink build from the target fd, honouring `NO_COLOR` / `CLICOLOR_FORCE`.
+
+- **Client address on the request — `HttpRequest::getRemoteAddress(): ?string`
+  and `HttpRequest::getRemotePort(): ?int`.** `getRemoteAddress()` returns the
+  **bare IP** — no port, no brackets around an IPv6 literal — the same shape as
+  `$_SERVER['REMOTE_ADDR']` (RFC 3875 §4.1.8) and as Servlet, Node, Swoole and
+  ASP.NET return. The port is a separate accessor. A combined `"ip:port"` string
+  is deliberately not offered: it is Go's documented wart, and it leaves callers
+  unable to split an IPv6 address. `null` on a Unix-socket listener, which has
+  no IP peer. The value is the socket peer and is **not** derived from
+  `X-Forwarded-For`.
+  `WebSocket::getRemotePort(): ?int` is added to match.
+
+### Changed
+
+- **BREAKING — `WebSocket::getRemoteAddress()` now returns the bare peer IP**
+  (`"203.0.113.7"`), not `"host:port"` / `"[host]:port"`, and returns `null`
+  rather than `""` when there is no IP peer. Use the new `getRemotePort()` for
+  the port. This makes the method mean the same thing as the new
+  `HttpRequest::getRemoteAddress()` instead of two different things on two
+  classes.
 
 ## [0.10.1] - 2026-07-10
 

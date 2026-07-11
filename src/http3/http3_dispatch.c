@@ -658,11 +658,12 @@ static void h3_log_access(http3_stream_t *s)
         return;
     }
 
-    char remote[128];
-    http3_format_peer((const struct sockaddr *)&c->peer, c->peer_len,
-                      remote, sizeof remote);
-    http_log_emit_access(c->log_state, s->request, Z_OBJ(s->response_zv),
-                         remote[0] != '\0' ? remote : NULL);
+    http_access_rec_t rec;
+    char              ip[INET6_ADDRSTRLEN];
+
+    http_request_fill_access_rec(s->request, Z_OBJ(s->response_zv),
+                                 &rec, ip, sizeof ip);
+    http_log_emit_access(c->log_state, &rec);
 }
 
 static void h3_handler_coroutine_entry(void)

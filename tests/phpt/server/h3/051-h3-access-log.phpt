@@ -1,5 +1,5 @@
 --TEST--
-HttpServer access log (#5, B6): h3 request emits an access record with proto=h3
+HttpServer access log (#5, B6): h3 request emits an access record with network.protocol.version=3
 --EXTENSIONS--
 true_async_server
 true_async
@@ -70,16 +70,17 @@ $rec = null;
 foreach (explode("\n", trim($log)) as $line) {
     if ($line === '') continue;
     $r = json_decode($line, true);
-    if (($r['Attributes']['path'] ?? '') === '/h3path') $rec = $r['Attributes'];
+    if (($r['Attributes']['url.path'] ?? '') === '/h3path') $rec = $r['Attributes'];
 }
 echo "rec: ", $rec !== null
-    ? sprintf("method=%s status=%d proto=%s bytes=%d remote=%s",
-        $rec['method'], $rec['status'], $rec['proto'], $rec['bytes'],
-        str_starts_with($rec['remote'] ?? '', '127.0.0.1:') ? 'yes' : 'no')
+    ? sprintf("method=%s status=%d proto=%s bytes=%d addr=%s",
+        $rec['http.request.method'], $rec['http.response.status_code'],
+        $rec['network.protocol.version'], $rec['http.response.body.size'],
+        ($rec['client.address'] ?? '') === '127.0.0.1' ? 'yes' : 'no')
     : "missing", "\n";
 echo "done\n";
 ?>
 --EXPECT--
 body: hi h3
-rec: method=GET status=200 proto=h3 bytes=5 remote=yes
+rec: method=GET status=200 proto=3 bytes=5 addr=yes
 done

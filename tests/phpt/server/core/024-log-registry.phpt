@@ -31,8 +31,8 @@ foreach ([
 
 echo "Done\n";
 --EXPECT--
-types: stream|file|stdout|stderr|syslog|php
+types: stream|file|stdout|stderr|syslog
 formatters: plain|logfmt|json|pretty|syslog|template
-bad-type: setLogSinks(): 'type' must be one of stream|file|stdout|stderr|syslog|php
+bad-type: setLogSinks(): 'type' must be one of stream|file|stdout|stderr|syslog
 bad-format: setLogSinks(): 'format' must be one of plain|logfmt|json|pretty|syslog|template
 Done

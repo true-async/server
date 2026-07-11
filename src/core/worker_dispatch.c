@@ -73,9 +73,9 @@ typedef struct {
     uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
-/* Per-request access record (issue #5, B6). The worker only holds the
- * request/response zvals; the remote addr lives reactor-side and is omitted
- * here (the reactor never sees the completed response). */
+/* Per-request access record (issue #5, B6). The peer rides on the request
+ * itself, so the worker logs the client IP even though the connection it was
+ * accepted on belongs to the reactor's thread. */
 static void worker_log_access(worker_dispatch_ctx_t *ctx)
 {
     http_log_state_t *st = http_server_get_log_state(ctx->server);
@@ -84,8 +84,12 @@ static void worker_log_access(worker_dispatch_ctx_t *ctx)
         return;
     }
 
-    http_log_emit_access(st, http_request_from_zobj(Z_OBJ(ctx->request_zv)),
-                         Z_OBJ(ctx->response_zv), NULL);
+    http_access_rec_t rec;
+    char              ip[INET6_ADDRSTRLEN];
+
+    http_request_fill_access_rec(http_request_from_zobj(Z_OBJ(ctx->request_zv)),
+                                 Z_OBJ(ctx->response_zv), &rec, ip, sizeof ip);
+    http_log_emit_access(st, &rec);
 }
 
 /* Handler coroutine body: run the registered user handler with (request, response). */

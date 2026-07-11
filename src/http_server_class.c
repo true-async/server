@@ -1274,22 +1274,6 @@ static void http_server_start_logging(http_server_object *server,
                 continue;
             }
 
-            if (type->php_delivery) {
-                zval *zlvl_p = zend_hash_str_find(spec, "level", sizeof("level") - 1);
-                zval *zcat_p = zend_hash_str_find(spec, "category", sizeof("category") - 1);
-
-                memset(&specs[n], 0, sizeof specs[n]);
-                specs[n].level         = (http_log_severity_t)
-                    Z_LVAL_P(zend_enum_fetch_case_value(Z_OBJ_P(zlvl_p)));
-                specs[n].category_mask = zcat_p != NULL
-                    ? http_log_category_mask(Z_STRVAL_P(zcat_p), Z_STRLEN_P(zcat_p))
-                    : HTTP_LOG_CAT_APP;
-                specs[n].php_cb        = zend_hash_str_find(spec, "callback",
-                                                            sizeof("callback") - 1);
-                n++;
-                continue;
-            }
-
             if (!type->open(spec, &opened[n], &mode)) {
                 /* Unreachable target, or a parent-opened 'stream' resource
                  * that cannot cross into this worker thread (use 'file'). */
@@ -1326,7 +1310,6 @@ static void http_server_start_logging(http_server_object *server,
                                   ? fdef->make_ud(spec, &opened[n]) : NULL;
             specs[n].formatter_ud_free = fdef != NULL ? fdef->free_ud : NULL;
             specs[n].stream_zv    = &opened[n];
-            specs[n].php_cb       = NULL;
             specs[n].write_mode   = mode;
             n++;
         } ZEND_HASH_FOREACH_END();
@@ -1338,7 +1321,6 @@ static void http_server_start_logging(http_server_object *server,
         specs[0].formatter_ud      = NULL;
         specs[0].formatter_ud_free = NULL;
         specs[0].stream_zv         = &cfg->log_stream;
-        specs[0].php_cb            = NULL;
         specs[0].write_mode        = HTTP_LOG_WRITE_STREAM;
         n = 1;
     }
@@ -5017,52 +4999,68 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
 
 /* Emit one counters slice as assoc entries (issue #5, A4). Shared by every
  * worker entry and the summed totals block. */
-static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
+/* The counter field table, materialised. Name, byte offset and how the value
+ * combines across workers — see HTTP_SERVER_COUNTER_TABLE in php_http_server.h. */
+static const struct {
+    const char *name;
+    size_t      offset;
+    int         kind;
+} stats_fields[] = {
+#define HTTP_COUNTER_ROW(field, k) \
+    { #field, offsetof(http_server_counters_t, field), HTTP_COUNTER_##k },
+    HTTP_SERVER_COUNTER_TABLE(HTTP_COUNTER_ROW)
+#undef HTTP_COUNTER_ROW
+};
+
+/* Fails the build if a counter was added to the struct but not to the table, or
+ * if one stopped being a 64-bit word (a 32-bit field would shift every counter
+ * after it in the aggregate — the bug this assert exists to prevent). */
+ZEND_STATIC_ASSERT(sizeof(stats_fields) / sizeof(stats_fields[0])
+                       * sizeof(uint64_t) == sizeof(http_server_counters_t),
+                   "HTTP_SERVER_COUNTER_TABLE is out of sync with "
+                   "http_server_counters_t");
+
+/* One worker's counter slot, read from another thread while that worker keeps
+ * writing it. The looseness is deliberate — a statistic may lag by a bump — but
+ * it has to be spelled as a relaxed atomic load, not a plain one: a plain load
+ * racing a plain store is a data race, which the compiler may reload or tear at
+ * will (and which ThreadSanitizer rightly flags). Writers stay plain: each slot
+ * has exactly one writer. */
+static zend_always_inline uint64_t stats_field_load(const http_server_counters_t *c,
+                                                    size_t offset)
 {
-    add_assoc_long(arr, "total_requests",         (zend_long)c->total_requests);
-    add_assoc_long(arr, "active_requests",        (zend_long)c->active_requests);
-    add_assoc_long(arr, "requests_shed_total",    (zend_long)c->requests_shed_total);
-    add_assoc_long(arr, "responses_2xx_total",    (zend_long)c->responses_2xx_total);
-    add_assoc_long(arr, "responses_3xx_total",    (zend_long)c->responses_3xx_total);
-    add_assoc_long(arr, "responses_4xx_total",    (zend_long)c->responses_4xx_total);
-    add_assoc_long(arr, "responses_5xx_total",    (zend_long)c->responses_5xx_total);
-    add_assoc_long(arr, "conns_active_h1",        (zend_long)c->conns_active_h1);
-    add_assoc_long(arr, "conns_active_h2",        (zend_long)c->conns_active_h2);
-    add_assoc_long(arr, "conns_active_h3",        (zend_long)c->conns_active_h3);
-    add_assoc_long(arr, "streaming_responses_total",             (zend_long)c->streaming_responses_total);
-    add_assoc_long(arr, "stream_send_calls_total",               (zend_long)c->stream_send_calls_total);
-    add_assoc_long(arr, "stream_bytes_sent_total",               (zend_long)c->stream_bytes_sent_total);
-    add_assoc_long(arr, "stream_send_backpressure_events_total", (zend_long)c->stream_send_backpressure_events_total);
-    add_assoc_long(arr, "worker_wire_dropped_total",             (zend_long)c->worker_wire_dropped_total);
-    add_assoc_long(arr, "h2_streams_active",       (zend_long)c->h2_streams_active);
-    add_assoc_long(arr, "h2_streams_opened_total", (zend_long)c->h2_streams_opened_total);
-    add_assoc_long(arr, "h2_streams_reset_by_peer_total", (zend_long)c->h2_streams_reset_by_peer_total);
-    add_assoc_long(arr, "h2_streams_refused_total",(zend_long)c->h2_streams_refused_total);
-    add_assoc_long(arr, "h2_goaway_recv_total",    (zend_long)c->h2_goaway_recv_total);
-    add_assoc_long(arr, "h2_goaway_sent_total",    (zend_long)c->h2_goaway_sent_total);
-    add_assoc_long(arr, "h2_data_recv_bytes_total",(zend_long)c->h2_data_recv_bytes_total);
-    add_assoc_long(arr, "h2_data_sent_bytes_total",(zend_long)c->h2_data_sent_bytes_total);
-    add_assoc_long(arr, "h1_connection_close_sent_total", (zend_long)c->h1_connection_close_sent_total);
-    add_assoc_long(arr, "h3_goaway_sent_total",    (zend_long)c->h3_goaway_sent_total);
-    add_assoc_long(arr, "tls_bytes_plaintext_in_total",   (zend_long)c->tls_bytes_plaintext_in_total);
-    add_assoc_long(arr, "tls_bytes_plaintext_out_total",  (zend_long)c->tls_bytes_plaintext_out_total);
-    add_assoc_long(arr, "tls_bytes_ciphertext_in_total",  (zend_long)c->tls_bytes_ciphertext_in_total);
-    add_assoc_long(arr, "tls_bytes_ciphertext_out_total", (zend_long)c->tls_bytes_ciphertext_out_total);
-    add_assoc_long(arr, "static_zero_coroutine_total",    (zend_long)c->static_zero_coroutine_total);
-    add_assoc_long(arr, "static_cache_hits_total",   (zend_long)c->static_cache_hits_total);
-    add_assoc_long(arr, "static_cache_misses_total", (zend_long)c->static_cache_misses_total);
+    const uint64_t *p = (const uint64_t *)((const char *)c + offset);
+
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
 }
 
-/* Field-wise accumulate into the totals block. The slice is a POD of 64-bit
- * counters (every field is uint64_t or size_t == 8 bytes on our targets), so a
- * word-wise add covers every field and stays correct when A5 adds more. */
-static void stats_counters_add(http_server_counters_t *acc, const http_server_counters_t *c)
+static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
 {
-    uint64_t       *dst = (uint64_t *)acc;
-    const uint64_t *src = (const uint64_t *)c;
+    for (size_t i = 0; i < sizeof(stats_fields) / sizeof(stats_fields[0]); i++) {
+        add_assoc_long(arr, stats_fields[i].name,
+                       (zend_long)stats_field_load(c, stats_fields[i].offset));
+    }
+}
 
-    for (size_t i = 0; i < sizeof(*acc) / sizeof(uint64_t); i++) {
-        dst[i] += src[i];
+/* Accumulate one worker's slot into the totals block, per-field and per-kind.
+ * Field-wise (not word-wise over the whole struct): each field is read through
+ * its own type at its own offset, so there is no strict-aliasing violation and
+ * no assumption that the struct is a flat uint64_t array. */
+static void stats_counters_add(http_server_counters_t *acc,
+                               const http_server_counters_t *c)
+{
+    for (size_t i = 0; i < sizeof(stats_fields) / sizeof(stats_fields[0]); i++) {
+        const size_t off = stats_fields[i].offset;
+        uint64_t    *dst = (uint64_t *)((char *)acc + off);
+        const uint64_t v = stats_field_load(c, off);
+
+        if (stats_fields[i].kind == HTTP_COUNTER_MAX) {
+            if (v > *dst) {
+                *dst = v;
+            }
+        } else {
+            *dst += v;
+        }
     }
 }
 

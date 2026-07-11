@@ -55,6 +55,27 @@ final class HttpRequest
     public function getHttpVersion(): string {}
 
     /**
+     * Client IP address of the socket peer, e.g. "203.0.113.7" or "2001:db8::1".
+     *
+     * Bare IP only: no port, and no brackets around an IPv6 literal — the same
+     * shape as $_SERVER['REMOTE_ADDR'] (RFC 3875 §4.1.8), so it feeds straight
+     * into filter_var(..., FILTER_VALIDATE_IP), an ACL or a rate limiter. Use
+     * getRemotePort() for the port.
+     *
+     * NULL on a Unix-socket listener, which has no IP peer.
+     *
+     * This is the peer of the TCP/QUIC connection. It is NOT derived from
+     * X-Forwarded-For — behind a proxy, parse that header yourself, and only
+     * when you trust the proxy.
+     */
+    public function getRemoteAddress(): ?string {}
+
+    /**
+     * Client port of the socket peer, e.g. 54321. NULL when there is no IP peer.
+     */
+    public function getRemotePort(): ?int {}
+
+    /**
      * Check if header exists (case-insensitive)
      */
     public function hasHeader(string $name): bool {}

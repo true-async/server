@@ -2938,77 +2938,6 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSinks)
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::onLog(callable $callback, ?LogSeverity $level = null,
- *          string $category = 'all'): static
- * Sugar for a setLogSinks() entry of type 'php' — appends to the sink list. */
-ZEND_METHOD(TrueAsync_HttpServerConfig, onLog)
-{
-    zend_fcall_info       fci;
-    zend_fcall_info_cache fcc;
-    zval                 *zlvl         = NULL;
-    char                 *category     = NULL;
-    size_t                category_len = 0;
-
-    ZEND_PARSE_PARAMETERS_START(1, 3)
-        Z_PARAM_FUNC(fci, fcc)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_OBJECT_OF_CLASS_OR_NULL(zlvl, http_log_severity_ce)
-        Z_PARAM_STRING(category, category_len)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    const char  *cat  = category != NULL ? category : "all";
-    const size_t catl = category != NULL ? category_len : 3;
-
-    if (http_log_category_mask(cat, catl) == 0) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "onLog(): 'category' must be one of app|access|all", 0);
-        return;
-    }
-
-    if (Z_TYPE(config->log_sinks) == IS_ARRAY
-        && zend_hash_num_elements(Z_ARRVAL(config->log_sinks)) >= HTTP_LOG_MAX_SINKS) {
-        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
-            "onLog(): at most %d sinks", HTTP_LOG_MAX_SINKS);
-        return;
-    }
-
-    zval spec;
-    array_init(&spec);
-    add_assoc_string(&spec, "type", "php");
-    Z_TRY_ADDREF(fci.function_name);
-    add_assoc_zval(&spec, "callback", &fci.function_name);
-    add_assoc_stringl(&spec, "category", cat, catl);
-
-    if (zlvl != NULL) {
-        Z_ADDREF_P(zlvl);
-        add_assoc_zval(&spec, "level", zlvl);
-    } else {
-        zval lvl;
-        ZVAL_OBJ_COPY(&lvl, zend_enum_get_case_cstr(http_log_severity_ce, "INFO"));
-        add_assoc_zval(&spec, "level", &lvl);
-    }
-
-    if (Z_TYPE(config->log_sinks) != IS_ARRAY) {
-        if (Z_TYPE(config->log_sinks) != IS_UNDEF) {
-            zval_ptr_dtor(&config->log_sinks);
-        }
-        array_init(&config->log_sinks);
-    } else {
-        SEPARATE_ARRAY(&config->log_sinks);
-    }
-
-    add_next_index_zval(&config->log_sinks, &spec);
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
-}
-/* }}} */
-
 /* {{{ proto HttpServerConfig::setTelemetryEnabled(bool $enabled): static */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTelemetryEnabled)
 {
@@ -3387,7 +3316,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
                     fprintf(stderr,
                             "http_server: log sink type '%.*s' is per-thread and "
                             "will be inactive in pool workers (use 'file'/'stdout'/"
-                            "'stderr'/'syslog', or register onLog in the bootloader)\n",
+                            "'stderr'/'syslog')\n",
                             (int)tl, t);
                 }
                 continue;

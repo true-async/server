@@ -117,13 +117,6 @@ typedef struct http_log_sink {
     void                     *formatter_ud;
     void                    (*formatter_ud_free)(void *ud);
 
-    /* PHP-callback delivery (sink type 'php' / onLog): the record is handed
-     * to userland as an array; no formatter, no stream transport. The fcc is
-     * resolved once at sink build. */
-    bool                      is_php;
-    zval                      php_cb;
-    zend_fcall_info_cache     php_fcc;
-
     /* Async file-writer transport: one write in flight, later emits
      * coalesce into pending (writer_cb). Owns its own drop counter and
      * stderr-fallback rate-limit so a drop is attributed to this sink. */
@@ -163,16 +156,27 @@ typedef struct http_log_state {
  * gate short-circuits without touching anything else. */
 extern http_log_state_t http_log_state_default;
 
-/* One structured ACCESS record for a completed request: method, path,
- * status, proto (from req->http_major), body bytes, duration (when stamps
- * ran), remote (nullable) and the request's trace context. Gated on
- * state->has_access — call sites wrap it in UNEXPECTED(has_access) so the
- * no-access-sink cost is one branch. Severity INFO. */
-struct http_request_t;
+/* One completed request, as the logger sees it — a POD so this layer needs no
+ * request, response or protocol types. Fields carry OTel HTTP semconv names.
+ * Pointers are borrowed for the emit; NULL/0 omits the attribute. */
+typedef struct {
+    const char *method;           /* http.request.method */
+    const char *url_path;         /* url.path */
+    const char *url_query;        /* url.query */
+    const char *protocol_version; /* network.protocol.version: "1.1"|"2"|"3" */
+    int         status;           /* http.response.status_code */
+    uint64_t    response_size;    /* http.response.body.size */
+    uint64_t    duration_ns;      /* http.server.request.duration (emitted in s) */
+    const char *client_address;   /* client.address — bare IP */
+    uint16_t    client_port;      /* client.port */
+    const uint8_t *trace_id;      /* 16 bytes; NULL = no trace context */
+    const uint8_t *span_id;       /* 8 bytes */
+    uint8_t        trace_flags;
+} http_access_rec_t;
+
+/* Severity INFO. Gated on state->has_access; call sites wrap in UNEXPECTED(). */
 void http_log_emit_access(http_log_state_t *state,
-                          const struct http_request_t *req,
-                          zend_object *response_obj,
-                          const char *remote);
+                          const http_access_rec_t *rec);
 
 /* The level gate is re-checked inside, so a call site that skips
  * the http_logf_* macro is still correct (just slower). */
@@ -260,11 +264,11 @@ typedef struct {
     /* Non-NULL forces this formatter (the spec's 'format' is ignored) —
      * how syslog pins its wire format. NULL → the spec's 'format' picks. */
     const http_log_formatter_def_t *pinned_formatter;
-    /* true = records are delivered to the spec's 'callback' as a PHP array
-     * instead of being formatted and written to a stream; `open` is unused
-     * (may be NULL). The onLog seam. */
-    bool php_delivery;
 } http_log_sink_type_t;
+
+/* No sink delivers to a PHP callback by design: emits fire from IO-completion
+ * callbacks, teardown, and H3 reactor threads, which have no TSRM context.
+ * Userland exporters drain a file/socket sink from their own coroutine. */
 
 /* false when the registry is full or the name is already taken. */
 bool http_log_register_formatter(const http_log_formatter_def_t *def);
@@ -300,7 +304,6 @@ typedef struct {
     void                  *formatter_ud;
     void                 (*formatter_ud_free)(void *ud);   /* owned ud, or NULL */
     zval                  *stream_zv;
-    zval                  *php_cb;    /* non-NULL → PHP-callback sink */
     http_log_write_mode_t  write_mode;
 } http_log_sink_spec_t;
 

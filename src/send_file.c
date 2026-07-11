@@ -100,7 +100,12 @@ static void engine_log_access(engine_state_t *state)
 		return;
 	}
 
-	http_log_emit_access(st, state->request, state->response_obj, NULL);
+	http_access_rec_t rec;
+	char              ip[INET6_ADDRSTRLEN];
+
+	http_request_fill_access_rec(state->request, state->response_obj,
+	                             &rec, ip, sizeof ip);
+	http_log_emit_access(st, &rec);
 }
 
 typedef struct

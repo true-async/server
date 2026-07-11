@@ -57,7 +57,11 @@ void ws_php_classes_register(void);
 typedef struct {
     ws_session_t   *session;          /* borrowed; cleared on connection teardown */
     zend_string    *subprotocol;      /* selected subprotocol (NULL = none); owned */
-    zend_string    *remote_address;   /* lazily computed; owned; NULL until first read */
+    /* Peer, snapshotted at upgrade while conn is guaranteed alive. Bare IP —
+     * the port is separate, never glued into the string (see http_sockaddr_ip).
+     * NULL / 0 for a Unix-socket listener. */
+    zend_string    *remote_address;
+    uint16_t        remote_port;
     bool            closed;           /* close() has been called or peer CLOSE seen */
 
     /* Pre-commit upgrade state. The handler runs BEFORE the 101

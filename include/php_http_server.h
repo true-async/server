@@ -780,8 +780,10 @@ typedef struct {
     /* Admission-reject (overload shedding) */
     uint64_t requests_shed_total;
 
-    /* Request lifetime gauge (++ on dispatch, -- on dispose) */
-    size_t   active_requests;
+    /* Request lifetime gauge (++ on dispatch, -- on dispose). uint64_t, not
+     * size_t: the cross-worker aggregate walks this struct as 64-bit words, and
+     * a 4-byte field on a 32-bit target would shift every counter after it. */
+    uint64_t active_requests;
 
     /* TLS bytes — fed per IO-iter from the TLS state machine */
     uint64_t tls_bytes_plaintext_in_total;
@@ -823,6 +825,57 @@ typedef struct {
     uint64_t static_cache_hits_total;
     uint64_t static_cache_misses_total;
 } http_server_counters_t;
+
+/* Counter field table. One row per field of http_server_counters_t; it drives
+ * getStats()'s array, the cross-worker aggregate and the reset, so a new
+ * counter is declared above and listed here — not hand-copied into three
+ * more switch/append blocks that quietly drift apart.
+ *
+ * `kind` is how the value combines ACROSS workers:
+ *   SUM — monotonic totals, and gauges (active counts genuinely add up).
+ *   MAX — a sample that is nonsense when summed. An RTT is not additive;
+ *         adding four workers' latest ping RTT yields a number that describes
+ *         nothing. The worst observed sample is the honest aggregate.
+ *
+ * A _Static_assert in http_server_class.c fails the build if the struct grows a
+ * field this table misses, or if a field stops being a 64-bit word. */
+#define HTTP_COUNTER_SUM 0
+#define HTTP_COUNTER_MAX 1
+
+#define HTTP_SERVER_COUNTER_TABLE(X)                        \
+    X(streaming_responses_total,             SUM)           \
+    X(stream_send_calls_total,               SUM)           \
+    X(stream_bytes_sent_total,               SUM)           \
+    X(stream_send_backpressure_events_total, SUM)           \
+    X(worker_wire_dropped_total,             SUM)           \
+    X(h2_streams_active,                     SUM)           \
+    X(h2_streams_opened_total,               SUM)           \
+    X(h2_streams_reset_by_peer_total,        SUM)           \
+    X(h2_streams_refused_total,              SUM)           \
+    X(h2_goaway_recv_total,                  SUM)           \
+    X(h2_goaway_sent_total,                  SUM)           \
+    X(h2_data_recv_bytes_total,              SUM)           \
+    X(h2_data_sent_bytes_total,              SUM)           \
+    X(h2_ping_rtt_ns,                        MAX)           \
+    X(h1_connection_close_sent_total,        SUM)           \
+    X(h3_goaway_sent_total,                  SUM)           \
+    X(requests_shed_total,                   SUM)           \
+    X(active_requests,                       SUM)           \
+    X(tls_bytes_plaintext_in_total,          SUM)           \
+    X(tls_bytes_plaintext_out_total,         SUM)           \
+    X(tls_bytes_ciphertext_in_total,         SUM)           \
+    X(tls_bytes_ciphertext_out_total,        SUM)           \
+    X(total_requests,                        SUM)           \
+    X(responses_2xx_total,                   SUM)           \
+    X(responses_3xx_total,                   SUM)           \
+    X(responses_4xx_total,                   SUM)           \
+    X(responses_5xx_total,                   SUM)           \
+    X(conns_active_h1,                       SUM)           \
+    X(conns_active_h2,                       SUM)           \
+    X(conns_active_h3,                       SUM)           \
+    X(static_zero_coroutine_total,           SUM)           \
+    X(static_cache_hits_total,               SUM)           \
+    X(static_cache_misses_total,             SUM)
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
  * caches &server->view (or &http_server_view_default) at create time.
@@ -1194,6 +1247,23 @@ zend_string *http_response_format_streaming_headers(zend_object *obj);
 zend_string *http_response_format_static_head(zend_object *obj,
                                               bool include_inline_body);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
+
+/* Peer address rendering — one canonical pair for every protocol. H1/H2 keep
+ * the accepted socket's peer, H3 the datagram peer; both render through here.
+ *
+ * http_sockaddr_ip writes the BARE IP: no port, and no brackets around an
+ * IPv6 literal. That is the REMOTE_ADDR form (RFC 3875 §4.1.8) and what every
+ * mainstream server API returns — PHP's own $_SERVER['REMOTE_ADDR'], Servlet's
+ * getRemoteAddr(), Swoole's remote_addr, node's socket.remoteAddress. An
+ * "ip:port" string is deliberately NOT offered: it is Go's documented wart,
+ * and it makes IPv6 unsplittable for callers. Ports travel separately.
+ *
+ * Returns the length written; writes "" and returns 0 when the peer carries no
+ * IP (AF_UNIX listener, address never captured). `out` needs INET6_ADDRSTRLEN.
+ * http_sockaddr_port returns the port in host order, or 0 when there is none. */
+size_t   http_sockaddr_ip(const struct sockaddr *addr, socklen_t addr_len,
+                          char *out, size_t out_len);
+uint16_t http_sockaddr_port(const struct sockaddr *addr, socklen_t addr_len);
 void http_response_set_protocol_version(zend_object *obj, const char *version);
 /* RFC 9110 §9.3.2 — HEAD responses must not carry a body; send() drops
  * chunks silently when set. Stamped at dispatch wherever the request is

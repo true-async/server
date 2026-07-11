@@ -17,8 +17,6 @@
 #include "Zend/zend_async_API.h"
 
 #include "php_http_server.h"          /* invalid_argument exception ce */
-#include "http1/http_parser.h"        /* http_request_t for the access record */
-#include "Zend/zend_hrtime.h"
 #include "log/http_log.h"
 #include "core/async_plain_event.h"   /* drain-flush wakeup */
 #include "../../stubs/LogSeverity.php_arginfo.h"
@@ -946,7 +944,7 @@ bool http_log_register_formatter(const http_log_formatter_def_t *def)
 bool http_log_register_sink_type(const http_log_sink_type_t *type)
 {
     if (type == NULL || type->name == NULL
-        || (type->open == NULL && !type->php_delivery)
+        || type->open == NULL
         || g_sink_type_count >= HTTP_LOG_REG_SLOTS
         || http_log_sink_type_by_name(type->name, strlen(type->name)) != NULL) {
         return false;
@@ -1267,27 +1265,11 @@ static bool sink_open_syslog(HashTable *spec, zval *out,
     return true;
 }
 
-/* 'php' delivers each record to the spec's 'callback' as an array — the
- * onLog seam userland exporters (OTLP etc.) build on. */
-static bool sink_validate_php(HashTable *spec)
-{
-    zval *zcb = zend_hash_str_find(spec, "callback", sizeof("callback") - 1);
-
-    if (zcb == NULL || !zend_is_callable(zcb, 0, NULL)) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "setLogSinks(): type 'php' requires a callable 'callback'", 0);
-        return false;
-    }
-
-    return true;
-}
-
-static const http_log_sink_type_t sink_type_stream = { "stream", sink_validate_stream, sink_open_stream, NULL, false };
-static const http_log_sink_type_t sink_type_file   = { "file",   sink_validate_file,   sink_open_file,   NULL, false };
-static const http_log_sink_type_t sink_type_stdout = { "stdout", NULL, sink_open_stdout, NULL, false };
-static const http_log_sink_type_t sink_type_stderr = { "stderr", NULL, sink_open_stderr, NULL, false };
-static const http_log_sink_type_t sink_type_syslog = { "syslog", sink_validate_syslog, sink_open_syslog, &fmt_syslog, false };
-static const http_log_sink_type_t sink_type_php    = { "php",    sink_validate_php,    NULL, NULL, true };
+static const http_log_sink_type_t sink_type_stream = { "stream", sink_validate_stream, sink_open_stream, NULL };
+static const http_log_sink_type_t sink_type_file   = { "file",   sink_validate_file,   sink_open_file,   NULL };
+static const http_log_sink_type_t sink_type_stdout = { "stdout", NULL, sink_open_stdout, NULL };
+static const http_log_sink_type_t sink_type_stderr = { "stderr", NULL, sink_open_stderr, NULL };
+static const http_log_sink_type_t sink_type_syslog = { "syslog", sink_validate_syslog, sink_open_syslog, &fmt_syslog };
 
 /* ------------------------------------------------------------------------ */
 
@@ -1630,90 +1612,12 @@ void http_log_emitf(http_log_state_t *state,
     log_dispatch_record(state, &rec);
 }
 
-/* Re-entrancy guard for PHP-callback sinks: a callback that itself logs
- * would recurse through dispatch forever. While inside a callback, php
- * sinks are skipped (stream sinks still receive the nested record). */
-ZEND_TLS bool in_php_log_cb = false;
-
-/* Deliver one record to a php sink as an array:
- * {timestamp_ns, severity, severity_text, category, message,
- *  attrs: {k: v, …}, trace_id?, span_id?}. A callback exception is absorbed
- * (drop-counted, rate-limited stderr notice) — it never kills the worker. */
-static void log_deliver_php(http_log_sink_t *sink, const http_log_record_t *rec)
-{
-    if (in_php_log_cb) {
-        return;
-    }
-
-    zval arr;
-    array_init(&arr);
-    add_assoc_long(&arr, "timestamp_ns", (zend_long)rec->timestamp_ns);
-    add_assoc_long(&arr, "severity", (zend_long)rec->severity);
-    add_assoc_string(&arr, "severity_text", severity_text(rec->severity));
-    add_assoc_string(&arr, "category",
-                     rec->category == HTTP_LOG_CAT_ACCESS ? "access" : "app");
-    add_assoc_stringl(&arr, "message", rec->body != NULL ? rec->body : "",
-                      rec->body_len);
-
-    zval attrs;
-    array_init(&attrs);
-    for (size_t i = 0; i < rec->attrs_count; i++) {
-        const http_log_attr_t *a = &rec->attrs[i];
-
-        switch (a->type) {
-            case HTTP_LOG_ATTR_STR:
-                add_assoc_string(&attrs, a->key, a->v.s != NULL ? a->v.s : "");
-                break;
-            case HTTP_LOG_ATTR_I64:
-                add_assoc_long(&attrs, a->key, (zend_long)a->v.i64);
-                break;
-            case HTTP_LOG_ATTR_U64:
-                add_assoc_long(&attrs, a->key, (zend_long)a->v.u64);
-                break;
-            case HTTP_LOG_ATTR_BOOL:
-                add_assoc_bool(&attrs, a->key, a->v.b);
-                break;
-            case HTTP_LOG_ATTR_F64:
-                add_assoc_double(&attrs, a->key, a->v.f64);
-                break;
-        }
-    }
-    add_assoc_zval(&arr, "attrs", &attrs);
-
-    if (rec->has_trace) {
-        char hex[33];
-        log_sbuf_t sb;
-
-        sb_init(&sb, hex, sizeof hex);
-        sb_put_hex(&sb, rec->trace_id, sizeof rec->trace_id);
-        add_assoc_string(&arr, "trace_id", hex);
-
-        sb_init(&sb, hex, sizeof hex);
-        sb_put_hex(&sb, rec->span_id, sizeof rec->span_id);
-        add_assoc_string(&arr, "span_id", hex);
-    }
-
-    zval retval;
-    ZVAL_UNDEF(&retval);
-
-    in_php_log_cb = true;
-    zend_call_known_fcc(&sink->php_fcc, &retval, 1, &arr, NULL);
-    in_php_log_cb = false;
-
-    if (UNEXPECTED(EG(exception) != NULL)) {
-        sink->dropped_total++;
-        emit_fallback_stderr(sink, "onLog callback threw — exception absorbed");
-        zend_clear_exception();
-    }
-
-    zval_ptr_dtor(&retval);
-    zval_ptr_dtor(&arr);
-}
 
 /* Shared fan-out behind emitf and emit_access: format once per distinct
  * (formatter, ud), then hand the bytes to every sink whose floor and
- * category mask admit the record. A cache miss past HTTP_LOG_FMT_SLOTS just
- * reformats into the last slot — correct, only un-deduped. */
+ * category mask admit the record. Past HTTP_LOG_FMT_SLOTS distinct formatters
+ * the last slot becomes scratch: it is re-stamped on every miss, so a later
+ * sink can never read those bytes under a stale (fn, ud, len). */
 static void log_dispatch_record(http_log_state_t *state,
                                 const http_log_record_t *rec)
 {
@@ -1730,11 +1634,6 @@ static void log_dispatch_record(http_log_state_t *state,
             continue;
         }
 
-        if (sink->is_php) {
-            log_deliver_php(sink, rec);
-            continue;
-        }
-
         int s = -1;
         for (int k = 0; k < slots; k++) {
             if (meta[k].fn == sink->formatter && meta[k].ud == sink->formatter_ud) {
@@ -1743,84 +1642,86 @@ static void log_dispatch_record(http_log_state_t *state,
             }
         }
 
-        char  *buf;
-        size_t len;
+        if (s < 0) {
+            /* Miss: take a fresh slot, or reuse the last one as scratch once
+             * the cache is full. Either way re-stamp its meta, so its bytes
+             * and its recorded length always describe the same formatter. */
+            s = slots < HTTP_LOG_FMT_SLOTS ? slots++ : HTTP_LOG_FMT_SLOTS - 1;
 
-        if (s >= 0) {
-            buf = fbuf[s];
-            len = meta[s].len;
-        } else if (slots < HTTP_LOG_FMT_SLOTS) {
-            s = slots++;
             meta[s].fn  = sink->formatter;
             meta[s].ud  = sink->formatter_ud;
             meta[s].len = sink->formatter(rec, fbuf[s], sizeof fbuf[s],
                                           sink->formatter_ud);
-            buf = fbuf[s];
-            len = meta[s].len;
-        } else {
-            buf = fbuf[HTTP_LOG_FMT_SLOTS - 1];
-            len = sink->formatter(rec, buf, sizeof fbuf[0], sink->formatter_ud);
         }
 
-        if (len == 0) {
+        if (meta[s].len == 0) {
             continue;
         }
 
-        http_log_sink_write(sink, buf, len);
+        http_log_sink_write(sink, fbuf[s], meta[s].len);
     }
 }
 
-void http_log_emit_access(http_log_state_t *state,
-                          const http_request_t *req,
-                          zend_object *response_obj,
-                          const char *remote)
+void http_log_emit_access(http_log_state_t *state, const http_access_rec_t *ar)
 {
-    if (state == NULL || !state->has_access
-        || req == NULL || response_obj == NULL) {
+    if (state == NULL || !state->has_access || ar == NULL) {
         return;
     }
 
-    const char *method = req->method != NULL ? ZSTR_VAL(req->method) : "-";
-    const char *uri    = req->uri != NULL ? ZSTR_VAL(req->uri) : "-";
-    const int   status = http_response_get_status(response_obj);
-    const char *proto  = req->http_major >= 3 ? "h3"
-                       : req->http_major == 2 ? "h2" : "h1";
+    const char *method = ar->method != NULL ? ar->method : "-";
+    const char *path   = ar->url_path != NULL ? ar->url_path : "-";
 
-    http_log_attr_t attrs[8];
+    /* Stable OTel HTTP semconv names (v1.23+). The envelope is OTel Logs, so
+     * the attributes have to be too — a collector keys off these exact names. */
+    http_log_attr_t attrs[9];
     size_t n = 0;
 
-    attrs[n++] = (http_log_attr_t){ .key = "method", .type = HTTP_LOG_ATTR_STR,
-                                    .v.s = method };
-    attrs[n++] = (http_log_attr_t){ .key = "path", .type = HTTP_LOG_ATTR_STR,
-                                    .v.s = uri };
-    attrs[n++] = (http_log_attr_t){ .key = "status", .type = HTTP_LOG_ATTR_I64,
-                                    .v.i64 = status };
-    attrs[n++] = (http_log_attr_t){ .key = "proto", .type = HTTP_LOG_ATTR_STR,
-                                    .v.s = proto };
-    attrs[n++] = (http_log_attr_t){ .key = "bytes", .type = HTTP_LOG_ATTR_U64,
-                                    .v.u64 = http_response_get_body_len(response_obj) };
+    attrs[n++] = (http_log_attr_t){ .key = "http.request.method",
+                                    .type = HTTP_LOG_ATTR_STR, .v.s = method };
+    attrs[n++] = (http_log_attr_t){ .key = "url.path",
+                                    .type = HTTP_LOG_ATTR_STR, .v.s = path };
 
-    /* Duration from the CoDel/telemetry stamps (start_logging forces them on
-     * when an access sink exists); end_ns may not be stamped yet at this
-     * point in the completion path, so fall back to a fresh hrtime. */
-    if (req->start_ns != 0) {
-        const uint64_t end = req->end_ns != 0 ? req->end_ns : zend_hrtime();
-
-        if (end > req->start_ns) {
-            attrs[n++] = (http_log_attr_t){ .key = "duration_ms",
-                                            .type = HTTP_LOG_ATTR_F64,
-                                            .v.f64 = (double)(end - req->start_ns) / 1e6 };
-        }
+    if (ar->url_query != NULL && ar->url_query[0] != '\0') {
+        attrs[n++] = (http_log_attr_t){ .key = "url.query",
+                                        .type = HTTP_LOG_ATTR_STR,
+                                        .v.s = ar->url_query };
     }
 
-    if (remote != NULL) {
-        attrs[n++] = (http_log_attr_t){ .key = "remote",
+    attrs[n++] = (http_log_attr_t){ .key = "http.response.status_code",
+                                    .type = HTTP_LOG_ATTR_I64,
+                                    .v.i64 = ar->status };
+
+    if (ar->protocol_version != NULL) {
+        attrs[n++] = (http_log_attr_t){ .key = "network.protocol.version",
                                         .type = HTTP_LOG_ATTR_STR,
-                                        .v.s = remote };
+                                        .v.s = ar->protocol_version };
+    }
+
+    attrs[n++] = (http_log_attr_t){ .key = "http.response.body.size",
+                                    .type = HTTP_LOG_ATTR_U64,
+                                    .v.u64 = ar->response_size };
+
+    /* OTel's unit for http.server.request.duration is seconds, not ms. */
+    if (ar->duration_ns != 0) {
+        attrs[n++] = (http_log_attr_t){ .key = "http.server.request.duration",
+                                        .type = HTTP_LOG_ATTR_F64,
+                                        .v.f64 = (double)ar->duration_ns / 1e9 };
+    }
+
+    if (ar->client_address != NULL) {
+        attrs[n++] = (http_log_attr_t){ .key = "client.address",
+                                        .type = HTTP_LOG_ATTR_STR,
+                                        .v.s = ar->client_address };
+    }
+
+    if (ar->client_port != 0) {
+        attrs[n++] = (http_log_attr_t){ .key = "client.port",
+                                        .type = HTTP_LOG_ATTR_I64,
+                                        .v.i64 = ar->client_port };
     }
 
     char body[512];
-    int  blen = snprintf(body, sizeof body, "%s %s %d", method, uri, status);
+    int  blen = snprintf(body, sizeof body, "%s %s %d", method, path, ar->status);
 
     if (blen < 0) {
         return;
@@ -1839,13 +1740,13 @@ void http_log_emit_access(http_log_state_t *state,
         .body_len     = (size_t)blen,
         .attrs        = attrs,
         .attrs_count  = n,
-        .trace_flags  = req->trace_flags,
-        .has_trace    = req->has_trace,
+        .trace_flags  = ar->trace_flags,
+        .has_trace    = ar->trace_id != NULL,
     };
 
-    if (req->has_trace) {
-        memcpy(rec.trace_id, req->trace_id, sizeof rec.trace_id);
-        memcpy(rec.span_id, req->span_id, sizeof rec.span_id);
+    if (rec.has_trace) {
+        memcpy(rec.trace_id, ar->trace_id, sizeof rec.trace_id);
+        memcpy(rec.span_id, ar->span_id, sizeof rec.span_id);
     }
 
     log_dispatch_record(state, &rec);
@@ -1877,7 +1778,6 @@ void http_log_minit(void)
     http_log_register_sink_type(&sink_type_stdout);
     http_log_register_sink_type(&sink_type_stderr);
     http_log_register_sink_type(&sink_type_syslog);
-    http_log_register_sink_type(&sink_type_php);
 }
 
 void http_log_mshutdown(void)
@@ -1925,34 +1825,9 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     memset(sink, 0, sizeof *sink);
     sink->severity_floor = HTTP_LOG_OFF;
     ZVAL_UNDEF(&sink->stream_zv);
-    ZVAL_UNDEF(&sink->php_cb);
 
     if (spec->level == HTTP_LOG_OFF) {
         return false;
-    }
-
-    /* PHP-callback sink: no formatter, no transport — resolve the fcc once
-     * and deliver records as arrays from the dispatch loop. */
-    if (spec->php_cb != NULL) {
-        char *err = NULL;
-
-        if (!zend_is_callable_ex(spec->php_cb, NULL, 0, NULL,
-                                 &sink->php_fcc, &err)) {
-            if (err != NULL) {
-                efree(err);
-            }
-            return false;
-        }
-        if (err != NULL) {
-            efree(err);
-        }
-
-        ZVAL_COPY(&sink->php_cb, spec->php_cb);
-        sink->is_php            = true;
-        sink->category_mask     = spec->category_mask != 0 ? spec->category_mask
-                                                           : HTTP_LOG_CAT_APP;
-        sink->severity_floor    = spec->level;
-        return true;
     }
 
     zval *stream_zv = spec->stream_zv;
@@ -2119,14 +1994,6 @@ static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
  * ref. Assumes the caller already drained (or budgeted the drain away). */
 static void http_log_sink_stop(http_log_sink_t *sink)
 {
-    if (sink->is_php) {
-        zval_ptr_dtor(&sink->php_cb);
-        ZVAL_UNDEF(&sink->php_cb);
-        sink->is_php         = false;
-        sink->severity_floor = HTTP_LOG_OFF;
-        return;
-    }
-
     /* The formatter ud is ours regardless of the transport's fate — the
      * formatter only runs inside emit, never from an in-flight write. */
     if (sink->formatter_ud_free != NULL && sink->formatter_ud != NULL) {
@@ -2139,8 +2006,16 @@ static void http_log_sink_stop(http_log_sink_t *sink)
      * tear them down with a libuv thread-pool write still in flight. */
     if (UNEXPECTED(sink->writer_cb != NULL
                    && sink->writer_cb->active_req != NULL)) {
+        http_log_writer_cb_t *cb = sink->writer_cb;
+
         emit_fallback_stderr(sink, "teardown with in-flight write — leaking sink");
-        writer_flush_timer_destroy(sink->writer_cb);   /* stop the zombie tick */
+        writer_flush_timer_destroy(cb);   /* stop the zombie tick */
+
+        /* The sink lives in http_server_object; the orphaned cb outlives it and
+         * its completion still fires. Cut the back-pointer or that completion
+         * dereferences freed memory — every cb path already tolerates NULL. */
+        cb->sink = NULL;
+
         sink->writer_cb      = NULL;
         sink->async_io       = NULL;
         sink->stream_set     = false;

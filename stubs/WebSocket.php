@@ -142,10 +142,20 @@ final class WebSocket implements \Iterator
     public function getSubprotocol(): ?string {}
 
     /**
-     * Peer address in `host:port` form (IPv4) or `[host]:port` (IPv6)
-     * for TCP listeners. Empty string for Unix-socket listeners.
+     * Client IP address of the socket peer, e.g. "203.0.113.7" or "2001:db8::1".
+     *
+     * Bare IP only: no port, and no brackets around an IPv6 literal — the same
+     * shape as $_SERVER['REMOTE_ADDR'] and HttpRequest::getRemoteAddress().
+     * Use getRemotePort() for the port.
+     *
+     * NULL on a Unix-socket listener, which has no IP peer.
      */
-    public function getRemoteAddress(): string {}
+    public function getRemoteAddress(): ?string {}
+
+    /**
+     * Client port of the socket peer, e.g. 54321. NULL when there is no IP peer.
+     */
+    public function getRemotePort(): ?int {}
 
     // === Iterator === so `foreach ($ws as $msg)` mirrors a recv() loop.
     // The cursor advances by pulling the next message; iteration ends on a

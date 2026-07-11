@@ -240,6 +240,13 @@ static int cb_on_begin_headers(nghttp2_session *ng,
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
 
+    /* Peer, snapshotted at accept — copied onto the request so it survives the
+     * connection and reaches the pool worker and the send-file engine. */
+    if (session->conn != NULL) {
+        stream->request->peer     = session->conn->peer;
+        stream->request->peer_len = session->conn->peer_len;
+    }
+
     stream_table_register(session, stream);
     nghttp2_session_set_stream_user_data(ng, stream_id, stream);
 

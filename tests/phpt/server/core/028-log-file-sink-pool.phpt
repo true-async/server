@@ -57,15 +57,21 @@ $server->start();
 $log = @file_get_contents($path) ?: '';
 @unlink($path);
 
-$n = 0;
+$n = 0; $ip = 0;
 foreach (explode("\n", trim($log)) as $line) {
     if ($line === '') continue;
     $r = json_decode($line, true);
-    if (is_array($r) && str_starts_with($r['Attributes']['path'] ?? '', '/w')) $n++;
+    if (is_array($r) && str_starts_with($r['Attributes']['url.path'] ?? '', '/w')) $n++;
+    /* Pool mode used to lose the client IP entirely — the peer lived on the
+     * reactor's connection and never reached the worker. It rides the request
+     * now, so every worker-side record carries it. */
+    if (is_array($r) && ($r['Attributes']['client.address'] ?? '') === '127.0.0.1') $ip++;
 }
 echo "access records: ", $n, "\n";
+echo "with client.address: ", $ip, "\n";
 echo "Done\n";
 --EXPECTF--
 no-path: rejected
 access records: 4
+with client.address: 4
 Done%A

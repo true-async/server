@@ -23,6 +23,11 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#ifdef PHP_WIN32
+# include <ws2tcpip.h>   /* inet_ntop */
+#else
+# include <arpa/inet.h>  /* inet_ntop, ntohs */
+#endif
 #ifndef PHP_WIN32
 # include <strings.h>
 #endif
@@ -719,6 +724,158 @@ ZEND_METHOD(TrueAsync_HttpRequest, getTraceState)
     }
 
     http_request_retval_str(return_value, intern->request->tracestate_raw);
+}
+
+size_t http_sockaddr_ip(const struct sockaddr *addr, socklen_t addr_len,
+                        char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return 0;
+    }
+
+    out[0] = '\0';
+
+    if (addr == NULL) {
+        return 0;
+    }
+
+    const void *src = NULL;
+    int         af  = 0;
+
+    if (addr->sa_family == AF_INET
+        && addr_len >= (socklen_t)sizeof(struct sockaddr_in)) {
+        af  = AF_INET;
+        src = &((const struct sockaddr_in *)addr)->sin_addr;
+    } else if (addr->sa_family == AF_INET6
+               && addr_len >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        af  = AF_INET6;
+        src = &((const struct sockaddr_in6 *)addr)->sin6_addr;
+    } else {
+        return 0;   /* AF_UNIX and friends have no IP */
+    }
+
+    if (inet_ntop(af, src, out, (socklen_t)out_len) == NULL) {
+        out[0] = '\0';
+        return 0;
+    }
+
+    return strlen(out);
+}
+
+uint16_t http_sockaddr_port(const struct sockaddr *addr, socklen_t addr_len)
+{
+    if (addr == NULL) {
+        return 0;
+    }
+
+    if (addr->sa_family == AF_INET
+        && addr_len >= (socklen_t)sizeof(struct sockaddr_in)) {
+        return ntohs(((const struct sockaddr_in *)addr)->sin_port);
+    }
+
+    if (addr->sa_family == AF_INET6
+        && addr_len >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        return ntohs(((const struct sockaddr_in6 *)addr)->sin6_port);
+    }
+
+    return 0;
+}
+
+/* Build the logger's access record from a completed request. Lives here, not in
+ * src/log: turning a request into a log record is the request layer's job, and
+ * it is what keeps the logging layer free of protocol types.
+ *
+ * `ip_buf` backs rec->client_address — the record borrows, so the buffer must
+ * outlive the emit (callers keep it on the same stack frame). */
+void http_request_fill_access_rec(const http_request_t *req,
+                                  zend_object *response_obj,
+                                  http_access_rec_t *rec,
+                                  char *ip_buf, size_t ip_buf_len)
+{
+    memset(rec, 0, sizeof *rec);
+
+    if (req == NULL || response_obj == NULL) {
+        return;
+    }
+
+    rec->method   = req->method != NULL ? ZSTR_VAL(req->method) : NULL;
+    rec->url_path = req->path != NULL ? ZSTR_VAL(req->path)
+                  : (req->uri != NULL ? ZSTR_VAL(req->uri) : NULL);
+
+    /* url.query is the raw string after '?' — req->uri holds path?query, and
+     * req->path is the path alone, so the split is already done for us. */
+    if (req->uri != NULL) {
+        const char *q = strchr(ZSTR_VAL(req->uri), '?');
+        rec->url_query = (q != NULL && q[1] != '\0') ? q + 1 : NULL;
+    }
+
+    rec->status        = http_response_get_status(response_obj);
+    rec->response_size = http_response_get_body_len(response_obj);
+
+    /* network.protocol.version per OTel: the bare version, not a scheme alias
+     * ("2", never "h2"). Note "2"/"3" have no minor — OTel spells them so. */
+    rec->protocol_version = req->http_major >= 3 ? "3"
+                          : req->http_major == 2 ? "2"
+                          : req->http_minor == 0 ? "1.0" : "1.1";
+
+    /* Duration from the telemetry stamps (start_logging forces them on when an
+     * access sink exists). end_ns may not be stamped yet this far down the
+     * completion path, so fall back to a fresh reading. */
+    if (req->start_ns != 0) {
+        const uint64_t end = req->end_ns != 0 ? req->end_ns : zend_hrtime();
+
+        if (end > req->start_ns) {
+            rec->duration_ns = end - req->start_ns;
+        }
+    }
+
+    if (req->peer_len > 0 && ip_buf != NULL && ip_buf_len > 0) {
+        if (http_sockaddr_ip((const struct sockaddr *)&req->peer, req->peer_len,
+                             ip_buf, ip_buf_len) > 0) {
+            rec->client_address = ip_buf;
+        }
+
+        rec->client_port = http_sockaddr_port((const struct sockaddr *)&req->peer,
+                                              req->peer_len);
+    }
+
+    if (req->has_trace) {
+        rec->trace_id    = req->trace_id;
+        rec->span_id     = req->span_id;
+        rec->trace_flags = req->trace_flags;
+    }
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getRemoteAddress)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    char   ip[INET6_ADDRSTRLEN];
+    size_t n = http_sockaddr_ip((const struct sockaddr *)&intern->request->peer,
+                                intern->request->peer_len, ip, sizeof ip);
+
+    if (n == 0) {
+        RETURN_NULL();   /* Unix-socket listener — no IP peer */
+    }
+
+    RETURN_STRINGL(ip, n);
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getRemotePort)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const uint16_t port = http_sockaddr_port(
+        (const struct sockaddr *)&intern->request->peer,
+        intern->request->peer_len);
+
+    if (port == 0) {
+        RETURN_NULL();
+    }
+
+    RETURN_LONG((zend_long)port);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getTraceId)
