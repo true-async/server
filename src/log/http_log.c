@@ -33,10 +33,8 @@
 #endif
 
 #ifdef PHP_WIN32
-/* winsock2.h must precede windows.h on Windows whenever a TU may end
- * up linked against networking headers from neighbouring code (project
- * convention). We don't need sockets here, but the include order is
- * cheap to honour and avoids future surprises. */
+/* winsock2.h must precede windows.h (project convention); it also
+ * declares gethostname(), used for the syslog HEADER. */
 # include <winsock2.h>
 # include <windows.h>
 #endif
@@ -589,20 +587,18 @@ static int syslog_severity(http_log_severity_t s)
     }
 }
 
-/* Local hostname for the syslog HEADER, resolved once. "-" (NILVALUE) if
- * unavailable. */
-static const char *syslog_hostname(void)
+/* Local hostname for the syslog HEADER. "-" (NILVALUE) if unavailable.
+ * Resolved once at MINIT (single-threaded) — formatters then read it from any
+ * worker thread with no race. */
+static char syslog_host[256] = "-";
+
+static void syslog_hostname_resolve(void)
 {
-    static char host[256];
-
-    if (host[0] == '\0') {
-        if (gethostname(host, sizeof host - 1) != 0 || host[0] == '\0') {
-            host[0] = '-';
-            host[1] = '\0';
-        }
+    if (gethostname(syslog_host, sizeof syslog_host - 1) != 0
+        || syslog_host[0] == '\0') {
+        syslog_host[0] = '-';
+        syslog_host[1] = '\0';
     }
-
-    return host;
 }
 
 /* RFC 5424 message with RFC 6587 octet-counted framing: "LEN SP SYSLOG-MSG",
@@ -629,7 +625,7 @@ size_t http_log_format_syslog(const http_log_record_t *rec,
     sb_init(&m, msg, sizeof msg);
 
     sb_printf(&m, "<%d>1 %s %s %s %ld - - ",
-              pri, ts, syslog_hostname(), HTTP_LOG_SYSLOG_APPNAME,
+              pri, ts, syslog_host, HTTP_LOG_SYSLOG_APPNAME,
               (long)getpid());
     if (rec->body != NULL) {
         sb_write(&m, rec->body, rec->body_len);
@@ -1239,6 +1235,8 @@ void http_log_minit(void)
 {
     http_log_severity_ce = register_class_TrueAsync_LogSeverity();
 
+    syslog_hostname_resolve();
+
     /* Built-ins go through the same registry a plugin extension would use. */
     http_log_register_formatter(&fmt_plain);
     http_log_register_formatter(&fmt_logfmt);
@@ -1415,19 +1413,33 @@ static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
 
     /* Same thread: no completion can fire between this check and SUSPEND,
      * so no lost wakeup. drain_event only fires once the chain is empty. */
-    if (cb->drain_event != NULL && ZEND_ASYNC_WAKER_NEW(co) != NULL) {
-        zend_async_resume_when(co, cb->drain_event, false,
-                               zend_async_waker_callback_resolve, NULL);
-        zend_async_event_t *const timer =
-            &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)budget_ms, false)->base;
-        zend_async_resume_when(co, timer, true,
-                               zend_async_waker_callback_timeout, NULL);
-        ZEND_ASYNC_SUSPEND();
-        zend_async_waker_clean(co);
+    if (cb->drain_event == NULL) {
+        return;
+    }
 
-        if (EG(exception)) {
-            zend_clear_exception();   /* budget elapsed → leak path below */
-        }
+    /* Without the budget timer an unbounded wait risks pinning teardown on a
+     * wedged write — fall to the leak path instead. */
+    zend_async_timer_event_t *const timer =
+        ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)budget_ms, false);
+
+    if (UNEXPECTED(timer == NULL)) {
+        return;
+    }
+
+    if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
+        timer->base.dispose(&timer->base);
+        return;
+    }
+
+    zend_async_resume_when(co, cb->drain_event, false,
+                           zend_async_waker_callback_resolve, NULL);
+    zend_async_resume_when(co, &timer->base, true,
+                           zend_async_waker_callback_timeout, NULL);
+    ZEND_ASYNC_SUSPEND();
+    zend_async_waker_clean(co);
+
+    if (EG(exception)) {
+        zend_clear_exception();   /* budget elapsed → leak path below */
     }
 }
 
