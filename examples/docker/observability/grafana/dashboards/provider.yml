@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+  - name: true-async-server
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
