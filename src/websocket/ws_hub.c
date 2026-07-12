@@ -21,9 +21,8 @@
 #define WS_HUB_MAILBOX_CAPACITY 4096
 #define WS_HUB_MAILBOX_BATCH      64
 
-/* A room is just an identity. The refcount is what makes the pointer safe to
- * hand to another thread; zend_string's own refcount is NOT atomic, so the name
- * is owned outright rather than shared through Zend refcounting. */
+/* zend_string's refcount is NOT atomic, so the name is owned outright rather
+ * than shared through Zend refcounting. */
 struct ws_room_s {
     zend_atomic_int refcount;
     zend_string    *name;
@@ -39,8 +38,6 @@ struct ws_hub_s {
     bool              taken[WS_HUB_MAX_WORKERS];
 };
 
-/* One message body shared by the whole fan-out instead of copied per recipient.
- * The last worker done with it frees it. */
 typedef struct {
     zend_atomic_int refcount;
     size_t          len;
@@ -48,9 +45,8 @@ typedef struct {
     char            data[1];
 } ws_payload_t;
 
-/* A count() in flight. Workers add their tally straight into `total`, so there is
- * no reply queue; the last one to answer wakes the caller. Refcounted because a
- * timed-out caller must not free it under a worker still answering. */
+/* Refcounted because a timed-out caller must not free this under a worker that
+ * is still answering. */
 typedef struct {
     zend_atomic_int             refcount;
     zend_atomic_int             pending;
@@ -71,9 +67,8 @@ typedef struct {
     ws_query_t   *query;       /* count */
 } ws_cmd_t;
 
-/* Members of one room on THIS worker: a dense array, not a hash — delivery only
- * walks it, and walking must not allocate. `dead` counts tombstones left by a
- * leave that happened mid-walk. */
+/* Dense array, not a hash: delivery only walks it, and the walk must not
+ * allocate. `dead` counts tombstones (see ws_room_local_remove). */
 typedef struct {
     ws_session_t **items;
     uint32_t       count;
@@ -82,7 +77,6 @@ typedef struct {
     bool           iterating;
 } ws_room_local_t;
 
-/* The rooms a session is in, and its slot in each — so leaving is O(1). */
 typedef struct ws_room_link {
     struct ws_room_link *next;
     ws_room_t           *room;
@@ -98,8 +92,7 @@ typedef struct {
 
 ZEND_TLS ws_local_t *ws_local = NULL;
 
-/* The local table is keyed by the room pointer: it is stable while a reference is
- * held, so delivery needs neither a string nor a hash of one. */
+/* Safe as a key: the pointer is stable while a reference is held. */
 #define WS_ROOM_KEY(room) ((zend_ulong)(uintptr_t)(room))
 
 static ws_payload_t *ws_payload_new(const char *data, const size_t len, const bool binary)
@@ -143,9 +136,8 @@ ws_room_t *ws_hub_room(ws_hub_t *hub, zend_string *name)
     ws_room_t *room = zend_hash_find_ptr(&hub->rooms, name);
 
     if (room != NULL) {
-        /* Held under the mutex, so this cannot race a retire that already hit
-         * zero: that retire re-checks the count with the mutex held and backs
-         * off if a lookup revived the room. */
+        /* Cannot race a retire that already hit zero: it re-checks under the
+         * mutex and backs off when a lookup revived the room. */
         zend_atomic_int_fetch_add(&room->refcount, 1);
     } else {
         room = pemalloc(sizeof(*room), 1);
@@ -470,8 +462,7 @@ static uint32_t ws_local_deliver(ws_room_t *room, const ws_payload_t *payload,
         return 0;
     }
 
-    /* A send can tear its own session down, which re-enters leave_all and would
-     * shift the array under this walk — hence the tombstones. */
+    /* A send can tear its own session down, re-entering leave_all mid-walk. */
     const bool nested = local->iterating;
     local->iterating  = true;
 
@@ -625,10 +616,8 @@ uint32_t ws_hub_count(ws_hub_t *hub, ws_room_t *room, const uint32_t timeout_ms)
     ZEND_ATOMIC_INT_INIT(&query->total, (int)local);
     query->done = done;
 
-    /* Subscribe BEFORE posting: a worker can answer — and fire `done` — before we
-     * would have got round to suspending, and that wakeup must not be lost. The
-     * waker owns the timeout, so a worker that never answers costs us the bound
-     * instead of hanging the caller. */
+    /* Subscribe BEFORE posting: a worker can answer, and fire `done`, before we
+     * reach the suspend — that wakeup must not be lost. */
     const bool armed = zend_async_waker_new_with_timeout(me, timeout_ms, NULL) != NULL;
 
     if (armed) {

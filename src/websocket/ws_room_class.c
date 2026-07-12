@@ -81,10 +81,8 @@ zend_object *websocket_room_object_create(void *hub, zend_string *name)
     return obj;
 }
 
-/* The WebSocket handed to us is a PHP object of THIS worker, so its session
- * pointer never crosses a thread. The session is built lazily, so joining has
- * to commit the upgrade exactly like send()/recv() — a handler that joins
- * before its first I/O has no session yet. */
+/* The session is built lazily, so joining must commit the upgrade like
+ * send()/recv() do — a handler that joins before its first I/O has none yet. */
 static ws_session_t *ws_room_session_of(const zval *ws_zv)
 {
     websocket_object *const w = Z_WEBSOCKET_P((zval *)ws_zv);
@@ -204,8 +202,7 @@ ZEND_METHOD(TrueAsync_WebSocketRoom, __construct)
 }
 
 /* A room captured by a handler closure rides into every worker with it. The hub
- * is process-wide, so each side takes its own reference to the same ws_room_t —
- * nothing about the room is copied. */
+ * is process-wide, so each side just takes its own reference to the same room. */
 static zend_object *websocket_room_transfer_obj(
     zend_object *object,
     zend_async_thread_transfer_ctx_t *ctx,
