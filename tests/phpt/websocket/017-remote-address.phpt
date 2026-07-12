@@ -78,7 +78,7 @@ $server->start();
 echo "opcode: 0x", dechex($opcode), "\n";                       // 0x1 text
 [$addr, $port] = explode('|', $payload, 2) + [1 => ''];
 echo "bare ip: ", ($addr === '127.0.0.1' ? 'yes' : "no ($addr)"), "\n";
-echo "is_ip:   ", (filter_var($addr, FILTER_VALIDATE_IP) !== false ? 'yes' : 'no'), "\n";
+echo "is_ip:   ", (preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', $addr) ? 'yes' : 'no'), "\n";
 echo "port:    ", (preg_match('/^\d{1,5}$/', $port) && (int) $port > 0 ? 'yes' : "no ($port)"), "\n";
 echo "Done\n";
 --EXPECT--

@@ -23,11 +23,11 @@ $server->addHttpHandler(function ($req, $res) {
     $addr = $req->getRemoteAddress();
     $rport = $req->getRemotePort();
 
-    /* Bare IP: no port glued on, no brackets. It must survive
-     * FILTER_VALIDATE_IP, which "1.2.3.4:5678" would not. */
+    /* Bare IP: no port glued on, no brackets. "127.0.0.1", not
+     * "127.0.0.1:5678" — a raw ipv4 with no colon. (No ext/filter here.) */
     $res->setStatusCode(200)->setBody(json_encode([
         'addr'     => $addr,
-        'is_ip'    => filter_var($addr, FILTER_VALIDATE_IP) !== false,
+        'is_ip'    => (bool) preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', (string) $addr),
         'no_colon' => !str_contains((string) $addr, ':'),
         'port_ok'  => is_int($rport) && $rport > 0 && $rport < 65536,
     ]))->end();
