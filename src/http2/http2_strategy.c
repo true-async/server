@@ -1837,6 +1837,7 @@ static bool ws_h2_send_internal(void *ctx, const uint8_t *data, size_t len)
 static const ws_transport_ops_t ws_h2_transport = {
     .send          = ws_h2_send,
     .send_internal = ws_h2_send_internal,
+    .sendable      = h2_stream_sendable,
 };
 
 /* Commit the streaming 200 + bring the per-stream wslay session online.

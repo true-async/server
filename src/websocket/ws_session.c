@@ -125,9 +125,15 @@ static bool ws_h1_send_internal(void *ctx, const uint8_t *data, size_t len)
     return http_connection_send_batched(conn, copy, len);
 }
 
+static bool ws_h1_sendable(void *ctx)
+{
+    return !http_connection_outbound_over_highwater((const http_connection_t *)ctx);
+}
+
 static const ws_transport_ops_t ws_h1_transport = {
     .send          = ws_h1_send,
     .send_internal = ws_h1_send_internal,
+    .sendable      = ws_h1_sendable,
 };
 
 static ssize_t ws_session_send_callback(wslay_event_context_ptr ctx,
@@ -844,6 +850,15 @@ bool ws_session_over_highwater(const ws_session_t *session)
      * sends / future streaming. H2 binds to a stream, so skip it there. */
     return session->transport_ctx == session->conn
         && http_connection_outbound_over_highwater(session->conn);
+}
+
+bool ws_session_transport_sendable(const ws_session_t *session)
+{
+    if (session->transport == NULL || session->transport->sendable == NULL) {
+        return true;
+    }
+
+    return session->transport->sendable(session->transport_ctx);
 }
 
 ws_writable_t ws_session_wait_writable(ws_session_t *session, uint32_t timeout_ms)
