@@ -43,7 +43,7 @@ extern "C" {
 #define HTTP_STATS_CACHELINE 64
 
 /* One per-worker counter slot. `counters` is the same slice a running server
- * bumps on its hot path (Stage A2 points server->counters at &slot->counters).
+ * bumps on its hot path (Stage A2 points server->counters_live at &slot->counters).
  * `active` gates a slot into the aggregate: claim zeroes the counters and then
  * release-stores active=1; a reader acquire-loads active before summing. */
 typedef struct {

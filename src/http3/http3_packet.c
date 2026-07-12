@@ -128,12 +128,22 @@ ZEND_STATIC_ASSERT(HTTP3_STAT_COUNT * sizeof(uint64_t)
                    "HTTP3_PACKET_STAT_TABLE is out of sync with "
                    "http3_packet_stats_t");
 
+/* Relaxed 64-bit load, portable to MSVC (no __atomic_* builtins). One writer
+ * per counter, so this only bars the compiler tearing/reloading; on the Windows
+ * targets an aligned volatile load is a single un-torn MOV. */
+static zend_always_inline uint64_t h3_relaxed_load_u64(const uint64_t *p)
+{
+#if defined(_MSC_VER)
+    return *(const volatile uint64_t *)p;
+#else
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+#endif
+}
+
 static zend_always_inline uint64_t http3_stat_load(const http3_packet_stats_t *s,
                                                    const size_t offset)
 {
-    const uint64_t *p = (const uint64_t *)((const char *)s + offset);
-
-    return __atomic_load_n(p, __ATOMIC_RELAXED);
+    return h3_relaxed_load_u64((const uint64_t *)((const char *)s + offset));
 }
 
 size_t http3_stat_count(void)
@@ -162,7 +172,7 @@ uint64_t http3_stat_bucket(const http3_packet_stats_t *s, const size_t b)
         return 0;
     }
 
-    return __atomic_load_n(&s->reactor_lat_bucket[b], __ATOMIC_RELAXED);
+    return h3_relaxed_load_u64(&s->reactor_lat_bucket[b]);
 }
 
 /* Categorise a sendmsg/sendto errno into the send-error stat buckets. Pure

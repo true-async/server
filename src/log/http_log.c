@@ -174,6 +174,26 @@ static void sb_putc(log_sbuf_t *sb, char c)
     sb_write(sb, &c, 1);
 }
 
+/* Terminate a record with its trailing newline — even when the record overflowed
+ * the buffer. On a plain STREAM sink the '\n' is the only record separator, so a
+ * truncated line that lost it would merge with the next record (an attacker with
+ * a long request target could hide an unrelated request's log); force the
+ * separator into the last byte rather than drop it. */
+static void sb_end_line(log_sbuf_t *sb)
+{
+    if (sb->len + 1 < sb->cap) {
+        sb->buf[sb->len++] = '\n';
+        sb->buf[sb->len] = '\0';
+        return;
+    }
+
+    if (sb->cap >= 2) {
+        sb->buf[sb->cap - 2] = '\n';   /* last emitted byte (buf[len] is the NUL) */
+        sb->len = sb->cap - 1;
+        sb->buf[sb->cap - 1] = '\0';
+    }
+}
+
 static void sb_puts(log_sbuf_t *sb, const char *s)
 {
     sb_write(sb, s, strlen(s));
@@ -428,7 +448,7 @@ size_t http_log_format_plain(const http_log_record_t *rec,
     }
 
     sb_put_attrs(&sb, rec, LOG_STYLE_PLAIN);
-    sb_putc(&sb, '\n');
+    sb_end_line(&sb);
 
     return sb.len;
 }
@@ -453,7 +473,7 @@ size_t http_log_format_logfmt(const http_log_record_t *rec,
     sb_put_logfmt_val(&sb, rec->body != NULL ? rec->body : "", rec->body_len);
 
     sb_put_attrs(&sb, rec, LOG_STYLE_LOGFMT);
-    sb_putc(&sb, '\n');
+    sb_end_line(&sb);
 
     return sb.len;
 }
@@ -498,7 +518,7 @@ size_t http_log_format_json(const http_log_record_t *rec,
     }
 
     sb_putc(&sb, '}');
-    sb_putc(&sb, '\n');
+    sb_end_line(&sb);
 
     return sb.len;
 }
@@ -584,7 +604,7 @@ size_t http_log_format_pretty(const http_log_record_t *rec,
     }
 
     sb_put_attrs(&sb, rec, color ? LOG_STYLE_PRETTY : LOG_STYLE_PLAIN);
-    sb_putc(&sb, '\n');
+    sb_end_line(&sb);
 
     return sb.len;
 }
@@ -813,7 +833,7 @@ size_t http_log_format_template(const http_log_record_t *rec,
         }
     }
 
-    sb_putc(&sb, '\n');
+    sb_end_line(&sb);
     return sb.len;
 }
 

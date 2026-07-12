@@ -1094,6 +1094,17 @@ static zend_always_inline void http_server_on_tls_io(http_server_counters_t *c,
     c->tls_bytes_ciphertext_out_total += ciphertext_out;
 }
 
+/* Relaxed 64-bit load (one writer per counter): bars a compiler tear/reload of
+ * a cross-thread read. MSVC lacks __atomic_*; an aligned volatile load is one MOV. */
+static zend_always_inline uint64_t http_relaxed_load_u64(const uint64_t *p)
+{
+#if defined(_MSC_VER)
+    return *(const volatile uint64_t *)p;
+#else
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+#endif
+}
+
 /* Cheap per-request counter bump. Split out of on_request_sample so the
  * H1/H2/H3 hot paths can keep counting requests even when
  * sample_stamps_enabled is false and the full sojourn/service sample is

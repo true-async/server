@@ -214,9 +214,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
  * object — the transport reactor has no server object on its thread but
  * can hold its own refs to the persistent, atomically-refcounted mounts.
  * http_static_try_serve is a thin wrapper that resolves these from the
- * server and forwards. */
+ * server and forwards.
+ *
+ * `server` is used only to reach the access-log state and MUST be NULL on the
+ * transport reactor thread, whose sinks belong to another thread — a NULL
+ * server suppresses the access record on that path. */
 struct http_static_cache_s;
 http_static_result_t http_static_try_serve_mounts(
+	http_server_object *server,
 	const http_static_handler_t *const *mounts, size_t mount_count,
 	struct http_static_cache_s *cache,
 	struct http_request_t *request,

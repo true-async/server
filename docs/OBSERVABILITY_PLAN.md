@@ -51,7 +51,7 @@ on nothing from A.
 | 9 | B4 — `setLogSinks` config | B1, B2 | no |
 | 10 | B5 — external transports | B1 | ⚠ blocking I/O vs reactor → **profiler** |
 | 11 | B6 — structured access log | B1, B2 | ⚠ per-request emit → **profiler** |
-| 12 | B7 — `onLog` PHP hook | B1 | no |
+| 12 | B7 — `onLog` PHP hook (dropped: no VM re-entry from IO/reactor threads) | B1 | no |
 | — | A6 — duration histograms | A4 | deferred |
 
 ---
@@ -549,27 +549,14 @@ everywhere. An access sink forces `sample_stamps_enabled` (third consumer).
       the honest price of the enabled feature; further cuts need a
       formatter rewrite (not taken).
 
-### Stage B7 — `onLog` PHP hook (+ userland OTLP) ✅ _(step 12)_
+### Stage B7 — `onLog` PHP hook (+ userland OTLP) ✗ dropped _(step 12)_
 
-Shipped: sink type `php` through the registry (`php_delivery` type kind — no
-stream; the spec's callable is resolved to an fcc once at sink build) +
-`HttpServerConfig::onLog(callable, ?LogSeverity level = INFO, category='all')`
-sugar that appends the equivalent spec. Records arrive as arrays
-(`timestamp_ns/severity/severity_text/category/message/attrs/trace_id/span_id`)
-from inside the same fan-out (`log_dispatch_record`). A `ZEND_TLS` re-entrancy
-guard keeps a logging callback from recursing into itself (stream sinks still
-get the nested record); a callback exception is absorbed (drop-counted,
-rate-limited notice).
-
-- [x] Code quality — fcc resolved once; delivery inside the dispatch loop
-- [x] No duplicated logic — php sink is a delivery variant inside the one
-      fan-out, not a second logging path
-- [x] `const`
-- [x] Comments reviewed
-- [x] Tests — core/029: records for diagnostics + access, thrown exception
-      absorbed mid-stream, invalid callback rejected at config time
-- [x] Coverage checked
-- [x] Build & verify — 134 tests green
+Prototyped then reverted in 06aef5c. A `php` sink type / `onLog` callback would
+call back into the VM, but records are emitted from IO callbacks and the H3
+transport reactor — threads with no PHP/TSRM context — so re-entering the VM
+there is unsafe. Userland export instead points a `json` sink at a file/socket
+and drains it from a coroutine (see the `setLogSinks` note in the stubs and the
+CHANGELOG "No sink calls back into PHP, by design").
 
 #### B7b — pool-mode logging fix + `file` sink ✅
 

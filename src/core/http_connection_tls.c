@@ -843,6 +843,12 @@ static void tls_on_handshake_done(http_connection_t *conn,
     if (conn->strategy != NULL) {
         conn->strategy->on_request_ready = http_connection_on_request_ready;
         conn->protocol_detected = true;
+        /* Balance the per-protocol active gauge: this ALPN path installs the
+         * strategy directly and bypasses http_protocol_strategy_detect (the
+         * plaintext inc site), yet http_connection_destroy decrements on
+         * protocol_detected regardless — without this every TLS connection
+         * under-decrements its bucket. */
+        http_server_conn_active_inc(conn->counters, alpn_proto);
     }
 }
 

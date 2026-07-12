@@ -108,8 +108,7 @@ typedef enum {
 /* One logging destination: a severity floor, a formatter, and an async
  * transport. A record fans out to every sink whose floor admits it, each
  * rendering with its own formatter. Sinks are independent — one failing
- * (drop-counted, rate-limited stderr notice) never blocks the others. B1
- * ships a single transport, the async file writer below; B5 adds more. */
+ * (drop-counted, rate-limited stderr notice) never blocks the others. */
 typedef struct http_log_sink {
     http_log_severity_t       severity_floor;
     uint8_t                   category_mask;   /* http_log_category_t bits */

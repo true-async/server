@@ -156,6 +156,15 @@ static void worker_dispatch_entry(void)
                                       ctx->start_ns - ctx->enqueue_ns,
                                       end_ns - ctx->start_ns,
                                       end_ns);
+
+        /* The pool stamps the ctx, but the access record reads the request; copy
+         * the service window across so http.server.request.duration is present. */
+        if (!Z_ISUNDEF(ctx->request_zv)) {
+            http_request_t *const req =
+                http_request_from_zobj(Z_OBJ(ctx->request_zv));
+            req->start_ns = ctx->start_ns;
+            req->end_ns   = end_ns;
+        }
     }
 
     worker_log_access(ctx);

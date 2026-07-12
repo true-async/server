@@ -4988,17 +4988,23 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->connections_force_closed_total       = 0;
     server->drain_events_reactive_total          = 0;
     server->drain_events_cooldown_blocked_total  = 0;
-    /* Streaming counters. */
+    /* Blanket-reset the counters, but carry the live occupancy gauges across:
+     * active_requests, conns_active_* and h2_streams_active are current state,
+     * and zeroing them mid-flight would make the next close decrement underflow
+     * a uint64. */
+    const uint64_t live_active_requests  = server->counters_live->active_requests;
+    const uint64_t live_conns_h1         = server->counters_live->conns_active_h1;
+    const uint64_t live_conns_h2         = server->counters_live->conns_active_h2;
+    const uint64_t live_conns_h3         = server->counters_live->conns_active_h3;
+    const uint64_t live_h2_streams       = server->counters_live->h2_streams_active;
+
     memset(server->counters_live, 0, sizeof(*server->counters_live));
-    /* HTTP/2 stream telemetry. Active count is
-     * live state — NOT cleared (otherwise operators would see a
-     * negative drift as close events decrement past zero). */
-    server->counters_live->h2_streams_opened_total                = 0;
-    server->counters_live->h2_streams_reset_by_peer_total         = 0;
-    server->counters_live->h2_goaway_recv_total                   = 0;
-    server->counters_live->h2_data_recv_bytes_total               = 0;
-    server->counters_live->h2_data_sent_bytes_total               = 0;
-    server->counters_live->h2_ping_rtt_ns                         = 0;
+
+    server->counters_live->active_requests  = live_active_requests;
+    server->counters_live->conns_active_h1  = live_conns_h1;
+    server->counters_live->conns_active_h2  = live_conns_h2;
+    server->counters_live->conns_active_h3  = live_conns_h3;
+    server->counters_live->h2_streams_active = live_h2_streams;
     /* Don't reset paused_since_ns or CoDel runtime state — those track
      * live pause and would confuse the control loop if cleared mid-flight. */
 
@@ -5115,9 +5121,9 @@ static void http3_emit_listener_stats(zval *return_value, http3_listener_t *list
     array_init(&entry);
     add_assoc_string(&entry, "host", (char *)http3_listener_host(listener));
     add_assoc_long  (&entry, "port", http3_listener_port(listener));
-    add_assoc_long  (&entry, "datagrams_received", (zend_long)__atomic_load_n(&s->datagrams_received, __ATOMIC_RELAXED));
-    add_assoc_long  (&entry, "bytes_received",     (zend_long)__atomic_load_n(&s->bytes_received, __ATOMIC_RELAXED));
-    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)__atomic_load_n(&s->datagrams_errored, __ATOMIC_RELAXED));
+    add_assoc_long  (&entry, "datagrams_received", (zend_long)http_relaxed_load_u64(&s->datagrams_received));
+    add_assoc_long  (&entry, "bytes_received",     (zend_long)http_relaxed_load_u64(&s->bytes_received));
+    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)http_relaxed_load_u64(&s->datagrams_errored));
     add_assoc_long  (&entry, "last_datagram_size", (zend_long)s->last_datagram_size);
     add_assoc_string(&entry, "last_peer",          (char *)s->last_peer);
 

@@ -435,6 +435,7 @@ static bool http3_reactor_try_static(http3_connection_t *c, http3_stream_t *s,
                            http_request_method_is_head(s->request));
 
     const http_static_result_t rc = http_static_try_serve_mounts(
+        /* server */ NULL,   /* reactor thread: sinks belong elsewhere, no access log */
         (const http_static_handler_t *const *)rctx->static_mounts,
         rctx->static_mount_count, rctx->static_cache,
         s->request, Z_OBJ(s->response_zv), c->counters,

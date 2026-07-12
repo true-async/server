@@ -46,15 +46,10 @@ ZEND_STATIC_ASSERT(STATS_FIELD_COUNT * sizeof(uint64_t)
                    "HTTP_SERVER_COUNTER_TABLE is out of sync with "
                    "http_server_counters_t");
 
-/* Relaxed, not plain: a lagging statistic is fine, a plain load racing the
- * worker's plain store is a data race the compiler may tear or reload. Same
- * instruction on x86-64/arm64. Writers stay plain — one writer per slot. */
 static zend_always_inline uint64_t stats_field_load(const http_server_counters_t *c,
                                                     const size_t offset)
 {
-    const uint64_t *p = (const uint64_t *)((const char *)c + offset);
-
-    return __atomic_load_n(p, __ATOMIC_RELAXED);
+    return http_relaxed_load_u64((const uint64_t *)((const char *)c + offset));
 }
 
 size_t http_stats_field_count(void)

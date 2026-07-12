@@ -132,6 +132,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Observability review fixes (#5).**
+  - **Per-protocol connection gauge underflowed for every HTTPS connection.** A
+    TLS/ALPN connection installs its strategy in the handshake path, which
+    bypassed the `conns_active_h1/h2` increment while the close path still
+    decremented — so the gauge wrapped toward `UINT64_MAX`. The handshake path
+    now increments to match.
+  - **A long request target corrupted the JSON/text access log.** A record that
+    overflowed the formatter buffer was truncated including its trailing
+    newline, merging it with the next record on a stream sink (a client could
+    hide an unrelated request behind a long URL). The record separator is now
+    forced even on truncation.
+  - **`level => LogSeverity::OFF` sinks came back to life under a worker pool.**
+    The frozen-config round-trip had no OFF case and collapsed OFF to INFO, so a
+    sink the user disabled started logging in workers. OFF now round-trips.
+  - **Pool-mode access records lost `http.server.request.duration`.** The worker
+    stamped its service window on the dispatch ctx but the access record reads
+    the request; the window is now copied across.
+  - **The static hard-zero serve path counted requests but never logged them.**
+    The send-file engine resolved its log state from a NULL server on that path;
+    the h1/h2 worker path now passes its server so the access record is emitted
+    (the transport reactor still passes NULL — its sinks belong to another
+    thread).
+  - **`resetTelemetry()` zeroed the live occupancy gauges**, so the next
+    connection/stream close decremented past zero and underflowed. Reset now
+    preserves `conns_active_*`, `active_requests` and `h2_streams_active`.
+  - **Windows build:** the new relaxed 64-bit counter reads used the
+    GCC/Clang-only `__atomic_load_n` with no MSVC fallback in TUs compiled on
+    Windows; they now go through a portable helper.
+
 - **`getHttp3Stats()` could return counters from two different moments.** The
   QUIC counters were read by copying the whole per-listener stats block while
   the reactor thread kept writing it, so fields on either side of an update

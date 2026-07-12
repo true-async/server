@@ -3514,7 +3514,8 @@ static void http_server_config_populate_from_shared(
                 }
             }
 
-            const char *case_name = s->level == 5  ? "DEBUG"
+            const char *case_name = s->level == 0  ? "OFF"
+                                  : s->level == 5  ? "DEBUG"
                                   : s->level == 13 ? "WARN"
                                   : s->level == 17 ? "ERROR" : "INFO";
             zval lvl;
