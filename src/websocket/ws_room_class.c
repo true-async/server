@@ -63,9 +63,6 @@ static void websocket_room_free(zend_object *obj)
     zend_object_std_dtor(&wrapper->std);
 }
 
-/* The hub reference is what lets a room outlive the server that minted it: a
- * script that still holds $room after start() returns would otherwise release
- * the room through a freed hub. */
 static void websocket_room_bind(websocket_room_object *wrapper, ws_hub_t *hub,
                                 ws_room_t *room)
 {
@@ -194,8 +191,8 @@ ZEND_METHOD(TrueAsync_WebSocketRoom, count)
 
     const uint32_t total = ws_hub_count(room->hub, room->room, WS_ROOM_COUNT_TIMEOUT_MS);
 
-    /* A missed deadline just leaves that worker out of the tally; an exception
-     * here means the coroutine was cancelled (server stop) and must die. */
+    /* An exception here is a cancellation (server stop), never a timeout — it
+     * must not come back as a number. */
     if (EG(exception) != NULL) {
         RETURN_THROWS();
     }

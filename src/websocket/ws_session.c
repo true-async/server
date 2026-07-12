@@ -869,8 +869,7 @@ ws_send_rc_t ws_session_queue_and_flush(ws_session_t *session, const uint8_t opc
     int rc;
 
 #ifdef HAVE_HTTP_COMPRESSION
-    /* permessage-deflate: compress the payload, then queue it with the RSV1 bit
-     * set. wslay copies the buffer, so `comp` is freed at once. */
+    /* wslay copies the payload it is handed, so `comp` is freed at once. */
     if (session->pmce_enabled) {
         smart_str comp = {0};
 
@@ -925,8 +924,7 @@ ws_send_rc_t ws_session_queue_and_flush(ws_session_t *session, const uint8_t opc
 
     session->flushing = 0;
 
-    /* Wake any producer blocked over the high-water mark. Still safe — the pin
-     * is held, so the session is alive. */
+    /* Still safe — the pin is held, so the session is alive. */
     ws_session_notify_writable(session);
 
     /* Releasing the pin may run the deferred teardown, which frees the session.

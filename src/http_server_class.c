@@ -5249,9 +5249,7 @@ static void http_server_free(zend_object *obj)
         server->worker_inbox = NULL;
     }
 
-    /* Room hub (issue #2). Only the server that created it holds a reference;
-     * a worker clone borrows the pointer. Any WebSocketRoom the script still
-     * holds keeps the hub alive past this point. */
+    /* A WebSocketRoom the script still holds keeps the hub alive past this. */
     if (server->ws_hub_owner) {
         ws_hub_release(server->ws_hub);
         server->ws_hub       = NULL;

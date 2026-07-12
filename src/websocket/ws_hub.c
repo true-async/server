@@ -603,8 +603,8 @@ static uint32_t ws_local_count(const ws_room_t *room)
     return local != NULL ? local->count - local->dead : 0;
 }
 
-/* Runs on the worker that was asked. Answer with our own member count and send
- * it home, so the asker settles its query on its own thread. */
+/* Runs on the asked worker. The answer goes home rather than being applied here,
+ * so the asker settles its query on its own thread. */
 static void ws_hub_answer_count(ws_hub_t *hub, ws_cmd_t *cmd)
 {
     ws_query_t *const query = cmd->query;
@@ -617,8 +617,6 @@ static void ws_hub_answer_count(ws_hub_t *hub, ws_cmd_t *cmd)
 
     tsrm_mutex_lock(hub->admin);
 
-    /* A detached asker frees its slot for reuse; without the generation check
-     * the reply would settle a stranger's query on the wrong thread. */
     const bool posted = query->gen == hub->gen[query->slot]
         && ws_hub_post_locked(hub, query->slot, reply);
 
@@ -783,9 +781,8 @@ uint32_t ws_hub_count(ws_hub_t *hub, ws_room_t *room, const uint32_t timeout_ms)
 
     tsrm_mutex_unlock(hub->admin);
 
-    /* The waker owns its timeout timer. A worker that misses the deadline is
-     * simply left out of the tally; only a genuine cancellation sets an
-     * exception, which we let the caller see. */
+    /* A timeout resumes cleanly — an exception here is a cancellation, and we
+     * deliberately do not swallow it. */
     if (query->pending > 0
         && zend_async_waker_new_with_timeout(me, timeout_ms, NULL) != NULL) {
         zend_async_resume_when(me, done, false, zend_async_waker_callback_resolve, NULL);
