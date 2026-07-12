@@ -648,7 +648,7 @@ final class HttpServerConfig
     public function setStatsEnabled(bool $enabled): static {}
 
     /** @return bool */
-    public function getStatsEnabled(): bool {}
+    public function isStatsEnabled(): bool {}
 
     // === HTTP body compression (issue #8) ===
 

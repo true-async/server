@@ -1984,7 +1984,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled)
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 
-ZEND_METHOD(TrueAsync_HttpServerConfig, getStatsEnabled)
+ZEND_METHOD(TrueAsync_HttpServerConfig, isStatsEnabled)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);

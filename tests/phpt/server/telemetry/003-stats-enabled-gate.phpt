@@ -23,11 +23,11 @@ require_once __DIR__ . '/../_free_port.inc';
 
 /* Config round-trip + default. */
 $c = new HttpServerConfig();
-echo 'default_off=', ($c->getStatsEnabled() === false ? 1 : 0), "\n";
+echo 'default_off=', ($c->isStatsEnabled() === false ? 1 : 0), "\n";
 $c->setStatsEnabled(true);
-echo 'set_on=', ($c->getStatsEnabled() === true ? 1 : 0), "\n";
+echo 'set_on=', ($c->isStatsEnabled() === true ? 1 : 0), "\n";
 $c->setStatsEnabled(false);
-echo 'set_off=', ($c->getStatsEnabled() === false ? 1 : 0), "\n";
+echo 'set_off=', ($c->isStatsEnabled() === false ? 1 : 0), "\n";
 
 /* Pool with stats OFF: no slab, snapshot empty. */
 $port = tas_free_port();

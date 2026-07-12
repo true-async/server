@@ -1147,9 +1147,9 @@ static zend_always_inline void http_server_conn_active_dec(http_server_counters_
                                                            http_protocol_type_t proto)
 {
     switch (proto) {
-        case HTTP_PROTOCOL_HTTP1: if (c->conns_active_h1) c->conns_active_h1--; break;
-        case HTTP_PROTOCOL_HTTP2: if (c->conns_active_h2) c->conns_active_h2--; break;
-        case HTTP_PROTOCOL_HTTP3: if (c->conns_active_h3) c->conns_active_h3--; break;
+        case HTTP_PROTOCOL_HTTP1: if (c->conns_active_h1) { c->conns_active_h1--; } break;
+        case HTTP_PROTOCOL_HTTP2: if (c->conns_active_h2) { c->conns_active_h2--; } break;
+        case HTTP_PROTOCOL_HTTP3: if (c->conns_active_h3) { c->conns_active_h3--; } break;
         default: break;
     }
 }
