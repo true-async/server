@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-worker WebSocket rooms (#2).** `HttpServer::room()` returns a
+  `WebSocketRoom` shared by every worker of the process: `join()`, `leave()`,
+  `broadcast()`, `broadcastBinary()`, `count()`. Until now a broadcast could only
+  reach peers of the sending worker (a worker is a thread with its own PHP
+  context), so a chat had to run `setWorkers(1)`. Share-nothing design: each
+  worker keeps its own member table and a broadcast is handed to it through its
+  mailbox — a session pointer never crosses a thread. `count()` is a
+  scatter/gather over the workers, so it is a snapshot, not a live counter.
+
 ### Fixed
 
 - **`WebSocket::trySend()` silently dropped frames over HTTP/2 (#2).** The H2

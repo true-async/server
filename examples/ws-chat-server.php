@@ -1,8 +1,8 @@
 <?php
 /**
- * WebSocket broadcast chat room — shows the multi-producer send model.
+ * WebSocket chat room — one room, many workers.
  *
- * Run (single worker keeps one shared room in-process):
+ * Run:
  *   php examples/ws-chat-server.php
  *   PORT=9000 php examples/ws-chat-server.php
  *
@@ -12,15 +12,15 @@
  *
  * Key ideas:
  *   - One coroutine per connection; `foreach ($ws as $msg)` is the pull loop.
- *   - send() is safe to call from ANY coroutine on the thread, so one
- *     connection's handler can push to every other peer's socket.
- *   - trySend() never suspends — it drops for a backpressured (slow) peer
- *     instead of stalling delivery to the whole room. Use send() instead if
- *     you need every message delivered and are willing to apply backpressure.
+ *   - broadcast() never suspends: a peer whose socket is backed up drops the
+ *     message instead of stalling delivery to the whole room.
+ *   - count() asks every worker and sums the answers — a snapshot, not a live
+ *     counter.
  *
- * Scaling past one worker: each worker is a separate thread with its own
- * $room, so a cross-worker chat needs shared state (Redis pub/sub, etc.).
- * This example uses setWorkers(1) to keep the room in one process.
+ * The room is held by the server, not by PHP: a worker is a thread with its own
+ * PHP context, so an array of connections could only ever reach that worker's
+ * peers. HttpServer::room() gives every worker the same room, and broadcast()
+ * reaches members wherever they are — no Redis, no setWorkers(1).
  */
 
 use TrueAsync\HttpServer;
@@ -31,30 +31,21 @@ use TrueAsync\HttpResponse;
 
 $config = (new HttpServerConfig())
     ->addListener('0.0.0.0', (int)(getenv('PORT') ?: 8080))
-    ->setWorkers(1);
+    ->setWorkers(4);
 
 $server = new HttpServer($config);
 
-/** @var \SplObjectStorage<WebSocket,true> $room */
-$room = new \SplObjectStorage();
+$room = $server->room('chat');
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($room) {
-    $room->attach($ws);
+    $room->join($ws);   // leaving is automatic when the connection closes
     $ws->send('welcome — ' . $room->count() . ' online');
 
-    try {
-        foreach ($ws as $msg) {
-            $line = ($msg->binary ? '[binary] ' : '') . $msg->data;
+    foreach ($ws as $msg) {
+        $line = ($msg->binary ? '[binary] ' : '') . $msg->data;
 
-            // Fan out to everyone except the sender.
-            foreach ($room as $peer) {
-                if ($peer !== $ws) {
-                    $peer->trySend($line);
-                }
-            }
-        }
-    } finally {
-        $room->detach($ws);
+        // Fan out to everyone except the sender — across all four workers.
+        $room->broadcast($line, $ws);
     }
 });
 

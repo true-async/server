@@ -497,6 +497,9 @@ struct conn_arena_s;
 typedef struct conn_arena_s conn_arena_t;
 conn_arena_t *http_server_arena(http_server_object *server);
 
+/* ws_hub_t* — void here so this header stays free of the WebSocket build gate. */
+void *http_server_ws_hub(http_server_object *server);
+
 /* Hot-path slices binder. Called by http_connection_spawn after
  * http_connection_create has obtained a slot via http_server_arena —
  * wires up counter/view/log_state pointers so subsequent inline

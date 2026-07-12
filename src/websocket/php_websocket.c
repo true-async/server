@@ -1141,6 +1141,7 @@ void ws_php_classes_register(void)
     websocket_message_ce    = register_class_TrueAsync_WebSocketMessage();
     websocket_upgrade_ce    = register_class_TrueAsync_WebSocketUpgrade();
     websocket_ce            = register_class_TrueAsync_WebSocket(zend_ce_iterator);
+    ws_room_class_register();
 
     /* Wire object handlers. Same pattern as http_response_handlers —
      * memcpy std defaults, then override offset (so PHP knows where

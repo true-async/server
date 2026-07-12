@@ -12,6 +12,7 @@
 
 #include "php.h"
 #include "websocket/ws_session.h"
+#include "websocket/ws_hub.h"
 #include "websocket/websocket_strategy.h"  /* ws_strategy_get_session — drain hook */
 #include "core/async_plain_event.h"        /* in-thread coroutine wakeup event */
 #include "core/http_connection.h"
@@ -861,6 +862,74 @@ bool ws_session_transport_sendable(const ws_session_t *session)
     return session->transport->sendable(session->transport_ctx);
 }
 
+bool ws_session_try_send(ws_session_t *session, const char *data, const size_t len,
+                         const bool binary)
+{
+    if (session->ctx == NULL || session->write_error || session->peer_closed) {
+        return false;
+    }
+
+    if (!ws_session_transport_sendable(session)
+        || ws_session_over_highwater(session)) {
+        return false;
+    }
+
+    const uint8_t opcode = binary ? WSLAY_BINARY_FRAME : WSLAY_TEXT_FRAME;
+    int rc;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (session->pmce_enabled) {
+        smart_str comp = {0};
+
+        if (ws_session_pmce_deflate(session, data, len, &comp) != 0) {
+            smart_str_free(&comp);
+            return false;
+        }
+
+        rc = ws_session_queue_payload(session, opcode,
+            comp.s ? ZSTR_VAL(comp.s) : "", comp.s ? ZSTR_LEN(comp.s) : 0,
+            WSLAY_RSV1_BIT);
+        smart_str_free(&comp);
+    } else
+#endif
+    {
+        rc = ws_session_queue_payload(session, opcode, data, len, WSLAY_RSV_NONE);
+    }
+
+    if (rc != 0) {
+        return false;
+    }
+
+    if (session->flushing) {
+        return true;
+    }
+
+    /* Pin the connection: the flush can complete a pending teardown, which
+     * would free the session under us. */
+    http_connection_t *const conn = session->conn;
+    if (conn != NULL) {
+        conn->handler_refcount++;
+    }
+
+    session->flushing      = 1;
+    session->internal_send = 1;
+    const int drc = ws_session_drive_send(session);
+    session->internal_send = 0;
+    session->flushing      = 0;
+
+    ws_session_notify_writable(session);
+
+    if (conn != NULL) {
+        if (conn->handler_refcount > 0) {
+            conn->handler_refcount--;
+        }
+
+        http_connection_destroy_if_idle_deferred(conn);
+    }
+
+    return drc == 0;
+}
+
 ws_writable_t ws_session_wait_writable(ws_session_t *session, uint32_t timeout_ms)
 {
     if (!ws_session_over_highwater(session)) {
@@ -1008,6 +1077,10 @@ void ws_session_destroy(ws_session_t *session)
     if (session == NULL) {
         return;
     }
+
+    /* Single teardown point for both transports — H1 via the strategy, H2 via
+     * the stream — so room membership cannot outlive the session. */
+    ws_hub_leave_all(session);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct

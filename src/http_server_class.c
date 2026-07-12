@@ -31,6 +31,16 @@
 #include "core/reactor_pool.h"
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/ws_hub.h"
+# include "websocket/php_websocket.h"
+#else
+/* Rooms are a WebSocket feature; without it the hub calls compile away. */
+# define ws_hub_create()      NULL
+# define ws_hub_free(hub)     ((void)(hub))
+# define ws_hub_attach(hub)   (-1)
+# define ws_hub_detach()      ((void)0)
+#endif
 #include "core/response_wire.h"
 #include "core/stream_credit.h"
 #include "core/async_plain_event.h"   /* async_coroutine_sleep_ms */
@@ -481,6 +491,12 @@ struct http_server_object {
      * its deadline tick and self-stops when it moves; the parent bumps it and
      * rotates the pool. */
     void                    *reload_shared;
+
+    /* Cross-worker WebSocket rooms (ws_hub.h, issue #2). Owned by the parent,
+     * pointer fanned out to the clones exactly like reload_shared above. */
+    void                    *ws_hub;
+    bool                     ws_hub_owner;      /* single-worker server: frees its own */
+
     int                      reload_epoch_seen; /* worker clone: last epoch acted on */
     bool                     reload_in_progress;/* parent: one rotation at a time */
     void                    *pool_await_state;  /* parent: st of the active pool run */
@@ -1328,6 +1344,11 @@ bool http_server_should_drain_now(http_server_object *server,
 conn_arena_t *http_server_arena(http_server_object *server)
 {
     return &server->conn_arena;
+}
+
+void *http_server_ws_hub(http_server_object *server)
+{
+    return server != NULL ? server->ws_hub : NULL;
 }
 
 /* Bind a freshly-allocated conn to its owning server's hot-path
@@ -3004,6 +3025,10 @@ static int http_server_start_pool(http_server_object *server,
     ZEND_ATOMIC_INT_INIT(&reload_shared->epoch, 0);
     server->reload_shared = reload_shared;
 
+    if (server->ws_hub == NULL) {
+        server->ws_hub = ws_hub_create();
+    }
+
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
     pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
@@ -3149,6 +3174,12 @@ cleanup:
     /* Every clone (and its epoch-watching tick) is gone — drop the beacon. */
     server->reload_shared = NULL;
     pefree(reload_shared, 1);
+
+    /* Same lifetime: every worker has detached its slot by now. */
+    if (server->ws_hub != NULL) {
+        ws_hub_free(server->ws_hub);
+        server->ws_hub = NULL;
+    }
 
     http_logf_info(&server->log_state, "server.stop mode=pool");
     http_log_server_stop(&server->log_state);
@@ -3844,6 +3875,17 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * per-await read-timeout creation. Failure here is non-fatal. */
     http_server_deadline_tick_start(server);
 
+    /* Rooms (issue #2). A single-worker server owns its hub outright; a clone
+     * inherited the parent's. Attach needs a live reactor on this thread, which
+     * we have here — the mailbox handle is created on it. */
+    if (server->ws_hub == NULL && !server->is_worker_clone) {
+        server->ws_hub = ws_hub_create();
+        server->ws_hub_owner = true;
+    }
+
+    const bool ws_hub_attached = server->ws_hub != NULL
+        && ws_hub_attach(server->ws_hub) >= 0;
+
     /* Create wait event and suspend until stop() is called */
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
@@ -3888,6 +3930,16 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * timer keeps libuv loop alive past worker shutdown and
      * scheduler.c:1964 asserts ("The event loop must be stopped"). */
     http_server_deadline_tick_stop(server);
+
+    if (ws_hub_attached) {
+        ws_hub_detach();
+    }
+
+    if (server->ws_hub_owner) {
+        ws_hub_free(server->ws_hub);
+        server->ws_hub = NULL;
+        server->ws_hub_owner = false;
+    }
 
     if (UNEXPECTED(bailout)) {
         zend_bailout();
@@ -3965,6 +4017,38 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 }
 
 /* {{{ proto HttpServer::stop(): bool */
+ZEND_METHOD(TrueAsync_HttpServer, room)
+{
+    zend_string *name;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name)
+    ZEND_PARSE_PARAMETERS_END();
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    /* Rooms are usually taken during setup, before start() has built the hub —
+     * and the pool parent must own one before it fans the pointer out to the
+     * clones, so create it on first use rather than at start. */
+    if (server->ws_hub == NULL) {
+        server->ws_hub = ws_hub_create();
+        server->ws_hub_owner = !server->is_worker_clone;
+    }
+
+    zend_object *const room = websocket_room_object_create(server->ws_hub, name);
+
+    if (room == NULL) {
+        RETURN_THROWS();
+    }
+
+    RETURN_OBJ(room);
+#else
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "WebSocket support is not enabled in this build", 0);
+    RETURN_THROWS();
+#endif
+}
+
 ZEND_METHOD(TrueAsync_HttpServer, stop)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -5459,6 +5543,7 @@ static zend_object *http_server_transfer_obj(
         /* Hot-reload beacon (issue #93): plain pointer copy — the pemalloc'd
          * struct is owned by the pool parent and outlives every clone. */
         dst_shell->reload_shared = src->reload_shared;
+        dst_shell->ws_hub        = src->ws_hub;
 
         return dst;
     }
@@ -5487,6 +5572,7 @@ static zend_object *http_server_transfer_obj(
      * tick. Snapshot the current value — only a bump AFTER this load retires
      * the worker. */
     dst_obj->reload_shared = src_shell->reload_shared;
+    dst_obj->ws_hub        = src_shell->ws_hub;
 
     if (dst_obj->reload_shared != NULL) {
         dst_obj->reload_epoch_seen = zend_atomic_int_load(

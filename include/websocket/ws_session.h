@@ -75,6 +75,12 @@ typedef struct ws_session_t {
     /* Owning wslay context. NULL until ws_session_init() succeeds. */
     wslay_event_context_ptr ctx;
 
+    /* Rooms (ws_hub.h). Cross-thread a session is addressed by ws_id, never by
+     * pointer; `rooms` is this thread's membership list, carrying the session's
+     * slot in each room's member array so leaving is O(1). */
+    uint64_t             ws_id;
+    struct ws_room_link *rooms;
+
     /* Borrowed back-pointer for callbacks. The session's lifetime is
      * a strict subset of conn's, so no refcount needed. For H2 this is
      * session->conn (shared) — config + remote-addr still resolve. */
@@ -309,6 +315,14 @@ typedef enum {
 bool ws_session_over_highwater(const ws_session_t *session);
 
 bool ws_session_transport_sendable(const ws_session_t *session);
+
+/*
+ * Queue + flush one message without suspending: the caller may be a room drain
+ * running on the reactor, where there is no coroutine to park. A transport that
+ * cannot take the frame right now makes this return false rather than drop it.
+ */
+bool ws_session_try_send(ws_session_t *session, const char *data, size_t len,
+                         bool binary);
 
 /*
  * Suspend the calling producer coroutine until the outbound queue drains

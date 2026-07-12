@@ -104,6 +104,15 @@ final class HttpServer
     public function stop(): bool {}
 
     /**
+     * A named WebSocket room, shared by every worker of this process.
+     *
+     * The same name always yields the same room, so a connection handled by one
+     * worker can be reached by a broadcast issued from another. Cheap to call —
+     * rooms are interned, not created per call. See WebSocketRoom.
+     */
+    public function room(string $name): WebSocketRoom {}
+
+    /**
      * Hot-reload the worker pool (issue #93). Pool parent only: workers finish
      * their in-flight work, stop and exit; fresh worker threads re-run the
      * bootloader — picking up changed code — and take over on the same listen
