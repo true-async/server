@@ -20,6 +20,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Room lifetime, races and lost commands (#2).** Hardening pass over the room
+  hub, all found by review of the initial implementation:
+  - The hub was freed when the server stopped, while a `WebSocketRoom` the script
+    still held kept pointing at it — the room's destructor then took a mutex in
+    freed memory (confirmed under valgrind). The hub is refcounted now, so a room
+    stays usable after `stop()`.
+  - `count()` handed a trigger event to the answering workers but disposed it on
+    timeout; a late answer then fired a freed event. Answers now come home through
+    the asker's own mailbox, so the query settles on one thread and needs no
+    cross-thread event at all.
+  - `broadcast()`/`count()` read a worker's mailbox pointer without the hub lock,
+    racing a concurrent detach that frees it. Publishing, retiring and posting to
+    a slot now all happen under the lock.
+  - Dropping the last reference to a room could free it twice: a lookup could
+    revive it from zero while the first dropper was still waiting for the mutex.
+  - `getName()` took a non-atomic refcount on a `zend_string` shared by every
+    worker; it returns a copy now.
+  - A detaching worker discarded its mailbox without draining it, leaking every
+    queued command — once per worker, on every hot reload.
+- **A full worker mailbox dropped room traffic silently.** Broadcasts that cannot
+  be handed to a worker are counted (`ws_hub_dropped`) instead of vanishing.
 - **`WebSocket::trySend()` silently dropped frames over HTTP/2 (#2).** The H2
   chunk ring is bounded by slots as well as bytes, and the non-suspending sink
   discards a frame past the last slot — yet `trySend()` still returned `true`,

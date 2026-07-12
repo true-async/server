@@ -316,10 +316,30 @@ bool ws_session_over_highwater(const ws_session_t *session);
 
 bool ws_session_transport_sendable(const ws_session_t *session);
 
+typedef enum {
+    WS_SEND_OK = 0,
+    WS_SEND_DEFLATE_FAILED,
+    WS_SEND_QUEUE_FAILED,
+    WS_SEND_WRITE_FAILED,
+} ws_send_rc_t;
+
 /*
- * Queue + flush one message without suspending: the caller may be a room drain
- * running on the reactor, where there is no coroutine to park. A transport that
- * cannot take the frame right now makes this return false rather than drop it.
+ * Queue one message and drive the flush — the transport half of every send.
+ * `internal` selects the non-suspending sink (a socket-full write parks in the
+ * bounded batched tail instead of the producer coroutine), which is mandatory
+ * for callers that have no coroutine to park: trySend, and a room delivery
+ * running on the reactor.
+ *
+ * The connection is pinned across the flush, and releasing that pin can run a
+ * deferred teardown — so on return `session` may already be freed. Read the
+ * return code and nothing else.
+ */
+ws_send_rc_t ws_session_queue_and_flush(ws_session_t *session, uint8_t opcode,
+                                        const char *data, size_t len, bool internal);
+
+/*
+ * Never suspends. Gates on the transport and the high-water mark first, so a
+ * peer that is backed up is skipped rather than queued into.
  */
 bool ws_session_try_send(ws_session_t *session, const char *data, size_t len,
                          bool binary);

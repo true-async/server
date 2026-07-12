@@ -48,6 +48,12 @@ typedef void (*thread_mailbox_drain_fn)(void **items, size_t count, void *arg);
 thread_mailbox_t *thread_mailbox_create(size_t capacity, size_t batch,
                                         thread_mailbox_drain_fn on_drain, void *arg);
 
+/* Drain whatever is still queued, synchronously, through on_drain. Consumer-
+ * thread only; producers must have stopped. thread_mailbox_free discards the
+ * queue without draining it, so a consumer that owns the items (and must
+ * release them) drains first. */
+void thread_mailbox_drain_pending(thread_mailbox_t *mb);
+
 /* Dispose the mailbox. Consumer-thread only; producers must have stopped. */
 void thread_mailbox_free(thread_mailbox_t *mb);
 

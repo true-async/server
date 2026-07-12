@@ -58,8 +58,21 @@ static void websocket_room_free(zend_object *obj)
     websocket_room_object *wrapper = websocket_room_from_obj(obj);
 
     ws_room_release(wrapper->hub, wrapper->room);
+    ws_hub_release(wrapper->hub);
 
     zend_object_std_dtor(&wrapper->std);
+}
+
+/* The hub reference is what lets a room outlive the server that minted it: a
+ * script that still holds $room after start() returns would otherwise release
+ * the room through a freed hub. */
+static void websocket_room_bind(websocket_room_object *wrapper, ws_hub_t *hub,
+                                ws_room_t *room)
+{
+    ws_hub_addref(hub);
+
+    wrapper->hub  = hub;
+    wrapper->room = room;
 }
 
 zend_object *websocket_room_object_create(void *hub, zend_string *name)
@@ -73,10 +86,8 @@ zend_object *websocket_room_object_create(void *hub, zend_string *name)
     }
 
     zend_object *const obj = websocket_room_create(websocket_room_ce);
-    websocket_room_object *const wrapper = websocket_room_from_obj(obj);
 
-    wrapper->hub  = hub;
-    wrapper->room = room;
+    websocket_room_bind(websocket_room_from_obj(obj), hub, room);
 
     return obj;
 }
@@ -181,7 +192,15 @@ ZEND_METHOD(TrueAsync_WebSocketRoom, count)
 
     const websocket_room_object *const room = Z_WEBSOCKET_ROOM_P(ZEND_THIS);
 
-    RETURN_LONG((zend_long)ws_hub_count(room->hub, room->room, WS_ROOM_COUNT_TIMEOUT_MS));
+    const uint32_t total = ws_hub_count(room->hub, room->room, WS_ROOM_COUNT_TIMEOUT_MS);
+
+    /* A missed deadline just leaves that worker out of the tally; an exception
+     * here means the coroutine was cancelled (server stop) and must die. */
+    if (EG(exception) != NULL) {
+        RETURN_THROWS();
+    }
+
+    RETURN_LONG((zend_long)total);
 }
 
 ZEND_METHOD(TrueAsync_WebSocketRoom, getName)
@@ -189,8 +208,11 @@ ZEND_METHOD(TrueAsync_WebSocketRoom, getName)
     ZEND_PARSE_PARAMETERS_NONE();
 
     const websocket_room_object *const room = Z_WEBSOCKET_ROOM_P(ZEND_THIS);
+    zend_string *const name = ws_room_name(room->room);
 
-    RETURN_STR_COPY(ws_room_name(room->room));
+    /* A copy, not a reference: the room's name is persistent and shared by every
+     * worker, and zend_string's refcount is not atomic. */
+    RETURN_STR(zend_string_init(ZSTR_VAL(name), ZSTR_LEN(name), 0));
 }
 
 ZEND_METHOD(TrueAsync_WebSocketRoom, __construct)
@@ -211,32 +233,18 @@ static zend_object *websocket_room_transfer_obj(
 {
     websocket_room_object *const src = websocket_room_from_obj(object);
 
-    if (kind == ZEND_OBJECT_TRANSFER) {
-        zend_object *const dst = default_fn(object, ctx, sizeof(websocket_room_object));
+    const size_t size = kind == ZEND_OBJECT_TRANSFER ? sizeof(websocket_room_object) : 0;
 
-        if (UNEXPECTED(dst == NULL)) {
-            return NULL;
-        }
-
-        /* The shell carries its own reference so the room cannot be retired
-         * between the transfer and the worker loading it. */
-        websocket_room_object *const shell = websocket_room_from_obj(dst);
-        shell->hub  = src->hub;
-        shell->room = ws_hub_room(src->hub, ws_room_name(src->room));
-
-        return dst;
-    }
-
-    /* LOAD */
-    zend_object *const dst = default_fn(object, ctx, 0);
+    zend_object *const dst = default_fn(object, ctx, size);
 
     if (UNEXPECTED(dst == NULL)) {
         return NULL;
     }
 
-    websocket_room_object *const loaded = websocket_room_from_obj(dst);
-    loaded->hub  = src->hub;
-    loaded->room = ws_hub_room(src->hub, ws_room_name(src->room));
+    /* Both sides take their own reference, so the room cannot be retired between
+     * the transfer and the worker loading it. */
+    websocket_room_bind(websocket_room_from_obj(dst), src->hub,
+                        ws_hub_room(src->hub, ws_room_name(src->room)));
 
     return dst;
 }

@@ -845,88 +845,37 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
         }
     }
 
-#ifdef HAVE_HTTP_COMPRESSION
-    /* permessage-deflate: compress the payload, then queue it with the
-     * RSV1 bit set. wslay copies the buffer, so `comp` is freed at once. */
-    if (s->pmce_enabled) {
-        smart_str comp = {0};
-        if (ws_session_pmce_deflate(s, ZSTR_VAL(payload), ZSTR_LEN(payload),
-                                    &comp) != 0) {
-            smart_str_free(&comp);
+    /* trySend must never suspend, so it drives the flush through the internal
+     * (non-suspending) sink; blocking send() keeps the producer path that may
+     * park on the socket. Everything past this point can free the session —
+     * `s` and `w` MUST NOT be touched again. */
+    const ws_send_rc_t rc = ws_session_queue_and_flush(
+        s, opcode, ZSTR_VAL(payload), ZSTR_LEN(payload), nonblocking);
+
+    switch (rc) {
+        case WS_SEND_OK:
+            return true;
+
+        case WS_SEND_DEFLATE_FAILED:
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket deflate failed");
             return false;
-        }
 
-        const int qrc = ws_session_queue_payload(s, opcode,
-            comp.s ? ZSTR_VAL(comp.s) : "", comp.s ? ZSTR_LEN(comp.s) : 0,
-            WSLAY_RSV1_BIT);
-        smart_str_free(&comp);
-
-        if (qrc != 0) {
+        case WS_SEND_QUEUE_FAILED:
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket queue_msg failed (out of memory or session closed)");
             return false;
-        }
-    } else
-#endif
-    {
-        if (ws_session_queue_payload(s, opcode, ZSTR_VAL(payload),
-                                     ZSTR_LEN(payload), WSLAY_RSV_NONE) != 0) {
-            zend_throw_exception_ex(websocket_exception_ce, 0,
-                "WebSocket queue_msg failed (out of memory or session closed)");
+
+        case WS_SEND_WRITE_FAILED:
+            /* Sticky write error. The next recv()/send() sees write_error and
+             * routes to a closed exception; the read-side teardown owns tearing
+             * the connection down. */
+            ws_throw_closed(1006, NULL,
+                "WebSocket send failed (peer closed or write error)");
             return false;
-        }
     }
 
-    if (s->flushing) {
-        /* Another coroutine already drives the flusher; it'll pick up
-         * the message we just enqueued. */
-        return true;
-    }
-
-    /* Pin the connection across the flush. wslay_event_send may suspend the
-     * producer inside http_connection_send (socket backpressure); if the
-     * owning handler coroutine exits meanwhile (or a user-spawned writer holds
-     * the flusher role past the handler), teardown must NOT free the session
-     * out from under the suspended flusher — that frees the wslay context and
-     * the next send_callback writes through freed memory. The pin defers
-     * teardown until the flush unwinds. */
-    http_connection_t *const flush_conn = w->conn;
-    if (flush_conn != NULL) { flush_conn->handler_refcount++; }
-
-    /* trySend must never suspend: drive the flush through the non-suspending
-     * internal sink (socket-full → park in the bounded batched tail / drop a
-     * control frame) instead of the producer path that may block on the
-     * socket. Blocking send() keeps the suspending producer path. */
-    s->flushing = 1;
-    if (nonblocking) { s->internal_send = 1; }
-    const int rc = ws_session_drive_send(s);
-    if (nonblocking) { s->internal_send = 0; }
-    s->flushing = 0;
-
-    /* Wake any producer blocked over the high-water. Still safe — the pin is
-     * held, so the session is alive. */
-    ws_session_notify_writable(s);
-
-    /* Release the pin. This may now run the deferred teardown (freeing the
-     * session), so `s` and `w` MUST NOT be touched afterwards. */
-    if (flush_conn != NULL) {
-        if (flush_conn->handler_refcount > 0) { flush_conn->handler_refcount--; }
-        http_connection_destroy_if_idle_deferred(flush_conn);
-    }
-
-    if (rc != 0) {
-        /* Sticky write error or session-internal failure. The next
-         * recv()/send() will see write_error and route to a closed
-         * exception; we don't tear the connection down from here
-         * because the read-side teardown owns that path. */
-        ws_throw_closed(1006, NULL,
-            "WebSocket send failed (peer closed or write error)");
-        return false;
-    }
-
-    return true;
+    return false;
 }
 /* }}} */
 

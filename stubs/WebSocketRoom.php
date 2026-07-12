@@ -54,8 +54,9 @@ final class WebSocketRoom
      * @param string $text UTF-8, as for WebSocket::send().
      * @param WebSocket|null $except Skip this member — the usual "everyone but
      *        the sender" case in a chat room.
-     * @return int Members the message was addressed to (a snapshot: membership
-     *         can change while the fan-out is in flight).
+     * @return int Members served on the CALLING worker. Delivery to the other
+     *         workers is asynchronous and cannot be counted here, so this is a
+     *         local number, not a room-wide one.
      */
     public function broadcast(string $text, ?WebSocket $except = null): int {}
 

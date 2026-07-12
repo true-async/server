@@ -37,7 +37,7 @@
  * — and getting it wrong would silently lose a message.
  *
  * Threading:
- *   - create()/free() on the parent.
+ *   - create()/addref()/release() from any thread.
  *   - attach()/detach() on each worker (they own that thread's mailbox).
  *   - join/leave/leave_all() on the thread owning the session.
  *   - room()/room_release()/broadcast()/count() from any thread.
@@ -48,8 +48,12 @@
 typedef struct ws_hub_s  ws_hub_t;
 typedef struct ws_room_s ws_room_t;
 
+/* Refcounted: a PHP WebSocketRoom can outlive the server that minted it (it is
+ * an ordinary object the script may still hold when start() returns), and every
+ * room drop needs the hub's mutex. */
 ws_hub_t *ws_hub_create(void);
-void      ws_hub_free(ws_hub_t *hub);
+void      ws_hub_addref(ws_hub_t *hub);
+void      ws_hub_release(ws_hub_t *hub);
 
 /* Claims a slot and publishes this thread's mailbox. Returns the slot, or -1. */
 int  ws_hub_attach(ws_hub_t *hub);
@@ -69,7 +73,10 @@ void ws_hub_leave_all(ws_session_t *session);
 
 /* Never suspends; a peer whose transport is backed up drops the message (trySend
  * semantics). Returns the members served on THIS worker — remote delivery is
- * asynchronous, so an exact total would be a lie. */
+ * asynchronous, so an exact total would be a lie.
+ *
+ * A remote worker whose mailbox is full also drops the message, and that one is
+ * NOT visible in the return value: it is counted in ws_hub_dropped() instead. */
 uint32_t ws_hub_broadcast(ws_hub_t *hub, ws_room_t *room,
                           const char *data, size_t len, bool binary,
                           uint64_t except_id);
@@ -79,5 +86,10 @@ uint32_t ws_hub_broadcast(ws_hub_t *hub, ws_room_t *room,
  * SUSPENDS the caller; a worker that misses `timeout_ms` is left out of the sum,
  * so the result is a snapshot, not a live number. Coroutine context only. */
 uint32_t ws_hub_count(ws_hub_t *hub, ws_room_t *room, uint32_t timeout_ms);
+
+/* Messages this hub could not hand to a worker because its mailbox was full,
+ * process-wide since start. A rising count means a worker is not draining fast
+ * enough (or a client is flooding broadcasts) and room traffic is being lost. */
+uint64_t ws_hub_dropped(ws_hub_t *hub);
 
 #endif /* WS_HUB_H */

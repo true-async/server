@@ -37,7 +37,7 @@
 #else
 /* Rooms are a WebSocket feature; without it the hub calls compile away. */
 # define ws_hub_create()      NULL
-# define ws_hub_free(hub)     ((void)(hub))
+# define ws_hub_release(hub)  ((void)(hub))
 # define ws_hub_attach(hub)   (-1)
 # define ws_hub_detach()      ((void)0)
 #endif
@@ -492,10 +492,12 @@ struct http_server_object {
      * rotates the pool. */
     void                    *reload_shared;
 
-    /* Cross-worker WebSocket rooms (ws_hub.h, issue #2). Owned by the parent,
-     * pointer fanned out to the clones exactly like reload_shared above. */
+    /* Cross-worker WebSocket rooms (ws_hub.h, issue #2). The hub is refcounted:
+     * this object holds one reference (ws_hub_owner), each PHP WebSocketRoom
+     * holds another, and the pointer is fanned out to the clones exactly like
+     * reload_shared above. A clone borrows it and never releases. */
     void                    *ws_hub;
-    bool                     ws_hub_owner;      /* single-worker server: frees its own */
+    bool                     ws_hub_owner;
 
     int                      reload_epoch_seen; /* worker clone: last epoch acted on */
     bool                     reload_in_progress;/* parent: one rotation at a time */
@@ -1344,11 +1346,6 @@ bool http_server_should_drain_now(http_server_object *server,
 conn_arena_t *http_server_arena(http_server_object *server)
 {
     return &server->conn_arena;
-}
-
-void *http_server_ws_hub(http_server_object *server)
-{
-    return server != NULL ? server->ws_hub : NULL;
 }
 
 /* Bind a freshly-allocated conn to its owning server's hot-path
@@ -3026,7 +3023,8 @@ static int http_server_start_pool(http_server_object *server,
     server->reload_shared = reload_shared;
 
     if (server->ws_hub == NULL) {
-        server->ws_hub = ws_hub_create();
+        server->ws_hub       = ws_hub_create();
+        server->ws_hub_owner = true;
     }
 
     /* One persistent shell per worker. Allocate the whole array up
@@ -3175,11 +3173,8 @@ cleanup:
     server->reload_shared = NULL;
     pefree(reload_shared, 1);
 
-    /* Same lifetime: every worker has detached its slot by now. */
-    if (server->ws_hub != NULL) {
-        ws_hub_free(server->ws_hub);
-        server->ws_hub = NULL;
-    }
+    /* The hub is deliberately NOT freed here — a WebSocketRoom the script still
+     * holds outlives this call. http_server_free drops our reference. */
 
     http_logf_info(&server->log_state, "server.stop mode=pool");
     http_log_server_stop(&server->log_state);
@@ -3933,12 +3928,6 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     if (ws_hub_attached) {
         ws_hub_detach();
-    }
-
-    if (server->ws_hub_owner) {
-        ws_hub_free(server->ws_hub);
-        server->ws_hub = NULL;
-        server->ws_hub_owner = false;
     }
 
     if (UNEXPECTED(bailout)) {
@@ -5258,6 +5247,15 @@ static void http_server_free(zend_object *obj)
     if (server->worker_inbox != NULL) {
         worker_inbox_free(server->worker_inbox);
         server->worker_inbox = NULL;
+    }
+
+    /* Room hub (issue #2). Only the server that created it holds a reference;
+     * a worker clone borrows the pointer. Any WebSocketRoom the script still
+     * holds keeps the hub alive past this point. */
+    if (server->ws_hub_owner) {
+        ws_hub_release(server->ws_hub);
+        server->ws_hub       = NULL;
+        server->ws_hub_owner = false;
     }
 
     /* Pool-mode worker ctx array (issue #11). NULL outside pool mode;
