@@ -5,19 +5,15 @@ declare(strict_types=1);
 /*
  * Observability: getStats() -> Prometheus -> Grafana, plus a JSON access log.
  *
- * The server does not speak Prometheus itself, and deliberately so — an
- * embedded exporter would drag a scrape format, a text encoder and a config
- * surface into the extension. getStats() hands you a plain PHP array; the
- * twenty lines of render_prometheus() below turn it into the text format. Swap
- * them for OpenMetrics, StatsD or a JSON blob without touching the server.
+ * The server has no embedded exporter. getStats() returns a plain PHP array and
+ * $render below turns it into the Prometheus text format — swap that for
+ * OpenMetrics or StatsD without touching the server.
  *
- * Run it:
  *   php examples/observability-server.php
  *   curl -s localhost:8080/metrics
  *
- * With Prometheus + Grafana (see examples/docker/observability/):
  *   docker compose -f examples/docker/observability/docker-compose.yml up -d
- *   open http://localhost:3001    (anonymous admin, dashboard pre-loaded)
+ *   open http://localhost:3001          # Grafana, no login, dashboard loaded
  */
 
 use TrueAsync\HttpServer;
@@ -29,30 +25,21 @@ $workers = (int) (getenv('WORKERS') ?: 4);
 $logPath = getenv('ACCESS_LOG') ?: (sys_get_temp_dir() . '/tas-access.log');
 
 /*
- * A CLOSURE, not a named function.
+ * A closure, not a `function render(...)`. Under setWorkers(N) the handler is
+ * copied into a worker thread, which has its own function table — a named
+ * function declared here does not exist there and calling it aborts the worker.
+ * Closures are copied, so reach them through use() (or declare them in a
+ * bootloader).
  *
- * Under setWorkers(N) the handler is copied into a worker thread, and that
- * thread has its own function table: a `function render_prometheus()` declared
- * here does not exist there, and calling it aborts the worker. Closures do get
- * copied — so anything the handler calls must reach it through use(), or be
- * declared in a bootloader.
- *
- * The rendering itself: a counter's NAME decides its Prometheus type. A *_total
- * is monotonic and only grows, so it is a `counter`; everything else here is a
- * point-in-time reading, so it is a `gauge`. Getting this backwards is the
- * classic exporter bug — rate() over a gauge, or a counter a scraper thinks
- * reset.
- *
- * The server draws the same distinction internally, which is what makes the
- * numbers trustworthy across a reload(): monotonic totals are inherited from a
- * retiring worker, so tas_requests_total keeps climbing, while gauges are summed
- * over live workers only, so tas_conns_active_h1 drops to what is really open
- * instead of stranding a dead worker's last reading.
+ * A *_total is monotonic and becomes a Prometheus `counter`; the rest are
+ * point-in-time readings and become `gauge`s. That split is not cosmetic: the
+ * server inherits a retiring worker's totals but not its gauges, so across a
+ * reload() tas_requests_total keeps climbing while tas_conns_active_h1 falls
+ * back to what is really open.
  */
 $render = function (array $stats): string {
-    /* Prometheus names a counter with a _total SUFFIX. Most of the server's
-     * counters already read that way; `total_requests` does not, so rename it
-     * rather than emit a counter the convention says is a gauge. */
+    /* Prometheus wants the _total as a SUFFIX; the server spells this one the
+     * other way round. */
     $rename = ['total_requests' => 'requests_total'];
 
     $out = [];
@@ -64,8 +51,8 @@ $render = function (array $stats): string {
                 . (str_ends_with($name, '_total') ? 'counter' : 'gauge');
         $out[]  = $metric . ' ' . $value;
 
-        /* Same metric, one series per worker: sum() them back up, or spot the
-         * single worker that is misbehaving. */
+        /* One series per worker: sum() them back up, or spot the single worker
+         * that has gone quiet. */
         foreach ($stats['workers'] as $id => $counters) {
             $raw = array_search($name, $rename, true) ?: $name;
             if (isset($counters[$raw])) {
@@ -85,13 +72,9 @@ $config = (new HttpServerConfig())
     ->setWorkers($workers)
     ->setStatsEnabled(true)          /* opt-in: no counters, no cost, without it */
     ->setLogSinks([
-        /* 'file' (not 'stream') is the sink that works under a worker pool:
-         * each worker reopens the path itself, whereas a parent-opened stream
-         * resource cannot cross into a worker thread.
-         *
-         * category 'access' = one structured record per completed request.
-         * The attributes use OpenTelemetry HTTP semantic conventions, so a
-         * collector reads them without a custom mapping. */
+        /* 'file', not 'stream': each worker reopens the path itself, whereas a
+         * parent-opened stream resource cannot cross into a worker thread.
+         * 'access' = one record per request, in OTel semantic conventions. */
         [
             'type'     => 'file',
             'path'     => $logPath,
@@ -99,7 +82,6 @@ $config = (new HttpServerConfig())
             'category' => 'access',
             'level'    => LogSeverity::INFO,
         ],
-        /* Server diagnostics to the console, human-readable. */
         [
             'type'     => 'stderr',
             'format'   => 'pretty',
