@@ -65,6 +65,10 @@ typedef struct ws_pending_message_t {
 typedef struct ws_transport_ops_t {
     bool (*send)(void *ctx, const uint8_t *data, size_t len);
     bool (*send_internal)(void *ctx, const uint8_t *data, size_t len);
+
+    /* NULL = no transport limit. send_internal DROPS a frame the sink cannot
+     * take (H2 ring past its last slot), so trySend must gate on this. */
+    bool (*sendable)(void *ctx);
 } ws_transport_ops_t;
 
 typedef struct ws_session_t {
@@ -303,6 +307,8 @@ typedef enum {
  * relies on the chunk-ring's own backpressure, so this returns false there.
  */
 bool ws_session_over_highwater(const ws_session_t *session);
+
+bool ws_session_transport_sendable(const ws_session_t *session);
 
 /*
  * Suspend the calling producer coroutine until the outbound queue drains

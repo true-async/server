@@ -141,6 +141,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list is also driven by a field table guarded by a static assert, instead of a
   hand-kept block of ~60 appends that a newly added counter could silently miss.
 
+- **`WebSocket::trySend()` silently dropped frames over HTTP/2 (#2).** The H2
+  chunk ring is bounded by slots as well as bytes, and the non-suspending sink
+  discards a frame past the last slot — yet `trySend()` still returned `true`,
+  so a handler looping on it lost every frame past the ring with no signal
+  (measured: 100 accepted, 8 delivered, on a healthy reader too). The transport
+  now exposes a `sendable` hook that the non-blocking path gates on, so
+  `trySend()` reports BUSY as documented. HTTP/1 was unaffected.
+
 ## [0.10.1] - 2026-07-10
 
 ### Fixed
