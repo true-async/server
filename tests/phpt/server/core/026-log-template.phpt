@@ -79,8 +79,7 @@ string(42) "2024-01-01 00:00:00.123 [INFO] user login
 "
 string(30) "2024-01-01T00:00:00.123Z|INFO
 "
-string(125) "user login§ path=/a b tag=v"1 line=a
-b n=-7 sz=4294967296 ok=true r=1.5§000102030405060708090a0b0c0d0e0f§0001020304050607
+string(128) "user login§ path=/a b tag=v"1 line=a\x0ab n=-7 sz=4294967296 ok=true r=1.5§000102030405060708090a0b0c0d0e0f§0001020304050607
 "
 string(33) "{nope} user login 24/01/01 tail{
 "

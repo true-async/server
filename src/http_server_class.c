@@ -3233,6 +3233,15 @@ static int http_server_start_pool(http_server_object *server,
     const http_server_config_t *const stats_cfg = http_server_get_config(server);
     if (stats_cfg != NULL && stats_cfg->stats_enabled) {
         g_stats_registry = http_stats_registry_create(workers);
+
+        /* Don't let a failed slab masquerade as a one-worker server: getStats()
+         * falls back to the parent's own counters when the registry is NULL, so
+         * say so rather than report a silently wrong aggregate. */
+        if (g_stats_registry == NULL) {
+            fprintf(stderr, "http_server: stats slab allocation failed for %d "
+                            "workers; getStats() will report the parent only\n",
+                    workers);
+        }
     }
 
     pool_await_state_t *st = ecalloc(1, sizeof(*st));

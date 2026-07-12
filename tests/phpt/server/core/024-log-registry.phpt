@@ -20,6 +20,9 @@ echo "formatters: {$reg['formatters']}\n";
 foreach ([
     'bad-type'   => [['type' => 'gelf', 'level' => LogSeverity::INFO]],
     'bad-format' => [['type' => 'stdout', 'format' => 'xml', 'level' => LogSeverity::INFO]],
+    /* syslog is a wire format, not a public formatter: it carries no record
+     * framing, so on a plain stream the records would run together. */
+    'syslog-fmt' => [['type' => 'stdout', 'format' => 'syslog', 'level' => LogSeverity::INFO]],
 ] as $tag => $spec) {
     try {
         (new HttpServerConfig())->setLogSinks($spec);
@@ -32,7 +35,8 @@ foreach ([
 echo "Done\n";
 --EXPECT--
 types: stream|file|stdout|stderr|syslog
-formatters: plain|logfmt|json|pretty|syslog|template
+formatters: plain|logfmt|json|pretty|template
 bad-type: setLogSinks(): 'type' must be one of stream|file|stdout|stderr|syslog
-bad-format: setLogSinks(): 'format' must be one of plain|logfmt|json|pretty|syslog|template
+bad-format: setLogSinks(): 'format' must be one of plain|logfmt|json|pretty|template
+syslog-fmt: setLogSinks(): 'format' must be one of plain|logfmt|json|pretty|template
 Done

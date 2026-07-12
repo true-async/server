@@ -208,6 +208,28 @@ static void sb_put_hex(log_sbuf_t *sb, const uint8_t *bytes, size_t n)
     }
 }
 
+/* Write a value into a text line (plain/pretty/template/syslog), escaping
+ * control bytes as \xXX. Request-derived fields — method, path — reach here
+ * unfiltered, and a raw control byte would let a client forge a log line or,
+ * for the ANSI-coloured pretty formatter written to a terminal, inject an
+ * escape sequence. json/logfmt have their own quoting and do not use this. */
+static void sb_put_text_safe(log_sbuf_t *sb, const char *s, size_t n)
+{
+    static const char hexd[] = "0123456789abcdef";
+
+    for (size_t i = 0; i < n; i++) {
+        const unsigned char c = (unsigned char)s[i];
+
+        if (c < 0x20 || c == 0x7f) {
+            sb_puts(sb, "\\x");
+            sb_putc(sb, hexd[c >> 4]);
+            sb_putc(sb, hexd[c & 0x0f]);
+        } else {
+            sb_putc(sb, (char)c);
+        }
+    }
+}
+
 /* JSON string per RFC 8259: quote and escape the mandatory controls. */
 static void sb_put_json_str(log_sbuf_t *sb, const char *s, size_t n)
 {
@@ -359,8 +381,10 @@ static void sb_put_attrs(log_sbuf_t *sb, const http_log_record_t *rec,
                     sb_put_json_str(sb, v != NULL ? v : "", v != NULL ? strlen(v) : 0);
                 } else if (style == LOG_STYLE_LOGFMT) {
                     sb_put_logfmt_val(sb, v != NULL ? v : "", v != NULL ? strlen(v) : 0);
+                } else if (v != NULL) {
+                    sb_put_text_safe(sb, v, strlen(v));
                 } else {
-                    sb_puts(sb, v != NULL ? v : "(null)");
+                    sb_puts(sb, "(null)");
                 }
                 break;
             }
@@ -400,7 +424,7 @@ size_t http_log_format_plain(const http_log_record_t *rec,
     sb_puts(&sb, severity_text(rec->severity));
     sb_putc(&sb, ' ');
     if (rec->body != NULL) {
-        sb_write(&sb, rec->body, rec->body_len);
+        sb_put_text_safe(&sb, rec->body, rec->body_len);
     }
 
     sb_put_attrs(&sb, rec, LOG_STYLE_PLAIN);
@@ -556,7 +580,7 @@ size_t http_log_format_pretty(const http_log_record_t *rec,
 
     sb_puts(&sb, "  ");
     if (rec->body != NULL) {
-        sb_write(&sb, rec->body, rec->body_len);
+        sb_put_text_safe(&sb, rec->body, rec->body_len);
     }
 
     sb_put_attrs(&sb, rec, color ? LOG_STYLE_PRETTY : LOG_STYLE_PLAIN);
@@ -770,7 +794,7 @@ size_t http_log_format_template(const http_log_record_t *rec,
                 break;
             case TMPL_MSG:
                 if (rec->body != NULL) {
-                    sb_write(&sb, rec->body, rec->body_len);
+                    sb_put_text_safe(&sb, rec->body, rec->body_len);
                 }
                 break;
             case TMPL_ATTRS:
@@ -882,7 +906,7 @@ size_t http_log_format_syslog(const http_log_record_t *rec,
               pri, ts, syslog_host, HTTP_LOG_SYSLOG_APPNAME,
               (long)getpid());
     if (rec->body != NULL) {
-        sb_write(&sb, rec->body, rec->body_len);
+        sb_put_text_safe(&sb, rec->body, rec->body_len);
     }
     sb_put_attrs(&sb, rec, LOG_STYLE_PLAIN);
 
@@ -1770,7 +1794,10 @@ void http_log_minit(void)
     http_log_register_formatter(&fmt_logfmt);
     http_log_register_formatter(&fmt_json);
     http_log_register_formatter(&fmt_pretty);
-    http_log_register_formatter(&fmt_syslog);
+    /* fmt_syslog is intentionally NOT registered as a public formatter: its
+     * output carries no record framing (that is the syslog transport's job), so
+     * on a plain stream the records would run together. The syslog sink pins it
+     * directly; 'format' => 'syslog' on any other sink is rejected. */
     http_log_register_formatter(&fmt_template);
 
     http_log_register_sink_type(&sink_type_stream);

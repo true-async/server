@@ -21,8 +21,8 @@ $msg = _http_log_format_selftest('syslog');
 
 $expMsg = '<14>1 2024-01-01T00:00:00.123Z ' . gethostname() . ' php-http-server '
         . getmypid() . ' - - '
-        . 'user login path=/a b tag=v"1 line=a' . "\n"
-        . 'b n=-7 sz=4294967296 ok=true r=1.5';
+        . 'user login path=/a b tag=v"1 line=a\x0ab'
+        . ' n=-7 sz=4294967296 ok=true r=1.5';
 
 var_dump($msg === $expMsg);
 

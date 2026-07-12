@@ -13,14 +13,17 @@ if (!function_exists('_http_log_format_selftest')) {
 <?php
 /* Stage B2: the three built-in formatters render a fixed canonical record
  * (INFO "user login", a mix of attrs incl. space/quote/newline, a trace
- * context) with no server. plain stays byte-identical to B1; logfmt quotes
- * values that need it; json emits one valid OTel-Logs object per line and is
- * the only formatter that carries the trace fields. */
+ * context) with no server. plain escapes control bytes as \xXX so a value
+ * cannot forge a line; logfmt quotes values that need it; json emits one valid
+ * OTel-Logs object per line and is the only formatter that carries the trace
+ * fields. */
 
 $nl = "\n";
 
-$expPlain = '2024-01-01T00:00:00.123Z INFO user login path=/a b tag=v"1 line=a' . $nl
-          . 'b n=-7 sz=4294967296 ok=true r=1.5' . $nl;
+/* The 'line' attr holds a raw "\n"; plain renders it as \x0a — one line, not
+ * two — so an attacker-controlled value cannot break out of the record. */
+$expPlain = '2024-01-01T00:00:00.123Z INFO user login path=/a b tag=v"1 line=a\x0ab'
+          . ' n=-7 sz=4294967296 ok=true r=1.5' . $nl;
 
 $expLogfmt = 'ts=2024-01-01T00:00:00.123Z level=INFO msg="user login" path="/a b" tag="v\"1" line="a' . $nl
            . 'b" n=-7 sz=4294967296 ok=true r=1.5' . $nl;

@@ -19,9 +19,10 @@ if (!function_exists('_http_log_format_selftest')
 
 $E = "\x1b";
 
-/* colour OFF: exact plain golden, no escape codes. */
-$expOff = '00:00:00.123  INFO   user login path=/a b tag=v"1 line=a' . "\n"
-        . 'b n=-7 sz=4294967296 ok=true r=1.5' . "\n";
+/* colour OFF: exact plain golden, no escape codes. The raw "\n" in 'line' comes
+ * out as \x0a — one line — so a value cannot forge a record. */
+$expOff = '00:00:00.123  INFO   user login path=/a b tag=v"1 line=a\x0ab'
+        . ' n=-7 sz=4294967296 ok=true r=1.5' . "\n";
 
 $off = _http_log_format_selftest('pretty', false);
 var_dump($off === $expOff);
@@ -32,7 +33,7 @@ $expOn =
     "{$E}[2m00:00:00.123{$E}[0m  {$E}[32mINFO {$E}[0m  user login"
   . " {$E}[2mpath{$E}[0m=/a b"
   . " {$E}[2mtag{$E}[0m=v\"1"
-  . " {$E}[2mline{$E}[0m=a\nb"
+  . " {$E}[2mline{$E}[0m=a\\x0ab"
   . " {$E}[2mn{$E}[0m=-7"
   . " {$E}[2msz{$E}[0m=4294967296"
   . " {$E}[2mok{$E}[0m=true"

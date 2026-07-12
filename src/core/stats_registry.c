@@ -136,6 +136,12 @@ http_stats_registry_t *http_stats_registry_create(const int capacity)
     reg->capacity = capacity;
     reg->admin    = tsrm_mutex_alloc();
 
+    if (reg->admin == NULL) {
+        stats_slab_free(slab);
+        pefree(reg, 1);
+        return NULL;
+    }
+
     return reg;
 }
 

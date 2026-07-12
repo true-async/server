@@ -1224,9 +1224,17 @@ PHP_FUNCTION(_http_log_format_selftest)
     /* Resolve through the formatter registry — the same lookup setLogSinks
      * uses — so the goldens also cover the plugin seam. ud stays hook-built
      * (make_ud wants a sink spec): pretty = colour flag, syslog = facility,
-     * template = compiled template (freed below). */
+     * template = compiled template (freed below). syslog is not a public
+     * formatter (it needs syslog framing); reach it through the sink type
+     * that pins it, so the golden still covers the wire format. */
     const http_log_formatter_def_t *fdef =
         http_log_formatter_by_name(style, style_len);
+
+    if (fdef == NULL) {
+        const http_log_sink_type_t *stype =
+            http_log_sink_type_by_name(style, style_len);
+        fdef = stype != NULL ? stype->pinned_formatter : NULL;
+    }
 
     if (fdef == NULL) {
         RETURN_FALSE;

@@ -65,7 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     return, static handler, compression reject, sendFile engine, reactor-pool
     worker dispatch) across HTTP/1, HTTP/2 and HTTP/3, including under a
     worker pool. Off by default: without an access sink the cost is one
-    predicted branch per request.
+    predicted branch per request. The text formatters (plain, pretty, template,
+    syslog) escape control bytes in values as `\xXX`, so a request-derived field
+    cannot forge a log line or inject an ANSI sequence into a `pretty` console;
+    json and logfmt already quote their own output.
   - **No sink calls back into PHP, by design.** Records are emitted from libuv
     IO-completion callbacks, connection teardown, error paths and the HTTP/3
     reactor threads — a bare thread pool with no TSRM context — so the logging
@@ -88,8 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lists; another extension can add its own sink type or formatter at MINIT
     via `http_log_register_sink_type()` / `http_log_register_formatter()`
     (built-ins register through the same seam). Validation error messages list
-    whatever is actually registered. The `syslog` formatter is now also
-    name-addressable (`'format'=>'syslog'`) on stream sinks.
+    whatever is actually registered. The `syslog` wire format is not a public
+    formatter — it carries no record framing (that is the syslog transport's
+    job), so it is reachable only through the `syslog` sink type, and
+    `'format'=>'syslog'` on any other sink is rejected at config time.
   - **`template` formatter — user-controlled line layout.** `['format' =>
     'template', 'template' => '{ts:Y-m-d H:i:s.v} [{level}] {msg}{attrs}']`
     renders each record through a custom template: `{ts}` (ISO-8601) or
