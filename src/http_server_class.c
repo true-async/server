@@ -5001,66 +5001,11 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
  * worker entry and the summed totals block. */
 /* The counter field table, materialised. Name, byte offset and how the value
  * combines across workers — see HTTP_SERVER_COUNTER_TABLE in php_http_server.h. */
-static const struct {
-    const char *name;
-    size_t      offset;
-    int         kind;
-} stats_fields[] = {
-#define HTTP_COUNTER_ROW(field, k) \
-    { #field, offsetof(http_server_counters_t, field), HTTP_COUNTER_##k },
-    HTTP_SERVER_COUNTER_TABLE(HTTP_COUNTER_ROW)
-#undef HTTP_COUNTER_ROW
-};
-
-/* Fails the build if a counter was added to the struct but not to the table, or
- * if one stopped being a 64-bit word (a 32-bit field would shift every counter
- * after it in the aggregate — the bug this assert exists to prevent). */
-ZEND_STATIC_ASSERT(sizeof(stats_fields) / sizeof(stats_fields[0])
-                       * sizeof(uint64_t) == sizeof(http_server_counters_t),
-                   "HTTP_SERVER_COUNTER_TABLE is out of sync with "
-                   "http_server_counters_t");
-
-/* One worker's counter slot, read from another thread while that worker keeps
- * writing it. The looseness is deliberate — a statistic may lag by a bump — but
- * it has to be spelled as a relaxed atomic load, not a plain one: a plain load
- * racing a plain store is a data race, which the compiler may reload or tear at
- * will (and which ThreadSanitizer rightly flags). Writers stay plain: each slot
- * has exactly one writer. */
-static zend_always_inline uint64_t stats_field_load(const http_server_counters_t *c,
-                                                    size_t offset)
-{
-    const uint64_t *p = (const uint64_t *)((const char *)c + offset);
-
-    return __atomic_load_n(p, __ATOMIC_RELAXED);
-}
-
 static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
 {
-    for (size_t i = 0; i < sizeof(stats_fields) / sizeof(stats_fields[0]); i++) {
-        add_assoc_long(arr, stats_fields[i].name,
-                       (zend_long)stats_field_load(c, stats_fields[i].offset));
-    }
-}
-
-/* Accumulate one worker's slot into the totals block, per-field and per-kind.
- * Field-wise (not word-wise over the whole struct): each field is read through
- * its own type at its own offset, so there is no strict-aliasing violation and
- * no assumption that the struct is a flat uint64_t array. */
-static void stats_counters_add(http_server_counters_t *acc,
-                               const http_server_counters_t *c)
-{
-    for (size_t i = 0; i < sizeof(stats_fields) / sizeof(stats_fields[0]); i++) {
-        const size_t off = stats_fields[i].offset;
-        uint64_t    *dst = (uint64_t *)((char *)acc + off);
-        const uint64_t v = stats_field_load(c, off);
-
-        if (stats_fields[i].kind == HTTP_COUNTER_MAX) {
-            if (v > *dst) {
-                *dst = v;
-            }
-        } else {
-            *dst += v;
-        }
+    for (size_t i = 0, n = http_stats_field_count(); i < n; i++) {
+        add_assoc_long(arr, http_stats_field_name(i),
+                       (zend_long)http_stats_field_get(c, i));
     }
 }
 
@@ -5095,6 +5040,9 @@ ZEND_METHOD(TrueAsync_HttpServer, getStats)
     if (g_stats_registry != NULL) {
         const int cap = http_stats_registry_capacity(g_stats_registry);
 
+        /* 'workers' lists the live slots; 'totals' also inherits the monotonic
+         * counts of workers that have already exited, so a pool reload does not
+         * make a total run backwards. */
         for (int i = 0; i < cap; i++) {
             const http_stats_slot_t *const slot = http_stats_registry_at(g_stats_registry, i);
 
@@ -5106,15 +5054,16 @@ ZEND_METHOD(TrueAsync_HttpServer, getStats)
             array_init(&w);
             stats_counters_to_zval(&w, &slot->counters);
             add_index_zval(&workers, (zend_long)slot->worker_id, &w);
-            stats_counters_add(&totals, &slot->counters);
         }
+
+        http_stats_registry_totals(g_stats_registry, &totals);
     } else {
         /* Single-worker / non-pool: the server's own counters are the one slot. */
         zval w;
         array_init(&w);
         stats_counters_to_zval(&w, server->counters_live);
         add_index_zval(&workers, 0, &w);
-        stats_counters_add(&totals, server->counters_live);
+        http_stats_counters_add(&totals, server->counters_live);
     }
 
     array_init(return_value);
@@ -5147,113 +5096,36 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
  * its own thread); they are advisory uint64s, so a torn read is benign. */
 static void http3_emit_listener_stats(zval *return_value, http3_listener_t *listener)
 {
-    http3_listener_stats_t s;
-    http3_listener_get_stats(listener, &s);
+    const http3_listener_stats_t *const s = http3_listener_stats_ptr(listener);
+
+    if (s == NULL) {
+        return;
+    }
 
     zval entry;
     array_init(&entry);
     add_assoc_string(&entry, "host", (char *)http3_listener_host(listener));
     add_assoc_long  (&entry, "port", http3_listener_port(listener));
-    add_assoc_long  (&entry, "datagrams_received", (zend_long)s.datagrams_received);
-    add_assoc_long  (&entry, "bytes_received",     (zend_long)s.bytes_received);
-    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)s.datagrams_errored);
-    add_assoc_long  (&entry, "last_datagram_size", (zend_long)s.last_datagram_size);
-    add_assoc_string(&entry, "last_peer",          s.last_peer);
+    add_assoc_long  (&entry, "datagrams_received", (zend_long)__atomic_load_n(&s->datagrams_received, __ATOMIC_RELAXED));
+    add_assoc_long  (&entry, "bytes_received",     (zend_long)__atomic_load_n(&s->bytes_received, __ATOMIC_RELAXED));
+    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)__atomic_load_n(&s->datagrams_errored, __ATOMIC_RELAXED));
+    add_assoc_long  (&entry, "last_datagram_size", (zend_long)s->last_datagram_size);
+    add_assoc_string(&entry, "last_peer",          (char *)s->last_peer);
 
-    /* QUIC packet classification counters. */
-    add_assoc_long(&entry, "quic_initial",            (zend_long)s.packet.quic_initial);
-    add_assoc_long(&entry, "quic_short_header",       (zend_long)s.packet.quic_short_header);
-    add_assoc_long(&entry, "quic_version_negotiated", (zend_long)s.packet.quic_version_negotiated);
-    add_assoc_long(&entry, "quic_parse_errors",       (zend_long)s.packet.quic_parse_errors);
-    /* ngtcp2_conn lifecycle counters. */
-    add_assoc_long(&entry, "quic_conn_accepted",      (zend_long)s.packet.quic_conn_accepted);
-    add_assoc_long(&entry, "quic_conn_rejected",      (zend_long)s.packet.quic_conn_rejected);
-    /* Read-path counters. */
-    add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
-    add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
-    add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
-    add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
-    add_assoc_long(&entry, "quic_migration_storm_shed", (zend_long)s.packet.quic_migration_storm_shed);
-    /* CID steering. */
-    add_assoc_long(&entry, "quic_steered_out",        (zend_long)s.packet.quic_steered_out);
-    add_assoc_long(&entry, "quic_steered_in",         (zend_long)s.packet.quic_steered_in);
-    add_assoc_long(&entry, "quic_steered_drop",       (zend_long)s.packet.quic_steered_drop);
-    /* Issued / retired alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1). */
-    add_assoc_long(&entry, "quic_new_cid_issued",     (zend_long)s.packet.quic_new_cid_issued);
-    add_assoc_long(&entry, "quic_cid_retired",        (zend_long)s.packet.quic_cid_retired);
-    /* Write-loop + timer counters. */
-    add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
-    add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);
-    add_assoc_long(&entry, "quic_timer_fired",        (zend_long)s.packet.quic_timer_fired);
-    add_assoc_long(&entry, "quic_write_error",        (zend_long)s.packet.quic_write_error);
-    /* Handshake / ALPN counters. */
-    add_assoc_long(&entry, "quic_handshake_completed", (zend_long)s.packet.quic_handshake_completed);
-    add_assoc_long(&entry, "quic_alpn_mismatch",       (zend_long)s.packet.quic_alpn_mismatch);
-    /* nghttp3 lifecycle counters. */
-    add_assoc_long(&entry, "h3_init_ok",            (zend_long)s.packet.h3_init_ok);
-    add_assoc_long(&entry, "h3_init_failed",        (zend_long)s.packet.h3_init_failed);
-    add_assoc_long(&entry, "h3_stream_close",       (zend_long)s.packet.h3_stream_close);
-    add_assoc_long(&entry, "h3_stream_read_error",  (zend_long)s.packet.h3_stream_read_error);
-    /* Request-assembly counters. */
-    add_assoc_long(&entry, "h3_request_received",   (zend_long)s.packet.h3_request_received);
-    add_assoc_long(&entry, "h3_request_oversized",  (zend_long)s.packet.h3_request_oversized);
-    add_assoc_long(&entry, "h3_streams_opened",     (zend_long)s.packet.h3_streams_opened);
-    /* Response counters. */
-    add_assoc_long(&entry, "h3_response_submitted",   (zend_long)s.packet.h3_response_submitted);
-    add_assoc_long(&entry, "h3_response_submit_error",(zend_long)s.packet.h3_response_submit_error);
-    /* Connection lifecycle counters. */
-    add_assoc_long(&entry, "quic_connection_close_sent", (zend_long)s.packet.quic_connection_close_sent);
-    add_assoc_long(&entry, "quic_conn_in_closing",       (zend_long)s.packet.quic_conn_in_closing);
-    add_assoc_long(&entry, "quic_conn_in_draining",      (zend_long)s.packet.quic_conn_in_draining);
-    add_assoc_long(&entry, "quic_conn_idle_closed",      (zend_long)s.packet.quic_conn_idle_closed);
-    add_assoc_long(&entry, "quic_conn_handshake_timeout",(zend_long)s.packet.quic_conn_handshake_timeout);
-    add_assoc_long(&entry, "quic_conn_reaped",           (zend_long)s.packet.quic_conn_reaped);
-    add_assoc_long(&entry, "quic_stateless_reset_sent",  (zend_long)s.packet.quic_stateless_reset_sent);
-    add_assoc_long(&entry, "quic_retry_sent",            (zend_long)s.packet.quic_retry_sent);
-    add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
-    add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
-    add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
-    add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
-    add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
-    /* Audit hardening counters. */
-    add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
-    add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
-
-    /* Reactor-iteration watchdog. Tick = one poll-cb wakeup; on the single
-     * reactor thread its latency is the ACK/PTO delay imposed on every live
-     * connection. */
-    add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
-    add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
-    add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
-    add_assoc_long(&entry, "reactor_slow_ticks",       (zend_long)s.packet.reactor_slow_ticks);
-    add_assoc_long(&entry, "reactor_timer_late",       (zend_long)s.packet.reactor_timer_late);
-    add_assoc_long(&entry, "reactor_max_timer_late_ns",(zend_long)s.packet.reactor_max_timer_late_ns);
-    {
-        zval hist;
-        array_init(&hist);
-
-        const size_t nbuckets = sizeof(s.packet.reactor_lat_bucket)
-                              / sizeof(s.packet.reactor_lat_bucket[0]);
-
-        for (size_t i = 0; i < nbuckets; ++i) {
-            add_next_index_long(&hist, (zend_long)s.packet.reactor_lat_bucket[i]);
-        }
-
-        add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
+    /* Every QUIC counter, straight off the field table — no hand-kept list to
+     * fall out of step with the struct, and each field is loaded on its own so
+     * the reactor cannot hand back a mix of two moments. */
+    for (size_t i = 0, n = http3_stat_count(); i < n; i++) {
+        add_assoc_long(&entry, http3_stat_name(i),
+                       (zend_long)http3_stat_get(&s->packet, i));
     }
 
-    /* Send-path error categorisation. */
-    add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
-    add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);
-    add_assoc_long(&entry, "quic_send_emsgsize",         (zend_long)s.packet.quic_send_emsgsize);
-    add_assoc_long(&entry, "quic_send_unreach",          (zend_long)s.packet.quic_send_unreach);
-    add_assoc_long(&entry, "quic_send_other_error",      (zend_long)s.packet.quic_send_other_error);
-    add_assoc_long(&entry, "quic_gso_disabled",          (zend_long)s.packet.quic_gso_disabled);
-
-    /* Async errors observed via MSG_ERRQUEUE. */
-    add_assoc_long(&entry, "quic_errqueue_emsgsize",     (zend_long)s.packet.quic_errqueue_emsgsize);
-    add_assoc_long(&entry, "quic_errqueue_unreach",      (zend_long)s.packet.quic_errqueue_unreach);
-    add_assoc_long(&entry, "quic_errqueue_other",        (zend_long)s.packet.quic_errqueue_other);
+    zval hist;
+    array_init(&hist);
+    for (size_t b = 0; b < HTTP3_LAT_BUCKETS; b++) {
+        add_next_index_long(&hist, (zend_long)http3_stat_bucket(&s->packet, b));
+    }
+    add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
 
     add_next_index_zval(return_value, &entry);
 }

@@ -106,6 +106,65 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
     memcpy(out, mac, 16);
 }
 
+/* The QUIC counter field table, materialised. See HTTP3_PACKET_STAT_TABLE. */
+static const struct {
+    const char *name;
+    size_t      offset;
+    int         kind;
+} http3_stats[] = {
+#define HTTP3_STAT_ROW(field, k) \
+    { #field, offsetof(http3_packet_stats_t, field), HTTP3_STAT_##k },
+    HTTP3_PACKET_STAT_TABLE(HTTP3_STAT_ROW)
+#undef HTTP3_STAT_ROW
+};
+
+#define HTTP3_STAT_COUNT (sizeof(http3_stats) / sizeof(http3_stats[0]))
+
+/* Fails the build if a counter was added to the struct but not to the table.
+ * The histogram is not a table row, so it is accounted for separately. */
+ZEND_STATIC_ASSERT(HTTP3_STAT_COUNT * sizeof(uint64_t)
+                       + sizeof(((http3_packet_stats_t *)0)->reactor_lat_bucket)
+                       == sizeof(http3_packet_stats_t),
+                   "HTTP3_PACKET_STAT_TABLE is out of sync with "
+                   "http3_packet_stats_t");
+
+static zend_always_inline uint64_t http3_stat_load(const http3_packet_stats_t *s,
+                                                   size_t offset)
+{
+    const uint64_t *p = (const uint64_t *)((const char *)s + offset);
+
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+size_t http3_stat_count(void)
+{
+    return HTTP3_STAT_COUNT;
+}
+
+const char *http3_stat_name(size_t i)
+{
+    return i < HTTP3_STAT_COUNT ? http3_stats[i].name : NULL;
+}
+
+int http3_stat_kind(size_t i)
+{
+    return i < HTTP3_STAT_COUNT ? http3_stats[i].kind : HTTP3_STAT_SUM;
+}
+
+uint64_t http3_stat_get(const http3_packet_stats_t *s, size_t i)
+{
+    return i < HTTP3_STAT_COUNT ? http3_stat_load(s, http3_stats[i].offset) : 0;
+}
+
+uint64_t http3_stat_bucket(const http3_packet_stats_t *s, size_t b)
+{
+    if (b >= HTTP3_LAT_BUCKETS) {
+        return 0;
+    }
+
+    return __atomic_load_n(&s->reactor_lat_bucket[b], __ATOMIC_RELAXED);
+}
+
 /* Categorise a sendmsg/sendto errno into the send-error stat buckets. Pure
  * errno→counter mapping (no listener internals), so it lives here where a
  * unit test can drive it without the listener TU. */

@@ -141,8 +141,15 @@ typedef struct _http3_listener_stats_s {
     http3_packet_stats_t packet;
 } http3_listener_stats_t;
 
+/* Bulk snapshot. The reactor thread keeps writing while this copies, so fields
+ * can come from either side of an update and need not describe the same moment.
+ * Fine for a test hook; for anything a user reads, go through
+ * http3_listener_stats_ptr + the http3_stat_* accessors, which load per field. */
 void http3_listener_get_stats(const http3_listener_t *listener,
                               http3_listener_stats_t *out);
+
+/* The live stats block, for per-field relaxed-atomic reads. */
+const http3_listener_stats_t *http3_listener_stats_ptr(const http3_listener_t *listener);
 
 const char *http3_listener_host(const http3_listener_t *listener);
 int http3_listener_port(const http3_listener_t *listener);

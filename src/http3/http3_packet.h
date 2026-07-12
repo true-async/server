@@ -158,6 +158,94 @@ typedef struct _http3_packet_stats_s {
     uint64_t quic_errqueue_other;     /* other extended-error origins (zerocopy, txtime, …) */
 } http3_packet_stats_t;
 
+/* Field table for the scalars above — one row per counter, driving the read
+ * (relaxed atomic, since the reactor thread writes these while PHP reads them)
+ * and the getHttp3Stats() array. Add a counter to the struct and to this table;
+ * a _Static_assert in http3_packet.c fails the build if they drift apart.
+ *
+ * `kind` is SUM for a monotonic total and MAX for a high-water sample, which is
+ * meaningless when added. reactor_lat_bucket[] is a histogram and is handled
+ * separately — it is not a row here. */
+#define HTTP3_STAT_SUM 0
+#define HTTP3_STAT_MAX 1
+
+#define HTTP3_PACKET_STAT_TABLE(X)              \
+    X(quic_initial,                 SUM)        \
+    X(quic_short_header,            SUM)        \
+    X(quic_version_negotiated,      SUM)        \
+    X(quic_parse_errors,            SUM)        \
+    X(quic_conn_accepted,           SUM)        \
+    X(quic_conn_rejected,           SUM)        \
+    X(quic_read_ok,                 SUM)        \
+    X(quic_read_error,              SUM)        \
+    X(quic_read_fatal,              SUM)        \
+    X(quic_path_migrations,         SUM)        \
+    X(quic_migration_storm_shed,    SUM)        \
+    X(quic_steered_out,             SUM)        \
+    X(quic_steered_in,              SUM)        \
+    X(quic_steered_drop,            SUM)        \
+    X(quic_new_cid_issued,          SUM)        \
+    X(quic_cid_retired,             SUM)        \
+    X(quic_packets_sent,            SUM)        \
+    X(quic_bytes_sent,              SUM)        \
+    X(quic_timer_fired,             SUM)        \
+    X(quic_write_error,             SUM)        \
+    X(quic_handshake_completed,     SUM)        \
+    X(quic_alpn_mismatch,           SUM)        \
+    X(h3_init_ok,                   SUM)        \
+    X(h3_init_failed,               SUM)        \
+    X(h3_stream_close,              SUM)        \
+    X(h3_stream_read_error,         SUM)        \
+    X(h3_request_received,          SUM)        \
+    X(h3_request_oversized,         SUM)        \
+    X(h3_streams_opened,            SUM)        \
+    X(h3_response_submitted,        SUM)        \
+    X(h3_response_submit_error,     SUM)        \
+    X(quic_connection_close_sent,   SUM)        \
+    X(quic_conn_in_closing,         SUM)        \
+    X(quic_conn_in_draining,        SUM)        \
+    X(quic_conn_idle_closed,        SUM)        \
+    X(quic_conn_handshake_timeout,  SUM)        \
+    X(quic_conn_reaped,             SUM)        \
+    X(quic_stateless_reset_sent,    SUM)        \
+    X(quic_retry_sent,              SUM)        \
+    X(quic_retry_token_ok,          SUM)        \
+    X(quic_retry_token_invalid,     SUM)        \
+    X(quic_conn_per_peer_rejected,  SUM)        \
+    X(quic_conn_global_rejected,    SUM)        \
+    X(quic_conn_refused_sent,       SUM)        \
+    X(h3_framing_error,             SUM)        \
+    X(quic_drain_iter_cap_hit,      SUM)        \
+    X(reactor_ticks,                SUM)        \
+    X(reactor_busy_ns,              SUM)        \
+    X(reactor_max_tick_ns,          MAX)        \
+    X(reactor_slow_ticks,           SUM)        \
+    X(reactor_timer_late,           SUM)        \
+    X(reactor_max_timer_late_ns,    MAX)        \
+    X(quic_send_eagain,             SUM)        \
+    X(quic_send_gso_refused,        SUM)        \
+    X(quic_send_emsgsize,           SUM)        \
+    X(quic_send_unreach,            SUM)        \
+    X(quic_send_other_error,        SUM)        \
+    X(quic_gso_disabled,            SUM)        \
+    X(quic_errqueue_emsgsize,       SUM)        \
+    X(quic_errqueue_unreach,        SUM)        \
+    X(quic_errqueue_other,          SUM)
+
+#define HTTP3_LAT_BUCKETS 12
+
+/* Read one counter with a relaxed atomic load. The reactor thread writes these
+ * with a plain ++ (single writer), but PHP reads them from another thread, and
+ * a plain load racing a plain store is a data race. Copying the whole struct —
+ * what this replaces — was worse: it could return fields from either side of a
+ * concurrent update, so packets_sent and bytes_sent no longer described the
+ * same moment. */
+size_t      http3_stat_count(void);
+const char *http3_stat_name(size_t i);
+uint64_t    http3_stat_get(const http3_packet_stats_t *s, size_t i);
+int         http3_stat_kind(size_t i);
+uint64_t    http3_stat_bucket(const http3_packet_stats_t *s, size_t b);
+
 /* Write + send a QUIC Version Negotiation datagram to `peer` over the
  * listener's socket. Returns true on success.
  *

@@ -1768,6 +1768,11 @@ void http3_listener_get_stats(const http3_listener_t *listener,
     *out = listener->stats;
 }
 
+const http3_listener_stats_t *http3_listener_stats_ptr(const http3_listener_t *listener)
+{
+    return listener != NULL ? &listener->stats : NULL;
+}
+
 const char *http3_listener_host(const http3_listener_t *listener)
 {
     return listener ? listener->host : NULL;

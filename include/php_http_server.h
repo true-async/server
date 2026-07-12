@@ -831,16 +831,24 @@ typedef struct {
  * counter is declared above and listed here — not hand-copied into three
  * more switch/append blocks that quietly drift apart.
  *
- * `kind` is how the value combines ACROSS workers:
- *   SUM — monotonic totals, and gauges (active counts genuinely add up).
- *   MAX — a sample that is nonsense when summed. An RTT is not additive;
- *         adding four workers' latest ping RTT yields a number that describes
- *         nothing. The worst observed sample is the honest aggregate.
+ * `kind` is how the value combines across workers, and — the part that is easy
+ * to get wrong — what happens to it when a worker dies:
  *
- * A _Static_assert in http_server_class.c fails the build if the struct grows a
+ *   SUM   — a monotonic total. Sums across workers, and a retiring worker's
+ *           value is folded into the registry's retired accumulator: a total
+ *           must never go backwards just because the pool reloaded.
+ *   GAUGE — a currently-active count. Sums across LIVE workers only; a dead
+ *           worker holds no open connections and no in-flight requests, so
+ *           carrying its last value forward would strand a phantom.
+ *   MAX    — a latest sample. Summing it is meaningless (an RTT is not
+ *           additive), and a dead worker's sample is stale, so it is the max
+ *           across live workers.
+ *
+ * A _Static_assert in stats_registry.c fails the build if the struct grows a
  * field this table misses, or if a field stops being a 64-bit word. */
-#define HTTP_COUNTER_SUM 0
-#define HTTP_COUNTER_MAX 1
+#define HTTP_COUNTER_SUM   0
+#define HTTP_COUNTER_GAUGE 1
+#define HTTP_COUNTER_MAX   2
 
 #define HTTP_SERVER_COUNTER_TABLE(X)                        \
     X(streaming_responses_total,             SUM)           \
@@ -848,7 +856,7 @@ typedef struct {
     X(stream_bytes_sent_total,               SUM)           \
     X(stream_send_backpressure_events_total, SUM)           \
     X(worker_wire_dropped_total,             SUM)           \
-    X(h2_streams_active,                     SUM)           \
+    X(h2_streams_active,                     GAUGE)         \
     X(h2_streams_opened_total,               SUM)           \
     X(h2_streams_reset_by_peer_total,        SUM)           \
     X(h2_streams_refused_total,              SUM)           \
@@ -860,7 +868,7 @@ typedef struct {
     X(h1_connection_close_sent_total,        SUM)           \
     X(h3_goaway_sent_total,                  SUM)           \
     X(requests_shed_total,                   SUM)           \
-    X(active_requests,                       SUM)           \
+    X(active_requests,                       GAUGE)         \
     X(tls_bytes_plaintext_in_total,          SUM)           \
     X(tls_bytes_plaintext_out_total,         SUM)           \
     X(tls_bytes_ciphertext_in_total,         SUM)           \
@@ -870,9 +878,9 @@ typedef struct {
     X(responses_3xx_total,                   SUM)           \
     X(responses_4xx_total,                   SUM)           \
     X(responses_5xx_total,                   SUM)           \
-    X(conns_active_h1,                       SUM)           \
-    X(conns_active_h2,                       SUM)           \
-    X(conns_active_h3,                       SUM)           \
+    X(conns_active_h1,                       GAUGE)         \
+    X(conns_active_h2,                       GAUGE)         \
+    X(conns_active_h3,                       GAUGE)         \
     X(static_zero_coroutine_total,           SUM)           \
     X(static_cache_hits_total,               SUM)           \
     X(static_cache_misses_total,             SUM)

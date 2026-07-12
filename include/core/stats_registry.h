@@ -83,6 +83,22 @@ bool http_stats_slot_active(const http_stats_slot_t *slot);
 /* Free the slab. Parent thread, after workers quiesce. */
 void http_stats_registry_free(http_stats_registry_t *reg);
 
+/* Aggregate every live slot plus the totals inherited from workers that have
+ * already exited. Monotonic totals survive a pool reload; gauges and samples
+ * come from live workers only. Any thread. */
+void http_stats_registry_totals(http_stats_registry_t *reg,
+                                http_server_counters_t *out);
+
+/* Accumulate one counter block into another, honouring each field's kind. */
+void http_stats_counters_add(http_server_counters_t *acc,
+                             const http_server_counters_t *c);
+
+/* Field-table access, so callers can render a counter block without repeating
+ * the field list. Values are read with a relaxed atomic load. */
+size_t      http_stats_field_count(void);
+const char *http_stats_field_name(size_t i);
+uint64_t    http_stats_field_get(const http_server_counters_t *c, size_t i);
+
 #ifdef __cplusplus
 }
 #endif

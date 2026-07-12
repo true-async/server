@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     per-status-class `responses_2xx/3xx/4xx/5xx_total` (each request classified
     exactly once, so the four sum to `total_requests`), and per-protocol active
     gauges `conns_active_h1/h2/h3`. Throws when stats are disabled.
+
+    Counters carry their aggregation kind, so a value is combined the way its
+    meaning allows: monotonic totals sum and **survive a `reload()`** (a
+    retiring worker's totals are inherited, so a scraper never sees a counter
+    run backwards just because the pool rotated); active gauges sum across live
+    workers only (a dead worker holds no open connections, so its last value is
+    not carried forward as a phantom); and a latest-sample counter such as
+    `h2_ping_rtt_ns` reports the maximum, since summing four workers' round-trip
+    times describes nothing.
   - **Multi-sink logging (`HttpServerConfig::setLogSinks()`).** A log record now
     fans out to several sinks at once, each with its own severity floor and
     formatter; the fast gate is the minimum floor across sinks, and one failing
@@ -115,6 +124,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the port. This makes the method mean the same thing as the new
   `HttpRequest::getRemoteAddress()` instead of two different things on two
   classes.
+
+### Fixed
+
+- **`getHttp3Stats()` could return counters from two different moments.** The
+  QUIC counters were read by copying the whole per-listener stats block while
+  the reactor thread kept writing it, so fields on either side of an update
+  could land in the same report — `quic_packets_sent` from after a send,
+  `quic_bytes_sent` from before it. Each counter is now loaded individually with
+  a relaxed atomic read, so the report is internally consistent. The counter
+  list is also driven by a field table guarded by a static assert, instead of a
+  hand-kept block of ~60 appends that a newly added counter could silently miss.
 
 ## [0.10.1] - 2026-07-10
 

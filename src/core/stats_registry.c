@@ -24,10 +24,65 @@
 # include <malloc.h>
 #endif
 
+/* The counter field table, materialised. See HTTP_SERVER_COUNTER_TABLE. */
+static const struct {
+    const char *name;
+    size_t      offset;
+    int         kind;
+} stats_fields[] = {
+#define HTTP_COUNTER_ROW(field, k) \
+    { #field, offsetof(http_server_counters_t, field), HTTP_COUNTER_##k },
+    HTTP_SERVER_COUNTER_TABLE(HTTP_COUNTER_ROW)
+#undef HTTP_COUNTER_ROW
+};
+
+#define STATS_FIELD_COUNT (sizeof(stats_fields) / sizeof(stats_fields[0]))
+
+/* Fails the build if a counter was added to the struct but not to the table, or
+ * if one stopped being a 64-bit word (a 32-bit field would shift every counter
+ * after it in the aggregate — the bug this assert exists to prevent). */
+ZEND_STATIC_ASSERT(STATS_FIELD_COUNT * sizeof(uint64_t)
+                       == sizeof(http_server_counters_t),
+                   "HTTP_SERVER_COUNTER_TABLE is out of sync with "
+                   "http_server_counters_t");
+
+/* A live worker keeps writing its slot while we read it from another thread.
+ * The looseness is deliberate — a statistic may lag a bump — but it has to be
+ * spelled as a relaxed atomic load: a plain load racing a plain store is a data
+ * race the compiler may reload or tear. Writers stay plain; one writer a slot. */
+static zend_always_inline uint64_t stats_field_load(const http_server_counters_t *c,
+                                                    size_t offset)
+{
+    const uint64_t *p = (const uint64_t *)((const char *)c + offset);
+
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+size_t http_stats_field_count(void)
+{
+    return STATS_FIELD_COUNT;
+}
+
+const char *http_stats_field_name(size_t i)
+{
+    return i < STATS_FIELD_COUNT ? stats_fields[i].name : NULL;
+}
+
+uint64_t http_stats_field_get(const http_server_counters_t *c, size_t i)
+{
+    return i < STATS_FIELD_COUNT ? stats_field_load(c, stats_fields[i].offset) : 0;
+}
+
 struct http_stats_registry_s {
     http_stats_slot_t *slots;      /* [capacity], one cache-line-aligned slab */
     MUTEX_T            admin;       /* serialises claim/retire; reads stay lock-free */
     int                capacity;
+    /* Monotonic totals inherited from workers that have already exited. A slot
+     * is recycled by memset at claim, so without this a pool reload would reset
+     * every total to zero and getStats() would report a counter running
+     * backwards. Only SUM fields land here — see HTTP_SERVER_COUNTER_TABLE.
+     * Written under `admin` at retire; read under `admin` in totals(). */
+    http_server_counters_t retired;
 };
 
 /* sizeof(http_stats_slot_t) is a multiple of HTTP_STATS_CACHELINE (the _Alignas
@@ -77,7 +132,7 @@ http_stats_registry_t *http_stats_registry_create(const int capacity)
         return NULL;
     }
 
-    http_stats_registry_t *const reg = pemalloc(sizeof(*reg), 1);
+    http_stats_registry_t *const reg = pecalloc(1, sizeof(*reg), 1);
     reg->slots    = slab;
     reg->capacity = capacity;
     reg->admin    = tsrm_mutex_alloc();
@@ -120,10 +175,81 @@ bool http_stats_registry_retire(http_stats_registry_t *reg, const int idx)
     }
 
     tsrm_mutex_lock(reg->admin);
+
+    /* Inherit the departing worker's monotonic totals before the slot is freed
+     * for recycling; its gauges and samples die with it. The worker is gone by
+     * now, so a plain read of its slot races nobody. */
+    const http_server_counters_t *c = &reg->slots[idx].counters;
+
+    for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
+        if (stats_fields[i].kind != HTTP_COUNTER_SUM) {
+            continue;
+        }
+
+        const size_t off = stats_fields[i].offset;
+        *(uint64_t *)((char *)&reg->retired + off) +=
+            *(const uint64_t *)((const char *)c + off);
+    }
+
     zend_atomic_int_store_ex(&reg->slots[idx].active, 0);
     tsrm_mutex_unlock(reg->admin);
 
     return true;
+}
+
+void http_stats_registry_totals(http_stats_registry_t *reg,
+                                http_server_counters_t *out)
+{
+    memset(out, 0, sizeof *out);
+
+    if (UNEXPECTED(reg == NULL)) {
+        return;
+    }
+
+    /* Retired totals are read under the same lock that retire() writes them. */
+    tsrm_mutex_lock(reg->admin);
+    memcpy(out, &reg->retired, sizeof *out);
+    tsrm_mutex_unlock(reg->admin);
+
+    for (int s = 0; s < reg->capacity; s++) {
+        const http_stats_slot_t *slot = &reg->slots[s];
+
+        if (!http_stats_slot_active(slot)) {
+            continue;
+        }
+
+        for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
+            const size_t   off = stats_fields[i].offset;
+            uint64_t      *dst = (uint64_t *)((char *)out + off);
+            const uint64_t v   = stats_field_load(&slot->counters, off);
+
+            if (stats_fields[i].kind == HTTP_COUNTER_MAX) {
+                if (v > *dst) {
+                    *dst = v;
+                }
+            } else {
+                *dst += v;   /* SUM and GAUGE both add across live workers */
+            }
+        }
+    }
+}
+
+void http_stats_counters_add(http_server_counters_t *acc,
+                             const http_server_counters_t *c)
+{
+    for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
+        const size_t   off = stats_fields[i].offset;
+        uint64_t      *dst = (uint64_t *)((char *)acc + off);
+        const uint64_t v   = stats_field_load(c, off);
+
+        if (stats_fields[i].kind == HTTP_COUNTER_MAX) {
+            if (v > *dst) {
+                *dst = v;
+            }
+        } else {
+            *dst += v;
+        }
+    }
 }
 
 int http_stats_registry_capacity(const http_stats_registry_t *reg)
