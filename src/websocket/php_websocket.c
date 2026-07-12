@@ -814,6 +814,10 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
     }
     ws_session_t *const s = w->session;
 
+    if (nonblocking && !ws_session_transport_sendable(s)) {
+        return false;   /* BUSY — caller drops / retries; no exception */
+    }
+
     /* Backpressure gate. send() parks over the high-water mark until the
      * queue drains; trySend() reports BUSY. No-op when the knob is off or
      * the queue has room (ws_session_over_highwater returns false). */
