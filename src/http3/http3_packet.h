@@ -234,16 +234,13 @@ typedef struct _http3_packet_stats_s {
 
 #define HTTP3_LAT_BUCKETS 12
 
-/* Read one counter with a relaxed atomic load. The reactor thread writes these
- * with a plain ++ (single writer), but PHP reads them from another thread, and
- * a plain load racing a plain store is a data race. Copying the whole struct —
- * what this replaces — was worse: it could return fields from either side of a
- * concurrent update, so packets_sent and bytes_sent no longer described the
- * same moment. */
+/* Per-field relaxed-atomic reads. Copying the block wholesale — what this
+ * replaces — could return fields from either side of a concurrent update, so
+ * packets_sent and bytes_sent no longer described the same moment. */
 size_t      http3_stat_count(void);
 const char *http3_stat_name(size_t i);
-uint64_t    http3_stat_get(const http3_packet_stats_t *s, size_t i);
 int         http3_stat_kind(size_t i);
+uint64_t    http3_stat_get(const http3_packet_stats_t *s, size_t i);
 uint64_t    http3_stat_bucket(const http3_packet_stats_t *s, size_t b);
 
 /* Write + send a QUIC Version Negotiation datagram to `peer` over the

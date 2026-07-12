@@ -46,12 +46,11 @@ ZEND_STATIC_ASSERT(STATS_FIELD_COUNT * sizeof(uint64_t)
                    "HTTP_SERVER_COUNTER_TABLE is out of sync with "
                    "http_server_counters_t");
 
-/* A live worker keeps writing its slot while we read it from another thread.
- * The looseness is deliberate — a statistic may lag a bump — but it has to be
- * spelled as a relaxed atomic load: a plain load racing a plain store is a data
- * race the compiler may reload or tear. Writers stay plain; one writer a slot. */
+/* Relaxed, not plain: a lagging statistic is fine, a plain load racing the
+ * worker's plain store is a data race the compiler may tear or reload. Same
+ * instruction on x86-64/arm64. Writers stay plain — one writer per slot. */
 static zend_always_inline uint64_t stats_field_load(const http_server_counters_t *c,
-                                                    size_t offset)
+                                                    const size_t offset)
 {
     const uint64_t *p = (const uint64_t *)((const char *)c + offset);
 
@@ -63,12 +62,12 @@ size_t http_stats_field_count(void)
     return STATS_FIELD_COUNT;
 }
 
-const char *http_stats_field_name(size_t i)
+const char *http_stats_field_name(const size_t i)
 {
     return i < STATS_FIELD_COUNT ? stats_fields[i].name : NULL;
 }
 
-uint64_t http_stats_field_get(const http_server_counters_t *c, size_t i)
+uint64_t http_stats_field_get(const http_server_counters_t *c, const size_t i)
 {
     return i < STATS_FIELD_COUNT ? stats_field_load(c, stats_fields[i].offset) : 0;
 }
@@ -197,7 +196,7 @@ bool http_stats_registry_retire(http_stats_registry_t *reg, const int idx)
     return true;
 }
 
-void http_stats_registry_totals(http_stats_registry_t *reg,
+void http_stats_registry_totals(const http_stats_registry_t *reg,
                                 http_server_counters_t *out)
 {
     memset(out, 0, sizeof *out);

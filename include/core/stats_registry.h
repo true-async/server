@@ -86,7 +86,7 @@ void http_stats_registry_free(http_stats_registry_t *reg);
 /* Aggregate every live slot plus the totals inherited from workers that have
  * already exited. Monotonic totals survive a pool reload; gauges and samples
  * come from live workers only. Any thread. */
-void http_stats_registry_totals(http_stats_registry_t *reg,
+void http_stats_registry_totals(const http_stats_registry_t *reg,
                                 http_server_counters_t *out);
 
 /* Accumulate one counter block into another, honouring each field's kind. */

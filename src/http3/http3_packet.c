@@ -129,7 +129,7 @@ ZEND_STATIC_ASSERT(HTTP3_STAT_COUNT * sizeof(uint64_t)
                    "http3_packet_stats_t");
 
 static zend_always_inline uint64_t http3_stat_load(const http3_packet_stats_t *s,
-                                                   size_t offset)
+                                                   const size_t offset)
 {
     const uint64_t *p = (const uint64_t *)((const char *)s + offset);
 
@@ -141,22 +141,22 @@ size_t http3_stat_count(void)
     return HTTP3_STAT_COUNT;
 }
 
-const char *http3_stat_name(size_t i)
+const char *http3_stat_name(const size_t i)
 {
     return i < HTTP3_STAT_COUNT ? http3_stats[i].name : NULL;
 }
 
-int http3_stat_kind(size_t i)
+int http3_stat_kind(const size_t i)
 {
     return i < HTTP3_STAT_COUNT ? http3_stats[i].kind : HTTP3_STAT_SUM;
 }
 
-uint64_t http3_stat_get(const http3_packet_stats_t *s, size_t i)
+uint64_t http3_stat_get(const http3_packet_stats_t *s, const size_t i)
 {
     return i < HTTP3_STAT_COUNT ? http3_stat_load(s, http3_stats[i].offset) : 0;
 }
 
-uint64_t http3_stat_bucket(const http3_packet_stats_t *s, size_t b)
+uint64_t http3_stat_bucket(const http3_packet_stats_t *s, const size_t b)
 {
     if (b >= HTTP3_LAT_BUCKETS) {
         return 0;
