@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 21372,
-      "hit": 17497
+      "hit": 17496
     },
     "functions": {
       "total": 1469,
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 358,
-        "hit": 264
+        "hit": 263
       },
       "functions": {
         "total": 22,
@@ -423,7 +423,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 905,
-        "hit": 747
+        "hit": 746
       },
       "functions": {
         "total": 48,
@@ -683,7 +683,7 @@
     "src/http_server_config.c": {
       "lines": {
         "total": 1609,
-        "hit": 1463
+        "hit": 1464
       },
       "functions": {
         "total": 140,
