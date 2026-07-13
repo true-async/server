@@ -863,6 +863,47 @@ bool ws_session_transport_sendable(const ws_session_t *session)
     return session->transport->sendable(session->transport_ctx);
 }
 
+bool ws_session_publish_allowed(ws_session_t *session)
+{
+    const http_server_config_t *const cfg = session->conn != NULL
+        ? http_server_get_config(session->conn->server) : NULL;
+
+    const uint32_t rate = cfg != NULL ? cfg->ws_publish_rate : 0;
+
+    if (rate == 0) {
+        return true;   /* limit off — the default */
+    }
+
+    /* One message costs this much allowance; the bucket holds `burst` of them. */
+    const uint64_t cost  = 1000000000ULL / rate;
+    const uint32_t burst = cfg->ws_publish_burst != 0 ? cfg->ws_publish_burst : rate;
+    const uint64_t cap   = cost * burst;
+
+    const uint64_t now = http_now_coarse_ns();
+
+    /* First publish on this connection starts with a full bucket, so a handler
+     * that fans out once on connect is never the one that gets refused. */
+    if (session->publish_stamp_ns == 0) {
+        session->publish_credit_ns = cap;
+    } else if (now > session->publish_stamp_ns) {
+        session->publish_credit_ns += now - session->publish_stamp_ns;
+
+        if (session->publish_credit_ns > cap) {
+            session->publish_credit_ns = cap;
+        }
+    }
+
+    session->publish_stamp_ns = now;
+
+    if (session->publish_credit_ns < cost) {
+        return false;
+    }
+
+    session->publish_credit_ns -= cost;
+
+    return true;
+}
+
 ws_send_rc_t ws_session_queue_and_flush(ws_session_t *session, const uint8_t opcode,
                                         const char *data, const size_t len,
                                         const bool internal)

@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application knows how many topics it needs. Over the cap the filter is refused
   and the connection stays up, as EMQX answers with SUBACK 0x97 and NATS with
   `-ERR 'Maximum Subscriptions Exceeded'`.
+- **`HttpServerConfig::setWsPublishRateLimit()` — a leash on `publish()` (#120).**
+  Per-connection token bucket, off by default (as EMQX ships `messages_rate`).
+  `publish()` is the one WebSocket call an unprivileged peer can turn into work on
+  *every* worker in the process — `send()`/`trySend()` only ever touch its own
+  socket. Unmetered, one client looping on a relayed message fills every worker's
+  inbox, and the drops that follow take out *other* topics' traffic too. Over the
+  rate `publish()` throws `WebSocketBackpressureException` and the connection
+  stays up: the sender is told, rather than the message vanishing into a full
+  mailbox where nobody can see it.
 
 - **Observability — telemetry metrics + logging redesign (#5).** Metrics are
   read through a plain PHP array (no embedded exporters); logs fan out to

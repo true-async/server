@@ -264,6 +264,12 @@ struct _http_server_config_t {
      * input into subscribe() and wants a ceiling. */
     uint32_t ws_max_subscriptions;
 
+    /* Token bucket over publish(), per connection (issue #120). 0 = off, the
+     * default — same as EMQX's messages_rate, which also ships as `infinity`.
+     * `burst` is the bucket depth in messages; 0 means one second's worth. */
+    uint32_t ws_publish_rate;
+    uint32_t ws_publish_burst;
+
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
      * phase 2 adds Brotli + zstd through the same vtable.
      *   compression_enabled         — master switch (default true).

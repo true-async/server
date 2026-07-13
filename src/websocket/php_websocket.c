@@ -1203,6 +1203,18 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
 
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
+    /* publish() is the one call an unprivileged peer can use to cause work on
+     * every worker in the process, so it is the one that needs a leash (#120).
+     * Refusing loudly beats dropping quietly: an over-rate message would
+     * otherwise disappear into a full mailbox, taking OTHER topics' traffic with
+     * it, and the sender would never know. */
+    if (w->session != NULL && !ws_session_publish_allowed(w->session)) {
+        zend_throw_exception_ex(websocket_backpressure_exception_ce, 0,
+            "Publish rate limit exceeded on this connection "
+            "(HttpServerConfig::setWsPublishRateLimit)");
+        RETURN_THROWS();
+    }
+
     uint64_t except_id = 0;
 
     if (exclude_self && w->session != NULL) {

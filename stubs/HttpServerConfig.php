@@ -464,6 +464,33 @@ final class HttpServerConfig
     public function getWsMaxSubscriptions(): int {}
 
     /**
+     * Token bucket over WebSocket::publish(), per connection (issue #120).
+     *
+     * Default: 0 — off, the same default EMQX ships for its `messages_rate`.
+     *
+     * publish() is the one WebSocket call an unprivileged peer can use to cause
+     * work on EVERY worker in the process: send() and trySend() only ever touch
+     * the peer's own socket. Unmetered, a single client looping on a message the
+     * handler relays fills every worker's inbox — and once an inbox is full the
+     * drops hit OTHER topics' traffic too, so the damage is process-wide rather
+     * than confined to the abuser.
+     *
+     * Over the rate, publish() throws WebSocketBackpressureException and the
+     * connection stays up. The sender is told, which is the point: a message that
+     * silently vanished into a full mailbox is invisible to everyone.
+     *
+     * $burst is the bucket depth in messages — how far a handler may run ahead of
+     * the sustained rate. 0 means one second's worth.
+     */
+    public function setWsPublishRateLimit(int $perSecond, int $burst = 0): static {}
+
+    /** @return int */
+    public function getWsPublishRateLimit(): int {}
+
+    /** @return int */
+    public function getWsPublishBurst(): int {}
+
+    /**
      * Server-initiated PING cadence in milliseconds. The server sends a
      * PING this often on otherwise-idle connections; the peer must reply
      * with PONG within WsPongTimeoutMs or the connection is torn down

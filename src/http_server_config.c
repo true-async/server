@@ -94,6 +94,8 @@ struct _http_server_shared_config_t {
     uint32_t                ws_ping_interval_ms;
     uint32_t                ws_pong_timeout_ms;
     uint32_t                ws_max_subscriptions;
+    uint32_t                ws_publish_rate;
+    uint32_t                ws_publish_burst;
     bool                    ws_permessage_deflate;
 
     /* Compression — see http_server_config_t for semantics. The MIME
@@ -452,6 +454,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->ws_ping_interval_ms  = DEFAULT_WS_PING_INTERVAL_MS;
     config->ws_pong_timeout_ms   = DEFAULT_WS_PONG_TIMEOUT_MS;
     config->ws_max_subscriptions = 0;   /* unlimited — the application decides */
+    config->ws_publish_rate      = 0;   /* off — see setWsPublishRateLimit */
+    config->ws_publish_burst     = 0;
     config->ws_permessage_deflate = false;
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->http3_pacing = false;          /* QUIC send pacing — opt-in (#59) */
@@ -1523,6 +1527,45 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxSubscriptions)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_max_subscriptions);
+}
+
+/* proto HttpServerConfig::setWsPublishRateLimit(int $perSecond, int $burst = 0): static
+ * Token bucket over publish(), per connection (issue #120). 0 = off (default).
+ * Over the rate publish() throws WebSocketBackpressureException — the sender is
+ * told, rather than the message vanishing into a full mailbox somewhere. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPublishRateLimit)
+{
+    zend_long per_second;
+    zend_long burst = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(per_second)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(burst)
+    ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    if (per_second < 0 || per_second > UINT32_MAX || burst < 0 || burst > UINT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "WsPublishRateLimit must be 0 (off) or a positive rate, with a non-negative burst", 0);
+        return;
+    }
+    config->ws_publish_rate  = (uint32_t)per_second;
+    config->ws_publish_burst = (uint32_t)burst;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsPublishRateLimit(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPublishRateLimit)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_publish_rate);
+}
+
+/* proto HttpServerConfig::getWsPublishBurst(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPublishBurst)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_publish_burst);
 }
 
 /* proto HttpServerConfig::setWsPingIntervalMs(int $ms): static
@@ -3066,6 +3109,8 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->ws_max_message_size          = 0;
     config->ws_max_frame_size            = 0;
     config->ws_max_subscriptions         = 0;
+    config->ws_publish_rate              = 0;
+    config->ws_publish_burst             = 0;
     config->ws_ping_interval_ms          = 0;
     config->ws_pong_timeout_ms           = 0;
     config->ws_permessage_deflate        = false;
@@ -3239,6 +3284,8 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->ws_max_message_size          = src->ws_max_message_size;
     shared->ws_max_frame_size            = src->ws_max_frame_size;
     shared->ws_max_subscriptions         = src->ws_max_subscriptions;
+    shared->ws_publish_rate              = src->ws_publish_rate;
+    shared->ws_publish_burst             = src->ws_publish_burst;
     shared->ws_ping_interval_ms          = src->ws_ping_interval_ms;
     shared->ws_pong_timeout_ms           = src->ws_pong_timeout_ms;
     shared->ws_permessage_deflate        = src->ws_permessage_deflate;
@@ -3474,6 +3521,8 @@ static void http_server_config_populate_from_shared(
     dst->ws_max_message_size          = src->ws_max_message_size;
     dst->ws_max_frame_size            = src->ws_max_frame_size;
     dst->ws_max_subscriptions         = src->ws_max_subscriptions;
+    dst->ws_publish_rate              = src->ws_publish_rate;
+    dst->ws_publish_burst             = src->ws_publish_burst;
     dst->ws_ping_interval_ms          = src->ws_ping_interval_ms;
     dst->ws_pong_timeout_ms           = src->ws_pong_timeout_ms;
     dst->ws_permessage_deflate        = src->ws_permessage_deflate;

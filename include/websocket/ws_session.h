@@ -93,6 +93,18 @@ typedef struct ws_session_t {
     struct ws_topic_sub  *topics;
     uint64_t              topic_mark;
 
+    /* Token bucket over publish(), per connection (issue #120). publish() is the
+     * one WebSocket call an unprivileged peer can use to cause work on EVERY
+     * worker — send()/trySend() only ever touch its own socket. Unmetered, one
+     * client looping on a relayed message fills every worker's inbox, and the
+     * drops that follow take out OTHER topics' traffic too.
+     *
+     * Credit is measured in nanoseconds of allowance rather than whole tokens:
+     * the coarse clock ticks every 4-10ms, and integer tokens would round away
+     * to nothing at any rate finer than that. Off (rate 0) unless configured. */
+    uint64_t              publish_credit_ns;
+    uint64_t              publish_stamp_ns;
+
     /* Borrowed back-pointer for callbacks. The session's lifetime is
      * a strict subset of conn's, so no refcount needed. For H2 this is
      * session->conn (shared) — config + remote-addr still resolve. */
@@ -327,6 +339,11 @@ typedef enum {
 bool ws_session_over_highwater(const ws_session_t *session);
 
 bool ws_session_transport_sendable(const ws_session_t *session);
+
+/* Spends one publish token (issue #120). False = this connection is over its
+ * configured rate and the message must NOT go out. Always true when the limit is
+ * off, which is the default. Never suspends. */
+bool ws_session_publish_allowed(ws_session_t *session);
 
 typedef enum {
     WS_SEND_OK = 0,
