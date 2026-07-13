@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 21289,
-      "hit": 17438
+      "total": 21356,
+      "hit": 17487
     },
     "functions": {
-      "total": 1466,
-      "hit": 1323
+      "total": 1468,
+      "hit": 1325
     }
   },
   "files": {
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 358,
-        "hit": 264
+        "hit": 263
       },
       "functions": {
         "total": 22,
@@ -233,7 +233,7 @@
     "src/core/response_wire.c": {
       "lines": {
         "total": 165,
-        "hit": 154
+        "hit": 153
       },
       "functions": {
         "total": 26,
@@ -273,11 +273,11 @@
     "src/core/worker_dispatch.c": {
       "lines": {
         "total": 353,
-        "hit": 269
+        "hit": 262
       },
       "functions": {
         "total": 17,
-        "hit": 14
+        "hit": 13
       }
     },
     "src/core/worker_inbox.c": {
@@ -402,8 +402,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 847,
-        "hit": 713
+        "total": 865,
+        "hit": 725
       },
       "functions": {
         "total": 48,
@@ -423,11 +423,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 905,
-        "hit": 747
+        "hit": 749
       },
       "functions": {
         "total": 48,
-        "hit": 41
+        "hit": 42
       }
     },
     "src/http3/http3_connection.c": {
@@ -443,7 +443,7 @@
     "src/http3/http3_dispatch.c": {
       "lines": {
         "total": 441,
-        "hit": 362
+        "hit": 360
       },
       "functions": {
         "total": 21,
@@ -463,7 +463,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 666,
-        "hit": 505
+        "hit": 506
       },
       "functions": {
         "total": 46,
@@ -483,7 +483,7 @@
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 237,
-        "hit": 162
+        "hit": 165
       },
       "functions": {
         "total": 17,
@@ -812,12 +812,12 @@
     },
     "src/websocket/ws_dispatch.c": {
       "lines": {
-        "total": 195,
-        "hit": 156
+        "total": 244,
+        "hit": 198
       },
       "functions": {
-        "total": 8,
-        "hit": 8
+        "total": 10,
+        "hit": 10
       }
     },
     "src/websocket/ws_handshake.c": {
