@@ -494,17 +494,15 @@ struct http_server_object {
      * tasks. NULL outside pool mode; owned ref released in start_pool cleanup. */
     zend_async_thread_pool_t *worker_pool;
 
-    /* Pool control channel (issue #117): owned by the pool parent (start_pool
-     * alloc/free), pointer fanned out to worker clones through the transfer
-     * shells. reload() and stop() publish a command on it and ring the cohort;
-     * each clone reads the command on its own thread and retires itself. */
+    /* Pool control channel (issue #117), created by start_pool and fanned out to
+     * the clones through the transfer shells. */
     pool_ctl_t              *pool_ctl;
     int                      pool_ctl_slot;      /* worker clone: its wakeup slot, -1 = none */
     bool                     pool_retire_queued; /* worker clone: retire coroutine enqueued */
     bool                     reload_in_progress; /* parent: one rotation at a time */
     void                    *pool_await_state;   /* parent: st of the active pool run */
-    /* Parent: notified once the cohort has fully drained and start() is done —
-     * this is what a pool-mode stop() suspends on. Multi-subscriber. */
+    /* Parent: notified once the cohort has drained and the pool is down — what a
+     * pool-mode stop() suspends on. Multi-subscriber. */
     zend_async_event_t      *pool_stopped_event;
 
     /* Hot-reload triggers (issue #93), pool parent only. Watcher objects are
@@ -604,15 +602,10 @@ static void http_server_accept_callback(
     void *result,
     zend_object *exception);
 
-/* Pool control channel (issue #117) — the parent's only path to its workers.
- * The parent publishes a command and rings every worker's wakeup (uv_async: the
- * one libuv call safe from a foreign thread); each worker reads it on its own
- * thread and retires. The command is state, not an edge: a worker that comes up
- * after it was published still sees it.
- *
- * http_server_pool_ctl_leave is what fences the parent out — it empties the slot
- * and closes the handle under the same lock the broadcast holds, so the parent
- * can never be inside uv_async_send on a handle its owner is disposing. */
+/* Pool control channel (issue #117) — the parent's only path to its workers: a
+ * command plus one uv_async wakeup per worker (the one libuv call safe from a
+ * foreign thread). The command is state, not an edge, so a worker that comes up
+ * after it was published still sees it. */
 typedef enum {
     POOL_CMD_NONE = 0,
     POOL_CMD_RELOAD,   /* drain, exit; the parent submits a replacement */
@@ -672,8 +665,8 @@ static pool_cmd_t pool_ctl_current(const pool_ctl_t *ctl)
         : (pool_cmd_t) zend_atomic_int_load_ex((zend_atomic_int *) &ctl->command);
 }
 
-/* Parent: publish, then ring. Stored before any wake, so a worker woken by this
- * broadcast — or one that starts after it — reads the command that caused it. */
+/* Stored before any wake, so a worker woken by this broadcast — or one that
+ * starts after it — reads the command that caused it. */
 static void pool_ctl_command(pool_ctl_t *ctl, const pool_cmd_t cmd)
 {
     if (UNEXPECTED(ctl == NULL)) {
@@ -726,8 +719,8 @@ static void http_server_pool_retire_entry(void)
     http_server_do_stop(server, reason);   /* logs server.stop reason=... */
 }
 
-/* The parent rang us. Both commands mean "retire" — reload() submits a
- * replacement afterwards, stop() does not. Runs on the worker's own thread. */
+/* Worker thread. Both commands mean "retire"; only reload() submits a
+ * replacement afterwards. */
 static void http_server_pool_ctl_wake(zend_async_event_t *event,
                                       zend_async_event_callback_t *callback,
                                       void *result, zend_object *exception)
@@ -3498,13 +3491,10 @@ static int http_server_start_pool(http_server_object *server,
 
     rc = (st->pending == 0) ? SUCCESS : FAILURE;
 
-    /* We are leaving with workers still serving — the await was cancelled, not
-     * resolved (Async\graceful_shutdown(), or the parent coroutine was killed).
-     * Nothing in the engine stops a busy worker: closing the task channel only
-     * reaches a worker that is back at recv, and ours is inside start(). So tell
-     * them ourselves, or they would outlive the parent and wedge the process.
-     * They drain and exit on their own threads while the shutdown drain reaps
-     * their completion futures; the channel is refcounted and outlives us. */
+    /* Workers still serving: the await was cancelled, not resolved
+     * (Async\graceful_shutdown()). Nothing in the engine stops a BUSY worker —
+     * closing the task channel only reaches one that is back at recv, and ours
+     * is inside start() — so they would outlive us and wedge the process. */
     if (st->pending > 0) {
         http_logf_info(&server->log_state, "server.stop mode=pool reason=shutdown");
         pool_ctl_command(pool_ctl, POOL_CMD_STOP);
@@ -3572,8 +3562,7 @@ cleanup:
     http_server_close_pool_tcp_fds(server);
 #endif
 
-    /* Last: release whoever is blocked in a pool-mode stop() (issue #117). The
-     * server is fully down by now, which is exactly what stop() promises. */
+    /* Last, because stop() promises the server is fully down when it returns. */
     if (server->pool_stopped_event != NULL) {
         zend_async_event_t *const stopped = server->pool_stopped_event;
         server->pool_stopped_event = NULL;
@@ -3649,12 +3638,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         }
     }
 
-    /* Pool worker: join the control channel (issue #117) before binding
-     * anything. The command is state, not an edge — a thread slow enough to get
-     * here only after the parent published one reads it and leaves without ever
-     * taking a listen socket. It would otherwise miss the broadcast that woke
-     * its cohort and outlive it, and the parent awaits every worker. A worker
-     * the parent cannot reach at all must not run for the same reason. */
+    /* Join the channel before binding anything: a thread slow enough to get here
+     * only after the parent published a command missed the broadcast that woke
+     * its cohort, and would otherwise outlive it — with the parent waiting. */
     if (server->is_worker_clone && server->pool_ctl != NULL) {
         if (pool_ctl_current(server->pool_ctl) != POOL_CMD_NONE) {
             RETURN_TRUE;
@@ -4355,8 +4341,7 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
      * loop drains forever and stop() never lets the script exit. */
     http_server_deadline_tick_stop(server);
 
-    /* We are going down: no further command can reach us, and the parent must
-     * not hold a wakeup into a loop that is about to close (issue #117). */
+    /* The parent must not hold a wakeup into a loop that is about to close. */
     http_server_pool_ctl_leave(server);
 
     /* Stop all listen events. dispose() closes the underlying uv handle
@@ -4412,9 +4397,6 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 #endif
 }
 
-/* Suspend the calling coroutine until start_pool has torn the pool down.
- * Every caller subscribes to the same event and takes a ref; start_pool notifies
- * it last, after the workers are gone and the listen sockets are closed. */
 static void http_server_await_pool_stopped(http_server_object *server)
 {
     zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -4441,12 +4423,10 @@ static void http_server_await_pool_stopped(http_server_object *server)
 }
 
 /* {{{ proto HttpServer::stop(): bool
- * Pool parent (issue #117): publishes STOP on the control channel, rings the
- * cohort, and suspends until every worker has drained and the pool is down —
- * so stop() returns only once the server is really gone. A standalone server
- * (or a worker stopping itself) does NOT suspend: stop() there is typically
- * called from a request handler, and the shutdown drain waits on that very
- * handler — the caller would be waiting for itself. */
+ * Pool parent (issue #117): retires the cohort and suspends until the pool is
+ * down, so stop() returns only once the server is really gone. A standalone
+ * server does NOT suspend — stop() there is typically called from a request
+ * handler, which the shutdown drain waits on: it would wait for itself. */
 ZEND_METHOD(TrueAsync_HttpServer, stop)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -4458,8 +4438,6 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
     }
 
     if (server->in_pool_mode) {
-        /* A second stop() while the first is still draining joins the wait
-         * rather than re-issuing the command. */
         if (!server->stopping) {
             server->stopping = true;
             http_logf_info(&server->log_state, "server.stop mode=pool reason=stop");
@@ -4552,7 +4530,6 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
      * down under us. */
     st->pending += workers;
 
-    /* The cohort is rung awake and retires itself. */
     pool_ctl_command(server->pool_ctl, POOL_CMD_RELOAD);
 
     /* Rotate: suspends until every old worker exited; the engine spawns the
