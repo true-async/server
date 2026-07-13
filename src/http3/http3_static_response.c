@@ -301,20 +301,33 @@ static void h3_static_finalize(h3_static_state_t *state)
     }
 }
 
-/* Give up on the body mid-flight. Ends the stream so nghttp3 tears it down and
- * the close hook below runs the teardown — doing it here would free the file io
- * from inside its own completion callback. */
+/* Give up on the body mid-flight — the file was truncated under us, or the read
+ * failed. RESET the write side instead of flagging a clean EOF: the status and
+ * the Content-Length are already on the wire, so ending the stream normally
+ * would hand the peer a short body under a success status and call it done. A
+ * reset is how HTTP/3 says "this transfer failed".
+ *
+ * The teardown itself waits for the stream close the reset triggers — releasing
+ * the file io from inside its own completion callback would free it while
+ * nghttp3 still owns every queued chunk. */
 static void h3_static_fail(h3_static_state_t *state)
 {
     state->status = -1;
 
-    if (state->stream != NULL && state->stream->conn != NULL
-        && !state->stream->peer_closed && !state->eof_reached) {
-        state->eof_reached = true;
-        state->busy = true;
-        h3_stream_mark_ended(state->stream);
-        state->busy = false;
-        return;
+    http3_stream_t *const s = state->stream;
+    http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
+
+    if (c != NULL && !s->peer_closed && !state->eof_reached) {
+        state->eof_reached = true;   /* nothing more will be read or queued */
+
+        if (c->ngtcp2_conn != NULL) {
+            (void)ngtcp2_conn_shutdown_stream_write(
+                (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
+                NGHTTP3_H3_INTERNAL_ERROR);
+            http3_listener_mark_flush(c->listener, c);
+            http3_listener_queue_epilogue_flush(c->listener);
+            return;   /* close_cb → h3_static_stream_closed → finalize */
+        }
     }
 
     h3_static_finalize(state);
