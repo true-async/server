@@ -145,8 +145,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sendFile()` is delivered by the reactor, so the reactor is the only place the
   final status exists — it was already counted there, but the access record was
   lost, because a reactor has no PHP context and must never touch a worker's
-  descriptor. It can fill a ring. A `stream` sink now also works under a worker
-  pool, and a file sink is one descriptor instead of one per worker.
+  descriptor. It can fill a ring.
+
+  Sinks are still built per server clone, so under a worker pool each worker
+  still opens its own (and still cannot open a `stream` sink — a PHP resource
+  does not cross threads; use `file`). What changed is that the parent's sinks
+  are now reachable from the transport reactors, which is what the access record
+  needed. Sharing one sink set across the pool — one descriptor per sink instead
+  of one per worker — is a follow-up the log thread makes possible but does not
+  yet do.
 
 ### Fixed
 
