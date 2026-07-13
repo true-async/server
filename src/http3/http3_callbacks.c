@@ -674,6 +674,15 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
         vec[0].len  = avail;
         s->chunk_read_offset    += avail;
         s->chunk_pending_bytes  -= avail;
+
+        /* Queue drained below the producer's ceiling — wake whoever is waiting
+         * to refill it. The static/sendFile sender parks here, and until now its
+         * only wake-ups were the peer's ACK and a window extension: taking the
+         * bytes off the queue is itself progress, and nothing reported it. */
+        if (s->write_event != NULL && s->write_event->trigger != NULL) {
+            s->write_event->trigger(s->write_event);
+        }
+
         return 1;
     }
 
