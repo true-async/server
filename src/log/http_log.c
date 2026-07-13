@@ -1821,19 +1821,20 @@ static zend_async_io_type log_io_type_for_fd(const int fd)
         return ZEND_ASYNC_IO_TYPE_FILE;   /* not a socket, or a datagram one */
     }
 
-    int       domain = 0;
-    socklen_t dlen   = sizeof domain;
+    /* The address family, not SO_DOMAIN — that one is Linux-only. */
+    struct sockaddr_storage sa;
+    socklen_t               salen = sizeof sa;
 
-    if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &dlen) != 0) {
+    if (getsockname(fd, (struct sockaddr *)&sa, &salen) != 0) {
         return ZEND_ASYNC_IO_TYPE_FILE;
     }
 
     /* libuv drives an AF_UNIX stream through its pipe handle, not its tcp one. */
-    if (domain == AF_UNIX) {
+    if (sa.ss_family == AF_UNIX) {
         return ZEND_ASYNC_IO_TYPE_PIPE;
     }
 
-    if (domain == AF_INET || domain == AF_INET6) {
+    if (sa.ss_family == AF_INET || sa.ss_family == AF_INET6) {
         return ZEND_ASYNC_IO_TYPE_TCP;
     }
 #else

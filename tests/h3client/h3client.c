@@ -72,6 +72,9 @@ typedef struct {
      * multi-request mode. */
     unsigned long                response_header_count;
     bool                         response_done;
+    /* The peer reset our request stream: whatever arrived is a partial body, and
+     * the client exits non-zero so a test cannot mistake it for a complete one. */
+    bool                         stream_reset;
     bool                         h3_streams_bound;
 
     /* For POST. */
@@ -170,9 +173,18 @@ static int h3_stop_sending(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
+/* The peer reset the stream: the transfer FAILED, however many bytes arrived.
+ * Say so — a caller that only looked at the status line and the body length
+ * would otherwise read a truncated response as a complete one. */
 static int h3_reset_stream(nghttp3_conn *conn, int64_t stream_id,
                            uint64_t err, void *cu, void *su) {
-    (void)conn; (void)stream_id; (void)err; (void)cu; (void)su;
+    (void)conn; (void)su;
+    h3c_t *c = cu;
+    if (stream_id == c->stream_id) {
+        fprintf(stderr, "RESET=%llu\n", (unsigned long long)err);
+        c->stream_reset = true;
+        c->response_done = true;
+    }
     return 0;
 }
 
@@ -922,5 +934,6 @@ int main(int argc, char **argv) {
 
     if (c.retired_fd >= 0) { close(c.retired_fd); }
 
-    return 0;
+    /* A reset stream is a failed transfer, not a short one. */
+    return c.stream_reset ? 1 : 0;
 }

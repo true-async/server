@@ -1,3 +1,18 @@
+"""Independent HTTP/3 probe (aioquic) for the phpt suite.
+
+h3client shares ngtcp2 + nghttp3 with the server, so a shared misreading of the
+spec would hide a bug from both. aioquic is a separate implementation, which is
+the whole point of running some tests through it.
+
+It prints one line the test can assert on:
+
+    status=<code> bytes=<n> outcome=CLEAN_END|RESET(err=<code>)|TIMEOUT
+
+`outcome` is what h3client could not tell apart until it learned to report
+RESET_STREAM: a transfer the server aborts mid-body is NOT a short success.
+
+Usage: python3 h3probe.py <host> <port> <path>
+"""
 import asyncio, sys
 from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
