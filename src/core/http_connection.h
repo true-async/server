@@ -68,9 +68,7 @@ struct _http_connection_t {
     zend_async_io_t           *io;         /* TrueAsync TCP IO handle — owns the accepted socket */
     http_connection_read_cb_t *read_cb;    /* Persistent read callback attached to io->event */
 
-    /* Accepted socket fd, retained so the peer address can be resolved
-     * via getpeername() on demand (WebSocket::getRemoteAddress); keeps
-     * address resolution off the accept hot path. */
+    /* Accepted socket fd. */
     php_socket_t               client_fd;
 
     /* Owning server. NULL when the connection runs unsupervised (tests).
@@ -105,6 +103,16 @@ struct _http_connection_t {
      * before freeing the server, so post-free emits drop silently
      * instead of UAFing. Same discipline as counters/view. */
     struct http_log_state     *log_state;
+
+    /* Socket peer, captured once at accept (see http_connection_create).
+     * Resolving it lazily at request completion — the old behaviour — asked
+     * the kernel for the address of a socket the client may already have
+     * reset, so getpeername() failed and the access log silently lost the
+     * client IP for exactly the requests worth investigating. Snapshot it
+     * while the socket is certainly alive; format it on demand.
+     * peer_len == 0 means no IP peer (Unix-socket listener). */
+    struct sockaddr_storage    peer;
+    socklen_t                  peer_len;
 
     /* Pointer to the request currently being handled. NULL between
      * requests. Used by the handler coroutine to read/write timing
@@ -377,11 +385,11 @@ http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 
-/* Resolve the peer as "host:port" (IPv4) / "[host]:port" (IPv6) via
- * getpeername() on the accepted fd. Returns a fresh zend_string the
- * caller owns, or NULL when there is no IP peer (Unix-socket listener,
- * closed fd, getpeername failure). */
+/* Bare peer IP (REMOTE_ADDR form: no port, no brackets) as a fresh zend_string
+ * the caller owns, or NULL when there is no IP peer (Unix-socket listener).
+ * The port is separate on purpose — see http_sockaddr_ip. */
 zend_string *http_connection_remote_address(const http_connection_t *conn);
+uint16_t     http_connection_remote_port(const http_connection_t *conn);
 
 /* Teardown a connection that just went idle (handler_refcount == 0 and
  * destroy_pending), but defer the actual http_connection_destroy to a

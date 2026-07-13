@@ -584,6 +584,13 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     req->http_major = llhttp_parser->http_major;
     req->http_minor = llhttp_parser->http_minor;
 
+    /* Peer, snapshotted at accept — copied onto the request so it survives the
+     * connection and reaches the pool worker and the send-file engine. */
+    if (parser->conn != NULL) {
+        req->peer     = parser->conn->peer;
+        req->peer_len = parser->conn->peer_len;
+    }
+
     /* Get method. Common methods resolve to a process-wide interned
      * zend_string (zero alloc); anything else — extension/WebDAV verbs,
      * custom methods — falls back to the per-request zend_string_init

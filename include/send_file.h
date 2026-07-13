@@ -99,9 +99,6 @@ typedef struct
 	 * and IMF-date formatting — all derived data lives in the view. */
 	const http_static_cache_view_t *cache_view;
 
-	/* Telemetry sink. May be NULL on offline tests. */
-	http_server_counters_t *counters;
-
 	/* Server pointer for open-file-cache integration on miss path.
 	 * NULL = cache disabled (sendFile case). */
 	http_server_object *server;

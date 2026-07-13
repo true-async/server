@@ -292,7 +292,23 @@ static http3_connection_t *http3_connection_accept(
         c->counters  = srv != NULL ? http_server_counters(srv)
                                    : http3_listener_local_counters(listener);
         c->view      = http_server_view(srv);
-        c->log_state = http_server_get_log_state(srv);
+
+        /* Reactor mode: the parent's logger travels on the reactor context. The
+         * sinks are owned by the log thread and a producer only fills its own
+         * ring, so emitting from here is safe — and it is the only way a request
+         * this thread serves end to end reaches the access log. */
+        const http3_reactor_ctx_t *const rctx = http3_listener_reactor_ctx(listener);
+
+        c->log_state = (srv == NULL && rctx != NULL && rctx->log_state != NULL)
+                           ? rctx->log_state
+                           : http_server_get_log_state(srv);
+
+        /* Reactor thread: charge its dropped records to its own counter slice
+         * (the same one getStats reports under `reactors`). Idempotent — every
+         * connection on this thread resolves the same slice. */
+        if (srv == NULL) {
+            http_log_set_thread_drop_counter(&c->counters->log_records_dropped_total);
+        }
     }
 
     /* original_dcid for transport_params: with Retry, this is the DCID
@@ -552,6 +568,11 @@ static http3_connection_t *http3_connection_accept(
      * Add after map registration so a fragment state (listed but not
      * looked up) cannot be observed. */
     http3_listener_track_connection(listener, c);
+
+    /* Count the connection once it is fully established and tracked — the
+     * mid-create failure paths above efree directly and never reach the
+     * matching dec in http3_connection_free. */
+    http_server_conn_active_inc(c->counters, HTTP_PROTOCOL_HTTP3);
 
     return c;
 }
@@ -966,6 +987,10 @@ void http3_connection_free(http3_connection_t *conn)
     http3_listener_peer_dec(conn->listener,
                             (const struct sockaddr *)&conn->admit_peer);
 
+    /* Release the per-protocol gauge slot claimed at create. The closed
+     * guard above makes this run exactly once per connection. */
+    http_server_conn_active_dec(conn->counters, HTTP_PROTOCOL_HTTP3);
+
     conn->closed = true;
 
     /* Unlink from the listener dirty list before teardown — a conn freed
@@ -1002,6 +1027,11 @@ void http3_connection_free(http3_connection_t *conn)
         conn->streams_head = NULL;
         while (s != NULL) {
             http3_stream_t *next = s->list_next;
+
+            /* Cancel before clearing s->conn: the pump is a callback FSM with
+             * no scope to cancel it, and it holds the file io + a stream pin. */
+            h3_static_cancel(s);
+
             s->conn = NULL;
 
             if (conn->nghttp3_conn != NULL) {

@@ -1,5 +1,5 @@
 /* This is a generated file, edit WebSocket.php.stub.php instead.
- * Stub hash: e8df45965d0a2e5b3dc1481708688d6abbf6892f */
+ * Stub hash: 8ddb413755de2818b1aaf47ccbf73366b7fec141 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_WebSocket___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -38,7 +38,9 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getSubprotocol, 0, 0, IS_STRING, 1)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getRemoteAddress, 0, 0, IS_STRING, 0)
+#define arginfo_class_TrueAsync_WebSocket_getRemoteAddress arginfo_class_TrueAsync_WebSocket_getSubprotocol
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getRemotePort, 0, 0, IS_LONG, 1)
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_WebSocket_current arginfo_class_TrueAsync_WebSocket_recv
@@ -64,6 +66,7 @@ ZEND_METHOD(TrueAsync_WebSocket, close);
 ZEND_METHOD(TrueAsync_WebSocket, isClosed);
 ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol);
 ZEND_METHOD(TrueAsync_WebSocket, getRemoteAddress);
+ZEND_METHOD(TrueAsync_WebSocket, getRemotePort);
 ZEND_METHOD(TrueAsync_WebSocket, current);
 ZEND_METHOD(TrueAsync_WebSocket, key);
 ZEND_METHOD(TrueAsync_WebSocket, next);
@@ -82,6 +85,7 @@ static const zend_function_entry class_TrueAsync_WebSocket_methods[] = {
 	ZEND_ME(TrueAsync_WebSocket, isClosed, arginfo_class_TrueAsync_WebSocket_isClosed, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getSubprotocol, arginfo_class_TrueAsync_WebSocket_getSubprotocol, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getRemoteAddress, arginfo_class_TrueAsync_WebSocket_getRemoteAddress, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, getRemotePort, arginfo_class_TrueAsync_WebSocket_getRemotePort, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, current, arginfo_class_TrueAsync_WebSocket_current, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, key, arginfo_class_TrueAsync_WebSocket_key, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, next, arginfo_class_TrueAsync_WebSocket_next, ZEND_ACC_PUBLIC)

@@ -62,6 +62,19 @@ typedef struct {
     const char *content_type;      size_t content_type_len;
     const char *download_name;     size_t download_name_len;
     const char *cache_control;     size_t cache_control_len;
+
+    /* The request side of the delivery. The reactor runs the sendfile engine
+     * long after the worker's dispose has freed its request — and those fields
+     * live in the worker's allocation domain, so the reactor must never touch
+     * them. Everything the engine reads off a request travels here instead:
+     * the method/URI it reports, and the four conditional headers it honours
+     * (RFC 9110 §13). NULL = header absent. */
+    const char *method;            size_t method_len;
+    const char *uri;               size_t uri_len;
+    const char *range;             size_t range_len;
+    const char *if_range;          size_t if_range_len;
+    const char *if_modified_since; size_t if_modified_since_len;
+    const char *if_none_match;     size_t if_none_match_len;
     int      status;
     uint8_t  disposition;
     bool     disposition_set;

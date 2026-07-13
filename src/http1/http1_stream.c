@@ -108,6 +108,11 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
         }
 
         ctx->h1_stream_headers_sent = true;
+
+        /* Headers on the wire = this response is now a streaming one. H2/H3
+         * count it on their first chunk too; without this an H1 stream showed
+         * up in the send/byte counters but never in streaming_responses_total. */
+        http_server_on_streaming_response_started(conn->counters);
     }
 
     /* Empty chunk is legal on the wire but would be indistinguishable

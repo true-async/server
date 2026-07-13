@@ -1,5 +1,5 @@
 --TEST--
-WebSocket: getRemoteAddress() returns the peer host:port
+WebSocket: getRemoteAddress() returns the bare peer IP, getRemotePort() the port
 --EXTENSIONS--
 true_async_server
 true_async
@@ -24,8 +24,9 @@ $config = (new HttpServerConfig())
 $server = new HttpServer($config);
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
-    // Report the peer address back as a text frame, then exit.
-    $ws->send($ws->getRemoteAddress());
+    // Report the peer back as a text frame, then exit. Address and port are
+    // separate accessors — the address is a bare IP, never "ip:port".
+    $ws->send($ws->getRemoteAddress() . '|' . $ws->getRemotePort());
 });
 
 $server->addHttpHandler(function ($req, $resp) { $resp->setStatusCode(404)->end(); });
@@ -75,10 +76,14 @@ $server->start();
 [$opcode, $payload] = await($client);
 
 echo "opcode: 0x", dechex($opcode), "\n";                       // 0x1 text
-echo "matches 127.0.0.1:<port>: ",
-     (preg_match('/^127\.0\.0\.1:\d{1,5}$/', $payload) ? 'yes' : "no ($payload)"), "\n";
+[$addr, $port] = explode('|', $payload, 2) + [1 => ''];
+echo "bare ip: ", ($addr === '127.0.0.1' ? 'yes' : "no ($addr)"), "\n";
+echo "is_ip:   ", (preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', $addr) ? 'yes' : 'no'), "\n";
+echo "port:    ", (preg_match('/^\d{1,5}$/', $port) && (int) $port > 0 ? 'yes' : "no ($port)"), "\n";
 echo "Done\n";
 --EXPECT--
 opcode: 0x1
-matches 127.0.0.1:<port>: yes
+bare ip: yes
+is_ip:   yes
+port:    yes
 Done

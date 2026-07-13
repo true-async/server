@@ -17,6 +17,7 @@
 #include "main/php_network.h"           /* php_socket_t, SOCK_ERR, closesocket, php_socket_errno */
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_hrtime.h"
+#include "Zend/zend_enum.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
 #include "core/http_connection_internal.h"
@@ -31,6 +32,7 @@
 #include "core/reactor_pool.h"
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
+#include "core/stats_registry.h"
 #include "core/response_wire.h"
 #include "core/stream_credit.h"
 #include "core/async_plain_event.h"   /* async_coroutine_sleep_ms */
@@ -44,6 +46,13 @@
 #ifdef HAVE_HTTP_SERVER_HTTP3
 # include "http3/http3_listener.h"
 # include "http3/http3_steer.h"
+/* Defined in http3_listener.c. Not in http3_listener.h — that header must stay
+ * free of php_http_server.h (circular). A reactor-spawned listener counts the
+ * requests it serves end to end on the transport thread into this slice; no
+ * worker slab slot exists for them, so getStats() folds it into the totals.
+ * Read cross-thread: advisory uint64s, a torn read is benign (same discipline
+ * as http3_listener_stats_ptr). */
+extern http_server_counters_t *http3_listener_local_counters(http3_listener_t *l);
 #endif
 
 /* Backpressure tunables. Hard-cap hysteresis ratio: pause_low = ratio *
@@ -427,8 +436,16 @@ struct http_server_object {
     /* Hot-path counters slice. Layout-public via php_http_server.h so
      * other TUs can bump fields directly via the inline helpers — one
      * load + one inc/add at the call site, no function call, no NULL
-     * check. Connections cache &server->counters at create time. */
+     * check. Connections cache counters_live (below) at create time. */
     http_server_counters_t   counters;
+
+    /* Live counter target (issue #5, A2). &counters for a standalone/parent
+     * server; the shared stats-slab slot for a pool worker. Everything that is
+     * not already reaching through a cached conn->counters pointer goes via
+     * this, so the telemetry API can sum each worker's slot. stats_slot is the
+     * claimed slab index, -1 when the server owns no slot. */
+    http_server_counters_t  *counters_live;
+    int                      stats_slot;
 
     /* Config values (cached). Timeouts are in seconds; 0 = disabled.
      * Unsigned gives non-negative semantics without sentinel confusion.
@@ -1040,7 +1057,7 @@ bool http_server_should_shed_request(const http_server_object *server)
      * catches it: once max_inflight_requests is hit, those same
      * existing connections also get 503 / REFUSED_STREAM. */
     if (server->max_inflight_requests > 0
-        && server->counters.active_requests >= server->max_inflight_requests) {
+        && server->counters_live->active_requests >= server->max_inflight_requests) {
         return true;
     }
 
@@ -1114,7 +1131,7 @@ const http_server_view_t http_server_view_default = {
  * cache once at create time. */
 http_server_counters_t *http_server_counters(http_server_object *server)
 {
-    return server != NULL ? &server->counters : &http_server_counters_dummy;
+    return server != NULL ? server->counters_live : &http_server_counters_dummy;
 }
 
 const http_server_view_t *http_server_view(const http_server_object *server)
@@ -1222,6 +1239,116 @@ http_server_config_t *http_server_get_config(http_server_object *server)
 http_log_state_t *http_server_get_log_state(http_server_object *server)
 {
     return server != NULL ? &server->log_state : &http_log_state_default;
+}
+
+/* Translate the config's log sinks (or the log_severity/log_stream sugar) into
+ * http_log_sink_spec_t and activate the logger. Specs are validated at
+ * setLogSinks() time, so reads here are unchecked; each sink's transport and
+ * formatter come from the sink-type / formatter registry (http_log.c). opened[]
+ * holds the per-sink stream ref only until start_sinks takes its own. */
+static void http_server_start_logging(http_server_object *server,
+                                      http_server_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return;
+    }
+
+    http_log_sink_spec_t specs[HTTP_LOG_MAX_SINKS];
+    zval                 opened[HTTP_LOG_MAX_SINKS];
+    int                  n = 0;
+
+    for (int i = 0; i < HTTP_LOG_MAX_SINKS; i++) {
+        ZVAL_UNDEF(&opened[i]);
+    }
+
+    if (Z_TYPE(cfg->log_sinks) == IS_ARRAY
+        && zend_hash_num_elements(Z_ARRVAL(cfg->log_sinks)) > 0) {
+
+        zval *elem;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(cfg->log_sinks), elem) {
+            if (n >= HTTP_LOG_MAX_SINKS) {
+                break;
+            }
+
+            HashTable *spec  = Z_ARRVAL_P(elem);
+            zval      *ztype = zend_hash_str_find(spec, "type", sizeof("type") - 1);
+
+            const http_log_sink_type_t *type =
+                http_log_sink_type_by_name(Z_STRVAL_P(ztype), Z_STRLEN_P(ztype));
+            http_log_write_mode_t mode = HTTP_LOG_WRITE_STREAM;
+
+            if (type == NULL) {
+                continue;
+            }
+
+            if (!type->open(spec, &opened[n], &mode)) {
+                /* Unreachable target, or a parent-opened 'stream' resource
+                 * that cannot cross into this worker thread (use 'file'). */
+                fprintf(stderr,
+                        "http_server: log sink type '%s' skipped (open failed)\n",
+                        Z_STRVAL_P(ztype));
+                continue;
+            }
+
+            const http_log_formatter_def_t *fdef = type->pinned_formatter;
+
+            if (fdef == NULL) {
+                zval *zfmt = zend_hash_str_find(spec, "format", sizeof("format") - 1);
+
+                if (zfmt != NULL) {
+                    fdef = http_log_formatter_by_name(Z_STRVAL_P(zfmt),
+                                                      Z_STRLEN_P(zfmt));
+                }
+                if (fdef == NULL) {
+                    fdef = http_log_formatter_by_name("plain", sizeof("plain") - 1);
+                }
+            }
+
+            zval *zlvl    = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+            zval *backing = zend_enum_fetch_case_value(Z_OBJ_P(zlvl));
+            zval *zcat    = zend_hash_str_find(spec, "category", sizeof("category") - 1);
+
+            specs[n].category_mask = zcat != NULL
+                ? http_log_category_mask(Z_STRVAL_P(zcat), Z_STRLEN_P(zcat))
+                : HTTP_LOG_CAT_APP;
+            specs[n].level        = (http_log_severity_t)Z_LVAL_P(backing);
+            specs[n].formatter    = fdef != NULL ? fdef->fn : http_log_format_plain;
+            specs[n].formatter_ud = (fdef != NULL && fdef->make_ud != NULL)
+                                  ? fdef->make_ud(spec, &opened[n]) : NULL;
+            specs[n].formatter_ud_free = fdef != NULL ? fdef->free_ud : NULL;
+            specs[n].stream_zv    = &opened[n];
+            specs[n].write_mode   = mode;
+            n++;
+        } ZEND_HASH_FOREACH_END();
+
+    } else if (cfg->log_severity != 0 && Z_TYPE(cfg->log_stream) != IS_UNDEF) {
+        specs[0].level             = (http_log_severity_t)cfg->log_severity;
+        specs[0].category_mask     = HTTP_LOG_CAT_APP;
+        specs[0].formatter         = http_log_format_plain;
+        specs[0].formatter_ud      = NULL;
+        specs[0].formatter_ud_free = NULL;
+        specs[0].stream_zv         = &cfg->log_stream;
+        specs[0].write_mode        = HTTP_LOG_WRITE_STREAM;
+        n = 1;
+    }
+
+    http_log_server_start_sinks(&server->log_state, specs, n);
+
+    /* Emits on this thread charge their drops to this server's counters — the
+     * worker clone's slab slot, or the parent's own slice. */
+    http_log_set_thread_drop_counter(&server->counters_live->log_records_dropped_total);
+
+    /* The access record's duration comes from the request stamps that CoDel/
+     * telemetry normally gate; an access sink is a third consumer. */
+    if (server->log_state.has_access) {
+        server->view.sample_stamps_enabled = true;
+    }
+
+    for (int i = 0; i < HTTP_LOG_MAX_SINKS; i++) {
+        if (Z_TYPE(opened[i]) != IS_UNDEF) {
+            zval_ptr_dtor(&opened[i]);
+        }
+    }
 }
 
 void http_server_trigger_drain(http_server_object *server)
@@ -1341,7 +1468,7 @@ void http_server_bind_connection(http_server_object *server,
     }
 
     http_connection_t *real = (http_connection_t *)conn;
-    real->counters  = &server->counters;
+    real->counters  = server->counters_live;
     real->view      = &server->view;
     real->log_state = &server->log_state;
     /* Live config pointer for hot-path readers (compression, future
@@ -2173,6 +2300,13 @@ static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
  * One per process, shared across all threads. */
 static worker_registry_t *g_worker_registry = NULL;
 
+/* Process-wide per-worker statistics slab (issue #5, A1). Created by the pool
+ * parent sized to the worker count; each worker claims a slot (A2); the
+ * telemetry API walks it lock-free. NULL outside pool mode — a single-worker
+ * server reads its own embedded counters instead. Gating on setStatsEnabled
+ * lands in A3; A1 always allocates it. */
+static http_stats_registry_t *g_stats_registry = NULL;
+
 /* Process-wide reactor pool handle. The pool itself is owned by the parent's
  * http_server_object; this global lets a worker thread reach it to post
  * responses back over the reverse channel (reactor_pool_post_exec), addressed by
@@ -2329,6 +2463,7 @@ static size_t http_server_reactor_h3_spawn(http_server_object *server, const int
             (cache_max > 0 && cache_ttl > 0)
                 ? http_static_cache_create((size_t)cache_max, (time_t)cache_ttl)
                 : NULL;
+        server->reactor_h3_ctx[r].log_state           = &server->log_state;
     }
 
     void *const ssl_ctx = server->reactor_tls_ctx->ctx;
@@ -2891,6 +3026,74 @@ static void http_server_worker_inbox_retire(http_server_object *server)
                    worker_inbox_depth(server->worker_inbox));
 }
 
+/* Claim this worker clone's stats slab slot and point its live counters at it,
+ * so the telemetry API can sum every worker's counters. Idempotent — a reload
+ * keeps the same slot — and a no-op for a standalone/parent server or when no
+ * slab exists (manual ThreadPool mode). Runs on the worker thread at start,
+ * before any connection caches the counters pointer. */
+static void http_server_stats_up(http_server_object *server)
+{
+    if (server->stats_slot >= 0
+        || g_stats_registry == NULL
+        || !server->is_worker_clone) {
+        return;
+    }
+
+    const int slot = http_stats_registry_claim(g_stats_registry);
+
+    if (slot < 0) {
+        return;
+    }
+
+    server->stats_slot    = slot;
+    server->counters_live = &http_stats_registry_at(g_stats_registry, slot)->counters;
+}
+
+/* Release this worker's slab slot on teardown and drop its live counters back
+ * to the embedded slice. Safe after the pool parent already freed the slab —
+ * retire NULL-guards on the (now-cleared) registry. */
+static void http_server_stats_down(http_server_object *server)
+{
+    if (server->stats_slot < 0) {
+        return;
+    }
+
+    http_stats_registry_retire(g_stats_registry, server->stats_slot);
+    server->stats_slot    = -1;
+    server->counters_live = &server->counters;
+}
+
+#ifdef HTTP_SERVER_TEST_HOOKS
+/* Test-only: snapshot each active slab slot's total_requests into out[] (up to
+ * max), returning the active-slot count. Proves pool workers bump their own
+ * slot rather than an embedded counter. Any thread (lock-free read). */
+int http_server_stats_slab_snapshot(uint64_t *out, const int max)
+{
+    if (g_stats_registry == NULL) {
+        return 0;
+    }
+
+    int n = 0;
+    const int cap = http_stats_registry_capacity(g_stats_registry);
+
+    for (int i = 0; i < cap; i++) {
+        const http_stats_slot_t *const slot = http_stats_registry_at(g_stats_registry, i);
+
+        if (!http_stats_slot_active(slot)) {
+            continue;
+        }
+
+        if (out != NULL && n < max) {
+            out[n] = slot->counters.total_requests;
+        }
+
+        n++;
+    }
+
+    return n;
+}
+#endif
+
 /* Stand up this worker clone's request inbox and publish it to the shared
  * registry so a reactor can route requests to it. Gated + H3-only + clone-only;
  * a no-op otherwise. Runs on the worker thread after its server scope exists. */
@@ -2954,11 +3157,7 @@ static int http_server_start_pool(http_server_object *server,
     /* The pool parent gets its own log lifecycle: reload() reports through it
      * (issue #93), and pool-mode start/stop become visible like worker ones. */
     if (boot_cfg != NULL) {
-        zval *log_stream = (Z_TYPE(boot_cfg->log_stream) != IS_UNDEF)
-                         ? &boot_cfg->log_stream : NULL;
-        http_log_server_start(&server->log_state,
-                              (http_log_severity_t)boot_cfg->log_severity,
-                              log_stream);
+        http_server_start_logging(server, boot_cfg);
         http_logf_info(&server->log_state, "server.start mode=pool workers=%d",
                        workers);
     }
@@ -3039,6 +3238,23 @@ static int http_server_start_pool(http_server_object *server,
      * workers, so a worker that comes up fast finds the registry ready to
      * publish into. */
     http_server_reactor_pool_up(server, workers);
+
+    /* Per-worker stats slab (issue #5): one slot per worker, ready before any
+     * worker claims one. Opt-in via setStatsEnabled; not gated behind the
+     * reactor pool — telemetry applies to plain pool mode too. */
+    const http_server_config_t *const stats_cfg = http_server_get_config(server);
+    if (stats_cfg != NULL && stats_cfg->stats_enabled) {
+        g_stats_registry = http_stats_registry_create(workers);
+
+        /* Don't let a failed slab masquerade as a one-worker server: getStats()
+         * falls back to the parent's own counters when the registry is NULL, so
+         * say so rather than report a silently wrong aggregate. */
+        if (g_stats_registry == NULL) {
+            fprintf(stderr, "http_server: stats slab allocation failed for %d "
+                            "workers; getStats() will report the parent only\n",
+                    workers);
+        }
+    }
 
     pool_await_state_t *st = ecalloc(1, sizeof(*st));
     st->pending = workers;
@@ -3139,6 +3355,13 @@ cleanup:
      * frees the worker registry, and stops the reactor loops. */
     http_server_reactor_pool_down(server);
 
+    /* Workers have quiesced — free the stats slab after them (no claim/retire
+     * can race the free now). */
+    if (g_stats_registry != NULL) {
+        http_stats_registry_free(g_stats_registry);
+        g_stats_registry = NULL;
+    }
+
     if (st->all_done != NULL) {
         st->all_done->dispose(st->all_done);
     }
@@ -3229,6 +3452,11 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         }
     }
 
+    /* A pool worker claims its stats slab slot before any counter is touched,
+     * so every subsequent read/write (and every conn that caches the pointer)
+     * lands in the worker's own slot. */
+    http_server_stats_up(server);
+
     /* Get config values - call PHP methods */
     zval retval;
 
@@ -3254,7 +3482,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     }
 
     server->max_inflight_requests = cfg_inflight;
-    server->counters.active_requests = 0;
+    server->counters_live->active_requests = 0;
 
     /* Derive backpressure thresholds from max_connections. pause_high = cap,
      * pause_low = 80% of cap (floor 1 below high). When max_connections=0
@@ -3363,11 +3591,13 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isBodyStreamingEnabled", &retval);
     server->view.body_streaming_enabled = (Z_TYPE(retval) == IS_TRUE);
 
-    /* Stamps drive CoDel sojourn samples and the telemetry aggregate
-     * (sojourn_sum / service_sum / sojourn_max). Drain falls back to a
-     * fresh hrtime when end_ns is 0, so it does not require stamps. */
+    /* Stamps drive CoDel sojourn samples, the telemetry aggregate
+     * (sojourn_sum / service_sum / sojourn_max) and the access-log duration.
+     * Drain falls back to a fresh hrtime when end_ns is 0, so it does not
+     * require stamps. */
     server->view.sample_stamps_enabled =
-        (server->codel_target_ns != 0) || server->view.telemetry_enabled;
+        (server->codel_target_ns != 0) || server->view.telemetry_enabled
+        || server->log_state.has_access;
 
     /* Mirror configured max_body_size into the global parser pool.
      * Both the H1 parser (via http_parser_create on checkout) and the
@@ -3825,11 +4055,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     {
         http_server_config_t *cfg = http_server_config_from_obj(Z_OBJ(server->config));
-        zval *log_stream = (Z_TYPE(cfg->log_stream) != IS_UNDEF)
-                         ? &cfg->log_stream : NULL;
-        http_log_server_start(&server->log_state,
-                              (http_log_severity_t)cfg->log_severity,
-                              log_stream);
+        http_server_start_logging(server, cfg);
         http_logf_info(&server->log_state,
                        "server.start backlog=%d max_connections=%d",
                        server->backlog, server->max_connections);
@@ -4612,11 +4838,11 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     array_init(return_value);
-    add_assoc_long(return_value, "total_requests", (zend_long)server->counters.total_requests);
+    add_assoc_long(return_value, "total_requests", (zend_long)server->counters_live->total_requests);
     add_assoc_long(return_value, "active_connections", server->active_connections);
-    add_assoc_long(return_value, "active_requests", (zend_long)server->counters.active_requests);
+    add_assoc_long(return_value, "active_requests", (zend_long)server->counters_live->active_requests);
     add_assoc_long(return_value, "max_inflight_requests", (zend_long)server->max_inflight_requests);
-    add_assoc_long(return_value, "requests_shed_total", (zend_long)server->counters.requests_shed_total);
+    add_assoc_long(return_value, "requests_shed_total", (zend_long)server->counters_live->requests_shed_total);
     add_assoc_long(return_value, "bytes_received", 0);  /* TODO */
     add_assoc_long(return_value, "bytes_sent", 0);      /* TODO */
     add_assoc_long(return_value, "errors", 0);          /* TODO */
@@ -4652,10 +4878,10 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
                        ? (double)server->tls_handshake_ns_sum / (double)server->tls_handshake_ns_count * ns_to_ms
                        : 0.0);
     add_assoc_long  (return_value, "tls_resumed_total",              (zend_long)server->tls_resumed_total);
-    add_assoc_long  (return_value, "tls_bytes_plaintext_in_total",   (zend_long)server->counters.tls_bytes_plaintext_in_total);
-    add_assoc_long  (return_value, "tls_bytes_plaintext_out_total",  (zend_long)server->counters.tls_bytes_plaintext_out_total);
-    add_assoc_long  (return_value, "tls_bytes_ciphertext_in_total",  (zend_long)server->counters.tls_bytes_ciphertext_in_total);
-    add_assoc_long  (return_value, "tls_bytes_ciphertext_out_total", (zend_long)server->counters.tls_bytes_ciphertext_out_total);
+    add_assoc_long  (return_value, "tls_bytes_plaintext_in_total",   (zend_long)server->counters_live->tls_bytes_plaintext_in_total);
+    add_assoc_long  (return_value, "tls_bytes_plaintext_out_total",  (zend_long)server->counters_live->tls_bytes_plaintext_out_total);
+    add_assoc_long  (return_value, "tls_bytes_ciphertext_in_total",  (zend_long)server->counters_live->tls_bytes_ciphertext_in_total);
+    add_assoc_long  (return_value, "tls_bytes_ciphertext_out_total", (zend_long)server->counters_live->tls_bytes_ciphertext_out_total);
     add_assoc_long  (return_value, "tls_ktls_tx_total",              (zend_long)server->tls_ktls_tx_total);
     add_assoc_long  (return_value, "tls_ktls_rx_total",              (zend_long)server->tls_ktls_rx_total);
 
@@ -4680,49 +4906,49 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long(return_value, "connections_drained_proactive_total",
                    (zend_long)server->connections_drained_proactive_total);
     add_assoc_long(return_value, "h2_goaway_sent_total",
-                   (zend_long)server->counters.h2_goaway_sent_total);
+                   (zend_long)server->counters_live->h2_goaway_sent_total);
     add_assoc_long(return_value, "h3_goaway_sent_total",
-                   (zend_long)server->counters.h3_goaway_sent_total);
+                   (zend_long)server->counters_live->h3_goaway_sent_total);
     add_assoc_long(return_value, "h1_connection_close_sent_total",
-                   (zend_long)server->counters.h1_connection_close_sent_total);
+                   (zend_long)server->counters_live->h1_connection_close_sent_total);
     add_assoc_long(return_value, "connections_force_closed_total",
                    (zend_long)server->connections_force_closed_total);
 
     /* Streaming-response telemetry. */
     add_assoc_long(return_value, "streaming_responses_total",
-                   (zend_long)server->counters.streaming_responses_total);
+                   (zend_long)server->counters_live->streaming_responses_total);
     add_assoc_long(return_value, "stream_send_calls_total",
-                   (zend_long)server->counters.stream_send_calls_total);
+                   (zend_long)server->counters_live->stream_send_calls_total);
     add_assoc_long(return_value, "stream_send_backpressure_events_total",
-                   (zend_long)server->counters.stream_send_backpressure_events_total);
+                   (zend_long)server->counters_live->stream_send_backpressure_events_total);
     add_assoc_long(return_value, "stream_bytes_sent_total",
-                   (zend_long)server->counters.stream_bytes_sent_total);
+                   (zend_long)server->counters_live->stream_bytes_sent_total);
 
     /* StaticHandler hard-zero hit counter (issue #13). */
     add_assoc_long(return_value, "static_zero_coroutine_total",
-                   (zend_long)server->counters.static_zero_coroutine_total);
+                   (zend_long)server->counters_live->static_zero_coroutine_total);
     add_assoc_long(return_value, "static_cache_hits_total",
-                   (zend_long)server->counters.static_cache_hits_total);
+                   (zend_long)server->counters_live->static_cache_hits_total);
     add_assoc_long(return_value, "static_cache_misses_total",
-                   (zend_long)server->counters.static_cache_misses_total);
+                   (zend_long)server->counters_live->static_cache_misses_total);
 
     /* HTTP/2 stream-level telemetry. */
     add_assoc_long(return_value, "h2_streams_active",
-                   (zend_long)server->counters.h2_streams_active);
+                   (zend_long)server->counters_live->h2_streams_active);
     add_assoc_long(return_value, "h2_streams_opened_total",
-                   (zend_long)server->counters.h2_streams_opened_total);
+                   (zend_long)server->counters_live->h2_streams_opened_total);
     add_assoc_long(return_value, "h2_streams_reset_by_peer_total",
-                   (zend_long)server->counters.h2_streams_reset_by_peer_total);
+                   (zend_long)server->counters_live->h2_streams_reset_by_peer_total);
     add_assoc_long(return_value, "h2_streams_refused_total",
-                   (zend_long)server->counters.h2_streams_refused_total);
+                   (zend_long)server->counters_live->h2_streams_refused_total);
     add_assoc_long(return_value, "h2_goaway_recv_total",
-                   (zend_long)server->counters.h2_goaway_recv_total);
+                   (zend_long)server->counters_live->h2_goaway_recv_total);
     add_assoc_long(return_value, "h2_data_recv_bytes_total",
-                   (zend_long)server->counters.h2_data_recv_bytes_total);
+                   (zend_long)server->counters_live->h2_data_recv_bytes_total);
     add_assoc_long(return_value, "h2_data_sent_bytes_total",
-                   (zend_long)server->counters.h2_data_sent_bytes_total);
+                   (zend_long)server->counters_live->h2_data_sent_bytes_total);
     add_assoc_long(return_value, "h2_ping_rtt_ns",
-                   (zend_long)server->counters.h2_ping_rtt_ns);
+                   (zend_long)server->counters_live->h2_ping_rtt_ns);
 }
 /* }}} */
 
@@ -4733,10 +4959,10 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
 
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
-    server->counters.total_requests = 0;
-    server->counters.static_zero_coroutine_total = 0;
-    server->counters.static_cache_hits_total     = 0;
-    server->counters.static_cache_misses_total   = 0;
+    server->counters_live->total_requests = 0;
+    server->counters_live->static_zero_coroutine_total = 0;
+    server->counters_live->static_cache_hits_total     = 0;
+    server->counters_live->static_cache_misses_total   = 0;
     server->sojourn_sum_ns       = 0;
     server->service_sum_ns       = 0;
     server->sojourn_max_ns       = 0;
@@ -4749,10 +4975,10 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->tls_handshake_ns_sum           = 0;
     server->tls_handshake_ns_count         = 0;
     server->tls_resumed_total              = 0;
-    server->counters.tls_bytes_plaintext_in_total   = 0;
-    server->counters.tls_bytes_plaintext_out_total  = 0;
-    server->counters.tls_bytes_ciphertext_in_total  = 0;
-    server->counters.tls_bytes_ciphertext_out_total = 0;
+    server->counters_live->tls_bytes_plaintext_in_total   = 0;
+    server->counters_live->tls_bytes_plaintext_out_total  = 0;
+    server->counters_live->tls_bytes_ciphertext_in_total  = 0;
+    server->counters_live->tls_bytes_ciphertext_out_total = 0;
     server->tls_ktls_tx_total              = 0;
     server->tls_ktls_rx_total              = 0;
     server->parse_errors_4xx_total         = 0;
@@ -4761,34 +4987,168 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->parse_errors_414_total         = 0;
     server->parse_errors_431_total         = 0;
     server->parse_errors_503_total         = 0;
-    server->counters.requests_shed_total            = 0;
-    server->counters.h2_streams_refused_total       = 0;
+    server->counters_live->requests_shed_total            = 0;
+    server->counters_live->h2_streams_refused_total       = 0;
 
     /* Drain counters. drain_epoch_current / drain_last_fired_ns are
      * runtime state, NOT cleared (same rationale as paused_since_ns). */
     server->connections_drained_reactive_total   = 0;
     server->connections_drained_proactive_total  = 0;
-    server->counters.h2_goaway_sent_total                 = 0;
-    server->counters.h3_goaway_sent_total                 = 0;
-    server->counters.h1_connection_close_sent_total       = 0;
+    server->counters_live->h2_goaway_sent_total                 = 0;
+    server->counters_live->h3_goaway_sent_total                 = 0;
+    server->counters_live->h1_connection_close_sent_total       = 0;
     server->connections_force_closed_total       = 0;
     server->drain_events_reactive_total          = 0;
     server->drain_events_cooldown_blocked_total  = 0;
-    /* Streaming counters. */
-    memset(&server->counters, 0, sizeof(server->counters));
-    /* HTTP/2 stream telemetry. Active count is
-     * live state — NOT cleared (otherwise operators would see a
-     * negative drift as close events decrement past zero). */
-    server->counters.h2_streams_opened_total                = 0;
-    server->counters.h2_streams_reset_by_peer_total         = 0;
-    server->counters.h2_goaway_recv_total                   = 0;
-    server->counters.h2_data_recv_bytes_total               = 0;
-    server->counters.h2_data_sent_bytes_total               = 0;
-    server->counters.h2_ping_rtt_ns                         = 0;
+    /* Blanket-reset the counters, but carry the live occupancy gauges across:
+     * active_requests, conns_active_* and h2_streams_active are current state,
+     * and zeroing them mid-flight would make the next close decrement underflow
+     * a uint64. */
+    const uint64_t live_active_requests  = server->counters_live->active_requests;
+    const uint64_t live_conns_h1         = server->counters_live->conns_active_h1;
+    const uint64_t live_conns_h2         = server->counters_live->conns_active_h2;
+    const uint64_t live_conns_h3         = server->counters_live->conns_active_h3;
+    const uint64_t live_h2_streams       = server->counters_live->h2_streams_active;
+
+    memset(server->counters_live, 0, sizeof(*server->counters_live));
+
+    server->counters_live->active_requests  = live_active_requests;
+    server->counters_live->conns_active_h1  = live_conns_h1;
+    server->counters_live->conns_active_h2  = live_conns_h2;
+    server->counters_live->conns_active_h3  = live_conns_h3;
+    server->counters_live->h2_streams_active = live_h2_streams;
     /* Don't reset paused_since_ns or CoDel runtime state — those track
      * live pause and would confuse the control loop if cleared mid-flight. */
 
     RETURN_TRUE;
+}
+/* }}} */
+
+/* Emit one counters slice as assoc entries (issue #5, A4). Shared by every
+ * worker entry and the summed totals block. */
+/* The counter field table, materialised. Name, byte offset and how the value
+ * combines across workers — see HTTP_SERVER_COUNTER_TABLE in php_http_server.h. */
+static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
+{
+    for (size_t i = 0, n = http_stats_field_count(); i < n; i++) {
+        add_assoc_long(arr, http_stats_field_name(i),
+                       (zend_long)http_stats_field_get(c, i));
+    }
+}
+
+/* {{{ proto HttpServer::getStats(): array
+ *
+ * Cross-worker statistics aggregate (issue #5). Opt-in: throws when
+ * setStatsEnabled(true) was not set. Returns
+ *   { enabled: true, workers: { <id>: {..counters..}, ... }, totals: {..} }
+ * In pool mode it walks the shared slab, reading each worker's slot lock-free
+ * (no CAS); a slot mid-retire is skipped, so the aggregate can be stale by one
+ * worker — acceptable for statistics. A single-worker server reports its own
+ * counters as the sole worker. */
+ZEND_METHOD(TrueAsync_HttpServer, getStats)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *const server = Z_HTTP_SERVER_P(ZEND_THIS);
+    const http_server_config_t *const cfg = http_server_get_config(server);
+
+    if (cfg == NULL || !cfg->stats_enabled) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Statistics are not enabled — call HttpServerConfig::setStatsEnabled(true)", 0);
+        RETURN_THROWS();
+    }
+
+    http_server_counters_t totals;
+    memset(&totals, 0, sizeof(totals));
+
+    zval workers;
+    array_init(&workers);
+
+    if (g_stats_registry != NULL) {
+        const int cap = http_stats_registry_capacity(g_stats_registry);
+
+        /* 'workers' lists the live slots; 'totals' also inherits the monotonic
+         * counts of workers that have already exited, so a pool reload does not
+         * make a total run backwards. */
+        for (int i = 0; i < cap; i++) {
+            const http_stats_slot_t *const slot = http_stats_registry_at(g_stats_registry, i);
+
+            if (!http_stats_slot_active(slot)) {
+                continue;
+            }
+
+            zval w;
+            array_init(&w);
+            stats_counters_to_zval(&w, &slot->counters);
+            add_index_zval(&workers, (zend_long)slot->worker_id, &w);
+        }
+
+        http_stats_registry_totals(g_stats_registry, &totals);
+    } else {
+        /* Single-worker / non-pool: the server's own counters are the one slot. */
+        zval w;
+        array_init(&w);
+        stats_counters_to_zval(&w, server->counters_live);
+        add_index_zval(&workers, 0, &w);
+        http_stats_counters_add(&totals, server->counters_live);
+    }
+
+    /* Reactor-owned counters. A request the transport thread serves end to end
+     * (static hard-zero, the reactor half of a marshalled sendFile) never
+     * touches a worker slot, so without this it would be missing from totals.
+     * Listed separately because a reactor is not a worker, and folded in so
+     * `totals` stays the sum of everything reported here. */
+    zval reactors;
+    array_init(&reactors);
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* One reactor can own several listeners (one per UDP endpoint) and their
+     * counters belong to the same thread, so sum per reactor id before
+     * emitting. reactor_h3_listeners is MAX_LISTENERS-bounded, so a reactor id
+     * indexes this scratch array directly. */
+    http_server_counters_t per_reactor[MAX_LISTENERS];
+    bool                   reactor_seen[MAX_LISTENERS] = { false };
+
+    for (size_t i = 0; i < server->reactor_h3_listener_count; i++) {
+        http3_listener_t *const l = server->reactor_h3_listeners[i].listener;
+        const int rid = server->reactor_h3_listeners[i].reactor_id;
+
+        if (l == NULL || rid < 0 || rid >= MAX_LISTENERS) {
+            continue;
+        }
+
+        const http_server_counters_t *const c = http3_listener_local_counters(l);
+
+        if (!reactor_seen[rid]) {
+            memset(&per_reactor[rid], 0, sizeof(per_reactor[rid]));
+            reactor_seen[rid] = true;
+        }
+
+        http_stats_counters_add(&per_reactor[rid], c);
+        http_stats_counters_add(&totals, c);
+    }
+
+    for (int rid = 0; rid < MAX_LISTENERS; rid++) {
+        if (!reactor_seen[rid]) {
+            continue;
+        }
+
+        zval r;
+        array_init(&r);
+        stats_counters_to_zval(&r, &per_reactor[rid]);
+        add_index_zval(&reactors, (zend_long)rid, &r);
+    }
+#endif
+
+    array_init(return_value);
+    add_assoc_bool(return_value, "enabled", true);
+    add_assoc_zval(return_value, "workers", &workers);
+    add_assoc_zval(return_value, "reactors", &reactors);
+
+    zval totals_zv;
+    array_init(&totals_zv);
+    stats_counters_to_zval(&totals_zv, &totals);
+    add_assoc_zval(return_value, "totals", &totals_zv);
 }
 /* }}} */
 
@@ -4811,113 +5171,37 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
  * its own thread); they are advisory uint64s, so a torn read is benign. */
 static void http3_emit_listener_stats(zval *return_value, http3_listener_t *listener)
 {
-    http3_listener_stats_t s;
-    http3_listener_get_stats(listener, &s);
+    const http3_listener_stats_t *const s = http3_listener_stats_ptr(listener);
+
+    if (s == NULL) {
+        return;
+    }
 
     zval entry;
     array_init(&entry);
     add_assoc_string(&entry, "host", (char *)http3_listener_host(listener));
     add_assoc_long  (&entry, "port", http3_listener_port(listener));
-    add_assoc_long  (&entry, "datagrams_received", (zend_long)s.datagrams_received);
-    add_assoc_long  (&entry, "bytes_received",     (zend_long)s.bytes_received);
-    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)s.datagrams_errored);
-    add_assoc_long  (&entry, "last_datagram_size", (zend_long)s.last_datagram_size);
-    add_assoc_string(&entry, "last_peer",          s.last_peer);
+    add_assoc_long  (&entry, "datagrams_received", (zend_long)http_relaxed_load_u64(&s->datagrams_received));
+    add_assoc_long  (&entry, "bytes_received",     (zend_long)http_relaxed_load_u64(&s->bytes_received));
+    add_assoc_long  (&entry, "datagrams_errored",  (zend_long)http_relaxed_load_u64(&s->datagrams_errored));
+    add_assoc_long  (&entry, "poll_rearms",        (zend_long)http_relaxed_load_u64(&s->poll_rearms));
+    add_assoc_long  (&entry, "last_datagram_size", (zend_long)s->last_datagram_size);
+    add_assoc_string(&entry, "last_peer",          (char *)s->last_peer);
 
-    /* QUIC packet classification counters. */
-    add_assoc_long(&entry, "quic_initial",            (zend_long)s.packet.quic_initial);
-    add_assoc_long(&entry, "quic_short_header",       (zend_long)s.packet.quic_short_header);
-    add_assoc_long(&entry, "quic_version_negotiated", (zend_long)s.packet.quic_version_negotiated);
-    add_assoc_long(&entry, "quic_parse_errors",       (zend_long)s.packet.quic_parse_errors);
-    /* ngtcp2_conn lifecycle counters. */
-    add_assoc_long(&entry, "quic_conn_accepted",      (zend_long)s.packet.quic_conn_accepted);
-    add_assoc_long(&entry, "quic_conn_rejected",      (zend_long)s.packet.quic_conn_rejected);
-    /* Read-path counters. */
-    add_assoc_long(&entry, "quic_read_ok",            (zend_long)s.packet.quic_read_ok);
-    add_assoc_long(&entry, "quic_read_error",         (zend_long)s.packet.quic_read_error);
-    add_assoc_long(&entry, "quic_read_fatal",         (zend_long)s.packet.quic_read_fatal);
-    add_assoc_long(&entry, "quic_path_migrations",    (zend_long)s.packet.quic_path_migrations);
-    add_assoc_long(&entry, "quic_migration_storm_shed", (zend_long)s.packet.quic_migration_storm_shed);
-    /* CID steering. */
-    add_assoc_long(&entry, "quic_steered_out",        (zend_long)s.packet.quic_steered_out);
-    add_assoc_long(&entry, "quic_steered_in",         (zend_long)s.packet.quic_steered_in);
-    add_assoc_long(&entry, "quic_steered_drop",       (zend_long)s.packet.quic_steered_drop);
-    /* Issued / retired alternate CIDs (NEW_CONNECTION_ID, RFC 9000 §5.1). */
-    add_assoc_long(&entry, "quic_new_cid_issued",     (zend_long)s.packet.quic_new_cid_issued);
-    add_assoc_long(&entry, "quic_cid_retired",        (zend_long)s.packet.quic_cid_retired);
-    /* Write-loop + timer counters. */
-    add_assoc_long(&entry, "quic_packets_sent",       (zend_long)s.packet.quic_packets_sent);
-    add_assoc_long(&entry, "quic_bytes_sent",         (zend_long)s.packet.quic_bytes_sent);
-    add_assoc_long(&entry, "quic_timer_fired",        (zend_long)s.packet.quic_timer_fired);
-    add_assoc_long(&entry, "quic_write_error",        (zend_long)s.packet.quic_write_error);
-    /* Handshake / ALPN counters. */
-    add_assoc_long(&entry, "quic_handshake_completed", (zend_long)s.packet.quic_handshake_completed);
-    add_assoc_long(&entry, "quic_alpn_mismatch",       (zend_long)s.packet.quic_alpn_mismatch);
-    /* nghttp3 lifecycle counters. */
-    add_assoc_long(&entry, "h3_init_ok",            (zend_long)s.packet.h3_init_ok);
-    add_assoc_long(&entry, "h3_init_failed",        (zend_long)s.packet.h3_init_failed);
-    add_assoc_long(&entry, "h3_stream_close",       (zend_long)s.packet.h3_stream_close);
-    add_assoc_long(&entry, "h3_stream_read_error",  (zend_long)s.packet.h3_stream_read_error);
-    /* Request-assembly counters. */
-    add_assoc_long(&entry, "h3_request_received",   (zend_long)s.packet.h3_request_received);
-    add_assoc_long(&entry, "h3_request_oversized",  (zend_long)s.packet.h3_request_oversized);
-    add_assoc_long(&entry, "h3_streams_opened",     (zend_long)s.packet.h3_streams_opened);
-    /* Response counters. */
-    add_assoc_long(&entry, "h3_response_submitted",   (zend_long)s.packet.h3_response_submitted);
-    add_assoc_long(&entry, "h3_response_submit_error",(zend_long)s.packet.h3_response_submit_error);
-    /* Connection lifecycle counters. */
-    add_assoc_long(&entry, "quic_connection_close_sent", (zend_long)s.packet.quic_connection_close_sent);
-    add_assoc_long(&entry, "quic_conn_in_closing",       (zend_long)s.packet.quic_conn_in_closing);
-    add_assoc_long(&entry, "quic_conn_in_draining",      (zend_long)s.packet.quic_conn_in_draining);
-    add_assoc_long(&entry, "quic_conn_idle_closed",      (zend_long)s.packet.quic_conn_idle_closed);
-    add_assoc_long(&entry, "quic_conn_handshake_timeout",(zend_long)s.packet.quic_conn_handshake_timeout);
-    add_assoc_long(&entry, "quic_conn_reaped",           (zend_long)s.packet.quic_conn_reaped);
-    add_assoc_long(&entry, "quic_stateless_reset_sent",  (zend_long)s.packet.quic_stateless_reset_sent);
-    add_assoc_long(&entry, "quic_retry_sent",            (zend_long)s.packet.quic_retry_sent);
-    add_assoc_long(&entry, "quic_retry_token_ok",        (zend_long)s.packet.quic_retry_token_ok);
-    add_assoc_long(&entry, "quic_retry_token_invalid",   (zend_long)s.packet.quic_retry_token_invalid);
-    add_assoc_long(&entry, "quic_conn_per_peer_rejected",(zend_long)s.packet.quic_conn_per_peer_rejected);
-    add_assoc_long(&entry, "quic_conn_global_rejected", (zend_long)s.packet.quic_conn_global_rejected);
-    add_assoc_long(&entry, "quic_conn_refused_sent",    (zend_long)s.packet.quic_conn_refused_sent);
-    /* Audit hardening counters. */
-    add_assoc_long(&entry, "h3_framing_error",           (zend_long)s.packet.h3_framing_error);
-    add_assoc_long(&entry, "quic_drain_iter_cap_hit",    (zend_long)s.packet.quic_drain_iter_cap_hit);
-
-    /* Reactor-iteration watchdog. Tick = one poll-cb wakeup; on the single
-     * reactor thread its latency is the ACK/PTO delay imposed on every live
-     * connection. */
-    add_assoc_long(&entry, "reactor_ticks",            (zend_long)s.packet.reactor_ticks);
-    add_assoc_long(&entry, "reactor_busy_ns",          (zend_long)s.packet.reactor_busy_ns);
-    add_assoc_long(&entry, "reactor_max_tick_ns",      (zend_long)s.packet.reactor_max_tick_ns);
-    add_assoc_long(&entry, "reactor_slow_ticks",       (zend_long)s.packet.reactor_slow_ticks);
-    add_assoc_long(&entry, "reactor_timer_late",       (zend_long)s.packet.reactor_timer_late);
-    add_assoc_long(&entry, "reactor_max_timer_late_ns",(zend_long)s.packet.reactor_max_timer_late_ns);
-    {
-        zval hist;
-        array_init(&hist);
-
-        const size_t nbuckets = sizeof(s.packet.reactor_lat_bucket)
-                              / sizeof(s.packet.reactor_lat_bucket[0]);
-
-        for (size_t i = 0; i < nbuckets; ++i) {
-            add_next_index_long(&hist, (zend_long)s.packet.reactor_lat_bucket[i]);
-        }
-
-        add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
+    /* Every QUIC counter, straight off the field table — no hand-kept list to
+     * fall out of step with the struct, and each field is loaded on its own so
+     * the reactor cannot hand back a mix of two moments. */
+    for (size_t i = 0, n = http3_stat_count(); i < n; i++) {
+        add_assoc_long(&entry, http3_stat_name(i),
+                       (zend_long)http3_stat_get(&s->packet, i));
     }
 
-    /* Send-path error categorisation. */
-    add_assoc_long(&entry, "quic_send_eagain",           (zend_long)s.packet.quic_send_eagain);
-    add_assoc_long(&entry, "quic_send_gso_refused",      (zend_long)s.packet.quic_send_gso_refused);
-    add_assoc_long(&entry, "quic_send_emsgsize",         (zend_long)s.packet.quic_send_emsgsize);
-    add_assoc_long(&entry, "quic_send_unreach",          (zend_long)s.packet.quic_send_unreach);
-    add_assoc_long(&entry, "quic_send_other_error",      (zend_long)s.packet.quic_send_other_error);
-    add_assoc_long(&entry, "quic_gso_disabled",          (zend_long)s.packet.quic_gso_disabled);
-
-    /* Async errors observed via MSG_ERRQUEUE. */
-    add_assoc_long(&entry, "quic_errqueue_emsgsize",     (zend_long)s.packet.quic_errqueue_emsgsize);
-    add_assoc_long(&entry, "quic_errqueue_unreach",      (zend_long)s.packet.quic_errqueue_unreach);
-    add_assoc_long(&entry, "quic_errqueue_other",        (zend_long)s.packet.quic_errqueue_other);
+    zval hist;
+    array_init(&hist);
+    for (size_t b = 0; b < HTTP3_LAT_BUCKETS; b++) {
+        add_next_index_long(&hist, (zend_long)http3_stat_bucket(&s->packet, b));
+    }
+    add_assoc_zval(&entry, "reactor_lat_bucket", &hist);
 
     add_next_index_zval(return_value, &entry);
 }
@@ -5017,6 +5301,11 @@ static zend_object *http_server_create(zend_class_entry *ce)
     http_protocol_handlers_init(&server->protocol_handlers);
     http_log_state_init(&server->log_state);
     conn_arena_init(&server->conn_arena);
+
+    /* Counters live in the embedded slice until a pool worker claims a slab
+     * slot (A2); stats_slot < 0 means "no slot owned". */
+    server->counters_live = &server->counters;
+    server->stats_slot    = -1;
     /* All other fields are pecalloc-zeroed: running=false, stopping=false,
      * server_scope/scope_object/wait_event=NULL, counters/view zeroed,
      * listeners[] zeroed, transit_handlers=NULL, etc. */
@@ -5175,6 +5464,10 @@ static void http_server_free(zend_object *obj)
         worker_inbox_free(server->worker_inbox);
         server->worker_inbox = NULL;
     }
+
+    /* Release this worker's stats slab slot (no-op for a standalone/parent
+     * server, or if the pool parent already freed the slab). */
+    http_server_stats_down(server);
 
     /* Pool-mode worker ctx array (issue #11). NULL outside pool mode;
      * non-NULL only for parent servers that ran with workers > 1.

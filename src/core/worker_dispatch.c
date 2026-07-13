@@ -25,6 +25,7 @@
 #include "grpc/grpc.h"                       /* grpc_classify */
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
+#include "log/http_log.h"                    /* access-log emit */
 
 #define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
 
@@ -48,6 +49,10 @@ typedef struct {
     uint64_t                enqueue_ns;
     uint64_t                start_ns;
     bool                    stamps;
+
+    /* The user handler died in a zend_bailout: dispose still renders a 500 but
+     * collects no telemetry for the request, same as H1/H2/H3. */
+    bool                    handler_bailout;
 
     /* Routing echoed from the request onto the response_wire so the reactor
      * can resolve which QUIC stream to emit on. */
@@ -79,9 +84,8 @@ static void worker_dispatch_entry(void)
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)co->extended_data;
     ZEND_ASSERT(ctx != NULL);
 
-    /* Synthetic 404 (no handler) still counts as a served request. */
+    /* Synthetic 404 (no handler): dispose reports it like any other response. */
     if (ctx->skip_handler) {
-        http_server_count_request(ctx->counters);
         return;
     }
 
@@ -120,19 +124,27 @@ static void worker_dispatch_entry(void)
     } zend_end_try();
 
     if (UNEXPECTED(bailout)) {
+        ctx->handler_bailout = true;
         return;
     }
 
     /* Stamp end before the retval dtor so destructor time is not charged as
      * service time. */
-    http_server_count_request(ctx->counters);
-
     if (ctx->stamps) {
         const uint64_t end_ns = zend_hrtime();
         http_server_on_request_sample(ctx->server,
                                       ctx->start_ns - ctx->enqueue_ns,
                                       end_ns - ctx->start_ns,
                                       end_ns);
+
+        /* The pool stamps the ctx, but the access record reads the request; copy
+         * the service window across so http.server.request.duration is present. */
+        if (!Z_ISUNDEF(ctx->request_zv)) {
+            http_request_t *const req =
+                http_request_from_zobj(Z_OBJ(ctx->request_zv));
+            req->start_ns = ctx->start_ns;
+            req->end_ns   = end_ns;
+        }
     }
 
     zval_ptr_dtor(&retval);
@@ -208,6 +220,7 @@ void response_wire_discard(response_wire_t *rw)
 {
     /* nobody adopts the credit ref — release it or the producer hangs */
     stream_credit_abandon((stream_credit_t *)response_wire_credit(rw));
+
 
     zend_string *const orphan_chunk =
         (zend_string *)response_wire_take_chunk(rw);
@@ -490,6 +503,17 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
 /* Marshal $response->sendFile() into a SEND_FILE wire: path + option snapshot
  * as raw bytes; the reactor re-opens the path and runs the sendfile engine
  * (#105). Returns NULL on allocation failure; borrows sf. */
+/* Span of a request header, for the SEND_FILE wire. NULL when absent. */
+static const char *worker_req_header(const http_request_t *req, const char *name,
+                                     const size_t name_len, size_t *len_out)
+{
+    const zend_string *const v = req != NULL
+        ? http_request_find_header(req, name, name_len) : NULL;
+
+    *len_out = v != NULL ? ZSTR_LEN(v) : 0;
+    return v != NULL ? ZSTR_VAL(v) : NULL;
+}
+
 static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx,
                                                 const http_send_file_request_t *sf)
 {
@@ -501,6 +525,11 @@ static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx
     }
 
     response_wire_set_kind(rw, RESPONSE_WIRE_SEND_FILE);
+
+    /* The engine runs on the reactor, which must not read this request: our
+     * dispose frees its fields on this thread. Copy across what it needs. */
+    const http_request_t *const req = !Z_ISUNDEF(ctx->request_zv)
+        ? http_request_from_zobj(Z_OBJ(ctx->request_zv)) : NULL;
 
     const http_send_file_options_t *const o = &sf->opts;
     response_wire_send_file_t wsf = {
@@ -523,6 +552,19 @@ static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx
         .delete_after_send = o->delete_after_send,
         .is_head           = ctx->is_head,
     };
+
+    if (req != NULL) {
+        wsf.method   = req->method != NULL ? ZSTR_VAL(req->method) : NULL;
+        wsf.method_len = req->method != NULL ? ZSTR_LEN(req->method) : 0;
+        wsf.uri      = req->uri != NULL ? ZSTR_VAL(req->uri) : NULL;
+        wsf.uri_len  = req->uri != NULL ? ZSTR_LEN(req->uri) : 0;
+        wsf.range    = worker_req_header(req, "range", 5, &wsf.range_len);
+        wsf.if_range = worker_req_header(req, "if-range", 8, &wsf.if_range_len);
+        wsf.if_modified_since =
+            worker_req_header(req, "if-modified-since", 17, &wsf.if_modified_since_len);
+        wsf.if_none_match =
+            worker_req_header(req, "if-none-match", 13, &wsf.if_none_match_len);
+    }
 
     if (!response_wire_set_send_file(rw, &wsf)) {
         response_wire_free(rw);
@@ -554,6 +596,8 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
         ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
         ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
     }
+
+    bool marshalled_send_file = false;
 
     if (!Z_ISUNDEF(ctx->response_zv)) {
         zend_object *const resp = Z_OBJ(ctx->response_zv);
@@ -589,10 +633,11 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
              * Falls through to the buffered render when absent (#105). */
             http_send_file_request_t *const sf =
                 ctx->is_grpc ? NULL : http_response_take_send_file(resp);
+            const bool is_send_file = sf != NULL;
 
             response_wire_t *rw;
 
-            if (sf != NULL) {
+            if (is_send_file) {
                 rw = worker_render_send_file(ctx, sf);
                 http_send_file_request_free(sf);
             } else {
@@ -600,8 +645,23 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             }
 
             if (rw != NULL) {
-                worker_wire_post(ctx, rw);   /* sink owns rw now */
+                /* Only a sendFile the reactor actually received is accounted
+                 * there; one that never made it off this thread still has to be
+                 * reported here, or it is counted by nobody. */
+                marshalled_send_file =
+                    worker_wire_post(ctx, rw) && is_send_file;   /* sink owns rw now */
             }
+        }
+
+        /* Collect telemetry here, where the response is final — except for a
+         * marshalled sendFile: its status is only stamped once the reactor has
+         * run the engine, so the reactor's cleanup reports that one instead. */
+        if (EXPECTED(!ctx->handler_bailout) && !marshalled_send_file) {
+            http_request_telemetry(Z_ISUNDEF(ctx->request_zv)
+                                     ? NULL
+                                     : http_request_from_zobj(Z_OBJ(ctx->request_zv)),
+                                 resp, ctx->counters,
+                                 http_server_get_log_state(ctx->server));
         }
 
         /* ctx dies below; a late send() on a kept $response must throw, not UAF */

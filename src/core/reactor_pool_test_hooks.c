@@ -27,15 +27,26 @@
 #include "core/worker_dispatch.h"
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
+#include "core/stats_registry.h"
 #include "core/async_plain_event.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "log/http_log.h"
 
 #include <stdint.h>
 #include <string.h>
+#ifndef PHP_WIN32
+# include <unistd.h>   /* STDOUT_FILENO */
+#endif
+#ifndef STDOUT_FILENO
+# define STDOUT_FILENO 1
+#endif
 
 /* Defined in src/http_request.c; wraps an http_request_t in an HttpRequest zval. */
 extern zval *http_request_create_from_parsed(http_request_t *req);
+
+/* Defined in src/http_server_class.c; snapshots the per-worker stats slab. */
+extern int http_server_stats_slab_snapshot(uint64_t *out, int max);
 
 #ifdef PHP_WIN32
 # include <windows.h>
@@ -1072,6 +1083,286 @@ PHP_FUNCTION(_http_server_reactor_h3_listener_selftest)
 #endif
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_stats_registry_selftest, 0, 1,
+                                        MAY_BE_ARRAY | MAY_BE_FALSE)
+    ZEND_ARG_TYPE_INFO(0, capacity, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+/* Exercise the per-worker stats slab (issue #5, A1) with no server or coroutine:
+ * claim every slot (indices distinct and in range), confirm a full slab refuses a
+ * further claim, write+read a counter through a slot, then retire a slot and
+ * confirm it drops from the active count, reads inactive, and is recycled — with
+ * its counters zeroed — by the next claim. Returns a summary the phpt asserts, or
+ * false on a bad capacity. */
+PHP_FUNCTION(_http_server_stats_registry_selftest)
+{
+    zend_long capacity = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(capacity)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (capacity <= 0) {
+        RETURN_FALSE;
+    }
+
+    http_stats_registry_t *const reg = http_stats_registry_create((int)capacity);
+
+    if (reg == NULL) {
+        RETURN_FALSE;
+    }
+
+    const int cap = http_stats_registry_capacity(reg);
+
+    int  *const idxs = ecalloc((size_t)cap, sizeof(*idxs));
+    bool *const seen = ecalloc((size_t)cap, sizeof(*seen));
+    int  claimed  = 0;
+    bool distinct = true;
+
+    for (int i = 0; i < cap; i++) {
+        const int idx = http_stats_registry_claim(reg);
+
+        if (idx < 0 || idx >= cap || seen[idx]) {
+            distinct = false;
+            break;
+        }
+
+        seen[idx]       = true;
+        idxs[claimed++] = idx;
+    }
+
+    const bool overflow_refused = (http_stats_registry_claim(reg) == -1);
+    const int  count_full       = http_stats_registry_count(reg);
+
+    /* Write a counter through a slot, read it back through a fresh at(). */
+    http_stats_registry_at(reg, idxs[0])->counters.total_requests = 0xABCDEF;
+    const bool write_read_ok =
+        (http_stats_registry_at(reg, idxs[0])->counters.total_requests == 0xABCDEF);
+    const bool active0 =
+        http_stats_slot_active(http_stats_registry_at(reg, idxs[0]));
+
+    /* Retire slot 0: it drops from the active count and reads inactive. */
+    const bool retire_ok     = http_stats_registry_retire(reg, idxs[0]);
+    const int  count_retired = http_stats_registry_count(reg);
+    const bool inactive0     =
+        !http_stats_slot_active(http_stats_registry_at(reg, idxs[0]));
+
+    /* Reclaim: the next claim reuses the freed slot with its counters zeroed. */
+    const int  reidx           = http_stats_registry_claim(reg);
+    const bool recycle_idx_ok  = (reidx == idxs[0]);
+    const bool recycled_zeroed =
+        (http_stats_registry_at(reg, reidx)->counters.total_requests == 0);
+
+    array_init(return_value);
+    add_assoc_long(return_value, "capacity", cap);
+    add_assoc_long(return_value, "claimed", claimed);
+    add_assoc_bool(return_value, "distinct", distinct);
+    add_assoc_bool(return_value, "overflow_refused", overflow_refused);
+    add_assoc_long(return_value, "count_full", count_full);
+    add_assoc_bool(return_value, "write_read_ok", write_read_ok);
+    add_assoc_bool(return_value, "active0", active0);
+    add_assoc_bool(return_value, "retire_ok", retire_ok);
+    add_assoc_long(return_value, "count_retired", count_retired);
+    add_assoc_bool(return_value, "inactive0", inactive0);
+    add_assoc_bool(return_value, "recycle_idx_ok", recycle_idx_ok);
+    add_assoc_bool(return_value, "recycled_zeroed", recycled_zeroed);
+
+    efree(idxs);
+    efree(seen);
+    http_stats_registry_free(reg);
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_stats_slab_snapshot, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* Snapshot the process-wide stats slab (issue #5, A2): one entry per active
+ * worker slot carrying that slot's total_requests. Called by the phpt from the
+ * parent coroutine while a pool serves — proving each worker bumps its own slab
+ * slot (not an embedded counter). Empty array when no slab exists. */
+PHP_FUNCTION(_http_server_stats_slab_snapshot)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    uint64_t  totals[256];
+    const int n = http_server_stats_slab_snapshot(totals, 256);
+
+    array_init(return_value);
+
+    for (int i = 0; i < n; i++) {
+        add_next_index_long(return_value, (zend_long)totals[i]);
+    }
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_log_format_selftest, 0, 1,
+                                        MAY_BE_STRING | MAY_BE_FALSE)
+    ZEND_ARG_TYPE_INFO(0, style, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, color, _IS_BOOL, 0, "false")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, template, IS_STRING, 0, "\"\"")
+ZEND_END_ARG_INFO()
+
+/* Format a fixed canonical record (issue #5, B2/B3) with the named formatter
+ * and return the bytes, so the phpt goldens plain/logfmt/json/pretty output —
+ * including space/quote/newline escaping, the json-only trace fields, and the
+ * pretty colour on/off paths — with no server or coroutine. `color` feeds the
+ * pretty formatter's ud; `template` the template formatter's. false on an
+ * unknown style or an uncompilable template. */
+PHP_FUNCTION(_http_log_format_selftest)
+{
+    char       *style;
+    size_t      style_len;
+    zend_bool   color = 0;
+    char       *tmpl_arg = NULL;
+    size_t      tmpl_len = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 3)
+        Z_PARAM_STRING(style, style_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(color)
+        Z_PARAM_STRING(tmpl_arg, tmpl_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* Resolve through the formatter registry — the same lookup setLogSinks
+     * uses — so the goldens also cover the plugin seam. ud stays hook-built
+     * (make_ud wants a sink spec): pretty = colour flag, syslog = facility,
+     * template = compiled template (freed below). syslog is not a public
+     * formatter (it needs syslog framing); reach it through the sink type
+     * that pins it, so the golden still covers the wire format. */
+    const http_log_formatter_def_t *fdef =
+        http_log_formatter_by_name(style, style_len);
+
+    if (fdef == NULL) {
+        const http_log_sink_type_t *stype =
+            http_log_sink_type_by_name(style, style_len);
+        fdef = stype != NULL ? stype->pinned_formatter : NULL;
+    }
+
+    if (fdef == NULL) {
+        RETURN_FALSE;
+    }
+
+    http_log_formatter_fn fmt      = fdef->fn;
+    void                 *fmt_ud   = NULL;
+    bool                  ud_owned = false;
+
+    if (style_len == 6 && memcmp(style, "pretty", 6) == 0) {
+        fmt_ud = color ? (void *)1 : NULL;
+    } else if (style_len == 6 && memcmp(style, "syslog", 6) == 0) {
+        fmt_ud = (void *)(intptr_t)1;   /* facility = user */
+    } else if (style_len == 8 && memcmp(style, "template", 8) == 0) {
+        fmt_ud = http_log_template_parse(tmpl_arg, tmpl_len);
+        if (fmt_ud == NULL) {
+            RETURN_FALSE;
+        }
+        ud_owned = true;
+    }
+
+    const http_log_attr_t attrs[] = {
+        { .key = "path", .type = HTTP_LOG_ATTR_STR,  .v.s   = "/a b" },
+        { .key = "tag",  .type = HTTP_LOG_ATTR_STR,  .v.s   = "v\"1" },
+        { .key = "line", .type = HTTP_LOG_ATTR_STR,  .v.s   = "a\nb" },
+        { .key = "n",    .type = HTTP_LOG_ATTR_I64,  .v.i64 = -7 },
+        { .key = "sz",   .type = HTTP_LOG_ATTR_U64,  .v.u64 = 4294967296ULL },
+        { .key = "ok",   .type = HTTP_LOG_ATTR_BOOL, .v.b   = true },
+        { .key = "r",    .type = HTTP_LOG_ATTR_F64,  .v.f64 = 1.5 },
+    };
+
+    http_log_record_t rec = {
+        .state        = NULL,
+        .timestamp_ns = 1704067200123000000ULL,   /* 2024-01-01T00:00:00.123Z */
+        .severity     = HTTP_LOG_INFO,
+        .tmpl         = "user login",
+        .body         = "user login",
+        .body_len     = sizeof("user login") - 1,
+        .attrs        = attrs,
+        .attrs_count  = sizeof attrs / sizeof attrs[0],
+        .has_trace    = true,
+    };
+
+    for (uint8_t i = 0; i < sizeof rec.trace_id; i++) {
+        rec.trace_id[i] = i;
+    }
+    for (uint8_t i = 0; i < sizeof rec.span_id; i++) {
+        rec.span_id[i] = i;
+    }
+
+    char   buf[2048];
+    size_t n = fmt(&rec, buf, sizeof buf, fmt_ud);
+
+    if (ud_owned) {
+        efree(fmt_ud);
+    }
+
+    RETURN_STRINGL(buf, n);
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_log_color_decide, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+/* Resolve the pretty-sink colour decision (issue #5, B3) against the current
+ * environment on a non-TTY fd, so the phpt can assert NO_COLOR / CLICOLOR_FORCE
+ * are honoured without needing a real terminal. */
+PHP_FUNCTION(_http_log_color_decide)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    RETURN_BOOL(http_log_color_for_fd(STDOUT_FILENO));
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_log_registry_names, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* Snapshot the sink-type / formatter registry (issue #5, B5d) as
+ * {'types' => [...], 'formatters' => [...]} so a phpt can assert the
+ * built-ins registered and the pipe-joined error lists match. */
+PHP_FUNCTION(_http_log_registry_names)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    char types[256];
+    char formatters[256];
+    http_log_sink_type_names(types, sizeof types);
+    http_log_formatter_names(formatters, sizeof formatters);
+
+    array_init(return_value);
+    add_assoc_string(return_value, "types", types);
+    add_assoc_string(return_value, "formatters", formatters);
+}
+
+/* Flood a server's log sinks with `count` records from this thread, with no
+ * suspension in between: the writer cannot drain a 64 KiB ring mid-burst, so a
+ * large enough burst overflows it. Exists to prove the drop is counted — an
+ * observability feature that silently loses records is worse than none. */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_log_flood, 0, 2, IS_LONG, 0)
+    ZEND_ARG_OBJ_INFO(0, server, TrueAsync\\HttpServer, 0)
+    ZEND_ARG_TYPE_INFO(0, count, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(_http_log_flood)
+{
+    zval      *server_zv;
+    zend_long  count;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_OBJECT(server_zv)
+        Z_PARAM_LONG(count)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *const server = http_server_object_from_zend(Z_OBJ_P(server_zv));
+
+    if (server == NULL) {
+        RETURN_LONG(-1);
+    }
+
+    http_log_state_t *const st = http_server_get_log_state(server);
+
+    for (zend_long i = 0; i < count; i++) {
+        http_logf_info(st, "log.flood seq=%ld filler=%s", (long)i,
+                       "0123456789012345678901234567890123456789");
+    }
+
+    RETURN_LONG((zend_long)http_server_counters(server)->log_records_dropped_total);
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
@@ -1082,6 +1373,12 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_worker_registry_selftest, arginfo_worker_registry_selftest)
     ZEND_FE(_http_server_worker_registry_route_selftest, arginfo_worker_registry_route_selftest)
     ZEND_FE(_http_server_reactor_h3_listener_selftest, arginfo_reactor_h3_listener_selftest)
+    ZEND_FE(_http_server_stats_registry_selftest, arginfo_stats_registry_selftest)
+    ZEND_FE(_http_server_stats_slab_snapshot, arginfo_stats_slab_snapshot)
+    ZEND_FE(_http_log_format_selftest, arginfo_log_format_selftest)
+    ZEND_FE(_http_log_color_decide, arginfo_log_color_decide)
+    ZEND_FE(_http_log_registry_names, arginfo_log_registry_names)
+    ZEND_FE(_http_log_flood, arginfo_log_flood)
     PHP_FE_END
 };
 

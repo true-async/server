@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s        # tight, so the demo dashboard moves while you watch
+
+scrape_configs:
+  - job_name: true-async-server
+    static_configs:
+      # The PHP server runs on the HOST, not in a container: it needs the
+      # locally built extension. host.docker.internal resolves to the host
+      # thanks to the extra_hosts entry in docker-compose.yml.
+      - targets: ['host.docker.internal:8080']

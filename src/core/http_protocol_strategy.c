@@ -141,6 +141,14 @@ bool detect_and_assign_protocol(http_connection_t *conn)
     }
 
     conn->protocol_detected = true;
+
+    /* Bump the per-protocol active gauge now that ALPN settled. Only a
+     * real strategy counts; the strategy-less unsupported path stays
+     * UNKNOWN and is balanced by the noop dec at close. */
+    if (conn->strategy != NULL) {
+        http_server_conn_active_inc(conn->counters, conn->protocol_type);
+    }
+
     return true;
 }
 /* }}} */

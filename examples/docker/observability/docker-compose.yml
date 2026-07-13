@@ -1,0 +1,37 @@
+# Prometheus + Grafana for examples/observability-server.php
+#
+# The PHP server stays on the HOST — it needs the locally built extension, and
+# the point of the demo is to scrape a real server, not a rebuilt one. Only the
+# monitoring stack is containerised.
+#
+#   php examples/observability-server.php                  # host, port 8080
+#   docker compose -f examples/docker/observability/docker-compose.yml up -d
+#   open http://localhost:3001                             # Grafana, no login
+#
+#   examples/docker/observability/smoke-test.sh            # proves it end to end
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Lets the container reach the server running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.5.0
+    ports:
+      - "3001:3000"
+    environment:
+      # Demo only: open the dashboard without a login prompt.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus

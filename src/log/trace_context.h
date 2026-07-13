@@ -36,9 +36,13 @@ bool trace_parse_traceparent(const char *header, size_t len,
 void trace_hex_encode(const uint8_t *src, size_t src_len,
                       char *dst);
 
-/* Look up "traceparent"/"tracestate" in the parsed request headers
- * and populate req->trace_*, req->traceparent_raw, req->tracestate_raw.
- * No-op when telemetry is disabled or no valid traceparent is present. */
+/* Look up "traceparent"/"tracestate" in the parsed request headers and populate
+ * req->trace_*, req->traceparent_raw, req->tracestate_raw. No-op when the
+ * request carries no valid traceparent.
+ *
+ * This does NOT gate on telemetry being enabled — it cannot, since it only sees
+ * the request. Callers own that check (they hold the server view); every
+ * current one does it. */
 struct http_request_t;
 void http_request_parse_trace_context(struct http_request_t *req);
 

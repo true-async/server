@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServer.php.stub.php instead.
- * Stub hash: 446882ff5cae763644a297a476df8b0cc96f8068 */
+ * Stub hash: 48c2c9c7953a5b34151f208d9b415a848b442a60 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServer___construct, 0, 0, 1)
 	ZEND_ARG_OBJ_INFO(0, config, TrueAsync\\HttpServerConfig, 0)
@@ -44,6 +44,8 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServer_getRuntimeStats arginfo_class_TrueAsync_HttpServer_getTelemetry
 
+#define arginfo_class_TrueAsync_HttpServer_getStats arginfo_class_TrueAsync_HttpServer_getTelemetry
+
 ZEND_METHOD(TrueAsync_HttpServer, __construct);
 ZEND_METHOD(TrueAsync_HttpServer, isHttp2);
 ZEND_METHOD(TrueAsync_HttpServer, isHttp3);
@@ -61,6 +63,7 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry);
 ZEND_METHOD(TrueAsync_HttpServer, getConfig);
 ZEND_METHOD(TrueAsync_HttpServer, getHttp3Stats);
 ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats);
+ZEND_METHOD(TrueAsync_HttpServer, getStats);
 
 static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, __construct, arginfo_class_TrueAsync_HttpServer___construct, ZEND_ACC_PUBLIC)
@@ -80,6 +83,7 @@ static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, getConfig, arginfo_class_TrueAsync_HttpServer_getConfig, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, getHttp3Stats, arginfo_class_TrueAsync_HttpServer_getHttp3Stats, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, getRuntimeStats, arginfo_class_TrueAsync_HttpServer_getRuntimeStats, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, getStats, arginfo_class_TrueAsync_HttpServer_getStats, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 

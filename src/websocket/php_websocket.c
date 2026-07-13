@@ -212,11 +212,12 @@ zend_object *websocket_object_create_pre_commit(http_connection_t *conn,
     w->conn      = conn;
     memcpy(w->accept_value, accept_value, sizeof(w->accept_value));
 
-    /* Resolve the peer address now, while conn is guaranteed alive, and
-     * cache it — getRemoteAddress() then serves it without touching conn
-     * (which may be torn down while a broadcast holds a ref to $ws).
-     * NULL for Unix-socket listeners → getRemoteAddress() returns "". */
+    /* Resolve the peer now, while conn is guaranteed alive, and cache it —
+     * getRemoteAddress() then serves it without touching conn (which may be
+     * torn down while a broadcast holds a ref to $ws). NULL / 0 for
+     * Unix-socket listeners. */
     w->remote_address = http_connection_remote_address(conn);
+    w->remote_port    = http_connection_remote_port(conn);
 
     return obj;
 }
@@ -1118,18 +1119,28 @@ ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol)
     RETURN_NULL();
 }
 
+ZEND_METHOD(TrueAsync_WebSocket, getRemotePort)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    websocket_object *w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    if (w->remote_port == 0) {
+        RETURN_NULL();
+    }
+
+    RETURN_LONG((zend_long)w->remote_port);
+}
+
 ZEND_METHOD(TrueAsync_WebSocket, getRemoteAddress)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     websocket_object *w = Z_WEBSOCKET_P(ZEND_THIS);
-    if (w->remote_address) {
-        RETURN_STR_COPY(w->remote_address);
+
+    if (w->remote_address == NULL) {
+        RETURN_NULL();   /* Unix-socket listener — no IP peer */
     }
-    /* Lazy resolution from the connection lands when handshake wiring
-     * commits — for now an unbound or not-yet-resolved object reports
-     * the empty string rather than NULL so the return-type contract
-     * (`: string`) is honoured. */
-    RETURN_EMPTY_STRING();
+
+    RETURN_STR_COPY(w->remote_address);
 }
 /* }}} */
 

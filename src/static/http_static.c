@@ -180,12 +180,14 @@ http_static_result_t http_static_try_serve(http_server_object *server,
 										   void *user)
 {
 	return http_static_try_serve_mounts(
+		server,
 		http_static_handler_mounts(server), http_static_handler_count(server),
 		http_static_cache_acquire(server), request, response_obj, counters, cbs,
 		user);
 }
 
 http_static_result_t http_static_try_serve_mounts(
+	http_server_object *server,
 	const http_static_handler_t *const *mounts, size_t mount_count,
 	struct http_static_cache_s *cache,
 	http_request_t *request,
@@ -476,8 +478,7 @@ http_static_result_t http_static_try_serve_mounts(
 			cfg.extra_headers = mount->extra_headers;
 			cfg.mime_overrides = mount->mime_overrides;
 			cfg.cache_view = have_view ? &cv : NULL;
-			cfg.counters = counters;
-			cfg.server = NULL;
+			cfg.server = server;
 			cfg.cache = cache;
 			cfg.content_encoding = picked_encoding;
 			cfg.content_encoding_len = picked_encoding_len;

@@ -1,0 +1,73 @@
+{
+  "title": "TrueAsync HTTP Server",
+  "uid": "tas-overview",
+  "timezone": "browser",
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Requests/sec by status class",
+      "description": "rate() is only valid on a counter. These are *_total, monotonic, and they survive a reload() — so a pool rotation does not show up here as a fake spike or a reset.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(tas_responses_2xx_total[1m]))", "legendFormat": "2xx", "refId": "A" },
+        { "expr": "sum(rate(tas_responses_3xx_total[1m]))", "legendFormat": "3xx", "refId": "B" },
+        { "expr": "sum(rate(tas_responses_4xx_total[1m]))", "legendFormat": "4xx", "refId": "C" },
+        { "expr": "sum(rate(tas_responses_5xx_total[1m]))", "legendFormat": "5xx", "refId": "D" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Active connections by protocol",
+      "description": "Gauges: current readings, not totals. A retiring worker's value is dropped rather than inherited, so these fall to what is really open after a reload() instead of stranding a phantom.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "tas_conns_active_h1", "legendFormat": "HTTP/1", "refId": "A" },
+        { "expr": "tas_conns_active_h2", "legendFormat": "HTTP/2", "refId": "B" },
+        { "expr": "tas_conns_active_h3", "legendFormat": "HTTP/3", "refId": "C" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests/sec per worker",
+      "description": "Same counter, split by the worker label. One flat line among busy ones is a wedged worker.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "expr": "rate(tas_requests_total{worker!=\"\"}[1m])", "legendFormat": "worker {{worker}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Total requests served",
+      "description": "Monotonic across the whole process lifetime, including workers that have already exited. It must never go backwards — that is what a reload() used to do.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "tas_requests_total{worker=\"\"} or on() sum(tas_requests_total) unless on() tas_requests_total{worker=\"\"}", "legendFormat": "total", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Live workers",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "tas_workers", "legendFormat": "workers", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests in flight",
+      "description": "Gauge. Climbs under load, returns to zero when the server drains.",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "tas_active_requests", "legendFormat": "in flight", "refId": "A" }
+      ]
+    }
+  ]
+}

@@ -531,6 +531,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/worker_dispatch.c
     src/core/worker_inbox.c
     src/core/worker_registry.c
+    src/core/stats_registry.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c

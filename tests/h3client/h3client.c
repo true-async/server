@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
@@ -71,6 +72,9 @@ typedef struct {
      * multi-request mode. */
     unsigned long                response_header_count;
     bool                         response_done;
+    /* The peer reset our request stream: whatever arrived is a partial body, and
+     * the client exits non-zero so a test cannot mistake it for a complete one. */
+    bool                         stream_reset;
     bool                         h3_streams_bound;
 
     /* For POST. */
@@ -131,7 +135,7 @@ static int h3_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
 static int h3_recv_data(nghttp3_conn *conn, int64_t stream_id,
                         const uint8_t *data, size_t datalen,
                         void *cu, void *su) {
-    (void)conn; (void)stream_id; (void)su;
+    (void)conn; (void)su;
     h3c_t *c = cu;
     if (c->response_body_len + datalen > c->response_body_cap) {
         size_t new_cap = c->response_body_cap == 0 ? 4096 : c->response_body_cap * 2;
@@ -143,6 +147,15 @@ static int h3_recv_data(nghttp3_conn *conn, int64_t stream_id,
     }
     memcpy(c->response_body + c->response_body_len, data, datalen);
     c->response_body_len += datalen;
+
+    /* Return the flow-control credit for the payload. The count
+     * nghttp3_conn_read_stream reports back (and which recv_stream_data_cb
+     * extends the windows by) covers framing only — DATA is deferred-consume,
+     * so the application has to extend for it. Without this the stream window
+     * runs out, the server waits for a MAX_STREAM_DATA that never comes, and
+     * any response past the initial window hangs. */
+    ngtcp2_conn_extend_max_stream_offset(c->qc, stream_id, datalen);
+    ngtcp2_conn_extend_max_offset(c->qc, datalen);
     return 0;
 }
 
@@ -160,9 +173,18 @@ static int h3_stop_sending(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
+/* The peer reset the stream: the transfer FAILED, however many bytes arrived.
+ * Say so — a caller that only looked at the status line and the body length
+ * would otherwise read a truncated response as a complete one. */
 static int h3_reset_stream(nghttp3_conn *conn, int64_t stream_id,
                            uint64_t err, void *cu, void *su) {
-    (void)conn; (void)stream_id; (void)err; (void)cu; (void)su;
+    (void)conn; (void)su;
+    h3c_t *c = cu;
+    if (stream_id == c->stream_id) {
+        fprintf(stderr, "RESET=%llu\n", (unsigned long long)err);
+        c->stream_reset = true;
+        c->response_done = true;
+    }
     return 0;
 }
 
@@ -319,6 +341,42 @@ static bool submit_request(h3c_t *c, const char *method, const char *host,
     nghttp3_data_reader dr = { .read_data = req_body_reader };
 
     if (bloat_kib == 0) {
+        /* H3CLIENT_HEADER="name: value" — one extra request header, enough to
+         * drive conditional / ranged requests from a phpt. */
+        const char *extra = getenv("H3CLIENT_HEADER");
+        const char *colon = (extra != NULL) ? strchr(extra, ':') : NULL;
+
+        if (extra != NULL && colon == NULL) {
+            fprintf(stderr, "h3client: H3CLIENT_HEADER needs \"name: value\"; ignored\n");
+        }
+
+        if (colon != NULL) {
+            char name[128];
+            const size_t nlen = (size_t)(colon - extra);
+
+            /* Sending the request without the header the caller asked for would
+             * make the test fail somewhere else entirely — say so here. */
+            if (nlen == 0 || nlen >= sizeof(name)) {
+                fprintf(stderr, "h3client: H3CLIENT_HEADER name is empty or over "
+                                "%zu bytes; ignored\n", sizeof(name) - 1);
+            } else {
+                for (size_t i = 0; i < nlen; i++) {
+                    name[i] = (char)tolower((unsigned char)extra[i]);
+                }
+
+                const char *value = colon + 1;
+                while (*value == ' ') value++;
+
+                nghttp3_nv nv[6];
+                memcpy(nv, base, sizeof(base));
+                nv[5] = (nghttp3_nv){ .name = (uint8_t *)name, .namelen = nlen,
+                                      .value = (uint8_t *)value, .valuelen = strlen(value) };
+
+                return nghttp3_conn_submit_request(c->h3, c->stream_id, nv, 6,
+                    has_body ? &dr : NULL, NULL) == 0;
+            }
+        }
+
         return nghttp3_conn_submit_request(c->h3, c->stream_id, base, 5,
             has_body ? &dr : NULL, NULL) == 0;
     }
@@ -876,5 +934,6 @@ int main(int argc, char **argv) {
 
     if (c.retired_fd >= 0) { close(c.retired_fd); }
 
-    return 0;
+    /* A reset stream is a failed transfer, not a short one. */
+    return c.stream_reset ? 1 : 0;
 }

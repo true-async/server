@@ -288,19 +288,66 @@ See [docs/RECOMMENDATIONS.md](RECOMMENDATIONS.md) for tuning guidance.
 
 ## 7. Observability
 
+### Metrics — `getStats()`
+
+Opt in with `setStatsEnabled(true)`; without it `getStats()` throws (the
+per-worker counter slab is only allocated when stats are enabled). The hot-path
+counter bumps themselves are always on and cheap.
+
+```php
+$config->setStatsEnabled(true);
+// … once running, from any thread:
+$stats = $server->getStats();
+```
+
+The shape is **nested**, not flat — per-worker slots plus a summed total:
+
+```php
+[
+    'enabled' => true,
+    'workers' => [ 0 => ['total_requests' => …, 'conns_active_h1' => …, …], 1 => […] ],
+    'totals'  => ['total_requests' => …, 'responses_2xx_total' => …, …],  // summed
+]
+```
+
+`*_total` fields are monotonic counters (and survive a pool reload);
+`conns_active_*`, `active_requests`, `h2_streams_active` are point-in-time
+gauges. Build any exposition format (Prometheus, OTLP, StatsD) in PHP on top of
+this array — the server ships no embedded exporter. See
+`examples/observability-server.php` for a Prometheus `/metrics` endpoint.
+
+### Logging — sinks and formatters
+
+`setLogSeverity()` + `setLogStream()` is the single-stream sugar. For more,
+`setLogSinks()` fans each record out to up to 8 sinks, each with its own
+severity floor, formatter and category:
+
 ```php
 use TrueAsync\LogSeverity;
 
-$config
-    ->setLogSeverity(LogSeverity::INFO)   // OFF / DEBUG / INFO / WARN / ERROR
-    ->setLogStream(fopen('/var/log/truasync.log', 'a'))
-    ->setTelemetryEnabled(true);          // ingest W3C traceparent / tracestate
+$config->setLogSinks([
+    // structured access log (one record per completed request) as JSON to a file
+    ['type' => 'file', 'path' => '/var/log/access.log', 'format' => 'json',
+     'category' => 'access', 'level' => LogSeverity::INFO],
+    // human diagnostics to a coloured console
+    ['type' => 'stderr', 'format' => 'pretty',
+     'category' => 'app', 'level' => LogSeverity::WARN],
+]);
 ```
 
-Counters (request totals, sojourn samples, TLS handshake stats, drain
-events, etc.) are exposed via `$server->getStats()` once the server is
-running. Format is a flat associative array — fan it out to your
-metrics backend of choice.
+`type` is `stream` / `file` / `stdout` / `stderr` / `syslog`; `format` is
+`plain` / `logfmt` / `json` / `pretty` / `template`; `category` routes record
+kinds (`app` diagnostics, `access` per-request, `all`). Under a worker pool use
+`file` (each worker reopens the path) — a parent-opened `stream` resource cannot
+cross into worker threads. No sink calls back into PHP: records are emitted from
+IO and reactor threads with no VM context, so export from userland by draining a
+`json` file/socket sink in your own coroutine.
+
+### Trace context
+
+```php
+$config->setTelemetryEnabled(true);   // ingest W3C traceparent / tracestate
+```
 
 ---
 

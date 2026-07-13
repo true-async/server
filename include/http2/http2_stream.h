@@ -168,6 +168,12 @@ struct http2_stream_t {
      * the static delivery). Mirrors h1_request_ctx_t::skip_php_handler. */
     bool                 skip_handler;
 
+    /* The user handler died in a zend_bailout. Dispose still runs and derives
+     * a 500, but no telemetry is collected for it (no count, no access record) —
+     * post-bailout state is not trustworthy enough to report. Mirrors
+     * http1_request_ctx_t::handler_bailout, which the H1 seam gates on. */
+    bool                 handler_bailout;
+
     /* Phase 1 hybrid TLS emit accounting (issue #30): set true at submit
      * time if the response is too big for the DRAIN path (body >
      * H2_TLS_HYBRID_LARGE_THRESHOLD, or streaming with unknown size).
