@@ -40,7 +40,8 @@
 # define ws_hub_create()      NULL
 # define ws_hub_release(hub)  ((void)(hub))
 # define ws_hub_attach(hub)   (-1)
-# define ws_hub_detach()      ((void)0)
+# define ws_hub_detach(hub)   ((void)(hub))
+# define WS_HUB_MAX_WORKERS   0
 #endif
 #include "core/stats_registry.h"
 #include "core/response_wire.h"
@@ -1251,6 +1252,11 @@ http_server_config_t *http_server_get_config(http_server_object *server)
 
     if (Z_TYPE(server->config) != IS_OBJECT) return NULL;
     return http_server_config_from_obj(Z_OBJ(server->config));
+}
+
+void *http_server_get_ws_hub(http_server_object *server)
+{
+    return server != NULL ? server->ws_hub : NULL;
 }
 
 http_log_state_t *http_server_get_log_state(http_server_object *server)
@@ -4099,8 +4105,19 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         server->ws_hub_owner = true;
     }
 
+    /* A worker that fails to attach gets no topic tree, and then every
+     * subscribe() on it throws while every publish() quietly does nothing. That
+     * is worse than not starting, so it is fatal rather than a degradation. */
     const bool ws_hub_attached = server->ws_hub != NULL
         && ws_hub_attach(server->ws_hub) >= 0;
+
+    if (server->ws_hub != NULL && !ws_hub_attached) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Failed to attach this worker to the WebSocket topic hub — more than "
+            "%d workers, or a second WebSocket server already running on this thread",
+            WS_HUB_MAX_WORKERS);
+        RETURN_FALSE;
+    }
 
     /* Create wait event and suspend until stop() is called */
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -4152,7 +4169,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
          * shutdown, with the tree already gone. ws_topic_unsubscribe_all copes
          * with that; it is the one path where it has to. */
         if (ws_hub_attached) {
-            ws_hub_detach();
+            ws_hub_detach(server->ws_hub);
         }
 
         zend_bailout();
@@ -4168,7 +4185,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * tree out from under that teardown, which walks it — SIGSEGV on any stop()
      * with a subscriber still connected. */
     if (ws_hub_attached) {
-        ws_hub_detach();
+        ws_hub_detach(server->ws_hub);
     }
 
     RETURN_TRUE;

@@ -257,6 +257,13 @@ struct _http_server_config_t {
     uint32_t ws_pong_timeout_ms;
     bool     ws_permessage_deflate;   /* RFC 7692 permessage-deflate; default off */
 
+    /* Distinct topic filters one connection may hold. 0 = no limit, and that is
+     * the default: every self-hosted broker defaults to unlimited (EMQX
+     * max_subscriptions, NATS max_subs), because only the application knows how
+     * many topics it needs. The knob exists for the application that pipes client
+     * input into subscribe() and wants a ceiling. */
+    uint32_t ws_max_subscriptions;
+
     /* HTTP body compression (issues #8, #9). Phase 1 ships gzip via zlib-ng;
      * phase 2 adds Brotli + zstd through the same vtable.
      *   compression_enabled         — master switch (default true).
@@ -551,6 +558,12 @@ http_server_object *http_server_object_from_zend(zend_object *obj);
  * pointer is non-owning and stays valid for the server's lifetime —
  * the config object's zval is held inside http_server_object. */
 http_server_config_t *http_server_get_config         (http_server_object *server);
+
+/* This server's WebSocket topic hub (ws_hub_t*, void to keep the build gate out
+ * of this header). NULL when the extension is built without WebSocket, or before
+ * start(). A connection reaches its OWN server's hub through this — two servers
+ * running on one thread must not share a topic tree. */
+void *http_server_get_ws_hub(http_server_object *server);
 
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures
  * (http_connection_t, http3_connection_t, mp_processor_t) cache the

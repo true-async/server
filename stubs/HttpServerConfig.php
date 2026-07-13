@@ -443,6 +443,27 @@ final class HttpServerConfig
     public function getWsMaxFrameSize(): int {}
 
     /**
+     * How many distinct topic filters one connection may subscribe to.
+     *
+     * Default: 0 — no limit. Every self-hosted broker defaults the same way
+     * (EMQX `max_subscriptions`, NATS `max_subs`): only the application knows
+     * how many topics it needs, so it is not the server's place to guess.
+     *
+     * Set it when the handler feeds client input into subscribe() — e.g.
+     * `$ws->subscribe($msg->data)` — and an unbounded client should not be able
+     * to grow the worker's topic tree without end. Over the limit, subscribe()
+     * throws WebSocketException and the connection stays up, which is what EMQX
+     * answers with SUBACK 0x97 and NATS with -ERR 'Maximum Subscriptions
+     * Exceeded'.
+     *
+     * The filter's depth is capped separately and always (128 levels).
+     */
+    public function setWsMaxSubscriptions(int $count): static {}
+
+    /** @return int */
+    public function getWsMaxSubscriptions(): int {}
+
+    /**
      * Server-initiated PING cadence in milliseconds. The server sends a
      * PING this often on otherwise-idle connections; the peer must reply
      * with PONG within WsPongTimeoutMs or the connection is torn down

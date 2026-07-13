@@ -40,7 +40,12 @@
  *   - publish()/count() from any thread.
  */
 
-#define WS_HUB_MAX_WORKERS 64
+/* Matches the ceiling setWorkers() enforces. It has to: a worker that finds no
+ * slot gets no topic tree, and then every subscribe() on it throws while every
+ * publish() quietly does nothing — a half-working server. The table costs ~21KB
+ * per hub; the 4KB interest filter is allocated per worker that actually
+ * attaches, not per slot. */
+#define WS_HUB_MAX_WORKERS 1024
 
 typedef struct ws_hub_s ws_hub_t;
 
@@ -48,15 +53,18 @@ ws_hub_t *ws_hub_create(void);
 void      ws_hub_addref(ws_hub_t *hub);
 void      ws_hub_release(ws_hub_t *hub);
 
-/* Claims a slot and publishes this thread's mailbox. Returns the slot, or -1. */
+/* Claims a slot and publishes this thread's mailbox. Returns the slot, or -1 —
+ * every slot taken, or this thread is already attached to this hub. A caller
+ * that ignores -1 gets a worker whose connections cannot subscribe at all, so
+ * start() treats it as a startup failure rather than degrading quietly. */
 int  ws_hub_attach(ws_hub_t *hub);
-void ws_hub_detach(void);
+void ws_hub_detach(ws_hub_t *hub);
 
-/* This thread's hub and topic tree, NULL when the worker never attached. A
- * connection reaches its hub through the thread that owns it — which is why no
- * topic handle has to be carried into a handler. */
-ws_hub_t             *ws_hub_local(void);
-struct ws_topic_tree *ws_hub_local_tree(void);
+/* This thread's topic tree FOR THAT HUB, NULL when it never attached. Keyed by
+ * hub, not thread: two HttpServers can share a thread, and a connection must
+ * reach its own server's tree. A connection finds its hub through its server
+ * (http_server_get_ws_hub), so no topic handle is carried into a handler. */
+struct ws_topic_tree *ws_hub_tree(const ws_hub_t *hub);
 
 /* Assigned on first subscribe; identifies a session across threads so a publish
  * can skip its own sender. */
@@ -124,7 +132,7 @@ void ws_hub_get_stats(ws_hub_t *hub, ws_hub_stats_t *out);
  * Called on the thread owning the session, from ws_topic_tree.c; a no-op on a
  * thread that never attached. `prefix_len` is a byte count into `filter`.
  */
-void ws_hub_interest_add(const char *filter, size_t prefix_len);
-void ws_hub_interest_remove(const char *filter, size_t prefix_len);
+void ws_hub_interest_add(ws_hub_t *hub, const char *filter, size_t prefix_len);
+void ws_hub_interest_remove(ws_hub_t *hub, const char *filter, size_t prefix_len);
 
 #endif /* WS_HUB_H */

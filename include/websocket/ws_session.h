@@ -28,6 +28,9 @@ typedef struct ws_pending_message_t {
     bool                         binary;
 } ws_pending_message_t;
 
+struct ws_hub_s;
+struct ws_topic_sub;
+
 /*
  * Per-connection WebSocket runtime state. Allocated when an Upgrade
  * is accepted and the WS strategy is installed; freed on connection
@@ -79,7 +82,13 @@ typedef struct ws_session_t {
      * cross-thread it is addressed by ws_id — used only to skip the publisher.
      * `topics` is this thread's subscription list; `topic_mark` is the last
      * publish pass that served this session, so two filters that both match one
-     * topic still deliver a single copy. */
+     * topic still deliver a single copy.
+     *
+     * `hub` is THIS session's server's hub, snapshotted at init. Not looked up
+     * per call through the connection: teardown must still find it after conn
+     * has begun to come apart. Two servers can share a thread, so the hub is a
+     * property of the session, never of the thread. */
+    struct ws_hub_s      *hub;
     uint64_t              ws_id;
     struct ws_topic_sub  *topics;
     uint64_t              topic_mark;

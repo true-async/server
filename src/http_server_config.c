@@ -93,6 +93,7 @@ struct _http_server_shared_config_t {
     uint32_t                ws_max_frame_size;
     uint32_t                ws_ping_interval_ms;
     uint32_t                ws_pong_timeout_ms;
+    uint32_t                ws_max_subscriptions;
     bool                    ws_permessage_deflate;
 
     /* Compression — see http_server_config_t for semantics. The MIME
@@ -450,6 +451,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->ws_max_frame_size    = DEFAULT_WS_MAX_FRAME_SIZE;
     config->ws_ping_interval_ms  = DEFAULT_WS_PING_INTERVAL_MS;
     config->ws_pong_timeout_ms   = DEFAULT_WS_PONG_TIMEOUT_MS;
+    config->ws_max_subscriptions = 0;   /* unlimited — the application decides */
     config->ws_permessage_deflate = false;
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->http3_pacing = false;          /* QUIC send pacing — opt-in (#59) */
@@ -1495,6 +1497,32 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxFrameSize)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_max_frame_size);
+}
+
+/* proto HttpServerConfig::setWsMaxSubscriptions(int $count): static
+ * Distinct topic filters one connection may hold; 0 = no limit (the default).
+ * Over the limit subscribe() throws and the connection stays up — the same shape
+ * as EMQX's SUBACK 0x97 and NATS's -ERR 'Maximum Subscriptions Exceeded'. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxSubscriptions)
+{
+    zend_long count;
+    ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(count) ZEND_PARSE_PARAMETERS_END();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    if (config_check_locked(config)) { return; }
+    if (count < 0 || count > UINT32_MAX) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "WsMaxSubscriptions must be 0 (no limit) or a positive count", 0);
+        return;
+    }
+    config->ws_max_subscriptions = (uint32_t)count;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+/* proto HttpServerConfig::getWsMaxSubscriptions(): int */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxSubscriptions)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)Z_HTTP_SERVER_CONFIG_P(ZEND_THIS)->ws_max_subscriptions);
 }
 
 /* proto HttpServerConfig::setWsPingIntervalMs(int $ms): static
@@ -3037,6 +3065,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->tls_buffer_bytes = 0;
     config->ws_max_message_size          = 0;
     config->ws_max_frame_size            = 0;
+    config->ws_max_subscriptions         = 0;
     config->ws_ping_interval_ms          = 0;
     config->ws_pong_timeout_ms           = 0;
     config->ws_permessage_deflate        = false;
@@ -3209,6 +3238,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->h2_static_budget_max        = src->h2_static_budget_max;
     shared->ws_max_message_size          = src->ws_max_message_size;
     shared->ws_max_frame_size            = src->ws_max_frame_size;
+    shared->ws_max_subscriptions         = src->ws_max_subscriptions;
     shared->ws_ping_interval_ms          = src->ws_ping_interval_ms;
     shared->ws_pong_timeout_ms           = src->ws_pong_timeout_ms;
     shared->ws_permessage_deflate        = src->ws_permessage_deflate;
@@ -3443,6 +3473,7 @@ static void http_server_config_populate_from_shared(
     dst->h2_static_budget_max        = src->h2_static_budget_max;
     dst->ws_max_message_size          = src->ws_max_message_size;
     dst->ws_max_frame_size            = src->ws_max_frame_size;
+    dst->ws_max_subscriptions         = src->ws_max_subscriptions;
     dst->ws_ping_interval_ms          = src->ws_ping_interval_ms;
     dst->ws_pong_timeout_ms           = src->ws_pong_timeout_ms;
     dst->ws_permessage_deflate        = src->ws_permessage_deflate;

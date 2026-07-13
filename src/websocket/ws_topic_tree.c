@@ -44,6 +44,9 @@ typedef struct ws_topic_node {
 struct ws_topic_tree {
     ws_topic_node_t   root;
 
+    /* Where this worker's interest filter lives — see ws_hub.h. */
+    struct ws_hub_s  *hub;
+
     /* Bumped once per publish/count. A session stamped with the current mark has
      * already been served this pass, so overlapping filters (`a/b` and `a/#`)
      * deliver one copy, not two. */
@@ -412,10 +415,11 @@ static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
 
 /* ------------------------------------------------------------------- tree */
 
-ws_topic_tree_t *ws_topic_tree_create(void)
+ws_topic_tree_t *ws_topic_tree_create(struct ws_hub_s *hub)
 {
     ws_topic_tree_t *const tree = ecalloc(1, sizeof(*tree));
     tree->root.kind = WS_NODE_ROOT;
+    tree->hub       = hub;
 
     return tree;
 }
@@ -435,7 +439,19 @@ void ws_topic_tree_free(ws_topic_tree_t *tree)
     efree(tree);
 }
 
-bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session, zend_string *filter)
+static uint32_t ws_sub_count(const ws_session_t *session)
+{
+    uint32_t n = 0;
+
+    for (const ws_topic_sub_t *sub = session->topics; sub != NULL; sub = sub->next) {
+        n++;
+    }
+
+    return n;
+}
+
+bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
+                        zend_string *filter, const uint32_t max)
 {
     ws_topic_levels_t levels;
 
@@ -445,6 +461,10 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session, zend_strin
 
     if (ws_sub_find(session, filter) != NULL) {
         return true;   /* idempotent */
+    }
+
+    if (max != 0 && ws_sub_count(session) >= max) {
+        return false;
     }
 
     ws_topic_node_t *node = &tree->root;
@@ -466,7 +486,7 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session, zend_strin
     sub->next      = session->topics;
     session->topics = sub;
 
-    ws_hub_interest_add(ZSTR_VAL(filter),
+    ws_hub_interest_add(tree->hub, ZSTR_VAL(filter),
                         ws_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter)));
 
     return true;
@@ -485,7 +505,7 @@ static void ws_sub_drop(ws_topic_tree_t *tree, ws_session_t *session,
 
     /* After the tree, never before: while a subscription is live the interest
      * filter must not understate it, or a publish would skip this worker. */
-    ws_hub_interest_remove(ZSTR_VAL(sub->filter),
+    ws_hub_interest_remove(tree->hub, ZSTR_VAL(sub->filter),
                            ws_topic_interest_prefix(ZSTR_VAL(sub->filter),
                                                     ZSTR_LEN(sub->filter)));
 

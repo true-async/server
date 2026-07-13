@@ -58,6 +58,34 @@ http_server_config_t *http_server_get_config(http_server_object *server)
     return NULL;
 }
 
+/* Topics (ws_hub.c / ws_topic_tree.c) are not in the fuzz TU set — the frame
+ * decoder never reaches them. With no hub, a session subscribes to nothing, so
+ * these only satisfy the linker. */
+void *http_server_get_ws_hub(http_server_object *server)
+{
+    (void)server;
+    return NULL;
+}
+
+struct ws_topic_tree *ws_hub_tree(const struct ws_hub_s *hub)
+{
+    (void)hub;
+    return NULL;
+}
+
+void ws_topic_unsubscribe_all(struct ws_topic_tree *tree, ws_session_t *session)
+{
+    (void)tree;
+    (void)session;
+}
+
+/* The deferred-teardown seam ws_session_queue_and_flush reaches on a send that
+ * closes its own connection. conn is NULL here, so it is never called. */
+void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
+{
+    (void)conn;
+}
+
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len)
 {
     (void)conn; (void)data; (void)len;

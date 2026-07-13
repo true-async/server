@@ -12,6 +12,8 @@
 #include "php.h"
 #include "websocket/ws_session.h"
 
+struct ws_hub_s;
+
 /*
  * Per-worker topic tree (issue #2). Thread-local: no locks, no atomics, no
  * shared registry. Each worker indexes only the sessions IT owns, and a publish
@@ -42,15 +44,17 @@
  * with the pass number and skips a session already stamped.
  */
 
-/* Deeper filters are rejected — the walk recurses per level. */
-#define WS_TOPIC_MAX_LEVELS 32
+/* Deeper filters are rejected — the walk recurses per level. Same ceiling as
+ * EMQX's max_topic_levels, which is the only broker that caps this by default. */
+#define WS_TOPIC_MAX_LEVELS 128
 
 /* Every level-prefix of a topic, plus the empty one. */
 #define WS_TOPIC_MAX_PREFIXES (WS_TOPIC_MAX_LEVELS + 1)
 
 typedef struct ws_topic_tree ws_topic_tree_t;
 
-ws_topic_tree_t *ws_topic_tree_create(void);
+/* `hub` is where this tree publishes its interest filter (ws_hub.h). */
+ws_topic_tree_t *ws_topic_tree_create(struct ws_hub_s *hub);
 void             ws_topic_tree_free(ws_topic_tree_t *tree);
 
 /* A filter may carry wildcards; a name may not. Both reject an empty string and
@@ -58,9 +62,13 @@ void             ws_topic_tree_free(ws_topic_tree_t *tree);
 bool ws_topic_is_valid_filter(const char *topic, size_t len);
 bool ws_topic_is_valid_name(const char *topic, size_t len);
 
-/* Idempotent: subscribing twice through the same filter is one subscription. */
+/* Idempotent: subscribing twice through the same filter is one subscription, and
+ * it does not spend quota. `max` is the cap on distinct filters this session may
+ * hold, 0 for none — false means it was already at the cap, which the caller
+ * reports on the filter without tearing the connection down (what EMQX answers
+ * with SUBACK 0x97 and NATS with -ERR 'Maximum Subscriptions Exceeded'). */
 bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
-                        zend_string *filter);
+                        zend_string *filter, uint32_t max);
 bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
                           zend_string *filter);
 

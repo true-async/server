@@ -97,15 +97,33 @@ typedef struct {
     char          topic[1];
 } ws_cmd_t;
 
-typedef struct {
-    ws_hub_t         *hub;
-    int               slot;
-    uint32_t          gen;
-    thread_mailbox_t *inbox;
-    ws_topic_tree_t  *tree;
+/* This thread's attachment to ONE hub. */
+typedef struct ws_local_s {
+    struct ws_local_s *next;
+    ws_hub_t          *hub;
+    int                slot;
+    uint32_t           gen;
+    thread_mailbox_t  *inbox;
+    ws_topic_tree_t   *tree;
 } ws_local_t;
 
-ZEND_TLS ws_local_t *ws_local = NULL;
+/* A list, not a single attachment: two HttpServers can run on one thread (the
+ * second start()ed from a coroutine), and each owns a hub. Keyed by hub, so a
+ * connection reaches ITS server's topic tree — a thread-global would silently
+ * subscribe the second server's sockets into the first server's tree. The list
+ * is one element long in every normal setup, so the walk is free. */
+ZEND_TLS ws_local_t *ws_locals = NULL;
+
+static ws_local_t *ws_local_of(const ws_hub_t *hub)
+{
+    for (ws_local_t *local = ws_locals; local != NULL; local = local->next) {
+        if (local->hub == hub) {
+            return local;
+        }
+    }
+
+    return NULL;
+}
 
 /* zend_atomic has fetch_add for int only. Returns the value before the add. */
 static uint64_t ws_atomic_u64_add(zend_atomic_int64 *counter, const int64_t delta)
@@ -215,14 +233,11 @@ uint64_t ws_hub_next_id(ws_hub_t *hub)
     return ws_atomic_u64_add(&hub->next_ws_id, 1);
 }
 
-ws_hub_t *ws_hub_local(void)
+ws_topic_tree_t *ws_hub_tree(const ws_hub_t *hub)
 {
-    return ws_local != NULL ? ws_local->hub : NULL;
-}
+    const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
 
-ws_topic_tree_t *ws_hub_local_tree(void)
-{
-    return ws_local != NULL ? ws_local->tree : NULL;
+    return local != NULL ? local->tree : NULL;
 }
 
 /* -------------------------------------------------------------- interest */
@@ -247,20 +262,18 @@ static void ws_interest_probe(const char *key, const size_t len,
     }
 }
 
-/* This thread's filter, or NULL when it never attached — or when it is detaching
- * and a session still being torn down unsubscribes on the way out. */
-static zend_atomic_int *ws_interest_mine(void)
+/* NULL when this thread never attached to `hub` — or when it is detaching and a
+ * session still being torn down unsubscribes on the way out. */
+static void ws_interest_bump(ws_hub_t *hub, const char *filter,
+                             const size_t prefix_len, const int delta)
 {
-    return ws_local != NULL ? ws_local->hub->interest[ws_local->slot] : NULL;
-}
+    const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
 
-static void ws_interest_bump(const char *filter, const size_t prefix_len, const int delta)
-{
-    zend_atomic_int *const counters = ws_interest_mine();
-
-    if (counters == NULL) {
+    if (local == NULL || hub->interest[local->slot] == NULL) {
         return;
     }
+
+    zend_atomic_int *const counters = hub->interest[local->slot];
 
     uint32_t bucket[WS_INTEREST_PROBES];
     ws_interest_probe(filter, prefix_len, bucket);
@@ -270,14 +283,14 @@ static void ws_interest_bump(const char *filter, const size_t prefix_len, const 
     }
 }
 
-void ws_hub_interest_add(const char *filter, const size_t prefix_len)
+void ws_hub_interest_add(ws_hub_t *hub, const char *filter, const size_t prefix_len)
 {
-    ws_interest_bump(filter, prefix_len, 1);
+    ws_interest_bump(hub, filter, prefix_len, 1);
 }
 
-void ws_hub_interest_remove(const char *filter, const size_t prefix_len)
+void ws_hub_interest_remove(ws_hub_t *hub, const char *filter, const size_t prefix_len)
 {
-    ws_interest_bump(filter, prefix_len, -1);
+    ws_interest_bump(hub, filter, prefix_len, -1);
 }
 
 /* Every level-prefix of the topic being published, hashed once for the whole
@@ -346,7 +359,7 @@ static void ws_hub_drain(void **items, size_t count, void *arg);
 
 int ws_hub_attach(ws_hub_t *hub)
 {
-    if (hub == NULL || ws_local != NULL) {
+    if (hub == NULL || ws_local_of(hub) != NULL) {
         return -1;
     }
 
@@ -393,47 +406,61 @@ int ws_hub_attach(ws_hub_t *hub)
         return -1;
     }
 
-    ws_local        = ecalloc(1, sizeof(*ws_local));
-    ws_local->hub   = hub;
-    ws_local->slot  = slot;
-    ws_local->gen   = gen;
-    ws_local->inbox = inbox;
-    ws_local->tree  = ws_topic_tree_create();
+    ws_local_t *const local = ecalloc(1, sizeof(*local));
+    local->hub   = hub;
+    local->slot  = slot;
+    local->gen   = gen;
+    local->inbox = inbox;
+    local->tree  = ws_topic_tree_create(hub);
+    local->next  = ws_locals;
+    ws_locals    = local;
 
     return slot;
 }
 
-void ws_hub_detach(void)
+void ws_hub_detach(ws_hub_t *hub)
 {
-    if (ws_local == NULL) {
+    ws_local_t *local = ws_locals;
+    ws_local_t *prev  = NULL;
+
+    while (local != NULL && local->hub != hub) {
+        prev  = local;
+        local = local->next;
+    }
+
+    if (local == NULL) {
         return;
     }
 
-    ws_hub_t *const hub = ws_local->hub;
-
     tsrm_mutex_lock(hub->admin);
-    zend_atomic_int *const counters = hub->interest[ws_local->slot];
-    hub->inbox[ws_local->slot]      = NULL;
-    hub->interest[ws_local->slot]   = NULL;
-    hub->taken[ws_local->slot]      = false;
+    zend_atomic_int *const counters = hub->interest[local->slot];
+    hub->inbox[local->slot]         = NULL;
+    hub->interest[local->slot]      = NULL;
+    hub->taken[local->slot]         = false;
     tsrm_mutex_unlock(hub->admin);
 
     /* Retired under the lock, so no publisher is still reading it. The drain
-     * below can tear a session down and unsubscribe it; ws_interest_mine() now
-     * answers NULL, and those decrements land nowhere — which is what we want. */
+     * below can tear a session down and unsubscribe it; hub->interest[slot] is
+     * NULL now, so those decrements land nowhere — which is what we want. */
     pefree(counters, 1);
 
     /* The slot is retired, so no producer can post any more. Whatever is still
      * queued holds payload/query references and thread_mailbox_free throws the
      * queue away without touching them — drain it first or every rotation of the
-     * pool leaks. */
-    thread_mailbox_drain_pending(ws_local->inbox);
-    thread_mailbox_free(ws_local->inbox);
+     * pool leaks. The attachment stays on the list across the drain: it is what
+     * the drain resolves the tree through. */
+    thread_mailbox_drain_pending(local->inbox);
+    thread_mailbox_free(local->inbox);
 
-    ws_topic_tree_free(ws_local->tree);
+    if (prev != NULL) {
+        prev->next = local->next;
+    } else {
+        ws_locals = local->next;
+    }
 
-    efree(ws_local);
-    ws_local = NULL;
+    ws_topic_tree_free(local->tree);
+
+    efree(local);
 }
 
 /* ----------------------------------------------------------------- query */
@@ -446,10 +473,12 @@ static void ws_hub_answer_count(ws_hub_t *hub, ws_cmd_t *cmd)
 
     cmd->query = NULL;   /* the reference travels on with the reply */
 
+    const ws_local_t *const local = ws_local_of(hub);
+
     ws_cmd_t *const reply = ws_cmd_new(WS_CMD_COUNT_REPLY, NULL, 0);
     reply->query = query;
-    reply->count = ws_local != NULL
-        ? ws_topic_count(ws_local->tree, cmd->topic, cmd->topic_len) : 0;
+    reply->count = local != NULL
+        ? ws_topic_count(local->tree, cmd->topic, cmd->topic_len) : 0;
 
     tsrm_mutex_lock(hub->admin);
 
@@ -486,13 +515,15 @@ static void ws_hub_drain(void **items, const size_t count, void *arg)
 {
     ws_hub_t *const hub = arg;
 
+    const ws_local_t *const local = ws_local_of(hub);
+
     for (size_t i = 0; i < count; i++) {
         ws_cmd_t *const cmd = items[i];
 
         switch (cmd->kind) {
             case WS_CMD_PUBLISH:
-                if (ws_local != NULL) {
-                    (void) ws_topic_publish(ws_local->tree, cmd->topic, cmd->topic_len,
+                if (local != NULL) {
+                    (void) ws_topic_publish(local->tree, cmd->topic, cmd->topic_len,
                                             cmd->payload->data, cmd->payload->len,
                                             cmd->payload->binary, cmd->except_id);
                 }
@@ -523,8 +554,10 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
         return 0;
     }
 
-    const uint32_t sent = ws_local != NULL
-        ? ws_topic_publish(ws_local->tree, topic, topic_len, data, len, binary, except_id)
+    const ws_local_t *const me = ws_local_of(hub);
+
+    const uint32_t sent = me != NULL
+        ? ws_topic_publish(me->tree, topic, topic_len, data, len, binary, except_id)
         : 0;
 
     ws_interest_t interest;
@@ -537,7 +570,7 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
     uint64_t      skipped  = 0;
 
     for (int slot = 0; slot < hub->slots_used; slot++) {
-        if (hub->inbox[slot] == NULL || (ws_local != NULL && slot == ws_local->slot)) {
+        if (hub->inbox[slot] == NULL || (me != NULL && slot == me->slot)) {
             continue;
         }
 
@@ -582,11 +615,13 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
 uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
                       const uint32_t timeout_ms)
 {
-    if (hub == NULL || ws_local == NULL) {
+    const ws_local_t *const mine = hub != NULL ? ws_local_of(hub) : NULL;
+
+    if (mine == NULL) {
         return 0;
     }
 
-    const uint32_t local = ws_topic_count(ws_local->tree, topic, topic_len);
+    const uint32_t local = ws_topic_count(mine->tree, topic, topic_len);
 
     zend_coroutine_t *const me = ZEND_ASYNC_CURRENT_COROUTINE;
 
@@ -606,8 +641,8 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
 
     ws_query_t *const query = pecalloc(1, sizeof(*query), 1);
     ZEND_ATOMIC_INT_INIT(&query->refcount, 1);
-    query->slot  = ws_local->slot;
-    query->gen   = ws_local->gen;
+    query->slot  = mine->slot;
+    query->gen   = mine->gen;
     query->total = local;
     query->done  = done;
 
@@ -619,7 +654,7 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
     tsrm_mutex_lock(hub->admin);
 
     for (int slot = 0; slot < hub->slots_used; slot++) {
-        if (slot == ws_local->slot || hub->inbox[slot] == NULL
+        if (slot == mine->slot || hub->inbox[slot] == NULL
             || !ws_interest_matches(hub, slot, &interest)) {
             continue;
         }

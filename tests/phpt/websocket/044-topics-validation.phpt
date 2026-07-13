@@ -30,8 +30,8 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 
-$deep    = implode('/', array_fill(0, 32, 'a'));   /* exactly WS_TOPIC_MAX_LEVELS */
-$tooDeep = implode('/', array_fill(0, 33, 'a'));
+$deep    = implode('/', array_fill(0, 128, 'a'));   /* exactly WS_TOPIC_MAX_LEVELS */
+$tooDeep = implode('/', array_fill(0, 129, 'a'));
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($deep, $tooDeep) {
     $try = function (callable $fn) use ($ws) {
@@ -46,13 +46,13 @@ $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($de
     $out[] = 'sport/#: '     . $try(fn() => $ws->subscribe('sport/#'));
     $out[] = 'sport/+/x: '   . $try(fn() => $ws->subscribe('sport/+/x'));
     $out[] = '#: '           . $try(fn() => $ws->subscribe('#'));
-    $out[] = 'depth 32: '    . $try(fn() => $ws->subscribe($deep));
+    $out[] = 'depth 128: '   . $try(fn() => $ws->subscribe($deep));
 
     /* Rejected filters. */
     $out[] = '#/tail: '      . $try(fn() => $ws->subscribe('#/tail'));       // '#' must be last
     $out[] = 'sport+: '      . $try(fn() => $ws->subscribe('sport+'));       // not a whole level
     $out[] = 'empty: '       . $try(fn() => $ws->subscribe(''));
-    $out[] = 'depth 33: '    . $try(fn() => $ws->subscribe($tooDeep));
+    $out[] = 'depth 129: '   . $try(fn() => $ws->subscribe($tooDeep));
 
     /* A publish topic must be concrete. */
     $out[] = 'publish a/b: ' . $try(fn() => $ws->publish('a/b', 'x'));
@@ -93,11 +93,11 @@ a//b: ok
 sport/#: ok
 sport/+/x: ok
 #: ok
-depth 32: ok
+depth 128: ok
 #/tail: rejected
 sport+: rejected
 empty: rejected
-depth 33: rejected
+depth 129: rejected
 publish a/b: ok
 publish +: rejected
 publish #: rejected

@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker; wildcard subscribers are still always reached.
 - `HttpServer::getRuntimeStats()` reports `ws_topic_posted`, `ws_topic_skipped`
   and `ws_topic_dropped`.
+- `HttpServerConfig::setWsMaxSubscriptions()` caps the distinct topic filters one
+  connection may hold. Default 0 — no limit, the same default every self-hosted
+  broker ships (EMQX `max_subscriptions`, NATS `max_subs`), because only the
+  application knows how many topics it needs. Over the cap the filter is refused
+  and the connection stays up, as EMQX answers with SUBACK 0x97 and NATS with
+  `-ERR 'Maximum Subscriptions Exceeded'`.
 
 - **Observability — telemetry metrics + logging redesign (#5).** Metrics are
   read through a plain PHP array (no embedded exporters); logs fan out to
@@ -191,6 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   go of its topic tree before the scope drain destroyed the sessions — and a
   session unsubscribes itself as it is destroyed, so the teardown walked freed
   nodes. SIGSEGV on any stop() with a live subscriber.
+- **Topics were unusable past 64 workers (#2).** `setWorkers()` allows 1024 but
+  the hub had 64 slots, so workers beyond that got no topic tree: `subscribe()`
+  threw and `publish()` quietly did nothing. The slot table matches
+  `setWorkers()` now, and a worker that still cannot attach fails to start rather
+  than serving half a feature.
+- A connection now reaches its topic hub through its own **server** rather than a
+  thread-local, so two `HttpServer`s sharing a thread cannot share a topic tree.
+- Topic filters may be 128 levels deep, up from 32 — the ceiling EMQX uses.
 - **A full worker mailbox dropped topic traffic silently.** Publishes that cannot
   be handed to a worker are counted (`ws_topic_dropped`) instead of vanishing.
 

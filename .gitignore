@@ -139,3 +139,4 @@ fuzz/oom-*
 
 # reload-server.php runtime marker
 examples/app-version.txt
+fuzz/fuzz_ws_frame
