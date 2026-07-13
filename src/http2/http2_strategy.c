@@ -167,6 +167,13 @@ static void h2_static_on_static_done(void *user, int status)
     http2_stream_t *stream = (http2_stream_t *)user;
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
+    /* The H2 static hard-zero path has no coroutine, so it reaches neither the
+     * dispose nor the dispose_tail seam — this is its only telemetry point. */
+    if (!Z_ISUNDEF(stream->response_zv)) {
+        http_request_telemetry(stream->request, Z_OBJ(stream->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     http_server_on_request_dispose(conn->counters);
 
     if (conn->handler_refcount > 0) {
@@ -402,21 +409,6 @@ static void http2_strategy_dispatch(struct http_request_t *request,
  * connection. One coroutine per stream → multiplex works.
  * ------------------------------------------------------------------------- */
 
-/* Per-request access record (issue #5, B6); mirrors h1_log_access. */
-static void h2_log_access(http_connection_t *conn, http2_stream_t *stream)
-{
-    if (EXPECTED(conn->log_state == NULL || !conn->log_state->has_access)) {
-        return;
-    }
-
-    http_access_rec_t rec;
-    char              ip[INET6_ADDRSTRLEN];
-
-    http_request_fill_access_rec(stream->request, Z_OBJ(stream->response_zv),
-                                 &rec, ip, sizeof ip);
-    http_log_emit_access(conn->log_state, &rec);
-}
-
 /* Invokes the user handler with the stream's own (request, response)
  * zvals. All state lives on the stream — multiplexed coroutines
  * never touch a shared conn-level zval. */
@@ -431,9 +423,6 @@ static void http2_handler_coroutine_entry(void)
      * dispose runs the normal buffered commit and the wire frames go
      * out the same way they would for any handler-set response. */
     if (stream->skip_handler) {
-        http_server_count_request(conn->counters,
-                                  http_response_get_status(Z_OBJ(stream->response_zv)));
-        h2_log_access(conn, stream);
         return;
     }
 
@@ -473,11 +462,8 @@ static void http2_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(conn->counters,
-                                      http_response_get_status(Z_OBJ(stream->response_zv)));
 
             if (stamps) stream->request->end_ns = zend_hrtime();
-            h2_log_access(conn, stream);
             return;
         }
     }
@@ -521,9 +507,11 @@ static void http2_handler_coroutine_entry(void)
         const char *u = (stream->request && stream->request->uri)
                             ? ZSTR_VAL(stream->request->uri) : "?";
         http_handler_log_bailout("h2", co, m, u);
-        /* Skip retval dtor + sample + count — post-bailout PHP state
-         * cannot sustain those. Stream dispose still runs and will
-         * RST or send whatever the response was at the point of bailout. */
+        /* Skip retval dtor + sample — post-bailout PHP state cannot sustain
+         * those. Stream dispose still runs and will RST or send whatever the
+         * response was at the point of bailout; the flag keeps the telemetry
+         * seams in dispose / dispose_tail off this request. */
+        stream->handler_bailout = true;
         return;
     }
 
@@ -531,10 +519,7 @@ static void http2_handler_coroutine_entry(void)
      * destructor time on a returned object doesn't count as service
      * time. Matches the HTTP/1 handler-coroutine discipline. Stamps and
      * the sample call are skipped when no consumer (CoDel/telemetry) is
-     * active; total_requests is still bumped. */
-    http_server_count_request(conn->counters,
-                              http_response_get_status(Z_OBJ(stream->response_zv)));
-
+     * active. */
     if (stream->request != NULL && stamps) {
         stream->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
@@ -543,8 +528,6 @@ static void http2_handler_coroutine_entry(void)
             stream->request->end_ns   - stream->request->start_ns,
             stream->request->end_ns);
     }
-
-    h2_log_access(conn, stream);
 
     zval_ptr_dtor(&retval);
 }
@@ -667,6 +650,15 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         (void)http2_commit_stream_response(conn, stream);
     }
 
+    /* Status is final here (exception-derived, committed) and the sendFile
+     * path already returned above, so this reports every non-sendFile stream
+     * exactly once. The zvals are still live — the release below is 2→1. */
+    if (EXPECTED(!stream->handler_bailout) && conn != NULL &&
+        !Z_ISUNDEF(stream->response_zv)) {
+        http_request_telemetry(stream->request, Z_OBJ(stream->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     /* zvals must outlive dispose: data_provider borrows response_body
      * past dispose (emit runs later from scheduler context). */
     http2_stream_release(stream);
@@ -686,6 +678,15 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 static void h2_stream_dispose_tail(http_connection_t *conn,
                                    http2_stream_t *stream)
 {
+    /* sendFile completion: the engine has stamped the real status (206/416/
+     * 404/...) by now, which is exactly why telemetry is collected here and
+     * not at the handler-entry tail, where it would always read 200. */
+    if (EXPECTED(!stream->handler_bailout) && conn != NULL &&
+        !Z_ISUNDEF(stream->response_zv)) {
+        http_request_telemetry(stream->request, Z_OBJ(stream->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     if (!Z_ISUNDEF(stream->request_zv)) {
         zval_ptr_dtor(&stream->request_zv);
         ZVAL_UNDEF(&stream->request_zv);

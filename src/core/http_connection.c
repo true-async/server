@@ -2465,24 +2465,6 @@ void http_handler_log_bailout(const char *proto, const void *coroutine,
 }
 /* }}} */
 
-/* Per-request access record (issue #5, B6). One branch when no access sink is
- * configured. The peer travels on the request, so this is protocol-agnostic. */
-static void h1_log_access(http1_request_ctx_t *ctx)
-{
-    http_connection_t *conn = ctx->conn;
-
-    if (EXPECTED(conn->log_state == NULL || !conn->log_state->has_access)) {
-        return;
-    }
-
-    http_access_rec_t rec;
-    char              ip[INET6_ADDRSTRLEN];
-
-    http_request_fill_access_rec(ctx->request, Z_OBJ(ctx->response_zv),
-                                 &rec, ip, sizeof ip);
-    http_log_emit_access(conn->log_state, &rec);
-}
-
 /* {{{ http_handler_coroutine_entry
  *
  * Coroutine body: calls the user's PHP handler with (request, response).
@@ -2507,9 +2489,6 @@ void http_handler_coroutine_entry(void)
      * counters / keepalive / drain / Alt-Svc work converges in one
      * place. */
     if (ctx->skip_php_handler) {
-        http_server_count_request(conn->counters,
-                                  http_response_get_status(Z_OBJ(ctx->response_zv)));
-
         if (req && stamps) {
             req->end_ns = zend_hrtime();
             http_server_on_request_sample(conn->server,
@@ -2518,7 +2497,6 @@ void http_handler_coroutine_entry(void)
                                           req->end_ns);
         }
 
-        h1_log_access(ctx);
         return;
     }
 
@@ -2536,11 +2514,8 @@ void http_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(conn->counters,
-                                      http_response_get_status(Z_OBJ(ctx->response_zv)));
 
             if (req && stamps) req->end_ns = zend_hrtime();
-            h1_log_access(ctx);
             return;  /* Skip handler call; dispose emits the response. */
         }
     }
@@ -2603,8 +2578,9 @@ void http_handler_coroutine_entry(void)
         const char *m = (req && req->method) ? ZSTR_VAL(req->method) : "?";
         const char *u = (req && req->uri)    ? ZSTR_VAL(req->uri)    : "?";
         http_handler_log_bailout("h1", coroutine, m, u);
-        /* Skip retval dtor, sample, end_ns, count_request — every one of
-         * those touches state that's untrustworthy after a bailout. */
+        /* Skip retval dtor, sample, end_ns — every one of those touches
+         * state that's untrustworthy after a bailout. The telemetry seam in
+         * http_request_finalize skips bailouts too (ctx->handler_bailout). */
         return;
     }
 
@@ -2614,11 +2590,7 @@ void http_handler_coroutine_entry(void)
      * One sample per request: sojourn feeds CoDel, service feeds
      * telemetry. Fires even on handler exception (EG(exception) set) —
      * the measurement is still meaningful, work was done.
-     * Skipped when no consumer is active (sample_stamps_enabled == false);
-     * total_requests is still bumped via http_server_count_request. */
-    http_server_count_request(conn->counters,
-                              http_response_get_status(Z_OBJ(ctx->response_zv)));
-
+     * Skipped when no consumer is active (sample_stamps_enabled == false). */
     if (req && stamps) {
         req->end_ns = zend_hrtime();
         /* Pass req->end_ns so on_request_sample's CoDel-window logic
@@ -2629,8 +2601,6 @@ void http_handler_coroutine_entry(void)
                                       req->end_ns   - req->start_ns,
                                       req->end_ns);
     }
-
-    h1_log_access(ctx);
 
     zval_ptr_dtor(&retval);
 }
@@ -2929,6 +2899,15 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
                            const bool should_continue)
 {
+    /* Every H1 completion converges here — handler, sendFile (after the engine
+     * stamped the real status), static hard-zero — with request and response
+     * still alive, so this is where the request is counted and access-logged.
+     * A bailed-out handler is deliberately left out (see the entry). */
+    if (EXPECTED(!ctx->handler_bailout && !Z_ISUNDEF(ctx->response_zv))) {
+        http_request_telemetry(ctx->request, Z_OBJ(ctx->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     /* Tear down per-request state. Zvals + ctx are owned solely by
      * this finalize; no other path looks at them after the caller
      * cleared its own back-pointer. */

@@ -846,6 +846,27 @@ void http_request_fill_access_rec(const http_request_t *req,
     }
 }
 
+void http_request_telemetry(http_request_t *request, zend_object *response_obj,
+                          http_server_counters_t *counters,
+                          http_log_state_t *log_state)
+{
+    if (UNEXPECTED(response_obj == NULL)) {
+        return;
+    }
+
+    http_server_count_request(counters, http_response_get_status(response_obj));
+
+    if (log_state == NULL || !log_state->has_access) {
+        return;
+    }
+
+    http_access_rec_t rec;
+    char              ip[INET6_ADDRSTRLEN];
+
+    http_request_fill_access_rec(request, response_obj, &rec, ip, sizeof ip);
+    http_log_emit_access(log_state, &rec);
+}
+
 ZEND_METHOD(TrueAsync_HttpRequest, getRemoteAddress)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);

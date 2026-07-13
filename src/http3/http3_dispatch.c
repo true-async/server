@@ -260,11 +260,69 @@ static http_send_file_request_t *h3_send_file_req_from_wire(const response_wire_
     return req;
 }
 
+/* Rebuild, on the reactor, the slice of the request the sendfile engine reads:
+ * the conditional headers it honours plus the method/URI the access record
+ * reports. Persistent (reactor-owned) so it is freed on the thread that made
+ * it — the worker's own request is in the worker's allocation domain and is
+ * already gone by the time this runs. */
+static http_request_t *h3_reactor_request_from_wire(http3_connection_t *c,
+                                                    const response_wire_send_file_t *w)
+{
+    http_request_t *const req = pecalloc(1, sizeof(*req), 1);
+
+    req->persistent = true;
+    req->refcount   = 1;
+    req->http_major = 3;
+    req->peer       = c->peer;
+    req->peer_len   = c->peer_len;
+
+    if (w->method != NULL) {
+        req->method = zend_string_init(w->method, w->method_len, 1);
+    }
+
+    if (w->uri != NULL) {
+        req->uri = zend_string_init(w->uri, w->uri_len, 1);
+    }
+
+    http_request_init_headers(req);
+
+    const struct { const char *name; size_t name_len; const char *val; size_t val_len; } hdrs[] = {
+        { "range",             5,  w->range,             w->range_len },
+        { "if-range",          8,  w->if_range,          w->if_range_len },
+        { "if-modified-since", 17, w->if_modified_since, w->if_modified_since_len },
+        { "if-none-match",     13, w->if_none_match,     w->if_none_match_len },
+    };
+
+    for (size_t i = 0; i < sizeof hdrs / sizeof hdrs[0]; i++) {
+        if (hdrs[i].val == NULL) {
+            continue;
+        }
+
+        zend_string *const name = zend_string_init(hdrs[i].name, hdrs[i].name_len, 1);
+        zend_string *const val  = zend_string_init(hdrs[i].val, hdrs[i].val_len, 1);
+
+        http_request_store_header(req, name, val);   /* takes val, borrows name */
+        zend_string_release(name);
+    }
+
+    return req;
+}
+
 /* Retire the reactor-side response object and flush. The slab slot is
  * reclaimed by the normal pool release (nghttp3 close + worker consumed),
  * which needs response_zv UNDEF — so dtor it here. */
 static void h3_reactor_sendfile_cleanup(http3_connection_t *c, http3_stream_t *s)
 {
+    /* Pool sendFile: the worker marshalled the send and left the delivery to
+     * us, so the reactor is the only place the final status exists. c->log_state
+     * is the OFF default here — this counts, and never touches a worker's sink.
+     * The stand-in request carries the method/URI; the worker's own request is
+     * off-limits on this thread. */
+    if (c != NULL && !Z_ISUNDEF(s->response_zv)) {
+        http_request_telemetry(s->sf_request, Z_OBJ(s->response_zv),
+                               c->counters, c->log_state);
+    }
+
     if (!Z_ISUNDEF(s->response_zv)) {
         zval_ptr_dtor(&s->response_zv);
         ZVAL_UNDEF(&s->response_zv);
@@ -273,6 +331,11 @@ static void h3_reactor_sendfile_cleanup(http3_connection_t *c, http3_stream_t *s
     if (c != NULL && !c->closed) {
         http3_connection_drain_out(c);
         http3_connection_arm_timer(c);
+    }
+
+    if (s->sf_request != NULL) {
+        http_request_destroy(s->sf_request);   /* persistent, reactor-owned */
+        s->sf_request = NULL;
     }
 }
 
@@ -311,11 +374,13 @@ static void h3_reactor_apply_send_file(http3_connection_t *c, http3_stream_t *s,
 
     http_send_file_request_t *const req = h3_send_file_req_from_wire(&w);
 
+    s->sf_request = h3_reactor_request_from_wire(c, &w);
+
     h3_sendfile_user_t *const u = ecalloc(1, sizeof(*u));
     u->conn   = c;
     u->stream = s;
 
-    if (http_send_file_dispatch(s->request, Z_OBJ(s->response_zv), req,
+    if (http_send_file_dispatch(s->sf_request, Z_OBJ(s->response_zv), req,
                                 h3_reactor_sendfile_on_done, u)) {
         return;   /* pump owns delivery; on_done retires the response object */
     }
@@ -649,24 +714,6 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     ZEND_ASYNC_ENQUEUE_COROUTINE(co);
 }
 
-/* Per-request access record (issue #5, B6); mirrors h1_log_access. */
-static void h3_log_access(http3_stream_t *s)
-{
-    http3_connection_t *c = s->conn;
-
-    if (EXPECTED(c == NULL || c->log_state == NULL
-                 || !c->log_state->has_access)) {
-        return;
-    }
-
-    http_access_rec_t rec;
-    char              ip[INET6_ADDRSTRLEN];
-
-    http_request_fill_access_rec(s->request, Z_OBJ(s->response_zv),
-                                 &rec, ip, sizeof ip);
-    http_log_emit_access(c->log_state, &rec);
-}
-
 static void h3_handler_coroutine_entry(void)
 {
     const zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -679,9 +726,6 @@ static void h3_handler_coroutine_entry(void)
      * synchronous body (inline small file or 4xx). Skip the user handler;
      * dispose runs the buffered commit. Mirrors http2_handler_coroutine_entry. */
     if (s->skip_handler) {
-        http_server_count_request(s->conn->counters,
-                                  http_response_get_status(Z_OBJ(s->response_zv)));
-        h3_log_access(s);
         return;
     }
 
@@ -715,11 +759,8 @@ static void h3_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(s->conn->counters,
-                                      http_response_get_status(Z_OBJ(s->response_zv)));
 
             if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
-            h3_log_access(s);
             return;
         }
     }
@@ -761,6 +802,7 @@ static void h3_handler_coroutine_entry(void)
         const char *u = (s->request && s->request->uri)
                             ? ZSTR_VAL(s->request->uri) : "?";
         http_handler_log_bailout("h3", co, m, u);
+        s->handler_bailout = true;
         return;
     }
 
@@ -769,11 +811,7 @@ static void h3_handler_coroutine_entry(void)
     /* Stamp end_ns + feed backpressure sample BEFORE retval dtor so
      * destructor time on a returned object doesn't get counted as
      * service time. Same discipline as H1/H2 handler entries. Stamps
-     * and the sample call are gated on sample_stamps_enabled;
-     * total_requests is still bumped. */
-    http_server_count_request(s->conn->counters,
-                              http_response_get_status(Z_OBJ(s->response_zv)));
-
+     * and the sample call are gated on sample_stamps_enabled. */
     if (s->request != NULL && server != NULL && stamps) {
         s->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
@@ -782,8 +820,6 @@ static void h3_handler_coroutine_entry(void)
             s->request->end_ns   - s->request->start_ns,
             s->request->end_ns);
     }
-
-    h3_log_access(s);
 
     zval_ptr_dtor(&retval);
 }
@@ -794,6 +830,15 @@ static void h3_handler_coroutine_entry(void)
  * sendFile pump's on_done once the file has finished streaming. */
 static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
 {
+    /* Where every embedded-H3 completion converges — handler, sendFile (after
+     * the engine stamped its status), static — with both zvals still live. On
+     * the reactor thread c->log_state is the OFF default, so a static hard-zero
+     * served there counts but never reaches a worker's sink. */
+    if (EXPECTED(!s->handler_bailout) && c != NULL && !Z_ISUNDEF(s->response_zv)) {
+        http_request_telemetry(s->request, Z_OBJ(s->response_zv),
+                             c->counters, c->log_state);
+    }
+
     if (!Z_ISUNDEF(s->request_zv)) {
         zval_ptr_dtor(&s->request_zv);
         ZVAL_UNDEF(&s->request_zv);

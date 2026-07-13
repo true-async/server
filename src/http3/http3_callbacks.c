@@ -1538,6 +1538,12 @@ static int h3_stream_close_cb(nghttp3_conn *conn, int64_t stream_id,
     }
 
     h3_stream_mark_peer_closed(s);
+
+    /* Retire an in-flight body pump before dropping our ref: it fires the
+     * engine's on_done, which retires the response and drops the refs the
+     * delivery held. */
+    h3_static_stream_closed(s);
+
     http3_stream_release(s);
     return 0;
 }

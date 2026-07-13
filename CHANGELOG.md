@@ -132,6 +132,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sendFile()` was counted and access-logged with the wrong status (#5).** The
+  handler only *queues* a send and returns with the default 200; the real wire
+  status (206, 304, 416, 404, 500) is stamped later by the send-file engine. But
+  counting and the access record happened in the handler-coroutine's entry tail,
+  so every ranged download was reported as a 200. Both now happen once per
+  request, at each protocol's teardown — where the request and the response are
+  both alive *and* the status is final — through one protocol-agnostic seam,
+  `http_request_telemetry()`. It replaces five near-identical access-log wrappers
+  and the send-file engine's own counting, which had the further flaw of
+  resolving a worker's log sink from the transport thread.
+
+  Requests served entirely on a transport reactor (a static hard-zero hit, the
+  reactor half of a pooled `sendFile()`) are counted into that reactor's own
+  counters, which `getStats()` now folds into `totals` and reports under a new
+  `reactors` key — before, they were counted where nothing ever read them.
+
+- **HTTP/3 range requests returned the wrong bytes.** A ranged `sendFile()` (or
+  ranged static file) answered `206` with correct `Content-Range` headers and
+  then sent the body **from the start of the file**: the H3 body pump stored the
+  engine's `body_offset` and never seeked to it. HTTP/2 had always seeked.
+
+- **HTTP/3 files larger than 64 KiB never arrived under the reactor pool.** Only
+  the inline fast path (files up to the 64 KiB slurp threshold) worked; anything
+  that needed the real body pump — every larger file, and *every* ranged request
+  — hung until the client timed out. The pump drove itself from a PHP coroutine
+  and demanded a server object and an async scope, and a transport reactor has
+  neither (no PHP runs there), so it failed immediately and no response was ever
+  sent. It is now a callback FSM, like HTTP/2's, and runs on any thread: reads
+  complete into a callback that queues the chunk and decides whether to read on,
+  with backpressure from the stream's write window and the per-thread static
+  memory budget. As a consequence the reactor no longer touches the worker's
+  request at all — the conditional headers the engine honours (`Range`,
+  `If-Range`, `If-Modified-Since`, `If-None-Match`) now travel on the SEND_FILE
+  wire, because those request fields live in the worker's allocation domain and
+  freeing them from the reactor corrupts its heap.
+
 - **Observability review fixes (#5).**
   - **Per-protocol connection gauge underflowed for every HTTPS connection.** A
     TLS/ALPN connection installs its strategy in the handshake path, which

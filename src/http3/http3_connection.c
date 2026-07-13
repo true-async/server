@@ -1011,6 +1011,11 @@ void http3_connection_free(http3_connection_t *conn)
         conn->streams_head = NULL;
         while (s != NULL) {
             http3_stream_t *next = s->list_next;
+
+            /* Cancel before clearing s->conn: the pump is a callback FSM with
+             * no scope to cancel it, and it holds the file io + a stream pin. */
+            h3_static_cancel(s);
+
             s->conn = NULL;
 
             if (conn->nghttp3_conn != NULL) {

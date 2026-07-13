@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
@@ -319,6 +320,33 @@ static bool submit_request(h3c_t *c, const char *method, const char *host,
     nghttp3_data_reader dr = { .read_data = req_body_reader };
 
     if (bloat_kib == 0) {
+        /* H3CLIENT_HEADER="name: value" — one extra request header, enough to
+         * drive conditional / ranged requests from a phpt. */
+        const char *extra = getenv("H3CLIENT_HEADER");
+        const char *colon = (extra != NULL) ? strchr(extra, ':') : NULL;
+
+        if (colon != NULL) {
+            char name[64];
+            size_t nlen = (size_t)(colon - extra);
+
+            if (nlen > 0 && nlen < sizeof(name)) {
+                for (size_t i = 0; i < nlen; i++) {
+                    name[i] = (char)tolower((unsigned char)extra[i]);
+                }
+
+                const char *value = colon + 1;
+                while (*value == ' ') value++;
+
+                nghttp3_nv nv[6];
+                memcpy(nv, base, sizeof(base));
+                nv[5] = (nghttp3_nv){ .name = (uint8_t *)name, .namelen = nlen,
+                                      .value = (uint8_t *)value, .valuelen = strlen(value) };
+
+                return nghttp3_conn_submit_request(c->h3, c->stream_id, nv, 6,
+                    has_body ? &dr : NULL, NULL) == 0;
+            }
+        }
+
         return nghttp3_conn_submit_request(c->h3, c->stream_id, base, 5,
             has_body ? &dr : NULL, NULL) == 0;
     }

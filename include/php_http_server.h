@@ -1154,6 +1154,17 @@ static zend_always_inline void http_server_conn_active_dec(http_server_counters_
     }
 }
 
+/* Classify a completed request exactly once: bump the counters with the
+ * response's FINAL status and, when an access sink admits it, emit the access
+ * record. Every H1/H2/H3/pool teardown routes through this instead of counting
+ * at its handler-coroutine entry tail, which is why a sendFile is reported
+ * with the status the engine stamped (206/304/416/...) and not the handler's
+ * default 200. `counters` is never NULL (dummy fallback); `log_state` may be
+ * NULL or the OFF default a reactor thread carries, and then it only counts. */
+void http_request_telemetry(http_request_t *request, zend_object *response_obj,
+                          http_server_counters_t *counters,
+                          struct http_log_state *log_state);
+
 /* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are
  * needed by an active consumer (CoDel or telemetry). Hot-path stamp
  * sites gate on this — false skips three zend_hrtime() calls per

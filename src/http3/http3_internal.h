@@ -196,6 +196,17 @@ void h3_stream_mark_ended(void *ctx);
 void h3_static_account_alloc(size_t n);
 void h3_static_account_debit(size_t n);
 
+/* Abort the stream's in-flight body pump, if any: disposes its file io and
+ * fires its on_done(-1). Teardown must call this — the pump is a callback FSM,
+ * so there is no coroutine scope to cancel it. No-op without a pump. */
+void h3_static_cancel(http3_stream_t *s);
+
+/* Retire the pump when nghttp3 closes the stream. This is where a static /
+ * sendFile delivery reports success: the pump cannot retire from inside its own
+ * read callback (nghttp3 still owns every queued chunk there), so the close is
+ * what fires its on_done. No-op without a pump. */
+void h3_static_stream_closed(http3_stream_t *s);
+
 /* Static-file body delivery for HTTP/3. Wired into h3_stream_ops via
  * the .send_static_response slot. See http3_static_response.c for the
  * lifecycle contract. */

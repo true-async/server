@@ -90,6 +90,11 @@ struct _http3_stream_s {
      * http2_stream_t.skip_handler. */
     bool              skip_handler;
 
+    /* The user handler died in a zend_bailout. Dispose still runs, but the
+     * request gets no telemetry (no count, no access record) — post-bailout
+     * state is not trustworthy enough to report. Mirrors H1/H2. */
+    bool              handler_bailout;
+
     /* Buffered response body (REST/setBody path). The data_reader
      * callback feeds nghttp3 from this buffer at offset
      * `response_body_offset` until EOF. Owned by the stream; released
@@ -164,6 +169,19 @@ struct _http3_stream_s {
      * extends the per-stream write window; lazy-created on first wait,
      * disposed in http3_stream_release. */
     zend_async_trigger_event_t *write_event;
+
+    /* Reactor-side stand-in request for a marshalled sendFile (pool mode). The
+     * worker's request must never be read here — its fields live in the
+     * worker's allocation domain — so the engine gets this persistent copy of
+     * the bits it needs (method, uri, conditional headers), built from the
+     * wire and freed by the reactor that made it. */
+    http_request_t   *sf_request;
+
+    /* In-flight static/sendFile body pump (h3_static_state_t *), or NULL. It is
+     * callback-driven rather than a coroutine, so nothing cancels it for us:
+     * connection teardown calls h3_static_cancel through this pointer. Cleared
+     * by the pump itself when it finishes. */
+    void             *static_pump;
 
     /* Per-stream PHP objects + handler coroutine. HTTP/3 multiplexes N
      * concurrent requests on one QUIC connection, so each stream needs

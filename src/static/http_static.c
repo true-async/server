@@ -478,7 +478,6 @@ http_static_result_t http_static_try_serve_mounts(
 			cfg.extra_headers = mount->extra_headers;
 			cfg.mime_overrides = mount->mime_overrides;
 			cfg.cache_view = have_view ? &cv : NULL;
-			cfg.counters = counters;
 			cfg.server = server;
 			cfg.cache = cache;
 			cfg.content_encoding = picked_encoding;

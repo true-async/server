@@ -46,6 +46,13 @@
 #ifdef HAVE_HTTP_SERVER_HTTP3
 # include "http3/http3_listener.h"
 # include "http3/http3_steer.h"
+/* Defined in http3_listener.c. Not in http3_listener.h — that header must stay
+ * free of php_http_server.h (circular). A reactor-spawned listener counts the
+ * requests it serves end to end on the transport thread into this slice; no
+ * worker slab slot exists for them, so getStats() folds it into the totals.
+ * Read cross-thread: advisory uint64s, a torn read is benign (same discipline
+ * as http3_listener_stats_ptr). */
+extern http_server_counters_t *http3_listener_local_counters(http3_listener_t *l);
 #endif
 
 /* Backpressure tunables. Hard-cap hysteresis ratio: pause_low = ratio *
@@ -5081,9 +5088,57 @@ ZEND_METHOD(TrueAsync_HttpServer, getStats)
         http_stats_counters_add(&totals, server->counters_live);
     }
 
+    /* Reactor-owned counters. A request the transport thread serves end to end
+     * (static hard-zero, the reactor half of a marshalled sendFile) never
+     * touches a worker slot, so without this it would be missing from totals.
+     * Listed separately because a reactor is not a worker, and folded in so
+     * `totals` stays the sum of everything reported here. */
+    zval reactors;
+    array_init(&reactors);
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* One reactor can own several listeners (one per UDP endpoint) and their
+     * counters belong to the same thread, so sum per reactor id before
+     * emitting. reactor_h3_listeners is MAX_LISTENERS-bounded, so a reactor id
+     * indexes this scratch array directly. */
+    http_server_counters_t per_reactor[MAX_LISTENERS];
+    bool                   reactor_seen[MAX_LISTENERS] = { false };
+
+    for (size_t i = 0; i < server->reactor_h3_listener_count; i++) {
+        http3_listener_t *const l = server->reactor_h3_listeners[i].listener;
+        const int rid = server->reactor_h3_listeners[i].reactor_id;
+
+        if (l == NULL || rid < 0 || rid >= MAX_LISTENERS) {
+            continue;
+        }
+
+        const http_server_counters_t *const c = http3_listener_local_counters(l);
+
+        if (!reactor_seen[rid]) {
+            memset(&per_reactor[rid], 0, sizeof(per_reactor[rid]));
+            reactor_seen[rid] = true;
+        }
+
+        http_stats_counters_add(&per_reactor[rid], c);
+        http_stats_counters_add(&totals, c);
+    }
+
+    for (int rid = 0; rid < MAX_LISTENERS; rid++) {
+        if (!reactor_seen[rid]) {
+            continue;
+        }
+
+        zval r;
+        array_init(&r);
+        stats_counters_to_zval(&r, &per_reactor[rid]);
+        add_index_zval(&reactors, (zend_long)rid, &r);
+    }
+#endif
+
     array_init(return_value);
     add_assoc_bool(return_value, "enabled", true);
     add_assoc_zval(return_value, "workers", &workers);
+    add_assoc_zval(return_value, "reactors", &reactors);
 
     zval totals_zv;
     array_init(&totals_zv);
