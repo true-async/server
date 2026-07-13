@@ -102,10 +102,7 @@ struct http_log_writer_cb {
 
     /* Stop handshake: the stopping thread sets `closing` and waits on
      * `stop_event` (a trigger it owns, fired cross-thread by the log thread);
-     * the log thread finishes the drain and tears the transport down.
-     * `close_deadline` bounds that drain — a receiver that has stopped reading
-     * leaves a write that never completes, and the log thread cannot leave its
-     * loop while the io is still open. */
+     * the log thread finishes the drain and tears the transport down. */
     zend_atomic_bool             closing;
     zend_async_event_t          *stop_event;
     uint64_t                     close_deadline;
@@ -1938,8 +1935,7 @@ static void log_sink_open_op(void *arg)
 }
 
 /* Log thread: begin the stop. Marks the sink closing and kicks a final drain;
- * writer_teardown fires the caller's trigger once the rings are empty, or once
- * the drain deadline expires on a receiver that has stopped reading. */
+ * writer_teardown fires the caller's trigger once the rings are empty. */
 static void log_sink_close_op(void *arg)
 {
     http_log_writer_cb_t *const cb = (http_log_writer_cb_t *)arg;
