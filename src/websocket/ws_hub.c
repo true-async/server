@@ -107,11 +107,10 @@ typedef struct ws_local_s {
     ws_topic_tree_t   *tree;
 } ws_local_t;
 
-/* A list, not a single attachment: two HttpServers can run on one thread (the
- * second start()ed from a coroutine), and each owns a hub. Keyed by hub, so a
- * connection reaches ITS server's topic tree — a thread-global would silently
- * subscribe the second server's sockets into the first server's tree. The list
- * is one element long in every normal setup, so the walk is free. */
+/* Keyed by hub, not one-per-thread: a topic tree is per-SERVER state, and
+ * CODING_STANDARDS §1.2 keeps per-server state out of thread-globals. One
+ * element in every supported setup (§1.1 — one running server per thread), so
+ * the walk is free. */
 ZEND_TLS ws_local_t *ws_locals = NULL;
 
 static ws_local_t *ws_local_of(const ws_hub_t *hub)
@@ -262,12 +261,12 @@ static void ws_interest_probe(const char *key, const size_t len,
     }
 }
 
-/* NULL when this thread never attached to `hub` — or when it is detaching and a
- * session still being torn down unsubscribes on the way out. */
+/* A no-op once the slot is retired: detach nulls hub->interest[slot] before
+ * draining, and that drain can tear a session down and unsubscribe it. */
 static void ws_interest_bump(ws_hub_t *hub, const char *filter,
                              const size_t prefix_len, const int delta)
 {
-    const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
+    const ws_local_t *const local = ws_local_of(hub);
 
     if (local == NULL || hub->interest[local->slot] == NULL) {
         return;
@@ -355,7 +354,7 @@ static bool ws_hub_post_locked(ws_hub_t *hub, const int slot, ws_cmd_t *cmd)
     return inbox != NULL && thread_mailbox_post(inbox, cmd);
 }
 
-static void ws_hub_drain(void **items, size_t count, void *arg);
+static void ws_hub_drain(void **items, const size_t count, void *arg);
 
 int ws_hub_attach(ws_hub_t *hub)
 {
@@ -554,10 +553,10 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
         return 0;
     }
 
-    const ws_local_t *const me = ws_local_of(hub);
+    const ws_local_t *const local = ws_local_of(hub);
 
-    const uint32_t sent = me != NULL
-        ? ws_topic_publish(me->tree, topic, topic_len, data, len, binary, except_id)
+    const uint32_t sent = local != NULL
+        ? ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id)
         : 0;
 
     ws_interest_t interest;
@@ -570,7 +569,7 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
     uint64_t      skipped  = 0;
 
     for (int slot = 0; slot < hub->slots_used; slot++) {
-        if (hub->inbox[slot] == NULL || (me != NULL && slot == me->slot)) {
+        if (hub->inbox[slot] == NULL || (local != NULL && slot == local->slot)) {
             continue;
         }
 
@@ -579,8 +578,8 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
             continue;
         }
 
-        /* Copied once and shared across the fan-out — and not copied at all when
-         * this is the only worker. */
+        /* One copy for the whole fan-out, refcounted — and none at all when every
+         * other worker was skipped. */
         if (payload == NULL) {
             payload = ws_payload_new(data, len, binary);
         }
@@ -615,18 +614,18 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
 uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
                       const uint32_t timeout_ms)
 {
-    const ws_local_t *const mine = hub != NULL ? ws_local_of(hub) : NULL;
+    const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
 
-    if (mine == NULL) {
+    if (local == NULL) {
         return 0;
     }
 
-    const uint32_t local = ws_topic_count(mine->tree, topic, topic_len);
+    const uint32_t local_matches = ws_topic_count(local->tree, topic, topic_len);
 
-    zend_coroutine_t *const me = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
-    if (me == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
-        return local;   /* no coroutine to park — this worker's answer is all there is */
+    if (coroutine == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+        return local_matches;   /* no coroutine to park — our answer is all there is */
     }
 
     /* In-thread event, not a cross-thread trigger: the replies come back through
@@ -636,14 +635,14 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
     zend_async_event_t *const done = async_plain_event_new();
 
     if (done == NULL) {
-        return local;
+        return local_matches;
     }
 
     ws_query_t *const query = pecalloc(1, sizeof(*query), 1);
     ZEND_ATOMIC_INT_INIT(&query->refcount, 1);
-    query->slot  = mine->slot;
-    query->gen   = mine->gen;
-    query->total = local;
+    query->slot  = local->slot;
+    query->gen   = local->gen;
+    query->total = local_matches;
     query->done  = done;
 
     /* A worker with no interest would answer 0, so not asking it is not a
@@ -654,7 +653,7 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
     tsrm_mutex_lock(hub->admin);
 
     for (int slot = 0; slot < hub->slots_used; slot++) {
-        if (slot == mine->slot || hub->inbox[slot] == NULL
+        if (slot == local->slot || hub->inbox[slot] == NULL
             || !ws_interest_matches(hub, slot, &interest)) {
             continue;
         }
@@ -678,10 +677,10 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
     /* A timeout resumes cleanly — an exception here is a cancellation, and we
      * deliberately do not swallow it. */
     if (query->pending > 0
-        && zend_async_waker_new_with_timeout(me, timeout_ms, NULL) != NULL) {
-        zend_async_resume_when(me, done, false, zend_async_waker_callback_resolve, NULL);
+        && zend_async_waker_new_with_timeout(coroutine, timeout_ms, NULL) != NULL) {
+        zend_async_resume_when(coroutine, done, false, zend_async_waker_callback_resolve, NULL);
         ZEND_ASYNC_SUSPEND();
-        zend_async_waker_clean(me);
+        zend_async_waker_clean(coroutine);
     }
 
     const uint32_t total = query->total;

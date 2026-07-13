@@ -1072,9 +1072,8 @@ ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol)
 
 /* {{{ Topics (issue #2)
  *
- * A connection reaches the hub through its own SERVER, not through its thread —
- * two HttpServers can share a thread, and each owns a hub. So no topic handle
- * has to be minted, captured or carried into a handler; see ws_hub.h.
+ * A connection reaches the hub through its own server, so no topic handle has to
+ * be minted, captured or carried into a handler; see ws_hub.h.
  *
  * The session is built lazily, so subscribing has to commit the upgrade like
  * send()/recv() do: a handler that subscribes before its first I/O has none yet.
@@ -1129,8 +1128,8 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
     ws_topic_tree_t *const tree = ws_hub_tree(session->hub);
 
     if (tree == NULL) {
-        zend_throw_exception_ex(websocket_exception_ce, 0,
-            "Cannot subscribe — this worker is not attached to the topic hub");
+        zend_throw_exception(websocket_exception_ce,
+            "Cannot subscribe — this worker is not attached to the topic hub", 0);
         RETURN_THROWS();
     }
 
@@ -1203,23 +1202,17 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
 
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
-    /* publish() is the one call an unprivileged peer can use to cause work on
-     * every worker in the process, so it is the one that needs a leash (#120).
-     * Refusing loudly beats dropping quietly: an over-rate message would
-     * otherwise disappear into a full mailbox, taking OTHER topics' traffic with
-     * it, and the sender would never know. */
+    /* Throws rather than returning 0 (issue #120): a count of zero already means
+     * "nobody subscribed here", and an over-rate message that quietly vanished is
+     * exactly the failure the limit exists to make visible. */
     if (w->session != NULL && !ws_session_publish_allowed(w->session)) {
-        zend_throw_exception_ex(websocket_backpressure_exception_ce, 0,
+        zend_throw_exception(websocket_backpressure_exception_ce,
             "Publish rate limit exceeded on this connection "
-            "(HttpServerConfig::setWsPublishRateLimit)");
+            "(HttpServerConfig::setWsPublishRateLimit)", 0);
         RETURN_THROWS();
     }
 
-    uint64_t except_id = 0;
-
-    if (exclude_self && w->session != NULL) {
-        except_id = w->session->ws_id;
-    }
+    const uint64_t except_id = exclude_self && w->session != NULL ? w->session->ws_id : 0;
 
     const uint32_t sent = ws_hub_publish(ws_topic_hub_of(w),
         ZSTR_VAL(topic), ZSTR_LEN(topic),

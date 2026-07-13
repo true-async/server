@@ -567,8 +567,7 @@ http_server_config_t *http_server_get_config         (http_server_object *server
 
 /* This server's WebSocket topic hub (ws_hub_t*, void to keep the build gate out
  * of this header). NULL when the extension is built without WebSocket, or before
- * start(). A connection reaches its OWN server's hub through this — two servers
- * running on one thread must not share a topic tree. */
+ * start(). */
 void *http_server_get_ws_hub(http_server_object *server);
 
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures

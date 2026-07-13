@@ -1513,7 +1513,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxSubscriptions)
     ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(count) ZEND_PARSE_PARAMETERS_END();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     if (config_check_locked(config)) { return; }
-    if (count < 0 || count > UINT32_MAX) {
+    if (count < 0 || (zend_ulong)count > UINT32_MAX) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "WsMaxSubscriptions must be 0 (no limit) or a positive count", 0);
         return;
@@ -1544,7 +1544,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPublishRateLimit)
     ZEND_PARSE_PARAMETERS_END();
     http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
     if (config_check_locked(config)) { return; }
-    if (per_second < 0 || per_second > UINT32_MAX || burst < 0 || burst > UINT32_MAX) {
+    if (per_second < 0 || (zend_ulong)per_second > UINT32_MAX
+        || burst < 0 || (zend_ulong)burst > UINT32_MAX) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "WsPublishRateLimit must be 0 (off) or a positive rate, with a non-negative burst", 0);
         return;

@@ -32,7 +32,7 @@ typedef struct ws_topic_node {
     struct ws_topic_node *hash;
 
     /* Subscribers AT this node. Dense, not a hash: delivery only walks it, and
-     * the walk must not allocate. `dead` counts tombstones (see node_remove). */
+     * the walk must not allocate. `dead` counts tombstones (ws_node_detach). */
     ws_session_t        **subs;
     uint32_t              count;
     uint32_t              cap;
@@ -56,7 +56,7 @@ struct ws_topic_tree {
      * While the walk is in flight a removal only tombstones, and the node is
      * queued here — compacting or pruning it under the walk would free the very
      * node the walk is standing on. */
-    int               walking;
+    uint32_t          walking;
     ws_topic_node_t **dirty;
     uint32_t          dirty_count;
     uint32_t          dirty_cap;
@@ -111,11 +111,11 @@ static bool ws_topic_check(const char *topic, const size_t len, const bool wildc
     }
 
     for (uint32_t i = 0; i < levels.count; i++) {
-        const char *const lv = levels.level[i];
-        const size_t      ln = levels.len[i];
+        const char *const level     = levels.level[i];
+        const size_t      level_len = levels.len[i];
 
-        const bool is_plus = ln == 1 && lv[0] == '+';
-        const bool is_hash = ln == 1 && lv[0] == '#';
+        const bool is_plus = level_len == 1 && level[0] == '+';
+        const bool is_hash = level_len == 1 && level[0] == '#';
 
         if (is_plus || is_hash) {
             if (!wildcards_ok) {
@@ -131,7 +131,7 @@ static bool ws_topic_check(const char *topic, const size_t len, const bool wildc
         }
 
         /* A wildcard is a level, never part of one: "sport+" is not a pattern. */
-        if (memchr(lv, '+', ln) != NULL || memchr(lv, '#', ln) != NULL) {
+        if (memchr(level, '+', level_len) != NULL || memchr(level, '#', level_len) != NULL) {
             return false;
         }
     }
@@ -160,13 +160,13 @@ size_t ws_topic_interest_prefix(const char *filter, const size_t len)
     size_t prefix = 0;
 
     for (uint32_t i = 0; i < levels.count; i++) {
-        const char *const lv = levels.level[i];
+        const char *const level = levels.level[i];
 
-        if (levels.len[i] == 1 && (lv[0] == '+' || lv[0] == '#')) {
+        if (levels.len[i] == 1 && (level[0] == '+' || level[0] == '#')) {
             break;
         }
 
-        prefix = (size_t)(lv + levels.len[i] - filter);
+        prefix = (size_t)(level + levels.len[i] - filter);
     }
 
     return prefix;
@@ -315,15 +315,15 @@ static void ws_node_compact(ws_topic_node_t *node)
         return;
     }
 
-    uint32_t out = 0;
+    uint32_t kept = 0;
 
     for (uint32_t i = 0; i < node->count; i++) {
         if (node->subs[i] != NULL) {
-            node->subs[out++] = node->subs[i];
+            node->subs[kept++] = node->subs[i];
         }
     }
 
-    node->count = out;
+    node->count = kept;
     node->dead  = 0;
 }
 
@@ -395,11 +395,10 @@ static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
     /* Mid-walk the array must not shift under the iterator — tombstone instead,
      * and let ws_tree_settle compact once the walk unwinds.
      *
-     * `count` deliberately still includes the tombstone. That is what keeps
-     * ws_tree_settle safe: a node it has not reached yet is never ws_node_is_empty
-     * (), so pruning a dirty CHILD cannot cascade up and free a dirty parent that
-     * is still sitting in the list. Decrement `count` here and settle becomes a
-     * use-after-free. */
+     * `count` deliberately still counts the tombstone, and that is what keeps
+     * ws_tree_settle safe: a node it has not reached yet never looks empty, so
+     * pruning a dirty CHILD cannot cascade up and free a dirty parent still
+     * sitting in the list. Decrement `count` here and settle becomes a UAF. */
     if (tree->walking > 0) {
         node->subs[idx] = NULL;
         node->dead++;
@@ -441,13 +440,13 @@ void ws_topic_tree_free(ws_topic_tree_t *tree)
 
 static uint32_t ws_sub_count(const ws_session_t *session)
 {
-    uint32_t n = 0;
+    uint32_t count = 0;
 
     for (const ws_topic_sub_t *sub = session->topics; sub != NULL; sub = sub->next) {
-        n++;
+        count++;
     }
 
-    return n;
+    return count;
 }
 
 bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
@@ -514,7 +513,8 @@ static void ws_sub_drop(ws_topic_tree_t *tree, ws_session_t *session,
     efree(sub);
 }
 
-bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session, zend_string *filter)
+bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
+                          const zend_string *filter)
 {
     if (tree == NULL) {
         return false;   /* the worker detached; see ws_topic_unsubscribe_all */
@@ -573,49 +573,49 @@ typedef struct {
     size_t      len;
     bool        binary;
     uint64_t    except_id;
-    bool        deliver;
+    bool        should_deliver;
 
     uint32_t    hits;
 } ws_topic_visit_t;
 
-static void ws_topic_visit(ws_topic_visit_t *v, ws_topic_node_t *node)
+static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
 {
     for (uint32_t i = 0; i < node->count; i++) {
         ws_session_t *const session = node->subs[i];
 
-        if (session == NULL || session->ws_id == v->except_id) {
+        if (session == NULL || session->ws_id == visit->except_id) {
             continue;
         }
 
         /* Two filters of one session can match the same topic — serve it once. */
-        if (session->topic_mark == v->tree->mark) {
+        if (session->topic_mark == visit->tree->mark) {
             continue;
         }
 
-        session->topic_mark = v->tree->mark;
+        session->topic_mark = visit->tree->mark;
 
-        if (!v->deliver) {
-            v->hits++;
+        if (!visit->should_deliver) {
+            visit->hits++;
             continue;
         }
 
-        if (ws_session_try_send(session, v->data, v->len, v->binary)) {
-            v->hits++;
+        if (ws_session_try_send(session, visit->data, visit->len, visit->binary)) {
+            visit->hits++;
         }
     }
 }
 
-static void ws_topic_walk(ws_topic_visit_t *v, ws_topic_node_t *node,
+static void ws_topic_walk(ws_topic_visit_t *visit, ws_topic_node_t *node,
                           const ws_topic_levels_t *levels, const uint32_t i)
 {
     /* '#' takes the whole remainder — including none of it, which is why
      * "sport/#" matches "sport" itself. */
     if (node->hash != NULL) {
-        ws_topic_visit(v, node->hash);
+        ws_topic_visit(visit, node->hash);
     }
 
     if (i == levels->count) {
-        ws_topic_visit(v, node);
+        ws_topic_visit(visit, node);
         return;
     }
 
@@ -624,17 +624,17 @@ static void ws_topic_walk(ws_topic_visit_t *v, ws_topic_node_t *node,
             node->children, levels->level[i], levels->len[i]);
 
         if (literal != NULL) {
-            ws_topic_walk(v, literal, levels, i + 1);
+            ws_topic_walk(visit, literal, levels, i + 1);
         }
     }
 
     if (node->plus != NULL) {
-        ws_topic_walk(v, node->plus, levels, i + 1);
+        ws_topic_walk(visit, node->plus, levels, i + 1);
     }
 }
 
 static uint32_t ws_topic_match(ws_topic_tree_t *tree, const char *topic,
-                               const size_t topic_len, ws_topic_visit_t *v)
+                               const size_t topic_len, ws_topic_visit_t *visit)
 {
     ws_topic_levels_t levels;
 
@@ -643,37 +643,37 @@ static uint32_t ws_topic_match(ws_topic_tree_t *tree, const char *topic,
     }
 
     tree->mark++;
-    v->tree = tree;
+    visit->tree = tree;
 
     tree->walking++;
-    ws_topic_walk(v, &tree->root, &levels, 0);
+    ws_topic_walk(visit, &tree->root, &levels, 0);
     tree->walking--;
 
     if (tree->walking == 0) {
         ws_tree_settle(tree);
     }
 
-    return v->hits;
+    return visit->hits;
 }
 
 uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t topic_len,
                           const char *data, const size_t len, const bool binary,
                           const uint64_t except_id)
 {
-    ws_topic_visit_t v = {
+    ws_topic_visit_t visit = {
         .data      = data,
         .len       = len,
         .binary    = binary,
         .except_id = except_id,
-        .deliver   = true,
+        .should_deliver = true,
     };
 
-    return ws_topic_match(tree, topic, topic_len, &v);
+    return ws_topic_match(tree, topic, topic_len, &visit);
 }
 
 uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, const size_t topic_len)
 {
-    ws_topic_visit_t v = { .deliver = false };
+    ws_topic_visit_t visit = { .should_deliver = false };
 
-    return ws_topic_match(tree, topic, topic_len, &v);
+    return ws_topic_match(tree, topic, topic_len, &visit);
 }

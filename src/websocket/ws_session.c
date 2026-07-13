@@ -874,7 +874,6 @@ bool ws_session_publish_allowed(ws_session_t *session)
         return true;   /* limit off — the default */
     }
 
-    /* One message costs this much allowance; the bucket holds `burst` of them. */
     const uint64_t cost  = 1000000000ULL / rate;
     const uint32_t burst = cfg->ws_publish_burst != 0 ? cfg->ws_publish_burst : rate;
     const uint64_t cap   = cost * burst;

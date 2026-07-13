@@ -23,12 +23,11 @@
  * its thread — a use-after-free is impossible by construction rather than by
  * discipline.
  *
- * The consequence worth stating: there is no shared topic registry at all. The
- * hub does not know which worker holds subscribers of what, and does not need
- * to — it publishes to everyone and the workers filter, the same model
- * Socket.IO's Redis adapter uses. So there is no name table to lock, no topic
- * object to refcount, and no lifetime to get wrong. A wildcard filter could not
- * be interned as an object anyway: `user/42/#` is a predicate, not a room.
+ * The consequence worth stating: there is no shared topic registry. The hub
+ * carries no name table to lock, no topic object to refcount, and no lifetime to
+ * get wrong — a wildcard filter could not be interned as an object anyway,
+ * `user/42/#` being a predicate rather than a room. What each worker publishes
+ * upward is only a Bloom summary of its interest, never the topics themselves.
  *
  * What the hub does own is the worker slot table (one mailbox per worker), the
  * ws_id counter, and one interest filter per worker. `admin` guards the slots.
@@ -61,8 +60,8 @@ int  ws_hub_attach(ws_hub_t *hub);
 void ws_hub_detach(ws_hub_t *hub);
 
 /* This thread's topic tree FOR THAT HUB, NULL when it never attached. Keyed by
- * hub, not thread: two HttpServers can share a thread, and a connection must
- * reach its own server's tree. A connection finds its hub through its server
+ * hub because a tree is per-SERVER state, which CODING_STANDARDS §1.2 keeps out
+ * of thread-globals. A connection finds its hub through its server
  * (http_server_get_ws_hub), so no topic handle is carried into a handler. */
 struct ws_topic_tree *ws_hub_tree(const ws_hub_t *hub);
 
@@ -100,8 +99,8 @@ typedef struct {
     uint64_t skipped;
 
     /* Commands a worker's mailbox would not take because it was full. This one
-     * is data loss: a worker is not draining fast enough, or a client is
-     * flooding publishes (issue #120 — there is no rate limit yet). */
+     * is data loss: a worker is not draining fast enough, or a publisher is
+     * running without setWsPublishRateLimit(). */
     uint64_t dropped;
 } ws_hub_stats_t;
 
@@ -109,28 +108,19 @@ void ws_hub_get_stats(ws_hub_t *hub, ws_hub_stats_t *out);
 
 /* ---------------------------------------------------------------- interest
  *
- * Without this, a publish wakes EVERY worker — copies the payload, posts a
- * command and fires an eventfd — and most of them then find no subscriber and
- * throw it away. So each worker summarises what it subscribes to in a counting
- * Bloom filter, and a publisher skips the workers that certainly do not match.
- * This is what NATS propagates between nodes as "interest", and it is why the
- * cost of a topic nobody in the process listens to is now zero wake-ups instead
- * of one per worker.
+ * Each worker summarises its subscriptions in a counting Bloom filter so a
+ * publisher can skip the workers that certainly hold no match, instead of waking
+ * every one of them — the "interest" NATS propagates between nodes.
  *
- * Bloom, so a wildcard cannot be keyed by name: the filter holds each
- * subscription's leading literal prefix and a publisher probes every
- * level-prefix of its topic — see ws_topic_tree.h, which argues why that can
- * only ever produce a false POSITIVE (a wasted wake-up), never a false negative
- * (a lost message). Counting, because a Bloom bit cannot be cleared on
- * unsubscribe. A worker with a `#` subscription contributes the empty prefix and
- * is therefore woken by everything, correctly.
+ * Counting, because a Bloom bit cannot be cleared on unsubscribe. The key is the
+ * subscription's leading literal prefix, never its full name: ws_topic_tree.h
+ * argues why that can only cost a wasted wake-up and never lose a message.
  *
- * The filter degrades honestly: a topic space with unboundedly many distinct
- * prefixes ("order/{uuid}/status") saturates it, every probe hits, and the hub
- * is back to waking everyone — never to losing a message.
+ * It degrades honestly: an unbounded topic space ("order/{uuid}/status")
+ * saturates the filter, every probe hits, and the hub is back to waking everyone.
  *
- * Called on the thread owning the session, from ws_topic_tree.c; a no-op on a
- * thread that never attached. `prefix_len` is a byte count into `filter`.
+ * Called on the thread owning the session; a no-op on a thread that never
+ * attached. `prefix_len` is a byte count into `filter`.
  */
 void ws_hub_interest_add(ws_hub_t *hub, const char *filter, size_t prefix_len);
 void ws_hub_interest_remove(ws_hub_t *hub, const char *filter, size_t prefix_len);

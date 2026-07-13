@@ -84,24 +84,18 @@ typedef struct ws_session_t {
      * publish pass that served this session, so two filters that both match one
      * topic still deliver a single copy.
      *
-     * `hub` is THIS session's server's hub, snapshotted at init. Not looked up
-     * per call through the connection: teardown must still find it after conn
-     * has begun to come apart. Two servers can share a thread, so the hub is a
-     * property of the session, never of the thread. */
+     * `hub` is this session's server's hub, snapshotted at init rather than
+     * looked up per call: teardown must still find it after conn has begun to
+     * come apart. */
     struct ws_hub_s      *hub;
     uint64_t              ws_id;
     struct ws_topic_sub  *topics;
     uint64_t              topic_mark;
 
-    /* Token bucket over publish(), per connection (issue #120). publish() is the
-     * one WebSocket call an unprivileged peer can use to cause work on EVERY
-     * worker — send()/trySend() only ever touch its own socket. Unmetered, one
-     * client looping on a relayed message fills every worker's inbox, and the
-     * drops that follow take out OTHER topics' traffic too.
-     *
-     * Credit is measured in nanoseconds of allowance rather than whole tokens:
-     * the coarse clock ticks every 4-10ms, and integer tokens would round away
-     * to nothing at any rate finer than that. Off (rate 0) unless configured. */
+    /* Token bucket over publish() (issue #120), off unless configured. Credit is
+     * carried in NANOSECONDS of allowance, not in whole tokens: the coarse clock
+     * ticks every 4-10ms, so integer tokens would round away to nothing at any
+     * rate finer than that. */
     uint64_t              publish_credit_ns;
     uint64_t              publish_stamp_ns;
 

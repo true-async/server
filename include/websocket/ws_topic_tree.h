@@ -70,7 +70,7 @@ bool ws_topic_is_valid_name(const char *topic, size_t len);
 bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
                         zend_string *filter, uint32_t max);
 bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
-                          zend_string *filter);
+                          const zend_string *filter);
 
 /* Called from ws_session_destroy — a closing connection leaves every topic. */
 void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_session_t *session);
