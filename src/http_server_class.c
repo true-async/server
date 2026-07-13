@@ -1334,6 +1334,10 @@ static void http_server_start_logging(http_server_object *server,
 
     http_log_server_start_sinks(&server->log_state, specs, n);
 
+    /* Emits on this thread charge their drops to this server's counters — the
+     * worker clone's slab slot, or the parent's own slice. */
+    http_log_set_thread_drop_counter(&server->counters_live->log_records_dropped_total);
+
     /* The access record's duration comes from the request stamps that CoDel/
      * telemetry normally gate; an access sink is a third consumer. */
     if (server->log_state.has_access) {

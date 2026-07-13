@@ -288,6 +288,11 @@ bool http_log_color_for_fd(int fd);
 
 extern zend_class_entry *http_log_severity_ce;
 
+/* Where this thread's dropped records are counted. Each producer thread points
+ * this at its own counters slice, so the bump is race-free and getStats can
+ * attribute the loss. NULL (the default) just skips the count. */
+void http_log_set_thread_drop_counter(uint64_t *counter);
+
 void http_log_state_init(http_log_state_t *state);
 void http_log_minit(void);
 void http_log_mshutdown(void);

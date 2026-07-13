@@ -100,6 +100,7 @@ struct http_log_writer_cb {
     zend_atomic_bool             closing;
     zend_async_event_t          *stop_event;
 
+
     /* Periodic flush timer (lifetime of the sink): coalesces low-rate emits into
      * fewer writes, and is the safety net when a wake-up could not be posted. */
     zend_async_event_t          *flush_timer;
@@ -1389,6 +1390,14 @@ ZEND_TLS struct {
 ZEND_TLS int tls_ring_count = 0;
 ZEND_TLS int tls_ring_gen   = -1;
 
+/* This thread's drop counter (its own counters slice), or NULL. */
+ZEND_TLS uint64_t *tls_drop_counter = NULL;
+
+void http_log_set_thread_drop_counter(uint64_t *counter)
+{
+    tls_drop_counter = counter;
+}
+
 static void writer_kick_next(http_log_writer_cb_t *cb);
 static void writer_flush_timer_create(http_log_writer_cb_t *cb);
 static void writer_flush_timer_destroy(http_log_writer_cb_t *cb);
@@ -1522,6 +1531,10 @@ static void log_prod_append(http_log_writer_cb_t *cb, log_prod_t *r,
             cb->sink->dropped_total++;
         }
 
+        if (tls_drop_counter != NULL) {
+            (*tls_drop_counter)++;   /* our own slice: no other thread writes it */
+        }
+
         emit_fallback_stderr(cb->sink, "ring overflow");
         return;
     }
@@ -1603,6 +1616,7 @@ static void writer_complete_cb(
     }
 
     zend_async_io_req_t *req = cb->active_req;
+
 
     if (UNEXPECTED(req->exception != NULL)) {
         if (cb->sink != NULL) {
@@ -1785,13 +1799,57 @@ typedef struct {
     bool                  ok;
 } log_open_arg_t;
 
+/* A stream socket must be driven as a socket, not as a file. Wrapped as a file,
+ * its writes are handed to the blocking IO pool — the same pool that serves
+ * sendFile — so a syslog receiver that stops reading parks a pool thread per
+ * write until its TCP window is drained. As a socket the write is a poll-driven
+ * uv_write on the log thread's loop and back-pressures into the ring instead.
+ *
+ * Datagram sockets stay on the file path on purpose: a send() to a UDP or
+ * unix-datagram peer does not wait on a slow receiver (it drops), so there is
+ * nothing to unblock, and libuv's udp handle cannot adopt an already-connected
+ * descriptor. Everything else — regular files, stdout, a pipe — keeps its
+ * current behaviour. */
+static zend_async_io_type log_io_type_for_fd(const int fd)
+{
+#ifndef PHP_WIN32
+    int       type   = 0;
+    socklen_t tlen   = sizeof type;
+
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tlen) != 0
+        || type != SOCK_STREAM) {
+        return ZEND_ASYNC_IO_TYPE_FILE;   /* not a socket, or a datagram one */
+    }
+
+    int       domain = 0;
+    socklen_t dlen   = sizeof domain;
+
+    if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &dlen) != 0) {
+        return ZEND_ASYNC_IO_TYPE_FILE;
+    }
+
+    /* libuv drives an AF_UNIX stream through its pipe handle, not its tcp one. */
+    if (domain == AF_UNIX) {
+        return ZEND_ASYNC_IO_TYPE_PIPE;
+    }
+
+    if (domain == AF_INET || domain == AF_INET6) {
+        return ZEND_ASYNC_IO_TYPE_TCP;
+    }
+#else
+    (void)fd;
+#endif
+
+    return ZEND_ASYNC_IO_TYPE_FILE;
+}
+
 static void log_sink_open_op(void *arg)
 {
     log_open_arg_t *const a = (log_open_arg_t *)arg;
 
     zend_async_io_t *const io =
         ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)a->fd,
-                             ZEND_ASYNC_IO_TYPE_FILE,
+                             log_io_type_for_fd(a->fd),
                              ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
 
     if (io == NULL) {
@@ -2305,6 +2363,7 @@ static void http_log_sink_stop(http_log_sink_t *sink)
         /* The log thread is gone: nothing can drain, and nothing will fire the
          * trigger. Leak the cb rather than free a transport we cannot reach. */
         if (done != NULL) {
+            ZEND_ASYNC_EVENT_SET_CLOSED(&done->base);
             done->base.dispose(&done->base);
         }
 
@@ -2339,6 +2398,9 @@ static void http_log_sink_stop(http_log_sink_t *sink)
             timer->base.dispose(&timer->base);
         }
 
+        /* A trigger holds a loop reference (it is a uv_async): closing it first
+         * is what lets the caller's loop actually stop at shutdown. */
+        ZEND_ASYNC_EVENT_SET_CLOSED(&done->base);
         done->base.dispose(&done->base);
     }
 

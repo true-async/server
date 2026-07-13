@@ -302,6 +302,13 @@ static http3_connection_t *http3_connection_accept(
         c->log_state = (srv == NULL && rctx != NULL && rctx->log_state != NULL)
                            ? rctx->log_state
                            : http_server_get_log_state(srv);
+
+        /* Reactor thread: charge its dropped records to its own counter slice
+         * (the same one getStats reports under `reactors`). Idempotent — every
+         * connection on this thread resolves the same slice. */
+        if (srv == NULL) {
+            http_log_set_thread_drop_counter(&c->counters->log_records_dropped_total);
+        }
     }
 
     /* original_dcid for transport_params: with Retry, this is the DCID

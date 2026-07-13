@@ -1328,6 +1328,41 @@ PHP_FUNCTION(_http_log_registry_names)
     add_assoc_string(return_value, "formatters", formatters);
 }
 
+/* Flood a server's log sinks with `count` records from this thread, with no
+ * suspension in between: the writer cannot drain a 64 KiB ring mid-burst, so a
+ * large enough burst overflows it. Exists to prove the drop is counted — an
+ * observability feature that silently loses records is worse than none. */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_log_flood, 0, 2, IS_LONG, 0)
+    ZEND_ARG_OBJ_INFO(0, server, TrueAsync\\HttpServer, 0)
+    ZEND_ARG_TYPE_INFO(0, count, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(_http_log_flood)
+{
+    zval      *server_zv;
+    zend_long  count;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_OBJECT(server_zv)
+        Z_PARAM_LONG(count)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *const server = http_server_object_from_zend(Z_OBJ_P(server_zv));
+
+    if (server == NULL) {
+        RETURN_LONG(-1);
+    }
+
+    http_log_state_t *const st = http_server_get_log_state(server);
+
+    for (zend_long i = 0; i < count; i++) {
+        http_logf_info(st, "log.flood seq=%ld filler=%s", (long)i,
+                       "0123456789012345678901234567890123456789");
+    }
+
+    RETURN_LONG((zend_long)http_server_counters(server)->log_records_dropped_total);
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
@@ -1343,6 +1378,7 @@ static const zend_function_entry reactor_pool_test_functions[] = {
     ZEND_FE(_http_log_format_selftest, arginfo_log_format_selftest)
     ZEND_FE(_http_log_color_decide, arginfo_log_color_decide)
     ZEND_FE(_http_log_registry_names, arginfo_log_registry_names)
+    ZEND_FE(_http_log_flood, arginfo_log_flood)
     PHP_FE_END
 };
 

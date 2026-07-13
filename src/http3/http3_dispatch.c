@@ -499,6 +499,12 @@ static bool http3_reactor_try_static(http3_connection_t *c, http3_stream_t *s,
     http_response_set_head(Z_OBJ(s->response_zv),
                            http_request_method_is_head(s->request));
 
+    /* Without the protocol op the engine has nowhere to delegate and falls back
+     * to reading the whole file synchronously — on the transport thread, which
+     * stalls every other connection it owns, and into memory whatever the file's
+     * size. The pump is a callback FSM now, so the reactor can drive it. */
+    http_response_install_stream_ops(Z_OBJ(s->response_zv), &h3_stream_ops, s);
+
     const http_static_result_t rc = http_static_try_serve_mounts(
         /* server */ NULL,   /* reactor thread: sinks belong elsewhere, no access log */
         (const http_static_handler_t *const *)rctx->static_mounts,

@@ -250,16 +250,10 @@ struct http_request_t {
     int32_t                   body_h2_consume_pending;
     void                     *body_h3_stream;
 
-    /* Socket peer, captured once when the request is built (H1/H2 copy it off
-     * the connection, H3 off the QUIC path). Stored raw, formatted on demand —
-     * rendering an address is far more expensive than copying one, and only
-     * getRemoteAddress()/the access log ever need the string.
-     *
-     * It lives on the request, not the connection, because the two consumers
-     * that need it furthest downstream have no connection to reach for: the
-     * pool worker (the connection belongs to the reactor's thread) and the
-     * send-file engine (protocol-agnostic by design). Travelling with the
-     * request, it crosses the reactor->worker mailbox for free.
+    /* Socket peer, on the request rather than the connection because the two
+     * consumers furthest downstream have no connection to reach for: the pool
+     * worker (the connection belongs to the reactor's thread) and the send-file
+     * engine (protocol-agnostic by design).
      *
      * peer_len == 0 means "no IP peer" (AF_UNIX listener, or never captured). */
     struct sockaddr_storage peer;

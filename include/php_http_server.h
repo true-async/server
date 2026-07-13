@@ -811,6 +811,12 @@ typedef struct {
     uint64_t conns_active_h2;
     uint64_t conns_active_h3;
 
+    /* Log records this thread could not hand to a sink — its ring was full (a
+     * burst outran the writer) or the write failed. Counted per producer thread
+     * so a dropped record is attributed to whoever produced it. Silently losing
+     * log lines is exactly what an operator must be able to see. */
+    uint64_t log_records_dropped_total;
+
     /* StaticHandler hard-zero hits — bumped on every successful
      * dispatch into the no-coroutine FSM (open → stat → headers →
      * sendfile → close, bypassing the PHP coroutine entirely). The
@@ -881,6 +887,7 @@ typedef struct {
     X(conns_active_h1,                       GAUGE)         \
     X(conns_active_h2,                       GAUGE)         \
     X(conns_active_h3,                       GAUGE)         \
+    X(log_records_dropped_total,             SUM)           \
     X(static_zero_coroutine_total,           SUM)           \
     X(static_cache_hits_total,               SUM)           \
     X(static_cache_misses_total,             SUM)

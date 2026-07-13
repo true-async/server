@@ -150,6 +150,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A syslog sink over TCP wrote blockingly.** Every log descriptor was wrapped as
+  an async *file*, so its writes went to the blocking IO pool — the same pool that
+  serves `sendFile()`. A syslog receiver that stopped reading therefore parked a
+  pool thread per write until its TCP window drained. The io type is now taken
+  from the descriptor itself: an inet stream socket is driven as a socket, an
+  AF_UNIX stream through libuv's pipe handle, everything else stays a file.
+  Datagram sinks stay on the file path deliberately — a `send()` to a UDP or
+  unix-datagram peer does not wait on a slow receiver, so there is nothing to
+  unblock.
+
+- **A static mount under the reactor pool read files synchronously on the
+  transport thread.** The reactor never installed the protocol's streaming ops on
+  the response it built, so the send-file engine found no operation to delegate to
+  and fell back to reading the whole file — blocking the reactor loop (and with it
+  every other connection that thread owns) and buffering the file in memory
+  whatever its size. The ops are installed now, so a static hit goes through the
+  same callback-driven body pump as everything else.
+
+- **Log records dropped by a full ring were invisible.** A sink's ring is bounded
+  on purpose — the producer must never block — so a burst that outruns the writer
+  costs records. They were only ever mentioned in a rate-limited stderr line.
+  `getStats()` now reports `log_records_dropped_total`, counted per producer
+  thread (each charges its own counter slice, so the bump is race-free and the
+  loss is attributed to whoever produced it). An observability feature that
+  silently loses log lines is worse than one that admits it.
+
 - **HTTP/1 streaming responses were never counted.** `$response->send()` bumped
   `stream_send_calls_total` and `stream_bytes_sent_total` but not
   `streaming_responses_total` — HTTP/2 and HTTP/3 count it on their first chunk,

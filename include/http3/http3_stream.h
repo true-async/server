@@ -170,11 +170,10 @@ struct _http3_stream_s {
      * disposed in http3_stream_release. */
     zend_async_trigger_event_t *write_event;
 
-    /* Reactor-side stand-in request for a marshalled sendFile (pool mode). The
-     * worker's request must never be read here — its fields live in the
-     * worker's allocation domain — so the engine gets this persistent copy of
-     * the bits it needs (method, uri, conditional headers), built from the
-     * wire and freed by the reactor that made it. */
+    /* Stand-in request the sendfile engine reads on a marshalled send (pool
+     * mode). `s->request` is off-limits on this thread — its fields live in the
+     * worker's allocation domain, and freeing or reading them here corrupts that
+     * heap. Persistent, and freed by the reactor that built it. */
     http_request_t   *sf_request;
 
     /* In-flight static/sendFile body pump (h3_static_state_t *), or NULL. It is
