@@ -49,9 +49,11 @@ extern zval *http_request_create_from_parsed(http_request_t *req);
  */
 typedef struct {
     http_connection_t *conn;
+    http_request_t    *req;          /* borrowed: owned by request_zv */
     zval               request_zv;
     zval               websocket_zv;
     zval               upgrade_zv;
+    unsigned           handler_bailout : 1;   /* zend_bailout caught in the entry */
 } ws_handler_ctx_t;
 
 /* {{{ Forward decls */
@@ -173,6 +175,7 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
      * which is when the 101 actually goes on the wire. */
     ws_handler_ctx_t *ctx = ecalloc(1, sizeof(*ctx));
     ctx->conn = conn;
+    ctx->req  = req;
 
     zval *req_obj = http_request_create_from_parsed(req);
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
@@ -232,7 +235,10 @@ static zend_string *build_error_response(int status, const char *extra_header)
         case 403: reason = "Forbidden";          break;
         case 405: reason = "Method Not Allowed"; break;
         case 426: reason = "Upgrade Required";   break;
-        default:  reason = "Bad Request";        break;
+        case 500: reason = "Internal Server Error"; break;
+        default:  reason = (status >= 500) ? "Internal Server Error"
+                                           : "Bad Request";
+                  break;
     }
 
     smart_str buf = {0};
@@ -363,10 +369,98 @@ static void ws_handler_coroutine_entry(void)
     ZVAL_COPY_VALUE(&params[2], &ctx->upgrade_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &conn->handler->fci.function_name,
-                       &retval, 3, params);
+    /* Bailout firewall — see http_handler_log_bailout in http_connection.c. */
+    zend_try
+    {
+        call_user_function(NULL, NULL, &conn->handler->fci.function_name,
+                           &retval, 3, params);
+    }
+
+    zend_catch
+    {
+        ctx->handler_bailout = 1;
+    }
+
+    zend_end_try();
+
+    if (UNEXPECTED(ctx->handler_bailout)) {
+        const http_request_t *const req = ctx->req;
+        http_handler_log_bailout("ws", coroutine,
+            (req != NULL && req->method != NULL) ? ZSTR_VAL(req->method) : "?",
+            (req != NULL && req->uri    != NULL) ? ZSTR_VAL(req->uri)    : "?");
+        /* No PHP API past this point: post-bailout EG state cannot sustain
+         * another zval op. Cleanup runs in dispose (own zend_try). */
+        return;
+    }
 
     zval_ptr_dtor(&retval);
+}
+/* }}} */
+
+/* {{{ handler-failure seam — contract in php_websocket.h
+ *
+ * Left on the coroutine, the exception is rethrown at finalize and takes the
+ * worker thread down (#119). The two escalation paths gate on different flags,
+ * so both are set (#101). Logged because a WS handler has no response body to
+ * carry the exception to the operator.
+ */
+int ws_handler_consume_exception(zend_coroutine_t *coroutine)
+{
+    zend_object *const exc = coroutine->exception;
+    if (exc == NULL) {
+        return 0;
+    }
+
+    ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
+    ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
+
+    /* Cancellation is the scope retiring the handler (server stop, connection
+     * teardown), not a handler failure: consume it, but keep the ordinary
+     * teardown — no log, no 1011, no error status. */
+    if (ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+        return 0;
+    }
+
+    zval rv;
+    zval *const msg_zv = zend_read_property_ex(exc->ce, exc,
+                             ZSTR_KNOWN(ZEND_STR_MESSAGE), /*silent=*/1, &rv);
+    zval *const file_zv = zend_read_property_ex(exc->ce, exc,
+                             ZSTR_KNOWN(ZEND_STR_FILE), /*silent=*/1, &rv);
+    zval *const line_zv = zend_read_property_ex(exc->ce, exc,
+                             ZSTR_KNOWN(ZEND_STR_LINE), /*silent=*/1, &rv);
+    zval *const code_zv = zend_read_property_ex(exc->ce, exc,
+                              ZSTR_KNOWN(ZEND_STR_CODE), /*silent=*/1, &rv);
+
+    zend_error(E_WARNING,
+        "[true-async-server] uncaught exception in websocket handler: %s: %s (in %s:%d)",
+        ZSTR_VAL(exc->ce->name),
+        (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING) ? Z_STRVAL_P(msg_zv) : "",
+        (file_zv != NULL && Z_TYPE_P(file_zv) == IS_STRING) ? Z_STRVAL_P(file_zv) : "?",
+        (line_zv != NULL && Z_TYPE_P(line_zv) == IS_LONG) ? (int)Z_LVAL_P(line_zv) : 0);
+
+    const zend_long code = (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG)
+                             ? Z_LVAL_P(code_zv) : 0;
+    return (code >= 400 && code <= 599) ? (int)code : 500;
+}
+
+/* CLOSE 1011 (RFC 6455 §7.4.1), no reason payload — the exception text is for
+ * the log, not for the peer. internal_send picks the non-suspending sink:
+ * dispose must not park on backpressure while tearing the connection down. */
+void ws_handler_close_internal_error(websocket_object *w)
+{
+    ws_session_t *const s = w->session;
+    if (s == NULL || s->ctx == NULL || s->peer_closed || s->write_error
+        || s->flushing) {
+        return;
+    }
+
+    (void)wslay_event_queue_close(s->ctx, WSLAY_CODE_INTERNAL_SERVER_ERROR,
+                                  NULL, 0);
+    s->flushing      = 1;
+    s->internal_send = 1;
+    (void)ws_session_drive_send(s);
+    s->internal_send = 0;
+    s->flushing      = 0;
 }
 /* }}} */
 
@@ -409,9 +503,20 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         u = websocket_upgrade_from_obj(Z_OBJ(ctx->upgrade_zv));
     }
 
-    /* Case 2: reject was called pre-commit. Send the 4xx async. */
-    if (u != NULL && !w->committed && u->reject_status != 0) {
-        zend_string *resp = build_error_response(u->reject_status, NULL);
+    const int  exc_status = ws_handler_consume_exception(coroutine);
+    const bool failed     = (exc_status != 0) || ctx->handler_bailout;
+
+    /* An explicit reject() wins over the exception's status: it is the
+     * handler's deliberate answer, the throw may just be how it bailed out. */
+    int reject_status = (u != NULL) ? u->reject_status : 0;
+    if (reject_status == 0 && failed) {
+        reject_status = (exc_status != 0) ? exc_status : 500;
+    }
+
+    /* Case 2: reject was called (or the handler failed) pre-commit — answer
+     * with a status; no 101 goes out, so the peer never sees a WS session. */
+    if (w != NULL && !w->committed && reject_status != 0) {
+        zend_string *resp = build_error_response(reject_status, NULL);
         if (resp != NULL) {
             char *buf = emalloc(ZSTR_LEN(resp));
             memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
@@ -429,6 +534,14 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         if (EG(exception) != NULL) {
             zend_clear_exception();
         }
+    }
+
+    /* Committed + failed: the peer holds a live session, so the failure has to
+     * arrive in-protocol. The queued write keeps conn alive (destroy defers on
+     * out_in_flight), so the CLOSE still reaches the wire despite the teardown
+     * below. */
+    if (failed && w != NULL && w->committed && !w->closed) {
+        ws_handler_close_internal_error(w);
     }
 
     /* Mark the WebSocket as closed regardless of path. */

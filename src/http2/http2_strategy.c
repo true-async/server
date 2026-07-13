@@ -1972,6 +1972,7 @@ typedef struct {
     zval            websocket_zv;
     zval            request_zv;
     zval            upgrade_zv;
+    unsigned        handler_bailout : 1;   /* zend_bailout caught in the entry */
 } ws_h2_ctx_t;
 
 static void ws_h2_handler_entry(void)
@@ -1985,8 +1986,29 @@ static void ws_h2_handler_entry(void)
     ZVAL_COPY_VALUE(&params[2], &ctx->upgrade_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &ctx->handler->fci.function_name,
-                       &retval, 3, params);
+    /* Bailout firewall — see http_handler_log_bailout in http_connection.c. */
+    zend_try
+    {
+        call_user_function(NULL, NULL, &ctx->handler->fci.function_name,
+                           &retval, 3, params);
+    }
+
+    zend_catch
+    {
+        ctx->handler_bailout = 1;
+    }
+
+    zend_end_try();
+
+    if (UNEXPECTED(ctx->handler_bailout)) {
+        const http_request_t *const req = ctx->stream->request;
+        http_handler_log_bailout("ws-h2", co,
+            (req != NULL && req->method != NULL) ? ZSTR_VAL(req->method) : "?",
+            (req != NULL && req->uri    != NULL) ? ZSTR_VAL(req->uri)    : "?");
+        /* No PHP API past this point (post-bailout EG state). */
+        return;
+    }
+
     zval_ptr_dtor(&retval);
 }
 
@@ -2013,12 +2035,27 @@ static void ws_h2_handler_dispose(zend_coroutine_t *coroutine)
     websocket_upgrade_object *u = (Z_TYPE(ctx->upgrade_zv) == IS_OBJECT)
         ? websocket_upgrade_from_obj(Z_OBJ(ctx->upgrade_zv)) : NULL;
 
-    if (u != NULL && w != NULL && !w->committed && u->reject_status != 0) {
-        /* reject() pre-commit → 4xx HEADERS + END_STREAM. */
+    /* Same failure contract as the H1 upgrade path (#119); reject() wins. */
+    const int  exc_status = ws_handler_consume_exception(coroutine);
+    const bool failed     = (exc_status != 0) || ctx->handler_bailout;
+
+    int reject_status = (u != NULL) ? u->reject_status : 0;
+    if (reject_status == 0 && failed) {
+        reject_status = (exc_status != 0) ? exc_status : 500;
+    }
+
+    if (w != NULL && !w->committed && reject_status != 0) {
+        /* reject / failure pre-commit → 4xx/5xx HEADERS + END_STREAM. */
         if (!stream->peer_closed) {
             (void)http2_session_submit_response(stream->session,
-                stream->stream_id, u->reject_status, NULL, 0, NULL, 0);
+                stream->stream_id, reject_status, NULL, 0, NULL, 0);
             http2_session_emit(stream->session);
+        }
+    } else if (failed && w != NULL && w->committed && !w->closed) {
+        /* Committed + failed → CLOSE 1011 on the stream, then EOF it. */
+        ws_handler_close_internal_error(w);
+        if (!stream->peer_closed) {
+            h2_stream_mark_ended(stream);
         }
     } else if (w != NULL && !w->committed) {
         /* Handler exited without WS I/O and without rejecting: accept,

@@ -167,6 +167,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An exception in a WebSocket handler killed the worker thread, silently (#119).**
+  The WS handler coroutine never consumed its exception, so it was rethrown at
+  finalize and retired the whole worker — one bad connection cost a thread of
+  accept capacity, and after N connections the port stopped accepting anything,
+  including plain HTTP. The same hole existed on the HTTP/2 Extended CONNECT path
+  (RFC 8441), and a fatal error (`memory_limit`, uncatchable error) took the worker
+  down through the missing bailout firewall. A failing handler now behaves like a
+  failing HTTP handler: the exception is consumed and logged with its class,
+  message and origin, and the failure is reported to the peer in-protocol — an
+  HTTP status when the handler threw before the upgrade committed (`Throwable::$code`
+  when it is a valid 4xx/5xx, else 500), a `CLOSE 1011` frame when the session was
+  already live. The worker keeps serving. Cancellation (server stop, connection
+  teardown) is unchanged — it is not a handler failure.
+
 - **One departing HTTP/3 peer could silence the listener for good.** When a client
   vanished while the server was still sending to it, the ICMP port-unreachable that
   came back was queued on the listener socket by `IP_RECVERR` and reported by epoll
