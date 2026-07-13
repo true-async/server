@@ -167,6 +167,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A log sink whose receiver stopped reading broke process shutdown (#121).** With
+  a stalled peer (a socket nobody drains, a wedged syslog collector) the sink's
+  write never completed, so the log thread's final drain waited on it forever: the
+  transport stayed open, the thread never left its loop, and the process aborted on
+  `ZEND_ASYNC_REACTOR_LOOP_ALIVE() == false && "The event loop must be stopped"`.
+  The stop-time drain is now bounded on the log thread itself — past the deadline
+  the write in flight is abandoned and the transport torn down regardless, so the
+  thread always leaves. The abandoned write keeps its buffer until the reactor
+  reports the cancellation (a file write is still reading it in the blocking pool),
+  and the stopping thread's existing budget goes back to being what it was meant to
+  be: a backstop, not the thing that has to fire. Records already in the ring are
+  still flushed when the receiver is healthy; drop accounting is unchanged.
+
 - **An exception in a WebSocket handler killed the worker thread, silently (#119).**
   The WS handler coroutine never consumed its exception, so it was rethrown at
   finalize and retired the whole worker — one bad connection cost a thread of

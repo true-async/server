@@ -66,6 +66,12 @@ http_log_state_t  http_log_state_default = {
  * past this leaks rather than pinning teardown. */
 #define HTTP_LOG_STOP_DRAIN_BUDGET_MS 3000u
 
+/* How long the log thread lets the final drain run before it abandons the write
+ * in flight and tears the transport down anyway. Must stay well under
+ * HTTP_LOG_STOP_DRAIN_BUDGET_MS: the stopping thread's budget is only a backstop,
+ * and the io has to be gone before the log thread is asked to leave its loop. */
+#define HTTP_LOG_CLOSE_DRAIN_BUDGET_MS 1000u
+
 /* Distinct formatters cached per emit before fan-out. The built-in set is
  * plain/json/logfmt/pretty, so a real config never overflows; this also
  * bounds the emit-path stack to ~8 KiB of format buffers. */
@@ -99,6 +105,7 @@ struct http_log_writer_cb {
      * the log thread finishes the drain and tears the transport down. */
     zend_atomic_bool             closing;
     zend_async_event_t          *stop_event;
+    uint64_t                     close_deadline;
 
 
     /* Periodic flush timer (lifetime of the sink): coalesces low-rate emits into
@@ -1646,12 +1653,23 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
 {
     zend_atomic_bool_store_ex(&cb->kick_pending, false);
 
+    const bool closing = zend_atomic_bool_load_ex(&cb->closing);
+
+    /* The stop drain is bounded. A receiver that stopped reading leaves a write
+     * that never completes, and the log thread cannot leave its loop while the io
+     * is open — so past the deadline the transport goes regardless of what is
+     * still queued. It is the flush timer that brings us back here to notice. */
+    if (closing && ZEND_ASYNC_NOW() >= cb->close_deadline) {
+        writer_teardown(cb);
+        return;
+    }
+
     if (cb->active_req != NULL) {
         return;   /* a write is in flight; its completion re-kicks */
     }
 
     if (cb->sink == NULL || cb->sink->async_io == NULL) {
-        if (zend_atomic_bool_load_ex(&cb->closing)) {
+        if (closing) {
             writer_teardown(cb);
         }
 
@@ -1716,7 +1734,7 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
             efree(out);
         }
 
-        if (zend_atomic_bool_load_ex(&cb->closing)) {
+        if (closing) {
             writer_teardown(cb);   /* drained: finish the stop handshake */
         }
 
@@ -1734,10 +1752,19 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
     }
 }
 
-/* Log thread: the drain is done and a stop is pending — release the transport
- * and hand the stopping thread its wake-up. Rings are freed here because the
- * producers have quiesced by contract (stop runs after the workers are done)
- * and the generation bump has already invalidated every cached pointer. */
+/* Buffer of an abandoned write: freed by the reactor when the write it was
+ * handed to completes (as a cancellation, once the io is closed). */
+static void writer_abandoned_buf_free(void *buf, zend_async_io_t *io)
+{
+    (void)io;
+    efree(buf);
+}
+
+/* Log thread: the drain is done (or its deadline has run out) and a stop is
+ * pending — release the transport and hand the stopping thread its wake-up.
+ * Rings are freed here because the producers have quiesced by contract (stop
+ * runs after the workers are done) and the generation bump has already
+ * invalidated every cached pointer. */
 static void writer_teardown(http_log_writer_cb_t *cb)
 {
     writer_flush_timer_destroy(cb);
@@ -1749,6 +1776,18 @@ static void writer_teardown(http_log_writer_cb_t *cb)
 
         if (io->event.del_callback != NULL) {
             io->event.del_callback(&io->event, &cb->base);
+        }
+
+        /* A write still in flight is one the receiver never took. Closing the io
+         * cancels it, but the buffer stays libuv's until that cancellation lands
+         * — a file write is reading it in the blocking pool right now. Hand both
+         * buffer and request to the completion instead of freeing them here. */
+        if (cb->active_req != NULL) {
+            zend_async_io_req_t *const req = cb->active_req;
+            cb->active_req = NULL;
+            cb->active_buf = NULL;
+            req->free_cb   = writer_abandoned_buf_free;
+            req->dispose(req);
         }
 
         ZEND_ASYNC_IO_CLOSE(io);
@@ -1872,9 +1911,10 @@ static void log_sink_open_op(void *arg)
     cb->sink         = a->sink;
     cb->mode         = a->mode;
     cb->producers    = NULL;
-    cb->active_req   = NULL;
-    cb->active_buf   = NULL;
-    cb->stop_event   = NULL;
+    cb->active_req     = NULL;
+    cb->active_buf     = NULL;
+    cb->stop_event     = NULL;
+    cb->close_deadline = 0;
     ZEND_ATOMIC_BOOL_INIT(&cb->kick_pending, false);
     ZEND_ATOMIC_BOOL_INIT(&cb->closing, false);
 
@@ -1901,6 +1941,7 @@ static void log_sink_close_op(void *arg)
     http_log_writer_cb_t *const cb = (http_log_writer_cb_t *)arg;
 
     zend_atomic_bool_store_ex(&cb->closing, true);
+    cb->close_deadline = ZEND_ASYNC_NOW() + HTTP_LOG_CLOSE_DRAIN_BUDGET_MS;
     writer_kick_next(cb);
 }
 
