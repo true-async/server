@@ -579,6 +579,51 @@ suite re-verified green.
 
 ---
 
+### Stage B8 — sinks move to a log thread ✅ _(after B7; commits `e4b4413`, `479ebeb`)_
+
+B1–B7 gave each sink its ring, its async io and its flush timer **on the thread
+that started it**. That is what blocked the last hole in B6: a request the
+transport reactor serves end to end (a static hit; the reactor half of a
+marshalled `sendFile`, where the reactor is the only place the final status
+exists) was counted but could not be access-logged — a reactor has no PHP
+context and must not touch a worker's descriptor.
+
+**Now:** the descriptor, the write in flight and the flush timer belong to ONE
+consumer thread (`reactor_pool_create(1, 0)` in `http_log.c`). Every other
+thread — workers, reactors, the parent — is a producer: it formats the record on
+its own stack and copies the bytes into its **own SPSC ring** for that sink
+(`log_prod_t`). One writer and one reader per ring, so emit takes no lock and no
+atomic read-modify-write; a release store of the write index is the whole
+synchronisation. Wake-ups are bounded to one in flight per sink
+(`kick_pending`); the 32 KiB high-water + 200 ms timer policy is unchanged, and
+so is drop-on-overflow.
+
+- io + writer + timer are created **on the log thread** (`log_sink_open_op` via
+  `reactor_pool_exec`) — they must be born on the loop that drives them. The
+  descriptor is resolved on the thread that owns the PHP stream.
+- Stop is a handshake: the stopping thread marks the sink `closing` and waits on
+  a trigger the log thread fires after the final drain (3 s budget).
+- The io type is taken from the descriptor (`log_io_type_for_fd`): an inet stream
+  socket is driven as a socket, an AF_UNIX stream through libuv's pipe handle,
+  everything else as a file. Wrapping a socket as a file sent its writes to the
+  blocking IO pool — the pool that also serves `sendFile`. Datagram sinks stay
+  file-typed on purpose (a `send()` to a UDP peer does not wait on a slow
+  receiver).
+- Drops are a metric now: `log_records_dropped_total`, counted per producer
+  thread into its own counters slice.
+
+**Not done (deliberately):** sinks are still built **per server clone**, so under
+a pool each worker still opens its own and still cannot open a `stream` sink (a
+PHP resource does not cross threads — use `file`). What the log thread changed is
+that the *parent's* sinks became reachable from the reactors. Sharing one sink
+set across the whole pool — one descriptor per sink instead of one per worker —
+is the natural follow-up it makes possible.
+
+**Known bug:** a sink whose receiver stalls breaks shutdown
+([#121](https://github.com/true-async/server/issues/121)) — the write never
+completes, so the log thread's loop never goes idle and the process trips the
+loop-alive assert.
+
 ## Relationship to issue #5
 
 | #5 pillar | This plan |

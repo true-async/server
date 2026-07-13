@@ -325,11 +325,20 @@ static bool submit_request(h3c_t *c, const char *method, const char *host,
         const char *extra = getenv("H3CLIENT_HEADER");
         const char *colon = (extra != NULL) ? strchr(extra, ':') : NULL;
 
-        if (colon != NULL) {
-            char name[64];
-            size_t nlen = (size_t)(colon - extra);
+        if (extra != NULL && colon == NULL) {
+            fprintf(stderr, "h3client: H3CLIENT_HEADER needs \"name: value\"; ignored\n");
+        }
 
-            if (nlen > 0 && nlen < sizeof(name)) {
+        if (colon != NULL) {
+            char name[128];
+            const size_t nlen = (size_t)(colon - extra);
+
+            /* Sending the request without the header the caller asked for would
+             * make the test fail somewhere else entirely — say so here. */
+            if (nlen == 0 || nlen >= sizeof(name)) {
+                fprintf(stderr, "h3client: H3CLIENT_HEADER name is empty or over "
+                                "%zu bytes; ignored\n", sizeof(name) - 1);
+            } else {
                 for (size_t i = 0; i < nlen; i++) {
                     name[i] = (char)tolower((unsigned char)extra[i]);
                 }
