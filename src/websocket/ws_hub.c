@@ -601,6 +601,40 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
     return sent;
 }
 
+/* Posts the query to every worker that might hold a match, and counts what went
+ * out in query->pending. A worker with no interest would answer 0, so skipping it
+ * is not a shortcut — it is the same answer, sooner. */
+static void ws_hub_ask_others(ws_hub_t *hub, const int own_slot, ws_query_t *query,
+                              const char *topic, const size_t topic_len)
+{
+    ws_interest_t interest;
+    ws_interest_build(&interest, topic, topic_len);
+
+    tsrm_mutex_lock(hub->admin);
+
+    for (int slot = 0; slot < hub->slots_used; slot++) {
+        if (slot == own_slot || hub->inbox[slot] == NULL
+            || !ws_interest_matches(hub, slot, &interest)) {
+            continue;
+        }
+
+        ws_cmd_t *const cmd = ws_cmd_new(WS_CMD_COUNT, topic, topic_len);
+        cmd->query = query;
+
+        zend_atomic_int_fetch_add(&query->refcount, 1);
+
+        if (ws_hub_post_locked(hub, slot, cmd)) {
+            query->pending++;
+        } else {
+            zend_atomic_int_fetch_add(&query->refcount, -1);
+            pefree(cmd, 1);
+            ws_hub_note_drop(hub);
+        }
+    }
+
+    tsrm_mutex_unlock(hub->admin);
+}
+
 uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
                       const uint32_t timeout_ms)
 {
@@ -635,34 +669,7 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
     query->total = local_matches;
     query->done  = done;
 
-    /* A worker with no interest would answer 0, so not asking it is not a
-     * shortcut — it is the same answer, sooner. */
-    ws_interest_t interest;
-    ws_interest_build(&interest, topic, topic_len);
-
-    tsrm_mutex_lock(hub->admin);
-
-    for (int slot = 0; slot < hub->slots_used; slot++) {
-        if (slot == local->slot || hub->inbox[slot] == NULL
-            || !ws_interest_matches(hub, slot, &interest)) {
-            continue;
-        }
-
-        ws_cmd_t *const cmd = ws_cmd_new(WS_CMD_COUNT, topic, topic_len);
-        cmd->query = query;
-
-        zend_atomic_int_fetch_add(&query->refcount, 1);
-
-        if (ws_hub_post_locked(hub, slot, cmd)) {
-            query->pending++;
-        } else {
-            zend_atomic_int_fetch_add(&query->refcount, -1);
-            pefree(cmd, 1);
-            ws_hub_note_drop(hub);
-        }
-    }
-
-    tsrm_mutex_unlock(hub->admin);
+    ws_hub_ask_others(hub, local->slot, query, topic, topic_len);
 
     /* A timeout resumes cleanly — an exception here is a cancellation, and we
      * deliberately do not swallow it. */

@@ -240,12 +240,15 @@ static ws_topic_node_t *ws_node_child(ws_topic_node_t *parent, const char *level
     return node;
 }
 
-static void ws_node_free(ws_topic_node_t *node, const bool self)
+static void ws_node_free(ws_topic_node_t *node);
+
+/* The root is embedded in the tree, so it is emptied but never freed. */
+static void ws_node_free_contents(ws_topic_node_t *node)
 {
     if (node->children != NULL) {
         ws_topic_node_t *child;
         ZEND_HASH_FOREACH_PTR(node->children, child) {
-            ws_node_free(child, true);
+            ws_node_free(child);
         } ZEND_HASH_FOREACH_END();
 
         zend_hash_destroy(node->children);
@@ -253,11 +256,11 @@ static void ws_node_free(ws_topic_node_t *node, const bool self)
     }
 
     if (node->plus != NULL) {
-        ws_node_free(node->plus, true);
+        ws_node_free(node->plus);
     }
 
     if (node->hash != NULL) {
-        ws_node_free(node->hash, true);
+        ws_node_free(node->hash);
     }
 
     if (node->subs != NULL) {
@@ -267,10 +270,13 @@ static void ws_node_free(ws_topic_node_t *node, const bool self)
     if (node->level != NULL) {
         zend_string_release(node->level);
     }
+}
 
-    if (self) {
-        efree(node);
-    }
+static void ws_node_free(ws_topic_node_t *node)
+{
+    ws_node_free_contents(node);
+
+    efree(node);
 }
 
 static bool ws_node_is_empty(const ws_topic_node_t *node)
@@ -303,7 +309,7 @@ static void ws_node_prune(ws_topic_node_t *node)
                 break;
         }
 
-        ws_node_free(node, true);
+        ws_node_free(node);
 
         node = parent;
     }
@@ -429,13 +435,26 @@ void ws_topic_tree_free(ws_topic_tree_t *tree)
         return;
     }
 
-    ws_node_free(&tree->root, false);
+    ws_node_free_contents(&tree->root);
 
     if (tree->dirty != NULL) {
         efree(tree->dirty);
     }
 
     efree(tree);
+}
+
+static void ws_interest_publish(struct ws_hub_s *hub, const zend_string *filter,
+                                const bool joining)
+{
+    const size_t prefix =
+        ws_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter));
+
+    if (joining) {
+        ws_hub_interest_add(hub, ZSTR_VAL(filter), prefix);
+    } else {
+        ws_hub_interest_remove(hub, ZSTR_VAL(filter), prefix);
+    }
 }
 
 static uint32_t ws_sub_count(const ws_session_t *session)
@@ -485,8 +504,7 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
     sub->next      = session->topics;
     session->topics = sub;
 
-    ws_hub_interest_add(tree->hub, ZSTR_VAL(filter),
-                        ws_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter)));
+    ws_interest_publish(tree->hub, filter, true);
 
     return true;
 }
@@ -504,9 +522,7 @@ static void ws_sub_drop(ws_topic_tree_t *tree, ws_session_t *session,
 
     /* After the tree, never before: while a subscription is live the interest
      * filter must not understate it, or a publish would skip this worker. */
-    ws_hub_interest_remove(tree->hub, ZSTR_VAL(sub->filter),
-                           ws_topic_interest_prefix(ZSTR_VAL(sub->filter),
-                                                    ZSTR_LEN(sub->filter)));
+    ws_interest_publish(tree->hub, sub->filter, false);
 
     zend_string_release(sub->filter);
 
