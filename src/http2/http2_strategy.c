@@ -2045,14 +2045,12 @@ static void ws_h2_handler_dispose(zend_coroutine_t *coroutine)
     }
 
     if (w != NULL && !w->committed && reject_status != 0) {
-        /* reject / failure pre-commit → 4xx/5xx HEADERS + END_STREAM. */
         if (!stream->peer_closed) {
             (void)http2_session_submit_response(stream->session,
                 stream->stream_id, reject_status, NULL, 0, NULL, 0);
             http2_session_emit(stream->session);
         }
     } else if (failed && w != NULL && w->committed && !w->closed) {
-        /* Committed + failed → CLOSE 1011 on the stream, then EOF it. */
         ws_handler_close_internal_error(w);
         if (!stream->peer_closed) {
             h2_stream_mark_ended(stream);
