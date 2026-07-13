@@ -4113,8 +4113,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     if (server->ws_hub != NULL && !ws_hub_attached) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-            "Failed to attach this worker to the WebSocket topic hub — more than "
-            "%d workers, or a second WebSocket server already running on this thread",
+            "Failed to attach this worker to the WebSocket topic hub: all %d slots "
+            "are taken",
             WS_HUB_MAX_WORKERS);
         RETURN_FALSE;
     }

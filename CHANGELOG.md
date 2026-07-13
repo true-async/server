@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share-nothing: each worker matches publishes against its own topic tree, and a
   session pointer never crosses a thread. `subscriberCount()` is a
   scatter/gather over the workers, so it is a snapshot, not a live counter.
+- Topics work on every WebSocket transport, not just plaintext HTTP/1: over TLS,
+  over HTTP/2 Extended CONNECT (where a session is bound to a stream, so a
+  publish reaches the sibling streams of the publisher's own connection), and
+  with permessage-deflate — one `publish()` serves a compressed peer and a plain
+  one side by side, each with the framing it negotiated. A publish to a peer whose
+  socket is backed up drops the message rather than queueing it, and never
+  suspends, so one dead reader cannot stall delivery to everyone else.
 - **Interest filter on publish.** Each worker summarises its subscriptions in a
   counting Bloom filter of topic prefixes, and a publisher skips the workers that
   cannot match, instead of waking all of them. A publish to a topic nobody in the
