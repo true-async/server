@@ -41,14 +41,6 @@ extern zend_class_entry *websocket_concurrent_read_exception_ce;
  */
 void ws_php_classes_register(void);
 
-/* WebSocketRoom (ws_room_class.c) — cross-worker rooms, see ws_hub.h. */
-extern zend_class_entry *websocket_room_ce;
-void ws_room_class_register(void);
-
-/* Interns `name` in `hub` and wraps it in a WebSocketRoom. NULL on failure with
- * an exception set. `hub` is a ws_hub_t* (void to keep the build gate out). */
-zend_object *websocket_room_object_create(void *hub, zend_string *name);
-
 /*
  * WebSocket PHP object backing.
  *

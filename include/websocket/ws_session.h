@@ -75,11 +75,14 @@ typedef struct ws_session_t {
     /* Owning wslay context. NULL until ws_session_init() succeeds. */
     wslay_event_context_ptr ctx;
 
-    /* Rooms (ws_hub.h). Cross-thread a session is addressed by ws_id, never by
-     * pointer; `rooms` is this thread's membership list, carrying the session's
-     * slot in each room's member array so leaving is O(1). */
-    uint64_t             ws_id;
-    struct ws_room_link *rooms;
+    /* Topics (ws_topic_tree.h). A session pointer never leaves its thread, so
+     * cross-thread it is addressed by ws_id — used only to skip the publisher.
+     * `topics` is this thread's subscription list; `topic_mark` is the last
+     * publish pass that served this session, so two filters that both match one
+     * topic still deliver a single copy. */
+    uint64_t              ws_id;
+    struct ws_topic_sub  *topics;
+    uint64_t              topic_mark;
 
     /* Borrowed back-pointer for callbacks. The session's lifetime is
      * a strict subset of conn's, so no refcount needed. For H2 this is

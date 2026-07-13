@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServer.php.stub.php instead.
- * Stub hash: cdea91c11c02d5638871bac605b0b5d8c8c3f5b3 */
+ * Stub hash: 88d35801cbc065874c181e73b5d4a764b489ec72 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServer___construct, 0, 0, 1)
 	ZEND_ARG_OBJ_INFO(0, config, TrueAsync\\HttpServerConfig, 0)
@@ -28,10 +28,6 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServer_stop arginfo_class_TrueAsync_HttpServer_isHttp2
 
-ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_TrueAsync_HttpServer_room, 0, 1, TrueAsync\\WebSocketRoom, 0)
-	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
-ZEND_END_ARG_INFO()
-
 #define arginfo_class_TrueAsync_HttpServer_reload arginfo_class_TrueAsync_HttpServer_isHttp2
 
 #define arginfo_class_TrueAsync_HttpServer_isRunning arginfo_class_TrueAsync_HttpServer_isHttp2
@@ -58,7 +54,6 @@ ZEND_METHOD(TrueAsync_HttpServer, addHttp2Handler);
 ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler);
 ZEND_METHOD(TrueAsync_HttpServer, start);
 ZEND_METHOD(TrueAsync_HttpServer, stop);
-ZEND_METHOD(TrueAsync_HttpServer, room);
 ZEND_METHOD(TrueAsync_HttpServer, reload);
 ZEND_METHOD(TrueAsync_HttpServer, isRunning);
 ZEND_METHOD(TrueAsync_HttpServer, getTelemetry);
@@ -78,7 +73,6 @@ static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, addGrpcHandler, arginfo_class_TrueAsync_HttpServer_addGrpcHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, start, arginfo_class_TrueAsync_HttpServer_start, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, stop, arginfo_class_TrueAsync_HttpServer_stop, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpServer, room, arginfo_class_TrueAsync_HttpServer_room, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, reload, arginfo_class_TrueAsync_HttpServer_reload, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, isRunning, arginfo_class_TrueAsync_HttpServer_isRunning, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, getTelemetry, arginfo_class_TrueAsync_HttpServer_getTelemetry, ZEND_ACC_PUBLIC)

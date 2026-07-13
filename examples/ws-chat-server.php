@@ -1,6 +1,6 @@
 <?php
 /**
- * WebSocket chat room — one room, many workers.
+ * WebSocket chat — one topic, many workers.
  *
  * Run:
  *   php examples/ws-chat-server.php
@@ -12,15 +12,21 @@
  *
  * Key ideas:
  *   - One coroutine per connection; `foreach ($ws as $msg)` is the pull loop.
- *   - broadcast() never suspends: a peer whose socket is backed up drops the
- *     message instead of stalling delivery to the whole room.
- *   - count() asks every worker and sums the answers — a snapshot, not a live
- *     counter.
+ *   - A topic is addressed by NAME, at the call site. There is no topic object to
+ *     obtain, hold or pass into the handler — the connection reaches the hub
+ *     through the thread that owns it, so nothing has to be captured.
+ *   - publish() never suspends: a peer whose socket is backed up drops the
+ *     message instead of stalling delivery to the whole topic.
+ *   - subscriberCount() asks every worker and sums the answers — a snapshot, not
+ *     a live counter.
  *
- * The room is held by the server, not by PHP: a worker is a thread with its own
- * PHP context, so an array of connections could only ever reach that worker's
- * peers. HttpServer::room() gives every worker the same room, and broadcast()
- * reaches members wherever they are — no Redis, no setWorkers(1).
+ * A worker is a thread with its own PHP context, so an array of connections
+ * could only ever reach that worker's peers. Topics live in the server: each
+ * worker indexes the connections it owns, and a publish is handed to every
+ * worker, which delivers to its own sockets. No Redis, no setWorkers(1).
+ *
+ * Filters follow MQTT, so a client could subscribe to `chat/#` and receive every
+ * room at once, or `chat/+/typing` for the typing indicator of any room.
  */
 
 use TrueAsync\HttpServer;
@@ -35,17 +41,16 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 
-$room = $server->room('chat');
+$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
+    $ws->subscribe('chat');   // unsubscribing is automatic when the connection closes
 
-$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($room) {
-    $room->join($ws);   // leaving is automatic when the connection closes
-    $ws->send('welcome — ' . $room->count() . ' online');
+    $ws->send('welcome — ' . $ws->subscriberCount('chat') . ' online');
 
     foreach ($ws as $msg) {
         $line = ($msg->binary ? '[binary] ' : '') . $msg->data;
 
         // Fan out to everyone except the sender — across all four workers.
-        $room->broadcast($line, $ws);
+        $ws->publish('chat', $line);
     }
 });
 

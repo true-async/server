@@ -147,6 +147,80 @@ final class WebSocket implements \Iterator
      */
     public function getRemoteAddress(): string {}
 
+    // === Topics (issue #2) — publish/subscribe across every worker.
+    //
+    // A worker is a thread with its own PHP context, so an array of connections
+    // could only ever reach the peers of one worker. Topics live in the server:
+    // each worker indexes the connections it owns, and a publish is handed to
+    // every worker, which delivers to its own sockets. No Redis, no
+    // setWorkers(1).
+    //
+    // A topic is addressed by NAME, at the call site — there is no topic object
+    // to obtain, hold, or pass around.
+    //
+    // Filters follow MQTT: levels are separated by `/`, `+` matches exactly one
+    // level, and a trailing `#` matches zero or more. So `user/42/#` receives
+    // `user/42/presence` and `user/42` alike, and `order/+/status` receives the
+    // status of an order that did not exist when you subscribed.
+
+    /**
+     * Subscribe this connection to a topic filter. Idempotent.
+     *
+     * @param string $filter Topic filter; may contain `+` / `#` wildcards.
+     * @throws WebSocketException on a malformed filter.
+     */
+    public function subscribe(string $filter): void {}
+
+    /**
+     * Unsubscribe from a filter. Idempotent — a filter never subscribed to is a
+     * no-op. A closing connection unsubscribes from everything by itself.
+     */
+    public function unsubscribe(string $filter): void {}
+
+    /**
+     * The filters this connection subscribed through, in no particular order.
+     *
+     * @return string[]
+     */
+    public function getTopics(): array {}
+
+    /**
+     * Publish a text message to a topic, on every worker.
+     *
+     * Never suspends: a peer whose outbound queue is backed up drops the message
+     * rather than stalling delivery to the rest of the topic (trySend
+     * semantics). Use send() on a single connection when you need delivery
+     * guarantees.
+     *
+     * A subscriber matched by several of its own filters still receives one
+     * copy.
+     *
+     * @param string $topic Concrete topic — wildcards are rejected, because a
+     *        message fanned out to a pattern has no well-defined destination.
+     * @param bool $excludeSelf Skip this connection — the "everyone but the
+     *        sender" case that a chat wants.
+     * @return int Subscribers served on the CALLING worker. Delivery to the
+     *         other workers is asynchronous and cannot be counted here, so this
+     *         is a local number, not a process-wide one.
+     * @throws WebSocketException on a malformed topic, or one carrying a wildcard.
+     */
+    public function publish(string $topic, string $text, bool $excludeSelf = true): int {}
+
+    /**
+     * Binary counterpart of publish().
+     */
+    public function publishBinary(string $topic, string $data, bool $excludeSelf = true): int {}
+
+    /**
+     * Connections across all workers that a publish to $topic would reach —
+     * including those subscribed through a wildcard that matches it.
+     *
+     * Each worker answers with its own count and the answers are summed, so this
+     * is a snapshot rather than a live number: a worker that does not answer in
+     * time is left out.
+     */
+    public function subscriberCount(string $topic): int {}
+
     // === Iterator === so `foreach ($ws as $msg)` mirrors a recv() loop.
     // The cursor advances by pulling the next message; iteration ends on a
     // graceful close and throws WebSocketClosedException on an error close.

@@ -492,10 +492,9 @@ struct http_server_object {
      * rotates the pool. */
     void                    *reload_shared;
 
-    /* Cross-worker WebSocket rooms (ws_hub.h, issue #2). The hub is refcounted:
-     * this object holds one reference (ws_hub_owner), each PHP WebSocketRoom
-     * holds another, and the pointer is fanned out to the clones exactly like
-     * reload_shared above. A clone borrows it and never releases. */
+    /* Cross-worker WebSocket topics (ws_hub.h, issue #2). The pointer is fanned
+     * out to the clones exactly like reload_shared above; a clone borrows it and
+     * never releases. */
     void                    *ws_hub;
     bool                     ws_hub_owner;
 
@@ -3173,9 +3172,6 @@ cleanup:
     server->reload_shared = NULL;
     pefree(reload_shared, 1);
 
-    /* The hub is deliberately NOT freed here — a WebSocketRoom the script still
-     * holds outlives this call. http_server_free drops our reference. */
-
     http_logf_info(&server->log_state, "server.stop mode=pool");
     http_log_server_stop(&server->log_state);
 
@@ -3870,9 +3866,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * per-await read-timeout creation. Failure here is non-fatal. */
     http_server_deadline_tick_start(server);
 
-    /* Rooms (issue #2). A single-worker server owns its hub outright; a clone
-     * inherited the parent's. Attach needs a live reactor on this thread, which
-     * we have here — the mailbox handle is created on it. */
+    /* Topics (issue #2). Attach needs a live reactor on this thread, which we
+     * have here — the mailbox handle is created on it. */
     if (server->ws_hub == NULL && !server->is_worker_clone) {
         server->ws_hub = ws_hub_create();
         server->ws_hub_owner = true;
@@ -3926,11 +3921,14 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * scheduler.c:1964 asserts ("The event loop must be stopped"). */
     http_server_deadline_tick_stop(server);
 
-    if (ws_hub_attached) {
-        ws_hub_detach();
-    }
-
     if (UNEXPECTED(bailout)) {
+        /* Nothing drains here — the sessions are torn down later, during request
+         * shutdown, with the tree already gone. ws_topic_unsubscribe_all copes
+         * with that; it is the one path where it has to. */
+        if (ws_hub_attached) {
+            ws_hub_detach();
+        }
+
         zend_bailout();
     }
 
@@ -3938,6 +3936,14 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * on the start() coroutine and can suspend, so server_scope is empty when
      * the object is freed (issue #74). On bailout we already longjmp'd above. */
     http_server_drain_scope(server);
+
+    /* Only now: a WebSocket session unsubscribes itself as it is destroyed, and
+     * the drain above is what destroys them. Detaching first frees the topic
+     * tree out from under that teardown, which walks it — SIGSEGV on any stop()
+     * with a subscriber still connected. */
+    if (ws_hub_attached) {
+        ws_hub_detach();
+    }
 
     RETURN_TRUE;
 }
@@ -4006,38 +4012,6 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 }
 
 /* {{{ proto HttpServer::stop(): bool */
-ZEND_METHOD(TrueAsync_HttpServer, room)
-{
-    zend_string *name;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_STR(name)
-    ZEND_PARSE_PARAMETERS_END();
-
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
-    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
-
-    /* Rooms are usually taken during setup, before start() has built the hub —
-     * and the pool parent must own one before it fans the pointer out to the
-     * clones, so create it on first use rather than at start. */
-    if (server->ws_hub == NULL) {
-        server->ws_hub = ws_hub_create();
-        server->ws_hub_owner = !server->is_worker_clone;
-    }
-
-    zend_object *const room = websocket_room_object_create(server->ws_hub, name);
-
-    if (room == NULL) {
-        RETURN_THROWS();
-    }
-
-    RETURN_OBJ(room);
-#else
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "WebSocket support is not enabled in this build", 0);
-    RETURN_THROWS();
-#endif
-}
-
 ZEND_METHOD(TrueAsync_HttpServer, stop)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -5066,6 +5040,15 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
     add_assoc_zval(return_value, "body_pool", &body_pool_zv);
     add_assoc_long(return_value, "body_pool_total_bytes",
                    (zend_long)total_pool_bytes);
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    ws_hub_stats_t ws;
+    ws_hub_get_stats(server->ws_hub, &ws);
+
+    add_assoc_long(return_value, "ws_topic_posted",  (zend_long)ws.posted);
+    add_assoc_long(return_value, "ws_topic_skipped", (zend_long)ws.skipped);
+    add_assoc_long(return_value, "ws_topic_dropped", (zend_long)ws.dropped);
+#endif
 }
 /* }}} */
 
@@ -5249,7 +5232,6 @@ static void http_server_free(zend_object *obj)
         server->worker_inbox = NULL;
     }
 
-    /* A WebSocketRoom the script still holds keeps the hub alive past this. */
     if (server->ws_hub_owner) {
         ws_hub_release(server->ws_hub);
         server->ws_hub       = NULL;

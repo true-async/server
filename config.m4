@@ -646,10 +646,10 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       src/websocket/websocket_strategy.c
       src/websocket/ws_session.c
       src/websocket/ws_hub.c
+      src/websocket/ws_topic_tree.c
       src/websocket/ws_handshake.c
       src/websocket/ws_dispatch.c
       src/websocket/php_websocket.c
-      src/websocket/ws_room_class.c
     "
 
     dnl wslay_net.h pulls in <arpa/inet.h> / <netinet/in.h> (for htons/ntohs)

@@ -1,15 +1,16 @@
 --TEST--
-WebSocket: rooms fan a broadcast across workers, and count() tallies every worker
+WebSocket topics: a publish reaches subscribers in every worker, and subscriberCount tallies them
 --EXTENSIONS--
 true_async_server
 true_async
 --FILE--
 <?php
-/* A worker is a thread with its own PHP context, so a room cannot be a PHP array
- * of connections: peers of other workers would never be reached. The room lives
- * in the server (ws_hub.c) and a broadcast is handed to each worker, which then
- * writes to its own sockets. Here 6 clients spread over 4 workers: one sends, the
- * other five must receive it whichever worker owns them. */
+/* A worker is a thread with its own PHP context, so a topic cannot be a PHP array
+ * of connections: peers of other workers would never be reached. Each worker
+ * indexes the connections it owns (ws_topic_tree.c) and a publish is handed to
+ * every worker as a plain string, which it matches against its own tree. Here 6
+ * clients spread over 4 workers: one publishes, the other five must receive it
+ * whichever worker owns them. */
 require_once __DIR__ . '/../server/_free_port.inc';
 require_once __DIR__ . '/_ws_client.inc';
 
@@ -31,18 +32,19 @@ $config = (new HttpServerConfig())
     ->setWsPingIntervalMs(0);
 
 $server = new HttpServer($config);
-$room   = $server->room('chat');
 
-$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($room) {
-    $room->join($ws);
+/* No handle to obtain, nothing to capture — the connection reaches the hub
+ * through the thread that owns it. */
+$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
+    $ws->subscribe('chat');
 
     foreach ($ws as $msg) {
         if ($msg->data === 'count') {
-            $ws->send('count:' . $room->count());
+            $ws->send('count:' . $ws->subscriberCount('chat'));
             continue;
         }
 
-        $room->broadcast('relay:' . $msg->data, $ws);
+        $ws->publish('chat', 'relay:' . $msg->data);
     }
 });
 
@@ -58,9 +60,9 @@ spawn(function () use ($port, $server) {
         $conns[] = $fp;
     }
 
-    delay(500);    // let every join land
+    delay(500);    // let every subscribe land
 
-    /* count() is a scatter/gather over the workers, not a shared counter. */
+    /* subscriberCount is a scatter/gather over the workers, not a shared counter. */
     ws_write($conns[0], 'count');
     delay(1000);
     $tally = ws_read_pending($conns[0]);
@@ -78,7 +80,7 @@ spawn(function () use ($port, $server) {
 
     echo 'count across workers: ', $tally === 'count:' . CLIENTS ? 'yes' : "no ($tally)", "\n";
     echo 'all peers received: ',   $got === CLIENTS - 1 ? 'yes' : "no ($got)", "\n";
-    echo 'sender excluded: ',      $echo === '' ? 'yes' : 'no', "\n";
+    echo 'publisher excluded: ',   $echo === '' ? 'yes' : 'no', "\n";
 
     foreach ($conns as $fp) { fclose($fp); }
 
@@ -91,4 +93,4 @@ $server->start();
 --EXPECTF--
 count across workers: yes
 all peers received: yes
-sender excluded: yes%A
+publisher excluded: yes%A

@@ -22,7 +22,68 @@ function ws_open(int $port, string $path = '/')
         $hs .= $c;
     }
 
-    return str_contains($hs, '101') ? $fp : null;
+    if (!str_contains($hs, '101')) {
+        return null;
+    }
+
+    /* A handler that sends the moment it is entered lands its first frames in the
+     * same segment as the 101 — keep whatever followed the header, or the reads
+     * below silently start at frame 3. */
+    $rest = substr($hs, strpos($hs, "\r\n\r\n") + 4);
+
+    if ($rest !== '') {
+        ws_pushback($fp, $rest);
+    }
+
+    return $fp;
+}
+
+/* Bytes read past the handshake, waiting to be consumed as frames. */
+function &ws_buffer($fp): string
+{
+    static $buffers = [];
+
+    $key = (int) $fp;
+
+    if (!isset($buffers[$key])) {
+        $buffers[$key] = '';
+    }
+
+    return $buffers[$key];
+}
+
+function ws_pushback($fp, string $bytes): void
+{
+    $buf = &ws_buffer($fp);
+    $buf .= $bytes;
+}
+
+/* Reads exactly $len bytes, buffer first, socket after. */
+function ws_take($fp, int $len, bool $blocking): string
+{
+    $buf = &ws_buffer($fp);
+    $out = '';
+
+    if ($buf !== '') {
+        $out = substr($buf, 0, $len);
+        $buf = substr($buf, strlen($out));
+    }
+
+    while (strlen($out) < $len) {
+        $chunk = fread($fp, $len - strlen($out));
+
+        if ($chunk === false || $chunk === '') {
+            break;
+        }
+
+        $out .= $chunk;
+
+        if (!$blocking) {
+            break;
+        }
+    }
+
+    return $out;
 }
 
 function ws_write($fp, string $payload, bool $binary = false): void
@@ -39,20 +100,21 @@ function ws_write($fp, string $payload, bool $binary = false): void
 /* One frame, or null when nothing is pending. Payloads here are always short. */
 function ws_read_frame($fp): ?array
 {
-    $hdr = fread($fp, 2);
-    if ($hdr === false || strlen($hdr) < 2) { return null; }
+    $hdr = ws_take($fp, 2, false);
+    if (strlen($hdr) < 2) { return null; }
 
     $opcode = ord($hdr[0]) & 0x0f;
     $len    = ord($hdr[1]) & 0x7f;
 
-    $data = '';
-    while (strlen($data) < $len) {
-        $chunk = fread($fp, $len - strlen($data));
-        if ($chunk === false || $chunk === '') break;
-        $data .= $chunk;
+    /* 126 and 127 escape to a 16- or 64-bit length. A server frame is never
+     * masked, so the payload starts right after. */
+    if ($len === 126) {
+        $len = unpack('n', ws_take($fp, 2, true))[1];
+    } elseif ($len === 127) {
+        $len = unpack('J', ws_take($fp, 8, true))[1];
     }
 
-    return ['opcode' => $opcode, 'data' => $data];
+    return ['opcode' => $opcode, 'data' => ws_take($fp, $len, true)];
 }
 
 function ws_read($fp): string
@@ -70,4 +132,27 @@ function ws_read_pending($fp): string
     stream_set_blocking($fp, true);
 
     return $data;
+}
+
+/* Waits for one frame, up to $timeout_ms, and returns '' if none came.
+ *
+ * Use this instead of "delay(250); ws_read_pending()" for anything that MUST
+ * arrive: a fixed sleep is tuned to an idle machine and turns into a flake the
+ * moment the box is loaded — which is exactly when the whole suite runs. A
+ * negative assertion ("this must NOT arrive") still needs a plain delay. */
+function ws_await($fp, int $timeout_ms = 5000): string
+{
+    $deadline = microtime(true) + $timeout_ms / 1000;
+
+    do {
+        $frame = ws_read_pending($fp);
+
+        if ($frame !== '') {
+            return $frame;
+        }
+
+        \Async\delay(20);
+    } while (microtime(true) < $deadline);
+
+    return '';
 }

@@ -9,38 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Cross-worker WebSocket rooms (#2).** `HttpServer::room()` returns a
-  `WebSocketRoom` shared by every worker of the process: `join()`, `leave()`,
-  `broadcast()`, `broadcastBinary()`, `count()`. Until now a broadcast could only
-  reach peers of the sending worker (a worker is a thread with its own PHP
-  context), so a chat had to run `setWorkers(1)`. Share-nothing design: each
-  worker keeps its own member table and a broadcast is handed to it through its
-  mailbox — a session pointer never crosses a thread. `count()` is a
+- **Cross-worker WebSocket topics (#2).** `WebSocket::subscribe()`,
+  `unsubscribe()`, `getTopics()`, `publish()`, `publishBinary()` and
+  `subscriberCount()`. A publish reaches subscribers on every worker of the
+  process; until now it could only reach peers of the sending worker (a worker is
+  a thread with its own PHP context), so a chat had to run `setWorkers(1)`.
+- Topic filters follow MQTT: `+` is exactly one level, `#` is the rest — so
+  `chat/+/typing` or `user/42/#` are subscriptions. A publish topic must be
+  concrete. Membership lives in the connection, and a topic is a string at the
+  call site: there is no topic object to obtain, hold or pass into a handler.
+- Share-nothing: each worker matches publishes against its own topic tree, and a
+  session pointer never crosses a thread. `subscriberCount()` is a
   scatter/gather over the workers, so it is a snapshot, not a live counter.
+- **Interest filter on publish.** Each worker summarises its subscriptions in a
+  counting Bloom filter of topic prefixes, and a publisher skips the workers that
+  cannot match, instead of waking all of them. A publish to a topic nobody in the
+  process listens to now costs zero cross-worker wake-ups instead of one per
+  worker; wildcard subscribers are still always reached.
+- `HttpServer::getRuntimeStats()` reports `ws_topic_posted`, `ws_topic_skipped`
+  and `ws_topic_dropped`.
 
 ### Fixed
 
-- **Room lifetime, races and lost commands (#2).** Hardening pass over the room
-  hub, all found by review of the initial implementation:
-  - The hub was freed when the server stopped, while a `WebSocketRoom` the script
-    still held kept pointing at it — the room's destructor then took a mutex in
-    freed memory (confirmed under valgrind). The hub is refcounted now, so a room
-    stays usable after `stop()`.
-  - `count()` handed a trigger event to the answering workers but disposed it on
-    timeout; a late answer then fired a freed event. Answers now come home through
-    the asker's own mailbox, so the query settles on one thread and needs no
-    cross-thread event at all.
-  - `broadcast()`/`count()` read a worker's mailbox pointer without the hub lock,
-    racing a concurrent detach that frees it. Publishing, retiring and posting to
-    a slot now all happen under the lock.
-  - Dropping the last reference to a room could free it twice: a lookup could
-    revive it from zero while the first dropper was still waiting for the mutex.
-  - `getName()` took a non-atomic refcount on a `zend_string` shared by every
-    worker; it returns a copy now.
-  - A detaching worker discarded its mailbox without draining it, leaking every
-    queued command — once per worker, on every hot reload.
-- **A full worker mailbox dropped room traffic silently.** Broadcasts that cannot
-  be handed to a worker are counted (`ws_hub_dropped`) instead of vanishing.
+- **`stop()` crashed when a subscriber was still connected (#2).** The worker let
+  go of its topic tree before the scope drain destroyed the sessions — and a
+  session unsubscribes itself as it is destroyed, so the teardown walked freed
+  nodes. SIGSEGV on any stop() with a live subscriber.
+- **A full worker mailbox dropped topic traffic silently.** Publishes that cannot
+  be handed to a worker are counted (`ws_topic_dropped`) instead of vanishing.
 - **`WebSocket::trySend()` silently dropped frames over HTTP/2 (#2).** The H2
   chunk ring is bounded by slots as well as bytes, and the non-suspending sink
   discards a frame past the last slot — yet `trySend()` still returned `true`,

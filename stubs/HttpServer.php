@@ -103,14 +103,6 @@ final class HttpServer
      */
     public function stop(): bool {}
 
-    /**
-     * A named WebSocket room, shared by every worker of this process.
-     *
-     * The same name always yields the same room, so a connection handled by one
-     * worker can be reached by a broadcast issued from another. Cheap to call —
-     * rooms are interned, not created per call. See WebSocketRoom.
-     */
-    public function room(string $name): WebSocketRoom {}
 
     /**
      * Hot-reload the worker pool (issue #93). Pool parent only: workers finish
@@ -186,6 +178,16 @@ final class HttpServer
      *                            right now), `bytes` (`count *
      *                            slot_bytes`).
      *  - `body_pool_total_bytes` — sum of `bytes` across all classes.
+     *  - `ws_topic_posted`      — cross-worker publishes handed to another
+     *                             worker's mailbox.
+     *  - `ws_topic_skipped`     — workers a publish did NOT wake, because the
+     *                             interest filter proved they hold no
+     *                             subscriber. Large next to `posted` means the
+     *                             filter is earning its keep.
+     *  - `ws_topic_dropped`     — publishes a worker's mailbox would not take
+     *                             because it was full. This one is data loss:
+     *                             a worker is not draining fast enough, or a
+     *                             client is flooding publishes.
      *
      * @return array
      */

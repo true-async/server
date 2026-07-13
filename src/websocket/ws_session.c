@@ -13,6 +13,7 @@
 #include "php.h"
 #include "websocket/ws_session.h"
 #include "websocket/ws_hub.h"
+#include "websocket/ws_topic_tree.h"
 #include "websocket/websocket_strategy.h"  /* ws_strategy_get_session — drain hook */
 #include "core/async_plain_event.h"        /* in-thread coroutine wakeup event */
 #include "core/http_connection.h"
@@ -1106,8 +1107,8 @@ void ws_session_destroy(ws_session_t *session)
     }
 
     /* Single teardown point for both transports — H1 via the strategy, H2 via
-     * the stream — so room membership cannot outlive the session. */
-    ws_hub_leave_all(session);
+     * the stream — so a subscription cannot outlive the session. */
+    ws_topic_unsubscribe_all(ws_hub_local_tree(), session);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct
