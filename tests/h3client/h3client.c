@@ -132,7 +132,7 @@ static int h3_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
 static int h3_recv_data(nghttp3_conn *conn, int64_t stream_id,
                         const uint8_t *data, size_t datalen,
                         void *cu, void *su) {
-    (void)conn; (void)stream_id; (void)su;
+    (void)conn; (void)su;
     h3c_t *c = cu;
     if (c->response_body_len + datalen > c->response_body_cap) {
         size_t new_cap = c->response_body_cap == 0 ? 4096 : c->response_body_cap * 2;
@@ -144,6 +144,15 @@ static int h3_recv_data(nghttp3_conn *conn, int64_t stream_id,
     }
     memcpy(c->response_body + c->response_body_len, data, datalen);
     c->response_body_len += datalen;
+
+    /* Return the flow-control credit for the payload. The count
+     * nghttp3_conn_read_stream reports back (and which recv_stream_data_cb
+     * extends the windows by) covers framing only — DATA is deferred-consume,
+     * so the application has to extend for it. Without this the stream window
+     * runs out, the server waits for a MAX_STREAM_DATA that never comes, and
+     * any response past the initial window hangs. */
+    ngtcp2_conn_extend_max_stream_offset(c->qc, stream_id, datalen);
+    ngtcp2_conn_extend_max_offset(c->qc, datalen);
     return 0;
 }
 
