@@ -33,7 +33,7 @@
  * ws_id counter, and one interest filter per worker. `admin` guards the slots.
  *
  * Threading:
- *   - create()/addref()/release() from any thread.
+ *   - create()/release() on the owning server.
  *   - attach()/detach() on each worker (they own that thread's mailbox).
  *   - subscribe/unsubscribe/unsubscribe_all() on the thread owning the session.
  *   - publish()/count() from any thread.
@@ -48,8 +48,9 @@
 
 typedef struct ws_hub_s ws_hub_t;
 
+/* One owner — the server that created it. Clones borrow the pointer and never
+ * free it, so there is nothing to refcount. */
 ws_hub_t *ws_hub_create(void);
-void      ws_hub_addref(ws_hub_t *hub);
 void      ws_hub_release(ws_hub_t *hub);
 
 /* Claims a slot and publishes this thread's mailbox. Returns the slot, or -1 —

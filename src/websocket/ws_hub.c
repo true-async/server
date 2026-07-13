@@ -30,8 +30,6 @@
 #define WS_INTEREST_PROBES     3u
 
 struct ws_hub_s {
-    zend_atomic_int refcount;
-
     /* Guards the slot table below — claiming a slot, retiring it, and posting
      * into one. There is no topic registry to guard: topics live in each
      * worker's own tree. */
@@ -198,7 +196,6 @@ ws_hub_t *ws_hub_create(void)
 {
     ws_hub_t *const hub = pecalloc(1, sizeof(*hub), 1);
 
-    ZEND_ATOMIC_INT_INIT(&hub->refcount, 1);
     ZEND_ATOMIC_INT64_INIT(&hub->next_ws_id, 1);
     ZEND_ATOMIC_INT64_INIT(&hub->posted, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->skipped, 0);
@@ -209,16 +206,9 @@ ws_hub_t *ws_hub_create(void)
     return hub;
 }
 
-void ws_hub_addref(ws_hub_t *hub)
-{
-    if (hub != NULL) {
-        zend_atomic_int_fetch_add(&hub->refcount, 1);
-    }
-}
-
 void ws_hub_release(ws_hub_t *hub)
 {
-    if (hub == NULL || zend_atomic_int_fetch_add(&hub->refcount, -1) != 1) {
+    if (hub == NULL) {
         return;
     }
 
