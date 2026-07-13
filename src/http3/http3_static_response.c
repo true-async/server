@@ -510,8 +510,8 @@ static void h3_static_read_dispatch(zend_async_event_t *event,
     state->bytes_sent += (uint64_t)transferred;
 
     /* Takes the ref; submits headers on the first call, then queues + resumes
-     * nghttp3 and drains. It never suspends: s->static_body_state is set, which
-     * is what tells append_chunk this producer does its own backpressure. */
+     * nghttp3 and drains. Never suspends — s->static_body_state is what tells
+     * append_chunk this producer backpressures itself. */
     state->busy = true;
     const int rc = h3_stream_append_chunk(state->stream, chunk);
     state->busy = false;

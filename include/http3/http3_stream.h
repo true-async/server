@@ -177,10 +177,9 @@ struct _http3_stream_s {
     http_request_t   *sf_request;
 
     /* In-flight static/sendFile body sender (h3_static_state_t *), or NULL.
-     * Callback-driven, not a coroutine: nothing cancels it for us (connection
-     * teardown calls h3_static_cancel through this pointer), and
-     * h3_stream_append_chunk must not suspend while it is set — see the
-     * backpressure loop there. Cleared by the sender when it finishes. */
+     * Callback-driven, not a coroutine: teardown cancels it through this pointer
+     * (h3_static_cancel), and h3_stream_append_chunk must not suspend while it is
+     * set. Cleared by the sender when it finishes. */
     void             *static_body_state;
 
     /* Per-stream PHP objects + handler coroutine. HTTP/3 multiplexes N

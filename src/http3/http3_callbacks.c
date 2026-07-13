@@ -1279,12 +1279,11 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
         http_server_on_stream_backpressure(counters);
     }
 
-    /* HAZARD: the static/sendFile body sender feeds us from an io callback on a
-     * transport thread. There IS a current coroutine there, so the suspend below
-     * looks legal — but it never returns: it parks a libuv callback frame, and
-     * the sender's own callback chain is what would have woken it. It carries its
-     * own backpressure (h3_static_try_read stops at the read-ahead ceiling and
-     * resumes on write_event), so leave the queue to it. */
+    /* The static/sendFile sender feeds us from an io callback on a transport
+     * thread, where a current coroutine exists — so the co != NULL guard below
+     * passes and the suspend never returns: it parks a libuv callback frame that
+     * the sender itself would have had to wake. It backpressures in
+     * h3_static_try_read instead. */
     const bool nonblocking_producer = s->static_body_state != NULL;
 
     /* Pull write_timeout_s once — config can't change mid-handler.

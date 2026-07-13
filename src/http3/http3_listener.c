@@ -500,13 +500,11 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
         return;
     }
 
-    /* HAZARD: on POLLERR libuv drops the fd from the loop for good
-     * (uv__poll_io → uv__io_stop + uv__handle_stop) and reports it here as
-     * ASYNC_DISCONNECT. On this socket POLLERR only ever means IP_RECVERR
-     * queued an ICMP error — typically a peer that vanished while we were
-     * still sending. The socket stays usable, so drain the error queue and
-     * re-arm below; without the re-arm the listener never sees another
-     * datagram for the life of the process. */
+    /* On POLLERR libuv drops the fd from the loop for good (uv__poll_io →
+     * uv__io_stop + uv__handle_stop) and reports it here as ASYNC_DISCONNECT.
+     * On this socket POLLERR only ever means IP_RECVERR queued an ICMP error —
+     * a peer that vanished while we were still sending. The socket stays usable,
+     * so drain the queue and re-arm below, or the listener goes deaf for good. */
     const bool poll_disarmed =
         (((zend_async_poll_event_t *)event)->triggered_events & ASYNC_DISCONNECT) != 0;
 
