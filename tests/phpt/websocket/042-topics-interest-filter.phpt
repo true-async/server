@@ -112,13 +112,17 @@ spawn(function () use ($port, $server) {
     echo 'unsubscribed topic — peers reached: ', $received('x'), "\n";
 
     /* 2. '+' is a predicate: the filter's literal prefix is `user`, and the topic
-     *    carries it. Every peer must be reached, on whatever worker it sits. */
-    $before = $stats();
+     *    carries it. Every peer must be reached, on whatever worker it sits.
+     *
+     *    Deliberately NOT asserted here: that the publish woke another worker.
+     *    Whether it has to depends on where the kernel put the connections — with
+     *    SO_REUSEPORT it spreads them, on the shared-fd path they can all land on
+     *    one worker — so `ws_topic_posted` is not a property of the filter. What
+     *    IS the filter's property is above (an unsubscribed topic wakes nobody)
+     *    and below (a matching one reaches everybody). */
     $publish('user/42/msg', 'plus');
-    $posted = $stats()['ws_topic_posted'] - $before['ws_topic_posted'];
 
     echo "'+' subscribers reached: ", $received('plus'), '/', PEERS, "\n";
-    echo "'+' publish woke workers: ", $posted > 0 ? 'yes' : 'no', "\n";
 
     /* 3. '#' swallows the whole remainder, so its prefix is `alerts` and the
      *    topic may be arbitrarily deeper than the filter. */
@@ -138,5 +142,4 @@ unsubscribed topic — workers woken: 0
 unsubscribed topic — workers skipped: yes
 unsubscribed topic — peers reached: 0
 '+' subscribers reached: 7/7
-'+' publish woke workers: yes
 '#' subscribers reached: 7/7%A
