@@ -124,6 +124,24 @@ struct _http_server_shared_config_t {
     bool                    http3_alt_svc_enabled;
     bool                    http3_pacing;
     bool                    request_scope;
+    bool                    stats_enabled;   /* issue #5: opt-in getStats() */
+
+    /* Logging (issue #5): sink specs flattened to persistent strings so each
+     * worker LOAD rebuilds its own sinks (file/stdout/stderr/syslog reopen
+     * their transport per worker). 'stream' (a parent-thread resource) and
+     * 'php' (a closure) cannot cross threads — skipped at freeze with a
+     * stderr notice. Absent keys are NULL. */
+    struct http_shared_log_sink {
+        zend_string *type;
+        zend_string *format;
+        zend_string *target;
+        zend_string *facility;
+        zend_string *path;
+        zend_string *tmpl;
+        zend_string *category;
+        int          level;
+    }                      *log_sinks;
+    size_t                  log_sink_count;
 };
 
 /* Forward declarations for shared-config lifecycle helpers */
@@ -1943,6 +1961,36 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, isRequestScope)
     RETURN_BOOL(config->request_scope);
 }
 
+/* {{{ proto HttpServerConfig::setStatsEnabled(bool $enabled): static
+ *
+ * Opt into the cross-worker statistics aggregate (issue #5). Off by default:
+ * with it off, no stats slab is allocated and HttpServer::getStats() throws.
+ * Distinct from telemetry_enabled (W3C trace-context ingestion). Fixed at
+ * start() like the other config. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled)
+{
+    bool enabled;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    config->stats_enabled = enabled;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+
+ZEND_METHOD(TrueAsync_HttpServerConfig, isStatsEnabled)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_BOOL(config->stats_enabled);
+}
+
 /* ==========================================================================
  * HTTP body compression knobs (issue #8). Editable until the config is
  * locked — see HttpServer::__construct. The MIME whitelist setter
@@ -2767,6 +2815,129 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getLogStream)
 }
 /* }}} */
 
+/* Validate one sink spec array; returns false (with an exception thrown) on
+ * any violation. 'type' and 'format' resolve through the sink-type / formatter
+ * registry (http_log.c) — a type's own validate() checks its extra keys. The
+ * common keys checked here: required LogSeverity 'level', optional 'format'.
+ * See http_server_start_logging for how specs build sinks. */
+static bool log_sink_spec_valid(zval *elem)
+{
+    if (Z_TYPE_P(elem) != IS_ARRAY) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): each sink must be an array", 0);
+        return false;
+    }
+
+    HashTable *spec = Z_ARRVAL_P(elem);
+
+    zval *ztype = zend_hash_str_find(spec, "type", sizeof("type") - 1);
+    if (ztype == NULL || Z_TYPE_P(ztype) != IS_STRING) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): each sink needs a string 'type'", 0);
+        return false;
+    }
+
+    const http_log_sink_type_t *type =
+        http_log_sink_type_by_name(Z_STRVAL_P(ztype), Z_STRLEN_P(ztype));
+
+    if (type == NULL) {
+        char names[256];
+        http_log_sink_type_names(names, sizeof names);
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "setLogSinks(): 'type' must be one of %s", names);
+        return false;
+    }
+
+    if (type->validate != NULL && !type->validate(spec)) {
+        return false;   /* exception thrown by the type */
+    }
+
+    zval *zfmt = zend_hash_str_find(spec, "format", sizeof("format") - 1);
+    if (zfmt != NULL) {
+        if (Z_TYPE_P(zfmt) != IS_STRING) {
+            zend_throw_exception(http_server_invalid_argument_exception_ce,
+                "setLogSinks(): 'format' must be a string", 0);
+            return false;
+        }
+
+        const http_log_formatter_def_t *fdef =
+            http_log_formatter_by_name(Z_STRVAL_P(zfmt), Z_STRLEN_P(zfmt));
+
+        if (fdef == NULL) {
+            char names[256];
+            http_log_formatter_names(names, sizeof names);
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "setLogSinks(): 'format' must be one of %s", names);
+            return false;
+        }
+
+        if (fdef->validate != NULL && !fdef->validate(spec)) {
+            return false;   /* exception thrown by the formatter */
+        }
+    }
+
+    zval *zcat = zend_hash_str_find(spec, "category", sizeof("category") - 1);
+    if (zcat != NULL
+        && (Z_TYPE_P(zcat) != IS_STRING
+            || http_log_category_mask(Z_STRVAL_P(zcat), Z_STRLEN_P(zcat)) == 0)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): 'category' must be one of app|access|all", 0);
+        return false;
+    }
+
+    zval *zlvl = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+    if (zlvl == NULL || Z_TYPE_P(zlvl) != IS_OBJECT
+        || !instanceof_function(Z_OBJCE_P(zlvl), http_log_severity_ce)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "setLogSinks(): each sink needs a LogSeverity 'level'", 0);
+        return false;
+    }
+
+    return true;
+}
+
+/* {{{ proto HttpServerConfig::setLogSinks(array $sinks): static */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSinks)
+{
+    zval *sinks_zv;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(sinks_zv)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    HashTable      *ht    = Z_ARRVAL_P(sinks_zv);
+    const uint32_t  count = zend_hash_num_elements(ht);
+
+    if (count > HTTP_LOG_MAX_SINKS) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "setLogSinks(): at most %d sinks, got %u", HTTP_LOG_MAX_SINKS, count);
+        return;
+    }
+
+    zval *elem;
+    ZEND_HASH_FOREACH_VAL(ht, elem) {
+        if (!log_sink_spec_valid(elem)) {
+            return;   /* exception already thrown */
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    if (Z_TYPE(config->log_sinks) != IS_UNDEF) {
+        zval_ptr_dtor(&config->log_sinks);
+        ZVAL_UNDEF(&config->log_sinks);
+    }
+
+    ZVAL_COPY(&config->log_sinks, sinks_zv);
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
 /* {{{ proto HttpServerConfig::setTelemetryEnabled(bool $enabled): static */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTelemetryEnabled)
 {
@@ -2884,6 +3055,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->is_locked = false;
     config->log_severity = 0;          /* HTTP_LOG_OFF */
     ZVAL_UNDEF(&config->log_stream);
+    ZVAL_UNDEF(&config->log_sinks);
     ZVAL_UNDEF(&config->bootloader);
     config->telemetry_enabled = false;
     config->body_streaming_enabled = false;
@@ -2952,6 +3124,11 @@ static void http_server_config_free(zend_object *obj)
         ZVAL_UNDEF(&config->log_stream);
     }
 
+    if (Z_TYPE(config->log_sinks) != IS_UNDEF) {
+        zval_ptr_dtor(&config->log_sinks);
+        ZVAL_UNDEF(&config->log_sinks);
+    }
+
     if (Z_TYPE(config->hot_reload_paths) != IS_UNDEF) {
         zval_ptr_dtor(&config->hot_reload_paths);
         ZVAL_UNDEF(&config->hot_reload_paths);
@@ -2993,6 +3170,20 @@ static void http_server_config_free(zend_object *obj)
  * ==========================================================================
  */
 
+/* Persistent copy of a string spec key, or NULL when absent. */
+static zend_string *shared_spec_str(HashTable *spec, const char *key, size_t klen)
+{
+    zval *z = zend_hash_str_find(spec, key, klen);
+
+    if (z == NULL || Z_TYPE_P(z) != IS_STRING) {
+        return NULL;
+    }
+
+    zend_string *s = zend_string_init(Z_STRVAL_P(z), Z_STRLEN_P(z), 1);
+    GC_MAKE_PERSISTENT_LOCAL(s);
+    return s;
+}
+
 static http_server_shared_config_t *http_server_shared_config_freeze(
     const http_server_config_t *src)
 {
@@ -3031,6 +3222,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     shared->http3_pacing                 = src->http3_pacing;
     shared->request_scope                = src->request_scope;
+    shared->stats_enabled                = src->stats_enabled;
     shared->write_buffer_size  = src->write_buffer_size;
 
     shared->http2_enabled              = src->http2_enabled;
@@ -3101,6 +3293,53 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
         }
     }
 
+    if (Z_TYPE(src->log_sinks) == IS_ARRAY
+        && zend_hash_num_elements(Z_ARRVAL(src->log_sinks)) > 0) {
+        const uint32_t total = zend_hash_num_elements(Z_ARRVAL(src->log_sinks));
+
+        shared->log_sinks = pecalloc(total, sizeof(*shared->log_sinks), 1);
+
+        zval *elem;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(src->log_sinks), elem) {
+            HashTable *spec  = Z_ARRVAL_P(elem);
+            zval      *ztype = zend_hash_str_find(spec, "type", sizeof("type") - 1);
+            const char *t    = Z_STRVAL_P(ztype);
+            const size_t tl  = Z_STRLEN_P(ztype);
+
+            /* A parent-opened resource / closure cannot cross into worker
+             * threads. Workers just skip these sinks (they still work on
+             * the parent); say so once at freeze time — but only when a
+             * pool will actually exist. */
+            if ((tl == 6 && memcmp(t, "stream", 6) == 0)
+                || (tl == 3 && memcmp(t, "php", 3) == 0)) {
+                if (src->workers > 1) {
+                    fprintf(stderr,
+                            "http_server: log sink type '%.*s' is per-thread and "
+                            "will be inactive in pool workers (use 'file'/'stdout'/"
+                            "'stderr'/'syslog')\n",
+                            (int)tl, t);
+                }
+                continue;
+            }
+
+            struct http_shared_log_sink *dst =
+                &shared->log_sinks[shared->log_sink_count];
+
+            dst->type     = shared_spec_str(spec, "type", sizeof("type") - 1);
+            dst->format   = shared_spec_str(spec, "format", sizeof("format") - 1);
+            dst->target   = shared_spec_str(spec, "target", sizeof("target") - 1);
+            dst->facility = shared_spec_str(spec, "facility", sizeof("facility") - 1);
+            dst->path     = shared_spec_str(spec, "path", sizeof("path") - 1);
+            dst->tmpl     = shared_spec_str(spec, "template", sizeof("template") - 1);
+            dst->category = shared_spec_str(spec, "category", sizeof("category") - 1);
+
+            zval *zlvl = zend_hash_str_find(spec, "level", sizeof("level") - 1);
+            dst->level = (int)Z_LVAL_P(zend_enum_fetch_case_value(Z_OBJ_P(zlvl)));
+
+            shared->log_sink_count++;
+        } ZEND_HASH_FOREACH_END();
+    }
+
     return shared;
 }
 
@@ -3159,6 +3398,23 @@ static void http_server_shared_config_release(http_server_shared_config_t *share
         pefree(shared->compression_mime_types, 1);
     }
 
+    if (shared->log_sinks) {
+        for (size_t i = 0; i < shared->log_sink_count; i++) {
+            struct http_shared_log_sink *s = &shared->log_sinks[i];
+            zend_string *fields[] = { s->type, s->format, s->target,
+                                      s->facility, s->path, s->tmpl,
+                                      s->category };
+
+            for (size_t k = 0; k < sizeof fields / sizeof fields[0]; k++) {
+                if (fields[k] != NULL) {
+                    zend_string_release_ex(fields[k], 1);
+                }
+            }
+        }
+
+        pefree(shared->log_sinks, 1);
+    }
+
     pefree(shared, 1);
 }
 
@@ -3200,6 +3456,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_alt_svc_enabled        = src->http3_alt_svc_enabled;
     dst->http3_pacing                 = src->http3_pacing;
     dst->request_scope                = src->request_scope;
+    dst->stats_enabled                = src->stats_enabled;
     dst->write_buffer_size  = src->write_buffer_size;
 
     dst->http2_enabled              = src->http2_enabled;
@@ -3228,6 +3485,45 @@ static void http_server_config_populate_from_shared(
                 ZSTR_VAL(src->compression_mime_types[i]),
                 ZSTR_LEN(src->compression_mime_types[i]),
                 &one);
+        }
+    }
+
+    /* Rebuild the log-sink spec array from the flattened snapshot so this
+     * worker's start_logging opens its own transports. 'level' is rebuilt
+     * as the LogSeverity case matching the frozen backing value. */
+    if (src->log_sink_count > 0) {
+        array_init(&dst->log_sinks);
+
+        for (size_t i = 0; i < src->log_sink_count; i++) {
+            const struct http_shared_log_sink *s = &src->log_sinks[i];
+            const struct { const char *key; zend_string *val; } strs[] = {
+                { "type", s->type },         { "format", s->format },
+                { "target", s->target },     { "facility", s->facility },
+                { "path", s->path },         { "template", s->tmpl },
+                { "category", s->category },
+            };
+
+            zval spec;
+            array_init(&spec);
+
+            for (size_t k = 0; k < sizeof strs / sizeof strs[0]; k++) {
+                if (strs[k].val != NULL) {
+                    add_assoc_stringl(&spec, strs[k].key,
+                                      ZSTR_VAL(strs[k].val),
+                                      ZSTR_LEN(strs[k].val));
+                }
+            }
+
+            const char *case_name = s->level == 0  ? "OFF"
+                                  : s->level == 5  ? "DEBUG"
+                                  : s->level == 13 ? "WARN"
+                                  : s->level == 17 ? "ERROR" : "INFO";
+            zval lvl;
+            ZVAL_OBJ_COPY(&lvl,
+                zend_enum_get_case_cstr(http_log_severity_ce, case_name));
+            add_assoc_zval(&spec, "level", &lvl);
+
+            add_next_index_zval(&dst->log_sinks, &spec);
         }
     }
 

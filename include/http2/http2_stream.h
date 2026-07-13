@@ -64,12 +64,6 @@ struct http2_stream_t {
      * SETTINGS_MAX_HEADER_LIST_SIZE; we double-check). */
     size_t               headers_total_bytes;
 
-    /* True after dispatch has fired for this stream — guard against
-     * double dispatch in the unlikely case of a malformed CONTINUATION
-     * arriving after END_HEADERS (nghttp2 already RST_STREAMs that,
-     * but defence-in-depth). */
-    bool                 request_dispatched;
-
     /* Buffered-response state. data_provider reads from response_body
      * starting at response_body_offset. Caller-owned pointer — must
      * stay alive until the DATA END_STREAM frame has drained (tracked
@@ -87,27 +81,6 @@ struct http2_stream_t {
      * see via $request->getBody(). */
     smart_str            request_body_buf;
 
-    /* Response trailers flag. When true, the
-     * DATA data_provider emits NGHTTP2_DATA_FLAG_EOF +
-     * NGHTTP2_DATA_FLAG_NO_END_STREAM on the final chunk so nghttp2
-     * closes the stream via a terminal HEADERS(trailers) frame
-     * instead of END_STREAM on DATA. Set by
-     * http2_session_submit_trailer before the drain loop reaches
-     * the final DATA slice. */
-    bool                 has_trailers;
-
-    /* Guards the lazy streaming-trailer submission in h2_dp_mark_eof so a
-     * multi-slice EOF (e.g. a trailing zero-length DATA frame) submits the
-     * response trailers exactly once. Buffered/unary responses submit
-     * eagerly in the commit path and never touch this. */
-    bool                 trailers_submitted;
-
-    /* True when this stream carries a gRPC call (content-type
-     * application/grpc + a registered gRPC handler). Set at dispatch;
-     * routes the coroutine to the gRPC handler and makes dispose default
-     * the grpc-status trailer. */
-    bool                 is_grpc;
-
     /* Streaming-response chunk queue.
      *
      * Active only when the handler called HttpResponse::send(); a
@@ -124,18 +97,6 @@ struct http2_stream_t {
     size_t               chunk_queue_tail;   /* next slot to append to */
     size_t               chunk_queue_bytes;  /* undrained bytes across all chunks */
     size_t               chunk_read_offset;  /* bytes already handed to nghttp2 from queue[head] */
-
-    /* True after $res->end() / endWithTrailers() on a streaming
-     * response. Data provider uses this to decide EOF vs DEFERRED
-     * when the queue empties. */
-    bool                 streaming_ended;
-
-    /* Set by cb_on_stream_close when nghttp2 tore down its internal
-     * stream state on a peer RST / graceful close. After that point
-     * any nghttp2_session_resume_stream_data / submit_* call for this
-     * stream_id is unsafe — our strategy-level dispose code checks
-     * this before invoking drain on a dead stream. */
-    bool                 peer_closed;
 
     /* Plain in-thread event awoken by ring drain / WINDOW_UPDATE. All
      * callbacks MUST defer session_emit via h2_session_schedule_emit
@@ -159,34 +120,12 @@ struct http2_stream_t {
     void                *coroutine;    /* zend_coroutine_t *; void to keep the
                                           zend_async header out of this TU */
 
-    /* Static-file delivery skips the user PHP handler — the static
-     * FSM has already populated response_obj and installed an
-     * on_stream_close hook below. http2_handler_coroutine_entry
-     * checks this and returns without calling conn->handler so the
-     * dispose path runs the normal flush logic (which then sees
-     * is_streaming==false / response committed and is a no-op for
-     * the static delivery). Mirrors h1_request_ctx_t::skip_php_handler. */
-    bool                 skip_handler;
-
-    /* Phase 1 hybrid TLS emit accounting (issue #30): set true at submit
-     * time if the response is too big for the DRAIN path (body >
-     * H2_TLS_HYBRID_LARGE_THRESHOLD, or streaming with unknown size).
-     * cb_on_stream_close uses this to decrement session->large_streams_pending. */
-    bool                 counted_large;
-
     /* Owning connection. Resolved once at h2 static FSM init via
      * http2_session_get_conn(stream->session) and stashed here so the
      * stream destructor can decrement per-conn accounting without
      * re-touching a possibly torn-down session. NULL outside static
      * delivery. */
     http_connection_t   *conn;
-
-    /* True while the h2 static FSM owns this stream's chunk_queue —
-     * every chunk allocated by h2_static_alloc_chunk and every release
-     * (drain, dtor, pending_chunk on finalize) must go through the
-     * accounting wrapper. User-driven setBody / streaming send() paths
-     * leave this false. */
-    bool                 static_tracks_chunks;
 
     /* Optional close hook for protocol-owned static delivery. Fires
      * exactly once from cb_on_stream_close right after nghttp2 tears
@@ -209,12 +148,51 @@ struct http2_stream_t {
      * decrements; the last release actually efree's. */
     unsigned             refcount;
 
-    /* WebSocket-over-HTTP/2 (RFC 8441). Set when this stream is an
-     * accepted Extended-CONNECT WebSocket: ws_session bridges wslay to
-     * the stream's DATA frames; is_websocket routes inbound DATA to it.
-     * NULL / false for ordinary request streams. Owned by the stream —
-     * freed in http2_stream_release. */
-    bool                 is_websocket;
+    /* Flags. Written only by the session's own thread: they share one storage
+     * unit, so a second writer would tear the neighbours. */
+
+    /* Guards a double dispatch from a malformed CONTINUATION arriving after
+     * END_HEADERS (nghttp2 already RST_STREAMs that; defence-in-depth). */
+    bool                 request_dispatched   : 1;
+
+    /* The final DATA chunk carries EOF + NO_END_STREAM, so nghttp2 closes the
+     * stream with a terminal HEADERS(trailers) frame instead of END_STREAM on
+     * DATA. Set before the drain loop reaches that slice. */
+    bool                 has_trailers         : 1;
+
+    /* A multi-slice EOF (e.g. a trailing zero-length DATA frame) must still
+     * submit the streaming trailers exactly once — h2_dp_mark_eof gates on
+     * this. Buffered responses submit eagerly and never touch it. */
+    bool                 trailers_submitted   : 1;
+
+    bool                 is_grpc              : 1;
+
+    /* $res->end() / endWithTrailers() on a streaming response: the data
+     * provider picks EOF over DEFERRED when the queue empties. */
+    bool                 streaming_ended      : 1;
+
+    /* nghttp2 tore its stream state down on a peer RST / graceful close: any
+     * resume_stream_data / submit_* for this id is now unsafe — dispose checks
+     * this before draining. */
+    bool                 peer_closed          : 1;
+
+    bool                 skip_handler         : 1;   /* static FSM answered; don't call conn->handler */
+
+    /* Handler died in a zend_bailout: dispose derives a 500, but collects no
+     * telemetry — post-bailout state is not trustworthy enough to report. */
+    bool                 handler_bailout      : 1;
+
+    /* Counted in session->large_streams_pending at submit (issue #30);
+     * cb_on_stream_close owes the decrement. */
+    bool                 counted_large        : 1;
+
+    /* The static FSM owns chunk_queue: every alloc and every release must go
+     * through the accounting wrapper. */
+    bool                 static_tracks_chunks : 1;
+
+    bool                 is_websocket         : 1;   /* Extended-CONNECT WebSocket (RFC 8441) */
+
+    /* Owned by the stream — freed in http2_stream_release. */
     struct ws_session_t *ws_session;
 };
 

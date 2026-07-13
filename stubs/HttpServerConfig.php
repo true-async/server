@@ -636,6 +636,20 @@ final class HttpServerConfig
     /** @return bool */
     public function isRequestScope(): bool {}
 
+    /**
+     * Opt into the cross-worker statistics aggregate (issue #5). Off by
+     * default: with it off no stats slab is allocated and
+     * {@see HttpServer::getStats()} throws. Distinct from trace-context
+     * telemetry. Fixed at server start.
+     *
+     * @param bool $enabled
+     * @return static
+     */
+    public function setStatsEnabled(bool $enabled): static {}
+
+    /** @return bool */
+    public function isStatsEnabled(): bool {}
+
     // === HTTP body compression (issue #8) ===
 
     /**
@@ -946,6 +960,56 @@ final class HttpServerConfig
      * @return resource|null
      */
     public function getLogStream(): mixed {}
+
+    /**
+     * Configure multiple log sinks — each a destination with its own format
+     * and severity. A record fans out to every sink whose level admits it, so
+     * you can e.g. write JSON to a file and a coloured console at once. Given,
+     * this overrides the setLogSeverity()/setLogStream() single-stream sugar.
+     *
+     * Each element is an array:
+     *   - 'type'     => 'stream' | 'file' | 'stdout' | 'stderr' | 'syslog'  (required)
+     *   - 'stream'   => resource               (required for 'stream')
+     *   - 'path'     => string                 (required for 'file')
+     *   - 'target'   => 'tcp://host:port' | 'udp://host:port' | 'udg:///dev/log'
+     *                                          (required for 'syslog')
+     *   - 'facility' => 'user' | 'daemon' | 'local0'..'local7' | …  (syslog, default 'user')
+     *   - 'format'   => 'plain' | 'logfmt' | 'json' | 'pretty' | 'template'
+     *                                          (default 'plain'; ignored for syslog)
+     *   - 'template' => string                 (required for format 'template')
+     *   - 'category' => 'app' | 'access' | 'all'  (default 'app')
+     *   - 'level'    => LogSeverity            (required)
+     *
+     * Use 'file' (not 'stream') under a worker pool: each worker reopens the
+     * path itself, whereas a parent-opened stream resource cannot cross into
+     * worker threads.
+     *
+     * 'pretty' auto-decides colour from the target (NO_COLOR / CLICOLOR_FORCE /
+     * isatty). 'syslog' emits RFC 5424: octet-framed (RFC 6587) over TCP, one
+     * record per datagram on udp/udg. 'template' renders each record through a
+     * custom line layout: {ts} (ISO-8601) or {ts:PATTERN} (date()-style subset
+     * Y y m d H i s v, e.g. '{ts:Y-m-d H:i:s.v}'), {level}, {msg}, {attrs},
+     * {trace}, {span}; any other text is literal. 'category' routes record
+     * kinds: 'app' gets server diagnostics, 'access' gets one structured record
+     * per completed request (OpenTelemetry HTTP semconv attributes:
+     * http.request.method, url.path, url.query, http.response.status_code,
+     * network.protocol.version, http.response.body.size,
+     * http.server.request.duration, client.address, client.port, trace
+     * context), 'all' gets both — so a JSON access log and a pretty
+     * diagnostics console can coexist. At most 8 sinks. Invalid specs throw at
+     * call time.
+     *
+     * There is no sink that calls back into PHP. Records are emitted from IO
+     * callbacks and from reactor threads that have no PHP context, so the log
+     * path must not re-enter the VM. To export logs from userland, point a
+     * sink at a file or socket with 'format' => 'json' and drain it from your
+     * own coroutine — which also keeps exporter latency off the request path.
+     *
+     * @param array $sinks List of sink spec arrays (see above).
+     * @return static
+     */
+    public function setLogSinks(array $sinks): static {}
+
 
     /**
      * Enable or disable telemetry. When enabled, the server parses

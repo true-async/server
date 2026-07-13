@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: bd0900669aec1532653cb9890d00beba15244f08 */
+ * Stub hash: b289111629a0445fd1112d52518be2e3e4df3895 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -192,6 +192,10 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isRequestScope arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
 
+#define arginfo_class_TrueAsync_HttpServerConfig_setStatsEnabled arginfo_class_TrueAsync_HttpServerConfig_setWsPermessageDeflate
+
+#define arginfo_class_TrueAsync_HttpServerConfig_isStatsEnabled arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
+
 #define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
@@ -285,6 +289,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_getLogStream, 0, 0, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setLogSinks, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, sinks, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
 #define arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled arginfo_class_TrueAsync_HttpServerConfig_setWsPermessageDeflate
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
@@ -368,6 +376,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setHttp3Pacing);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp3Pacing);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setRequestScope);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isRequestScope);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, isStatsEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel);
@@ -407,6 +417,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSeverity);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getLogSeverity);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setLogStream);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getLogStream);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setLogSinks);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTelemetryEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isTelemetryEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBodyStreamingEnabled);
@@ -487,6 +498,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, isHttp3Pacing, arginfo_class_TrueAsync_HttpServerConfig_isHttp3Pacing, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setRequestScope, arginfo_class_TrueAsync_HttpServerConfig_setRequestScope, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isRequestScope, arginfo_class_TrueAsync_HttpServerConfig_isRequestScope, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setStatsEnabled, arginfo_class_TrueAsync_HttpServerConfig_setStatsEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, isStatsEnabled, arginfo_class_TrueAsync_HttpServerConfig_isStatsEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel, arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, ZEND_ACC_PUBLIC)
@@ -526,6 +539,7 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getLogSeverity, arginfo_class_TrueAsync_HttpServerConfig_getLogSeverity, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setLogStream, arginfo_class_TrueAsync_HttpServerConfig_setLogStream, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getLogStream, arginfo_class_TrueAsync_HttpServerConfig_getLogStream, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setLogSinks, arginfo_class_TrueAsync_HttpServerConfig_setLogSinks, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setTelemetryEnabled, arginfo_class_TrueAsync_HttpServerConfig_setTelemetryEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isTelemetryEnabled, arginfo_class_TrueAsync_HttpServerConfig_isTelemetryEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setBodyStreamingEnabled, arginfo_class_TrueAsync_HttpServerConfig_setBodyStreamingEnabled, ZEND_ACC_PUBLIC)

@@ -1,5 +1,5 @@
 /* This is a generated file, edit WebSocket.php.stub.php instead.
- * Stub hash: 38e525411ce0cfac98690d5d1a5b828f4a0f28f8 */
+ * Stub hash: a0dea67ed33d880640465ea00a15add56cf9526d */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_WebSocket___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -38,7 +38,9 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getSubprotocol, 0, 0, IS_STRING, 1)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getRemoteAddress, 0, 0, IS_STRING, 0)
+#define arginfo_class_TrueAsync_WebSocket_getRemoteAddress arginfo_class_TrueAsync_WebSocket_getSubprotocol
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_getRemotePort, 0, 0, IS_LONG, 1)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_WebSocket_subscribe, 0, 1, IS_VOID, 0)
@@ -89,6 +91,7 @@ ZEND_METHOD(TrueAsync_WebSocket, close);
 ZEND_METHOD(TrueAsync_WebSocket, isClosed);
 ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol);
 ZEND_METHOD(TrueAsync_WebSocket, getRemoteAddress);
+ZEND_METHOD(TrueAsync_WebSocket, getRemotePort);
 ZEND_METHOD(TrueAsync_WebSocket, subscribe);
 ZEND_METHOD(TrueAsync_WebSocket, unsubscribe);
 ZEND_METHOD(TrueAsync_WebSocket, getTopics);
@@ -113,6 +116,7 @@ static const zend_function_entry class_TrueAsync_WebSocket_methods[] = {
 	ZEND_ME(TrueAsync_WebSocket, isClosed, arginfo_class_TrueAsync_WebSocket_isClosed, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getSubprotocol, arginfo_class_TrueAsync_WebSocket_getSubprotocol, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getRemoteAddress, arginfo_class_TrueAsync_WebSocket_getRemoteAddress, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_WebSocket, getRemotePort, arginfo_class_TrueAsync_WebSocket_getRemotePort, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, subscribe, arginfo_class_TrueAsync_WebSocket_subscribe, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, unsubscribe, arginfo_class_TrueAsync_WebSocket_unsubscribe, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_WebSocket, getTopics, arginfo_class_TrueAsync_WebSocket_getTopics, ZEND_ACC_PUBLIC)

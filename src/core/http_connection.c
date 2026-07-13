@@ -181,6 +181,15 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
     conn->server = server;
     conn->client_fd = socket_fd;
 
+    /* Snapshot the peer while the socket is guaranteed live. One getpeername()
+     * per connection (not per request), no formatting, no allocation. */
+    conn->peer_len = (socklen_t)sizeof(conn->peer);
+
+    if (getpeername(socket_fd, (struct sockaddr *)&conn->peer,
+                    &conn->peer_len) != 0) {
+        conn->peer_len = 0;
+    }
+
     conn->io = ZEND_ASYNC_IO_CREATE(
         (zend_file_descriptor_t)socket_fd,
         ZEND_ASYNC_IO_TYPE_TCP,
@@ -239,40 +248,33 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
 
 /* {{{ http_connection_remote_address
  *
- * Resolve the peer as "host:port" (IPv4) or "[host]:port" (IPv6) via
- * getpeername() on the accepted fd. Returns a fresh zend_string the
- * caller owns, or NULL when there is no IP peer (Unix-socket listener,
- * closed fd, or getpeername failure). Lazy — only reached from
- * WebSocket::getRemoteAddress(), never on the accept hot path. */
+ * Bare peer IP (REMOTE_ADDR form — no port, no brackets) as a fresh
+ * zend_string the caller owns, or NULL when the connection has no IP peer
+ * (Unix-socket listener). Reads the address snapshotted at accept; the port
+ * is a separate accessor, never glued into this string. */
 zend_string *http_connection_remote_address(const http_connection_t *conn)
 {
-    if (conn == NULL) {
+    if (conn == NULL || conn->peer_len == 0) {
         return NULL;
     }
 
-    struct sockaddr_storage ss;
-    socklen_t slen = sizeof(ss);
-    if (getpeername(conn->client_fd, (struct sockaddr *)&ss, &slen) != 0) {
-        return NULL;
+    char         ip[INET6_ADDRSTRLEN];
+    const size_t n = http_sockaddr_ip((const struct sockaddr *)&conn->peer,
+                                      conn->peer_len, ip, sizeof ip);
+
+    return n > 0 ? zend_string_init(ip, n, 0) : NULL;
+}
+/* }}} */
+
+/* {{{ http_connection_remote_port — peer port in host order, 0 when none. */
+uint16_t http_connection_remote_port(const http_connection_t *conn)
+{
+    if (conn == NULL || conn->peer_len == 0) {
+        return 0;
     }
 
-    char ip[INET6_ADDRSTRLEN];
-    char out[INET6_ADDRSTRLEN + 16];
-    ip[0] = '\0';
-
-    if (ss.ss_family == AF_INET) {
-        const struct sockaddr_in *const sin = (const struct sockaddr_in *)&ss;
-        inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-        snprintf(out, sizeof(out), "%s:%u", ip, (unsigned)ntohs(sin->sin_port));
-    } else if (ss.ss_family == AF_INET6) {
-        const struct sockaddr_in6 *const sin6 = (const struct sockaddr_in6 *)&ss;
-        inet_ntop(AF_INET6, &sin6->sin6_addr, ip, sizeof(ip));
-        snprintf(out, sizeof(out), "[%s]:%u", ip, (unsigned)ntohs(sin6->sin6_port));
-    } else {
-        return NULL;  /* AF_UNIX etc. — no host:port */
-    }
-
-    return zend_string_init(out, strlen(out), 0);
+    return http_sockaddr_port((const struct sockaddr *)&conn->peer,
+                              conn->peer_len);
 }
 /* }}} */
 
@@ -377,11 +379,21 @@ void http_connection_destroy(http_connection_t *conn)
         conn->out_pending_cap = 0;
     }
 
+
     /* Notify server of close so it can decrement active_connections and
      * maybe resume listeners. Per-request timing is already reported by
      * http_server_on_request_sample from the coroutine entry — no
      * timing carried on the connection itself. Safe with server == NULL. */
     http_server_on_connection_close(conn->server);
+
+    /* Per-protocol gauge release, mirroring the inc at protocol detection.
+     * A WebSocket connection was counted as h1 at ALPN, so map it back. */
+    if (conn->protocol_detected) {
+        const http_protocol_type_t gauge_proto =
+            conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET
+                ? HTTP_PROTOCOL_HTTP1 : conn->protocol_type;
+        http_server_conn_active_dec(conn->counters, gauge_proto);
+    }
 
     /* Detach the persistent read callback first. If we let
      * ZEND_ASYNC_IO_CLOSE dispose the event with our callback still in
@@ -2477,8 +2489,6 @@ void http_handler_coroutine_entry(void)
      * counters / keepalive / drain / Alt-Svc work converges in one
      * place. */
     if (ctx->skip_php_handler) {
-        http_server_count_request(conn->counters);
-
         if (req && stamps) {
             req->end_ns = zend_hrtime();
             http_server_on_request_sample(conn->server,
@@ -2504,7 +2514,6 @@ void http_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(conn->counters);
 
             if (req && stamps) req->end_ns = zend_hrtime();
             return;  /* Skip handler call; dispose emits the response. */
@@ -2569,8 +2578,9 @@ void http_handler_coroutine_entry(void)
         const char *m = (req && req->method) ? ZSTR_VAL(req->method) : "?";
         const char *u = (req && req->uri)    ? ZSTR_VAL(req->uri)    : "?";
         http_handler_log_bailout("h1", coroutine, m, u);
-        /* Skip retval dtor, sample, end_ns, count_request — every one of
-         * those touches state that's untrustworthy after a bailout. */
+        /* Skip retval dtor, sample, end_ns — every one of those touches
+         * state that's untrustworthy after a bailout. The telemetry seam in
+         * http_request_finalize skips bailouts too (ctx->handler_bailout). */
         return;
     }
 
@@ -2580,10 +2590,7 @@ void http_handler_coroutine_entry(void)
      * One sample per request: sojourn feeds CoDel, service feeds
      * telemetry. Fires even on handler exception (EG(exception) set) —
      * the measurement is still meaningful, work was done.
-     * Skipped when no consumer is active (sample_stamps_enabled == false);
-     * total_requests is still bumped via http_server_count_request. */
-    http_server_count_request(conn->counters);
-
+     * Skipped when no consumer is active (sample_stamps_enabled == false). */
     if (req && stamps) {
         req->end_ns = zend_hrtime();
         /* Pass req->end_ns so on_request_sample's CoDel-window logic
@@ -2892,6 +2899,15 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
                            const bool should_continue)
 {
+    /* Every H1 completion converges here — handler, sendFile (after the engine
+     * stamped the real status), static hard-zero — with request and response
+     * still alive, so this is where the request is counted and access-logged.
+     * A bailed-out handler is deliberately left out (see the entry). */
+    if (EXPECTED(!ctx->handler_bailout && !Z_ISUNDEF(ctx->response_zv))) {
+        http_request_telemetry(ctx->request, Z_OBJ(ctx->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     /* Tear down per-request state. Zvals + ctx are owned solely by
      * this finalize; no other path looks at them after the caller
      * cleared its own back-pointer. */

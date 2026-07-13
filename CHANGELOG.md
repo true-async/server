@@ -29,6 +29,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HttpServer::getRuntimeStats()` reports `ws_topic_posted`, `ws_topic_skipped`
   and `ws_topic_dropped`.
 
+- **Observability — telemetry metrics + logging redesign (#5).** Metrics are
+  read through a plain PHP array (no embedded exporters); logs fan out to
+  pluggable sinks.
+  - **Cross-worker stats (`HttpServer::getStats()`).** Opt-in via
+    `HttpServerConfig::setStatsEnabled(true)`. Each pool worker owns one slot in
+    a process-wide, cache-line-aligned counter slab and bumps it lock-free (no
+    atomics on the hot path); `getStats()` walks the slab from any thread and
+    returns `{enabled, workers, totals}`. Totals include `total_requests`,
+    per-status-class `responses_2xx/3xx/4xx/5xx_total` (each request classified
+    exactly once, so the four sum to `total_requests`), and per-protocol active
+    gauges `conns_active_h1/h2/h3`. Throws when stats are disabled.
+
+    Counters carry their aggregation kind, so a value is combined the way its
+    meaning allows: monotonic totals sum and **survive a `reload()`** (a
+    retiring worker's totals are inherited, so a scraper never sees a counter
+    run backwards just because the pool rotated); active gauges sum across live
+    workers only (a dead worker holds no open connections, so its last value is
+    not carried forward as a phantom); and a latest-sample counter such as
+    `h2_ping_rtt_ns` reports the maximum, since summing four workers' round-trip
+    times describes nothing.
+  - **Multi-sink logging (`HttpServerConfig::setLogSinks()`).** A log record now
+    fans out to several sinks at once, each with its own severity floor and
+    formatter; the fast gate is the minimum floor across sinks, and one failing
+    sink (drop-counted) never blocks the others. Emit formats once per distinct
+    formatter before fan-out. `setLogSinks([['type'=>'stream'|'stdout'|'stderr',
+    'stream'=>$res, 'format'=>'plain'|'logfmt'|'json'|'pretty',
+    'level'=>LogSeverity::…], …])` declares up to 8 sinks (invalid specs throw at
+    config time); `setLogSeverity()`/`setLogStream()` stay as single-stream sugar.
+    Each sink writes through the stream's own async IO handle and batches records
+    in a per-sink ring buffer flushed at a 32 KiB high-water mark or a 200 ms
+    timer, so a burst of logs coalesces into far fewer write syscalls while the
+    emit call itself never blocks.
+  - **syslog sink — TCP, UDP and unix datagram.** `['type'=>'syslog',
+    'target'=>'tcp://host:port' | 'udp://host:port' | 'udg:///dev/log',
+    'facility'=>'local0', 'level'=>…]` ships records as RFC 5424 messages. The
+    formatter emits the bare message; framing belongs to the transport: TCP
+    gets RFC 6587 octet-counted framing (a receiver splits records even when a
+    message carries an embedded newline), while UDP and unix-datagram targets
+    send exactly one record per datagram so message boundaries survive. PRI
+    packs the configured facility with the severity mapped to syslog levels.
+  - **Structured access log (`'category' => 'access'`).** A sink spec may
+    carry `'category' => 'app' | 'access' | 'all'` (default `'app'`): `app`
+    receives server diagnostics, `access` receives exactly one structured
+    record per completed request — so a JSON access log and a pretty
+    diagnostics console coexist on one server. Attributes use the stable
+    OpenTelemetry HTTP semantic conventions, matching the OTel Logs envelope
+    the `json` formatter already emits: `http.request.method`, `url.path`,
+    `url.query`, `http.response.status_code`, `network.protocol.version`
+    (`"1.1"`/`"2"`/`"3"`), `http.response.body.size`,
+    `http.server.request.duration` (seconds, per the spec's unit),
+    `client.address` (bare IP) and `client.port`, plus the W3C trace context
+    when telemetry parsed one — so a collector can interpret the record
+    without a custom mapping. Emitted on every completion path (handler
+    return, static handler, compression reject, sendFile engine, reactor-pool
+    worker dispatch) across HTTP/1, HTTP/2 and HTTP/3, including under a
+    worker pool. Off by default: without an access sink the cost is one
+    predicted branch per request. The text formatters (plain, pretty, template,
+    syslog) escape control bytes in values as `\xXX`, so a request-derived field
+    cannot forge a log line or inject an ANSI sequence into a `pretty` console;
+    json and logfmt already quote their own output.
+  - **No sink calls back into PHP, by design.** Records are emitted from libuv
+    IO-completion callbacks, connection teardown, error paths and the HTTP/3
+    reactor threads — a bare thread pool with no TSRM context — so the logging
+    path must not re-enter the VM. To export logs from userland, point a sink
+    at a file or socket with `'format' => 'json'` and drain it from your own
+    coroutine; that is the async-appender shape, and it also keeps exporter
+    latency off the request path and gives you batching. Extensions register
+    native destinations through `http_log_register_sink_type()`.
+  - **`file` sink + logging now works under the worker pool.** New
+    `['type'=>'file','path'=>…]` sink: each pool worker reopens the path
+    itself (append mode). Previously NO logging configuration crossed into
+    pool workers at all — the frozen config snapshot dropped it; sink specs
+    are now flattened into the snapshot and rebuilt per worker, so
+    `file`/`stdout`/`stderr`/`syslog` sinks (and the access log) work with
+    `setWorkers(N)`. `stream` (a parent-opened resource) cannot cross threads:
+    it stays active on the parent and is skipped in workers with a start-time
+    notice.
+  - **Sink-type / formatter registry (plugin seam).** `setLogSinks()` resolves
+    `'type'` and `'format'` names through a registry instead of hardcoded
+    lists; another extension can add its own sink type or formatter at MINIT
+    via `http_log_register_sink_type()` / `http_log_register_formatter()`
+    (built-ins register through the same seam). Validation error messages list
+    whatever is actually registered. The `syslog` wire format is not a public
+    formatter — it carries no record framing (that is the syslog transport's
+    job), so it is reachable only through the `syslog` sink type, and
+    `'format'=>'syslog'` on any other sink is rejected at config time.
+  - **`template` formatter — user-controlled line layout.** `['format' =>
+    'template', 'template' => '{ts:Y-m-d H:i:s.v} [{level}] {msg}{attrs}']`
+    renders each record through a custom template: `{ts}` (ISO-8601) or
+    `{ts:PATTERN}` with a PHP `date()`-style subset (`Y y m d H i s v`),
+    `{level}`, `{msg}`, `{attrs}`, `{trace}`, `{span}`; everything else is
+    literal (unknown placeholders pass through verbatim). The template is
+    compiled once when the sink starts, so the per-record render stays a flat
+    segment walk. Bad templates throw at `setLogSinks()` time.
+  - **Formatters: `plain`, `logfmt`, `json`, `pretty`.** `json` is one
+    OTel-Logs object per line (Timestamp/SeverityNumber/SeverityText/Body/
+    Attributes/TraceId/SpanId, RFC 8259 escaping); `logfmt` is `key=value` with
+    quoting; `pretty` is a coloured console line
+    (`HH:MM:SS.mmm  LEVEL  message  key=val …`) whose colour is decided once at
+    sink build from the target fd, honouring `NO_COLOR` / `CLICOLOR_FORCE`.
+
+- **Client address on the request — `HttpRequest::getRemoteAddress(): ?string`
+  and `HttpRequest::getRemotePort(): ?int`.** `getRemoteAddress()` returns the
+  **bare IP** — no port, no brackets around an IPv6 literal — the same shape as
+  `$_SERVER['REMOTE_ADDR']` (RFC 3875 §4.1.8) and as Servlet, Node, Swoole and
+  ASP.NET return. The port is a separate accessor. A combined `"ip:port"` string
+  is deliberately not offered: it is Go's documented wart, and it leaves callers
+  unable to split an IPv6 address. `null` on a Unix-socket listener, which has
+  no IP peer. The value is the socket peer and is **not** derived from
+  `X-Forwarded-For`.
+  `WebSocket::getRemotePort(): ?int` is added to match.
+
+### Changed
+
+- **BREAKING — `WebSocket::getRemoteAddress()` now returns the bare peer IP**
+  (`"203.0.113.7"`), not `"host:port"` / `"[host]:port"`, and returns `null`
+  rather than `""` when there is no IP peer. Use the new `getRemotePort()` for
+  the port. This makes the method mean the same thing as the new
+  `HttpRequest::getRemoteAddress()` instead of two different things on two
+  classes.
+
+### Changed
+
+- **Log sinks are owned by a dedicated log thread (#5).** A sink's descriptor,
+  its write in flight and its flush timer now live on one consumer thread, and
+  every other thread — pool workers, transport reactors, the parent — is a pure
+  producer: it formats the record on its own stack and copies the bytes into its
+  *own* ring for that sink. One writer and one reader per ring, so the emit path
+  takes no lock and no atomic read-modify-write; publishing the write index is
+  the whole synchronisation. The flush policy is unchanged (32 KiB high-water or
+  the 200 ms timer), and so is the drop-on-overflow behaviour.
+
+  This is what finally lets a transport reactor log. Under the reactor pool a
+  `sendFile()` is delivered by the reactor, so the reactor is the only place the
+  final status exists — it was already counted there, but the access record was
+  lost, because a reactor has no PHP context and must never touch a worker's
+  descriptor. It can fill a ring.
+
+  Sinks are still built per server clone, so under a worker pool each worker
+  still opens its own (and still cannot open a `stream` sink — a PHP resource
+  does not cross threads; use `file`). What changed is that the parent's sinks
+  are now reachable from the transport reactors, which is what the access record
+  needed. Sharing one sink set across the pool — one descriptor per sink instead
+  of one per worker — is a follow-up the log thread makes possible but does not
+  yet do.
+
+- **Per-request stream state is smaller (#122).** The `bool` flag walls on
+  `http3_stream_t` (15 flags) and `http2_stream_t` (12) are now one bitfield
+  block each, sitting next to `refcount` so they fill padding instead of adding
+  it. The structs go from 864 → 832 and 744 → 704 bytes; a listener that keeps
+  its stream slabs warm holds that much less per concurrent request. Both structs
+  are written only by their own thread (an H/3 stream is driven by its
+  connection's reactor; the worker never dereferences it, it only carries the
+  pointer back on the response wire), so the flags may share a storage unit. No
+  behaviour change.
+
 ### Fixed
 
 - **`stop()` crashed when a subscriber was still connected (#2).** The worker let
@@ -37,6 +193,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nodes. SIGSEGV on any stop() with a live subscriber.
 - **A full worker mailbox dropped topic traffic silently.** Publishes that cannot
   be handed to a worker are counted (`ws_topic_dropped`) instead of vanishing.
+
+- **An exception in a WebSocket handler killed the worker thread, silently (#119).**
+  The WS handler coroutine never consumed its exception, so it was rethrown at
+  finalize and retired the whole worker — one bad connection cost a thread of
+  accept capacity, and after N connections the port stopped accepting anything,
+  including plain HTTP. The same hole existed on the HTTP/2 Extended CONNECT path
+  (RFC 8441), and a fatal error (`memory_limit`, uncatchable error) took the worker
+  down through the missing bailout firewall. A failing handler now behaves like a
+  failing HTTP handler: the exception is consumed and logged with its class,
+  message and origin, and the failure is reported to the peer in-protocol — an
+  HTTP status when the handler threw before the upgrade committed (`Throwable::$code`
+  when it is a valid 4xx/5xx, else 500), a `CLOSE 1011` frame when the session was
+  already live. The worker keeps serving. Cancellation (server stop, connection
+  teardown) is unchanged — it is not a handler failure.
+
+- **One departing HTTP/3 peer could silence the listener for good.** When a client
+  vanished while the server was still sending to it, the ICMP port-unreachable that
+  came back was queued on the listener socket by `IP_RECVERR` and reported by epoll
+  as `POLLERR` — and libuv answers `POLLERR` by removing the descriptor from the
+  loop permanently. The listener then sat in `epoll_wait` while datagrams piled up
+  unread in the kernel: every later HTTP/3 request to that process timed out. The
+  poll is now re-armed (and the error queue drained) whenever this fires; the new
+  `poll_rearms` counter in `getHttp3Stats()` reports how often it happened.
+
+- **A static file or `sendFile()` over HTTP/3 could stall forever mid-body.** The
+  body sender is callback-driven, but `h3_stream_append_chunk` still took its
+  coroutine backpressure path when a chunk did not fit the congestion window —
+  suspending inside a libuv callback on the transport thread, which never returns.
+  The transfer stopped at the read-ahead ceiling (~64 KiB) with the peer's ACKs
+  arriving and nothing left to wake the sender. It surfaced whenever the reactor
+  fell behind the queue (a busy or single-core host), so it hit the reactor pool
+  most often. The sender now keeps its own backpressure and append never suspends
+  on its behalf.
+
+- **A syslog sink over TCP wrote blockingly.** Every log descriptor was wrapped as
+  an async *file*, so its writes went to the blocking IO pool — the same pool that
+  serves `sendFile()`. A syslog receiver that stopped reading therefore parked a
+  pool thread per write until its TCP window drained. The io type is now taken
+  from the descriptor itself: an inet stream socket is driven as a socket, an
+  AF_UNIX stream through libuv's pipe handle, everything else stays a file.
+  Datagram sinks stay on the file path deliberately — a `send()` to a UDP or
+  unix-datagram peer does not wait on a slow receiver, so there is nothing to
+  unblock.
+
+- **A static mount under the reactor pool read files synchronously on the
+  transport thread.** The reactor never installed the protocol's streaming ops on
+  the response it built, so the send-file engine found no operation to delegate to
+  and fell back to reading the whole file — blocking the reactor loop (and with it
+  every other connection that thread owns) and buffering the file in memory
+  whatever its size. The ops are installed now, so a static hit goes through the
+  same callback-driven body pump as everything else.
+
+- **Log records dropped by a full ring were invisible.** A sink's ring is bounded
+  on purpose — the producer must never block — so a burst that outruns the writer
+  costs records. They were only ever mentioned in a rate-limited stderr line.
+  `getStats()` now reports `log_records_dropped_total`, counted per producer
+  thread (each charges its own counter slice, so the bump is race-free and the
+  loss is attributed to whoever produced it). An observability feature that
+  silently loses log lines is worse than one that admits it.
+
+- **HTTP/1 streaming responses were never counted.** `$response->send()` bumped
+  `stream_send_calls_total` and `stream_bytes_sent_total` but not
+  `streaming_responses_total` — HTTP/2 and HTTP/3 count it on their first chunk,
+  HTTP/1 did not, so a server streaming over HTTP/1 reported zero streaming
+  responses while its byte counters climbed.
+
+- **`sendFile()` was counted and access-logged with the wrong status (#5).** The
+  handler only *queues* a send and returns with the default 200; the real wire
+  status (206, 304, 416, 404, 500) is stamped later by the send-file engine. But
+  counting and the access record happened in the handler-coroutine's entry tail,
+  so every ranged download was reported as a 200. Both now happen once per
+  request, at each protocol's teardown — where the request and the response are
+  both alive *and* the status is final — through one protocol-agnostic seam,
+  `http_request_telemetry()`. It replaces five near-identical access-log wrappers
+  and the send-file engine's own counting, which had the further flaw of
+  resolving a worker's log sink from the transport thread.
+
+  Requests served entirely on a transport reactor (a static hard-zero hit, the
+  reactor half of a pooled `sendFile()`) are counted into that reactor's own
+  counters, which `getStats()` now folds into `totals` and reports under a new
+  `reactors` key — before, they were counted where nothing ever read them.
+
+- **HTTP/3 range requests returned the wrong bytes.** A ranged `sendFile()` (or
+  ranged static file) answered `206` with correct `Content-Range` headers and
+  then sent the body **from the start of the file**: the H3 body pump stored the
+  engine's `body_offset` and never seeked to it. HTTP/2 had always seeked.
+
+- **HTTP/3 files larger than 64 KiB never arrived under the reactor pool.** Only
+  the inline fast path (files up to the 64 KiB slurp threshold) worked; anything
+  that needed the real body pump — every larger file, and *every* ranged request
+  — hung until the client timed out. The pump drove itself from a PHP coroutine
+  and demanded a server object and an async scope, and a transport reactor has
+  neither (no PHP runs there), so it failed immediately and no response was ever
+  sent. It is now a callback FSM, like HTTP/2's, and runs on any thread: reads
+  complete into a callback that queues the chunk and decides whether to read on,
+  with backpressure from the stream's write window and the per-thread static
+  memory budget. As a consequence the reactor no longer touches the worker's
+  request at all — the conditional headers the engine honours (`Range`,
+  `If-Range`, `If-Modified-Since`, `If-None-Match`) now travel on the SEND_FILE
+  wire, because those request fields live in the worker's allocation domain and
+  freeing them from the reactor corrupts its heap.
+
+- **Observability review fixes (#5).**
+  - **Per-protocol connection gauge underflowed for every HTTPS connection.** A
+    TLS/ALPN connection installs its strategy in the handshake path, which
+    bypassed the `conns_active_h1/h2` increment while the close path still
+    decremented — so the gauge wrapped toward `UINT64_MAX`. The handshake path
+    now increments to match.
+  - **A long request target corrupted the JSON/text access log.** A record that
+    overflowed the formatter buffer was truncated including its trailing
+    newline, merging it with the next record on a stream sink (a client could
+    hide an unrelated request behind a long URL). The record separator is now
+    forced even on truncation.
+  - **`level => LogSeverity::OFF` sinks came back to life under a worker pool.**
+    The frozen-config round-trip had no OFF case and collapsed OFF to INFO, so a
+    sink the user disabled started logging in workers. OFF now round-trips.
+  - **Pool-mode access records lost `http.server.request.duration`.** The worker
+    stamped its service window on the dispatch ctx but the access record reads
+    the request; the window is now copied across.
+  - **The static hard-zero serve path counted requests but never logged them.**
+    The send-file engine resolved its log state from a NULL server on that path;
+    the h1/h2 worker path now passes its server so the access record is emitted
+    (the transport reactor still passes NULL — its sinks belong to another
+    thread).
+  - **`resetTelemetry()` zeroed the live occupancy gauges**, so the next
+    connection/stream close decremented past zero and underflowed. Reset now
+    preserves `conns_active_*`, `active_requests` and `h2_streams_active`.
+  - **Windows build:** the new relaxed 64-bit counter reads used the
+    GCC/Clang-only `__atomic_load_n` with no MSVC fallback in TUs compiled on
+    Windows; they now go through a portable helper.
+
+- **`getHttp3Stats()` could return counters from two different moments.** The
+  QUIC counters were read by copying the whole per-listener stats block while
+  the reactor thread kept writing it, so fields on either side of an update
+  could land in the same report — `quic_packets_sent` from after a send,
+  `quic_bytes_sent` from before it. Each counter is now loaded individually with
+  a relaxed atomic read, so the report is internally consistent. The counter
+  list is also driven by a field table guarded by a static assert, instead of a
+  hand-kept block of ~60 appends that a newly added counter could silently miss.
+
 - **`WebSocket::trySend()` silently dropped frames over HTTP/2 (#2).** The H2
   chunk ring is bounded by slots as well as bytes, and the non-suspending sink
   discards a frame past the last slot — yet `trySend()` still returned `true`,

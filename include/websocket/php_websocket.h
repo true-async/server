@@ -57,7 +57,11 @@ void ws_php_classes_register(void);
 typedef struct {
     ws_session_t   *session;          /* borrowed; cleared on connection teardown */
     zend_string    *subprotocol;      /* selected subprotocol (NULL = none); owned */
-    zend_string    *remote_address;   /* lazily computed; owned; NULL until first read */
+    /* Peer, snapshotted at upgrade while conn is guaranteed alive. Bare IP —
+     * the port is separate, never glued into the string (see http_sockaddr_ip).
+     * NULL / 0 for a Unix-socket listener. */
+    zend_string    *remote_address;
+    uint16_t        remote_port;
     bool            closed;           /* close() has been called or peer CLOSE seen */
 
     /* Pre-commit upgrade state. The handler runs BEFORE the 101
@@ -159,6 +163,22 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session);
 struct http2_stream_t;
 bool http2_ws_accept(struct http2_stream_t *stream, websocket_object *w,
                      const char *subprotocol, int deflate_bits);
+
+/*
+ * Handler-failure seam (defined in ws_dispatch.c), shared by the H1 upgrade
+ * path and the H2 Extended CONNECT path — both spawn a WS handler coroutine,
+ * and both must consume its exception or it is rethrown at finalize and kills
+ * the worker thread (#119).
+ *
+ * consume_exception marks the exception handled, logs it, and returns the
+ * status to answer a not-yet-committed upgrade with (Throwable::$code when it
+ * is a 4xx/5xx, else 500). 0 = the handler exited cleanly.
+ *
+ * close_internal_error sends CLOSE 1011 on an already-committed session.
+ * Non-suspending — callable from dispose.
+ */
+int  ws_handler_consume_exception(zend_coroutine_t *coroutine);
+void ws_handler_close_internal_error(websocket_object *w);
 
 /*
  * Factory: build a WebSocketMessage from the assembled payload

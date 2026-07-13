@@ -91,16 +91,15 @@ __attribute__((weak)) zend_string *http_known_header_lookup(const char *name, si
     return NULL;
 }
 
-/* Logging is irrelevant for fuzz harnesses; drop. Forward-declared
- * to avoid pulling http_log.h (which transitively pulls async event
- * machinery). */
-struct http_log_state;
-struct http_log_attr;
-__attribute__((weak)) void http_log_emitf(struct http_log_state *state, int sev,
-                                          const struct http_log_attr *attrs, size_t n,
+/* Logging is irrelevant for fuzz harnesses; drop. http_parser.h now pulls
+ * http_log.h (for http_access_rec_t), so match its real signature rather than
+ * forward-declaring a conflicting one. */
+__attribute__((weak)) void http_log_emitf(http_log_state_t *state,
+                                          http_log_severity_t sev,
+                                          const http_log_attr_t *attrs, size_t attrs_n,
                                           const char *tmpl, ...)
 {
-    (void)state; (void)sev; (void)attrs; (void)n; (void)tmpl;
+    (void)state; (void)sev; (void)attrs; (void)attrs_n; (void)tmpl;
 }
 
 /* Trace-context (W3C traceparent / B3) parsing is logging metadata;

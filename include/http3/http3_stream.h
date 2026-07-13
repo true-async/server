@@ -69,27 +69,6 @@ struct _http3_stream_s {
      * own counter as a belt-and-braces cap. */
     size_t            headers_total_bytes;
 
-    /* True after end_stream fired and body was finalized. */
-    bool              fin_received;
-
-    /* Set when the stream tripped the headers/body cap. RFC 9114 prefers
-     * stream-level rejection (H3_REQUEST_REJECTED) over killing the whole
-     * connection — once set, recv_header / recv_data short-circuit and
-     * end_headers skips dispatch. The matching shutdown_stream_read on
-     * both nghttp3 and ngtcp2 is issued at the moment the cap trips. */
-    bool              rejected;
-
-    /* True after dispatch handed the request to PHP-land.
-     * Until then the stream owns the request and must free it. */
-    bool              dispatched;
-
-    /* Set when the static-handler FSM produced the response synchronously
-     * (HTTP_STATIC_HANDLED: inline small-file body or a 4xx). The handler
-     * coroutine entry short-circuits the user handler; dispose still runs
-     * the buffered commit so the wire frames go out. Mirrors H2's
-     * http2_stream_t.skip_handler. */
-    bool              skip_handler;
-
     /* Buffered response body (REST/setBody path). The data_reader
      * callback feeds nghttp3 from this buffer at offset
      * `response_body_offset` until EOF. Owned by the stream; released
@@ -129,17 +108,7 @@ struct _http3_stream_s {
 
     /* static-file memory cap: charged on push, debited on ACK, reconciled
      * at teardown (http3_static_response.c) */
-    bool              tracks_static_bytes;
     size_t            static_inflight;
-
-    /* Set by h3_stream_ops.mark_ended (handler called $res->end() on a
-     * streaming response). Tells the data_reader to flag EOF when the
-     * queue empties instead of NGHTTP3_ERR_WOULDBLOCK. */
-    bool              streaming_ended;
-
-    bool              is_grpc;
-    bool              has_trailers;
-    bool              trailers_submitted;
 
     /* Trailers captured in dispose (response_zv still alive), submitted by
      * the data reader at true EOF. malloc'd nghttp3_nv[] pointing into
@@ -147,13 +116,6 @@ struct _http3_stream_s {
     void             *trailer_nv;
     size_t            trailer_count;
     char             *trailer_bytes;
-
-    /* Set by h3_stream_close_cb / h3_reset_stream_cb when nghttp3
-     * tears down stream state on a peer RST. After this point any
-     * nghttp3_conn_resume_stream call for this stream_id is a no-op
-     * and any further append_chunk must short-circuit so the handler
-     * unwinds cleanly with HttpException(499). */
-    bool              peer_closed;
 
     /* worker's stream_credit_t*, adopted from the STREAM_HEADERS wire;
      * NULL for local/buffered streams */
@@ -164,6 +126,18 @@ struct _http3_stream_s {
      * extends the per-stream write window; lazy-created on first wait,
      * disposed in http3_stream_release. */
     zend_async_trigger_event_t *write_event;
+
+    /* Stand-in request the sendfile engine reads on a marshalled send (pool
+     * mode). `s->request` is off-limits on this thread — its fields live in the
+     * worker's allocation domain, and freeing or reading them here corrupts that
+     * heap. Persistent, and freed by the reactor that built it. */
+    http_request_t   *sf_request;
+
+    /* In-flight static/sendFile body sender (h3_static_state_t *), or NULL.
+     * Callback-driven, not a coroutine: teardown cancels it through this pointer
+     * (h3_static_cancel), and h3_stream_append_chunk must not suspend while it is
+     * set. Cleared by the sender when it finishes. */
+    void             *static_body_state;
 
     /* Per-stream PHP objects + handler coroutine. HTTP/3 multiplexes N
      * concurrent requests on one QUIC connection, so each stream needs
@@ -188,9 +162,46 @@ struct _http3_stream_s {
      * Once dispatch fires, the handler coroutine bumps to 2. */
     unsigned          refcount;
 
-    /* Owned by a reactor listener; fixed at creation. Release reads this
-     * rather than s->conn, which teardown nulls before force-releasing. */
-    bool              reactor_owned;
+    /* Flags. Written only by the stream's reactor thread: they share one
+     * storage unit, so a second writer would tear the neighbours. */
+
+    bool              fin_received        : 1;   /* end_stream fired, body finalized */
+
+    /* Headers/body cap tripped: recv_header / recv_data short-circuit and
+     * end_headers skips dispatch (RFC 9114 wants a stream-level
+     * H3_REQUEST_REJECTED, not a dead connection). */
+    bool              rejected            : 1;
+
+    /* Request handed to PHP-land. Until then the stream must free it. */
+    bool              dispatched          : 1;
+
+    bool              skip_handler        : 1;   /* static FSM answered; dispose still commits */
+
+    /* Handler died in a zend_bailout: dispose runs, but the request gets no
+     * telemetry — post-bailout state is not trustworthy enough to report. */
+    bool              handler_bailout     : 1;
+
+    bool              tracks_static_bytes : 1;   /* static_inflight is charged */
+
+    /* $res->end() on a streaming response: the data_reader flags EOF when the
+     * queue empties instead of NGHTTP3_ERR_WOULDBLOCK. */
+    bool              streaming_ended     : 1;
+
+    bool              is_grpc             : 1;
+    bool              has_trailers        : 1;
+    bool              trailers_submitted  : 1;
+
+    /* nghttp3 tore the stream down on a peer RST: resume_stream is a no-op
+     * and append_chunk must short-circuit, else the handler never unwinds
+     * (it is owed an HttpException(499)). */
+    bool              peer_closed         : 1;
+
+    /* Release reads this rather than s->conn, which teardown nulls before
+     * force-releasing. Fixed at creation. */
+    bool              reactor_owned       : 1;
+
+    bool              hq_served           : 1;   /* hq-interop: response produced */
+    bool              hq_fin_sent         : 1;   /* hq-interop: its FIN emitted */
 
     /* Intrusive link in the owning connection's live-stream list. The
      * connection walks this list at teardown to force-release any
@@ -204,12 +215,9 @@ struct _http3_stream_s {
 
     /* hq-interop only (HTTP/0.9-over-QUIC). Request-line accumulator,
      * lazily allocated on the first stream byte; freed in release. h3
-     * streams leave these NULL/zero. hq_served latches once the response
-     * has been produced; hq_fin_sent latches once its FIN has been emitted. */
+     * streams leave these NULL/zero. */
     char             *hq_line;
     uint16_t          hq_line_len;
-    bool              hq_served;
-    bool              hq_fin_sent;
 
     /* hq response payload. hq_body points into the mmap'd file (hq_map) or a
      * static literal (error); NULL + zero len = empty body served FIN-only.

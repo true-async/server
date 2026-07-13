@@ -247,6 +247,7 @@ struct _http_server_config_t {
     bool     http3_alt_svc_enabled;
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
+    bool     stats_enabled;           /* issue #5: opt-in getStats() aggregate */
 
     /* WebSocket knobs: message/frame caps + ping
      * cadence + pong deadline. See HttpServerConfig::setWs* setters. */
@@ -306,6 +307,12 @@ struct _http_server_config_t {
      * gates traceparent/tracestate ingestion (Step 5). */
     int      log_severity;
     zval     log_stream;
+    /* setLogSinks() spec array (#5, B4): a validated, normalized PHP array of
+     * [type_int, format_int, level_int, stream_resource|null]. IS_UNDEF when
+     * unset — the logger then falls back to the log_severity/log_stream sugar.
+     * Not frozen into the worker snapshot; applied at start on parent/standalone
+     * like log_stream. */
+    zval     log_sinks;
     bool     telemetry_enabled;
 
     /* Hot-reload triggers (issue #93) — consumed by the pool parent only
@@ -773,8 +780,10 @@ typedef struct {
     /* Admission-reject (overload shedding) */
     uint64_t requests_shed_total;
 
-    /* Request lifetime gauge (++ on dispatch, -- on dispose) */
-    size_t   active_requests;
+    /* Request lifetime gauge (++ on dispatch, -- on dispose). uint64_t, not
+     * size_t: the cross-worker aggregate walks this struct as 64-bit words, and
+     * a 4-byte field on a 32-bit target would shift every counter after it. */
+    uint64_t active_requests;
 
     /* TLS bytes — fed per IO-iter from the TLS state machine */
     uint64_t tls_bytes_plaintext_in_total;
@@ -786,6 +795,27 @@ typedef struct {
      * http_server_count_request() helper hits one cache line shared with
      * the rest of the hot counters. Read by getStats / __debugInfo. */
     uint64_t total_requests;
+
+    /* Final response status class, bumped exactly once per served request
+     * alongside total_requests (see http_server_count_request). Every
+     * request lands in one bucket, so the four sum to total_requests. */
+    uint64_t responses_2xx_total;
+    uint64_t responses_3xx_total;
+    uint64_t responses_4xx_total;
+    uint64_t responses_5xx_total;
+
+    /* Active-connection gauge split by negotiated protocol (++ once the
+     * protocol is detected / on H3 conn open, -- at conn close). Sum of
+     * the three tracks the protocol-agnostic active_connections. */
+    uint64_t conns_active_h1;
+    uint64_t conns_active_h2;
+    uint64_t conns_active_h3;
+
+    /* Log records this thread could not hand to a sink — its ring was full (a
+     * burst outran the writer) or the write failed. Counted per producer thread
+     * so a dropped record is attributed to whoever produced it. Silently losing
+     * log lines is exactly what an operator must be able to see. */
+    uint64_t log_records_dropped_total;
 
     /* StaticHandler hard-zero hits — bumped on every successful
      * dispatch into the no-coroutine FSM (open → stat → headers →
@@ -801,6 +831,66 @@ typedef struct {
     uint64_t static_cache_hits_total;
     uint64_t static_cache_misses_total;
 } http_server_counters_t;
+
+/* Counter field table. One row per field of http_server_counters_t; it drives
+ * getStats()'s array, the cross-worker aggregate and the reset, so a new
+ * counter is declared above and listed here — not hand-copied into three
+ * more switch/append blocks that quietly drift apart.
+ *
+ * `kind` is how the value combines across workers, and — the part that is easy
+ * to get wrong — what happens to it when a worker dies:
+ *
+ *   SUM   — a monotonic total. Sums across workers, and a retiring worker's
+ *           value is folded into the registry's retired accumulator: a total
+ *           must never go backwards just because the pool reloaded.
+ *   GAUGE — a currently-active count. Sums across LIVE workers only; a dead
+ *           worker holds no open connections and no in-flight requests, so
+ *           carrying its last value forward would strand a phantom.
+ *   MAX    — a latest sample. Summing it is meaningless (an RTT is not
+ *           additive), and a dead worker's sample is stale, so it is the max
+ *           across live workers.
+ *
+ * A _Static_assert in stats_registry.c fails the build if the struct grows a
+ * field this table misses, or if a field stops being a 64-bit word. */
+#define HTTP_COUNTER_SUM   0
+#define HTTP_COUNTER_GAUGE 1
+#define HTTP_COUNTER_MAX   2
+
+#define HTTP_SERVER_COUNTER_TABLE(X)                        \
+    X(streaming_responses_total,             SUM)           \
+    X(stream_send_calls_total,               SUM)           \
+    X(stream_bytes_sent_total,               SUM)           \
+    X(stream_send_backpressure_events_total, SUM)           \
+    X(worker_wire_dropped_total,             SUM)           \
+    X(h2_streams_active,                     GAUGE)         \
+    X(h2_streams_opened_total,               SUM)           \
+    X(h2_streams_reset_by_peer_total,        SUM)           \
+    X(h2_streams_refused_total,              SUM)           \
+    X(h2_goaway_recv_total,                  SUM)           \
+    X(h2_goaway_sent_total,                  SUM)           \
+    X(h2_data_recv_bytes_total,              SUM)           \
+    X(h2_data_sent_bytes_total,              SUM)           \
+    X(h2_ping_rtt_ns,                        MAX)           \
+    X(h1_connection_close_sent_total,        SUM)           \
+    X(h3_goaway_sent_total,                  SUM)           \
+    X(requests_shed_total,                   SUM)           \
+    X(active_requests,                       GAUGE)         \
+    X(tls_bytes_plaintext_in_total,          SUM)           \
+    X(tls_bytes_plaintext_out_total,         SUM)           \
+    X(tls_bytes_ciphertext_in_total,         SUM)           \
+    X(tls_bytes_ciphertext_out_total,        SUM)           \
+    X(total_requests,                        SUM)           \
+    X(responses_2xx_total,                   SUM)           \
+    X(responses_3xx_total,                   SUM)           \
+    X(responses_4xx_total,                   SUM)           \
+    X(responses_5xx_total,                   SUM)           \
+    X(conns_active_h1,                       GAUGE)         \
+    X(conns_active_h2,                       GAUGE)         \
+    X(conns_active_h3,                       GAUGE)         \
+    X(log_records_dropped_total,             SUM)           \
+    X(static_zero_coroutine_total,           SUM)           \
+    X(static_cache_hits_total,               SUM)           \
+    X(static_cache_misses_total,             SUM)
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
  * caches &server->view (or &http_server_view_default) at create time.
@@ -1011,15 +1101,76 @@ static zend_always_inline void http_server_on_tls_io(http_server_counters_t *c,
     c->tls_bytes_ciphertext_out_total += ciphertext_out;
 }
 
+/* Relaxed 64-bit load (one writer per counter): bars a compiler tear/reload of
+ * a cross-thread read. MSVC lacks __atomic_*; an aligned volatile load is one MOV. */
+static zend_always_inline uint64_t http_relaxed_load_u64(const uint64_t *p)
+{
+#if defined(_MSC_VER)
+    return *(const volatile uint64_t *)p;
+#else
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+#endif
+}
+
 /* Cheap per-request counter bump. Split out of on_request_sample so the
  * H1/H2/H3 hot paths can keep counting requests even when
  * sample_stamps_enabled is false and the full sojourn/service sample is
  * skipped. Caller passes its cached counters slice (conn->counters) —
  * never NULL, falls back to http_server_counters_dummy. */
-static zend_always_inline void http_server_count_request(http_server_counters_t *c)
+static zend_always_inline void http_server_count_request(http_server_counters_t *c, int status)
 {
     c->total_requests++;
+
+    /* Classify into exactly one bucket so the four reconcile with
+     * total_requests. Anything below 300 (incl. an unset/0 status, which
+     * the wire normalises to 200) counts as 2xx. */
+    if (status >= 500) {
+        c->responses_5xx_total++;
+    } else if (status >= 400) {
+        c->responses_4xx_total++;
+    } else if (status >= 300) {
+        c->responses_3xx_total++;
+    } else {
+        c->responses_2xx_total++;
+    }
 }
+
+/* Active-connection gauge, split by negotiated protocol. inc fires once
+ * the protocol is known (ALPN / H3 open); dec fires at connection close.
+ * The caller passes the SAME protocol to both — an H1 connection that
+ * upgrades to WebSocket maps back to h1 so the gauge stays balanced. */
+static zend_always_inline void http_server_conn_active_inc(http_server_counters_t *c,
+                                                           http_protocol_type_t proto)
+{
+    switch (proto) {
+        case HTTP_PROTOCOL_HTTP1: c->conns_active_h1++; break;
+        case HTTP_PROTOCOL_HTTP2: c->conns_active_h2++; break;
+        case HTTP_PROTOCOL_HTTP3: c->conns_active_h3++; break;
+        default: break;
+    }
+}
+
+static zend_always_inline void http_server_conn_active_dec(http_server_counters_t *c,
+                                                           http_protocol_type_t proto)
+{
+    switch (proto) {
+        case HTTP_PROTOCOL_HTTP1: if (c->conns_active_h1) { c->conns_active_h1--; } break;
+        case HTTP_PROTOCOL_HTTP2: if (c->conns_active_h2) { c->conns_active_h2--; } break;
+        case HTTP_PROTOCOL_HTTP3: if (c->conns_active_h3) { c->conns_active_h3--; } break;
+        default: break;
+    }
+}
+
+/* Classify a completed request exactly once: bump the counters with the
+ * response's FINAL status and, when an access sink admits it, emit the access
+ * record. Every H1/H2/H3/pool teardown routes through this instead of counting
+ * at its handler-coroutine entry tail, which is why a sendFile is reported
+ * with the status the engine stamped (206/304/416/...) and not the handler's
+ * default 200. `counters` is never NULL (dummy fallback); `log_state` may be
+ * NULL or the OFF default a reactor thread carries, and then it only counts. */
+void http_request_telemetry(http_request_t *request, zend_object *response_obj,
+                          http_server_counters_t *counters,
+                          struct http_log_state *log_state);
 
 /* True iff per-request hrtime stamps (enqueue_ns/start_ns/end_ns) are
  * needed by an active consumer (CoDel or telemetry). Hot-path stamp
@@ -1133,6 +1284,23 @@ zend_string *http_response_format_streaming_headers(zend_object *obj);
 zend_string *http_response_format_static_head(zend_object *obj,
                                               bool include_inline_body);
 void http_response_set_socket(zend_object *obj, php_socket_t fd);
+
+/* Peer address rendering — one canonical pair for every protocol. H1/H2 keep
+ * the accepted socket's peer, H3 the datagram peer; both render through here.
+ *
+ * http_sockaddr_ip writes the BARE IP: no port, and no brackets around an
+ * IPv6 literal. That is the REMOTE_ADDR form (RFC 3875 §4.1.8) and what every
+ * mainstream server API returns — PHP's own $_SERVER['REMOTE_ADDR'], Servlet's
+ * getRemoteAddr(), Swoole's remote_addr, node's socket.remoteAddress. An
+ * "ip:port" string is deliberately NOT offered: it is Go's documented wart,
+ * and it makes IPv6 unsplittable for callers. Ports travel separately.
+ *
+ * Returns the length written; writes "" and returns 0 when the peer carries no
+ * IP (AF_UNIX listener, address never captured). `out` needs INET6_ADDRSTRLEN.
+ * http_sockaddr_port returns the port in host order, or 0 when there is none. */
+size_t   http_sockaddr_ip(const struct sockaddr *addr, socklen_t addr_len,
+                          char *out, size_t out_len);
+uint16_t http_sockaddr_port(const struct sockaddr *addr, socklen_t addr_len);
 void http_response_set_protocol_version(zend_object *obj, const char *version);
 /* RFC 9110 §9.3.2 — HEAD responses must not carry a body; send() drops
  * chunks silently when set. Stamped at dispatch wherever the request is
@@ -1147,6 +1315,10 @@ bool http_response_is_closed(zend_object *obj);
 int            http_response_get_status  (zend_object *obj);
 HashTable     *http_response_get_headers (zend_object *obj);
 HashTable     *http_response_get_trailers(zend_object *obj);
+
+/* Underlying http_request_t of an HttpRequest object — for contexts that
+ * only hold the zval (worker dispatch access-log emit). */
+struct http_request_t *http_request_from_zobj(zend_object *obj);
 const char    *http_response_get_body    (zend_object *obj, size_t *len_out);
 
 /* Default the grpc-status trailer to `status` unless one is already set.

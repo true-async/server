@@ -23,6 +23,7 @@
 #include "http2/http2_stream.h"
 #include "http2/http2_static_response.h"
 #include "core/async_plain_event.h"
+#include "log/http_log.h"          /* access-log emit */
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 # include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 # include "websocket/php_websocket.h"      /* websocket_object + http2_ws_accept */
@@ -165,6 +166,13 @@ static void h2_static_on_static_done(void *user, int status)
     (void)status;
     http2_stream_t *stream = (http2_stream_t *)user;
     http_connection_t *conn = http2_session_get_conn(stream->session);
+
+    /* The H2 static hard-zero path has no coroutine, so it reaches neither the
+     * dispose nor the dispose_tail seam — this is its only telemetry point. */
+    if (!Z_ISUNDEF(stream->response_zv)) {
+        http_request_telemetry(stream->request, Z_OBJ(stream->response_zv),
+                             conn->counters, conn->log_state);
+    }
 
     http_server_on_request_dispose(conn->counters);
 
@@ -415,7 +423,6 @@ static void http2_handler_coroutine_entry(void)
      * dispose runs the normal buffered commit and the wire frames go
      * out the same way they would for any handler-set response. */
     if (stream->skip_handler) {
-        http_server_count_request(conn->counters);
         return;
     }
 
@@ -455,7 +462,6 @@ static void http2_handler_coroutine_entry(void)
                 dec == 415 ? "Unsupported Content-Encoding" :
                 dec == 413 ? "Payload Too Large after decompression" :
                              "Malformed compressed request body");
-            http_server_count_request(conn->counters);
 
             if (stamps) stream->request->end_ns = zend_hrtime();
             return;
@@ -501,9 +507,11 @@ static void http2_handler_coroutine_entry(void)
         const char *u = (stream->request && stream->request->uri)
                             ? ZSTR_VAL(stream->request->uri) : "?";
         http_handler_log_bailout("h2", co, m, u);
-        /* Skip retval dtor + sample + count — post-bailout PHP state
-         * cannot sustain those. Stream dispose still runs and will
-         * RST or send whatever the response was at the point of bailout. */
+        /* Skip retval dtor + sample — post-bailout PHP state cannot sustain
+         * those. Stream dispose still runs and will RST or send whatever the
+         * response was at the point of bailout; the flag keeps the telemetry
+         * seams in dispose / dispose_tail off this request. */
+        stream->handler_bailout = true;
         return;
     }
 
@@ -511,9 +519,7 @@ static void http2_handler_coroutine_entry(void)
      * destructor time on a returned object doesn't count as service
      * time. Matches the HTTP/1 handler-coroutine discipline. Stamps and
      * the sample call are skipped when no consumer (CoDel/telemetry) is
-     * active; total_requests is still bumped. */
-    http_server_count_request(conn->counters);
-
+     * active. */
     if (stream->request != NULL && stamps) {
         stream->request->end_ns = zend_hrtime();
         http_server_on_request_sample(
@@ -644,6 +650,15 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         (void)http2_commit_stream_response(conn, stream);
     }
 
+    /* Status is final here (exception-derived, committed) and the sendFile
+     * path already returned above, so this reports every non-sendFile stream
+     * exactly once. The zvals are still live — the release below is 2→1. */
+    if (EXPECTED(!stream->handler_bailout) && conn != NULL &&
+        !Z_ISUNDEF(stream->response_zv)) {
+        http_request_telemetry(stream->request, Z_OBJ(stream->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     /* zvals must outlive dispose: data_provider borrows response_body
      * past dispose (emit runs later from scheduler context). */
     http2_stream_release(stream);
@@ -663,6 +678,15 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 static void h2_stream_dispose_tail(http_connection_t *conn,
                                    http2_stream_t *stream)
 {
+    /* sendFile completion: the engine has stamped the real status (206/416/
+     * 404/...) by now, which is exactly why telemetry is collected here and
+     * not at the handler-entry tail, where it would always read 200. */
+    if (EXPECTED(!stream->handler_bailout) && conn != NULL &&
+        !Z_ISUNDEF(stream->response_zv)) {
+        http_request_telemetry(stream->request, Z_OBJ(stream->response_zv),
+                             conn->counters, conn->log_state);
+    }
+
     if (!Z_ISUNDEF(stream->request_zv)) {
         zval_ptr_dtor(&stream->request_zv);
         ZVAL_UNDEF(&stream->request_zv);
@@ -1948,6 +1972,7 @@ typedef struct {
     zval            websocket_zv;
     zval            request_zv;
     zval            upgrade_zv;
+    unsigned        handler_bailout : 1;   /* zend_bailout caught in the entry */
 } ws_h2_ctx_t;
 
 static void ws_h2_handler_entry(void)
@@ -1961,8 +1986,29 @@ static void ws_h2_handler_entry(void)
     ZVAL_COPY_VALUE(&params[2], &ctx->upgrade_zv);
     ZVAL_UNDEF(&retval);
 
-    call_user_function(NULL, NULL, &ctx->handler->fci.function_name,
-                       &retval, 3, params);
+    /* Bailout firewall — see http_handler_log_bailout in http_connection.c. */
+    zend_try
+    {
+        call_user_function(NULL, NULL, &ctx->handler->fci.function_name,
+                           &retval, 3, params);
+    }
+
+    zend_catch
+    {
+        ctx->handler_bailout = 1;
+    }
+
+    zend_end_try();
+
+    if (UNEXPECTED(ctx->handler_bailout)) {
+        const http_request_t *const req = ctx->stream->request;
+        http_handler_log_bailout("ws-h2", co,
+            (req != NULL && req->method != NULL) ? ZSTR_VAL(req->method) : "?",
+            (req != NULL && req->uri    != NULL) ? ZSTR_VAL(req->uri)    : "?");
+        /* No PHP API past this point (post-bailout EG state). */
+        return;
+    }
+
     zval_ptr_dtor(&retval);
 }
 
@@ -1989,12 +2035,25 @@ static void ws_h2_handler_dispose(zend_coroutine_t *coroutine)
     websocket_upgrade_object *u = (Z_TYPE(ctx->upgrade_zv) == IS_OBJECT)
         ? websocket_upgrade_from_obj(Z_OBJ(ctx->upgrade_zv)) : NULL;
 
-    if (u != NULL && w != NULL && !w->committed && u->reject_status != 0) {
-        /* reject() pre-commit → 4xx HEADERS + END_STREAM. */
+    /* Same failure contract as the H1 upgrade path (#119); reject() wins. */
+    const int  exc_status = ws_handler_consume_exception(coroutine);
+    const bool failed     = (exc_status != 0) || ctx->handler_bailout;
+
+    int reject_status = (u != NULL) ? u->reject_status : 0;
+    if (reject_status == 0 && failed) {
+        reject_status = (exc_status != 0) ? exc_status : 500;
+    }
+
+    if (w != NULL && !w->committed && reject_status != 0) {
         if (!stream->peer_closed) {
             (void)http2_session_submit_response(stream->session,
-                stream->stream_id, u->reject_status, NULL, 0, NULL, 0);
+                stream->stream_id, reject_status, NULL, 0, NULL, 0);
             http2_session_emit(stream->session);
+        }
+    } else if (failed && w != NULL && w->committed && !w->closed) {
+        ws_handler_close_internal_error(w);
+        if (!stream->peer_closed) {
+            h2_stream_mark_ended(stream);
         }
     } else if (w != NULL && !w->committed) {
         /* Handler exited without WS I/O and without rejecting: accept,

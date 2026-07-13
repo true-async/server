@@ -106,6 +106,75 @@ void http3_packet_compute_sr_token(const uint8_t key[32],
     memcpy(out, mac, 16);
 }
 
+/* The QUIC counter field table, materialised. See HTTP3_PACKET_STAT_TABLE. */
+static const struct {
+    const char *name;
+    size_t      offset;
+    int         kind;
+} http3_stats[] = {
+#define HTTP3_STAT_ROW(field, k) \
+    { #field, offsetof(http3_packet_stats_t, field), HTTP3_STAT_##k },
+    HTTP3_PACKET_STAT_TABLE(HTTP3_STAT_ROW)
+#undef HTTP3_STAT_ROW
+};
+
+#define HTTP3_STAT_COUNT (sizeof(http3_stats) / sizeof(http3_stats[0]))
+
+/* Fails the build if a counter was added to the struct but not to the table.
+ * The histogram is not a table row, so it is accounted for separately. */
+ZEND_STATIC_ASSERT(HTTP3_STAT_COUNT * sizeof(uint64_t)
+                       + sizeof(((http3_packet_stats_t *)0)->reactor_lat_bucket)
+                       == sizeof(http3_packet_stats_t),
+                   "HTTP3_PACKET_STAT_TABLE is out of sync with "
+                   "http3_packet_stats_t");
+
+/* Relaxed 64-bit load, portable to MSVC (no __atomic_* builtins). One writer
+ * per counter, so this only bars the compiler tearing/reloading; on the Windows
+ * targets an aligned volatile load is a single un-torn MOV. */
+static zend_always_inline uint64_t h3_relaxed_load_u64(const uint64_t *p)
+{
+#if defined(_MSC_VER)
+    return *(const volatile uint64_t *)p;
+#else
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+#endif
+}
+
+static zend_always_inline uint64_t http3_stat_load(const http3_packet_stats_t *s,
+                                                   const size_t offset)
+{
+    return h3_relaxed_load_u64((const uint64_t *)((const char *)s + offset));
+}
+
+size_t http3_stat_count(void)
+{
+    return HTTP3_STAT_COUNT;
+}
+
+const char *http3_stat_name(const size_t i)
+{
+    return i < HTTP3_STAT_COUNT ? http3_stats[i].name : NULL;
+}
+
+int http3_stat_kind(const size_t i)
+{
+    return i < HTTP3_STAT_COUNT ? http3_stats[i].kind : HTTP3_STAT_SUM;
+}
+
+uint64_t http3_stat_get(const http3_packet_stats_t *s, const size_t i)
+{
+    return i < HTTP3_STAT_COUNT ? http3_stat_load(s, http3_stats[i].offset) : 0;
+}
+
+uint64_t http3_stat_bucket(const http3_packet_stats_t *s, const size_t b)
+{
+    if (b >= HTTP3_LAT_BUCKETS) {
+        return 0;
+    }
+
+    return h3_relaxed_load_u64(&s->reactor_lat_bucket[b]);
+}
+
 /* Categorise a sendmsg/sendto errno into the send-error stat buckets. Pure
  * errno→counter mapping (no listener internals), so it lives here where a
  * unit test can drive it without the listener TU. */

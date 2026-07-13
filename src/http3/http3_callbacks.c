@@ -674,6 +674,15 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
         vec[0].len  = avail;
         s->chunk_read_offset    += avail;
         s->chunk_pending_bytes  -= avail;
+
+        /* Queue drained below the producer's ceiling — wake whoever is waiting
+         * to refill it. The static/sendFile sender parks here, and until now its
+         * only wake-ups were the peer's ACK and a window extension: taking the
+         * bytes off the queue is itself progress, and nothing reported it. */
+        if (s->write_event != NULL && s->write_event->trigger != NULL) {
+            s->write_event->trigger(s->write_event);
+        }
+
         return 1;
     }
 
@@ -1269,12 +1278,20 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
     if (s->chunk_pending_bytes > 0) {
         http_server_on_stream_backpressure(counters);
     }
+
+    /* The static/sendFile sender feeds us from an io callback on a transport
+     * thread, where a current coroutine exists — so the co != NULL guard below
+     * passes and the suspend never returns: it parks a libuv callback frame that
+     * the sender itself would have had to wake. It backpressures in
+     * h3_static_try_read instead. */
+    const bool nonblocking_producer = s->static_body_state != NULL;
+
     /* Pull write_timeout_s once — config can't change mid-handler.
      * 0 = wait forever (used in tests / bring-up). Pre-multiply to ms so
      * the inner loop doesn't re-derive it per suspension. */
     const uint32_t write_timeout_ms =
         (uint32_t)c->view->write_timeout_s * 1000u;
-    while (s->chunk_pending_bytes > 0 && !s->peer_closed) {
+    while (s->chunk_pending_bytes > 0 && !s->peer_closed && !nonblocking_producer) {
         zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
 
         if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
@@ -1538,6 +1555,12 @@ static int h3_stream_close_cb(nghttp3_conn *conn, int64_t stream_id,
     }
 
     h3_stream_mark_peer_closed(s);
+
+    /* Retire an in-flight body pump before dropping our ref: it fires the
+     * engine's on_done, which retires the response and drops the refs the
+     * delivery held. */
+    h3_static_stream_closed(s);
+
     http3_stream_release(s);
     return 0;
 }

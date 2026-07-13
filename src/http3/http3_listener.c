@@ -225,8 +225,8 @@ typedef struct {
     http3_listener_t           *listener;
 } http3_recv_cb_t;
 
-static void format_peer(const struct sockaddr *addr, socklen_t addr_len,
-                        char *out, size_t out_size)
+void http3_format_peer(const struct sockaddr *addr, socklen_t addr_len,
+                       char *out, size_t out_size)
 {
     if (addr == NULL || out_size == 0) {
         if (out_size > 0) out[0] = '\0';
@@ -292,7 +292,7 @@ static void update_peer_cache(http3_listener_t *listener,
         || !sockaddr_same_peer(cur_addr, cur_addr_len,
                                (const struct sockaddr *)&listener->last_peer_addr,
                                listener->last_peer_addr_len)) {
-        format_peer(cur_addr, cur_addr_len,
+        http3_format_peer(cur_addr, cur_addr_len,
                     listener->stats.last_peer, sizeof(listener->stats.last_peer));
 
         if ((size_t)cur_addr_len <= sizeof(listener->last_peer_addr)) {
@@ -483,7 +483,6 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                                    zend_async_event_callback_t *cb,
                                    void *result, zend_object *exception)
 {
-    (void)event;
     (void)result;
     http3_recv_cb_t *rcb = (http3_recv_cb_t *)cb;
     http3_listener_t *listener = rcb->listener;
@@ -499,6 +498,19 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
 
     if (listener->fd < 0) {
         return;
+    }
+
+    /* On POLLERR libuv drops the fd from the loop for good (uv__poll_io →
+     * uv__io_stop + uv__handle_stop) and reports it here as ASYNC_DISCONNECT.
+     * On this socket POLLERR only ever means IP_RECVERR queued an ICMP error —
+     * a peer that vanished while we were still sending. The socket stays usable,
+     * so drain the queue and re-arm below, or the listener goes deaf for good. */
+    const bool poll_disarmed =
+        (((zend_async_poll_event_t *)event)->triggered_events & ASYNC_DISCONNECT) != 0;
+
+    if (UNEXPECTED(poll_disarmed)) {
+        listener->stats.poll_rearms++;
+        listener->errq_pending = true;
     }
 
     /* Reactor watchdog: time this whole tick. Capture before
@@ -668,6 +680,15 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
      * empty recvmmsg skips flush_dirty (any conns dirtied this tick drain on
      * the next wakeup). Only the latency sample is taken here. */
 tick_done:
+    if (UNEXPECTED(poll_disarmed) && !listener->closed
+        && listener->poll_event != NULL) {
+        zend_async_event_t *const pe = &listener->poll_event->base;
+        /* stop() first: libuv stopped the handle behind the event's back, so
+         * loop_ref_count still reads as running and start() alone is a no-op. */
+        pe->stop(pe);
+        pe->start(pe);
+    }
+
     h3_reactor_tick_record(listener, (uint64_t)zend_hrtime() - wd_t0,
                            wd_datagrams);
 }
@@ -1768,6 +1789,11 @@ void http3_listener_get_stats(const http3_listener_t *listener,
         return;
     }
     *out = listener->stats;
+}
+
+const http3_listener_stats_t *http3_listener_stats_ptr(const http3_listener_t *listener)
+{
+    return listener != NULL ? &listener->stats : NULL;
 }
 
 const char *http3_listener_host(const http3_listener_t *listener)

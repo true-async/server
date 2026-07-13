@@ -65,6 +65,13 @@ typedef struct {
      * reactor gets its own instance, touched only by its one thread (no locking).
      * NULL when no mount opted into StaticHandler::setOpenFileCache. */
     struct http_static_cache_s *static_cache;
+
+    /* The parent's logger. Safe to emit through from this thread: a sink's
+     * descriptor belongs to the log thread, and a producer only ever fills its
+     * own ring (src/log/http_log.c). This is what lets a request the reactor
+     * serves end to end — a static hit, the reactor half of a pooled sendFile —
+     * reach the access log instead of being counted and then forgotten. */
+    struct http_log_state *log_state;
 } http3_reactor_ctx_t;
 
 /* ssl_ctx is the OpenSSL SSL_CTX* shared with the TCP+TLS path (from
@@ -134,6 +141,7 @@ typedef struct _http3_listener_stats_s {
     uint64_t datagrams_received;
     uint64_t bytes_received;
     uint64_t datagrams_errored;      /* terminal recv errors observed */
+    uint64_t poll_rearms;            /* POLLERR disarmed the poll; we re-armed it */
     size_t   last_datagram_size;
     char     last_peer[64];          /* "ip:port" for the most recent datagram, "" if none */
 
@@ -141,8 +149,15 @@ typedef struct _http3_listener_stats_s {
     http3_packet_stats_t packet;
 } http3_listener_stats_t;
 
+/* Bulk snapshot. The reactor thread keeps writing while this copies, so fields
+ * can come from either side of an update and need not describe the same moment.
+ * Fine for a test hook; for anything a user reads, go through
+ * http3_listener_stats_ptr + the http3_stat_* accessors, which load per field. */
 void http3_listener_get_stats(const http3_listener_t *listener,
                               http3_listener_stats_t *out);
+
+/* The live stats block, for per-field relaxed-atomic reads. */
+const http3_listener_stats_t *http3_listener_stats_ptr(const http3_listener_t *listener);
 
 const char *http3_listener_host(const http3_listener_t *listener);
 int http3_listener_port(const http3_listener_t *listener);

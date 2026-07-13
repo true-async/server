@@ -192,4 +192,24 @@ final class HttpServer
      * @return array
      */
     public function getRuntimeStats(): array {}
+
+    /**
+     * Cross-worker statistics aggregate (issue #5).
+     *
+     * Opt-in: throws a RuntimeException unless
+     * {@see HttpServerConfig::setStatsEnabled()} was set to true. Returns:
+     *
+     *   [
+     *     'enabled' => true,
+     *     'workers' => [ <id> => ['total_requests'=>…, …], … ],
+     *     'totals'  => ['total_requests'=>…, …],   // summed across workers
+     *   ]
+     *
+     * Counters are read directly from each worker's slab slot with no locking,
+     * so the aggregate may be stale by at most one worker mid-rotation. A
+     * single-worker server reports its own counters as the sole worker.
+     *
+     * @return array
+     */
+    public function getStats(): array {}
 }

@@ -85,6 +85,42 @@ curl 127.0.0.1:8080/                    # version=v2, fresh boot id, zero downti
 Triggers: `enableReloadOnSignal()` (SIGHUP, prod), `enableHotReload([dirs])`
 (filesystem watcher, dev), or `$server->reload()` (programmatic).
 
+## Observability (metrics + structured logs)
+
+| File | What it shows |
+|---|---|
+| [`observability-server.php`](observability-server.php) | `getStats()` rendered as a Prometheus `/metrics` endpoint, plus a JSON access log in OpenTelemetry semantic conventions. |
+| [`docker/observability/`](docker/observability/) | Prometheus + Grafana, with a pre-loaded dashboard. |
+
+The server has no embedded exporter. `getStats()` returns a plain PHP array;
+twenty lines in the example turn it into the Prometheus text format, and you can
+swap them for OpenMetrics, StatsD or anything else without touching the server.
+
+```bash
+php examples/observability-server.php
+curl -s localhost:8080/metrics
+
+docker compose -f examples/docker/observability/docker-compose.yml up -d
+open http://localhost:3001          # Grafana, no login, dashboard loaded
+
+examples/docker/observability/smoke-test.sh   # asserts every hop end to end
+```
+
+The stack runs in Docker but the **server stays on the host** — it needs your
+locally built extension, and the point is to scrape a real one.
+
+**Why the counter kinds matter.** Run `reload()` while Grafana is open:
+`tas_requests_total` keeps climbing (a retiring worker's totals are inherited,
+so a scraper never sees a counter run backwards), while `tas_conns_active_h1`
+drops to what is really open (a dead worker holds no connections, so its last
+reading is not carried forward as a phantom).
+
+**Two traps the example is built to avoid.** Under `setWorkers(N)` the handler is
+copied into a worker thread, and that thread has its own function table — a
+`function render()` declared in your script does not exist there, so anything the
+handler calls must arrive through `use()` or a bootloader. And use the `file` log
+sink, not `stream`: a parent-opened stream resource cannot cross into a worker.
+
 ## Other demos
 
 | File | What it shows |
