@@ -1844,11 +1844,12 @@ typedef struct {
  * write until its TCP window is drained. As a socket the write is a poll-driven
  * uv_write on the log thread's loop and back-pressures into the ring instead.
  *
- * Datagram sockets stay on the file path on purpose: a send() to a UDP or
- * unix-datagram peer does not wait on a slow receiver (it drops), so there is
- * nothing to unblock, and libuv's udp handle cannot adopt an already-connected
- * descriptor. Everything else — regular files, stdout, a pipe — keeps its
- * current behaviour. */
+ * Datagram sockets stay on the file path because libuv's udp handle cannot adopt
+ * an already-connected descriptor. Note this is not free of back-pressure: UDP
+ * drops when the receiver falls behind, but an AF_UNIX datagram socket is
+ * reliable — a wedged collector fills its receive queue and the blocking sendto
+ * then parks a pool thread until the stop deadline abandons it. Everything else
+ * — regular files, stdout, a pipe — keeps its current behaviour. */
 static zend_async_io_type log_io_type_for_fd(const int fd)
 {
 #ifndef PHP_WIN32
