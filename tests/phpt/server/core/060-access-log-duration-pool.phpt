@@ -66,6 +66,6 @@ echo 'with_duration=', $with_dur, "\n";
 echo "Done\n";
 ?>
 --EXPECTF--
-records=4
+%Arecords=4
 with_duration=4
 Done%A

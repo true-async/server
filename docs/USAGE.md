@@ -402,13 +402,24 @@ $server->addHttpHandler($handler);
 $server->start();                       // blocks until every worker exits
 ```
 
+### Shutting the pool down
+
+`$server->stop()` works on the pool parent. It retires every worker over
+the pool's control channel and suspends until they have drained and the
+listen sockets are closed, so it returns only once the server is really
+down. Call it from a coroutine — typically a signal handler:
+
+```php
+Async\spawn(function () use ($server) {
+    Async\signal(SIGTERM);
+    $server->stop();               // returns when the pool is down
+});
+
+$server->start();                  // returns at the same moment
+```
+
 ### Caveats
 
-- **Cross-thread shutdown is incomplete.** `$server->stop()` on the
-  pool-parent throws — `Async\ThreadPool::cancel()` doesn't reliably
-  wake workers suspended on their own server's wait event. Until that
-  lands, terminate the process at the OS level (SIGINT / SIGTERM /
-  `posix_kill`) when you need to bring everything down.
 - **`SO_REUSEPORT` is Linux/BSD-only.** On Windows libuv falls back to
   a single accept thread; workers > 1 will compile but provide no
   parallelism.

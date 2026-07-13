@@ -233,6 +233,8 @@ static void http_server_listener_release(http_listener_t *listener)
     listener->listen_event = NULL;
 }
 
+typedef struct pool_ctl_s pool_ctl_t;   /* pool control channel (#117), defined below */
+
 /* Server object structure.
  * Field order grouped by alignment to minimise padding. zend_object must
  * remain last per PHP object layout contract.
@@ -472,9 +474,9 @@ struct http_server_object {
      * built-in worker pool (issue #11) — start() skips re-spawning the
      * pool and runs the standalone event loop. */
     bool                     is_worker_clone;
-    /* True only while the parent server is awaiting its child worker
-     * pool. stop() consults this to refuse pool-mode shutdown — the
-     * parent has no listen events of its own. */
+    /* True only while the parent server is awaiting its child worker pool. The
+     * parent has no listen events of its own, so stop() consults this to drive
+     * the cohort through the control channel instead (issue #117). */
     bool                     in_pool_mode;
 
     /* Pool-mode worker ctx array (issue #11). pemalloc'd block of N
@@ -492,15 +494,18 @@ struct http_server_object {
      * tasks. NULL outside pool mode; owned ref released in start_pool cleanup. */
     zend_async_thread_pool_t *worker_pool;
 
-    /* Hot-reload beacon (issue #93): pemalloc'd http_server_reload_shared_t
-     * owned by the pool parent (start_pool alloc/free), pointer fanned out to
-     * worker clones through the transfer shells. A worker watches `epoch` from
-     * its deadline tick and self-stops when it moves; the parent bumps it and
-     * rotates the pool. */
-    void                    *reload_shared;
-    int                      reload_epoch_seen; /* worker clone: last epoch acted on */
-    bool                     reload_in_progress;/* parent: one rotation at a time */
-    void                    *pool_await_state;  /* parent: st of the active pool run */
+    /* Pool control channel (issue #117): owned by the pool parent (start_pool
+     * alloc/free), pointer fanned out to worker clones through the transfer
+     * shells. reload() and stop() publish a command on it and ring the cohort;
+     * each clone reads the command on its own thread and retires itself. */
+    pool_ctl_t              *pool_ctl;
+    int                      pool_ctl_slot;      /* worker clone: its wakeup slot, -1 = none */
+    bool                     pool_retire_queued; /* worker clone: retire coroutine enqueued */
+    bool                     reload_in_progress; /* parent: one rotation at a time */
+    void                    *pool_await_state;   /* parent: st of the active pool run */
+    /* Parent: notified once the cohort has fully drained and start() is done —
+     * this is what a pool-mode stop() suspends on. Multi-subscriber. */
+    zend_async_event_t      *pool_stopped_event;
 
     /* Hot-reload triggers (issue #93), pool parent only. Watcher objects are
      * closed and released by http_server_hot_reload_down; the SIGHUP event is
@@ -599,12 +604,98 @@ static void http_server_accept_callback(
     void *result,
     zend_object *exception);
 
-/* Hot-reload beacon (issue #93): one per pool run, pemalloc'd and owned by the
- * pool parent (start_pool alloc/free); worker clones get the pointer through
- * their transfer shells and watch `epoch` from the deadline tick below. */
-typedef struct {
-    zend_atomic_int epoch;
-} http_server_reload_shared_t;
+/* Pool control channel (issue #117) — the parent's only path to its workers.
+ * The parent publishes a command and rings every worker's wakeup (uv_async: the
+ * one libuv call safe from a foreign thread); each worker reads it on its own
+ * thread and retires. The command is state, not an edge: a worker that comes up
+ * after it was published still sees it.
+ *
+ * http_server_pool_ctl_leave is what fences the parent out — it empties the slot
+ * and closes the handle under the same lock the broadcast holds, so the parent
+ * can never be inside uv_async_send on a handle its owner is disposing. */
+typedef enum {
+    POOL_CMD_NONE = 0,
+    POOL_CMD_RELOAD,   /* drain, exit; the parent submits a replacement */
+    POOL_CMD_STOP,     /* drain, exit for good */
+} pool_cmd_t;
+
+struct pool_ctl_s {
+    zend_atomic_int              command;
+    /* The channel outlives the parent: Async\graceful_shutdown() cancels the
+     * parent's await while its workers are still serving, and they keep reading
+     * the command until they retire. One ref for the parent, one per transit
+     * shell, one per clone the shell loads into. */
+    zend_atomic_int              refcount;
+    MUTEX_T                      lock;
+    int                          slots;
+    zend_async_trigger_event_t **wake;   /* [slots], NULL where unpublished */
+};
+
+static pool_ctl_t *pool_ctl_create(const int slots)
+{
+    pool_ctl_t *const ctl = pecalloc(1, sizeof(*ctl), 1);
+
+    ctl->slots = slots;
+    ctl->wake  = pecalloc((size_t) slots, sizeof(*ctl->wake), 1);
+    ctl->lock  = tsrm_mutex_alloc();
+    ZEND_ATOMIC_INT_INIT(&ctl->command, (int) POOL_CMD_NONE);
+    ZEND_ATOMIC_INT_INIT(&ctl->refcount, 1);
+
+    return ctl;
+}
+
+static void pool_ctl_addref(pool_ctl_t *ctl)
+{
+    if (ctl != NULL) {
+        zend_atomic_int_fetch_add(&ctl->refcount, 1);
+    }
+}
+
+/* A slot still published on the last release belongs to a thread that died
+ * without retiring; its handle is left alone — disposing a libuv handle from a
+ * foreign loop is worse than the leak. */
+static void pool_ctl_release(pool_ctl_t *ctl)
+{
+    if (ctl == NULL || zend_atomic_int_fetch_sub(&ctl->refcount, 1) != 1) {
+        return;
+    }
+
+    tsrm_mutex_free(ctl->lock);
+    pefree(ctl->wake, 1);
+    pefree(ctl, 1);
+}
+
+static pool_cmd_t pool_ctl_current(const pool_ctl_t *ctl)
+{
+    return ctl == NULL
+        ? POOL_CMD_NONE
+        : (pool_cmd_t) zend_atomic_int_load_ex((zend_atomic_int *) &ctl->command);
+}
+
+/* Parent: publish, then ring. Stored before any wake, so a worker woken by this
+ * broadcast — or one that starts after it — reads the command that caused it. */
+static void pool_ctl_command(pool_ctl_t *ctl, const pool_cmd_t cmd)
+{
+    if (UNEXPECTED(ctl == NULL)) {
+        return;
+    }
+
+    zend_atomic_int_store_ex(&ctl->command, (int) cmd);
+
+    if (cmd == POOL_CMD_NONE) {
+        return;
+    }
+
+    tsrm_mutex_lock(ctl->lock);
+
+    for (int i = 0; i < ctl->slots; i++) {
+        if (ctl->wake[i] != NULL) {
+            ctl->wake[i]->trigger(ctl->wake[i]);
+        }
+    }
+
+    tsrm_mutex_unlock(ctl->lock);
+}
 
 static void http_server_do_stop(http_server_object *server, const char *reason);
 static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
@@ -612,9 +703,10 @@ static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
 static void http_server_hot_reload_down(http_server_object *server);
 static void http_server_worker_inbox_retire(http_server_object *server);
 
-/* Runs on a fresh coroutine enqueued by the deadline tick: stop() disposes that
- * very tick timer, which must not happen from inside its own callback. */
-static void http_server_reload_stop_entry(void)
+/* Runs on a fresh coroutine, not on the control wakeup's own callback: the stop
+ * below disposes libuv handles, which must not happen from inside a handle's
+ * callback. */
+static void http_server_pool_retire_entry(void)
 {
     http_server_object *server =
         (http_server_object *) ZEND_ASYNC_CURRENT_COROUTINE->extended_data;
@@ -623,15 +715,113 @@ static void http_server_reload_stop_entry(void)
         return;
     }
 
+    const char *const reason =
+        pool_ctl_current(server->pool_ctl) == POOL_CMD_STOP ? "stop" : "reload";
+
     /* Reactor-pool mode: unpublish our inbox and fence the reactors BEFORE the
      * stop — a producer must never post into a dying worker's inbox (#93). */
     http_server_worker_inbox_retire(server);
 
     server->stopping = true;
-    fprintf(stderr, "[true-async-server] worker shutting down (reason=reload, grace=%us)\n",
-            server->shutdown_timeout_s);
-    fflush(stderr);
-    http_server_do_stop(server, "reload");
+    http_server_do_stop(server, reason);   /* logs server.stop reason=... */
+}
+
+/* The parent rang us. Both commands mean "retire" — reload() submits a
+ * replacement afterwards, stop() does not. Runs on the worker's own thread. */
+static void http_server_pool_ctl_wake(zend_async_event_t *event,
+                                      zend_async_event_callback_t *callback,
+                                      void *result, zend_object *exception)
+{
+    (void)callback; (void)result; (void)exception;
+
+    http_server_object *const server =
+        *(http_server_object **) ((char *) event + event->extra_offset);
+
+    if (server->pool_retire_queued || !server->running || server->stopping
+        || pool_ctl_current(server->pool_ctl) == POOL_CMD_NONE) {
+        return;
+    }
+
+    /* Main scope, not server_scope: the retire coroutine must survive the scope
+     * drain it triggers. */
+    zend_coroutine_t *const co = ZEND_ASYNC_NEW_COROUTINE(ZEND_ASYNC_MAIN_SCOPE);
+
+    if (EXPECTED(co != NULL)) {
+        server->pool_retire_queued = true;
+        co->internal_entry = http_server_pool_retire_entry;
+        co->extended_data  = server;
+        ZEND_ASYNC_ENQUEUE_COROUTINE(co);
+    }
+}
+
+/* Worker-clone thread only: the wakeup is a libuv handle on this thread's
+ * reactor. Returns the claimed slot, or -1 — a worker the parent cannot reach
+ * must not run, it would never retire and the parent awaits every worker.
+ * Deliberately not start()ed: the wakeup must not hold this loop alive. */
+static int http_server_pool_ctl_join(http_server_object *server)
+{
+    pool_ctl_t *const ctl = server->pool_ctl;
+
+    zend_async_trigger_event_t *const t =
+        ZEND_ASYNC_NEW_TRIGGER_EVENT_EX(sizeof(http_server_object *));
+
+    if (UNEXPECTED(t == NULL)) {
+        return -1;
+    }
+
+    *(http_server_object **) ((char *) &t->base + t->base.extra_offset) = server;
+    t->base.add_callback(&t->base, ZEND_ASYNC_EVENT_CALLBACK(http_server_pool_ctl_wake));
+
+    int slot = -1;
+
+    tsrm_mutex_lock(ctl->lock);
+
+    for (int i = 0; i < ctl->slots; i++) {
+        if (ctl->wake[i] == NULL) {
+            ctl->wake[i] = t;
+            slot = i;
+            break;
+        }
+    }
+
+    tsrm_mutex_unlock(ctl->lock);
+
+    if (UNEXPECTED(slot < 0)) {
+        ZEND_ASYNC_EVENT_SET_CLOSED(&t->base);
+        t->base.dispose(&t->base);
+    }
+
+    return slot;
+}
+
+/* Worker-clone thread only. Run from every exit the deadline tick is stopped
+ * from (normal, bailout, free). Closing under the lock is what fences the
+ * parent: a concurrent broadcast either rang this handle and has already left
+ * uv_async_send, or it finds the slot empty. */
+static void http_server_pool_ctl_leave(http_server_object *server)
+{
+    if (server->pool_ctl == NULL || server->pool_ctl_slot < 0) {
+        return;
+    }
+
+    pool_ctl_t *const ctl = server->pool_ctl;
+
+    tsrm_mutex_lock(ctl->lock);
+
+    zend_async_trigger_event_t *const t = ctl->wake[server->pool_ctl_slot];
+    ctl->wake[server->pool_ctl_slot] = NULL;
+
+    if (t != NULL) {
+        ZEND_ASYNC_EVENT_SET_CLOSED(&t->base);
+    }
+
+    tsrm_mutex_unlock(ctl->lock);
+
+    if (t != NULL) {
+        t->base.dispose(&t->base);
+    }
+
+    server->pool_ctl_slot = -1;
 }
 
 /* ==========================================================================
@@ -677,27 +867,6 @@ static void http_server_deadline_tick_fn(zend_async_event_t *event,
 
         c = next;
     }
-
-    /* Hot reload (issue #93): the pool parent bumped the shared epoch — retire
-     * this worker from a fresh coroutine, not from this timer's own callback. */
-    if (server->is_worker_clone && server->reload_shared != NULL
-        && server->running && !server->stopping) {
-        http_server_reload_shared_t *shared = server->reload_shared;
-        const int epoch = zend_atomic_int_load(&shared->epoch);
-
-        if (UNEXPECTED(epoch != server->reload_epoch_seen)) {
-            /* Main scope, not server_scope: the retire coroutine must survive
-             * the scope drain it triggers. */
-            zend_coroutine_t *co = ZEND_ASYNC_NEW_COROUTINE(ZEND_ASYNC_MAIN_SCOPE);
-
-            if (EXPECTED(co != NULL)) {
-                server->reload_epoch_seen = epoch;
-                co->internal_entry = http_server_reload_stop_entry;
-                co->extended_data  = server;
-                ZEND_ASYNC_ENQUEUE_COROUTINE(co);
-            }
-        }
-    }
 }
 
 /* tick_ms = max(250, min(read, write, keepalive) / 2). */
@@ -721,12 +890,6 @@ static uint32_t http_server_deadline_tick_ms(const http_server_object *server)
     uint32_t tick = m / 2;
 
     if (tick < 250) tick = 250;
-
-    /* Pool workers also watch the hot-reload epoch from this tick — cap the
-     * cadence so a reload is noticed within a second (issue #93). */
-    if (server->is_worker_clone && server->reload_shared != NULL && tick > 1000) {
-        tick = 1000;
-    }
 
     return tick;
 }
@@ -3197,11 +3360,22 @@ static int http_server_start_pool(http_server_object *server,
     }
 #endif
 
-    /* Hot-reload beacon (issue #93): allocated BEFORE the transfer loop so
-     * every worker shell fans the pointer out to its clone. */
-    http_server_reload_shared_t *reload_shared = pecalloc(1, sizeof(*reload_shared), 1);
-    ZEND_ATOMIC_INT_INIT(&reload_shared->epoch, 0);
-    server->reload_shared = reload_shared;
+    /* Control channel (issue #117): allocated BEFORE the transfer loop so every
+     * worker shell fans the pointer out to its clone. */
+    pool_ctl_t *pool_ctl = pool_ctl_create(workers);
+
+    if (UNEXPECTED(pool_ctl == NULL)) {
+        ZEND_THREAD_POOL_DELREF(pool);
+#ifndef PHP_WIN32
+        http_server_close_pool_unix_fds(server);
+        http_server_close_pool_tcp_fds(server);
+#endif
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Failed to create the worker pool control channel", 0);
+        return FAILURE;
+    }
+
+    server->pool_ctl = pool_ctl;
 
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
@@ -3218,8 +3392,8 @@ static int http_server_start_pool(http_server_object *server,
             }
 
             pefree(ctxs, 1);
-            server->reload_shared = NULL;
-            pefree(reload_shared, 1);
+            server->pool_ctl = NULL;
+            pool_ctl_release(pool_ctl);
             ZEND_THREAD_POOL_DELREF(pool);
 #ifndef PHP_WIN32
             http_server_close_pool_unix_fds(server);
@@ -3324,6 +3498,18 @@ static int http_server_start_pool(http_server_object *server,
 
     rc = (st->pending == 0) ? SUCCESS : FAILURE;
 
+    /* We are leaving with workers still serving — the await was cancelled, not
+     * resolved (Async\graceful_shutdown(), or the parent coroutine was killed).
+     * Nothing in the engine stops a busy worker: closing the task channel only
+     * reaches a worker that is back at recv, and ours is inside start(). So tell
+     * them ourselves, or they would outlive the parent and wedge the process.
+     * They drain and exit on their own threads while the shutdown drain reaps
+     * their completion futures; the channel is refcounted and outlives us. */
+    if (st->pending > 0) {
+        http_logf_info(&server->log_state, "server.stop mode=pool reason=shutdown");
+        pool_ctl_command(pool_ctl, POOL_CMD_STOP);
+    }
+
 cleanup:
     /* Dispose the completion futures we own, else their cross-thread triggers
      * linger armed on our reactor. Live cohort, not `ctxs` — reload() swaps it. */
@@ -3369,9 +3555,10 @@ cleanup:
     efree(st);
     ZEND_THREAD_POOL_DELREF(pool);
 
-    /* Every clone (and its epoch-watching tick) is gone — drop the beacon. */
-    server->reload_shared = NULL;
-    pefree(reload_shared, 1);
+    /* Drop the parent's ref. Workers cancelled out from under us (above) still
+     * hold theirs and free the channel when the last of them is gone. */
+    server->pool_ctl = NULL;
+    pool_ctl_release(pool_ctl);
 
     http_logf_info(&server->log_state, "server.stop mode=pool");
     http_log_server_stop(&server->log_state);
@@ -3384,6 +3571,16 @@ cleanup:
 #ifndef PHP_WIN32
     http_server_close_pool_tcp_fds(server);
 #endif
+
+    /* Last: release whoever is blocked in a pool-mode stop() (issue #117). The
+     * server is fully down by now, which is exactly what stop() promises. */
+    if (server->pool_stopped_event != NULL) {
+        zend_async_event_t *const stopped = server->pool_stopped_event;
+        server->pool_stopped_event = NULL;
+        ZEND_ASYNC_CALLBACKS_NOTIFY(stopped, NULL, NULL);
+        stopped->dispose(stopped);
+    }
+
     return rc;
 }
 /* }}} */
@@ -3449,6 +3646,26 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             }
 
             RETURN_FALSE;
+        }
+    }
+
+    /* Pool worker: join the control channel (issue #117) before binding
+     * anything. The command is state, not an edge — a thread slow enough to get
+     * here only after the parent published one reads it and leaves without ever
+     * taking a listen socket. It would otherwise miss the broadcast that woke
+     * its cohort and outlive it, and the parent awaits every worker. A worker
+     * the parent cannot reach at all must not run for the same reason. */
+    if (server->is_worker_clone && server->pool_ctl != NULL) {
+        if (pool_ctl_current(server->pool_ctl) != POOL_CMD_NONE) {
+            RETURN_TRUE;
+        }
+
+        server->pool_ctl_slot = http_server_pool_ctl_join(server);
+
+        if (UNEXPECTED(server->pool_ctl_slot < 0)) {
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "Failed to join the worker pool control channel", 0);
+            RETURN_THROWS();
         }
     }
 
@@ -4114,6 +4331,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * timer keeps libuv loop alive past worker shutdown and
      * scheduler.c:1964 asserts ("The event loop must be stopped"). */
     http_server_deadline_tick_stop(server);
+    http_server_pool_ctl_leave(server);
 
     if (UNEXPECTED(bailout)) {
         zend_bailout();
@@ -4136,6 +4354,10 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
      * keeps the libuv loop alive past server stop. Without this, the
      * loop drains forever and stop() never lets the script exit. */
     http_server_deadline_tick_stop(server);
+
+    /* We are going down: no further command can reach us, and the parent must
+     * not hold a wakeup into a loop that is about to close (issue #117). */
+    http_server_pool_ctl_leave(server);
 
     /* Stop all listen events. dispose() closes the underlying uv handle
      * and frees the fd; AF_UNIX rows also unlink the socket file. */
@@ -4190,7 +4412,41 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 #endif
 }
 
-/* {{{ proto HttpServer::stop(): bool */
+/* Suspend the calling coroutine until start_pool has torn the pool down.
+ * Every caller subscribes to the same event and takes a ref; start_pool notifies
+ * it last, after the workers are gone and the listen sockets are closed. */
+static void http_server_await_pool_stopped(http_server_object *server)
+{
+    zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    if (UNEXPECTED(coroutine == NULL)) {
+        return;
+    }
+
+    if (server->pool_stopped_event == NULL) {
+        server->pool_stopped_event = create_server_wait_event();
+    }
+
+    if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
+        return;
+    }
+
+    /* One ref per waiter: resume_when(..., true) hands ownership to the waker,
+     * and start_pool drops the ref it holds itself. */
+    ZEND_ASYNC_EVENT_ADD_REF(server->pool_stopped_event);
+    zend_async_resume_when(coroutine, server->pool_stopped_event, true,
+                           zend_async_waker_callback_resolve, NULL);
+    ZEND_ASYNC_SUSPEND();
+    zend_async_waker_clean(coroutine);
+}
+
+/* {{{ proto HttpServer::stop(): bool
+ * Pool parent (issue #117): publishes STOP on the control channel, rings the
+ * cohort, and suspends until every worker has drained and the pool is down —
+ * so stop() returns only once the server is really gone. A standalone server
+ * (or a worker stopping itself) does NOT suspend: stop() there is typically
+ * called from a request handler, and the shutdown drain waits on that very
+ * handler — the caller would be waiting for itself. */
 ZEND_METHOD(TrueAsync_HttpServer, stop)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -4201,31 +4457,37 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
         RETURN_TRUE;
     }
 
-    server->stopping = true;
-
-    /* Pool-mode parent has no listen events of its own — it's awaiting
-     * worker-completion callbacks. Cross-thread shutdown isn't wired up
-     * yet (issue #11): each worker has to stop itself from within its
-     * own handler. */
     if (server->in_pool_mode) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "stop() on a pool-parent HttpServer is not supported yet "
-            "(issue #11). Stop each worker from within its own handler.", 0);
-        RETURN_FALSE;
+        /* A second stop() while the first is still draining joins the wait
+         * rather than re-issuing the command. */
+        if (!server->stopping) {
+            server->stopping = true;
+            http_logf_info(&server->log_state, "server.stop mode=pool reason=stop");
+            pool_ctl_command(server->pool_ctl, POOL_CMD_STOP);
+        }
+
+        http_server_await_pool_stopped(server);
+
+        if (EG(exception)) {
+            RETURN_THROWS();
+        }
+
+        RETURN_TRUE;
     }
 
+    server->stopping = true;
     http_server_do_stop(server, NULL);
     RETURN_TRUE;
 }
 /* }}} */
 
 /* {{{ proto HttpServer::reload(): bool
- * Hot reload (issue #93), pool parent only. Bumps the shared epoch (workers
- * self-stop from their deadline tick: drain #74 + stop + exit to the closed
- * pool channel), rotates the pool via ThreadPool ABI reload() — replacement
- * threads re-run the bootloader, picking up changed code — then resubmits one
- * start() task per worker onto the fresh channel. Suspends until the old
- * cohort has fully drained. */
+ * Hot reload (issue #93), pool parent only. Publishes RELOAD on the control
+ * channel and rings the cohort (workers self-stop: drain #74 + stop + exit to
+ * the closed pool channel), rotates the pool via ThreadPool ABI reload() —
+ * replacement threads re-run the bootloader, picking up changed code — then
+ * resubmits one start() task per worker onto the fresh channel. Suspends until
+ * the old cohort has fully drained. */
 ZEND_METHOD(TrueAsync_HttpServer, reload)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -4251,11 +4513,14 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         RETURN_FALSE; /* one rotation at a time — call again after it returns */
     }
 
+    if (server->stopping) {
+        RETURN_FALSE; /* a stop() is draining the cohort — no new one */
+    }
+
     server->reload_in_progress = true;
 
     const int workers = server->pool_worker_ctx_count;
     pool_await_state_t *st = server->pool_await_state;
-    http_server_reload_shared_t *shared = server->reload_shared;
     const uint64_t t0 = ZEND_ASYNC_NOW();
 
     http_logf_info(&server->log_state, "reload.start workers=%d", workers);
@@ -4287,8 +4552,8 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
      * down under us. */
     st->pending += workers;
 
-    /* Workers notice the bump on their next tick and retire themselves. */
-    zend_atomic_int_inc(&shared->epoch);
+    /* The cohort is rung awake and retires itself. */
+    pool_ctl_command(server->pool_ctl, POOL_CMD_RELOAD);
 
     /* Rotate: suspends until every old worker exited; the engine spawns the
      * replacement threads 1:1, each re-running the bootloader. */
@@ -4313,6 +4578,31 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         server->reload_in_progress = false;
         RETURN_THROWS();
     }
+
+    /* A stop() landed while the rotation was in flight: the old cohort is gone
+     * and must stay gone. Drop the reservation and the shells we will not
+     * submit — start_pool is now free to finish the teardown. */
+    if (UNEXPECTED(server->stopping)) {
+        st->pending -= workers;
+
+        if (st->pending == 0 && st->all_done != NULL) {
+            ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
+        }
+
+        for (int i = 0; i < workers; i++) {
+            http_server_release_worker_shell(&fresh[i].server_transit);
+        }
+
+        pefree(fresh, 1);
+        http_logf_info(&server->log_state, "reload.aborted reason=stop");
+        server->reload_in_progress = false;
+        RETURN_FALSE;
+    }
+
+    /* Old cohort is gone; clear the command before the replacements can read it,
+     * or they would retire the moment they start. Ordered: a replacement only
+     * reads the channel from pool_worker_handler, i.e. strictly after submit. */
+    pool_ctl_command(server->pool_ctl, POOL_CMD_NONE);
 
     /* Replacement threads are parked on the new task channel — hand each one
      * its start() task from the fresh shells. */
@@ -5303,9 +5593,11 @@ static zend_object *http_server_create(zend_class_entry *ce)
     conn_arena_init(&server->conn_arena);
 
     /* Counters live in the embedded slice until a pool worker claims a slab
-     * slot (A2); stats_slot < 0 means "no slot owned". */
+     * slot (A2); stats_slot < 0 means "no slot owned". Same for the control
+     * channel's wakeup slot (#117) — 0 is a valid slot, so zero won't do. */
     server->counters_live = &server->counters;
     server->stats_slot    = -1;
+    server->pool_ctl_slot = -1;
     /* All other fields are pecalloc-zeroed: running=false, stopping=false,
      * server_scope/scope_object/wait_event=NULL, counters/view zeroed,
      * listeners[] zeroed, transit_handlers=NULL, etc. */
@@ -5368,6 +5660,7 @@ static void http_server_free(zend_object *obj)
          * a tick firing during shutdown could try to force-close a
          * conn whose io has already been disposed. */
         http_server_deadline_tick_stop(server);
+        http_server_pool_ctl_leave(server);
 
         for (size_t i = 0; i < server->listener_count; i++) {
             http_server_listener_release(&server->listeners[i]);
@@ -5386,6 +5679,13 @@ static void http_server_free(zend_object *obj)
 
         server->running = false;
     }
+
+    /* Worker clone: leave the control channel and drop our ref (#117). The
+     * parent's ref is dropped in start_pool, so when a cohort outlives a
+     * cancelled parent the last worker to go frees the channel. */
+    http_server_pool_ctl_leave(server);
+    pool_ctl_release(server->pool_ctl);
+    server->pool_ctl = NULL;
 
     /* Defensive on the path where the user dropped the server without
      * calling stop(); idempotent otherwise. */
@@ -5620,6 +5920,9 @@ static void http_server_release_worker_shell(zval *transit)
     if (Z_TYPE_P(transit) == IS_OBJECT) {
         http_server_object *shell = http_server_from_obj(Z_OBJ_P(transit));
 
+        pool_ctl_release(shell->pool_ctl);
+        shell->pool_ctl = NULL;
+
         if (Z_TYPE(shell->config) == IS_OBJECT) {
             ZEND_ASYNC_THREAD_RELEASE_TRANSFERRED_ZVAL(&shell->config);
         }
@@ -5749,9 +6052,11 @@ static zend_object *http_server_transfer_obj(
                sizeof(dst_shell->pool_tcp_fds));
         dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
 
-        /* Hot-reload beacon (issue #93): plain pointer copy — the pemalloc'd
-         * struct is owned by the pool parent and outlives every clone. */
-        dst_shell->reload_shared = src->reload_shared;
+        /* Control channel (issue #117). The shell holds a ref; the clone it
+         * loads into takes its own. */
+        dst_shell->pool_ctl      = src->pool_ctl;
+        dst_shell->pool_ctl_slot = -1;
+        pool_ctl_addref(dst_shell->pool_ctl);
 
         return dst;
     }
@@ -5776,15 +6081,12 @@ static zend_object *http_server_transfer_obj(
      * fresh ThreadPool on every worker. */
     dst_obj->is_worker_clone = true;
 
-    /* Hot-reload beacon (issue #93): the clone watches epoch from its deadline
-     * tick. Snapshot the current value — only a bump AFTER this load retires
-     * the worker. */
-    dst_obj->reload_shared = src_shell->reload_shared;
-
-    if (dst_obj->reload_shared != NULL) {
-        dst_obj->reload_epoch_seen = zend_atomic_int_load(
-            &((http_server_reload_shared_t *) dst_obj->reload_shared)->epoch);
-    }
+    /* Control channel (issue #117): the clone joins it from start() on its own
+     * thread — the wakeup is a libuv handle and can only be created there. The
+     * shell's ref is what keeps the channel alive for this load. */
+    dst_obj->pool_ctl      = src_shell->pool_ctl;
+    dst_obj->pool_ctl_slot = -1;
+    pool_ctl_addref(dst_obj->pool_ctl);
 
     if (Z_TYPE(src_shell->config) == IS_OBJECT) {
         /* create_object zeroed dst->config; drop the UNDEF and install loaded. */
