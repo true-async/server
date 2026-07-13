@@ -141,6 +141,7 @@ typedef struct _http3_listener_stats_s {
     uint64_t datagrams_received;
     uint64_t bytes_received;
     uint64_t datagrams_errored;      /* terminal recv errors observed */
+    uint64_t poll_rearms;            /* POLLERR disarmed the poll; we re-armed it */
     size_t   last_datagram_size;
     char     last_peer[64];          /* "ip:port" for the most recent datagram, "" if none */
 

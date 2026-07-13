@@ -1278,12 +1278,21 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
     if (s->chunk_pending_bytes > 0) {
         http_server_on_stream_backpressure(counters);
     }
+
+    /* HAZARD: the static/sendFile body sender feeds us from an io callback on a
+     * transport thread. There IS a current coroutine there, so the suspend below
+     * looks legal — but it never returns: it parks a libuv callback frame, and
+     * the sender's own callback chain is what would have woken it. It carries its
+     * own backpressure (h3_static_try_read stops at the read-ahead ceiling and
+     * resumes on write_event), so leave the queue to it. */
+    const bool nonblocking_producer = s->static_body_state != NULL;
+
     /* Pull write_timeout_s once — config can't change mid-handler.
      * 0 = wait forever (used in tests / bring-up). Pre-multiply to ms so
      * the inner loop doesn't re-derive it per suspension. */
     const uint32_t write_timeout_ms =
         (uint32_t)c->view->write_timeout_s * 1000u;
-    while (s->chunk_pending_bytes > 0 && !s->peer_closed) {
+    while (s->chunk_pending_bytes > 0 && !s->peer_closed && !nonblocking_producer) {
         zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
 
         if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {

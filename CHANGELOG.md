@@ -157,6 +157,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One departing HTTP/3 peer could silence the listener for good.** When a client
+  vanished while the server was still sending to it, the ICMP port-unreachable that
+  came back was queued on the listener socket by `IP_RECVERR` and reported by epoll
+  as `POLLERR` — and libuv answers `POLLERR` by removing the descriptor from the
+  loop permanently. The listener then sat in `epoll_wait` while datagrams piled up
+  unread in the kernel: every later HTTP/3 request to that process timed out. The
+  poll is now re-armed (and the error queue drained) whenever this fires; the new
+  `poll_rearms` counter in `getHttp3Stats()` reports how often it happened.
+
+- **A static file or `sendFile()` over HTTP/3 could stall forever mid-body.** The
+  body sender is callback-driven, but `h3_stream_append_chunk` still took its
+  coroutine backpressure path when a chunk did not fit the congestion window —
+  suspending inside a libuv callback on the transport thread, which never returns.
+  The transfer stopped at the read-ahead ceiling (~64 KiB) with the peer's ACKs
+  arriving and nothing left to wake the sender. It surfaced whenever the reactor
+  fell behind the queue (a busy or single-core host), so it hit the reactor pool
+  most often. The sender now keeps its own backpressure and append never suspends
+  on its behalf.
+
 - **A syslog sink over TCP wrote blockingly.** Every log descriptor was wrapped as
   an async *file*, so its writes went to the blocking IO pool — the same pool that
   serves `sendFile()`. A syslog receiver that stopped reading therefore parked a

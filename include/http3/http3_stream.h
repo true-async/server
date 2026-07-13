@@ -176,11 +176,12 @@ struct _http3_stream_s {
      * heap. Persistent, and freed by the reactor that built it. */
     http_request_t   *sf_request;
 
-    /* In-flight static/sendFile body pump (h3_static_state_t *), or NULL. It is
-     * callback-driven rather than a coroutine, so nothing cancels it for us:
-     * connection teardown calls h3_static_cancel through this pointer. Cleared
-     * by the pump itself when it finishes. */
-    void             *static_pump;
+    /* In-flight static/sendFile body sender (h3_static_state_t *), or NULL.
+     * Callback-driven, not a coroutine: nothing cancels it for us (connection
+     * teardown calls h3_static_cancel through this pointer), and
+     * h3_stream_append_chunk must not suspend while it is set — see the
+     * backpressure loop there. Cleared by the sender when it finishes. */
+    void             *static_body_state;
 
     /* Per-stream PHP objects + handler coroutine. HTTP/3 multiplexes N
      * concurrent requests on one QUIC connection, so each stream needs

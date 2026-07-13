@@ -257,8 +257,8 @@ static void h3_static_finalize(h3_static_state_t *state)
 
     h3_static_throttle_unlink(state);
 
-    if (state->stream != NULL && state->stream->static_pump == state) {
-        state->stream->static_pump = NULL;
+    if (state->stream != NULL && state->stream->static_body_state == state) {
+        state->stream->static_body_state = NULL;
     }
 
     if (state->cb != NULL && state->file_io != NULL) {
@@ -338,11 +338,11 @@ static void h3_static_fail(h3_static_state_t *state)
  * itself down. */
 void h3_static_stream_closed(http3_stream_t *s)
 {
-    if (s == NULL || s->static_pump == NULL) {
+    if (s == NULL || s->static_body_state == NULL) {
         return;
     }
 
-    h3_static_state_t *const state = (h3_static_state_t *)s->static_pump;
+    h3_static_state_t *const state = (h3_static_state_t *)s->static_body_state;
 
     if (!state->eof_reached || state->bytes_sent < state->body_length) {
         state->status = -1;   /* closed before the slice was fully queued */
@@ -353,11 +353,11 @@ void h3_static_stream_closed(http3_stream_t *s)
 
 void h3_static_cancel(http3_stream_t *s)
 {
-    if (s == NULL || s->static_pump == NULL) {
+    if (s == NULL || s->static_body_state == NULL) {
         return;
     }
 
-    h3_static_state_t *const state = (h3_static_state_t *)s->static_pump;
+    h3_static_state_t *const state = (h3_static_state_t *)s->static_body_state;
 
     state->status = -1;
     h3_static_finalize(state);
@@ -510,8 +510,8 @@ static void h3_static_read_dispatch(zend_async_event_t *event,
     state->bytes_sent += (uint64_t)transferred;
 
     /* Takes the ref; submits headers on the first call, then queues + resumes
-     * nghttp3 and drains. Outside a coroutine it never suspends — this pump
-     * does its own backpressure in try_read. */
+     * nghttp3 and drains. It never suspends: s->static_body_state is set, which
+     * is what tells append_chunk this producer does its own backpressure. */
     state->busy = true;
     const int rc = h3_stream_append_chunk(state->stream, chunk);
     state->busy = false;
@@ -622,7 +622,7 @@ int h3_stream_send_static_response(void *ctx,
     state->user        = user;
 
     s->tracks_static_bytes = true;
-    s->static_pump         = state;   /* teardown cancels through this */
+    s->static_body_state   = state;   /* teardown cancels through this */
 
     state->cb = h3_static_attach(&file_io->event, h3_static_read_dispatch, state);
 

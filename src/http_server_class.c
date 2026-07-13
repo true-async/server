@@ -5184,6 +5184,7 @@ static void http3_emit_listener_stats(zval *return_value, http3_listener_t *list
     add_assoc_long  (&entry, "datagrams_received", (zend_long)http_relaxed_load_u64(&s->datagrams_received));
     add_assoc_long  (&entry, "bytes_received",     (zend_long)http_relaxed_load_u64(&s->bytes_received));
     add_assoc_long  (&entry, "datagrams_errored",  (zend_long)http_relaxed_load_u64(&s->datagrams_errored));
+    add_assoc_long  (&entry, "poll_rearms",        (zend_long)http_relaxed_load_u64(&s->poll_rearms));
     add_assoc_long  (&entry, "last_datagram_size", (zend_long)s->last_datagram_size);
     add_assoc_string(&entry, "last_peer",          (char *)s->last_peer);
 
