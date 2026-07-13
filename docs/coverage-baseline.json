@@ -1,11 +1,11 @@
 {
   "totals": {
     "lines": {
-      "total": 21356,
-      "hit": 17487
+      "total": 21372,
+      "hit": 17497
     },
     "functions": {
-      "total": 1468,
+      "total": 1469,
       "hit": 1325
     }
   },
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 358,
-        "hit": 263
+        "hit": 264
       },
       "functions": {
         "total": 22,
@@ -233,7 +233,7 @@
     "src/core/response_wire.c": {
       "lines": {
         "total": 165,
-        "hit": 153
+        "hit": 154
       },
       "functions": {
         "total": 26,
@@ -273,11 +273,11 @@
     "src/core/worker_dispatch.c": {
       "lines": {
         "total": 353,
-        "hit": 262
+        "hit": 269
       },
       "functions": {
         "total": 17,
-        "hit": 13
+        "hit": 14
       }
     },
     "src/core/worker_inbox.c": {
@@ -423,11 +423,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 905,
-        "hit": 749
+        "hit": 747
       },
       "functions": {
         "total": 48,
-        "hit": 42
+        "hit": 41
       }
     },
     "src/http3/http3_connection.c": {
@@ -443,7 +443,7 @@
     "src/http3/http3_dispatch.c": {
       "lines": {
         "total": 441,
-        "hit": 360
+        "hit": 362
       },
       "functions": {
         "total": 21,
@@ -483,7 +483,7 @@
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 237,
-        "hit": 165
+        "hit": 162
       },
       "functions": {
         "total": 17,
@@ -683,7 +683,7 @@
     "src/http_server_config.c": {
       "lines": {
         "total": 1609,
-        "hit": 1464
+        "hit": 1463
       },
       "functions": {
         "total": 140,
@@ -702,11 +702,11 @@
     },
     "src/log/http_log.c": {
       "lines": {
-        "total": 1068,
-        "hit": 745
+        "total": 1084,
+        "hit": 750
       },
       "functions": {
-        "total": 79,
+        "total": 80,
         "hit": 63
       }
     },
