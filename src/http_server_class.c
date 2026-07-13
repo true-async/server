@@ -4397,20 +4397,21 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 #endif
 }
 
+/* Throws rather than returning early: the cohort has already been told to go, so
+ * a caller that cannot wait must not hear "stopped" — the pool is still up. */
 static void http_server_await_pool_stopped(http_server_object *server)
 {
     zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
-    if (UNEXPECTED(coroutine == NULL)) {
+    if (UNEXPECTED(coroutine == NULL || ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "stop(): cannot await the worker pool from here — call it from a coroutine",
+            0);
         return;
     }
 
     if (server->pool_stopped_event == NULL) {
         server->pool_stopped_event = create_server_wait_event();
-    }
-
-    if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
-        return;
     }
 
     /* One ref per waiter: resume_when(..., true) hands ownership to the waker,
