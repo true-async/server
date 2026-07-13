@@ -18,6 +18,7 @@
 
 #include "php_http_server.h"          /* invalid_argument exception ce */
 #include "log/http_log.h"
+#include "core/reactor_pool.h"   /* the log thread runs on a 1-reactor pool */
 #include "core/async_plain_event.h"   /* drain-flush wakeup */
 #include "../../stubs/LogSeverity.php_arginfo.h"
 
@@ -70,33 +71,39 @@ http_log_state_t  http_log_state_default = {
  * bounds the emit-path stack to ~8 KiB of format buffers. */
 #define HTTP_LOG_FMT_SLOTS 4
 
+/* The sink's transport, owned by the log thread. A producer only reads `mode`
+ * and reaches the ring list; everything else — the io, the write in flight, the
+ * flush timer — is touched on the log thread alone. */
 struct http_log_writer_cb {
     zend_async_event_callback_t  base;
     http_log_sink_t             *sink;
     zend_async_io_req_t         *active_req;
     char                        *active_buf;
-    /* true when we created sink->async_io from the stream's fd (socket/pipe);
-     * then we close it at stop. false when we borrowed the stream's own
-     * async-IO handle (file), which the stream disposes. */
-    bool                         io_owned;
-    /* Ring of formatted bytes awaiting write. emit appends here (never
-     * suspends); the completion chain, the high-water kick, and the flush
-     * timer drain it. head = next append offset, len = buffered bytes.
-     * mode decides the record framing on append and the write granularity
-     * on drain (DGRAM stores a u32 length header before each record so one
-     * record maps to one write). */
+    /* Record framing: applied by the producer as it appends, and decides the
+     * write granularity on drain (DGRAM stores a u32 length header before each
+     * record, so one record maps to exactly one write / one datagram). */
     http_log_write_mode_t        mode;
-    char                        *ring;
-    uint32_t                     ring_head;
-    uint32_t                     ring_len;
-    /* Periodic flush timer (lifetime of the sink): coalesces low-rate emits
-     * into fewer writes without leaving them buffered indefinitely. */
+
+    /* One lock-free ring per producer thread (log_prod_t). A producer appends
+     * to its own ring and never blocks; the log thread drains them all. The
+     * list is only ever prepended to, under g_log_lock. */
+    struct log_prod             *producers;
+
+    /* Set by the producer that filled a ring past the high-water mark, cleared
+     * by the log thread when it starts a drain — bounds the wake-ups to one in
+     * flight per sink instead of one per record. */
+    zend_atomic_bool             kick_pending;
+
+    /* Stop handshake: the stopping thread sets `closing` and waits on
+     * `stop_event` (a trigger it owns, fired cross-thread by the log thread);
+     * the log thread finishes the drain and tears the transport down. */
+    zend_atomic_bool             closing;
+    zend_async_event_t          *stop_event;
+
+    /* Periodic flush timer (lifetime of the sink): coalesces low-rate emits into
+     * fewer writes, and is the safety net when a wake-up could not be posted. */
     zend_async_event_t          *flush_timer;
     zend_async_event_callback_t *flush_timer_cb;
-    /* Fired by writer_complete_cb once the write chain fully drains, so
-     * http_log_server_stop can wait for flush without polling. Same thread
-     * as the completion, so a plain (non-uv) event suffices. */
-    zend_async_event_t          *drain_event;
 };
 
 /* Flush-timer callback: points back to the writer it drains. */
@@ -1333,11 +1340,252 @@ static void emit_fallback_stderr(http_log_sink_t *sink, const char *reason)
             (unsigned long long)sink->dropped_total);
 }
 
-/* Per-sink async writer: emit appends formatted bytes to a fixed ring; a single
- * ZEND_ASYNC_IO_WRITE at a time drains the ring, kicked at the high-water mark,
- * on the flush timer, and after each write completes. emit never suspends. */
+/* ------------------------------------------------------------------------
+ * The log thread
+ *
+ * Sinks are owned by ONE consumer thread: it holds the descriptor, the write in
+ * flight and the flush timer, and it is the only thread that touches them. Every
+ * other thread — pool workers, transport reactors, the parent — is a producer:
+ * it formats a record on its own stack and copies the bytes into its OWN ring
+ * for that sink. One writer, one reader per ring, so the hot path takes no lock
+ * and no atomic read-modify-write; publishing the write index with a release
+ * store is the whole synchronisation.
+ *
+ * This is what lets a transport reactor emit an access record at all: it has no
+ * PHP context and must never touch a worker's descriptor, but it can copy bytes
+ * into a ring. It also means one descriptor per sink instead of one per worker.
+ * ------------------------------------------------------------------------- */
+
+/* Bytes a single drain hands to one write. Bounds the copy-out buffer when many
+ * producers have queued up at once. */
+#define HTTP_LOG_WRITE_CHUNK_MAX (256u * 1024u)
+
+/* Per (producer thread, sink) ring. head/tail are free-running counters, not
+ * offsets: the difference is the fill level and wraps correctly, so no
+ * empty-vs-full ambiguity and no spare byte. Only the producer advances head,
+ * only the log thread advances tail. */
+typedef struct log_prod {
+    struct log_prod  *next;      /* other producers of the same sink */
+    char             *buf;       /* persistent: crosses threads */
+    zend_atomic_int   head;      /* producer publishes (release) */
+    zend_atomic_int   tail;      /* log thread publishes (release) */
+    zend_atomic_bool  dead;      /* sink stopped: stop appending, re-register */
+    uint64_t          dropped;   /* producer-only: records lost to a full ring */
+} log_prod_t;
+
+static reactor_pool_t *g_log_pool  = NULL;   /* the log thread (1 reactor) */
+static int             g_log_refs  = 0;      /* sinks that need it alive */
+static MUTEX_T         g_log_lock  = NULL;   /* guards the two above + ring lists */
+
+/* Producers cache their ring per sink; a stopped sink bumps the generation so a
+ * stale cache entry is dropped instead of writing into a freed ring. */
+#define HTTP_LOG_TLS_RINGS 16
+static zend_atomic_int g_log_generation;
+
+ZEND_TLS struct {
+    const http_log_writer_cb_t *cb;
+    log_prod_t                 *ring;
+} tls_rings[HTTP_LOG_TLS_RINGS];
+ZEND_TLS int tls_ring_count = 0;
+ZEND_TLS int tls_ring_gen   = -1;
 
 static void writer_kick_next(http_log_writer_cb_t *cb);
+static void writer_flush_timer_create(http_log_writer_cb_t *cb);
+static void writer_flush_timer_destroy(http_log_writer_cb_t *cb);
+
+/* The writer cb is embedded in the sink's transport, which writer_teardown
+ * frees on the log thread — the event layer must not free it for us. */
+static void writer_callback_dispose(zend_async_event_callback_t *callback,
+                                    zend_async_event_t          *event)
+{
+    (void)callback;
+    (void)event;
+}
+
+/* Start (or join) the log thread. Called with g_log_lock held. */
+static bool log_thread_ref(void)
+{
+    if (g_log_pool == NULL) {
+        g_log_pool = reactor_pool_create(1, 0);
+
+        if (g_log_pool == NULL) {
+            return false;
+        }
+    }
+
+    g_log_refs++;
+    return true;
+}
+
+static void log_thread_unref(void)
+{
+    if (--g_log_refs > 0 || g_log_pool == NULL) {
+        return;
+    }
+
+    reactor_pool_t *const pool = g_log_pool;
+    g_log_pool = NULL;
+    reactor_pool_destroy(pool);   /* joins the thread */
+}
+
+/* Ring geometry. CAP is a power of two, so the mask is the index. */
+static inline uint32_t ring_used(const log_prod_t *r)
+{
+    const uint32_t head = (uint32_t)zend_atomic_int_load_ex(&((log_prod_t *)r)->head);
+    const uint32_t tail = (uint32_t)zend_atomic_int_load_ex(&((log_prod_t *)r)->tail);
+    return head - tail;
+}
+
+/* ---- producer side (any thread: worker, reactor, parent) --------------- */
+
+static log_prod_t *log_prod_ring_for(http_log_writer_cb_t *cb)
+{
+    const int gen = zend_atomic_int_load_ex(&g_log_generation);
+
+    if (tls_ring_gen != gen) {
+        tls_ring_gen   = gen;
+        tls_ring_count = 0;   /* a sink stopped: every cached ring may be gone */
+    }
+
+    for (int i = 0; i < tls_ring_count; i++) {
+        if (tls_rings[i].cb == cb) {
+            return tls_rings[i].ring;
+        }
+    }
+
+    log_prod_t *const r = pecalloc(1, sizeof(*r), 1);
+    r->buf = pemalloc(HTTP_LOG_RING_CAP, 1);
+    ZEND_ATOMIC_INT_INIT(&r->head, 0);
+    ZEND_ATOMIC_INT_INIT(&r->tail, 0);
+    ZEND_ATOMIC_BOOL_INIT(&r->dead, false);
+
+    tsrm_mutex_lock(g_log_lock);
+    r->next = cb->producers;
+    cb->producers = r;              /* published before any head store below */
+    tsrm_mutex_unlock(g_log_lock);
+
+    if (tls_ring_count < HTTP_LOG_TLS_RINGS) {
+        tls_rings[tls_ring_count].cb   = cb;
+        tls_rings[tls_ring_count].ring = r;
+        tls_ring_count++;
+    }
+
+    return r;
+}
+
+/* Copy `len` bytes into the ring at the (unmasked) counter position. */
+static void ring_put(log_prod_t *r, uint32_t at, const char *src, uint32_t len)
+{
+    const uint32_t pos   = at & (HTTP_LOG_RING_CAP - 1);
+    const uint32_t first = HTTP_LOG_RING_CAP - pos;
+
+    if (len <= first) {
+        memcpy(r->buf + pos, src, len);
+    } else {
+        memcpy(r->buf + pos, src, first);
+        memcpy(r->buf, src + first, len - first);
+    }
+}
+
+static void ring_copy_out(const log_prod_t *r, uint32_t at, char *dst, uint32_t len)
+{
+    const uint32_t pos   = at & (HTTP_LOG_RING_CAP - 1);
+    const uint32_t first = HTTP_LOG_RING_CAP - pos;
+
+    if (len <= first) {
+        memcpy(dst, r->buf + pos, len);
+    } else {
+        memcpy(dst, r->buf + pos, first);
+        memcpy(dst + first, r->buf, len - first);
+    }
+}
+
+/* Append one record (optional frame prefix + payload) atomically: a burst past
+ * the ring's capacity drops the whole record, never half of it. The head store
+ * is what publishes it — the log thread never sees a partial record. */
+static void log_prod_append(http_log_writer_cb_t *cb, log_prod_t *r,
+                            const char *pre, size_t pre_len,
+                            const char *src, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+
+    const uint32_t head = (uint32_t)zend_atomic_int_load_ex(&r->head);
+    const uint32_t used = head - (uint32_t)zend_atomic_int_load_ex(&r->tail);
+    const uint32_t need = (uint32_t)(pre_len + len);
+
+    if (need > HTTP_LOG_RING_CAP - used) {
+        r->dropped++;
+
+        if (cb->sink != NULL) {
+            cb->sink->dropped_total++;
+        }
+
+        emit_fallback_stderr(cb->sink, "ring overflow");
+        return;
+    }
+
+    if (pre_len > 0) {
+        ring_put(r, head, pre, (uint32_t)pre_len);
+    }
+
+    ring_put(r, head + (uint32_t)pre_len, src, (uint32_t)len);
+    zend_atomic_int_store_ex(&r->head, (int)(head + need));   /* publish */
+
+    if (used + need < HTTP_LOG_FLUSH_HIGH_WATER) {
+        return;   /* below the high-water mark: the flush timer will take it */
+    }
+
+    /* One wake-up in flight per sink; the log thread clears the flag when it
+     * starts draining. A full mailbox is not a loss — the 200 ms timer on the
+     * log thread drains regardless. */
+    if (!zend_atomic_bool_exchange_ex(&cb->kick_pending, true)) {
+        if (!reactor_pool_post_exec(g_log_pool, 0, (reactor_exec_fn)writer_kick_next, cb)) {
+            zend_atomic_bool_store_ex(&cb->kick_pending, false);
+        }
+    }
+}
+
+/* Hand one already-formatted record to a sink: frame it per the writer mode and
+ * append to this thread's ring. Never blocks, never suspends, never touches the
+ * descriptor — that belongs to the log thread. */
+static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t len)
+{
+    http_log_writer_cb_t *cb = sink->writer_cb;
+
+    if (cb == NULL || sink->async_io == NULL
+        || zend_atomic_bool_load_ex(&cb->closing)) {
+        return;
+    }
+
+    log_prod_t *const r = log_prod_ring_for(cb);
+
+    if (UNEXPECTED(r == NULL) || zend_atomic_bool_load_ex(&r->dead)) {
+        return;
+    }
+
+    switch (cb->mode) {
+        case HTTP_LOG_WRITE_STREAM_FRAMED: {
+            char pre[24];   /* RFC 6587 octet count: "LEN SP" */
+            const int pn = snprintf(pre, sizeof pre, "%zu ", len);
+            log_prod_append(cb, r, pre, (size_t)pn, buf, len);
+            break;
+        }
+        case HTTP_LOG_WRITE_DGRAM: {
+            const uint32_t rec_len = (uint32_t)len;
+            log_prod_append(cb, r, (const char *)&rec_len, sizeof rec_len, buf, len);
+            break;
+        }
+        case HTTP_LOG_WRITE_STREAM:
+        default:
+            log_prod_append(cb, r, NULL, 0, buf, len);
+    }
+}
+
+/* ---- consumer side (log thread only) ----------------------------------- */
+
+static void writer_teardown(http_log_writer_cb_t *cb);
 
 static void writer_complete_cb(
     zend_async_event_t          *event,
@@ -1375,110 +1623,91 @@ static void writer_complete_cb(
     }
 
     writer_kick_next(cb);
-
-    /* Chain fully drained — wake a stop() waiting to flush before teardown. */
-    if (cb->drain_event != NULL && cb->active_req == NULL && cb->ring_len == 0) {
-        async_plain_event_fire(cb->drain_event);
-    }
 }
 
-static void writer_callback_dispose(
-    zend_async_event_callback_t *callback,
-    zend_async_event_t          *event)
-{
-    (void)event;
-    (void)callback;
-    /* Memory is owned by the embedding sink (http_log_sink_stop detaches
-     * and frees this struct). */
-}
-
-/* Raw wrap-aware ring primitives; callers account for capacity. */
-static void ring_put(http_log_writer_cb_t *cb, const char *src, uint32_t len)
-{
-    const uint32_t head  = cb->ring_head;
-    const uint32_t first = HTTP_LOG_RING_CAP - head;   /* room before the wrap */
-
-    if (len <= first) {
-        memcpy(cb->ring + head, src, len);
-    } else {
-        memcpy(cb->ring + head, src, first);
-        memcpy(cb->ring, src + first, len - first);
-    }
-
-    cb->ring_head = (head + len) & (HTTP_LOG_RING_CAP - 1);
-    cb->ring_len += len;
-}
-
-static void ring_copy_out(const http_log_writer_cb_t *cb, uint32_t pos,
-                          char *dst, uint32_t len)
-{
-    const uint32_t first = HTTP_LOG_RING_CAP - pos;
-
-    if (len <= first) {
-        memcpy(dst, cb->ring + pos, len);
-    } else {
-        memcpy(dst, cb->ring + pos, first);
-        memcpy(dst + first, cb->ring, len - first);
-    }
-}
-
-/* Append one record (optional frame prefix + payload) atomically: a burst
- * past the ring's capacity drops the whole record, never half of it. */
-static void writer_ring_append(http_log_writer_cb_t *cb,
-                               const char *pre, size_t pre_len,
-                               const char *src, size_t len)
-{
-    if (len == 0) {
-        return;
-    }
-
-    if (pre_len + len > (size_t)(HTTP_LOG_RING_CAP - cb->ring_len)) {
-        if (cb->sink != NULL) {
-            cb->sink->dropped_total++;
-        }
-
-        emit_fallback_stderr(cb->sink, "ring overflow");
-        return;
-    }
-
-    if (pre_len > 0) {
-        ring_put(cb, pre, (uint32_t)pre_len);
-    }
-    ring_put(cb, src, (uint32_t)len);
-}
-
+/* Pull the next write out of the producer rings. STREAM modes coalesce whatever
+ * every producer has queued into one write; DGRAM sends exactly one record, so
+ * each record travels as its own datagram (the completion chains the next). */
 static void writer_kick_next(http_log_writer_cb_t *cb)
 {
-    /* sink->async_io is NULL once the sink was stopped; a write already in
-     * flight re-kicks itself on completion. */
-    if (cb->sink == NULL || cb->sink->async_io == NULL
-        || cb->active_req != NULL || cb->ring_len == 0) {
+    zend_atomic_bool_store_ex(&cb->kick_pending, false);
+
+    if (cb->active_req != NULL) {
+        return;   /* a write is in flight; its completion re-kicks */
+    }
+
+    if (cb->sink == NULL || cb->sink->async_io == NULL) {
+        if (zend_atomic_bool_load_ex(&cb->closing)) {
+            writer_teardown(cb);
+        }
+
         return;
     }
 
-    /* libuv holds the buffer until completion, so copy the chunk out and free
-     * the ring space immediately — the producer can keep appending while the
-     * write is in flight. Stream modes drain everything buffered in one
-     * write; DGRAM sends exactly one record per write so each record travels
-     * as one datagram (the completion chains the next). */
-    uint32_t read_pos = (uint32_t)((cb->ring_head - cb->ring_len)
-                                   & (HTTP_LOG_RING_CAP - 1));
-    uint32_t chunk;
+    char    *out   = NULL;
+    uint32_t chunk = 0;
 
     if (cb->mode == HTTP_LOG_WRITE_DGRAM) {
-        uint32_t rec_len;
-        ring_copy_out(cb, read_pos, (char *)&rec_len, sizeof rec_len);
-        read_pos = (read_pos + (uint32_t)sizeof rec_len)
-                   & (HTTP_LOG_RING_CAP - 1);
-        cb->ring_len -= (uint32_t)sizeof rec_len;
-        chunk = rec_len;   /* >= 1: append never stores an empty record */
+        for (log_prod_t *r = cb->producers; r != NULL; r = r->next) {
+            if (ring_used(r) < sizeof(uint32_t)) {
+                continue;
+            }
+
+            const uint32_t tail = (uint32_t)zend_atomic_int_load_ex(&r->tail);
+            uint32_t rec_len;
+            ring_copy_out(r, tail, (char *)&rec_len, sizeof rec_len);
+
+            out   = emalloc(rec_len);
+            chunk = rec_len;
+            ring_copy_out(r, tail + (uint32_t)sizeof rec_len, out, rec_len);
+            zend_atomic_int_store_ex(&r->tail,
+                                     (int)(tail + (uint32_t)sizeof rec_len + rec_len));
+            break;
+        }
     } else {
-        chunk = cb->ring_len;
+        uint32_t total = 0;
+
+        for (log_prod_t *r = cb->producers; r != NULL; r = r->next) {
+            total += ring_used(r);
+        }
+
+        if (total > HTTP_LOG_WRITE_CHUNK_MAX) {
+            total = HTTP_LOG_WRITE_CHUNK_MAX;
+        }
+
+        if (total > 0) {
+            out = emalloc(total);
+
+            for (log_prod_t *r = cb->producers; r != NULL && chunk < total; r = r->next) {
+                uint32_t used = ring_used(r);
+
+                if (used == 0) {
+                    continue;
+                }
+
+                if (used > total - chunk) {
+                    used = total - chunk;   /* rest rides the next write */
+                }
+
+                const uint32_t tail = (uint32_t)zend_atomic_int_load_ex(&r->tail);
+                ring_copy_out(r, tail, out + chunk, used);
+                zend_atomic_int_store_ex(&r->tail, (int)(tail + used));
+                chunk += used;
+            }
+        }
     }
 
-    char *out = emalloc(chunk);
-    ring_copy_out(cb, read_pos, out, chunk);
-    cb->ring_len -= chunk;
+    if (chunk == 0) {
+        if (out != NULL) {
+            efree(out);
+        }
+
+        if (zend_atomic_bool_load_ex(&cb->closing)) {
+            writer_teardown(cb);   /* drained: finish the stop handshake */
+        }
+
+        return;
+    }
 
     cb->active_buf = out;
     cb->active_req = ZEND_ASYNC_IO_WRITE(cb->sink->async_io, out, chunk);
@@ -1489,6 +1718,131 @@ static void writer_kick_next(http_log_writer_cb_t *cb)
         cb->sink->dropped_total++;
         emit_fallback_stderr(cb->sink, "async write submit failed");
     }
+}
+
+/* Log thread: the drain is done and a stop is pending — release the transport
+ * and hand the stopping thread its wake-up. Rings are freed here because the
+ * producers have quiesced by contract (stop runs after the workers are done)
+ * and the generation bump has already invalidated every cached pointer. */
+static void writer_teardown(http_log_writer_cb_t *cb)
+{
+    writer_flush_timer_destroy(cb);
+
+    http_log_sink_t *const sink = cb->sink;
+
+    if (sink != NULL && sink->async_io != NULL) {
+        zend_async_io_t *const io = sink->async_io;
+
+        if (io->event.del_callback != NULL) {
+            io->event.del_callback(&io->event, &cb->base);
+        }
+
+        ZEND_ASYNC_IO_CLOSE(io);
+
+        if (io->event.dispose != NULL) {
+            io->event.dispose(&io->event);
+        }
+
+        sink->async_io = NULL;
+    }
+
+    tsrm_mutex_lock(g_log_lock);
+    log_prod_t *r = cb->producers;
+    cb->producers = NULL;
+    tsrm_mutex_unlock(g_log_lock);
+
+    while (r != NULL) {
+        log_prod_t *const next = r->next;
+        pefree(r->buf, 1);
+        pefree(r, 1);
+        r = next;
+    }
+
+    zend_async_event_t *const stop_event = cb->stop_event;
+
+    if (sink != NULL) {
+        sink->writer_cb = NULL;
+    }
+
+    efree(cb);   /* allocated on this thread */
+
+    if (stop_event != NULL) {
+        zend_async_trigger_event_t *const trig = (zend_async_trigger_event_t *)stop_event;
+
+        if (trig->trigger != NULL) {
+            trig->trigger(trig);   /* cross-thread wake of the stopping thread */
+        }
+    }
+}
+
+/* Log thread: create the io for an already-resolved descriptor, attach the
+ * writer and arm the flush timer. The io and the timer must be born on the loop
+ * that will drive them, which is why this runs here and not at the call site. */
+typedef struct {
+    http_log_sink_t      *sink;
+    int                   fd;
+    http_log_write_mode_t mode;
+    bool                  ok;
+} log_open_arg_t;
+
+static void log_sink_open_op(void *arg)
+{
+    log_open_arg_t *const a = (log_open_arg_t *)arg;
+
+    zend_async_io_t *const io =
+        ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)a->fd,
+                             ZEND_ASYNC_IO_TYPE_FILE,
+                             ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
+
+    if (io == NULL) {
+        return;
+    }
+
+    http_log_writer_cb_t *const cb = (http_log_writer_cb_t *)
+        ZEND_ASYNC_EVENT_CALLBACK_EX(writer_complete_cb, sizeof(http_log_writer_cb_t));
+
+    if (cb == NULL) {
+        if (io->event.dispose != NULL) {
+            io->event.dispose(&io->event);
+        }
+
+        return;
+    }
+
+    cb->base.dispose = writer_callback_dispose;
+    cb->sink         = a->sink;
+    cb->mode         = a->mode;
+    cb->producers    = NULL;
+    cb->active_req   = NULL;
+    cb->active_buf   = NULL;
+    cb->stop_event   = NULL;
+    ZEND_ATOMIC_BOOL_INIT(&cb->kick_pending, false);
+    ZEND_ATOMIC_BOOL_INIT(&cb->closing, false);
+
+    if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
+        efree(cb);
+
+        if (io->event.dispose != NULL) {
+            io->event.dispose(&io->event);
+        }
+
+        return;
+    }
+
+    a->sink->async_io  = io;
+    a->sink->writer_cb = cb;
+    writer_flush_timer_create(cb);   /* ticks on this thread's loop */
+    a->ok = true;
+}
+
+/* Log thread: begin the stop. Marks the sink closing and kicks a final drain;
+ * writer_teardown fires the caller's trigger once the rings are empty. */
+static void log_sink_close_op(void *arg)
+{
+    http_log_writer_cb_t *const cb = (http_log_writer_cb_t *)arg;
+
+    zend_atomic_bool_store_ex(&cb->closing, true);
+    writer_kick_next(cb);
 }
 
 /* Flush timer: fires every HTTP_LOG_FLUSH_INTERVAL_MS for the sink's lifetime;
@@ -1576,39 +1930,6 @@ static void writer_flush_timer_destroy(http_log_writer_cb_t *cb)
     }
 }
 
-/* Hand one already-formatted record to a sink: frame it per the writer mode,
- * append to the ring and flush now if it crossed the high-water mark
- * (otherwise the timer will). */
-static void http_log_sink_write(http_log_sink_t *sink, const char *buf, size_t len)
-{
-    http_log_writer_cb_t *cb = sink->writer_cb;
-
-    if (cb == NULL || sink->async_io == NULL || cb->ring == NULL) {
-        return;
-    }
-
-    switch (cb->mode) {
-        case HTTP_LOG_WRITE_STREAM_FRAMED: {
-            char pre[24];   /* RFC 6587 octet count: "LEN SP" */
-            const int pn = snprintf(pre, sizeof pre, "%zu ", len);
-            writer_ring_append(cb, pre, (size_t)pn, buf, len);
-            break;
-        }
-        case HTTP_LOG_WRITE_DGRAM: {
-            const uint32_t rec_len = (uint32_t)len;
-            writer_ring_append(cb, (const char *)&rec_len, sizeof rec_len,
-                               buf, len);
-            break;
-        }
-        case HTTP_LOG_WRITE_STREAM:
-        default:
-            writer_ring_append(cb, NULL, 0, buf, len);
-    }
-
-    if (cb->ring_len >= HTTP_LOG_FLUSH_HIGH_WATER) {
-        writer_kick_next(cb);
-    }
-}
 
 static void log_dispatch_record(http_log_state_t *state,
                                 const http_log_record_t *rec);
@@ -1807,6 +2128,9 @@ void http_log_minit(void)
 {
     http_log_severity_ce = register_class_TrueAsync_LogSeverity();
 
+    g_log_lock = tsrm_mutex_alloc();
+    ZEND_ATOMIC_INT_INIT(&g_log_generation, 0);
+
     syslog_hostname_resolve();
 
     /* Built-ins go through the same registry a plugin extension would use. */
@@ -1829,7 +2153,11 @@ void http_log_minit(void)
 
 void http_log_mshutdown(void)
 {
-    /* HttpServer instances own their own state; nothing global to free. */
+    /* Sinks are torn down with their server; only the lock is process-wide. */
+    if (g_log_lock != NULL) {
+        tsrm_mutex_free(g_log_lock);
+        g_log_lock = NULL;
+    }
 }
 
 /* Recompute the fast gates: `severity` is the lowest floor across app-
@@ -1863,9 +2191,11 @@ static void http_log_state_refresh_gate(http_log_state_t *state)
     state->has_access = has_access;
 }
 
-/* Build one sink onto a zeroed slot from its spec: borrow the stream's async
- * IO handle and attach the coalescing writer. Returns false (sink left
- * inactive, floor OFF) on any failure — the caller then owns spec's ud. */
+/* Build one sink from its spec. The descriptor is resolved here, on the thread
+ * that owns the PHP stream; the io, the writer and the flush timer are created
+ * on the log thread, which is the only thread that will ever drive them.
+ * Returns false (sink left inactive, floor OFF) on any failure — the caller
+ * then owns spec's ud. */
 static bool http_log_sink_start(http_log_sink_t *sink,
                                 const http_log_sink_spec_t *spec)
 {
@@ -1890,85 +2220,41 @@ static bool http_log_sink_start(http_log_sink_t *sink,
         return false;
     }
 
-    /* Prefer the stream's own async IO handle (true_async integration): the
-     * stream get-or-creates a zend_async_io_t and owns its lifetime, so we just
-     * borrow it. Only file streams implement this — socket streams expose
-     * readiness (PHP_STREAM_OPTION_ASYNC_EVENT_HANDLE) instead — so fall back to
-     * wrapping the stream's fd in an async IO we own. PRESERVE_FD keeps the
-     * descriptor with the stream either way. */
-    zend_async_io_t *io = NULL;
-    bool io_owned = false;
-    int rc = php_stream_set_option(stream, PHP_STREAM_OPTION_ASYNC_IO, 0, &io);
+    /* The stream's own async-IO handle is not usable: it belongs to this
+     * thread's loop, and the writes run on the log thread's. Take the raw
+     * descriptor instead — PRESERVE_FD keeps it with the stream, which stays
+     * referenced by sink->stream_zv for as long as the sink lives. */
+    int fd = -1;
 
-    if (rc != PHP_STREAM_OPTION_RETURN_OK || io == NULL) {
-        int fd = -1;
-
-        if (php_stream_cast(stream, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
-                            (void *)&fd, 0) != SUCCESS || fd < 0) {
-            fprintf(stderr,
-                    "http_server: log stream has neither an async IO handle nor "
-                    "an fd; sink disabled\n");
-            return false;
-        }
-
-        io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd,
-                                  ZEND_ASYNC_IO_TYPE_FILE,
-                                  ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
-
-        if (io == NULL) {
-            fprintf(stderr,
-                    "http_server: failed to wrap log stream fd into async io; "
-                    "sink disabled\n");
-            return false;
-        }
-
-        io_owned = true;
-    }
-
-    http_log_writer_cb_t *cb = (http_log_writer_cb_t *)
-        ZEND_ASYNC_EVENT_CALLBACK_EX(writer_complete_cb,
-                                     sizeof(http_log_writer_cb_t));
-
-    if (cb == NULL) {
-        if (io_owned && io->event.dispose != NULL) {
-            io->event.dispose(&io->event);
-        }
-
-        fprintf(stderr, "http_server: failed to allocate log writer cb\n");
+    if (php_stream_cast(stream, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
+                        (void *)&fd, 0) != SUCCESS || fd < 0) {
+        fprintf(stderr,
+                "http_server: log stream has no descriptor; sink disabled\n");
         return false;
     }
 
-    cb->base.dispose   = writer_callback_dispose;
-    cb->sink           = sink;
-    cb->active_req     = NULL;
-    cb->active_buf     = NULL;
-    cb->io_owned       = io_owned;
-    cb->mode           = spec->write_mode;
-    cb->ring           = emalloc(HTTP_LOG_RING_CAP);
-    cb->ring_head      = 0;
-    cb->ring_len       = 0;
-    cb->flush_timer    = NULL;
-    cb->flush_timer_cb = NULL;
-    cb->drain_event    = NULL;
+    tsrm_mutex_lock(g_log_lock);
+    const bool have_thread = log_thread_ref();
+    tsrm_mutex_unlock(g_log_lock);
 
-    if (UNEXPECTED(!io->event.add_callback(&io->event, &cb->base))) {
-        efree(cb->ring);
-        efree(cb);
-
-        if (io_owned && io->event.dispose != NULL) {
-            io->event.dispose(&io->event);
-        }
-
-        fprintf(stderr, "http_server: failed to attach log writer cb\n");
+    if (!have_thread) {
+        fprintf(stderr, "http_server: could not start the log thread; sink disabled\n");
         return false;
     }
 
-    writer_flush_timer_create(cb);   /* best-effort periodic flush */
+    log_open_arg_t arg = { .sink = sink, .fd = fd, .mode = spec->write_mode, .ok = false };
+
+    if (!reactor_pool_exec(g_log_pool, 0, log_sink_open_op, &arg) || !arg.ok) {
+        tsrm_mutex_lock(g_log_lock);
+        log_thread_unref();
+        tsrm_mutex_unlock(g_log_lock);
+
+        fprintf(stderr, "http_server: failed to open the log sink transport\n");
+        return false;
+    }
 
     ZVAL_COPY(&sink->stream_zv, stream_zv);
     sink->stream_set        = true;
-    sink->async_io          = io;
-    sink->writer_cb         = cb;
     sink->formatter         = spec->formatter != NULL ? spec->formatter
                                                       : http_log_format_plain;
     sink->category_mask     = spec->category_mask != 0 ? spec->category_mask
@@ -1979,66 +2265,9 @@ static bool http_log_sink_start(http_log_sink_t *sink,
     return true;
 }
 
-/* Wait up to budget_ms for a sink's in-flight write chain to drain. Waits on
- * a plain event fired by writer_complete_cb (same thread) rather than the io
- * req directly — the completion frees the req, so awaiting it is a UAF. A
- * timer caps the wait so a wedged write falls to the leak path in stop. */
-static void http_log_sink_drain(http_log_sink_t *sink, uint32_t budget_ms)
-{
-    if (budget_ms == 0 || sink->async_io == NULL || sink->writer_cb == NULL
-        || ZEND_ASYNC_CURRENT_COROUTINE == NULL) {
-        return;
-    }
-
-    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
-    http_log_writer_cb_t *const cb = sink->writer_cb;
-
-    /* Kick a write so buffered-but-unflushed bytes start draining, then wait
-     * for the completion chain to empty the ring. */
-    writer_kick_next(cb);
-
-    if (cb->active_req == NULL) {
-        return;   /* nothing buffered or in flight */
-    }
-
-    if (cb->drain_event == NULL) {
-        cb->drain_event = async_plain_event_new();
-    }
-
-    /* Same thread: no completion can fire between this check and SUSPEND,
-     * so no lost wakeup. drain_event only fires once the chain is empty. */
-    if (cb->drain_event == NULL) {
-        return;
-    }
-
-    /* Without the budget timer an unbounded wait risks pinning teardown on a
-     * wedged write — fall to the leak path instead. */
-    zend_async_timer_event_t *const timer =
-        ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)budget_ms, false);
-
-    if (UNEXPECTED(timer == NULL)) {
-        return;
-    }
-
-    if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
-        timer->base.dispose(&timer->base);
-        return;
-    }
-
-    zend_async_resume_when(co, cb->drain_event, false,
-                           zend_async_waker_callback_resolve, NULL);
-    zend_async_resume_when(co, &timer->base, true,
-                           zend_async_waker_callback_timeout, NULL);
-    ZEND_ASYNC_SUSPEND();
-    zend_async_waker_clean(co);
-
-    if (EG(exception)) {
-        zend_clear_exception();   /* budget elapsed → leak path below */
-    }
-}
-
-/* Tear a single sink down: free the writer cb, close the io, drop the stream
- * ref. Assumes the caller already drained (or budgeted the drain away). */
+/* Stop one sink: hand it to the log thread, which drains what the producers
+ * left and tears the transport down, then wait (bounded) for it to report back.
+ * Producers must have quiesced — the caller is the server's stop path. */
 static void http_log_sink_stop(http_log_sink_t *sink)
 {
     /* The formatter ud is ours regardless of the transport's fate — the
@@ -2048,73 +2277,84 @@ static void http_log_sink_stop(http_log_sink_t *sink)
     }
     sink->formatter_ud      = NULL;
     sink->formatter_ud_free = NULL;
+    sink->severity_floor    = HTTP_LOG_OFF;
 
-    /* No coroutine drained the write — leak the cb/io/stream rather than
-     * tear them down with a libuv thread-pool write still in flight. */
-    if (UNEXPECTED(sink->writer_cb != NULL
-                   && sink->writer_cb->active_req != NULL)) {
-        http_log_writer_cb_t *cb = sink->writer_cb;
+    http_log_writer_cb_t *const cb = sink->writer_cb;
 
-        emit_fallback_stderr(sink, "teardown with in-flight write — leaking sink");
-        writer_flush_timer_destroy(cb);   /* stop the zombie tick */
-
-        /* The sink lives in http_server_object; the orphaned cb outlives it and
-         * its completion still fires. Cut the back-pointer or that completion
-         * dereferences freed memory — every cb path already tolerates NULL. */
-        cb->sink = NULL;
-
-        sink->writer_cb      = NULL;
-        sink->async_io       = NULL;
-        sink->stream_set     = false;
-        sink->severity_floor = HTTP_LOG_OFF;
-        ZVAL_UNDEF(&sink->stream_zv);
-        return;
+    if (cb == NULL) {
+        goto drop_stream;
     }
 
-    if (sink->writer_cb != NULL) {
-        http_log_writer_cb_t *cb = sink->writer_cb;
+    /* Every cached producer ring for this sink dies with it. */
+    zend_atomic_int_store_ex(&g_log_generation,
+                             zend_atomic_int_load_ex(&g_log_generation) + 1);
+
+    tsrm_mutex_lock(g_log_lock);
+    for (log_prod_t *r = cb->producers; r != NULL; r = r->next) {
+        zend_atomic_bool_store_ex(&r->dead, true);
+    }
+    tsrm_mutex_unlock(g_log_lock);
+
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_async_trigger_event_t *const done =
+        co != NULL ? ZEND_ASYNC_NEW_TRIGGER_EVENT() : NULL;
+
+    cb->stop_event = done != NULL ? &done->base : NULL;
+
+    if (!reactor_pool_exec(g_log_pool, 0, log_sink_close_op, cb)) {
+        /* The log thread is gone: nothing can drain, and nothing will fire the
+         * trigger. Leak the cb rather than free a transport we cannot reach. */
+        if (done != NULL) {
+            done->base.dispose(&done->base);
+        }
+
         sink->writer_cb = NULL;
-
-        writer_flush_timer_destroy(cb);
-
-        if (sink->async_io != NULL
-            && sink->async_io->event.del_callback != NULL) {
-            sink->async_io->event.del_callback(&sink->async_io->event,
-                                               &cb->base);
-        }
-
-        /* Close the io only when we created it from the stream's fd; a borrowed
-         * handle belongs to the stream, which disposes it with its last ref.
-         * PRESERVE_FD means neither path closes the descriptor itself. */
-        if (cb->io_owned && sink->async_io != NULL) {
-            zend_async_io_t *io = sink->async_io;
-            ZEND_ASYNC_IO_CLOSE(io);
-
-            if (io->event.dispose != NULL) {
-                io->event.dispose(&io->event);
-            }
-        }
-
-        if (cb->ring != NULL) {
-            efree(cb->ring);
-        }
-
-        if (cb->drain_event != NULL) {
-            cb->drain_event->dispose(cb->drain_event);
-        }
-
-        efree(cb);
+        sink->async_io  = NULL;
+        goto drop_stream;
     }
 
-    sink->async_io = NULL;
+    if (done != NULL) {
+        /* The teardown is async (a write may still be in flight). Wait for the
+         * log thread's trigger, capped so a wedged descriptor cannot pin the
+         * server's shutdown. */
+        zend_async_timer_event_t *const timer =
+            ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)HTTP_LOG_STOP_DRAIN_BUDGET_MS, false);
 
+        if (ZEND_ASYNC_WAKER_NEW(co) != NULL) {
+            zend_async_resume_when(co, &done->base, false,
+                                   zend_async_waker_callback_resolve, NULL);
+
+            if (timer != NULL) {
+                zend_async_resume_when(co, &timer->base, true,
+                                       zend_async_waker_callback_timeout, NULL);
+            }
+
+            ZEND_ASYNC_SUSPEND();
+            zend_async_waker_clean(co);
+
+            if (EG(exception)) {
+                zend_clear_exception();   /* budget elapsed → leak path */
+            }
+        } else if (timer != NULL) {
+            timer->base.dispose(&timer->base);
+        }
+
+        done->base.dispose(&done->base);
+    }
+
+    sink->writer_cb = NULL;
+    sink->async_io  = NULL;
+
+    tsrm_mutex_lock(g_log_lock);
+    log_thread_unref();
+    tsrm_mutex_unlock(g_log_lock);
+
+drop_stream:
     if (sink->stream_set) {
         zval_ptr_dtor(&sink->stream_zv);
         sink->stream_set = false;
         ZVAL_UNDEF(&sink->stream_zv);
     }
-
-    sink->severity_floor = HTTP_LOG_OFF;
 }
 
 void http_log_server_start_sinks(http_log_state_t *state,
@@ -2173,18 +2413,9 @@ void http_log_server_stop(http_log_state_t *state)
     state->severity   = HTTP_LOG_OFF;   /* stop new emits immediately */
     state->has_access = false;
 
-    /* One shared budget bounds the total drain wait across sinks: each waits
-     * on its own drain_event, and an absolute deadline keeps the sum capped
-     * even when several sinks have writes in flight. */
-    uint64_t start_ns = now_realtime_ns();
-
+    /* Each sink hands itself to the log thread and waits (bounded) for the
+     * final drain — see http_log_sink_stop. */
     for (uint8_t i = 0; i < state->sink_count; i++) {
-        uint64_t elapsed_ms = (now_realtime_ns() - start_ns) / 1000000ULL;
-        uint32_t budget = elapsed_ms >= HTTP_LOG_STOP_DRAIN_BUDGET_MS
-                        ? 0u
-                        : (uint32_t)(HTTP_LOG_STOP_DRAIN_BUDGET_MS - elapsed_ms);
-
-        http_log_sink_drain(&state->sinks[i], budget);
         http_log_sink_stop(&state->sinks[i]);
     }
 

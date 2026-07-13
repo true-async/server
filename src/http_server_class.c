@@ -2459,6 +2459,7 @@ static size_t http_server_reactor_h3_spawn(http_server_object *server, const int
             (cache_max > 0 && cache_ttl > 0)
                 ? http_static_cache_create((size_t)cache_max, (time_t)cache_ttl)
                 : NULL;
+        server->reactor_h3_ctx[r].log_state           = &server->log_state;
     }
 
     void *const ssl_ctx = server->reactor_tls_ctx->ctx;

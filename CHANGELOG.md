@@ -130,7 +130,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HttpRequest::getRemoteAddress()` instead of two different things on two
   classes.
 
+### Changed
+
+- **Log sinks are owned by a dedicated log thread (#5).** A sink's descriptor,
+  its write in flight and its flush timer now live on one consumer thread, and
+  every other thread — pool workers, transport reactors, the parent — is a pure
+  producer: it formats the record on its own stack and copies the bytes into its
+  *own* ring for that sink. One writer and one reader per ring, so the emit path
+  takes no lock and no atomic read-modify-write; publishing the write index is
+  the whole synchronisation. The flush policy is unchanged (32 KiB high-water or
+  the 200 ms timer), and so is the drop-on-overflow behaviour.
+
+  This is what finally lets a transport reactor log. Under the reactor pool a
+  `sendFile()` is delivered by the reactor, so the reactor is the only place the
+  final status exists — it was already counted there, but the access record was
+  lost, because a reactor has no PHP context and must never touch a worker's
+  descriptor. It can fill a ring. A `stream` sink now also works under a worker
+  pool, and a file sink is one descriptor instead of one per worker.
+
 ### Fixed
+
+- **HTTP/1 streaming responses were never counted.** `$response->send()` bumped
+  `stream_send_calls_total` and `stream_bytes_sent_total` but not
+  `streaming_responses_total` — HTTP/2 and HTTP/3 count it on their first chunk,
+  HTTP/1 did not, so a server streaming over HTTP/1 reported zero streaming
+  responses while its byte counters climbed.
 
 - **`sendFile()` was counted and access-logged with the wrong status (#5).** The
   handler only *queues* a send and returns with the default 200; the real wire

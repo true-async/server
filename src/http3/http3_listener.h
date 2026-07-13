@@ -65,6 +65,13 @@ typedef struct {
      * reactor gets its own instance, touched only by its one thread (no locking).
      * NULL when no mount opted into StaticHandler::setOpenFileCache. */
     struct http_static_cache_s *static_cache;
+
+    /* The parent's logger. Safe to emit through from this thread: a sink's
+     * descriptor belongs to the log thread, and a producer only ever fills its
+     * own ring (src/log/http_log.c). This is what lets a request the reactor
+     * serves end to end — a static hit, the reactor half of a pooled sendFile —
+     * reach the access log instead of being counted and then forgotten. */
+    struct http_log_state *log_state;
 } http3_reactor_ctx_t;
 
 /* ssl_ctx is the OpenSSL SSL_CTX* shared with the TCP+TLS path (from

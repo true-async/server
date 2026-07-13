@@ -27,6 +27,7 @@ PHP_HTTP3_DISABLE_RETRY=1
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
+use TrueAsync\LogSeverity;
 use function Async\spawn;
 
 require __DIR__ . '/_h3_skipif.inc';
@@ -44,9 +45,11 @@ file_put_contents($file, str_repeat('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 4));
 /* Past SEND_FILE_SLURP_THRESHOLD (64 KiB), so delivery goes through the pump. */
 $bigBody = str_repeat('z', 200000);
 file_put_contents($big, $bigBody);
+$logPath = $dir . '/access.log';
+@unlink($logPath);
 
-register_shutdown_function(function () use ($dir, $cert, $key, $file, $big) {
-    @unlink($cert); @unlink($key); @unlink($file); @unlink($big); @rmdir($dir);
+register_shutdown_function(function () use ($dir, $cert, $key, $file, $big, $logPath) {
+    @unlink($cert); @unlink($key); @unlink($file); @unlink($big); @unlink($logPath); @rmdir($dir);
 });
 
 $port = tas_free_port_span(2);
@@ -56,6 +59,10 @@ $config = (new HttpServerConfig())
     ->addHttp3Listener('127.0.0.1', $port)
     ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
     ->setStatsEnabled(true)
+    ->setLogSinks([
+        ['type' => 'file', 'path' => $logPath, 'format' => 'json',
+         'category' => 'access', 'level' => LogSeverity::INFO],
+    ])
     ->setWorkers(2);
 
 $server = new HttpServer($config);
@@ -65,7 +72,7 @@ $server->addHttpHandler(function ($req, $res) use ($file, $big) {
 
 $client_bin = __DIR__ . '/../../../h3client/h3client';
 
-spawn(function () use ($server, $port, $client_bin, $bigBody) {
+spawn(function () use ($server, $port, $client_bin, $bigBody, $logPath) {
     usleep(600000);
 
     $run = function (string $path, ?string $range) use ($client_bin, $port) {
@@ -107,6 +114,18 @@ spawn(function () use ($server, $port, $client_bin, $bigBody) {
     $reactor_total = 0;
     foreach ($stats['reactors'] ?? [] as $r) { $reactor_total += $r['total_requests']; }
     echo 'from_reactors=', ($reactor_total === 3 ? 1 : 0), "\n";
+
+    /* The record can only come from the reactor: the worker marshalled the send
+     * and never saw the final status. Give the sink's flush timer a tick. */
+    usleep(400000);
+    $seen = [];
+    foreach (explode("\n", trim((string)@file_get_contents($logPath))) as $line) {
+        if ($line === '') continue;
+        $a = json_decode($line, true)['Attributes'] ?? [];
+        $seen[$a['url.path'] ?? '?'] = $a['http.response.status_code'] ?? '?';
+    }
+    echo 'log /ranged: ', $seen['/ranged'] ?? 'missing', "\n";
+    echo 'log /big: ',    $seen['/big'] ?? 'missing', "\n";
     echo "done\n";
 
     /* Pool-parent stop() is unsupported (#11); %A absorbs its exception. */
@@ -125,5 +144,7 @@ total=1
 class_sum=1
 2xx=1
 from_reactors=1
+log /ranged: 206
+log /big: 200
 done
 %A

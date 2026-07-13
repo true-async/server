@@ -292,7 +292,16 @@ static http3_connection_t *http3_connection_accept(
         c->counters  = srv != NULL ? http_server_counters(srv)
                                    : http3_listener_local_counters(listener);
         c->view      = http_server_view(srv);
-        c->log_state = http_server_get_log_state(srv);
+
+        /* Reactor mode: the parent's logger travels on the reactor context. The
+         * sinks are owned by the log thread and a producer only fills its own
+         * ring, so emitting from here is safe — and it is the only way a request
+         * this thread serves end to end reaches the access log. */
+        const http3_reactor_ctx_t *const rctx = http3_listener_reactor_ctx(listener);
+
+        c->log_state = (srv == NULL && rctx != NULL && rctx->log_state != NULL)
+                           ? rctx->log_state
+                           : http_server_get_log_state(srv);
     }
 
     /* original_dcid for transport_params: with Retry, this is the DCID
