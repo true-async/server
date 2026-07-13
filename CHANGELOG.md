@@ -155,6 +155,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of one per worker — is a follow-up the log thread makes possible but does not
   yet do.
 
+- **Per-request stream state is smaller (#122).** The `bool` flag walls on
+  `http3_stream_t` (15 flags) and `http2_stream_t` (12) are now one bitfield
+  block each, sitting next to `refcount` so they fill padding instead of adding
+  it. The structs go from 864 → 832 and 744 → 704 bytes; a listener that keeps
+  its stream slabs warm holds that much less per concurrent request. Both structs
+  are written only by their own thread (an H/3 stream is driven by its
+  connection's reactor; the worker never dereferences it, it only carries the
+  pointer back on the response wire), so the flags may share a storage unit. No
+  behaviour change.
+
 ### Fixed
 
 - **One departing HTTP/3 peer could silence the listener for good.** When a client
