@@ -65,10 +65,11 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         php_embed_init(0, NULL);
         /* Belt-and-braces: also set at runtime in case the env var path
          * didn't take (php_embed reads main INI first). */
-        zend_alter_ini_entry_chars(
-            zend_string_init("memory_limit", sizeof("memory_limit") - 1, 0),
-            "-1", 2,
-            ZEND_INI_SYSTEM, ZEND_INI_STAGE_ACTIVATE);
+        zend_string *const ini_name =
+            zend_string_init("memory_limit", sizeof("memory_limit") - 1, 0);
+        zend_alter_ini_entry_chars(ini_name, "-1", 2,
+                                   ZEND_INI_SYSTEM, ZEND_INI_STAGE_ACTIVATE);
+        zend_string_release(ini_name);
         php_is_up = true;
         atexit(fuzz_atexit_shutdown);
 

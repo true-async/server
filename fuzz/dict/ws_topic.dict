@@ -1,0 +1,11 @@
+# WebSocket topic engine fuzz dictionary
+sep="/"
+plus="+"
+hash="#"
+lit_a="a"
+seg="sport"
+seg2="tennis"
+double_slash="//"
+trailing="a/"
+hash_last="/#"
+plus_level="/+/"
