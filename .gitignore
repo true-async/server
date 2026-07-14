@@ -140,3 +140,8 @@ fuzz/oom-*
 # reload-server.php runtime marker
 examples/app-version.txt
 fuzz/fuzz_ws_frame
+fuzz/fuzz_ws_topic
+fuzz/corpus/ws/*
+!fuzz/corpus/ws/seed*
+fuzz/corpus/ws_topic/*
+!fuzz/corpus/ws_topic/seed*
