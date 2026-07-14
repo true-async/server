@@ -17,6 +17,8 @@
 #include "Zend/zend_async_API.h"
 #include "websocket/php_websocket.h"
 #include "websocket/ws_session.h"
+#include "websocket/ws_hub.h"
+#include "websocket/ws_topic_tree.h"
 #include "websocket/ws_handshake.h"
 #include "websocket/websocket_strategy.h"
 #include "core/http_connection.h"
@@ -846,88 +848,37 @@ static bool ws_do_send(zval *zv_this, zend_string *payload, uint8_t opcode,
         }
     }
 
-#ifdef HAVE_HTTP_COMPRESSION
-    /* permessage-deflate: compress the payload, then queue it with the
-     * RSV1 bit set. wslay copies the buffer, so `comp` is freed at once. */
-    if (s->pmce_enabled) {
-        smart_str comp = {0};
-        if (ws_session_pmce_deflate(s, ZSTR_VAL(payload), ZSTR_LEN(payload),
-                                    &comp) != 0) {
-            smart_str_free(&comp);
+    /* trySend must never suspend, so it drives the flush through the internal
+     * (non-suspending) sink; blocking send() keeps the producer path that may
+     * park on the socket. Everything past this point can free the session —
+     * `s` and `w` MUST NOT be touched again. */
+    const ws_send_rc_t rc = ws_session_queue_and_flush(
+        s, opcode, ZSTR_VAL(payload), ZSTR_LEN(payload), nonblocking);
+
+    switch (rc) {
+        case WS_SEND_OK:
+            return true;
+
+        case WS_SEND_DEFLATE_FAILED:
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket deflate failed");
             return false;
-        }
 
-        const int qrc = ws_session_queue_payload(s, opcode,
-            comp.s ? ZSTR_VAL(comp.s) : "", comp.s ? ZSTR_LEN(comp.s) : 0,
-            WSLAY_RSV1_BIT);
-        smart_str_free(&comp);
-
-        if (qrc != 0) {
+        case WS_SEND_QUEUE_FAILED:
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "WebSocket queue_msg failed (out of memory or session closed)");
             return false;
-        }
-    } else
-#endif
-    {
-        if (ws_session_queue_payload(s, opcode, ZSTR_VAL(payload),
-                                     ZSTR_LEN(payload), WSLAY_RSV_NONE) != 0) {
-            zend_throw_exception_ex(websocket_exception_ce, 0,
-                "WebSocket queue_msg failed (out of memory or session closed)");
+
+        case WS_SEND_WRITE_FAILED:
+            /* Sticky write error. The next recv()/send() sees write_error and
+             * routes to a closed exception; the read-side teardown owns tearing
+             * the connection down. */
+            ws_throw_closed(1006, NULL,
+                "WebSocket send failed (peer closed or write error)");
             return false;
-        }
     }
 
-    if (s->flushing) {
-        /* Another coroutine already drives the flusher; it'll pick up
-         * the message we just enqueued. */
-        return true;
-    }
-
-    /* Pin the connection across the flush. wslay_event_send may suspend the
-     * producer inside http_connection_send (socket backpressure); if the
-     * owning handler coroutine exits meanwhile (or a user-spawned writer holds
-     * the flusher role past the handler), teardown must NOT free the session
-     * out from under the suspended flusher — that frees the wslay context and
-     * the next send_callback writes through freed memory. The pin defers
-     * teardown until the flush unwinds. */
-    http_connection_t *const flush_conn = w->conn;
-    if (flush_conn != NULL) { flush_conn->handler_refcount++; }
-
-    /* trySend must never suspend: drive the flush through the non-suspending
-     * internal sink (socket-full → park in the bounded batched tail / drop a
-     * control frame) instead of the producer path that may block on the
-     * socket. Blocking send() keeps the suspending producer path. */
-    s->flushing = 1;
-    if (nonblocking) { s->internal_send = 1; }
-    const int rc = ws_session_drive_send(s);
-    if (nonblocking) { s->internal_send = 0; }
-    s->flushing = 0;
-
-    /* Wake any producer blocked over the high-water. Still safe — the pin is
-     * held, so the session is alive. */
-    ws_session_notify_writable(s);
-
-    /* Release the pin. This may now run the deferred teardown (freeing the
-     * session), so `s` and `w` MUST NOT be touched afterwards. */
-    if (flush_conn != NULL) {
-        if (flush_conn->handler_refcount > 0) { flush_conn->handler_refcount--; }
-        http_connection_destroy_if_idle_deferred(flush_conn);
-    }
-
-    if (rc != 0) {
-        /* Sticky write error or session-internal failure. The next
-         * recv()/send() will see write_error and route to a closed
-         * exception; we don't tear the connection down from here
-         * because the read-side teardown owns that path. */
-        ws_throw_closed(1006, NULL,
-            "WebSocket send failed (peer closed or write error)");
-        return false;
-    }
-
-    return true;
+    return false;
 }
 /* }}} */
 
@@ -1118,6 +1069,219 @@ ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol)
     }
     RETURN_NULL();
 }
+
+/* {{{ Topics (issue #2)
+ *
+ * A connection reaches the hub through its own server, so no topic handle has to
+ * be minted, captured or carried into a handler; see ws_hub.h.
+ *
+ * The session is built lazily, so subscribing has to commit the upgrade like
+ * send()/recv() do: a handler that subscribes before its first I/O has none yet.
+ */
+static ws_session_t *ws_topic_session_of(zval *zv_this)
+{
+    websocket_object *const w = Z_WEBSOCKET_P(zv_this);
+
+    if (!w->committed && !ws_commit_upgrade(w, true)) {
+        return NULL;   /* exception already set */
+    }
+
+    if (w->session == NULL || w->closed) {
+        ws_throw_closed(1006, NULL, "WebSocket is closed");
+        return NULL;
+    }
+
+    return w->session;
+}
+
+/* The connection this WebSocket still legitimately owns, or NULL. `conn` is NOT
+ * cleared on teardown — only `session` and `closed` are — so a coroutine that
+ * outlived its handler (the spawned-writer pattern) would otherwise follow a
+ * pointer into a connection slot the arena has already handed to someone else. */
+static http_connection_t *ws_live_conn_of(const websocket_object *w)
+{
+    if (w->session != NULL) {
+        return w->session->conn;
+    }
+
+    return w->closed ? NULL : w->conn;
+}
+
+/* Usable before the upgrade is committed — publish() does not need a session. */
+static ws_hub_t *ws_topic_hub_of(const websocket_object *w)
+{
+    if (w->session != NULL) {
+        return w->session->hub;
+    }
+
+    http_connection_t *const conn = ws_live_conn_of(w);
+
+    return conn != NULL ? http_server_get_ws_hub(conn->server) : NULL;
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, subscribe)
+{
+    zend_string *filter;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(filter)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!ws_topic_is_valid_filter(ZSTR_VAL(filter), ZSTR_LEN(filter))) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "Malformed topic filter \"%s\": levels are separated by '/', "
+            "'+' stands for exactly one level, '#' for the rest and must come last",
+            ZSTR_VAL(filter));
+        RETURN_THROWS();
+    }
+
+    ws_session_t *const session = ws_topic_session_of(ZEND_THIS);
+
+    if (session == NULL) {
+        RETURN_THROWS();
+    }
+
+    ws_topic_tree_t *const tree = ws_hub_tree(session->hub);
+
+    if (tree == NULL) {
+        zend_throw_exception(websocket_exception_ce,
+            "Cannot subscribe — this worker is not attached to the topic hub", 0);
+        RETURN_THROWS();
+    }
+
+    /* Only a subscriber needs an id, and only so a publish can skip its sender. */
+    if (session->ws_id == 0) {
+        session->ws_id = ws_hub_next_id(session->hub);
+    }
+
+    const http_server_config_t *const cfg = session->conn != NULL
+        ? http_server_get_config(session->conn->server) : NULL;
+
+    const uint32_t max = cfg != NULL ? cfg->ws_max_subscriptions : 0;
+
+    if (!ws_topic_subscribe(tree, session, filter, max)) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "Cannot subscribe to \"%s\": this connection already holds its limit "
+            "of %u subscriptions (HttpServerConfig::setWsMaxSubscriptions)",
+            ZSTR_VAL(filter), max);
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, unsubscribe)
+{
+    zend_string *filter;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(filter)
+    ZEND_PARSE_PARAMETERS_END();
+
+    const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    if (w->session != NULL) {
+        (void) ws_topic_unsubscribe(ws_hub_tree(w->session->hub), w->session, filter);
+    }
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, getTopics)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    if (w->session == NULL) {
+        RETURN_EMPTY_ARRAY();
+    }
+
+    ws_topic_list(w->session, return_value);
+}
+
+static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
+{
+    zend_string *topic;
+    zend_string *data;
+    bool exclude_self = true;
+
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STR(topic)
+        Z_PARAM_STR(data)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(exclude_self)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "Cannot publish to \"%s\": a publish topic must be concrete — "
+            "a message fanned out to a wildcard has no destination",
+            ZSTR_VAL(topic));
+        RETURN_THROWS();
+    }
+
+    const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    /* Metered on the connection, so a handler that publishes without ever doing
+     * WS I/O — no session yet — cannot slip past the limit, and an H2 client
+     * cannot multiply its allowance by opening more streams.
+     *
+     * Throws rather than returning 0 (issue #120): a count of zero already means
+     * "nobody subscribed here", and an over-rate message that quietly vanished is
+     * exactly the failure the limit exists to make visible. */
+    if (!ws_publish_allowed(ws_live_conn_of(w))) {
+        zend_throw_exception(websocket_backpressure_exception_ce,
+            "Publish rate limit exceeded on this connection "
+            "(HttpServerConfig::setWsPublishRateLimit)", 0);
+        RETURN_THROWS();
+    }
+
+    const uint64_t except_id = exclude_self && w->session != NULL ? w->session->ws_id : 0;
+
+    const uint32_t sent = ws_hub_publish(ws_topic_hub_of(w),
+        ZSTR_VAL(topic), ZSTR_LEN(topic),
+        ZSTR_VAL(data), ZSTR_LEN(data), binary, except_id);
+
+    RETURN_LONG((zend_long) sent);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, publish)
+{
+    ws_do_publish(INTERNAL_FUNCTION_PARAM_PASSTHRU, false);
+}
+
+ZEND_METHOD(TrueAsync_WebSocket, publishBinary)
+{
+    ws_do_publish(INTERNAL_FUNCTION_PARAM_PASSTHRU, true);
+}
+
+/* A worker that does not answer within this bound is left out of the tally
+ * rather than hanging the caller. */
+#define WS_TOPIC_COUNT_TIMEOUT_MS 1000
+
+ZEND_METHOD(TrueAsync_WebSocket, subscriberCount)
+{
+    zend_string *topic;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(topic)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+        zend_throw_exception_ex(websocket_exception_ce, 0,
+            "Cannot count subscribers of \"%s\": the topic must be concrete",
+            ZSTR_VAL(topic));
+        RETURN_THROWS();
+    }
+
+    const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
+
+    const uint32_t total = ws_hub_count(ws_topic_hub_of(w),
+        ZSTR_VAL(topic), ZSTR_LEN(topic), WS_TOPIC_COUNT_TIMEOUT_MS);
+
+    /* An exception here is a cancellation (server stop), never a timeout — it
+     * must not come back as a number. */
+    if (EG(exception) != NULL) {
+        RETURN_THROWS();
+    }
+
+    RETURN_LONG((zend_long) total);
+}
+/* }}} */
 
 ZEND_METHOD(TrueAsync_WebSocket, getRemotePort)
 {

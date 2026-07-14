@@ -110,6 +110,7 @@ final class HttpServer
      */
     public function stop(): bool {}
 
+
     /**
      * Hot-reload the worker pool (issue #93). Pool parent only: workers finish
      * their in-flight work, stop and exit; fresh worker threads re-run the
@@ -184,6 +185,16 @@ final class HttpServer
      *                            right now), `bytes` (`count *
      *                            slot_bytes`).
      *  - `body_pool_total_bytes` — sum of `bytes` across all classes.
+     *  - `ws_topic_posted`      — cross-worker publishes handed to another
+     *                             worker's mailbox.
+     *  - `ws_topic_skipped`     — workers a publish did NOT wake, because the
+     *                             interest filter proved they hold no
+     *                             subscriber. Large next to `posted` means the
+     *                             filter is earning its keep.
+     *  - `ws_topic_dropped`     — publishes a worker's mailbox would not take
+     *                             because it was full. This one is data loss:
+     *                             a worker is not draining fast enough, or a
+     *                             client is flooding publishes.
      *
      * @return array
      */

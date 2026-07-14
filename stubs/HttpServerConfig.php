@@ -443,6 +443,54 @@ final class HttpServerConfig
     public function getWsMaxFrameSize(): int {}
 
     /**
+     * How many distinct topic filters one connection may subscribe to.
+     *
+     * Default: 0 — no limit. Every self-hosted broker defaults the same way
+     * (EMQX `max_subscriptions`, NATS `max_subs`): only the application knows
+     * how many topics it needs, so it is not the server's place to guess.
+     *
+     * Set it when the handler feeds client input into subscribe() — e.g.
+     * `$ws->subscribe($msg->data)` — and an unbounded client should not be able
+     * to grow the worker's topic tree without end. Over the limit, subscribe()
+     * throws WebSocketException and the connection stays up, which is what EMQX
+     * answers with SUBACK 0x97 and NATS with -ERR 'Maximum Subscriptions
+     * Exceeded'.
+     *
+     * The filter's depth is capped separately and always (128 levels).
+     */
+    public function setWsMaxSubscriptions(int $count): static {}
+
+    /** @return int */
+    public function getWsMaxSubscriptions(): int {}
+
+    /**
+     * Token bucket over WebSocket::publish(), per connection (issue #120).
+     *
+     * Default: 0 — off, the same default EMQX ships for its `messages_rate`.
+     *
+     * publish() is the one WebSocket call an unprivileged peer can use to cause
+     * work on EVERY worker in the process: send() and trySend() only ever touch
+     * the peer's own socket. Unmetered, a single client looping on a message the
+     * handler relays fills every worker's inbox — and once an inbox is full the
+     * drops hit OTHER topics' traffic too, so the damage is process-wide rather
+     * than confined to the abuser.
+     *
+     * Over the rate, publish() throws WebSocketBackpressureException and the
+     * connection stays up. The sender is told, which is the point: a message that
+     * silently vanished into a full mailbox is invisible to everyone.
+     *
+     * $burst is the bucket depth in messages — how far a handler may run ahead of
+     * the sustained rate. 0 means one second's worth.
+     */
+    public function setWsPublishRateLimit(int $perSecond, int $burst = 0): static {}
+
+    /** @return int */
+    public function getWsPublishRateLimit(): int {}
+
+    /** @return int */
+    public function getWsPublishBurst(): int {}
+
+    /**
      * Server-initiated PING cadence in milliseconds. The server sends a
      * PING this often on otherwise-idle connections; the peer must reply
      * with PONG within WsPongTimeoutMs or the connection is torn down

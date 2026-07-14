@@ -102,5 +102,18 @@ fuzz_ws_frame: fuzz_ws_frame.c harness_common.c $(WS_SRC) $(STUBS_SRC)
 	      -DHAVE_PHP_H=1 -DHAVE_ARPA_INET_H=1 -DHAVE_NETINET_IN_H=1 \
 	      -o $@ $^ $(PHP_LDFLAGS)
 
+# WebSocket topic-engine fuzzer — drives the MQTT filter parser, the interest
+# prefix builder and the wildcard matcher + node lifecycle in ws_topic_tree.c
+# with attacker-chosen topic bytes. Just the one TU under test: the hub-interest
+# and delivery calls are stubbed inside the harness, so no threads / mailbox.
+# PHP embed for emalloc / zend_string / HashTable.
+TOPIC_SRC = ../src/websocket/ws_topic_tree.c
+
+fuzz_ws_topic: fuzz_ws_topic.c harness_common.c $(TOPIC_SRC) $(STUBS_SRC)
+	$(CC) $(CFLAGS) $(INCLUDES) $(WS_INCLUDES) $(PHP_CFLAGS) \
+	      -DHAVE_PHP_H=1 -DHAVE_ARPA_INET_H=1 -DHAVE_NETINET_IN_H=1 \
+	      -o $@ $^ $(PHP_LDFLAGS)
+
 clean:
-	rm -f fuzz_multipart fuzz_http1_parser fuzz_h2_session fuzz_ws_frame *.o
+	rm -f fuzz_multipart fuzz_http1_parser fuzz_h2_session fuzz_ws_frame \
+	      fuzz_ws_topic *.o

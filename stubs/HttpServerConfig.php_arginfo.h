@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: b289111629a0445fd1112d52518be2e3e4df3895 */
+ * Stub hash: 5b354ff466aa59dcc994c9b320bed2f1f3bcf5df */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -132,6 +132,21 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpServerConfig_setWsMaxFrameSize arginfo_class_TrueAsync_HttpServerConfig_setStreamWriteBufferBytes
 
 #define arginfo_class_TrueAsync_HttpServerConfig_getWsMaxFrameSize arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setWsMaxSubscriptions, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, count, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getWsMaxSubscriptions arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setWsPublishRateLimit, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, perSecond, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, burst, IS_LONG, 0, "0")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getWsPublishRateLimit arginfo_class_TrueAsync_HttpServerConfig_getWorkers
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getWsPublishBurst arginfo_class_TrueAsync_HttpServerConfig_getWorkers
 
 #define arginfo_class_TrueAsync_HttpServerConfig_setWsPingIntervalMs arginfo_class_TrueAsync_HttpServerConfig_setBackpressureTargetMs
 
@@ -350,6 +365,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxMessageSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxMessageSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxFrameSize);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxFrameSize);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsMaxSubscriptions);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsMaxSubscriptions);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPublishRateLimit);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPublishRateLimit);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPublishBurst);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPingIntervalMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWsPingIntervalMs);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWsPongTimeoutMs);
@@ -472,6 +492,11 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, getWsMaxMessageSize, arginfo_class_TrueAsync_HttpServerConfig_getWsMaxMessageSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setWsMaxFrameSize, arginfo_class_TrueAsync_HttpServerConfig_setWsMaxFrameSize, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getWsMaxFrameSize, arginfo_class_TrueAsync_HttpServerConfig_getWsMaxFrameSize, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setWsMaxSubscriptions, arginfo_class_TrueAsync_HttpServerConfig_setWsMaxSubscriptions, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getWsMaxSubscriptions, arginfo_class_TrueAsync_HttpServerConfig_getWsMaxSubscriptions, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setWsPublishRateLimit, arginfo_class_TrueAsync_HttpServerConfig_setWsPublishRateLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getWsPublishRateLimit, arginfo_class_TrueAsync_HttpServerConfig_getWsPublishRateLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getWsPublishBurst, arginfo_class_TrueAsync_HttpServerConfig_getWsPublishBurst, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setWsPingIntervalMs, arginfo_class_TrueAsync_HttpServerConfig_setWsPingIntervalMs, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getWsPingIntervalMs, arginfo_class_TrueAsync_HttpServerConfig_getWsPingIntervalMs, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setWsPongTimeoutMs, arginfo_class_TrueAsync_HttpServerConfig_setWsPongTimeoutMs, ZEND_ACC_PUBLIC)

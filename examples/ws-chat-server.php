@@ -1,8 +1,8 @@
 <?php
 /**
- * WebSocket broadcast chat room — shows the multi-producer send model.
+ * WebSocket chat — one topic, many workers.
  *
- * Run (single worker keeps one shared room in-process):
+ * Run:
  *   php examples/ws-chat-server.php
  *   PORT=9000 php examples/ws-chat-server.php
  *
@@ -12,15 +12,21 @@
  *
  * Key ideas:
  *   - One coroutine per connection; `foreach ($ws as $msg)` is the pull loop.
- *   - send() is safe to call from ANY coroutine on the thread, so one
- *     connection's handler can push to every other peer's socket.
- *   - trySend() never suspends — it drops for a backpressured (slow) peer
- *     instead of stalling delivery to the whole room. Use send() instead if
- *     you need every message delivered and are willing to apply backpressure.
+ *   - A topic is addressed by NAME, at the call site. There is no topic object to
+ *     obtain, hold or pass into the handler — the connection reaches the hub
+ *     through the thread that owns it, so nothing has to be captured.
+ *   - publish() never suspends: a peer whose socket is backed up drops the
+ *     message instead of stalling delivery to the whole topic.
+ *   - subscriberCount() asks every worker and sums the answers — a snapshot, not
+ *     a live counter.
  *
- * Scaling past one worker: each worker is a separate thread with its own
- * $room, so a cross-worker chat needs shared state (Redis pub/sub, etc.).
- * This example uses setWorkers(1) to keep the room in one process.
+ * A worker is a thread with its own PHP context, so an array of connections
+ * could only ever reach that worker's peers. Topics live in the server: each
+ * worker indexes the connections it owns, and a publish is handed to every
+ * worker, which delivers to its own sockets. No Redis, no setWorkers(1).
+ *
+ * Filters follow MQTT, so a client could subscribe to `chat/#` and receive every
+ * room at once, or `chat/+/typing` for the typing indicator of any room.
  */
 
 use TrueAsync\HttpServer;
@@ -31,30 +37,20 @@ use TrueAsync\HttpResponse;
 
 $config = (new HttpServerConfig())
     ->addListener('0.0.0.0', (int)(getenv('PORT') ?: 8080))
-    ->setWorkers(1);
+    ->setWorkers(4);
 
 $server = new HttpServer($config);
 
-/** @var \SplObjectStorage<WebSocket,true> $room */
-$room = new \SplObjectStorage();
+$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
+    $ws->subscribe('chat');   // unsubscribing is automatic when the connection closes
 
-$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($room) {
-    $room->attach($ws);
-    $ws->send('welcome — ' . $room->count() . ' online');
+    $ws->send('welcome — ' . $ws->subscriberCount('chat') . ' online');
 
-    try {
-        foreach ($ws as $msg) {
-            $line = ($msg->binary ? '[binary] ' : '') . $msg->data;
+    foreach ($ws as $msg) {
+        $line = ($msg->binary ? '[binary] ' : '') . $msg->data;
 
-            // Fan out to everyone except the sender.
-            foreach ($room as $peer) {
-                if ($peer !== $ws) {
-                    $peer->trySend($line);
-                }
-            }
-        }
-    } finally {
-        $room->detach($ws);
+        // Fan out to everyone except the sender — across all four workers.
+        $ws->publish('chat', $line);
     }
 });
 

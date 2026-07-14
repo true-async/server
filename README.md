@@ -44,7 +44,7 @@ This means you can serve a REST API over HTTP/2, push real-time events over Serv
 | ✅ Ready | **HTTP/2** | Multiplexing, server push (via nghttp2) |
 | ✅ Ready | **HTTP/3 / QUIC** | UDP transport via ngtcp2 + nghttp3; OpenSSL 3.5 QUIC API |
 | ✅ Ready | **Compression** | gzip (zlib-ng / zlib), Brotli, zstd — response encoding + inbound decode across H1/H2/H3. Server-side preference `zstd > br > gzip`; per-codec level setters. See [docs/COMPRESSION.md](docs/COMPRESSION.md). |
-| ✅ Ready | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure — 246/246 Autobahn conformance |
+| ✅ Ready | **WebSocket** | RFC 6455, upgrade from HTTP/1.1 and HTTP/2 (RFC 8441 Extended CONNECT), `wss://`, permessage-deflate (RFC 7692), full duplex, backpressure, cross-worker pub/sub topics with MQTT filters — 246/246 Autobahn conformance |
 | ✅ Ready | **SSE (Server-Sent Events)** | `text/event-stream` framing (WHATWG §9.2) over H1/H2/H3 via `HttpResponse::sseStart/sseEvent/sseComment/sseRetry` |
 | ✅ Ready | **gRPC** | Over HTTP/2 **and** HTTP/3 via `addGrpcHandler()` — unary + all streaming shapes incl. full-duplex bidi (`readMessage`/`writeMessage`), `grpc-status`/`grpc-message` trailers + Trailers-Only, `grpc-timeout`, per-message gzip, grpc-web + grpc-web-text (in-body `0x80` trailer frame; per-frame base64 for web-text), works under the reactor pool |
 

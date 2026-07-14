@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-worker WebSocket topics (#2).** `WebSocket::subscribe()`,
+  `unsubscribe()`, `getTopics()`, `publish()`, `publishBinary()` and
+  `subscriberCount()`. A publish reaches subscribers on every worker of the
+  process; until now it could only reach peers of the sending worker (a worker is
+  a thread with its own PHP context), so a chat had to run `setWorkers(1)`.
+- Topic filters follow MQTT: `+` is exactly one level, `#` is the rest — so
+  `chat/+/typing` or `user/42/#` are subscriptions. A publish topic must be
+  concrete. Membership lives in the connection, and a topic is a string at the
+  call site: there is no topic object to obtain, hold or pass into a handler.
+- Share-nothing: each worker matches publishes against its own topic tree, and a
+  session pointer never crosses a thread. `subscriberCount()` is a
+  scatter/gather over the workers, so it is a snapshot, not a live counter.
+- Topics work on every WebSocket transport, not just plaintext HTTP/1: over TLS,
+  over HTTP/2 Extended CONNECT (where a session is bound to a stream, so a
+  publish reaches the sibling streams of the publisher's own connection), and
+  with permessage-deflate — one `publish()` serves a compressed peer and a plain
+  one side by side, each with the framing it negotiated. A publish to a peer whose
+  socket is backed up drops the message rather than queueing it, and never
+  suspends, so one dead reader cannot stall delivery to everyone else.
+- **Interest filter on publish.** Each worker summarises its subscriptions in a
+  counting Bloom filter of topic prefixes, and a publisher skips the workers that
+  cannot match, instead of waking all of them. A publish to a topic nobody in the
+  process listens to now costs zero cross-worker wake-ups instead of one per
+  worker; wildcard subscribers are still always reached.
+- `HttpServer::getRuntimeStats()` reports `ws_topic_posted`, `ws_topic_skipped`
+  and `ws_topic_dropped`.
+- `HttpServerConfig::setWsMaxSubscriptions()` caps the distinct topic filters one
+  connection may hold. Default 0 — no limit, the same default every self-hosted
+  broker ships (EMQX `max_subscriptions`, NATS `max_subs`), because only the
+  application knows how many topics it needs. Over the cap the filter is refused
+  and the connection stays up, as EMQX answers with SUBACK 0x97 and NATS with
+  `-ERR 'Maximum Subscriptions Exceeded'`.
+- **`HttpServerConfig::setWsPublishRateLimit()` — a leash on `publish()` (#120).**
+  Per-connection token bucket, off by default (as EMQX ships `messages_rate`).
+  `publish()` is the one WebSocket call an unprivileged peer can turn into work on
+  *every* worker in the process — `send()`/`trySend()` only ever touch its own
+  socket. Unmetered, one client looping on a relayed message fills every worker's
+  inbox, and the drops that follow take out *other* topics' traffic too. Over the
+  rate `publish()` throws `WebSocketBackpressureException` and the connection
+  stays up: the sender is told, rather than the message vanishing into a full
+  mailbox where nobody can see it.
+
 - **Observability — telemetry metrics + logging redesign (#5).** Metrics are
   read through a plain PHP array (no embedded exporters); logs fan out to
   pluggable sinks.
@@ -190,6 +232,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`stop()` crashed when a subscriber was still connected (#2).** The worker let
+  go of its topic tree before the scope drain destroyed the sessions — and a
+  session unsubscribes itself as it is destroyed, so the teardown walked freed
+  nodes. SIGSEGV on any stop() with a live subscriber.
+- **Topics were unusable past 64 workers (#2).** `setWorkers()` allows 1024 but
+  the hub had 64 slots, so workers beyond that got no topic tree: `subscribe()`
+  threw and `publish()` quietly did nothing. The slot table matches
+  `setWorkers()` now, and a worker that still cannot attach fails to start rather
+  than serving half a feature.
+- A connection reaches its topic hub through its own **server** now, not through
+  a thread-global — per-server state belongs in the server (CODING_STANDARDS §1.2).
+- Topic filters may be 128 levels deep, up from 32 — the ceiling EMQX uses.
+- **A full worker mailbox dropped topic traffic silently.** Publishes that cannot
+  be handed to a worker are counted (`ws_topic_dropped`) instead of vanishing.
 - **A pool cohort outliving a cancelled parent (#117).** `Async\graceful_shutdown()`
   cancels the pool parent's await while its workers are still serving, and nothing
   in the engine stops a *busy* worker — closing the pool's task channel only reaches

@@ -12,6 +12,8 @@
 
 #include "php.h"
 #include "websocket/ws_session.h"
+#include "websocket/ws_hub.h"
+#include "websocket/ws_topic_tree.h"
 #include "websocket/websocket_strategy.h"  /* ws_strategy_get_session — drain hook */
 #include "core/async_plain_event.h"        /* in-thread coroutine wakeup event */
 #include "core/http_connection.h"
@@ -861,6 +863,142 @@ bool ws_session_transport_sendable(const ws_session_t *session)
     return session->transport->sendable(session->transport_ctx);
 }
 
+bool ws_publish_allowed(http_connection_t *conn)
+{
+    const http_server_config_t *const cfg = conn != NULL
+        ? http_server_get_config(conn->server) : NULL;
+
+    const uint32_t rate = cfg != NULL ? cfg->ws_publish_rate : 0;
+
+    if (rate == 0) {
+        return true;   /* limit off — the default */
+    }
+
+    /* A rate finer than one message per nanosecond is not a rate. */
+    const uint64_t cost  = rate < 1000000000u ? 1000000000ULL / rate : 1;
+    const uint32_t burst = cfg->ws_publish_burst != 0 ? cfg->ws_publish_burst : rate;
+    const uint64_t cap   = cost * (uint64_t) burst;
+
+    const uint64_t now = http_now_coarse_ns();
+
+    /* First publish on this connection starts with a full bucket, so a handler
+     * that fans out once on connect is never the one that gets refused. */
+    if (conn->ws_publish_stamp_ns == 0) {
+        conn->ws_publish_credit_ns = cap;
+    } else if (now > conn->ws_publish_stamp_ns) {
+        conn->ws_publish_credit_ns += now - conn->ws_publish_stamp_ns;
+
+        if (conn->ws_publish_credit_ns > cap) {
+            conn->ws_publish_credit_ns = cap;
+        }
+    }
+
+    conn->ws_publish_stamp_ns = now;
+
+    if (conn->ws_publish_credit_ns < cost) {
+        return false;
+    }
+
+    conn->ws_publish_credit_ns -= cost;
+
+    return true;
+}
+
+ws_send_rc_t ws_session_queue_and_flush(ws_session_t *session, const uint8_t opcode,
+                                        const char *data, const size_t len,
+                                        const bool internal)
+{
+    int rc;
+
+#ifdef HAVE_HTTP_COMPRESSION
+    /* wslay copies the payload it is handed, so `comp` is freed at once. */
+    if (session->pmce_enabled) {
+        smart_str comp = {0};
+
+        if (ws_session_pmce_deflate(session, data, len, &comp) != 0) {
+            smart_str_free(&comp);
+            return WS_SEND_DEFLATE_FAILED;
+        }
+
+        rc = ws_session_queue_payload(session, opcode,
+            comp.s ? ZSTR_VAL(comp.s) : "", comp.s ? ZSTR_LEN(comp.s) : 0,
+            WSLAY_RSV1_BIT);
+        smart_str_free(&comp);
+    } else
+#endif
+    {
+        rc = ws_session_queue_payload(session, opcode, data, len, WSLAY_RSV_NONE);
+    }
+
+    if (rc != 0) {
+        return WS_SEND_QUEUE_FAILED;
+    }
+
+    if (session->flushing) {
+        /* Another coroutine already drives the flusher; it will pick up the
+         * message we just enqueued. */
+        return WS_SEND_OK;
+    }
+
+    /* Pin the connection across the flush. wslay_event_send may suspend the
+     * producer inside http_connection_send (socket backpressure); if the owning
+     * handler coroutine exits meanwhile (or a user-spawned writer holds the
+     * flusher role past the handler), teardown must NOT free the session out
+     * from under the suspended flusher — that frees the wslay context and the
+     * next send_callback writes through freed memory. */
+    http_connection_t *const conn = session->conn;
+
+    if (conn != NULL) {
+        conn->handler_refcount++;
+    }
+
+    session->flushing = 1;
+
+    if (internal) {
+        session->internal_send = 1;
+    }
+
+    const int drc = ws_session_drive_send(session);
+
+    if (internal) {
+        session->internal_send = 0;
+    }
+
+    session->flushing = 0;
+
+    /* Still safe — the pin is held, so the session is alive. */
+    ws_session_notify_writable(session);
+
+    /* Releasing the pin may run the deferred teardown, which frees the session.
+     * Nothing below this may touch it. */
+    if (conn != NULL) {
+        if (conn->handler_refcount > 0) {
+            conn->handler_refcount--;
+        }
+
+        http_connection_destroy_if_idle_deferred(conn);
+    }
+
+    return drc == 0 ? WS_SEND_OK : WS_SEND_WRITE_FAILED;
+}
+
+bool ws_session_try_send(ws_session_t *session, const char *data, const size_t len,
+                         const bool binary)
+{
+    if (session->ctx == NULL || session->write_error || session->peer_closed) {
+        return false;
+    }
+
+    if (!ws_session_transport_sendable(session)
+        || ws_session_over_highwater(session)) {
+        return false;
+    }
+
+    const uint8_t opcode = binary ? WSLAY_BINARY_FRAME : WSLAY_TEXT_FRAME;
+
+    return ws_session_queue_and_flush(session, opcode, data, len, true) == WS_SEND_OK;
+}
+
 ws_writable_t ws_session_wait_writable(ws_session_t *session, uint32_t timeout_ms)
 {
     if (!ws_session_over_highwater(session)) {
@@ -932,6 +1070,7 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
     s->conn          = conn;
     s->transport     = transport;
     s->transport_ctx = transport_ctx;
+    s->hub           = conn != NULL ? http_server_get_ws_hub(conn->server) : NULL;
 
     static const struct wslay_event_callbacks cb = {
         .recv_callback         = ws_session_recv_callback,
@@ -1008,6 +1147,10 @@ void ws_session_destroy(ws_session_t *session)
     if (session == NULL) {
         return;
     }
+
+    /* Single teardown point for both transports — H1 via the strategy, H2 via
+     * the stream — so a subscription cannot outlive the session. */
+    ws_topic_unsubscribe_all(ws_hub_tree(session->hub), session);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct

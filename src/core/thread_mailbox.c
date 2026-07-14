@@ -97,6 +97,23 @@ fail:
     return NULL;
 }
 
+void thread_mailbox_drain_pending(thread_mailbox_t *mb)
+{
+    if (mb == NULL) {
+        return;
+    }
+
+    for (;;) {
+        const size_t n = thread_mpsc_drain(mb->queue, mb->batch_buf, mb->batch);
+
+        if (n == 0) {
+            break;
+        }
+
+        mb->on_drain(mb->batch_buf, n, mb->arg);
+    }
+}
+
 void thread_mailbox_free(thread_mailbox_t *mb)
 {
     if (mb == NULL) {

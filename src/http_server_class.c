@@ -32,6 +32,17 @@
 #include "core/reactor_pool.h"
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "websocket/ws_hub.h"
+# include "websocket/php_websocket.h"
+#else
+/* Topics are a WebSocket feature; without it the hub calls compile away. */
+# define ws_hub_create()      NULL
+# define ws_hub_release(hub)  ((void)(hub))
+# define ws_hub_attach(hub)   (-1)
+# define ws_hub_detach(hub)   ((void)(hub))
+# define WS_HUB_MAX_WORKERS   0
+#endif
 #include "core/stats_registry.h"
 #include "core/response_wire.h"
 #include "core/stream_credit.h"
@@ -493,6 +504,12 @@ struct http_server_object {
      * task channel, drain the old worker cohort, and resubmit fresh start()
      * tasks. NULL outside pool mode; owned ref released in start_pool cleanup. */
     zend_async_thread_pool_t *worker_pool;
+
+    /* Cross-worker WebSocket topics (ws_hub.h, issue #2). The pointer is fanned
+     * out to the worker clones through the transfer shells; a clone borrows it
+     * and never releases. */
+    void                    *ws_hub;
+    bool                     ws_hub_owner;
 
     /* Pool control channel (issue #117), created by start_pool and fanned out to
      * the clones through the transfer shells. */
@@ -1390,6 +1407,11 @@ http_server_config_t *http_server_get_config(http_server_object *server)
 
     if (Z_TYPE(server->config) != IS_OBJECT) return NULL;
     return http_server_config_from_obj(Z_OBJ(server->config));
+}
+
+void *http_server_get_ws_hub(http_server_object *server)
+{
+    return server != NULL ? server->ws_hub : NULL;
 }
 
 http_log_state_t *http_server_get_log_state(http_server_object *server)
@@ -3370,6 +3392,11 @@ static int http_server_start_pool(http_server_object *server,
 
     server->pool_ctl = pool_ctl;
 
+    if (server->ws_hub == NULL) {
+        server->ws_hub       = ws_hub_create();
+        server->ws_hub_owner = true;
+    }
+
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
     pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
@@ -4273,6 +4300,27 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * per-await read-timeout creation. Failure here is non-fatal. */
     http_server_deadline_tick_start(server);
 
+    /* Topics (issue #2). Attach needs a live reactor on this thread, which we
+     * have here — the mailbox handle is created on it. */
+    if (server->ws_hub == NULL && !server->is_worker_clone) {
+        server->ws_hub = ws_hub_create();
+        server->ws_hub_owner = true;
+    }
+
+    /* A worker that fails to attach gets no topic tree, and then every
+     * subscribe() on it throws while every publish() quietly does nothing. That
+     * is worse than not starting, so it is fatal rather than a degradation. */
+    const bool ws_hub_attached = server->ws_hub != NULL
+        && ws_hub_attach(server->ws_hub) >= 0;
+
+    if (server->ws_hub != NULL && !ws_hub_attached) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Failed to attach this worker to the WebSocket topic hub: all %d slots "
+            "are taken",
+            WS_HUB_MAX_WORKERS);
+        RETURN_FALSE;
+    }
+
     /* Create wait event and suspend until stop() is called */
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
@@ -4320,6 +4368,13 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     http_server_pool_ctl_leave(server);
 
     if (UNEXPECTED(bailout)) {
+        /* Nothing drains here — the sessions are torn down later, during request
+         * shutdown, with the tree already gone. ws_topic_unsubscribe_all copes
+         * with that; it is the one path where it has to. */
+        if (ws_hub_attached) {
+            ws_hub_detach(server->ws_hub);
+        }
+
         zend_bailout();
     }
 
@@ -4327,6 +4382,14 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * on the start() coroutine and can suspend, so server_scope is empty when
      * the object is freed (issue #74). On bailout we already longjmp'd above. */
     http_server_drain_scope(server);
+
+    /* Only now: a WebSocket session unsubscribes itself as it is destroyed, and
+     * the drain above is what destroys them. Detaching first frees the topic
+     * tree out from under that teardown, which walks it — SIGSEGV on any stop()
+     * with a subscriber still connected. */
+    if (ws_hub_attached) {
+        ws_hub_detach(server->ws_hub);
+    }
 
     RETURN_TRUE;
 }
@@ -5545,6 +5608,15 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
     add_assoc_zval(return_value, "body_pool", &body_pool_zv);
     add_assoc_long(return_value, "body_pool_total_bytes",
                    (zend_long)total_pool_bytes);
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    ws_hub_stats_t ws;
+    ws_hub_get_stats(server->ws_hub, &ws);
+
+    add_assoc_long(return_value, "ws_topic_posted",  (zend_long)ws.posted);
+    add_assoc_long(return_value, "ws_topic_skipped", (zend_long)ws.skipped);
+    add_assoc_long(return_value, "ws_topic_dropped", (zend_long)ws.dropped);
+#endif
 }
 /* }}} */
 
@@ -5741,6 +5813,12 @@ static void http_server_free(zend_object *obj)
     if (server->worker_inbox != NULL) {
         worker_inbox_free(server->worker_inbox);
         server->worker_inbox = NULL;
+    }
+
+    if (server->ws_hub_owner) {
+        ws_hub_release(server->ws_hub);
+        server->ws_hub       = NULL;
+        server->ws_hub_owner = false;
     }
 
     /* Release this worker's stats slab slot (no-op for a standalone/parent
@@ -6030,6 +6108,10 @@ static zend_object *http_server_transfer_obj(
                sizeof(dst_shell->pool_tcp_fds));
         dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
 
+        /* Topic hub (issue #2): plain pointer copy — it is owned by the pool
+         * parent and outlives every clone. */
+        dst_shell->ws_hub        = src->ws_hub;
+
         /* Control channel (issue #117). The shell holds a ref; the clone it
          * loads into takes its own. */
         dst_shell->pool_ctl      = src->pool_ctl;
@@ -6058,6 +6140,9 @@ static zend_object *http_server_transfer_obj(
      * the standalone event loop, otherwise we'd recursively spawn a
      * fresh ThreadPool on every worker. */
     dst_obj->is_worker_clone = true;
+
+    /* Topic hub (issue #2): the clone borrows the parent's and never frees it. */
+    dst_obj->ws_hub = src_shell->ws_hub;
 
     /* Control channel (issue #117): the clone joins it from start() on its own
      * thread — the wakeup is a libuv handle and can only be created there. The
