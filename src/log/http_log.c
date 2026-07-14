@@ -265,13 +265,79 @@ static void sb_put_text_safe(log_sbuf_t *sb, const char *s, size_t n)
     }
 }
 
-/* JSON string per RFC 8259: quote and escape the mandatory controls. */
+/* Bytes of the well-formed UTF-8 sequence at `s` (at most `n`), or 0 when the
+ * lead byte, a continuation byte, or the range is invalid. Rejects overlong
+ * forms, surrogates and >U+10FFFF per RFC 3629 so a pass-through cannot smuggle
+ * malformed UTF-8 into the JSON string. */
+static size_t utf8_seq_len(const unsigned char *s, const size_t n)
+{
+    const unsigned char c = s[0];
+
+    if ((c & 0xe0) == 0xc0) {
+        return c >= 0xc2 && n >= 2 && (s[1] & 0xc0) == 0x80 ? 2 : 0;
+    }
+
+    if ((c & 0xf0) == 0xe0) {
+        if (n < 3 || (s[1] & 0xc0) != 0x80 || (s[2] & 0xc0) != 0x80) {
+            return 0;
+        }
+
+        if (c == 0xe0 && s[1] < 0xa0) {   /* overlong */
+            return 0;
+        }
+
+        if (c == 0xed && s[1] >= 0xa0) {  /* UTF-16 surrogate half */
+            return 0;
+        }
+
+        return 3;
+    }
+
+    if ((c & 0xf8) == 0xf0) {
+        if (c > 0xf4 || n < 4 || (s[1] & 0xc0) != 0x80
+            || (s[2] & 0xc0) != 0x80 || (s[3] & 0xc0) != 0x80) {
+            return 0;
+        }
+
+        if (c == 0xf0 && s[1] < 0x90) {   /* overlong */
+            return 0;
+        }
+
+        if (c == 0xf4 && s[1] >= 0x90) {  /* > U+10FFFF */
+            return 0;
+        }
+
+        return 4;
+    }
+
+    return 0;
+}
+
+/* JSON string per RFC 8259: quote and escape the mandatory controls. A JSON
+ * string must be valid UTF-8, but request-derived fields (path, header values)
+ * are raw client bytes — a multi-byte sequence passes through intact, an
+ * invalid byte becomes U+FFFD, the same substitution php_json_encode makes with
+ * JSON_INVALID_UTF8_SUBSTITUTE. */
 static void sb_put_json_str(log_sbuf_t *sb, const char *s, size_t n)
 {
     sb_putc(sb, '"');
 
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
+    for (size_t i = 0; i < n; ) {
+        const unsigned char c = (unsigned char)s[i];
+
+        if (c >= 0x80) {
+            const size_t seq = utf8_seq_len((const unsigned char *)s + i, n - i);
+
+            if (seq == 0) {
+                sb_puts(sb, "\xef\xbf\xbd");   /* U+FFFD, replaces one bad byte */
+                i++;
+            } else {
+                sb_write(sb, s + i, seq);
+                i += seq;
+            }
+
+            continue;
+        }
 
         switch (c) {
             case '"':  sb_puts(sb, "\\\""); break;
@@ -288,6 +354,8 @@ static void sb_put_json_str(log_sbuf_t *sb, const char *s, size_t n)
                     sb_putc(sb, (char)c);
                 }
         }
+
+        i++;
     }
 
     sb_putc(sb, '"');
