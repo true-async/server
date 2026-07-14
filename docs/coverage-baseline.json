@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 21492,
-      "hit": 17692
+      "total": 22252,
+      "hit": 18431
     },
     "functions": {
-      "total": 1477,
-      "hit": 1339
+      "total": 1550,
+      "hit": 1413
     }
   },
   "files": {
@@ -103,11 +103,11 @@
     "src/core/body_pool.c": {
       "lines": {
         "total": 66,
-        "hit": 54
+        "hit": 63
       },
       "functions": {
         "total": 6,
-        "hit": 5
+        "hit": 6
       }
     },
     "src/core/body_pool.h": {
@@ -123,17 +123,17 @@
     "src/core/conn_arena.c": {
       "lines": {
         "total": 63,
-        "hit": 54
+        "hit": 62
       },
       "functions": {
         "total": 6,
-        "hit": 5
+        "hit": 6
       }
     },
     "src/core/http_connection.c": {
       "lines": {
         "total": 1051,
-        "hit": 794
+        "hit": 791
       },
       "functions": {
         "total": 65,
@@ -163,7 +163,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 358,
-        "hit": 264
+        "hit": 263
       },
       "functions": {
         "total": 22,
@@ -203,7 +203,7 @@
     "src/core/http_protocol_strategy.h": {
       "lines": {
         "total": 6,
-        "hit": 4
+        "hit": 6
       },
       "functions": {
         "total": 0,
@@ -252,12 +252,12 @@
     },
     "src/core/thread_mailbox.c": {
       "lines": {
-        "total": 110,
-        "hit": 81
+        "total": 116,
+        "hit": 85
       },
       "functions": {
-        "total": 12,
-        "hit": 10
+        "total": 13,
+        "hit": 11
       }
     },
     "src/core/tls_layer.c": {
@@ -423,11 +423,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 905,
-        "hit": 749
+        "hit": 746
       },
       "functions": {
         "total": 48,
-        "hit": 42
+        "hit": 41
       }
     },
     "src/http3/http3_connection.c": {
@@ -463,7 +463,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 666,
-        "hit": 505
+        "hit": 509
       },
       "functions": {
         "total": 46,
@@ -473,17 +473,17 @@
     "src/http3/http3_packet.c": {
       "lines": {
         "total": 115,
-        "hit": 98
+        "hit": 104
       },
       "functions": {
         "total": 13,
-        "hit": 11
+        "hit": 12
       }
     },
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 237,
-        "hit": 162
+        "hit": 165
       },
       "functions": {
         "total": 17,
@@ -672,22 +672,22 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 2412,
-        "hit": 1769
+        "total": 2440,
+        "hit": 1822
       },
       "functions": {
-        "total": 130,
-        "hit": 112
+        "total": 131,
+        "hit": 115
       }
     },
     "src/http_server_config.c": {
       "lines": {
-        "total": 1609,
-        "hit": 1483
+        "total": 1657,
+        "hit": 1527
       },
       "functions": {
-        "total": 140,
-        "hit": 131
+        "total": 145,
+        "hit": 136
       }
     },
     "src/http_sse.c": {
@@ -792,12 +792,12 @@
     },
     "src/websocket/php_websocket.c": {
       "lines": {
-        "total": 530,
-        "hit": 410
+        "total": 605,
+        "hit": 477
       },
       "functions": {
-        "total": 39,
-        "hit": 31
+        "total": 48,
+        "hit": 40
       }
     },
     "src/websocket/websocket_strategy.c": {
@@ -830,14 +830,34 @@
         "hit": 6
       }
     },
-    "src/websocket/ws_session.c": {
+    "src/websocket/ws_hub.c": {
       "lines": {
-        "total": 479,
-        "hit": 429
+        "total": 279,
+        "hit": 257
       },
       "functions": {
-        "total": 33,
-        "hit": 33
+        "total": 25,
+        "hit": 25
+      }
+    },
+    "src/websocket/ws_session.c": {
+      "lines": {
+        "total": 537,
+        "hit": 485
+      },
+      "functions": {
+        "total": 36,
+        "hit": 36
+      }
+    },
+    "src/websocket/ws_topic_tree.c": {
+      "lines": {
+        "total": 266,
+        "hit": 233
+      },
+      "functions": {
+        "total": 29,
+        "hit": 26
       }
     }
   }
