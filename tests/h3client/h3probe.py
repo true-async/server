@@ -11,15 +11,27 @@ It prints one line the test can assert on:
 `outcome` is what h3client could not tell apart until it learned to report
 RESET_STREAM: a transfer the server aborts mid-body is NOT a short success.
 
-Usage: python3 h3probe.py <host> <port> <path>
+Usage: python3 h3probe.py <host> <port> <path> [max_stream_data] [progress_file]
+
+The two optional arguments exist for the mid-transfer tests, which need a
+transfer that is demonstrably still running when they act on it:
+
+  max_stream_data  caps the client's flow-control window (bytes), so the server
+                   cannot race the whole body onto the wire before the test
+                   reacts — it has to pace itself against a small window.
+  progress_file    the running received-byte count is written here as it grows,
+                   so a test can truncate the file the instant the transfer is
+                   underway rather than guess a sleep.
 """
-import asyncio, sys
+import asyncio, os, sys
 from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.h3.connection import H3Connection
 from aioquic.h3.events import HeadersReceived, DataReceived
 from aioquic.quic.events import StreamReset
+
+PROGRESS_FILE = None
 
 class Probe(QuicConnectionProtocol):
     def __init__(self, *a, **kw):
@@ -46,6 +58,7 @@ class Probe(QuicConnectionProtocol):
                 self.status = dict(e.headers).get(b":status", b"?").decode()
             elif isinstance(e, DataReceived):
                 self.bytes += len(e.data)
+                _note_progress(self.bytes)
                 if e.stream_ended:
                     self._finish("CLEAN_END")
 
@@ -54,8 +67,20 @@ class Probe(QuicConnectionProtocol):
             self.outcome = outcome
             self.done.set_result(True)
 
-async def main(host, port, path):
+def _note_progress(n):
+    if PROGRESS_FILE is None:
+        return
+    # Atomic replace so a poller never reads a half-written count.
+    tmp = PROGRESS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(n))
+    os.replace(tmp, PROGRESS_FILE)
+
+async def main(host, port, path, max_stream_data):
     cfg = QuicConfiguration(is_client=True, alpn_protocols=["h3"], verify_mode=0)
+    if max_stream_data:
+        cfg.max_stream_data = max_stream_data
+        cfg.max_data = max_stream_data
     async with connect(host, port, configuration=cfg, create_protocol=Probe) as p:
         p.get(host, path)
         try:
@@ -64,4 +89,6 @@ async def main(host, port, path):
             p.outcome = "TIMEOUT"
         print(f"status={p.status} bytes={p.bytes} outcome={p.outcome}")
 
-asyncio.run(main(sys.argv[1], int(sys.argv[2]), sys.argv[3]))
+_max_stream_data = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+PROGRESS_FILE = sys.argv[5] if len(sys.argv) > 5 else None
+asyncio.run(main(sys.argv[1], int(sys.argv[2]), sys.argv[3], _max_stream_data))
