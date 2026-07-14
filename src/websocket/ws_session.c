@@ -863,10 +863,10 @@ bool ws_session_transport_sendable(const ws_session_t *session)
     return session->transport->sendable(session->transport_ctx);
 }
 
-bool ws_session_publish_allowed(ws_session_t *session)
+bool ws_publish_allowed(http_connection_t *conn)
 {
-    const http_server_config_t *const cfg = session->conn != NULL
-        ? http_server_get_config(session->conn->server) : NULL;
+    const http_server_config_t *const cfg = conn != NULL
+        ? http_server_get_config(conn->server) : NULL;
 
     const uint32_t rate = cfg != NULL ? cfg->ws_publish_rate : 0;
 
@@ -874,31 +874,32 @@ bool ws_session_publish_allowed(ws_session_t *session)
         return true;   /* limit off — the default */
     }
 
-    const uint64_t cost  = 1000000000ULL / rate;
+    /* A rate finer than one message per nanosecond is not a rate. */
+    const uint64_t cost  = rate < 1000000000u ? 1000000000ULL / rate : 1;
     const uint32_t burst = cfg->ws_publish_burst != 0 ? cfg->ws_publish_burst : rate;
-    const uint64_t cap   = cost * burst;
+    const uint64_t cap   = cost * (uint64_t) burst;
 
     const uint64_t now = http_now_coarse_ns();
 
     /* First publish on this connection starts with a full bucket, so a handler
      * that fans out once on connect is never the one that gets refused. */
-    if (session->publish_stamp_ns == 0) {
-        session->publish_credit_ns = cap;
-    } else if (now > session->publish_stamp_ns) {
-        session->publish_credit_ns += now - session->publish_stamp_ns;
+    if (conn->ws_publish_stamp_ns == 0) {
+        conn->ws_publish_credit_ns = cap;
+    } else if (now > conn->ws_publish_stamp_ns) {
+        conn->ws_publish_credit_ns += now - conn->ws_publish_stamp_ns;
 
-        if (session->publish_credit_ns > cap) {
-            session->publish_credit_ns = cap;
+        if (conn->ws_publish_credit_ns > cap) {
+            conn->ws_publish_credit_ns = cap;
         }
     }
 
-    session->publish_stamp_ns = now;
+    conn->ws_publish_stamp_ns = now;
 
-    if (session->publish_credit_ns < cost) {
+    if (conn->ws_publish_credit_ns < cost) {
         return false;
     }
 
-    session->publish_credit_ns -= cost;
+    conn->ws_publish_credit_ns -= cost;
 
     return true;
 }

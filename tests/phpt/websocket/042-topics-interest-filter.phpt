@@ -60,7 +60,7 @@ spawn(function () use ($port, $server) {
     $conns = [];
     for ($i = 0; $i <= PEERS; $i++) {
         $fp = ws_open($port);
-        if ($fp === null) { echo "handshake failed\n"; posix_kill(getmypid(), SIGKILL); }
+        if ($fp === null) { echo "handshake failed\n"; $server->stop(); return; }
         $conns[] = $fp;
     }
 
@@ -131,8 +131,7 @@ spawn(function () use ($port, $server) {
 
     foreach ($conns as $fp) { fclose($fp); }
 
-    /* The pool parent cannot stop() itself (issue #11) — same exit as 038. */
-    posix_kill(getmypid(), SIGKILL);
+    $server->stop();
 });
 
 $server->start();

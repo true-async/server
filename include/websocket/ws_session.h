@@ -92,13 +92,6 @@ typedef struct ws_session_t {
     struct ws_topic_sub  *topics;
     uint64_t              topic_mark;
 
-    /* Token bucket over publish() (issue #120), off unless configured. Credit is
-     * carried in NANOSECONDS of allowance, not in whole tokens: the coarse clock
-     * ticks every 4-10ms, so integer tokens would round away to nothing at any
-     * rate finer than that. */
-    uint64_t              publish_credit_ns;
-    uint64_t              publish_stamp_ns;
-
     /* Borrowed back-pointer for callbacks. The session's lifetime is
      * a strict subset of conn's, so no refcount needed. For H2 this is
      * session->conn (shared) — config + remote-addr still resolve. */
@@ -334,10 +327,12 @@ bool ws_session_over_highwater(const ws_session_t *session);
 
 bool ws_session_transport_sendable(const ws_session_t *session);
 
-/* Spends one publish token (issue #120). False = this connection is over its
- * configured rate and the message must NOT go out. Always true when the limit is
- * off, which is the default. Never suspends. */
-bool ws_session_publish_allowed(ws_session_t *session);
+/* Spends one publish token (issue #120). False = this CONNECTION is over its
+ * configured rate and the message must NOT go out. Takes the connection, not the
+ * session: H2 puts many sessions on one TCP, and metering per session would let a
+ * client multiply its allowance by the number of streams it opens. Always true
+ * when the limit is off, which is the default. Never suspends. */
+bool ws_publish_allowed(http_connection_t *conn);
 
 typedef enum {
     WS_SEND_OK = 0,

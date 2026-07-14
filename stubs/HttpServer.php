@@ -99,6 +99,13 @@ final class HttpServer
      * Stops accepting new connections, waits for active requests to complete
      * (up to shutdown timeout), then closes all connections.
      *
+     * On a pool parent (setWorkers(N), N > 1) this retires every worker and
+     * suspends until the pool is down (issue #117), so when it returns the
+     * server is really gone and start() has come back. Call it from a coroutine
+     * — a SIGTERM/SIGINT handler is the usual place. On a standalone server it
+     * does not suspend: it is normally called from a request handler, which the
+     * shutdown drain itself waits on.
+     *
      * @return bool True if stopped successfully
      */
     public function stop(): bool {}

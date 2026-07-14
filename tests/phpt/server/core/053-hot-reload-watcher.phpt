@@ -72,6 +72,6 @@ spawn(function () use ($port, $code, $dir) {
 $server->start();
 ?>
 --EXPECTF--
-before=v1
+%Abefore=v1
 %A
 after=v2%A

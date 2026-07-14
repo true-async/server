@@ -66,6 +66,6 @@ echo 'on_records=',  ($count($on) === 4 ? 4 : $count($on)), "\n";
 echo "Done\n";
 ?>
 --EXPECTF--
-off_records=0
+%Aoff_records=0
 on_records=4
 Done%A

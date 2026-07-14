@@ -45,7 +45,20 @@ echo 'configured rate: ', $config->getWsPublishRateLimit(),
 $server = new HttpServer($config);
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
+    /* BEFORE any WS I/O — no session exists yet. The bucket lives on the
+     * CONNECTION, so a handler that publishes without ever calling recv/send/
+     * subscribe is metered all the same; metering the session would have let this
+     * loop run unbounded and defeat the limit outright. */
+    $early    = 0;
+    $earlyOff = 0;
+
+    for ($i = 0; $i < 20; $i++) {
+        try { $ws->publish('room', 'pre'); $early++; }
+        catch (WebSocketBackpressureException $e) { $earlyOff++; }
+    }
+
     $ws->subscribe('room');
+    $ws->send("before any I/O: published=$early throttled=$earlyOff");
 
     foreach ($ws as $msg) {
         /* Flood: the bucket starts full, so the first BURST go out and the rest
@@ -77,6 +90,8 @@ spawn(function () use ($port, $server) {
     $fp = ws_open($port);
     if ($fp === null) { echo "handshake failed\n"; return; }
 
+    echo ws_await($fp, 10000), "\n";   // the pre-I/O report
+
     ws_write($fp, 'go');
 
     $line = ws_await($fp, 10000);
@@ -90,8 +105,9 @@ spawn(function () use ($port, $server) {
 
     [$sent, $refused] = [(int) $m[1], (int) $m[2]];
 
-    echo 'burst went through: ', $sent === BURST ? 'yes' : "no ($sent)", "\n";
-    echo 'the flood was refused: ', $refused === FLOOD - BURST ? 'yes' : "no ($refused)", "\n";
+    /* The pre-I/O burst already drained the bucket, so this second flood is
+     * refused almost entirely — what matters is that it IS metered. */
+    echo 'flood was throttled: ', $refused > 0 && $sent + $refused === FLOOD ? 'yes' : "no ($sent/$refused)", "\n";
     echo 'connection survived: yes', "\n";
     echo ws_await($fp, 10000), "\n";
 
@@ -104,7 +120,7 @@ $server->start();
 --EXPECTF--
 default rate limit: 0
 configured rate: 10 burst: 5
-burst went through: yes
-the flood was refused: yes
+before any I/O: published=5 throttled=15
+flood was throttled: yes
 connection survived: yes
 after refill: ok%A

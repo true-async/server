@@ -237,6 +237,15 @@ struct _http_connection_t {
     uint64_t                 drain_not_before_ns;    /* effective drain time: proactive = age+jitter, reactive = now+spread_jitter */
     uint64_t                 drain_epoch_seen;       /* last server->drain_epoch_current this conn observed */
 
+    /* Token bucket over WebSocket::publish() (issue #120). On the CONNECTION, not
+     * on the WS session: H2 multiplexes many sessions onto one TCP, and a limit
+     * per session would let one client multiply its allowance by the number of
+     * streams it opens. Credit is carried in NANOSECONDS of allowance rather than
+     * whole tokens — the coarse clock ticks every few ms, and integer tokens would
+     * round away to nothing at any rate finer than that. Zeroed by the arena. */
+    uint64_t                 ws_publish_credit_ns;
+    uint64_t                 ws_publish_stamp_ns;
+
     /* Grace-timer slot (reserved for future implementation).
      * MVP deferral: with the default max_connection_age_grace_ns == 0
      * (infinite grace) no timer is armed anyway, so pathological-

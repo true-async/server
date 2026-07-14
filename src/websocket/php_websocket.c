@@ -1094,6 +1094,19 @@ static ws_session_t *ws_topic_session_of(zval *zv_this)
     return w->session;
 }
 
+/* The connection this WebSocket still legitimately owns, or NULL. `conn` is NOT
+ * cleared on teardown — only `session` and `closed` are — so a coroutine that
+ * outlived its handler (the spawned-writer pattern) would otherwise follow a
+ * pointer into a connection slot the arena has already handed to someone else. */
+static http_connection_t *ws_live_conn_of(const websocket_object *w)
+{
+    if (w->session != NULL) {
+        return w->session->conn;
+    }
+
+    return w->closed ? NULL : w->conn;
+}
+
 /* Usable before the upgrade is committed — publish() does not need a session. */
 static ws_hub_t *ws_topic_hub_of(const websocket_object *w)
 {
@@ -1101,7 +1114,9 @@ static ws_hub_t *ws_topic_hub_of(const websocket_object *w)
         return w->session->hub;
     }
 
-    return w->conn != NULL ? http_server_get_ws_hub(w->conn->server) : NULL;
+    http_connection_t *const conn = ws_live_conn_of(w);
+
+    return conn != NULL ? http_server_get_ws_hub(conn->server) : NULL;
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, subscribe)
@@ -1202,10 +1217,14 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
 
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
-    /* Throws rather than returning 0 (issue #120): a count of zero already means
+    /* Metered on the connection, so a handler that publishes without ever doing
+     * WS I/O — no session yet — cannot slip past the limit, and an H2 client
+     * cannot multiply its allowance by opening more streams.
+     *
+     * Throws rather than returning 0 (issue #120): a count of zero already means
      * "nobody subscribed here", and an over-rate message that quietly vanished is
      * exactly the failure the limit exists to make visible. */
-    if (w->session != NULL && !ws_session_publish_allowed(w->session)) {
+    if (!ws_publish_allowed(ws_live_conn_of(w))) {
         zend_throw_exception(websocket_backpressure_exception_ce,
             "Publish rate limit exceeded on this connection "
             "(HttpServerConfig::setWsPublishRateLimit)", 0);

@@ -152,6 +152,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`HH:MM:SS.mmm  LEVEL  message  key=val …`) whose colour is decided once at
     sink build from the target fd, honouring `NO_COLOR` / `CLICOLOR_FORCE`.
 
+- **`HttpServer::stop()` works in pool mode (#117).** Calling it on a pool
+  parent (`setWorkers(N)`, `N > 1`) used to throw. It now retires the whole
+  cohort and **blocks until the server is really down** — when it returns, the
+  workers have drained, the pool is torn down and the listen sockets are closed.
+  This is what makes a graceful `Async\signal(SIGTERM)` → `stop()` shutdown work
+  under the built-in worker pool. A standalone server's `stop()` keeps its old
+  non-suspending behaviour: it is typically called from a request handler, and
+  the shutdown drain waits on that handler — a blocking `stop()` there would be
+  waiting for itself.
+
 - **Client address on the request — `HttpRequest::getRemoteAddress(): ?string`
   and `HttpRequest::getRemotePort(): ?int`.** `getRemoteAddress()` returns the
   **bare IP** — no port, no brackets around an IPv6 literal — the same shape as
@@ -173,6 +183,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   classes.
 
 ### Changed
+
+- **Pool workers are commanded, not polled (#117).** `reload()` used to bump a
+  shared epoch that each worker read from its deadline-watchdog tick, which
+  forced that timer to fire at least once a second per worker even when every
+  timeout was disabled. The parent now reaches its workers over a control
+  channel — an atomic command plus one `uv_async` wakeup per worker — so
+  `reload()` and `stop()` land immediately instead of within a tick, and the
+  deadline watchdog is back to doing only its own job (its cadence again follows
+  the read/write/keepalive timeouts, up to 120 s when all of them are off).
+
+  The command is state rather than an edge, which also closes a latent hang: a
+  worker thread that started up *after* the epoch was bumped snapshotted the new
+  value and would never retire, leaving the parent waiting on it forever.
 
 - **Log sinks are owned by a dedicated log thread (#5).** A sink's descriptor,
   its write in flight and its flush timer now live on one consumer thread, and
@@ -223,6 +246,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Topic filters may be 128 levels deep, up from 32 — the ceiling EMQX uses.
 - **A full worker mailbox dropped topic traffic silently.** Publishes that cannot
   be handed to a worker are counted (`ws_topic_dropped`) instead of vanishing.
+- **A pool cohort outliving a cancelled parent (#117).** `Async\graceful_shutdown()`
+  cancels the pool parent's await while its workers are still serving, and nothing
+  in the engine stops a *busy* worker — closing the pool's task channel only reaches
+  one that is back at `recv`, and ours is inside `start()`. The parent used to walk
+  away and free the shared reload beacon under their feet; the workers then read the
+  freed memory, got a value that differed from the epoch they had snapshotted, and
+  self-stopped — which is why shutdown appeared to work. Now the parent commands the
+  cohort to retire before it leaves, and the control channel is refcounted so it
+  outlives every worker that is still reading it.
+
 - **A log sink whose receiver stopped reading broke process shutdown (#121).** With
   a stalled peer (a socket nobody drains, a wedged syslog collector) the sink's
   write never completed, so the log thread's final drain waited on it forever: the

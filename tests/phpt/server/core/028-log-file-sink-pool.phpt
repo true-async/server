@@ -71,7 +71,7 @@ echo "access records: ", $n, "\n";
 echo "with client.address: ", $ip, "\n";
 echo "Done\n";
 --EXPECTF--
-no-path: rejected
+no-path: rejected%A
 access records: 4
 with client.address: 4
 Done%A
