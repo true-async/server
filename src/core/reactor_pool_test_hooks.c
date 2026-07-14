@@ -1198,6 +1198,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_log_format_selftest, 0, 1,
     ZEND_ARG_TYPE_INFO(0, style, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, color, _IS_BOOL, 0, "false")
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, template, IS_STRING, 0, "\"\"")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, body, IS_STRING, 0, "\"\"")
 ZEND_END_ARG_INFO()
 
 /* Format a fixed canonical record (issue #5, B2/B3) with the named formatter
@@ -1213,12 +1214,15 @@ PHP_FUNCTION(_http_log_format_selftest)
     zend_bool   color = 0;
     char       *tmpl_arg = NULL;
     size_t      tmpl_len = 0;
+    char       *body_arg = NULL;
+    size_t      body_len = 0;
 
-    ZEND_PARSE_PARAMETERS_START(1, 3)
+    ZEND_PARSE_PARAMETERS_START(1, 4)
         Z_PARAM_STRING(style, style_len)
         Z_PARAM_OPTIONAL
         Z_PARAM_BOOL(color)
         Z_PARAM_STRING(tmpl_arg, tmpl_len)
+        Z_PARAM_STRING(body_arg, body_len)
     ZEND_PARSE_PARAMETERS_END();
 
     /* Resolve through the formatter registry — the same lookup setLogSinks
@@ -1277,6 +1281,13 @@ PHP_FUNCTION(_http_log_format_selftest)
         .attrs_count  = sizeof attrs / sizeof attrs[0],
         .has_trace    = true,
     };
+
+    /* Body override — lets a golden feed the record's body raw bytes (e.g.
+     * invalid UTF-8) to exercise the json escaper's substitution. */
+    if (body_len > 0) {
+        rec.body     = body_arg;
+        rec.body_len = body_len;
+    }
 
     for (uint8_t i = 0; i < sizeof rec.trace_id; i++) {
         rec.trace_id[i] = i;
