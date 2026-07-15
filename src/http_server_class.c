@@ -1459,7 +1459,9 @@ static void http_server_start_logging(http_server_object *server,
                 continue;
             }
 
-            if (!type->open(spec, &opened[n], &mode)) {
+            /* Parenthesized to keep win32_compat.h's `open` macro (Windows only)
+             * from rewriting this struct member into php_win32_ioutil_open(). */
+            if (!(type->open)(spec, &opened[n], &mode)) {
                 /* Unreachable target, or a parent-opened 'stream' resource
                  * that cannot cross into this worker thread (use 'file'). */
                 fprintf(stderr,
