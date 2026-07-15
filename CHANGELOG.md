@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-07-15
+
+### Fixed
+- **`enableWebSocket(true)` claimed WebSocket "is not yet implemented" (#134).** WebSocket has been fully implemented for a long time; like `enableHttp2()`, this toggle is deliberately rejected because the working path is `addWebSocketHandler()`. The exception now says "Use addWebSocketHandler() to enable WebSocket" instead of lying about missing support. Behaviour is unchanged — WebSocket is enabled by registering a handler.
+
 ## [0.11.1] - 2026-07-15
 
 ### Fixed
