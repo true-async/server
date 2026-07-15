@@ -1807,7 +1807,8 @@ ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler)
         return;
     }
 
-    /* Store handler - will be used when WebSocket support is implemented */
+    /* Registering the handler is what enables WebSocket — there is no
+     * separate flag to set (enableWebSocket() is a legacy no-op). */
     http_protocol_add_handler_internal(
         INTERNAL_FUNCTION_PARAM_PASSTHRU,
         &server->protocol_handlers,

@@ -2526,10 +2526,12 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, enableWebSocket)
         return;
     }
 
-    /* TODO: Implement WebSocket support */
+    /* enableWebSocket() is the legacy flag; the working path is
+     * addWebSocketHandler(). Reject the toggle so users land on the
+     * supported API rather than a silently-ignored flag. */
     if (enable) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "WebSocket support is not yet implemented", 0);
+            "Use addWebSocketHandler() to enable WebSocket", 0);
         return;
     }
 

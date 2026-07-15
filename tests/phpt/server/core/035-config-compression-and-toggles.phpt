@@ -111,7 +111,7 @@ ex('h2-enable-throws', fn() => $c->enableHttp2(true));
 $c->enableHttp2(false);
 echo "h2-off: ", $c->isHttp2Enabled() ? 'on' : 'off', "\n";
 
-/* ---- enableWebSocket: not implemented — enable(true) throws ---- */
+/* ---- enableWebSocket: legacy toggle — enable(true) throws, use addWebSocketHandler() ---- */
 $c = new HttpServerConfig();
 echo "ws-default: ", $c->isWebSocketEnabled() ? 'on' : 'off', "\n";
 ex('ws-enable-throws', fn() => $c->enableWebSocket(true));
