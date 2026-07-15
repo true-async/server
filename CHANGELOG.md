@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-15
+
+### Fixed
+- **MSVC build broke on the new log-sink `open` member (Windows x64 Release/Debug).** `win32_compat.h`'s `#define open(path, flags, ...) php_win32_ioutil_open(...)` textually rewrote `type->open(spec, &opened[n], &mode)` in `http_server_class.c`, since the preprocessor matches on the `open(` token regardless of the preceding `->`. The call is now parenthesized (`(type->open)(...)`) to suppress the macro expansion at this one call site; the macro itself is unchanged and still covers real `open()` calls elsewhere.
+
 ## [0.11.0] - 2026-07-15
 
 ### Added
