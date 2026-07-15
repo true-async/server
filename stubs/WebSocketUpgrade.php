@@ -14,15 +14,16 @@ namespace TrueAsync;
  * the handler returns successfully (in which case the 101 is
  * dispatched with whatever subprotocol setSubprotocol selected).
  *
- * Surface only available to handlers registered with three
- * parameters:
+ * Surface only available to handlers that declare a third
+ * parameter:
  *
  *   addWebSocketHandler(function (WebSocket $ws, HttpRequest $req,
  *                                 WebSocketUpgrade $u): void { ... });
  *
- * The arity is detected via Reflection at registration; the two-arg
- * form skips this object entirely and accepts the upgrade with
- * default settings.
+ * The handler is always called with three arguments and PHP drops
+ * the ones it does not declare, so a shorter handler simply never
+ * sees this object and the upgrade is accepted with default
+ * settings.
  *
  * Once the handshake commits, calls on this object throw —
  * subprotocol can no longer change once Sec-WebSocket-Protocol has
