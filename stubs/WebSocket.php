@@ -177,7 +177,8 @@ final class WebSocket implements \Iterator
      * Subscribe this connection to a topic filter. Idempotent.
      *
      * @param string $filter Topic filter; may contain `+` / `#` wildcards.
-     * @throws WebSocketException on a malformed filter.
+     * @throws WebSocketException on a malformed filter, or once the connection
+     *         already holds its HttpServerConfig::setWsMaxSubscriptions() limit.
      */
     public function subscribe(string $filter): void {}
 
@@ -213,6 +214,8 @@ final class WebSocket implements \Iterator
      *         other workers is asynchronous and cannot be counted here, so this
      *         is a local number, not a process-wide one.
      * @throws WebSocketException on a malformed topic, or one carrying a wildcard.
+     * @throws WebSocketBackpressureException when the connection is over its
+     *         HttpServerConfig::setWsPublishRateLimit(). The connection stays up.
      */
     public function publish(string $topic, string $text, bool $excludeSelf = true): int {}
 

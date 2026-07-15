@@ -33,9 +33,10 @@ final class WebSocketClosedException extends WebSocketException
 
 /**
  * Raised by send() / sendBinary() when the outbound queue stays over
- * the high-watermark for longer than write_timeout_ms. Catching this
- * is the application's signal to either close the connection (slow
- * consumer detected) or drop the message and continue.
+ * the high-watermark for longer than write_timeout_ms — a slow consumer —
+ * and by publish() when the connection is over its configured
+ * setWsPublishRateLimit(). Either way the connection stays up: catching
+ * this is the application's signal to drop the message, back off, or close.
  */
 final class WebSocketBackpressureException extends WebSocketException
 {
