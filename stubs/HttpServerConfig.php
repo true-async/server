@@ -873,10 +873,14 @@ final class HttpServerConfig
     public function isHttp2Enabled(): bool {}
 
     /**
-     * Enable WebSocket support (TODO)
+     * Legacy toggle. WebSocket is enabled by registering a handler with
+     * HttpServer::addWebSocketHandler() — there is no separate flag to set.
+     * enableWebSocket(true) therefore throws, pointing at that API;
+     * enableWebSocket(false) is a no-op that stores the flag.
      *
-     * @param bool $enable Enable WebSocket
+     * @param bool $enable
      * @return static
+     * @throws HttpServerRuntimeException when passed true
      */
     public function enableWebSocket(bool $enable): static {}
 

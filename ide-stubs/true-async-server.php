@@ -1393,10 +1393,15 @@ final class HttpServerConfig
     public function isHttp2Enabled(): bool {}
 
     /**
-     * Enable WebSocket support.
+     * Legacy toggle. WebSocket is enabled by registering a handler with
+     * {@see HttpServer::addWebSocketHandler()} — there is no separate flag to
+     * set. enableWebSocket(true) therefore throws, pointing you at that API;
+     * enableWebSocket(false) is a no-op that stores the flag. Mirrors
+     * {@see enableHttp2()}, which is enabled the same way (addHttp2Handler()).
      *
-     * @param bool $enable Enable WebSocket
+     * @param bool $enable
      * @return static
+     * @throws HttpServerRuntimeException when passed true
      */
     public function enableWebSocket(bool $enable): static {}
 
@@ -1675,9 +1680,9 @@ final class HttpServer
 
     /**
      * Add the WebSocket handler. Registering it is what turns WebSocket on —
-     * there is no separate switch to flip. (Note that
-     * {@see HttpServerConfig::enableWebSocket()} is an unimplemented stub that
-     * throws; do not call it.)
+     * there is no separate switch to flip, exactly like HTTP/2 and
+     * {@see HttpServer::addHttp2Handler()}. ({@see HttpServerConfig::enableWebSocket()}
+     * is only a legacy toggle and throws when passed true.)
      *
      * An HTTP handler is still required: start() refuses to come up without one,
      * and it is what answers the requests that are not upgrades.
