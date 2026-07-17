@@ -565,10 +565,10 @@ http_server_object *http_server_object_from_zend(zend_object *obj);
  * the config object's zval is held inside http_server_object. */
 http_server_config_t *http_server_get_config         (http_server_object *server);
 
-/* This server's WebSocket topic hub (ws_hub_t*, void to keep the build gate out
+/* This server's WebSocket topic hub (topic_hub_t*, void to keep the build gate out
  * of this header). NULL when the extension is built without WebSocket, or before
  * start(). */
-void *http_server_get_ws_hub(http_server_object *server);
+void *http_server_get_topic_hub(http_server_object *server);
 
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures
  * (http_connection_t, http3_connection_t, mp_processor_t) cache the

@@ -17,7 +17,7 @@
 #include "Zend/zend_async_API.h"
 #include "websocket/php_websocket.h"
 #include "websocket/ws_session.h"
-#include "websocket/ws_hub.h"
+#include "websocket/topic_hub.h"
 #include "websocket/ws_topic_tree.h"
 #include "websocket/ws_handshake.h"
 #include "websocket/websocket_strategy.h"
@@ -1073,7 +1073,7 @@ ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol)
 /* {{{ Topics (issue #2)
  *
  * A connection reaches the hub through its own server, so no topic handle has to
- * be minted, captured or carried into a handler; see ws_hub.h.
+ * be minted, captured or carried into a handler; see topic_hub.h.
  *
  * The session is built lazily, so subscribing has to commit the upgrade like
  * send()/recv() do: a handler that subscribes before its first I/O has none yet.
@@ -1108,7 +1108,7 @@ static http_connection_t *ws_live_conn_of(const websocket_object *w)
 }
 
 /* Usable before the upgrade is committed — publish() does not need a session. */
-static ws_hub_t *ws_topic_hub_of(const websocket_object *w)
+static topic_hub_t *ws_topic_hub_of(const websocket_object *w)
 {
     if (w->session != NULL) {
         return w->session->hub;
@@ -1116,7 +1116,7 @@ static ws_hub_t *ws_topic_hub_of(const websocket_object *w)
 
     http_connection_t *const conn = ws_live_conn_of(w);
 
-    return conn != NULL ? http_server_get_ws_hub(conn->server) : NULL;
+    return conn != NULL ? http_server_get_topic_hub(conn->server) : NULL;
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, subscribe)
@@ -1140,7 +1140,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
         RETURN_THROWS();
     }
 
-    ws_topic_tree_t *const tree = ws_hub_tree(session->hub);
+    ws_topic_tree_t *const tree = topic_hub_tree(session->hub);
 
     if (tree == NULL) {
         zend_throw_exception(websocket_exception_ce,
@@ -1150,7 +1150,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
 
     /* Only a subscriber needs an id, and only so a publish can skip its sender. */
     if (session->ws_id == 0) {
-        session->ws_id = ws_hub_next_id(session->hub);
+        session->ws_id = topic_hub_next_id(session->hub);
     }
 
     const http_server_config_t *const cfg = session->conn != NULL
@@ -1177,7 +1177,7 @@ ZEND_METHOD(TrueAsync_WebSocket, unsubscribe)
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
     if (w->session != NULL) {
-        (void) ws_topic_unsubscribe(ws_hub_tree(w->session->hub), w->session, filter);
+        (void) ws_topic_unsubscribe(topic_hub_tree(w->session->hub), w->session, filter);
     }
 }
 
@@ -1233,7 +1233,7 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
 
     const uint64_t except_id = exclude_self && w->session != NULL ? w->session->ws_id : 0;
 
-    const uint32_t sent = ws_hub_publish(ws_topic_hub_of(w),
+    const uint32_t sent = topic_hub_publish(ws_topic_hub_of(w),
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(data), ZSTR_LEN(data), binary, except_id);
 
@@ -1270,7 +1270,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscriberCount)
 
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
-    const uint32_t total = ws_hub_count(ws_topic_hub_of(w),
+    const uint32_t total = topic_hub_count(ws_topic_hub_of(w),
         ZSTR_VAL(topic), ZSTR_LEN(topic), WS_TOPIC_COUNT_TIMEOUT_MS);
 
     /* An exception here is a cancellation (server stop), never a timeout — it

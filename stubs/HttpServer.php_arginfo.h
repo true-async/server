@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServer.php.stub.php instead.
- * Stub hash: 3e24c95b9f2f491738419df34143f69785d07e37 */
+ * Stub hash: 3749aa2b1fabb6958b6702a3e53d53eb97dda740 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServer___construct, 0, 0, 1)
 	ZEND_ARG_OBJ_INFO(0, config, TrueAsync\\HttpServerConfig, 0)
@@ -19,6 +19,24 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_addSt
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServer_addWebSocketHandler arginfo_class_TrueAsync_HttpServer_addHttpHandler
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_enableRooms, 0, 0, IS_STATIC, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_publish, 0, 2, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, topic, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, binary, _IS_BOOL, 0, "false")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_subscriberCount, 0, 1, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, topic, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeoutMs, IS_LONG, 0, "1000")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_TrueAsync_HttpServer_room, 0, 1, TrueAsync\\Room, 0)
+	ZEND_ARG_TYPE_INFO(0, topic, IS_STRING, 0)
+ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServer_addHttp2Handler arginfo_class_TrueAsync_HttpServer_addHttpHandler
 
@@ -52,6 +70,10 @@ ZEND_METHOD(TrueAsync_HttpServer, isHttp3);
 ZEND_METHOD(TrueAsync_HttpServer, addHttpHandler);
 ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler);
 ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler);
+ZEND_METHOD(TrueAsync_HttpServer, enableRooms);
+ZEND_METHOD(TrueAsync_HttpServer, publish);
+ZEND_METHOD(TrueAsync_HttpServer, subscriberCount);
+ZEND_METHOD(TrueAsync_HttpServer, room);
 ZEND_METHOD(TrueAsync_HttpServer, addHttp2Handler);
 ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler);
 ZEND_METHOD(TrueAsync_HttpServer, start);
@@ -72,6 +94,10 @@ static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, addHttpHandler, arginfo_class_TrueAsync_HttpServer_addHttpHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addStaticHandler, arginfo_class_TrueAsync_HttpServer_addStaticHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addWebSocketHandler, arginfo_class_TrueAsync_HttpServer_addWebSocketHandler, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, enableRooms, arginfo_class_TrueAsync_HttpServer_enableRooms, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, publish, arginfo_class_TrueAsync_HttpServer_publish, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, subscriberCount, arginfo_class_TrueAsync_HttpServer_subscriberCount, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, room, arginfo_class_TrueAsync_HttpServer_room, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addHttp2Handler, arginfo_class_TrueAsync_HttpServer_addHttp2Handler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addGrpcHandler, arginfo_class_TrueAsync_HttpServer_addGrpcHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, start, arginfo_class_TrueAsync_HttpServer_start, ZEND_ACC_PUBLIC)

@@ -33,15 +33,16 @@
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-# include "websocket/ws_hub.h"
+# include "websocket/topic_hub.h"
+# include "websocket/ws_topic_tree.h"
 # include "websocket/php_websocket.h"
 #else
 /* Topics are a WebSocket feature; without it the hub calls compile away. */
-# define ws_hub_create()      NULL
-# define ws_hub_release(hub)  ((void)(hub))
-# define ws_hub_attach(hub)   (-1)
-# define ws_hub_detach(hub)   ((void)(hub))
-# define WS_HUB_MAX_WORKERS   0
+# define topic_hub_create()      NULL
+# define topic_hub_release(hub)  ((void)(hub))
+# define topic_hub_attach(hub)   (-1)
+# define topic_hub_detach(hub)   ((void)(hub))
+# define TOPIC_HUB_MAX_WORKERS   0
 #endif
 #include "core/stats_registry.h"
 #include "core/response_wire.h"
@@ -97,6 +98,9 @@ extern http_server_counters_t *http3_listener_local_counters(http3_listener_t *l
 
 /* Include generated arginfo */
 #include "../stubs/HttpServer.php_arginfo.h"
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+# include "../stubs/Room.php_arginfo.h"
+#endif
 
 /* Feature-detect kernel-level load-balanced REUSEPORT (h2o-style):
  * Linux has it since 3.9, FreeBSD 12+ as SO_REUSEPORT_LB. Plain
@@ -505,11 +509,11 @@ struct http_server_object {
      * tasks. NULL outside pool mode; owned ref released in start_pool cleanup. */
     zend_async_thread_pool_t *worker_pool;
 
-    /* Cross-worker WebSocket topics (ws_hub.h, issue #2). The pointer is fanned
+    /* Cross-worker WebSocket topics (topic_hub.h, issue #2). The pointer is fanned
      * out to the worker clones through the transfer shells; a clone borrows it
      * and never releases. */
-    void                    *ws_hub;
-    bool                     ws_hub_owner;
+    void                    *topic_hub;
+    bool                     topic_hub_owner;
 
     /* Pool control channel (issue #117), created by start_pool and fanned out to
      * the clones through the transfer shells. */
@@ -1409,9 +1413,9 @@ http_server_config_t *http_server_get_config(http_server_object *server)
     return http_server_config_from_obj(Z_OBJ(server->config));
 }
 
-void *http_server_get_ws_hub(http_server_object *server)
+void *http_server_get_topic_hub(http_server_object *server)
 {
-    return server != NULL ? server->ws_hub : NULL;
+    return server != NULL ? server->topic_hub : NULL;
 }
 
 http_log_state_t *http_server_get_log_state(http_server_object *server)
@@ -3395,9 +3399,9 @@ static int http_server_start_pool(http_server_object *server,
 
     server->pool_ctl = pool_ctl;
 
-    if (server->ws_hub == NULL) {
-        server->ws_hub       = ws_hub_create();
-        server->ws_hub_owner = true;
+    if (server->topic_hub == NULL) {
+        server->topic_hub       = topic_hub_create();
+        server->topic_hub_owner = true;
     }
 
     /* One persistent shell per worker. Allocate the whole array up
@@ -4305,22 +4309,22 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     /* Topics (issue #2). Attach needs a live reactor on this thread, which we
      * have here — the mailbox handle is created on it. */
-    if (server->ws_hub == NULL && !server->is_worker_clone) {
-        server->ws_hub = ws_hub_create();
-        server->ws_hub_owner = true;
+    if (server->topic_hub == NULL && !server->is_worker_clone) {
+        server->topic_hub = topic_hub_create();
+        server->topic_hub_owner = true;
     }
 
     /* A worker that fails to attach gets no topic tree, and then every
      * subscribe() on it throws while every publish() quietly does nothing. That
      * is worse than not starting, so it is fatal rather than a degradation. */
-    const bool ws_hub_attached = server->ws_hub != NULL
-        && ws_hub_attach(server->ws_hub) >= 0;
+    const bool topic_hub_attached = server->topic_hub != NULL
+        && topic_hub_attach(server->topic_hub) >= 0;
 
-    if (server->ws_hub != NULL && !ws_hub_attached) {
+    if (server->topic_hub != NULL && !topic_hub_attached) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Failed to attach this worker to the WebSocket topic hub: all %d slots "
             "are taken",
-            WS_HUB_MAX_WORKERS);
+            TOPIC_HUB_MAX_WORKERS);
         RETURN_FALSE;
     }
 
@@ -4374,8 +4378,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         /* Nothing drains here — the sessions are torn down later, during request
          * shutdown, with the tree already gone. ws_topic_unsubscribe_all copes
          * with that; it is the one path where it has to. */
-        if (ws_hub_attached) {
-            ws_hub_detach(server->ws_hub);
+        if (topic_hub_attached) {
+            topic_hub_detach(server->topic_hub);
         }
 
         zend_bailout();
@@ -4390,8 +4394,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * the drain above is what destroys them. Detaching first frees the topic
      * tree out from under that teardown, which walks it — SIGSEGV on any stop()
      * with a subscriber still connected. */
-    if (ws_hub_attached) {
-        ws_hub_detach(server->ws_hub);
+    if (topic_hub_attached) {
+        topic_hub_detach(server->topic_hub);
     }
 
     RETURN_TRUE;
@@ -5613,12 +5617,347 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
                    (zend_long)total_pool_bytes);
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-    ws_hub_stats_t ws;
-    ws_hub_get_stats(server->ws_hub, &ws);
+    topic_hub_stats_t ws;
+    topic_hub_get_stats(server->topic_hub, &ws);
 
     add_assoc_long(return_value, "ws_topic_posted",  (zend_long)ws.posted);
     add_assoc_long(return_value, "ws_topic_skipped", (zend_long)ws.skipped);
     add_assoc_long(return_value, "ws_topic_dropped", (zend_long)ws.dropped);
+#endif
+}
+/* }}} */
+
+/* {{{ proto HttpServer::enableRooms(): static
+ * Opt into cross-worker rooms: allocate the topic hub up front so room
+ * publishes work before start(). start() also creates it on demand, so this is
+ * an explicit switch rather than a requirement. */
+ZEND_METHOD(TrueAsync_HttpServer, enableRooms)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (server->running) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot enable rooms while the server is running", 0);
+        return;
+    }
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    if (server->topic_hub == NULL) {
+        server->topic_hub       = topic_hub_create();
+        server->topic_hub_owner = true;
+    }
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+#else
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
+#endif
+}
+/* }}} */
+
+/* {{{ proto HttpServer::publish(string $topic, string $message, bool $binary = false): int
+ * Server-side publish to a room — no connection, so no sender is excluded; the
+ * message reaches every subscriber of $topic on every worker. Returns the
+ * subscribers served on the calling worker (other workers are asynchronous). */
+ZEND_METHOD(TrueAsync_HttpServer, publish)
+{
+    zend_string *topic;
+    zend_string *message;
+    bool         binary = false;
+
+    ZEND_PARSE_PARAMETERS_START(2, 3)
+        Z_PARAM_STR(topic)
+        Z_PARAM_STR(message)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(binary)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    if (server->topic_hub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Rooms are not available: call enableRooms() or addWebSocketHandler() before start()", 0);
+        return;
+    }
+
+    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Invalid room name: a publish topic must be a concrete name (no '+' or '#' wildcards)", 0);
+        return;
+    }
+
+    const uint32_t served = topic_hub_publish(
+        (topic_hub_t *) server->topic_hub,
+        ZSTR_VAL(topic), ZSTR_LEN(topic),
+        ZSTR_VAL(message), ZSTR_LEN(message),
+        binary,
+        /* except_id: 0 = server origin, exclude nobody */ 0
+    );
+
+    RETURN_LONG((zend_long) served);
+#else
+    (void) topic;
+    (void) message;
+    (void) binary;
+    (void) server;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
+#endif
+}
+/* }}} */
+
+/* {{{ proto HttpServer::subscriberCount(string $topic, int $timeoutMs = 1000): int
+ * Cross-worker subscriber tally for a room (scatter/gather). Suspends the
+ * calling coroutine; outside a coroutine it returns the local worker's count. */
+ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
+{
+    zend_string *topic;
+    zend_long    timeout_ms = 1000;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(topic)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(timeout_ms)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    if (server->topic_hub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Rooms are not available: call enableRooms() or addWebSocketHandler() before start()", 0);
+        return;
+    }
+
+    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Invalid room name: a count topic must be a concrete name (no '+' or '#' wildcards)", 0);
+        return;
+    }
+
+    if (timeout_ms < 0) {
+        timeout_ms = 0;
+    }
+
+    const uint32_t count = topic_hub_count(
+        (topic_hub_t *) server->topic_hub,
+        ZSTR_VAL(topic), ZSTR_LEN(topic),
+        (uint32_t) timeout_ms
+    );
+
+    RETURN_LONG((zend_long) count);
+#else
+    (void) topic;
+    (void) timeout_ms;
+    (void) server;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
+#endif
+}
+/* }}} */
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+/* ---- Room -----------------------------------------------------------------
+ *
+ * A server-side handle to a topic, minted by HttpServer::room(). It holds a ref
+ * to the owning server so it can reach the hub live, and owns a copy of the
+ * (already-validated concrete) topic. Publishing/counting through it needs no
+ * connection, so a background producer that is not a socket can drive a room. */
+static zend_class_entry   *room_ce = NULL;
+static zend_object_handlers room_handlers;
+
+typedef struct {
+    zval          server_zv;   /* owns a ref to the HttpServer */
+    zend_string  *topic;       /* owned; concrete name */
+    zend_object   std;
+} room_object;
+
+static zend_always_inline room_object *room_from_obj(zend_object *obj)
+{
+    return (room_object *)((char *)obj - offsetof(room_object, std));
+}
+
+#define Z_ROOM_P(zv) room_from_obj(Z_OBJ_P(zv))
+
+static zend_object *room_create(zend_class_entry *ce)
+{
+    room_object *obj = zend_object_alloc(sizeof(*obj), ce);
+
+    ZVAL_UNDEF(&obj->server_zv);
+    obj->topic = NULL;
+
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    obj->std.handlers = &room_handlers;
+
+    return &obj->std;
+}
+
+static void room_free(zend_object *obj)
+{
+    room_object *r = room_from_obj(obj);
+
+    if (r->topic) {
+        zend_string_release(r->topic);
+    }
+
+    zval_ptr_dtor(&r->server_zv);
+    zend_object_std_dtor(&r->std);
+}
+
+/* Called only from HttpServer::room(): takes a ref on the server zval and owns
+ * a copy of the already-validated topic. */
+static zend_object *room_object_create(zval *server_zv, zend_string *topic)
+{
+    zend_object *obj = room_create(room_ce);
+    room_object *r   = room_from_obj(obj);
+
+    ZVAL_COPY(&r->server_zv, server_zv);
+    r->topic = zend_string_copy(topic);
+
+    return obj;
+}
+
+ZEND_METHOD(TrueAsync_Room, __construct)
+{
+    /* Private — rooms are minted by HttpServer::room(). */
+    ZEND_PARSE_PARAMETERS_NONE();
+}
+
+/* {{{ proto Room::publish(string $message): int */
+ZEND_METHOD(TrueAsync_Room, publish)
+{
+    zend_string *message;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
+
+    if (server->topic_hub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Rooms are not available: start() the server first", 0);
+        return;
+    }
+
+    const uint32_t served = topic_hub_publish(
+        (topic_hub_t *) server->topic_hub,
+        ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
+        ZSTR_VAL(message), ZSTR_LEN(message),
+        /* binary */ false,
+        /* except_id */ 0
+    );
+
+    RETURN_LONG((zend_long) served);
+}
+/* }}} */
+
+/* {{{ proto Room::publishBinary(string $data): int */
+ZEND_METHOD(TrueAsync_Room, publishBinary)
+{
+    zend_string *data;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
+
+    if (server->topic_hub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Rooms are not available: start() the server first", 0);
+        return;
+    }
+
+    const uint32_t served = topic_hub_publish(
+        (topic_hub_t *) server->topic_hub,
+        ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
+        ZSTR_VAL(data), ZSTR_LEN(data),
+        /* binary */ true,
+        /* except_id */ 0
+    );
+
+    RETURN_LONG((zend_long) served);
+}
+/* }}} */
+
+/* {{{ proto Room::subscriberCount(int $timeoutMs = 1000): int */
+ZEND_METHOD(TrueAsync_Room, subscriberCount)
+{
+    zend_long timeout_ms = 1000;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(timeout_ms)
+    ZEND_PARSE_PARAMETERS_END();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
+
+    if (server->topic_hub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Rooms are not available: start() the server first", 0);
+        return;
+    }
+
+    if (timeout_ms < 0) {
+        timeout_ms = 0;
+    }
+
+    const uint32_t count = topic_hub_count(
+        (topic_hub_t *) server->topic_hub,
+        ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
+        (uint32_t) timeout_ms
+    );
+
+    RETURN_LONG((zend_long) count);
+}
+/* }}} */
+
+/* {{{ proto Room::name(): string */
+ZEND_METHOD(TrueAsync_Room, name)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+
+    RETURN_STR_COPY(room->topic);
+}
+/* }}} */
+#endif /* HAVE_HTTP_SERVER_WEBSOCKET */
+
+/* {{{ proto HttpServer::room(string $topic): Room
+ * A server-side handle to a room (topic) for publishing/counting without a
+ * connection. $topic must be a concrete name. */
+ZEND_METHOD(TrueAsync_HttpServer, room)
+{
+    zend_string *topic;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(topic)
+    ZEND_PARSE_PARAMETERS_END();
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Invalid room name: a room topic must be a concrete name (no '+' or '#' wildcards)", 0);
+        return;
+    }
+
+    RETURN_OBJ(room_object_create(ZEND_THIS, topic));
+#else
+    (void) topic;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
 #endif
 }
 /* }}} */
@@ -5818,10 +6157,10 @@ static void http_server_free(zend_object *obj)
         server->worker_inbox = NULL;
     }
 
-    if (server->ws_hub_owner) {
-        ws_hub_release(server->ws_hub);
-        server->ws_hub       = NULL;
-        server->ws_hub_owner = false;
+    if (server->topic_hub_owner) {
+        topic_hub_release(server->topic_hub);
+        server->topic_hub       = NULL;
+        server->topic_hub_owner = false;
     }
 
     /* Release this worker's stats slab slot (no-op for a standalone/parent
@@ -6113,7 +6452,7 @@ static zend_object *http_server_transfer_obj(
 
         /* Topic hub (issue #2): plain pointer copy — it is owned by the pool
          * parent and outlives every clone. */
-        dst_shell->ws_hub        = src->ws_hub;
+        dst_shell->topic_hub        = src->topic_hub;
 
         /* Control channel (issue #117). The shell holds a ref; the clone it
          * loads into takes its own. */
@@ -6145,7 +6484,7 @@ static zend_object *http_server_transfer_obj(
     dst_obj->is_worker_clone = true;
 
     /* Topic hub (issue #2): the clone borrows the parent's and never frees it. */
-    dst_obj->ws_hub = src_shell->ws_hub;
+    dst_obj->topic_hub = src_shell->topic_hub;
 
     /* Control channel (issue #117): the clone joins it from start() on its own
      * thread — the wakeup is a libuv handle and can only be created there. The
@@ -6270,5 +6609,15 @@ void http_server_class_register(void)
      * (still live in the source thread), but LOAD has no live source object
      * — it re-enters through ce->default_object_handlers. */
     http_server_ce->default_object_handlers = &http_server_handlers;
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    room_ce = register_class_TrueAsync_Room();
+    room_ce->create_object = room_create;
+
+    memcpy(&room_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+    room_handlers.offset    = offsetof(room_object, std);
+    room_handlers.free_obj  = room_free;
+    room_handlers.clone_obj = NULL;
+#endif
 }
 /* }}} */

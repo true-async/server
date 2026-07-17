@@ -12,7 +12,7 @@
 #include "php.h"
 #include "websocket/ws_session.h"
 
-struct ws_hub_s;
+struct topic_hub_s;
 
 /*
  * Per-worker topic tree (issue #2). Thread-local: no locks, no atomics, no
@@ -53,8 +53,8 @@ struct ws_hub_s;
 
 typedef struct ws_topic_tree ws_topic_tree_t;
 
-/* `hub` is where this tree publishes its interest filter (ws_hub.h). */
-ws_topic_tree_t *ws_topic_tree_create(struct ws_hub_s *hub);
+/* `hub` is where this tree publishes its interest filter (topic_hub.h). */
+ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub);
 void             ws_topic_tree_free(ws_topic_tree_t *tree);
 
 /* A filter may carry wildcards; a name may not. Both reject an empty string and
@@ -89,7 +89,7 @@ uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, size_t topic_l
 
 /* ---------------------------------------------------------------- interest
  *
- * These two feed the cross-worker interest filter (ws_hub.h), and only make
+ * These two feed the cross-worker interest filter (topic_hub.h), and only make
  * sense together — they are the two halves of one claim:
  *
  *   if a filter matches a concrete topic, the filter's leading literal prefix
