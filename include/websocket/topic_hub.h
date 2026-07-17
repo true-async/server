@@ -6,8 +6,8 @@
   +----------------------------------------------------------------------+
 */
 
-#ifndef WS_HUB_H
-#define WS_HUB_H
+#ifndef TOPIC_HUB_H
+#define TOPIC_HUB_H
 
 #include "php.h"
 #include "websocket/ws_session.h"
@@ -44,31 +44,31 @@
  * publish() quietly does nothing — a half-working server. The table costs ~21KB
  * per hub; the 4KB interest filter is allocated per worker that actually
  * attaches, not per slot. */
-#define WS_HUB_MAX_WORKERS 1024
+#define TOPIC_HUB_MAX_WORKERS 1024
 
-typedef struct ws_hub_s ws_hub_t;
+typedef struct topic_hub_s topic_hub_t;
 
 /* One owner — the server that created it. Clones borrow the pointer and never
  * free it, so there is nothing to refcount. */
-ws_hub_t *ws_hub_create(void);
-void      ws_hub_release(ws_hub_t *hub);
+topic_hub_t *topic_hub_create(void);
+void      topic_hub_release(topic_hub_t *hub);
 
 /* Claims a slot and publishes this thread's mailbox. Returns the slot, or -1 —
  * every slot taken, or this thread is already attached to this hub. A caller
  * that ignores -1 gets a worker whose connections cannot subscribe at all, so
  * start() treats it as a startup failure rather than degrading quietly. */
-int  ws_hub_attach(ws_hub_t *hub);
-void ws_hub_detach(ws_hub_t *hub);
+int  topic_hub_attach(topic_hub_t *hub);
+void topic_hub_detach(topic_hub_t *hub);
 
 /* This thread's topic tree FOR THAT HUB, NULL when it never attached. Keyed by
  * hub because a tree is per-SERVER state, which CODING_STANDARDS §1.2 keeps out
  * of thread-globals. A connection finds its hub through its server
- * (http_server_get_ws_hub), so no topic handle is carried into a handler. */
-struct ws_topic_tree *ws_hub_tree(const ws_hub_t *hub);
+ * (http_server_get_topic_hub), so no topic handle is carried into a handler. */
+struct ws_topic_tree *topic_hub_tree(const topic_hub_t *hub);
 
 /* Assigned on first subscribe; identifies a session across threads so a publish
  * can skip its own sender. */
-uint64_t ws_hub_next_id(ws_hub_t *hub);
+uint64_t topic_hub_next_id(topic_hub_t *hub);
 
 /* Fans `topic` out to every worker; each matches it against its own tree.
  * Never suspends — a peer whose transport is backed up drops the message
@@ -76,8 +76,8 @@ uint64_t ws_hub_next_id(ws_hub_t *hub);
  * to the others is asynchronous, so an exact total would be a lie.
  *
  * A worker whose mailbox is full also drops the message, and that one is NOT in
- * the return value: it is counted in ws_hub_get_stats().dropped instead. */
-uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, size_t topic_len,
+ * the return value: it is counted in topic_hub_get_stats().dropped instead. */
+uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary,
                         uint64_t except_id);
 
@@ -85,7 +85,7 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, size_t topic_len,
  * match count. SUSPENDS the caller; a worker that misses `timeout_ms` is left
  * out of the sum, so the result is a snapshot, not a live number. Coroutine
  * context only. */
-uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, size_t topic_len,
+uint32_t topic_hub_count(topic_hub_t *hub, const char *topic, size_t topic_len,
                       uint32_t timeout_ms);
 
 /* Process-wide since start, for HttpServer::getRuntimeStats(). */
@@ -103,9 +103,9 @@ typedef struct {
      * is data loss: a worker is not draining fast enough, or a publisher is
      * running without setWsPublishRateLimit(). */
     uint64_t dropped;
-} ws_hub_stats_t;
+} topic_hub_stats_t;
 
-void ws_hub_get_stats(ws_hub_t *hub, ws_hub_stats_t *out);
+void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out);
 
 /* ---------------------------------------------------------------- interest
  *
@@ -123,7 +123,7 @@ void ws_hub_get_stats(ws_hub_t *hub, ws_hub_stats_t *out);
  * Called on the thread owning the session; a no-op on a thread that never
  * attached. `prefix_len` is a byte count into `filter`.
  */
-void ws_hub_interest_add(ws_hub_t *hub, const char *filter, size_t prefix_len);
-void ws_hub_interest_remove(ws_hub_t *hub, const char *filter, size_t prefix_len);
+void topic_hub_interest_add(topic_hub_t *hub, const char *filter, size_t prefix_len);
+void topic_hub_interest_remove(topic_hub_t *hub, const char *filter, size_t prefix_len);
 
-#endif /* WS_HUB_H */
+#endif /* TOPIC_HUB_H */

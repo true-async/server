@@ -58,16 +58,16 @@ http_server_config_t *http_server_get_config(http_server_object *server)
     return NULL;
 }
 
-/* Topics (ws_hub.c / ws_topic_tree.c) are not in the fuzz TU set — the frame
+/* Topics (topic_hub.c / ws_topic_tree.c) are not in the fuzz TU set — the frame
  * decoder never reaches them. With no hub, a session subscribes to nothing, so
  * these only satisfy the linker. */
-void *http_server_get_ws_hub(http_server_object *server)
+void *http_server_get_topic_hub(http_server_object *server)
 {
     (void)server;
     return NULL;
 }
 
-struct ws_topic_tree *ws_hub_tree(const struct ws_hub_s *hub)
+struct ws_topic_tree *topic_hub_tree(const struct topic_hub_s *hub)
 {
     (void)hub;
     return NULL;

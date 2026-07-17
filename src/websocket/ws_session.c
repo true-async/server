@@ -12,7 +12,7 @@
 
 #include "php.h"
 #include "websocket/ws_session.h"
-#include "websocket/ws_hub.h"
+#include "websocket/topic_hub.h"
 #include "websocket/ws_topic_tree.h"
 #include "websocket/websocket_strategy.h"  /* ws_strategy_get_session — drain hook */
 #include "core/async_plain_event.h"        /* in-thread coroutine wakeup event */
@@ -1070,7 +1070,7 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
     s->conn          = conn;
     s->transport     = transport;
     s->transport_ctx = transport_ctx;
-    s->hub           = conn != NULL ? http_server_get_ws_hub(conn->server) : NULL;
+    s->hub           = conn != NULL ? http_server_get_topic_hub(conn->server) : NULL;
 
     static const struct wslay_event_callbacks cb = {
         .recv_callback         = ws_session_recv_callback,
@@ -1150,7 +1150,7 @@ void ws_session_destroy(ws_session_t *session)
 
     /* Single teardown point for both transports — H1 via the strategy, H2 via
      * the stream — so a subscription cannot outlive the session. */
-    ws_topic_unsubscribe_all(ws_hub_tree(session->hub), session);
+    ws_topic_unsubscribe_all(topic_hub_tree(session->hub), session);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct

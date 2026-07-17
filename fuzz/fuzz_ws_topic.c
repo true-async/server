@@ -26,7 +26,7 @@
  *
  * No hub, no threads: the tree is per-worker and single-threaded by design, and
  * the two hub-interest calls plus the delivery send are stubbed below (the
- * cross-thread fan-out lives in ws_hub.c and is out of this TU's scope).
+ * cross-thread fan-out lives in topic_hub.c and is out of this TU's scope).
  */
 
 #include "harness_common.h"
@@ -38,15 +38,15 @@
 #include <string.h>
 
 /* ws_topic_tree.c publishes each subscribe/unsubscribe into the owning worker's
- * cross-worker interest filter; that filter lives in ws_hub.c, which is not in
+ * cross-worker interest filter; that filter lives in topic_hub.c, which is not in
  * this TU. A no-op keeps the tree self-contained — the prefix it hands us is
  * already exercised directly via ws_topic_interest_prefix below. */
-void ws_hub_interest_add(struct ws_hub_s *hub, const char *filter, size_t prefix_len)
+void topic_hub_interest_add(struct topic_hub_s *hub, const char *filter, size_t prefix_len)
 {
     (void)hub; (void)filter; (void)prefix_len;
 }
 
-void ws_hub_interest_remove(struct ws_hub_s *hub, const char *filter, size_t prefix_len)
+void topic_hub_interest_remove(struct topic_hub_s *hub, const char *filter, size_t prefix_len)
 {
     (void)hub; (void)filter; (void)prefix_len;
 }

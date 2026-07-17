@@ -13,7 +13,7 @@
 #include "php.h"
 #include "websocket/ws_topic_tree.h"
 #include "websocket/ws_session.h"
-#include "websocket/ws_hub.h"   /* the interest filter this worker publishes upward */
+#include "websocket/topic_hub.h"   /* the interest filter this worker publishes upward */
 
 typedef enum {
     WS_NODE_ROOT,
@@ -44,8 +44,8 @@ typedef struct ws_topic_node {
 struct ws_topic_tree {
     ws_topic_node_t   root;
 
-    /* Where this worker's interest filter lives — see ws_hub.h. */
-    struct ws_hub_s  *hub;
+    /* Where this worker's interest filter lives — see topic_hub.h. */
+    struct topic_hub_s  *hub;
 
     /* Bumped once per publish/count. A session stamped with the current mark has
      * already been served this pass, so overlapping filters (`a/b` and `a/#`)
@@ -420,7 +420,7 @@ static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
 
 /* ------------------------------------------------------------------- tree */
 
-ws_topic_tree_t *ws_topic_tree_create(struct ws_hub_s *hub)
+ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub)
 {
     ws_topic_tree_t *const tree = ecalloc(1, sizeof(*tree));
     tree->root.kind = WS_NODE_ROOT;
@@ -444,16 +444,16 @@ void ws_topic_tree_free(ws_topic_tree_t *tree)
     efree(tree);
 }
 
-static void ws_interest_publish(struct ws_hub_s *hub, const zend_string *filter,
+static void ws_interest_publish(struct topic_hub_s *hub, const zend_string *filter,
                                 const bool joining)
 {
     const size_t prefix =
         ws_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter));
 
     if (joining) {
-        ws_hub_interest_add(hub, ZSTR_VAL(filter), prefix);
+        topic_hub_interest_add(hub, ZSTR_VAL(filter), prefix);
     } else {
-        ws_hub_interest_remove(hub, ZSTR_VAL(filter), prefix);
+        topic_hub_interest_remove(hub, ZSTR_VAL(filter), prefix);
     }
 }
 

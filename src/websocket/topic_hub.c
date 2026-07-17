@@ -12,7 +12,7 @@
 
 #include "php.h"
 #include "zend_exceptions.h"
-#include "websocket/ws_hub.h"
+#include "websocket/topic_hub.h"
 #include "websocket/ws_session.h"
 #include "websocket/ws_topic_tree.h"
 #include "core/thread_mailbox.h"
@@ -20,16 +20,16 @@
 
 #include <TSRM.h>
 
-#define WS_HUB_MAILBOX_CAPACITY 4096
-#define WS_HUB_MAILBOX_BATCH      64
+#define TOPIC_HUB_MAILBOX_CAPACITY 4096
+#define TOPIC_HUB_MAILBOX_BATCH      64
 
-/* Interest filter (ws_hub.h). Power of two — the probe sequence masks. 1024
+/* Interest filter (topic_hub.h). Power of two — the probe sequence masks. 1024
  * counters is 4KB per worker, and holds a few hundred distinct topic prefixes
  * before the false-positive rate is worth caring about. */
 #define WS_INTEREST_BUCKETS 1024u
 #define WS_INTEREST_PROBES     3u
 
-struct ws_hub_s {
+struct topic_hub_s {
     /* Guards the slot table below — claiming a slot, retiring it, and posting
      * into one. There is no topic registry to guard: topics live in each
      * worker's own tree. */
@@ -40,19 +40,19 @@ struct ws_hub_s {
     zend_atomic_int64 skipped;
     zend_atomic_int64 dropped;
 
-    thread_mailbox_t *inbox[WS_HUB_MAX_WORKERS];
+    thread_mailbox_t *inbox[TOPIC_HUB_MAX_WORKERS];
     /* Bumped on every attach. A worker that detaches frees its slot for reuse,
      * so a reply in flight must check the generation or it lands on the wrong
      * thread's query. */
-    uint32_t          gen[WS_HUB_MAX_WORKERS];
-    bool              taken[WS_HUB_MAX_WORKERS];
+    uint32_t          gen[TOPIC_HUB_MAX_WORKERS];
+    bool              taken[TOPIC_HUB_MAX_WORKERS];
     int               slots_used;   /* highest slot ever claimed + 1 */
 
     /* One counting Bloom per worker, written only by the worker that owns the
      * slot and read by every publisher. Per-bucket atomics rather than a lock:
      * a half-applied update can cost a wasted wake-up but cannot hide a live
      * subscription, which is the only error that would matter. */
-    zend_atomic_int  *interest[WS_HUB_MAX_WORKERS];
+    zend_atomic_int  *interest[TOPIC_HUB_MAX_WORKERS];
 };
 
 /* One copy shared by refcount across the whole fan-out, rather than one per
@@ -98,7 +98,7 @@ typedef struct {
 /* This thread's attachment to ONE hub. */
 typedef struct ws_local_s {
     struct ws_local_s *next;
-    ws_hub_t          *hub;
+    topic_hub_t          *hub;
     int                slot;
     uint32_t           gen;
     thread_mailbox_t  *inbox;
@@ -111,7 +111,7 @@ typedef struct ws_local_s {
  * the walk is free. */
 ZEND_TLS ws_local_t *ws_locals = NULL;
 
-static ws_local_t *ws_local_of(const ws_hub_t *hub)
+static ws_local_t *ws_local_of(const topic_hub_t *hub)
 {
     for (ws_local_t *local = ws_locals; local != NULL; local = local->next) {
         if (local->hub == hub) {
@@ -134,12 +134,12 @@ static uint64_t ws_atomic_u64_add(zend_atomic_int64 *counter, const int64_t delt
     return (uint64_t) cur;
 }
 
-static void ws_hub_note_drop(ws_hub_t *hub)
+static void topic_hub_note_drop(topic_hub_t *hub)
 {
     (void) ws_atomic_u64_add(&hub->dropped, 1);
 }
 
-void ws_hub_get_stats(ws_hub_t *hub, ws_hub_stats_t *out)
+void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out)
 {
     if (hub == NULL) {
         memset(out, 0, sizeof(*out));
@@ -192,9 +192,9 @@ static ws_cmd_t *ws_cmd_new(const ws_cmd_kind_t kind, const char *topic,
 
 /* ------------------------------------------------------------------- hub */
 
-ws_hub_t *ws_hub_create(void)
+topic_hub_t *topic_hub_create(void)
 {
-    ws_hub_t *const hub = pecalloc(1, sizeof(*hub), 1);
+    topic_hub_t *const hub = pecalloc(1, sizeof(*hub), 1);
 
     ZEND_ATOMIC_INT64_INIT(&hub->next_ws_id, 1);
     ZEND_ATOMIC_INT64_INIT(&hub->posted, 0);
@@ -206,7 +206,7 @@ ws_hub_t *ws_hub_create(void)
     return hub;
 }
 
-void ws_hub_release(ws_hub_t *hub)
+void topic_hub_release(topic_hub_t *hub)
 {
     if (hub == NULL) {
         return;
@@ -217,12 +217,12 @@ void ws_hub_release(ws_hub_t *hub)
     pefree(hub, 1);
 }
 
-uint64_t ws_hub_next_id(ws_hub_t *hub)
+uint64_t topic_hub_next_id(topic_hub_t *hub)
 {
     return ws_atomic_u64_add(&hub->next_ws_id, 1);
 }
 
-ws_topic_tree_t *ws_hub_tree(const ws_hub_t *hub)
+ws_topic_tree_t *topic_hub_tree(const topic_hub_t *hub)
 {
     const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
 
@@ -253,7 +253,7 @@ static void ws_interest_probe(const char *key, const size_t len,
 
 /* A no-op once the slot is retired: detach nulls hub->interest[slot] before
  * draining, and that drain can tear a session down and unsubscribe it. */
-static void ws_interest_bump(ws_hub_t *hub, const char *filter,
+static void ws_interest_bump(topic_hub_t *hub, const char *filter,
                              const size_t prefix_len, const int delta)
 {
     const ws_local_t *const local = ws_local_of(hub);
@@ -272,12 +272,12 @@ static void ws_interest_bump(ws_hub_t *hub, const char *filter,
     }
 }
 
-void ws_hub_interest_add(ws_hub_t *hub, const char *filter, const size_t prefix_len)
+void topic_hub_interest_add(topic_hub_t *hub, const char *filter, const size_t prefix_len)
 {
     ws_interest_bump(hub, filter, prefix_len, 1);
 }
 
-void ws_hub_interest_remove(ws_hub_t *hub, const char *filter, const size_t prefix_len)
+void topic_hub_interest_remove(topic_hub_t *hub, const char *filter, const size_t prefix_len)
 {
     ws_interest_bump(hub, filter, prefix_len, -1);
 }
@@ -308,7 +308,7 @@ static void ws_interest_build(ws_interest_t *interest, const char *topic,
 
 /* Called under `admin`, which is also what keeps the filter from being freed
  * under us by a concurrent detach. */
-static bool ws_interest_matches(const ws_hub_t *hub, const int slot,
+static bool ws_interest_matches(const topic_hub_t *hub, const int slot,
                                 const ws_interest_t *interest)
 {
     zend_atomic_int *const counters = hub->interest[slot];
@@ -337,23 +337,23 @@ static bool ws_interest_matches(const ws_hub_t *hub, const int slot,
 /* The mailbox is freed by its own worker on detach, and thread_mailbox's
  * contract is "free after producers have quiesced" — so claiming a slot,
  * retiring it and posting into it all happen under `admin`. */
-static bool ws_hub_post_locked(ws_hub_t *hub, const int slot, ws_cmd_t *cmd)
+static bool topic_hub_post_locked(topic_hub_t *hub, const int slot, ws_cmd_t *cmd)
 {
     thread_mailbox_t *const inbox = hub->inbox[slot];
 
     return inbox != NULL && thread_mailbox_post(inbox, cmd);
 }
 
-static void ws_hub_drain(void **items, const size_t count, void *arg);
+static void topic_hub_drain(void **items, const size_t count, void *arg);
 
-int ws_hub_attach(ws_hub_t *hub)
+int topic_hub_attach(topic_hub_t *hub)
 {
     if (hub == NULL || ws_local_of(hub) != NULL) {
         return -1;
     }
 
     thread_mailbox_t *const inbox = thread_mailbox_create(
-        WS_HUB_MAILBOX_CAPACITY, WS_HUB_MAILBOX_BATCH, ws_hub_drain, hub);
+        TOPIC_HUB_MAILBOX_CAPACITY, TOPIC_HUB_MAILBOX_BATCH, topic_hub_drain, hub);
 
     if (inbox == NULL) {
         return -1;
@@ -372,7 +372,7 @@ int ws_hub_attach(ws_hub_t *hub)
     /* The filter is published with the mailbox, so a publisher that can see the
      * slot can already see (an empty) interest for it. */
     tsrm_mutex_lock(hub->admin);
-    for (int i = 0; i < WS_HUB_MAX_WORKERS; i++) {
+    for (int i = 0; i < TOPIC_HUB_MAX_WORKERS; i++) {
         if (!hub->taken[i]) {
             hub->taken[i]    = true;
             hub->inbox[i]    = inbox;
@@ -407,7 +407,7 @@ int ws_hub_attach(ws_hub_t *hub)
     return slot;
 }
 
-void ws_hub_detach(ws_hub_t *hub)
+void topic_hub_detach(topic_hub_t *hub)
 {
     ws_local_t *local = ws_locals;
     ws_local_t *prev  = NULL;
@@ -456,7 +456,7 @@ void ws_hub_detach(ws_hub_t *hub)
 
 /* Runs on the asked worker. The answer goes home rather than being applied here,
  * so the asker settles its query on its own thread. */
-static void ws_hub_answer_count(ws_hub_t *hub, ws_cmd_t *cmd)
+static void topic_hub_answer_count(topic_hub_t *hub, ws_cmd_t *cmd)
 {
     ws_query_t *const query = cmd->query;
 
@@ -472,7 +472,7 @@ static void ws_hub_answer_count(ws_hub_t *hub, ws_cmd_t *cmd)
     tsrm_mutex_lock(hub->admin);
 
     const bool posted = query->gen == hub->gen[query->slot]
-        && ws_hub_post_locked(hub, query->slot, reply);
+        && topic_hub_post_locked(hub, query->slot, reply);
 
     if (!posted) {
         pefree(reply, 1);
@@ -481,7 +481,7 @@ static void ws_hub_answer_count(ws_hub_t *hub, ws_cmd_t *cmd)
     tsrm_mutex_unlock(hub->admin);
 
     if (!posted) {
-        ws_hub_note_drop(hub);
+        topic_hub_note_drop(hub);
         ws_query_release(query);
     }
 }
@@ -500,9 +500,9 @@ static void ws_query_settle(ws_query_t *query, const uint32_t answered)
     ws_query_release(query);
 }
 
-static void ws_hub_drain(void **items, const size_t count, void *arg)
+static void topic_hub_drain(void **items, const size_t count, void *arg)
 {
-    ws_hub_t *const hub = arg;
+    topic_hub_t *const hub = arg;
 
     const ws_local_t *const local = ws_local_of(hub);
 
@@ -521,7 +521,7 @@ static void ws_hub_drain(void **items, const size_t count, void *arg)
                 break;
 
             case WS_CMD_COUNT:
-                ws_hub_answer_count(hub, cmd);
+                topic_hub_answer_count(hub, cmd);
                 break;
 
             case WS_CMD_COUNT_REPLY:
@@ -535,7 +535,7 @@ static void ws_hub_drain(void **items, const size_t count, void *arg)
 
 /* --------------------------------------------------------------- publish */
 
-uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len,
+uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, const size_t topic_len,
                         const char *data, const size_t len, const bool binary,
                         const uint64_t except_id)
 {
@@ -580,12 +580,12 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
 
         zend_atomic_int_fetch_add(&payload->refcount, 1);
 
-        if (ws_hub_post_locked(hub, slot, cmd)) {
+        if (topic_hub_post_locked(hub, slot, cmd)) {
             posted++;
         } else {
             ws_payload_release(payload);
             pefree(cmd, 1);
-            ws_hub_note_drop(hub);
+            topic_hub_note_drop(hub);
         }
     }
 
@@ -604,7 +604,7 @@ uint32_t ws_hub_publish(ws_hub_t *hub, const char *topic, const size_t topic_len
 /* Posts the query to every worker that might hold a match, and counts what went
  * out in query->pending. A worker with no interest would answer 0, so skipping it
  * is not a shortcut — it is the same answer, sooner. */
-static void ws_hub_ask_others(ws_hub_t *hub, const int own_slot, ws_query_t *query,
+static void topic_hub_ask_others(topic_hub_t *hub, const int own_slot, ws_query_t *query,
                               const char *topic, const size_t topic_len)
 {
     ws_interest_t interest;
@@ -623,19 +623,19 @@ static void ws_hub_ask_others(ws_hub_t *hub, const int own_slot, ws_query_t *que
 
         zend_atomic_int_fetch_add(&query->refcount, 1);
 
-        if (ws_hub_post_locked(hub, slot, cmd)) {
+        if (topic_hub_post_locked(hub, slot, cmd)) {
             query->pending++;
         } else {
             zend_atomic_int_fetch_add(&query->refcount, -1);
             pefree(cmd, 1);
-            ws_hub_note_drop(hub);
+            topic_hub_note_drop(hub);
         }
     }
 
     tsrm_mutex_unlock(hub->admin);
 }
 
-uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
+uint32_t topic_hub_count(topic_hub_t *hub, const char *topic, const size_t topic_len,
                       const uint32_t timeout_ms)
 {
     const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
@@ -669,7 +669,7 @@ uint32_t ws_hub_count(ws_hub_t *hub, const char *topic, const size_t topic_len,
     query->total = local_matches;
     query->done  = done;
 
-    ws_hub_ask_others(hub, local->slot, query, topic, topic_len);
+    topic_hub_ask_others(hub, local->slot, query, topic, topic_len);
 
     /* A timeout resumes cleanly — an exception here is a cancellation, and we
      * deliberately do not swallow it. */

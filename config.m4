@@ -646,7 +646,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       deps/wslay/lib/wslay_stack.c
       src/websocket/websocket_strategy.c
       src/websocket/ws_session.c
-      src/websocket/ws_hub.c
+      src/websocket/topic_hub.c
       src/websocket/ws_topic_tree.c
       src/websocket/ws_handshake.c
       src/websocket/ws_dispatch.c

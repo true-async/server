@@ -7,7 +7,7 @@ true_async
 <?php
 /* A publish used to wake EVERY worker, copy the payload into each mailbox and let
  * most of them find no subscriber and throw it away. Each worker now summarises
- * what it subscribes to (ws_hub.c) and a publisher skips the ones that certainly
+ * what it subscribes to (topic_hub.c) and a publisher skips the ones that certainly
  * do not match.
  *
  * The interesting half is what must NOT be skipped. A filter cannot be summarised

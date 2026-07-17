@@ -69,6 +69,51 @@ final class HttpServer
     public function addWebSocketHandler(callable $handler): static {}
 
     /**
+     * Enable cross-worker rooms (pub/sub topics) on this server.
+     *
+     * A room is a topic that any code can publish to — the message fans out to
+     * every subscriber across all workers, over the same engine WebSocket
+     * connections use with {@see WebSocket::subscribe()}. Registering a
+     * WebSocket handler already allocates the room hub, so call this only when
+     * you want to publish rooms without a WebSocket handler, or to make the
+     * opt-in explicit. Must be called before start().
+     *
+     * @return static
+     */
+    public function enableRooms(): static {}
+
+    /**
+     * Publish a text message to a room, from the server side — no WebSocket
+     * connection required.
+     *
+     * Reaches every subscriber of $topic on every worker. Unlike
+     * {@see WebSocket::publish()} there is no sending connection, so nobody is
+     * excluded. $topic must be a concrete name (no `+` or `#` wildcards).
+     *
+     * @return int Subscribers served on the calling worker. Delivery to other
+     *             workers is asynchronous, so this is a local count, not a total.
+     */
+    public function publish(string $topic, string $message, bool $binary = false): int {}
+
+    /**
+     * Count the subscribers of a room across all workers (scatter/gather).
+     *
+     * Suspends the calling coroutine until every worker answers or $timeoutMs
+     * elapses; a worker that misses the deadline is left out of the sum. Called
+     * outside a coroutine it returns only the calling worker's count.
+     */
+    public function subscriberCount(string $topic, int $timeoutMs = 1000): int {}
+
+    /**
+     * Get a server-side handle to a room (topic), for publishing or counting
+     * from outside a WebSocket connection.
+     *
+     * $topic must be a concrete name (no `+` or `#` wildcards). The returned
+     * {@see Room} keeps this server alive for as long as it is held.
+     */
+    public function room(string $topic): Room {}
+
+    /**
      * Add HTTP/2 handler (TODO)
      *
      * @param callable $handler HTTP/2 handler callback

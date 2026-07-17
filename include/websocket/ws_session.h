@@ -28,7 +28,7 @@ typedef struct ws_pending_message_t {
     bool                         binary;
 } ws_pending_message_t;
 
-struct ws_hub_s;
+struct topic_hub_s;
 struct ws_topic_sub;
 
 /*
@@ -87,7 +87,7 @@ typedef struct ws_session_t {
      * `hub` is this session's server's hub, snapshotted at init rather than
      * looked up per call: teardown must still find it after conn has begun to
      * come apart. */
-    struct ws_hub_s      *hub;
+    struct topic_hub_s      *hub;
     uint64_t              ws_id;
     struct ws_topic_sub  *topics;
     uint64_t              topic_mark;
