@@ -132,7 +132,10 @@ final class HttpServerConfig
      * init that would otherwise need to run inside the handler closure
      * on every request.
      *
-     * Only consulted when {@see setWorkers()} > 1. Pass `null` to clear.
+     * Runs only in pool mode ({@see setWorkers()} > 1), where every worker is a
+     * fresh thread with nothing loaded. With a single worker the server runs in
+     * the calling process, which the caller has already set up, so the closure
+     * is never invoked and that setup is yours to do. Pass `null` to clear.
      *
      * @return static
      */
