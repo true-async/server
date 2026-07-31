@@ -884,7 +884,10 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, enableReloadOnSignal)
  * pool warm-up, opcache primes, or any other one-shot init that would
  * otherwise need to run inside the handler closure on every request.
  *
- * Only consulted when setWorkers(N) > 1. Pass NULL to clear. */
+ * Runs only in pool mode (setWorkers(N) > 1), where every worker is a fresh
+ * thread with nothing loaded. With a single worker the server runs in the
+ * calling process, which the caller has already set up, so the closure is
+ * never invoked and that setup is the caller's own. Pass NULL to clear. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setBootloader)
 {
     zval *bootloader_zv = NULL;
