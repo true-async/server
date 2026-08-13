@@ -10,10 +10,13 @@ if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT')
 --FILE--
 <?php
 /* A bootloader failure kills every worker before it reaches accept(), so the
- * server serves nothing. Two things must follow from that: the exception is
- * reported through the worker's own error stream (the pool otherwise carries it
- * only in the task rejection, which this server never awaits), and start()
- * reports failure instead of the success of a run that never happened. */
+ * server serves nothing: the parent must name the reason and start() must
+ * report failure instead of the success of a run that never happened.
+ *
+ * Reporting the exception itself belongs to the pool and is pinned there
+ * (php-async, tests/thread_pool/080-bootloader_exception_reported.phpt). The
+ * fatal it prints lands in this test's output too, between the lines below,
+ * on any build new enough to carry it. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -35,4 +38,4 @@ $server->addHttpHandler(function ($req, $res) {
 var_dump($server->start());
 ?>
 --EXPECTF--
-%AUncaught RuntimeException: boot failed!%Abool(false)%A
+%A[true-async-server] worker did not start: RuntimeException: boot failed!%Abool(false)%A
