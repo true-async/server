@@ -39,6 +39,7 @@
 #else
 /* Topics are a WebSocket feature; without it the hub calls compile away. */
 # define topic_hub_create()      NULL
+# define topic_hub_addref(hub)   ((void)(hub))
 # define topic_hub_release(hub)  ((void)(hub))
 # define topic_hub_attach(hub)   (-1)
 # define topic_hub_detach(hub)   ((void)(hub))
@@ -510,10 +511,11 @@ struct http_server_object {
     zend_async_thread_pool_t *worker_pool;
 
     /* Cross-worker WebSocket topics (topic_hub.h, issue #2). The pointer is fanned
-     * out to the worker clones through the transfer shells; a clone borrows it
-     * and never releases. */
+     * out to the worker clones through the transfer shells, and every copy of it
+     * holds a reference of its own — see the header for why the copy takes it
+     * rather than the eventual user. This server's reference is dropped in
+     * free_obj, whichever way it was acquired. */
     void                    *topic_hub;
-    bool                     topic_hub_owner;
 
     /* Pool control channel (issue #117), created by start_pool and fanned out to
      * the clones through the transfer shells. */
@@ -3423,8 +3425,7 @@ static int http_server_start_pool(http_server_object *server,
     server->pool_ctl = pool_ctl;
 
     if (server->topic_hub == NULL) {
-        server->topic_hub       = topic_hub_create();
-        server->topic_hub_owner = true;
+        server->topic_hub = topic_hub_create();
     }
 
     /* One persistent shell per worker. Allocate the whole array up
@@ -4342,7 +4343,6 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * have here — the mailbox handle is created on it. */
     if (server->topic_hub == NULL && !server->is_worker_clone) {
         server->topic_hub = topic_hub_create();
-        server->topic_hub_owner = true;
     }
 
     /* A worker that fails to attach gets no topic tree, and then every
@@ -4368,6 +4368,14 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
         server->wait_event->dispose(server->wait_event);
         server->wait_event = NULL;
+
+        /* This worker never reaches the exits below, so its slot and its hub
+         * reference go here instead — otherwise the hub, its admin mutex
+         * included, outlives every holder and the slot stays taken for good. */
+        if (topic_hub_attached) {
+            topic_hub_detach(server->topic_hub);
+        }
+
         zend_throw_exception(http_server_runtime_exception_ce,
             "Failed to create waker for server", 0);
         RETURN_FALSE;
@@ -5785,8 +5793,7 @@ ZEND_METHOD(TrueAsync_HttpServer, enableRooms)
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (server->topic_hub == NULL) {
-        server->topic_hub       = topic_hub_create();
-        server->topic_hub_owner = true;
+        server->topic_hub = topic_hub_create();
     }
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -6488,11 +6495,11 @@ static void http_server_free(zend_object *obj)
         server->worker_inbox = NULL;
     }
 
-    if (server->topic_hub_owner) {
-        topic_hub_release(server->topic_hub);
-        server->topic_hub       = NULL;
-        server->topic_hub_owner = false;
-    }
+    /* Whatever this server's reference was — the one create() returned, or the
+     * one the clone took at load — it goes here. Which of them it was does not
+     * matter to the hub; only the count does. */
+    topic_hub_release(server->topic_hub);
+    server->topic_hub = NULL;
 
     /* Release this worker's stats slab slot (no-op for a standalone/parent
      * server, or if the pool parent already freed the slab). */
@@ -6657,6 +6664,9 @@ static void http_server_release_worker_shell(zval *transit)
     pool_ctl_release(shell->pool_ctl);
     shell->pool_ctl = NULL;
 
+    topic_hub_release(shell->topic_hub);
+    shell->topic_hub = NULL;
+
     http_server_transit_handlers_t *th = shell->transit_handlers;
 
     /* Release every transferred root of this shell — config, each handler closure,
@@ -6799,9 +6809,11 @@ static zend_object *http_server_transfer_obj(
                sizeof(dst_shell->pool_tcp_fds));
         dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
 
-        /* Topic hub (issue #2): plain pointer copy — it is owned by the pool
-         * parent and outlives every clone. */
+        /* Topic hub (issue #2). The shell takes its own reference here, on the
+         * parent's thread and from the parent's live one, because the shell
+         * outlives this call and the parent may be freed while it does. */
         dst_shell->topic_hub        = src->topic_hub;
+        topic_hub_addref(dst_shell->topic_hub);
 
         /* Control channel (issue #117). The shell holds a ref; the clone it
          * loads into takes its own. */
@@ -6832,8 +6844,11 @@ static zend_object *http_server_transfer_obj(
      * fresh ThreadPool on every worker. */
     dst_obj->is_worker_clone = true;
 
-    /* Topic hub (issue #2): the clone borrows the parent's and never frees it. */
+    /* Topic hub (issue #2). Derived from the shell's reference, which is live for
+     * the whole of this load, and held for the clone's lifetime — so the hub is
+     * already this thread's before start() runs, let alone before it attaches. */
     dst_obj->topic_hub = src_shell->topic_hub;
+    topic_hub_addref(dst_obj->topic_hub);
 
     /* Control channel (issue #117): the clone joins it from start() on its own
      * thread — the wakeup is a libuv handle and can only be created there. The

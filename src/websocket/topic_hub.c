@@ -306,13 +306,13 @@ topic_hub_t *topic_hub_create(void)
     return hub;
 }
 
-/* Drop one reference; the last one out frees the hub. */
-static void topic_hub_delref(topic_hub_t *hub)
+void topic_hub_addref(topic_hub_t *hub)
 {
-    if (zend_atomic_int_dec(&hub->refcount) == 1) {
-        tsrm_mutex_free(hub->admin);
-        pefree(hub, 1);
+    if (hub == NULL) {
+        return;
     }
+
+    zend_atomic_int_fetch_add(&hub->refcount, 1);
 }
 
 void topic_hub_release(topic_hub_t *hub)
@@ -321,7 +321,11 @@ void topic_hub_release(topic_hub_t *hub)
         return;
     }
 
-    topic_hub_delref(hub);
+    /* fetch_add returns the value BEFORE the add, so 1 is the last reference. */
+    if (zend_atomic_int_fetch_add(&hub->refcount, -1) == 1) {
+        tsrm_mutex_free(hub->admin);
+        pefree(hub, 1);
+    }
 }
 
 uint64_t topic_hub_next_id(topic_hub_t *hub)
@@ -523,9 +527,10 @@ int topic_hub_attach(topic_hub_t *hub)
         return -1;
     }
 
-    /* Paired with the drop in topic_hub_detach: from here until this worker
-     * detaches, the hub stays alive whatever the owner does. */
-    zend_atomic_int_inc(&hub->refcount);
+    /* Paired with the drop in topic_hub_detach, and derived from the reference
+     * this thread's server object already holds: the slot outlives the object on
+     * the failure paths out of start(), so it needs a reference of its own. */
+    zend_atomic_int_fetch_add(&hub->refcount, 1);
 
     ws_local_t *const local = ecalloc(1, sizeof(*local));
     local->hub   = hub;
@@ -593,7 +598,7 @@ void topic_hub_detach(topic_hub_t *hub)
 
     /* Last touch of the hub — after this the owner may already be gone and the
      * block may be freed here. */
-    topic_hub_delref(hub);
+    topic_hub_release(hub);
 }
 
 /* ----------------------------------------------------------------- query */
