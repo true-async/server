@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A bootloader that threw made `HttpServer::start()` answer `true` for a server that never accepted a connection.** The pool rejects every worker's submission before its request loop starts, and the parent counted those rejections as workers that had finished their work, so the run read as a clean start followed by a clean stop. `start()` now answers `false` when any worker was rejected, and the parent names the first reason on stderr (`worker did not start: …`). The exception text itself comes from the worker and needs a `true_async` build that reports it.
+
 ## [0.11.2] - 2026-07-15
 
 ### Fixed

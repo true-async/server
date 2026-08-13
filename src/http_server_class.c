@@ -2214,6 +2214,7 @@ static void http_server_release_worker_shell(zval *transit);
 
 typedef struct {
     int                          pending;     /* workers not yet done */
+    int                          failed;      /* workers whose submission was rejected */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
     zend_async_event_callback_t  cb;          /* embedded — recovered via offsetof */
 } pool_await_state_t;
@@ -2277,11 +2278,33 @@ static void pool_worker_done_cb(zend_async_event_t *event,
                                 zend_async_event_callback_t *cb,
                                 void *result, zend_object *exception)
 {
-    (void)event; (void)result; (void)exception;
+    (void)event; (void)result;
     /* Callbacks fire on the parent thread (cross-thread wakeup is
      * already serialized by the reactor) — no atomicity needed. */
     pool_await_state_t *st = (pool_await_state_t *)
         ((char *)cb - offsetof(pool_await_state_t, cb));
+
+    /* A rejected submission means pool_worker_handler never ran: the pool failed
+     * the task before any worker could take it (a bootloader that threw, a shell
+     * that would not transfer). The worker-side report in pool_worker_handler
+     * cannot cover this — there is no worker — so the count is what keeps start()
+     * from reporting a server that never accepted a connection as started. */
+    if (UNEXPECTED(exception != NULL)) {
+        st->failed++;
+
+        /* One line per run: N workers of the same pool fail for the same reason,
+         * and the reason itself is already printed by the worker thread. */
+        if (st->failed == 1) {
+            zval *msg_zv = zend_read_property(exception->ce, exception,
+                                              "message", sizeof("message") - 1,
+                                              /*silent=*/1, NULL);
+            fprintf(stderr,
+                "[true-async-server] worker did not start: %s: %s\n",
+                ZSTR_VAL(exception->ce->name),
+                (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING) ? Z_STRVAL_P(msg_zv) : "");
+            fflush(stderr);
+        }
+    }
 
     if (--st->pending == 0 && st->all_done != NULL) {
         ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
@@ -3523,7 +3546,15 @@ static int http_server_start_pool(http_server_object *server,
         }
     }
 
-    rc = (st->pending == 0) ? SUCCESS : FAILURE;
+    /* start() answers "did this server serve": a run where every worker was
+     * rejected before it reached accept() is a failure, however cleanly the
+     * parent's await resolved. */
+    rc = (st->pending == 0 && st->failed == 0) ? SUCCESS : FAILURE;
+
+    if (st->failed > 0) {
+        http_logf_error(&server->log_state, "server.start.failed mode=pool workers=%d",
+                        st->failed);
+    }
 
     /* Workers still serving: the await was cancelled, not resolved
      * (Async\graceful_shutdown()). Nothing in the engine stops a BUSY worker —
