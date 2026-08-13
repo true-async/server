@@ -63,6 +63,12 @@ struct topic_hub_s {
      * a half-applied update can cost a wasted wake-up but cannot hide a live
      * subscription, which is the only error that would matter. */
     zend_atomic_int  *interest[TOPIC_HUB_MAX_WORKERS];
+
+    /* One for the owner, one per attached worker. A worker can still be in the
+     * epilogue of its start() when the owning HttpServer object is freed, so
+     * whichever of them leaves last frees the hub. Without this the worker locks
+     * hub->admin in a block that has already been returned to the allocator. */
+    zend_atomic_int   refcount;
 };
 
 /* One copy shared by refcount across the whole fan-out, rather than one per
@@ -295,8 +301,18 @@ topic_hub_t *topic_hub_create(void)
     ZEND_ATOMIC_INT64_INIT(&hub->retry_shutdown, 0);
 
     hub->admin = tsrm_mutex_alloc();
+    ZEND_ATOMIC_INT_INIT(&hub->refcount, 1);
 
     return hub;
+}
+
+/* Drop one reference; the last one out frees the hub. */
+static void topic_hub_delref(topic_hub_t *hub)
+{
+    if (zend_atomic_int_dec(&hub->refcount) == 1) {
+        tsrm_mutex_free(hub->admin);
+        pefree(hub, 1);
+    }
 }
 
 void topic_hub_release(topic_hub_t *hub)
@@ -305,9 +321,7 @@ void topic_hub_release(topic_hub_t *hub)
         return;
     }
 
-    tsrm_mutex_free(hub->admin);
-
-    pefree(hub, 1);
+    topic_hub_delref(hub);
 }
 
 uint64_t topic_hub_next_id(topic_hub_t *hub)
@@ -509,6 +523,10 @@ int topic_hub_attach(topic_hub_t *hub)
         return -1;
     }
 
+    /* Paired with the drop in topic_hub_detach: from here until this worker
+     * detaches, the hub stays alive whatever the owner does. */
+    zend_atomic_int_inc(&hub->refcount);
+
     ws_local_t *const local = ecalloc(1, sizeof(*local));
     local->hub   = hub;
     local->slot  = slot;
@@ -572,6 +590,10 @@ void topic_hub_detach(topic_hub_t *hub)
     ws_topic_tree_free(local->tree);
 
     efree(local);
+
+    /* Last touch of the hub — after this the owner may already be gone and the
+     * block may be freed here. */
+    topic_hub_delref(hub);
 }
 
 /* ----------------------------------------------------------------- query */
