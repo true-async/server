@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A process running an `HttpServer` alongside an `Async\ThreadPool` deadlocked on the way out, and at four workers corrupted the heap instead.** The topic hub is created by the owning server and shared with every worker clone, but it was freed by the owner's object destructor — which the shutdown of a userland `ThreadPool` reliably brings forward, ahead of a worker still in the epilogue of `start()`. That worker then called `tsrm_mutex_lock(hub->admin)` on a block already returned to the allocator: printing the mutex showed `__lock = -1027408845` and `__kind = -163562720`, values a `pthread_mutex_t` cannot hold. The main thread waited for those workers in `libuv_reactor_quiesce()` and never got them. The hub now carries a reference count — one for the owner, one per attached worker — so whichever leaves last frees it. Measured with `setWorkers(2)`: 10 hangs in 10 runs before, 12 clean exits in 12 after; with `setWorkers(4)`, 5 aborts with `corrupted double-linked list` in 10 runs before, 12 clean in 12 after.
+
 ## [0.11.3] - 2026-08-13
 
 ### Fixed
