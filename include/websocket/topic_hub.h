@@ -33,9 +33,9 @@
  * ws_id counter, and one interest filter per worker. `admin` guards the slots.
  *
  * Threading:
- *   - create() on the owning server; release() drops that server's reference.
+ *   - create()/release() on the owning server.
  *   - attach()/detach() on each worker (they own that thread's mailbox); detach
- *     drops the worker's reference, and the last holder frees the hub.
+ *     drops the worker's reference and may free the hub there.
  *   - subscribe/unsubscribe/unsubscribe_all() on the thread owning the session.
  *   - publish()/count() from any thread.
  */
@@ -49,31 +49,20 @@
 
 typedef struct topic_hub_s topic_hub_t;
 
-/* Reference counted. create() returns the first reference; addref takes another
- * and release drops one, and the hub lives until the last holder lets go — so
- * the free can run on a worker thread, and does whenever a worker outlives the
- * server object that created the hub.
- *
- * A new reference must be derived from one the caller already holds. Every
- * pointer copy that outlives its source therefore addrefs at the copy — the
- * worker shell when the hub is fanned out, the clone when the shell is loaded —
- * rather than at first use: a copy that waits until it needs the hub is racing
- * the owner's release, which is the bug this counting exists to prevent.
- * Both take NULL, so a build without WebSocket support needs no guards. */
+/* Reference counted. A new reference is derived from one the caller already
+ * holds and taken where the pointer is copied, not at first use: a later addref
+ * races the owner's release. addref/release take NULL. */
 topic_hub_t *topic_hub_create(void);
 void      topic_hub_addref(topic_hub_t *hub);
 void      topic_hub_release(topic_hub_t *hub);
 
 /* Claims a slot, publishes this thread's mailbox and takes a reference. Returns
- * the slot, or -1 — every slot taken, or this thread is already attached to this
- * hub. A caller that ignores -1 gets a worker whose connections cannot subscribe
- * at all, so start() treats it as a startup failure rather than degrading
- * quietly. A successful attach must be paired with a detach on the same thread,
- * on every exit path, or the hub is never freed. */
+ * the slot, or -1 when every slot is taken or this thread is already attached —
+ * start() treats that as fatal. Every exit path must detach, on this thread. */
 int  topic_hub_attach(topic_hub_t *hub);
 
 /* Retires this thread's slot, tree and outbound queue, then drops the reference
- * attach() took — which may be the last, in which case the hub is freed here. */
+ * attach() took; the hub may be freed here. */
 void topic_hub_detach(topic_hub_t *hub);
 
 /* This thread's topic tree FOR THAT HUB, NULL when it never attached. Keyed by

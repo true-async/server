@@ -527,9 +527,8 @@ int topic_hub_attach(topic_hub_t *hub)
         return -1;
     }
 
-    /* Paired with the drop in topic_hub_detach, and derived from the reference
-     * this thread's server object already holds: the slot outlives the object on
-     * the failure paths out of start(), so it needs a reference of its own. */
+    /* Paired with the drop in topic_hub_detach: the slot outlives this thread's
+     * server object on the failure paths out of start(), so it holds its own. */
     zend_atomic_int_fetch_add(&hub->refcount, 1);
 
     ws_local_t *const local = ecalloc(1, sizeof(*local));

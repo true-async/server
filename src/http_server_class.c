@@ -511,10 +511,8 @@ struct http_server_object {
     zend_async_thread_pool_t *worker_pool;
 
     /* Cross-worker WebSocket topics (topic_hub.h, issue #2). The pointer is fanned
-     * out to the worker clones through the transfer shells, and every copy of it
-     * holds a reference of its own — see the header for why the copy takes it
-     * rather than the eventual user. This server's reference is dropped in
-     * free_obj, whichever way it was acquired. */
+     * out to the worker clones through the transfer shells; every copy holds a
+     * reference of its own, and this server's is dropped in free_obj. */
     void                    *topic_hub;
 
     /* Pool control channel (issue #117), created by start_pool and fanned out to
@@ -4369,9 +4367,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         server->wait_event->dispose(server->wait_event);
         server->wait_event = NULL;
 
-        /* This worker never reaches the exits below, so its slot and its hub
-         * reference go here instead — otherwise the hub, its admin mutex
-         * included, outlives every holder and the slot stays taken for good. */
+        /* This path never reaches the exits below, so the slot and the hub
+         * reference are dropped here instead. */
         if (topic_hub_attached) {
             topic_hub_detach(server->topic_hub);
         }
@@ -6495,9 +6492,8 @@ static void http_server_free(zend_object *obj)
         server->worker_inbox = NULL;
     }
 
-    /* Whatever this server's reference was — the one create() returned, or the
-     * one the clone took at load — it goes here. Which of them it was does not
-     * matter to the hub; only the count does. */
+    /* A server object holds at most one reference, from create() or from the
+     * clone load, so the release is unconditional. */
     topic_hub_release(server->topic_hub);
     server->topic_hub = NULL;
 
@@ -6809,9 +6805,8 @@ static zend_object *http_server_transfer_obj(
                sizeof(dst_shell->pool_tcp_fds));
         dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
 
-        /* Topic hub (issue #2). The shell takes its own reference here, on the
-         * parent's thread and from the parent's live one, because the shell
-         * outlives this call and the parent may be freed while it does. */
+        /* Topic hub (issue #2). The shell outlives this call and the parent may
+         * be freed meanwhile, so the reference is taken here, from the live one. */
         dst_shell->topic_hub        = src->topic_hub;
         topic_hub_addref(dst_shell->topic_hub);
 
@@ -6844,9 +6839,8 @@ static zend_object *http_server_transfer_obj(
      * fresh ThreadPool on every worker. */
     dst_obj->is_worker_clone = true;
 
-    /* Topic hub (issue #2). Derived from the shell's reference, which is live for
-     * the whole of this load, and held for the clone's lifetime — so the hub is
-     * already this thread's before start() runs, let alone before it attaches. */
+    /* Topic hub (issue #2). Derived from the shell's reference, live for the whole
+     * of this load, and held for the clone's lifetime. */
     dst_obj->topic_hub = src_shell->topic_hub;
     topic_hub_addref(dst_obj->topic_hub);
 
