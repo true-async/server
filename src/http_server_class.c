@@ -4421,6 +4421,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         zend_bailout();
     }
 
+    /* Still running means cancellation woke us, not stop(): a listener left
+     * armed on the loop keeps uv_run from ever returning (issue #146). */
+    if (server->running) {
+        http_server_do_stop(server, "shutdown");
+    }
+
     /* Drain in-flight per-request handler coroutines now, while we are still
      * on the start() coroutine and can suspend, so server_scope is empty when
      * the object is freed (issue #74). On bailout we already longjmp'd above. */
