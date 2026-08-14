@@ -276,8 +276,10 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 #endif
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-	/* Must run while async's loop is up: this module registers after async, so its
-	 * RSHUTDOWN goes first. */
+	/* Runs while async's loop is still up, and not because of module order: the
+	 * reactor is torn down by ZEND_ASYNC_ENGINE_SHUTDOWN inside zend_deactivate(),
+	 * which php_request_shutdown reaches several steps after it has run every
+	 * module's RSHUTDOWN. */
 	topic_hub_thread_sweep();
 #endif
 

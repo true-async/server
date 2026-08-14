@@ -63,8 +63,15 @@ void      topic_hub_release(topic_hub_t *hub);
 int  topic_hub_attach(topic_hub_t *hub);
 
 /* Retires this thread's slot, tree and outbound queue, then drops the reference
- * attach() took; the hub may be freed here. */
+ * attach() took; the hub may be freed here. Whoever is parked on a subscription
+ * or a send is woken, so a live request learns its room went away. */
 void topic_hub_detach(topic_hub_t *hub);
+
+/* The same teardown for a request that can no longer run PHP — a fatal error, or
+ * the end of the request. It wakes nobody, because the coroutines that parked
+ * here are gone while their events are still request memory, and it releases by
+ * hand what those absent owners would have released. */
+void topic_hub_detach_request_over(topic_hub_t *hub);
 
 /* Detaches whatever this thread still holds, at request shutdown. A thread that
  * attached by subscribing has no start() epilogue to do it, and a slot left

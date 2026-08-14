@@ -43,6 +43,7 @@
 # define topic_hub_release(hub)  ((void)(hub))
 # define topic_hub_attach(hub)   (-1)
 # define topic_hub_detach(hub)   ((void)(hub))
+# define topic_hub_detach_request_over(hub)  ((void)(hub))
 # define TOPIC_HUB_MAX_WORKERS   0
 #endif
 #include "core/stats_registry.h"
@@ -4415,7 +4416,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
          * shutdown, with the tree already gone. ws_topic_unsubscribe_all copes
          * with that; it is the one path where it has to. */
         if (topic_hub_attached) {
-            topic_hub_detach(server->topic_hub);
+            /* The request is over — this teardown wakes nobody, because whoever
+             * was parked on a room here unwinds with us. */
+            topic_hub_detach_request_over(server->topic_hub);
         }
 
         zend_bailout();
