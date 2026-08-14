@@ -6116,13 +6116,27 @@ static zend_object *room_transfer_obj(
 {
     room_object *src = room_from_obj(object);
 
+    if (kind == ZEND_OBJECT_TRANSFER_RELEASE) {
+        topic_hub_release(src->hub);
+        src->hub = NULL;
+
+        if (src->topic != NULL) {
+            zend_string_release(src->topic);
+            src->topic = NULL;
+        }
+
+        return NULL;
+    }
+
     if (UNEXPECTED(src->hub == NULL)) {
         return NULL;   /* unminted; nothing to carry */
     }
 
     const bool persistent = (kind == ZEND_OBJECT_TRANSFER);
 
-    zend_object *dst = default_fn(object, ctx, persistent ? sizeof(room_object) : 0);
+    /* 0 lets the default size the allocation from the handler offset and the
+     * property count; a literal sizeof() would stop covering declared properties. */
+    zend_object *dst = default_fn(object, ctx, 0);
 
     if (UNEXPECTED(dst == NULL)) {
         return NULL;
@@ -6779,6 +6793,12 @@ static zend_object *http_server_transfer_obj(
     zend_object_transfer_kind_t kind,
     zend_object_transfer_default_fn default_fn)
 {
+    if (kind == ZEND_OBJECT_TRANSFER_RELEASE) {
+        /* The server owns its shells and frees them in
+         * http_server_release_worker_shell; releasing here would double-free. */
+        return NULL;
+    }
+
     if (kind == ZEND_OBJECT_TRANSFER) {
         http_server_object *src = http_server_from_obj(object);
 

@@ -3755,6 +3755,15 @@ static zend_object *http_server_config_transfer_obj(
     zend_object_transfer_kind_t kind,
     zend_object_transfer_default_fn default_fn)
 {
+    if (kind == ZEND_OBJECT_TRANSFER_RELEASE) {
+        http_server_config_t *shell = http_server_config_from_obj(object);
+
+        http_server_shared_config_release(shell->frozen);
+        shell->frozen = NULL;
+
+        return NULL;
+    }
+
     if (kind == ZEND_OBJECT_TRANSFER) {
         http_server_config_t *src = http_server_config_from_obj(object);
 
