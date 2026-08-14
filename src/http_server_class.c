@@ -5689,17 +5689,14 @@ static void room_publish_result(zval *return_value, uint32_t served,
     add_assoc_long(return_value, "dropped", (zend_long) dropped);
 }
 
-/* The reliable-send knobs as configured: retry cadence, default deadline, and
- * the per-worker outbound-queue cap. */
+/* The reliable-send knobs as configured; queue_max is per worker, in entries. */
 typedef struct {
     uint32_t interval_ms;
     uint32_t timeout_ms;    /* used when a call passes no timeout of its own */
     uint32_t queue_max;
 } room_retry_cfg_t;
 
-/* Reads the three knobs off the server's config, falling back to the documented
- * defaults for unset values. A snapshot of this is what a Room carries: the
- * config is locked at HttpServer construction, so it cannot go stale. */
+/* The knobs from the server's config, with the documented default per unset value. */
 static room_retry_cfg_t room_retry_cfg(http_server_object *server)
 {
     const http_server_config_t *const cfg = http_server_get_config(server);
@@ -5715,8 +5712,7 @@ static room_retry_cfg_t room_retry_cfg(http_server_object *server)
     return out;
 }
 
-/* Resolve one call's knobs: per-call timeoutMs (null ⇒ the configured default),
- * plus interval and queue cap always from `cfg`. */
+/* One call's knobs: a null timeoutMs means the configured default. */
 static void room_retry_knobs(const room_retry_cfg_t *cfg, bool timeout_is_null,
         zend_long timeout_ms, uint32_t *timeout, uint32_t *interval, uint32_t *queue_max)
 {
@@ -6048,16 +6044,15 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
 /* ---- Room -----------------------------------------------------------------
  *
  * A server-side handle to a topic, minted by HttpServer::room(). It owns a hub
- * reference and a topic copy, so it stays usable after the HttpServer object is
- * released. Publishing and counting through it need no connection, so a
- * background producer that is not a socket can drive a room. */
+ * reference and the topic, publishes with no connection, and stays usable once
+ * the HttpServer object is released. */
 static zend_class_entry   *room_ce = NULL;
 static zend_object_handlers room_handlers;
 
 typedef struct {
     topic_hub_t     *hub;     /* owns a reference; NULL only on an unminted object */
     zend_string     *topic;   /* owned; concrete name */
-    room_retry_cfg_t retry;   /* taken from the server's config when minted */
+    room_retry_cfg_t retry;   /* snapshot; the server's config is locked at construction */
     zend_object      std;
 } room_object;
 
@@ -6095,8 +6090,7 @@ static void room_free(zend_object *obj)
     zend_object_std_dtor(&room->std);
 }
 
-/* Called only from HttpServer::room(): the hub reference is taken here, from the
- * server's live one, and the already-validated topic is copied. */
+/* Takes the hub reference; the topic arrives already validated. */
 static zend_object *room_mint(http_server_object *server, zend_string *topic)
 {
     zend_object *obj  = room_create(room_ce);
@@ -6111,8 +6105,7 @@ static zend_object *room_mint(http_server_object *server, zend_string *topic)
     return obj;
 }
 
-/* An unminted Room reaches PHP only past the private constructor (reflection);
- * its hub and topic are NULL, and every method would dereference them. */
+/* Reflection can build a Room past the private constructor: hub and topic NULL. */
 static bool room_is_minted(const room_object *room)
 {
     if (UNEXPECTED(room->hub == NULL)) {
@@ -6306,9 +6299,8 @@ ZEND_METHOD(TrueAsync_Room, name)
 
 /* {{{ proto HttpServer::room(string $topic): Room
  * A server-side handle to a room (topic) for publishing/counting without a
- * connection. $topic must be a concrete name. Minting before start() creates the
- * hub if enableRooms() did not. A running server without one is refused: its
- * workers attached to no hub, so nothing they own would receive the publish. */
+ * connection. $topic must be a concrete name. Before start() the hub is created
+ * on demand; on a running server without one the call is refused. */
 ZEND_METHOD(TrueAsync_HttpServer, room)
 {
     zend_string *topic;
