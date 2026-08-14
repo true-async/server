@@ -1054,6 +1054,23 @@ static void ws_query_settle(ws_query_t *query, const uint32_t answered)
     ws_query_release(query);
 }
 
+/* A reply that comes home to a request which is over. The asker cannot be woken —
+ * it is gone, and its event is request memory — and the reference it holds across
+ * its park will never be dropped by it, so this drops it once. `abandoned` is the
+ * handshake that says it already has been, whether by the asker settling normally
+ * or by an earlier reply arriving here. */
+static void ws_query_orphan(ws_query_t *query)
+{
+    if (!query->abandoned) {
+        query->abandoned = true;
+        query->done      = NULL;
+
+        ws_query_release(query);   /* the asker's side */
+    }
+
+    ws_query_release(query);       /* this reply's side */
+}
+
 static void topic_hub_drain(void **items, const size_t count, void *arg)
 {
     topic_hub_t *const hub = arg;
@@ -1079,7 +1096,15 @@ static void topic_hub_drain(void **items, const size_t count, void *arg)
                 break;
 
             case WS_CMD_COUNT_REPLY:
-                ws_query_settle(cmd->query, cmd->count);
+                /* No attachment means this drain runs for a request that is over:
+                 * the end-of-request teardown unlinks before draining, exactly so
+                 * that what is queued is disposed of rather than delivered. */
+                if (local != NULL) {
+                    ws_query_settle(cmd->query, cmd->count);
+                } else {
+                    ws_query_orphan(cmd->query);
+                }
+
                 break;
         }
 

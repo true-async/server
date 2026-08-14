@@ -49,6 +49,10 @@ spawn(function () use ($server, $room, $ack) {
 
         $ack->publish('parked');   /* a cross-thread post needs no reactor turn */
 
+        /* Asks every other worker and parks on the answers: a reply that comes
+         * home after the fatal must be disposed of, not fired into the dead. */
+        spawn(fn() => $room->subscriberCount(2000));
+
         /* No reactor turn from here on, so what the main thread publishes piles
          * up in this worker's mailbox and is still there when the teardown drains
          * it — with the receiver dead and holding a reference to the ring. */
