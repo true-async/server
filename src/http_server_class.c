@@ -5689,22 +5689,38 @@ static void room_publish_result(zval *return_value, uint32_t served,
     add_assoc_long(return_value, "dropped", (zend_long) dropped);
 }
 
-/* Resolve the three reliable-send knobs: per-call timeoutMs (null ⇒ configured
- * default), plus interval and queue cap always from config. Falls back to the
- * documented defaults if a config value is unset. */
-static void room_retry_knobs(http_server_object *server, bool timeout_is_null,
-        zend_long timeout_ms, uint32_t *timeout, uint32_t *interval, uint32_t *queue_max)
+/* The reliable-send knobs as configured; queue_max is per worker, in entries. */
+typedef struct {
+    uint32_t interval_ms;
+    uint32_t timeout_ms;    /* used when a call passes no timeout of its own */
+    uint32_t queue_max;
+} room_retry_cfg_t;
+
+/* The knobs from the server's config, with the documented default per unset value. */
+static room_retry_cfg_t room_retry_cfg(http_server_object *server)
 {
     const http_server_config_t *const cfg = http_server_get_config(server);
 
-    *interval  = (cfg != NULL && cfg->ws_publish_retry_interval_ms != 0)
+    room_retry_cfg_t out;
+    out.interval_ms = (cfg != NULL && cfg->ws_publish_retry_interval_ms != 0)
         ? cfg->ws_publish_retry_interval_ms : 50u;
-    *queue_max = (cfg != NULL && cfg->ws_publish_retry_queue_max != 0)
+    out.timeout_ms  = (cfg != NULL && cfg->ws_publish_retry_timeout_ms != 0)
+        ? cfg->ws_publish_retry_timeout_ms : 5000u;
+    out.queue_max   = (cfg != NULL && cfg->ws_publish_retry_queue_max != 0)
         ? cfg->ws_publish_retry_queue_max : 4096u;
 
+    return out;
+}
+
+/* One call's knobs: a null timeoutMs means the configured default. */
+static void room_retry_knobs(const room_retry_cfg_t *cfg, bool timeout_is_null,
+        zend_long timeout_ms, uint32_t *timeout, uint32_t *interval, uint32_t *queue_max)
+{
+    *interval  = cfg->interval_ms;
+    *queue_max = cfg->queue_max;
+
     if (timeout_is_null) {
-        *timeout = (cfg != NULL && cfg->ws_publish_retry_timeout_ms != 0)
-            ? cfg->ws_publish_retry_timeout_ms : 5000u;
+        *timeout = cfg->timeout_ms;
     } else if (timeout_ms < 0) {
         *timeout = 0u;
     } else if ((zend_ulong) timeout_ms > UINT32_MAX) {
@@ -5896,7 +5912,8 @@ ZEND_METHOD(TrueAsync_HttpServer, trySend)
     }
 
     uint32_t timeout, interval, queue_max;
-    room_retry_knobs(server, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    const room_retry_cfg_t cfg = room_retry_cfg(server);
+    room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
 
     const bool ok = topic_hub_try_send(
         (topic_hub_t *) server->topic_hub,
@@ -5947,7 +5964,8 @@ ZEND_METHOD(TrueAsync_HttpServer, send)
     }
 
     uint32_t timeout, interval, queue_max;
-    room_retry_knobs(server, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    const room_retry_cfg_t cfg = room_retry_cfg(server);
+    room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
 
     const topic_hub_send_result_t r = topic_hub_send(
         (topic_hub_t *) server->topic_hub,
@@ -6025,17 +6043,17 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 /* ---- Room -----------------------------------------------------------------
  *
- * A server-side handle to a topic, minted by HttpServer::room(). It holds a ref
- * to the owning server so it can reach the hub live, and owns a copy of the
- * (already-validated concrete) topic. Publishing/counting through it needs no
- * connection, so a background producer that is not a socket can drive a room. */
+ * A server-side handle to a topic, minted by HttpServer::room(). It owns a hub
+ * reference and the topic, publishes with no connection, and stays usable once
+ * the HttpServer object is released. */
 static zend_class_entry   *room_ce = NULL;
 static zend_object_handlers room_handlers;
 
 typedef struct {
-    zval          server_zv;   /* owns a ref to the HttpServer */
-    zend_string  *topic;       /* owned; concrete name */
-    zend_object   std;
+    topic_hub_t     *hub;     /* owns a reference; NULL only on an unminted object */
+    zend_string     *topic;   /* owned; concrete name */
+    room_retry_cfg_t retry;   /* snapshot; the server's config is locked at construction */
+    zend_object      std;
 } room_object;
 
 static zend_always_inline room_object *room_from_obj(zend_object *obj)
@@ -6049,8 +6067,9 @@ static zend_object *room_create(zend_class_entry *ce)
 {
     room_object *obj = zend_object_alloc(sizeof(*obj), ce);
 
-    ZVAL_UNDEF(&obj->server_zv);
+    obj->hub   = NULL;
     obj->topic = NULL;
+    memset(&obj->retry, 0, sizeof(obj->retry));
 
     zend_object_std_init(&obj->std, ce);
     object_properties_init(&obj->std, ce);
@@ -6061,27 +6080,41 @@ static zend_object *room_create(zend_class_entry *ce)
 
 static void room_free(zend_object *obj)
 {
-    room_object *r = room_from_obj(obj);
+    room_object *room = room_from_obj(obj);
 
-    if (r->topic) {
-        zend_string_release(r->topic);
+    if (room->topic != NULL) {
+        zend_string_release(room->topic);
     }
 
-    zval_ptr_dtor(&r->server_zv);
-    zend_object_std_dtor(&r->std);
+    topic_hub_release(room->hub);
+    zend_object_std_dtor(&room->std);
 }
 
-/* Called only from HttpServer::room(): takes a ref on the server zval and owns
- * a copy of the already-validated topic. */
-static zend_object *room_object_create(zval *server_zv, zend_string *topic)
+/* Takes the hub reference; the topic arrives already validated. */
+static zend_object *room_mint(http_server_object *server, zend_string *topic)
 {
-    zend_object *obj = room_create(room_ce);
-    room_object *r   = room_from_obj(obj);
+    zend_object *obj  = room_create(room_ce);
+    room_object *room = room_from_obj(obj);
 
-    ZVAL_COPY(&r->server_zv, server_zv);
-    r->topic = zend_string_copy(topic);
+    room->hub = (topic_hub_t *) server->topic_hub;
+    topic_hub_addref(room->hub);
+
+    room->topic = zend_string_copy(topic);
+    room->retry = room_retry_cfg(server);
 
     return obj;
+}
+
+/* Reflection can build a Room past the private constructor: hub and topic NULL. */
+static bool room_is_minted(const room_object *room)
+{
+    if (UNEXPECTED(room->hub == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Room is uninitialized: rooms are minted by HttpServer::room()", 0);
+        return false;
+    }
+
+    return true;
 }
 
 ZEND_METHOD(TrueAsync_Room, __construct)
@@ -6100,18 +6133,15 @@ ZEND_METHOD(TrueAsync_Room, publish)
     ZEND_PARSE_PARAMETERS_END();
 
     room_object *room = Z_ROOM_P(ZEND_THIS);
-    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
 
-    if (server->topic_hub == NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: start() the server first", 0);
+    if (!room_is_minted(room)) {
         return;
     }
 
     uint64_t posted = 0, dropped = 0;
 
     const uint32_t served = topic_hub_publish(
-        (topic_hub_t *) server->topic_hub,
+        room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false,
@@ -6137,19 +6167,16 @@ ZEND_METHOD(TrueAsync_Room, trySend)
     ZEND_PARSE_PARAMETERS_END();
 
     room_object *room = Z_ROOM_P(ZEND_THIS);
-    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
 
-    if (server->topic_hub == NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: start() the server first", 0);
+    if (!room_is_minted(room)) {
         return;
     }
 
     uint32_t timeout, interval, queue_max;
-    room_retry_knobs(server, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
 
     const bool ok = topic_hub_try_send(
-        (topic_hub_t *) server->topic_hub,
+        room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
@@ -6173,19 +6200,16 @@ ZEND_METHOD(TrueAsync_Room, send)
     ZEND_PARSE_PARAMETERS_END();
 
     room_object *room = Z_ROOM_P(ZEND_THIS);
-    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
 
-    if (server->topic_hub == NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: start() the server first", 0);
+    if (!room_is_minted(room)) {
         return;
     }
 
     uint32_t timeout, interval, queue_max;
-    room_retry_knobs(server, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
 
     const topic_hub_send_result_t r = topic_hub_send(
-        (topic_hub_t *) server->topic_hub,
+        room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
@@ -6209,16 +6233,13 @@ ZEND_METHOD(TrueAsync_Room, publishBinary)
     ZEND_PARSE_PARAMETERS_END();
 
     room_object *room = Z_ROOM_P(ZEND_THIS);
-    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
 
-    if (server->topic_hub == NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: start() the server first", 0);
+    if (!room_is_minted(room)) {
         return;
     }
 
     const uint32_t served = topic_hub_publish(
-        (topic_hub_t *) server->topic_hub,
+        room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(data), ZSTR_LEN(data),
         /* binary */ true,
@@ -6241,11 +6262,8 @@ ZEND_METHOD(TrueAsync_Room, subscriberCount)
     ZEND_PARSE_PARAMETERS_END();
 
     room_object *room = Z_ROOM_P(ZEND_THIS);
-    http_server_object *server = http_server_from_obj(Z_OBJ(room->server_zv));
 
-    if (server->topic_hub == NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: start() the server first", 0);
+    if (!room_is_minted(room)) {
         return;
     }
 
@@ -6254,7 +6272,7 @@ ZEND_METHOD(TrueAsync_Room, subscriberCount)
     }
 
     const uint32_t count = topic_hub_count(
-        (topic_hub_t *) server->topic_hub,
+        room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         (uint32_t) timeout_ms
     );
@@ -6270,6 +6288,10 @@ ZEND_METHOD(TrueAsync_Room, name)
 
     room_object *room = Z_ROOM_P(ZEND_THIS);
 
+    if (!room_is_minted(room)) {
+        return;
+    }
+
     RETURN_STR_COPY(room->topic);
 }
 /* }}} */
@@ -6277,7 +6299,8 @@ ZEND_METHOD(TrueAsync_Room, name)
 
 /* {{{ proto HttpServer::room(string $topic): Room
  * A server-side handle to a room (topic) for publishing/counting without a
- * connection. $topic must be a concrete name. */
+ * connection. $topic must be a concrete name. Before start() the hub is created
+ * on demand; on a running server without one the call is refused. */
 ZEND_METHOD(TrueAsync_HttpServer, room)
 {
     zend_string *topic;
@@ -6293,7 +6316,19 @@ ZEND_METHOD(TrueAsync_HttpServer, room)
         return;
     }
 
-    RETURN_OBJ(room_object_create(ZEND_THIS, topic));
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (server->topic_hub == NULL) {
+        if (server->running) {
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "Rooms are not available: call enableRooms() before start()", 0);
+            return;
+        }
+
+        server->topic_hub = topic_hub_create();
+    }
+
+    RETURN_OBJ(room_mint(server, topic));
 #else
     (void) topic;
 

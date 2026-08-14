@@ -136,7 +136,8 @@ final class HttpServer
      * from outside a WebSocket connection.
      *
      * $topic must be a concrete name (no `+` or `#` wildcards). The returned
-     * {@see Room} keeps this server alive for as long as it is held.
+     * {@see Room} owns a reference to the topic hub, so it keeps publishing
+     * after this server is released. Minting one before start() enables rooms.
      */
     public function room(string $topic): Room {}
 
