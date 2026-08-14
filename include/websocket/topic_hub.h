@@ -11,6 +11,7 @@
 
 #include "php.h"
 #include "websocket/ws_session.h"
+#include "websocket/ws_topic_tree.h"
 
 /*
  * Cross-worker WebSocket topics (issue #2).
@@ -64,6 +65,11 @@ int  topic_hub_attach(topic_hub_t *hub);
 /* Retires this thread's slot, tree and outbound queue, then drops the reference
  * attach() took; the hub may be freed here. */
 void topic_hub_detach(topic_hub_t *hub);
+
+/* Detaches whatever this thread still holds. A thread that attached by
+ * subscribing has no start() epilogue to do it, and a slot left taken goes on
+ * collecting messages nobody will read. Called at request shutdown. */
+void topic_hub_thread_sweep(void);
 
 /* This thread's topic tree FOR THAT HUB, NULL when it never attached. Keyed by
  * hub because a tree is per-SERVER state, which CODING_STANDARDS §1.2 keeps out
@@ -187,9 +193,56 @@ typedef struct {
      * in flight — a clean-shutdown loss, distinct from a deadline `retry_expired`
      * so a shutdown is never mislabelled a timeout. */
     uint64_t retry_shutdown;
+
+    /* A server subscriber's ring was full, so its oldest message was dropped.
+     * Apart from `dropped` deliberately: that one says a WORKER is not draining
+     * and answers "add rate limiting", this one says one consumer inside a
+     * worker is behind. Room::lostCount() reports the same event per room. */
+    uint64_t sub_overflow;
 } topic_hub_stats_t;
 
 void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out);
+
+/* ------------------------------------------------------ server subscribers
+ *
+ * A receiver that is not a socket. Subscribing attaches this thread if it is not
+ * attached already, so a caller never has to know whether someone else got there
+ * first; unsubscribing never detaches, because a coroutine parked in send() on
+ * the same thread holds no subscription and would be woken with a spurious
+ * shutdown. The thread's exit is the only detach.
+ *
+ * Every call belongs to the thread that subscribed. A subscription is not a
+ * value: it is never carried to another thread. */
+typedef struct ws_payload ws_payload_t;   /* opaque: the ring holds these, PHP never sees one */
+
+typedef enum {
+    TOPIC_HUB_RECV_MESSAGE = 0,
+    TOPIC_HUB_RECV_TIMEOUT,     /* the deadline passed, or there was nothing and nowhere to park */
+    TOPIC_HUB_RECV_CLOSED,      /* unsubscribed, here or under a parked recv */
+    TOPIC_HUB_RECV_BUSY,        /* another coroutine is already parked on this subscription */
+} topic_hub_recv_status_t;
+
+/* NULL when the thread could not attach (every slot taken). The caller owns one
+ * reference and releases it with topic_hub_sub_release. */
+ws_server_sub_t *topic_hub_subscribe(topic_hub_t *hub, zend_string *filter);
+void             topic_hub_unsubscribe(ws_server_sub_t *sub);
+void             topic_hub_sub_release(ws_server_sub_t *sub);
+
+/* Messages this subscription's ring dropped because it was full. Monotonic and
+ * never reset, so two readers cannot destroy each other's evidence. */
+uint64_t topic_hub_sub_lost(const ws_server_sub_t *sub);
+
+/* Pops one message, or parks the calling coroutine until one arrives, the
+ * deadline passes, or the subscription closes. On MESSAGE the caller owns
+ * `*out` and releases it with topic_hub_payload_release.
+ *
+ * `timeout_ms`: negative waits with no deadline, 0 takes whatever is already
+ * there and returns, positive waits that many milliseconds. */
+topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, int64_t timeout_ms,
+                                       ws_payload_t **out);
+
+const char *topic_hub_payload_data(const ws_payload_t *payload, size_t *len, bool *binary);
+void        topic_hub_payload_release(ws_payload_t *payload);
 
 /* ---------------------------------------------------------------- interest
  *

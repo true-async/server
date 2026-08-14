@@ -49,6 +49,7 @@ struct topic_hub_s {
     zend_atomic_int64 retry_rejected;    /* sends refused — outbound queue at cap */
     zend_atomic_int64 retry_gone;        /* parked targets whose worker had detached */
     zend_atomic_int64 retry_shutdown;    /* parked targets abandoned by THIS worker's detach */
+    zend_atomic_int64 sub_overflow;      /* server subscriber rings that dropped their oldest */
 
     thread_mailbox_t *inbox[TOPIC_HUB_MAX_WORKERS];
     /* Bumped on every attach. A worker that detaches frees its slot for reuse,
@@ -73,7 +74,7 @@ struct topic_hub_s {
 
 /* One copy shared by refcount across the whole fan-out, rather than one per
  * worker. The topic rides inline in each command instead — it is short. */
-typedef struct {
+typedef struct ws_payload {
     zend_atomic_int refcount;
     size_t          len;
     bool            binary;
@@ -162,6 +163,10 @@ typedef struct ws_local_s {
     thread_mailbox_t  *inbox;
     ws_topic_tree_t   *tree;
 
+    /* Server subscriptions held on this thread — walked by detach and by the
+     * shutdown sweep, which are the only places allowed to close them. */
+    struct ws_server_sub *subs;
+
     /* Reliable-send outbound queue — thread-local, so NO lock: enqueued by this
      * worker's coroutines, drained by this worker's timer, torn down by this
      * worker's detach, all one thread. The bound (`retry_count` vs queue_max)
@@ -242,6 +247,7 @@ void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out)
     out->retry_rejected  = (uint64_t) zend_atomic_int64_load(&hub->retry_rejected);
     out->retry_gone      = (uint64_t) zend_atomic_int64_load(&hub->retry_gone);
     out->retry_shutdown  = (uint64_t) zend_atomic_int64_load(&hub->retry_shutdown);
+    out->sub_overflow    = (uint64_t) zend_atomic_int64_load(&hub->sub_overflow);
 }
 
 static ws_payload_t *ws_payload_new(const char *data, const size_t len, const bool binary)
@@ -299,6 +305,7 @@ topic_hub_t *topic_hub_create(void)
     ZEND_ATOMIC_INT64_INIT(&hub->retry_rejected, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->retry_gone, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->retry_shutdown, 0);
+    ZEND_ATOMIC_INT64_INIT(&hub->sub_overflow, 0);
 
     hub->admin = tsrm_mutex_alloc();
     ZEND_ATOMIC_INT_INIT(&hub->refcount, 1);
@@ -474,6 +481,104 @@ static bool topic_hub_post_locked(topic_hub_t *hub, const int slot, ws_cmd_t *cm
 
 static void topic_hub_drain(void **items, const size_t count, void *arg);
 
+/* ------------------------------------------------------ server subscribers
+ *
+ * A subscriber that is not a socket: the tree hands it a payload, it queues the
+ * payload and wakes the coroutine parked in recv(). Thread-local like the rest
+ * of ws_local_t — created, drained and closed on one thread.
+ *
+ * The ring is bounded and overflow drops the OLDEST entry: for a control room
+ * the newest command is the authoritative one, and keeping stale commands while
+ * discarding a fresh stop is the failure this path exists to prevent. */
+
+#define WS_SERVER_SUB_RING 64
+
+struct ws_server_sub {
+    struct ws_server_sub *next;
+    ws_local_t           *local;
+    zend_string          *filter;    /* owned */
+    uint64_t              mark;
+    bool                  parked;    /* a recv holds this subscription; a second one is refused */
+
+    ws_payload_t         *ring[WS_SERVER_SUB_RING];
+    uint32_t              head;
+    uint32_t              size;
+    uint64_t              lost;      /* monotonic, never reset */
+
+    zend_async_event_t   *waiter;    /* non-NULL only while a recv is parked */
+    bool                  closed;
+    uint32_t              refcount;  /* the tree's side and the caller's side */
+};
+
+uint64_t ws_server_sub_mark(const ws_server_sub_t *sub)
+{
+    return sub->mark;
+}
+
+void ws_server_sub_set_mark(ws_server_sub_t *sub, const uint64_t mark)
+{
+    sub->mark = mark;
+}
+
+bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
+                               const size_t len, const bool binary)
+{
+    if (sub->closed) {
+        return false;
+    }
+
+    ws_payload_t *const payload = ws_payload_new(data, len, binary);
+
+    if (payload == NULL) {
+        return false;
+    }
+
+    if (sub->size == WS_SERVER_SUB_RING) {
+        ws_payload_release(sub->ring[sub->head]);
+        sub->head = (sub->head + 1) % WS_SERVER_SUB_RING;
+        sub->size--;
+        sub->lost++;
+
+        if (sub->local != NULL) {
+            (void) ws_atomic_u64_add(&sub->local->hub->sub_overflow, 1);
+        }
+    }
+
+    sub->ring[(sub->head + sub->size) % WS_SERVER_SUB_RING] = payload;
+    sub->size++;
+
+    /* Runs no PHP: the woken coroutine resumes after the tree walk unwinds. */
+    if (sub->waiter != NULL) {
+        async_plain_event_fire(sub->waiter);
+    }
+
+    return true;
+}
+
+static void ws_server_sub_addref(ws_server_sub_t *sub)
+{
+    sub->refcount++;
+}
+
+static void ws_server_sub_release(ws_server_sub_t *sub)
+{
+    if (--sub->refcount > 0) {
+        return;
+    }
+
+    while (sub->size > 0) {
+        ws_payload_release(sub->ring[sub->head]);
+        sub->head = (sub->head + 1) % WS_SERVER_SUB_RING;
+        sub->size--;
+    }
+
+    if (sub->filter != NULL) {
+        zend_string_release(sub->filter);
+    }
+
+    efree(sub);
+}
+
 /* Reliable-send teardown, defined with the rest of the outbound-queue machinery
  * at the foot of the file; detach (above them) needs it. */
 static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local);
@@ -543,6 +648,203 @@ int topic_hub_attach(topic_hub_t *hub)
     return slot;
 }
 
+/* Every attachment this thread still holds, at the end of its request. A thread
+ * that attached through subscribe() has no start() epilogue to detach it, and a
+ * slot left taken keeps collecting messages nobody will ever read. */
+void topic_hub_thread_sweep(void)
+{
+    while (ws_locals != NULL) {
+        topic_hub_detach(ws_locals->hub);
+    }
+}
+
+/* Attach unless this thread already has, so a second room does not have to know
+ * whether the first one attached. Only the shutdown paths ever detach. */
+static ws_local_t *topic_hub_attach_ensure(topic_hub_t *hub)
+{
+    if (hub == NULL) {
+        return NULL;
+    }
+
+    ws_local_t *local = ws_local_of(hub);
+
+    if (local != NULL) {
+        return local;
+    }
+
+    return topic_hub_attach(hub) >= 0 ? ws_local_of(hub) : NULL;
+}
+
+ws_server_sub_t *topic_hub_subscribe(topic_hub_t *hub, zend_string *filter)
+{
+    ws_local_t *const local = topic_hub_attach_ensure(hub);
+
+    if (local == NULL) {
+        return NULL;
+    }
+
+    ws_server_sub_t *const sub = ecalloc(1, sizeof(*sub));
+    sub->local    = local;
+    sub->filter   = zend_string_copy(filter);
+    sub->refcount = 1;   /* the tree's side; the caller takes its own below */
+
+    if (!ws_topic_subscribe_server(local->tree, sub, filter)) {
+        ws_server_sub_release(sub);
+        return NULL;
+    }
+
+    ws_server_sub_addref(sub);   /* the caller's side */
+
+    sub->next   = local->subs;
+    local->subs = sub;
+
+    return sub;
+}
+
+/* Removes the subscription from the tree and drops the tree's reference. The
+ * thread's attachment stays: a coroutine parked in send() holds no subscription,
+ * and detaching under it would wake it with a spurious shutdown. */
+void topic_hub_unsubscribe(ws_server_sub_t *sub)
+{
+    if (sub == NULL || sub->closed) {
+        return;
+    }
+
+    ws_local_t *const local = sub->local;
+
+    sub->closed = true;
+
+    if (local != NULL) {
+        ws_topic_unsubscribe_server(local->tree, sub, sub->filter);
+
+        for (ws_server_sub_t **it = &local->subs; *it != NULL; it = &(*it)->next) {
+            if (*it == sub) {
+                *it = sub->next;
+                break;
+            }
+        }
+    }
+
+    if (sub->waiter != NULL) {
+        async_plain_event_fire(sub->waiter);   /* a parked recv wakes to a closed sub */
+    }
+
+    ws_server_sub_release(sub);
+}
+
+void topic_hub_sub_release(ws_server_sub_t *sub)
+{
+    if (sub != NULL) {
+        ws_server_sub_release(sub);
+    }
+}
+
+uint64_t topic_hub_sub_lost(const ws_server_sub_t *sub)
+{
+    return sub != NULL ? sub->lost : 0;
+}
+
+static ws_payload_t *ws_server_sub_pop(ws_server_sub_t *sub)
+{
+    if (sub->size == 0) {
+        return NULL;
+    }
+
+    ws_payload_t *const payload = sub->ring[sub->head];
+    sub->head = (sub->head + 1) % WS_SERVER_SUB_RING;
+    sub->size--;
+
+    return payload;
+}
+
+topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeout_ms,
+                                       ws_payload_t **out)
+{
+    *out = NULL;
+
+    if (sub == NULL || sub->closed) {
+        return TOPIC_HUB_RECV_CLOSED;
+    }
+
+    /* Before the ring is touched: whoever is parked owns this subscription, even
+     * while a message happens to be sitting in it. Deciding by "is the ring
+     * empty" lets a second caller steal the parked one's message. */
+    if (sub->parked) {
+        return TOPIC_HUB_RECV_BUSY;
+    }
+
+    *out = ws_server_sub_pop(sub);
+
+    if (*out != NULL) {
+        return TOPIC_HUB_RECV_MESSAGE;
+    }
+
+    zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    /* 0 is "take what is there", which an expired computed deadline also spells;
+     * outside a coroutine there is nothing to park on either way. */
+    if (timeout_ms == 0 || coroutine == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+        return TOPIC_HUB_RECV_TIMEOUT;
+    }
+
+    /* In-thread event, like count()'s: only this thread's tree walk fires it. */
+    zend_async_event_t *const waiter = async_plain_event_new();
+
+    if (waiter == NULL) {
+        return TOPIC_HUB_RECV_TIMEOUT;
+    }
+
+    /* Held across the suspend, as every other parked structure in this file is:
+     * unsubscribe() drops the tree's reference and the caller may drop its own,
+     * and the resume below reads this struct. */
+    ws_server_sub_addref(sub);
+
+    sub->waiter = waiter;
+    sub->parked = true;
+
+    /* The engine spells "no timer" as 0, which is what a negative timeout means
+     * here — wait until a message or a close, however long that takes. */
+    const zend_ulong waker_timeout = timeout_ms < 0 ? 0 : (zend_ulong) timeout_ms;
+
+    if (zend_async_waker_new_with_timeout(coroutine, waker_timeout, NULL) != NULL) {
+        zend_async_resume_when(coroutine, waiter, false, zend_async_waker_callback_resolve, NULL);
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(coroutine);
+    }
+
+    sub->waiter = NULL;
+    sub->parked = false;
+    waiter->dispose(waiter);
+
+    topic_hub_recv_status_t status;
+
+    if (sub->closed) {
+        status = TOPIC_HUB_RECV_CLOSED;
+    } else {
+        *out   = ws_server_sub_pop(sub);
+        status = *out != NULL ? TOPIC_HUB_RECV_MESSAGE : TOPIC_HUB_RECV_TIMEOUT;
+    }
+
+    /* Last, because releasing the final reference frees the ring `*out` came
+     * from — the payload itself carries its own reference. */
+    ws_server_sub_release(sub);
+
+    return status;
+}
+
+const char *topic_hub_payload_data(const ws_payload_t *payload, size_t *len, bool *binary)
+{
+    *len    = payload->len;
+    *binary = payload->binary;
+
+    return payload->data;
+}
+
+void topic_hub_payload_release(ws_payload_t *payload)
+{
+    ws_payload_release(payload);
+}
+
 void topic_hub_detach(topic_hub_t *hub)
 {
     ws_local_t *local = ws_locals;
@@ -589,6 +891,18 @@ void topic_hub_detach(topic_hub_t *hub)
         prev->next = local->next;
     } else {
         ws_locals = local->next;
+    }
+
+    /* Before the tree goes: a subscription outliving its nodes would unsubscribe
+     * into freed memory. Closing wakes a parked recv, which resumes only after
+     * this returns — by then `closed` tells it what happened. */
+    while (local->subs != NULL) {
+        ws_server_sub_t *const sub = local->subs;
+
+        local->subs = sub->next;
+        sub->local  = NULL;   /* the tree is going; nothing left to detach from */
+
+        topic_hub_unsubscribe(sub);
     }
 
     ws_topic_tree_free(local->tree);

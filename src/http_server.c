@@ -275,6 +275,13 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 	http_compression_pool_shutdown();
 #endif
 
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+	/* A thread that attached by subscribing has no start() epilogue to detach it.
+	 * Runs while async's loop is still up: this module registers after async, so
+	 * its RSHUTDOWN goes first. */
+	topic_hub_thread_sweep();
+#endif
+
 	return SUCCESS;
 }
 /* }}} */
