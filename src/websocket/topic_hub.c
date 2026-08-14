@@ -260,6 +260,11 @@ static ws_payload_t *ws_payload_new(const char *data, const size_t len, const bo
     return payload;
 }
 
+static void ws_payload_addref(ws_payload_t *payload)
+{
+    zend_atomic_int_fetch_add(&payload->refcount, 1);
+}
+
 static void ws_payload_release(ws_payload_t *payload)
 {
     if (zend_atomic_int_fetch_add(&payload->refcount, -1) == 1) {
@@ -519,16 +524,25 @@ void ws_server_sub_set_mark(ws_server_sub_t *sub, const uint64_t mark)
 }
 
 bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
-                               const size_t len, const bool binary)
+                               const size_t len, const bool binary, void **shared)
 {
     if (sub->closed) {
         return false;
     }
 
-    ws_payload_t *const payload = ws_payload_new(data, len, binary);
+    /* One body per publish rather than one per subscriber: the walk hands the
+     * same scratch to every server subscriber it reaches, so a node with N of
+     * them costs one copy and N references. */
+    ws_payload_t *payload = *shared;
 
     if (payload == NULL) {
-        return false;
+        payload = ws_payload_new(data, len, binary);
+
+        if (payload == NULL) {
+            return false;
+        }
+
+        *shared = payload;
     }
 
     if (sub->size == WS_SERVER_SUB_RING) {
@@ -542,6 +556,7 @@ bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
         }
     }
 
+    ws_payload_addref(payload);   /* the ring's reference; the walk keeps its own */
     sub->ring[(sub->head + sub->size) % WS_SERVER_SUB_RING] = payload;
     sub->size++;
 
@@ -1083,12 +1098,17 @@ static void topic_hub_drain(void **items, const size_t count, void *arg)
         switch (cmd->kind) {
             case WS_CMD_PUBLISH:
                 if (local != NULL) {
+                    /* The command already carries a shared persistent body: hand
+                     * it to the walk as its scratch and a cross-thread publish
+                     * copies nothing at all on this side. */
+                    void *shared = cmd->payload;
+
                     (void) ws_topic_publish(local->tree, cmd->topic, cmd->topic_len,
                                             cmd->payload->data, cmd->payload->len,
-                                            cmd->payload->binary, cmd->except_id);
+                                            cmd->payload->binary, cmd->except_id, &shared);
                 }
 
-                ws_payload_release(cmd->payload);
+                ws_payload_release(cmd->payload);   /* also the walk's reference */
                 break;
 
             case WS_CMD_COUNT:
@@ -1198,9 +1218,16 @@ uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, const size_t top
 
     const ws_local_t *const local = ws_local_of(hub);
 
+    void *local_body = NULL;
+
     const uint32_t sent = local != NULL
-        ? ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id)
+        ? ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id,
+                           &local_body)
         : 0;
+
+    if (local_body != NULL) {
+        ws_payload_release(local_body);   /* the walk's reference; the rings hold theirs */
+    }
 
     ws_interest_t interest;
     ws_interest_build(&interest, topic, topic_len);
@@ -1746,7 +1773,14 @@ static uint32_t topic_hub_send_fanout(topic_hub_t *hub, const ws_local_t *local,
         retry_target_t *full, uint32_t *nfull, ws_payload_t **payload)
 {
     if (local != NULL) {
-        (void) ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id);
+        void *local_body = NULL;
+
+        (void) ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id,
+                                &local_body);
+
+        if (local_body != NULL) {
+            ws_payload_release(local_body);
+        }
     }
 
     ws_interest_t interest;

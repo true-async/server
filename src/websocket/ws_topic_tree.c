@@ -648,6 +648,7 @@ typedef struct {
     bool        binary;
     uint64_t    except_id;
     bool        should_deliver;
+    void      **shared;      /* the caller's one-message scratch; see the header */
 
     uint32_t    hits;
 } ws_topic_visit_t;
@@ -677,7 +678,8 @@ static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
                 continue;
             }
 
-            if (ws_server_sub_try_deliver(server_sub, visit->data, visit->len, visit->binary)) {
+            if (ws_server_sub_try_deliver(server_sub, visit->data, visit->len, visit->binary,
+                                          visit->shared)) {
                 visit->hits++;
             }
 
@@ -761,7 +763,7 @@ static uint32_t ws_topic_match(ws_topic_tree_t *tree, const char *topic,
 
 uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t topic_len,
                           const char *data, const size_t len, const bool binary,
-                          const uint64_t except_id)
+                          const uint64_t except_id, void **shared)
 {
     ws_topic_visit_t visit = {
         .data      = data,
@@ -769,6 +771,7 @@ uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t
         .binary    = binary,
         .except_id = except_id,
         .should_deliver = true,
+        .shared    = shared,
     };
 
     return ws_topic_match(tree, topic, topic_len, &visit);

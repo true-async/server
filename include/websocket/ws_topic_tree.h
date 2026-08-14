@@ -77,8 +77,11 @@ typedef struct {
  * ws_session_t.topic_mark. */
 uint64_t ws_server_sub_mark(const ws_server_sub_t *sub);
 void     ws_server_sub_set_mark(ws_server_sub_t *sub, uint64_t mark);
+/* `shared` is the walk's one-message scratch, owned by whoever started the walk:
+ * the first server subscriber served puts the body there, the rest take a
+ * reference to it. NULL in, one message out, however many subscribers matched. */
 bool     ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
-                                   size_t len, bool binary);
+                                   size_t len, bool binary, void **shared);
 
 /* `hub` is where this tree publishes its interest filter (topic_hub.h). */
 ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub);
@@ -117,7 +120,7 @@ void ws_topic_list(const ws_session_t *session, zval *return_value);
  * a peer whose transport is backed up drops the message (trySend semantics). */
 uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, size_t topic_len,
                           const char *data, size_t len, bool binary,
-                          uint64_t except_id);
+                          uint64_t except_id, void **shared);
 
 /* Sessions on THIS worker matching `topic`, counted once each. */
 uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, size_t topic_len);
