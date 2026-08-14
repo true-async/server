@@ -1,5 +1,5 @@
 /* This is a generated file, edit Room.php.stub.php instead.
- * Stub hash: 2833c99aeeb14f786eedcbb13f8026119bd0909e */
+ * Stub hash: b9f968d32ab6fb53948b2d65455ed558821af8e3 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_Room___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -22,6 +22,18 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_Room_send, 0, 1,
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeoutMs, IS_LONG, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_Room_subscribe, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_Room_unsubscribe arginfo_class_TrueAsync_Room_subscribe
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_Room_recv, 0, 0, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeoutMs, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_Room_lostCount, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_Room_subscriberCount, 0, 0, IS_LONG, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeoutMs, IS_LONG, 0, "1000")
 ZEND_END_ARG_INFO()
@@ -34,6 +46,10 @@ ZEND_METHOD(TrueAsync_Room, publish);
 ZEND_METHOD(TrueAsync_Room, publishBinary);
 ZEND_METHOD(TrueAsync_Room, trySend);
 ZEND_METHOD(TrueAsync_Room, send);
+ZEND_METHOD(TrueAsync_Room, subscribe);
+ZEND_METHOD(TrueAsync_Room, unsubscribe);
+ZEND_METHOD(TrueAsync_Room, recv);
+ZEND_METHOD(TrueAsync_Room, lostCount);
 ZEND_METHOD(TrueAsync_Room, subscriberCount);
 ZEND_METHOD(TrueAsync_Room, name);
 
@@ -43,6 +59,10 @@ static const zend_function_entry class_TrueAsync_Room_methods[] = {
 	ZEND_ME(TrueAsync_Room, publishBinary, arginfo_class_TrueAsync_Room_publishBinary, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_Room, trySend, arginfo_class_TrueAsync_Room_trySend, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_Room, send, arginfo_class_TrueAsync_Room_send, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_Room, subscribe, arginfo_class_TrueAsync_Room_subscribe, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_Room, unsubscribe, arginfo_class_TrueAsync_Room_unsubscribe, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_Room, recv, arginfo_class_TrueAsync_Room_recv, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_Room, lostCount, arginfo_class_TrueAsync_Room_lostCount, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_Room, subscriberCount, arginfo_class_TrueAsync_Room_subscriberCount, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_Room, name, arginfo_class_TrueAsync_Room_name, ZEND_ACC_PUBLIC)
 	ZEND_FE_END

@@ -31,9 +31,10 @@ typedef struct ws_topic_node {
     struct ws_topic_node *plus;
     struct ws_topic_node *hash;
 
-    /* Subscribers AT this node. Dense, not a hash: delivery only walks it, and
-     * the walk must not allocate. `dead` counts tombstones (ws_node_detach). */
-    ws_session_t        **subs;
+    /* Subscribers AT this node, both kinds. Dense, not a hash: delivery only
+     * walks it, and the walk allocates nothing per session. `dead` counts
+     * tombstones (ws_node_detach). */
+    ws_subscriber_ref_t  *subs;
     uint32_t              count;
     uint32_t              cap;
     uint32_t              dead;
@@ -324,7 +325,7 @@ static void ws_node_compact(ws_topic_node_t *node)
     uint32_t kept = 0;
 
     for (uint32_t i = 0; i < node->count; i++) {
-        if (node->subs[i] != NULL) {
+        if (node->subs[i].ptr != NULL) {
             node->subs[kept++] = node->subs[i];
         }
     }
@@ -383,12 +384,12 @@ static void ws_tree_settle(ws_topic_tree_t *tree)
 }
 
 static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
-                           const ws_session_t *session)
+                           const void *subscriber)
 {
     uint32_t idx = node->count;
 
     for (uint32_t i = 0; i < node->count; i++) {
-        if (node->subs[i] == session) {
+        if (node->subs[i].ptr == subscriber) {
             idx = i;
             break;
         }
@@ -406,7 +407,7 @@ static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
      * pruning a dirty CHILD cannot cascade up and free a dirty parent still
      * sitting in the list. Decrement `count` here and settle becomes a UAF. */
     if (tree->walking > 0) {
-        node->subs[idx] = NULL;
+        node->subs[idx].ptr = NULL;
         node->dead++;
         ws_tree_mark_dirty(tree, node);
         return;
@@ -468,6 +469,28 @@ static uint32_t ws_sub_count(const ws_session_t *session)
     return count;
 }
 
+/* Creates the missing levels; returns the leaf so the caller can record it. */
+static ws_topic_node_t *ws_node_add(ws_topic_tree_t *tree, const ws_topic_levels_t *levels,
+                                    void *subscriber, const ws_sub_kind_t kind)
+{
+    ws_topic_node_t *node = &tree->root;
+
+    for (uint32_t i = 0; i < levels->count; i++) {
+        node = ws_node_child(node, levels->level[i], levels->len[i], true);
+    }
+
+    if (node->count == node->cap) {
+        node->cap  = node->cap != 0 ? node->cap * 2 : 4;
+        node->subs = erealloc(node->subs, node->cap * sizeof(*node->subs));
+    }
+
+    node->subs[node->count].ptr  = subscriber;
+    node->subs[node->count].kind = kind;
+    node->count++;
+
+    return node;
+}
+
 bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
                         zend_string *filter, const uint32_t max)
 {
@@ -485,18 +508,7 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
         return false;
     }
 
-    ws_topic_node_t *node = &tree->root;
-
-    for (uint32_t i = 0; i < levels.count; i++) {
-        node = ws_node_child(node, levels.level[i], levels.len[i], true);
-    }
-
-    if (node->count == node->cap) {
-        node->cap  = node->cap != 0 ? node->cap * 2 : 4;
-        node->subs = erealloc(node->subs, node->cap * sizeof(*node->subs));
-    }
-
-    node->subs[node->count++] = session;
+    ws_topic_node_t *const node = ws_node_add(tree, &levels, session, WS_SUB_SESSION);
 
     ws_topic_sub_t *const sub = emalloc(sizeof(*sub));
     sub->node      = node;
@@ -548,6 +560,52 @@ bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
     return false;
 }
 
+bool ws_topic_subscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
+                               zend_string *filter)
+{
+    ws_topic_levels_t levels;
+
+    if (!ws_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
+        return false;
+    }
+
+    ws_node_add(tree, &levels, sub, WS_SUB_SERVER);
+
+    ws_interest_publish(tree->hub, filter, true);
+
+    return true;
+}
+
+void ws_topic_unsubscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
+                                 const zend_string *filter)
+{
+    if (tree == NULL) {
+        return;   /* the thread detached; the nodes are gone with it */
+    }
+
+    ws_topic_levels_t levels;
+
+    if (!ws_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
+        return;
+    }
+
+    ws_topic_node_t *node = &tree->root;
+
+    for (uint32_t i = 0; i < levels.count && node != NULL; i++) {
+        node = ws_node_child(node, levels.level[i], levels.len[i], false);
+    }
+
+    if (node == NULL) {
+        return;
+    }
+
+    ws_node_detach(tree, node, sub);
+
+    /* After the tree, as for a session: an understated interest filter would let
+     * a publisher skip this worker while the subscription is still live. */
+    ws_interest_publish(tree->hub, filter, false);
+}
+
 /* `tree` is NULL when the worker already detached — which happens only on the
  * bailout path, where start() cannot drain the sessions before letting go of the
  * tree. Their nodes are freed memory by then, so drop the list without touching
@@ -597,9 +655,38 @@ typedef struct {
 static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
 {
     for (uint32_t i = 0; i < node->count; i++) {
-        ws_session_t *const session = node->subs[i];
+        const ws_subscriber_ref_t ref = node->subs[i];
 
-        if (session == NULL || session->ws_id == visit->except_id) {
+        if (ref.ptr == NULL) {
+            continue;
+        }
+
+        if (ref.kind == WS_SUB_SERVER) {
+            ws_server_sub_t *const server_sub = ref.ptr;
+
+            /* A server subscriber has no ws_id, so except_id cannot address it:
+             * a publisher that also subscribes hears its own message. */
+            if (ws_server_sub_mark(server_sub) == visit->tree->mark) {
+                continue;
+            }
+
+            ws_server_sub_set_mark(server_sub, visit->tree->mark);
+
+            if (!visit->should_deliver) {
+                visit->hits++;
+                continue;
+            }
+
+            if (ws_server_sub_try_deliver(server_sub, visit->data, visit->len, visit->binary)) {
+                visit->hits++;
+            }
+
+            continue;
+        }
+
+        ws_session_t *const session = ref.ptr;
+
+        if (session->ws_id == visit->except_id) {
             continue;
         }
 

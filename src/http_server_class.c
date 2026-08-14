@@ -5672,6 +5672,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
     add_assoc_long(return_value, "ws_retry_rejected",  (zend_long)ws.retry_rejected);
     add_assoc_long(return_value, "ws_retry_gone",      (zend_long)ws.retry_gone);
     add_assoc_long(return_value, "ws_retry_shutdown",  (zend_long)ws.retry_shutdown);
+    add_assoc_long(return_value, "ws_sub_overflow",    (zend_long)ws.sub_overflow);
 #endif
 }
 /* }}} */
@@ -6053,6 +6054,15 @@ typedef struct {
     topic_hub_t     *hub;     /* owns a reference; NULL only on an unminted object */
     zend_string     *topic;   /* owned; concrete name */
     room_retry_cfg_t retry;   /* snapshot; the server's config is locked at construction */
+
+    /* This thread's subscription, NULL until subscribe(). Never transferred:
+     * a transferred room subscribes again in its new thread. */
+    ws_server_sub_t *sub;
+
+    /* Losses from subscriptions this handle has already dropped, so lostCount()
+     * stays monotonic across an unsubscribe/subscribe pair. */
+    uint64_t         lost_before;
+
     zend_object      std;
 } room_object;
 
@@ -6067,8 +6077,10 @@ static zend_object *room_create(zend_class_entry *ce)
 {
     room_object *obj = zend_object_alloc(sizeof(*obj), ce);
 
-    obj->hub   = NULL;
-    obj->topic = NULL;
+    obj->hub         = NULL;
+    obj->topic       = NULL;
+    obj->sub         = NULL;
+    obj->lost_before = 0;
     memset(&obj->retry, 0, sizeof(obj->retry));
 
     zend_object_std_init(&obj->std, ce);
@@ -6081,6 +6093,12 @@ static zend_object *room_create(zend_class_entry *ce)
 static void room_free(zend_object *obj)
 {
     room_object *room = room_from_obj(obj);
+
+    if (room->sub != NULL) {
+        topic_hub_unsubscribe(room->sub);
+        topic_hub_sub_release(room->sub);
+        room->sub = NULL;
+    }
 
     if (room->topic != NULL) {
         zend_string_release(room->topic);
@@ -6148,6 +6166,7 @@ static zend_object *room_transfer_obj(
     topic_hub_addref(room->hub);
     room->topic = zend_string_init(ZSTR_VAL(src->topic), ZSTR_LEN(src->topic), persistent);
     room->retry = src->retry;
+    room->sub   = NULL;   /* a subscription belongs to one thread and is not transferred */
 
     return dst;
 }
@@ -6325,6 +6344,142 @@ ZEND_METHOD(TrueAsync_Room, subscriberCount)
     );
 
     RETURN_LONG((zend_long) count);
+}
+/* }}} */
+
+/* {{{ proto Room::subscribe(): void */
+ZEND_METHOD(TrueAsync_Room, subscribe)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+
+    if (!room_is_minted(room)) {
+        return;
+    }
+
+    if (room->sub != NULL) {
+        return;
+    }
+
+    room->sub = topic_hub_subscribe(room->hub, room->topic);
+
+    if (room->sub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot subscribe: this thread could not attach to the topic hub", 0);
+    }
+}
+/* }}} */
+
+/* {{{ proto Room::unsubscribe(): void */
+ZEND_METHOD(TrueAsync_Room, unsubscribe)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+
+    if (!room_is_minted(room) || room->sub == NULL) {
+        return;
+    }
+
+    room->lost_before += topic_hub_sub_lost(room->sub);
+
+    topic_hub_unsubscribe(room->sub);
+    topic_hub_sub_release(room->sub);
+    room->sub = NULL;
+}
+/* }}} */
+
+/* {{{ proto Room::recv(?int $timeoutMs = null): ?string */
+ZEND_METHOD(TrueAsync_Room, recv)
+{
+    zend_long timeout_ms      = 0;
+    bool      timeout_is_null = true;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG_OR_NULL(timeout_ms, timeout_is_null)
+    ZEND_PARSE_PARAMETERS_END();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+
+    if (!room_is_minted(room)) {
+        return;
+    }
+
+    /* A missing subscription is a mistake, not a quiet null: the caller cannot
+     * tell "nothing arrived" from "nobody ever joined". */
+    if (room->sub == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Room::recv() needs subscribe() first, in this thread", 0);
+        return;
+    }
+
+    ws_payload_t *payload = NULL;
+
+    /* Only null waits without a deadline. A negative argument is an expired
+     * computed deadline and takes what is queued, so the signed tri-state stays
+     * a C convention rather than a PHP one. */
+    const int64_t timeout = timeout_is_null ? -1 : (timeout_ms > 0 ? (int64_t) timeout_ms : 0);
+
+    const topic_hub_recv_status_t status = topic_hub_recv(room->sub, timeout, &payload);
+
+    /* A message is never dropped for a pending cancellation: one taken off the
+     * ring is returned here, and one that arrived during a cancelled park was
+     * left in the ring for the next reader. */
+    switch (status) {
+        case TOPIC_HUB_RECV_MESSAGE: {
+            size_t len;
+            bool   binary;
+            const char *const data = topic_hub_payload_data(payload, &len, &binary);
+
+            if (EG(exception) == NULL) {
+                RETVAL_STRINGL(data, len);
+            }
+
+            topic_hub_payload_release(payload);
+            return;
+        }
+
+        case TOPIC_HUB_RECV_BUSY:
+            if (EG(exception) == NULL) {
+                zend_throw_exception(http_server_runtime_exception_ce,
+                    "Room::recv() is already parked in another coroutine on this room", 0);
+            }
+
+            return;
+
+        case TOPIC_HUB_RECV_CLOSED:
+            if (EG(exception) == NULL) {
+                zend_throw_exception(http_server_runtime_exception_ce,
+                    "Room::recv() was interrupted: the subscription closed", 0);
+            }
+
+            return;
+
+        case TOPIC_HUB_RECV_TIMEOUT:
+        default:
+            if (EG(exception) != NULL) {
+                return;   /* a cancellation crossed the park */
+            }
+
+            RETURN_NULL();
+    }
+}
+/* }}} */
+
+/* {{{ proto Room::lostCount(): int */
+ZEND_METHOD(TrueAsync_Room, lostCount)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    room_object *room = Z_ROOM_P(ZEND_THIS);
+
+    if (!room_is_minted(room)) {
+        return;
+    }
+
+    RETURN_LONG((zend_long) (room->lost_before + topic_hub_sub_lost(room->sub)));
 }
 /* }}} */
 

@@ -53,6 +53,33 @@ struct topic_hub_s;
 
 typedef struct ws_topic_tree ws_topic_tree_t;
 
+/* ------------------------------------------------------------- subscribers
+ *
+ * A subscriber is a WebSocket session or a server-side receiver (topic_hub.h).
+ * The tree keeps both in one array and tells them apart by `kind`; the receiver
+ * is opaque here, so the three calls below are the tree's only view of it.
+ *
+ * Delivery to a server subscriber enqueues and fires an event, running no PHP,
+ * so it cannot re-enter unsubscribe mid-walk the way a socket write can. */
+typedef struct ws_server_sub ws_server_sub_t;
+
+typedef enum {
+    WS_SUB_SESSION = 0,
+    WS_SUB_SERVER,
+} ws_sub_kind_t;
+
+typedef struct {
+    void         *ptr;    /* NULL is a tombstone, whatever the kind */
+    ws_sub_kind_t kind;
+} ws_subscriber_ref_t;
+
+/* The mark is the once-per-pass stamp a session carries in
+ * ws_session_t.topic_mark. */
+uint64_t ws_server_sub_mark(const ws_server_sub_t *sub);
+void     ws_server_sub_set_mark(ws_server_sub_t *sub, uint64_t mark);
+bool     ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
+                                   size_t len, bool binary);
+
 /* `hub` is where this tree publishes its interest filter (topic_hub.h). */
 ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub);
 void             ws_topic_tree_free(ws_topic_tree_t *tree);
@@ -71,6 +98,14 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
                         zend_string *filter, uint32_t max);
 bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
                           const zend_string *filter);
+
+/* No per-session quota: a server subscriber is code, not a peer connection to
+ * protect from itself. The caller owns `sub` and must unsubscribe before freeing
+ * it. */
+bool ws_topic_subscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
+                               zend_string *filter);
+void ws_topic_unsubscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
+                                 const zend_string *filter);
 
 /* Called from ws_session_destroy — a closing connection leaves every topic. */
 void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_session_t *session);

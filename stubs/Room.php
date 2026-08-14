@@ -91,6 +91,51 @@ final class Room
     public function send(string $message, ?int $timeoutMs = null): int {}
 
     /**
+     * Join this room in the CALLING thread, so {@see recv()} can take messages
+     * published to it — by another thread, another worker, or a WebSocket peer.
+     *
+     * Attaches this thread to the topic machinery if nobody did yet. Idempotent
+     * per handle. A subscription belongs to one thread and is never carried by a
+     * transfer: a room handed to a {@see \Async\ThreadPool} task arrives
+     * unsubscribed, and the task subscribes for itself.
+     */
+    public function subscribe(): void {}
+
+    /**
+     * Leave this room in the calling thread. The thread stays attached — other
+     * rooms of the same server go on receiving.
+     */
+    public function unsubscribe(): void {}
+
+    /**
+     * Take the next message, or wait for one.
+     *
+     * Returns null when $timeoutMs passes with nothing to take, or at once when
+     * called outside a coroutine with nothing queued. Binary and text messages
+     * both come back as a string — the WebSocket frame type says nothing to a
+     * server-side consumer.
+     *
+     * @param int|null $timeoutMs Deadline in milliseconds. null waits without
+     *        one; 0 (or a negative, which is what an expired computed deadline
+     *        comes out as) takes whatever is already queued and returns.
+     * @throws HttpServerRuntimeException if this thread never subscribed, if
+     *         another coroutine is already parked on this room, or if the
+     *         subscription closed while parked.
+     */
+    public function recv(?int $timeoutMs = null): ?string {}
+
+    /**
+     * Messages this room's queue dropped because it was full.
+     *
+     * Monotonic for the lifetime of this handle, across unsubscribe/subscribe:
+     * snapshot it around a drain and compare. A publisher is never blocked by a
+     * slow consumer, so a receiver that falls behind loses the oldest messages —
+     * this is how it finds out. Whatever is still queued when a subscription
+     * ends is discarded and does NOT count here.
+     */
+    public function lostCount(): int {}
+
+    /**
      * Count the subscribers of this room across all workers (scatter/gather).
      *
      * Suspends the calling coroutine until every worker answers or $timeoutMs

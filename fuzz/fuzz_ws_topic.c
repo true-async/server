@@ -62,7 +62,31 @@ bool ws_session_try_send(ws_session_t *session, const char *data, size_t len,
     return true;
 }
 
-#define WS_TOPIC_FUZZ_SESSIONS 8u
+/* The real subscriber is defined in topic_hub.c, which this harness does not
+ * link: the mark is all the tree ever reads of it. */
+struct ws_server_sub {
+    uint64_t mark;
+};
+
+uint64_t ws_server_sub_mark(const ws_server_sub_t *sub)
+{
+    return sub->mark;
+}
+
+void ws_server_sub_set_mark(ws_server_sub_t *sub, uint64_t mark)
+{
+    sub->mark = mark;
+}
+
+bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data, size_t len,
+                               bool binary)
+{
+    (void)sub; (void)data; (void)len; (void)binary;
+    return true;
+}
+
+#define WS_TOPIC_FUZZ_SESSIONS    8u
+#define WS_TOPIC_FUZZ_SERVER_SUBS 4u
 #define WS_TOPIC_FUZZ_MAX_SUBS 32u   /* exercise the at-cap SUBACK-refused path */
 
 /* One byte of length, so a single slice is 0..255 bytes — long enough to reach
@@ -103,6 +127,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         sessions[i]->ws_id = (uint64_t)i + 1;
     }
 
+    ws_server_sub_t *server_subs[WS_TOPIC_FUZZ_SERVER_SUBS];
+    for (uint32_t i = 0; i < WS_TOPIC_FUZZ_SERVER_SUBS; i++) {
+        server_subs[i] = ecalloc(1, sizeof(*server_subs[i]));
+    }
+
     size_t pos = 0;
 
     while (pos < size) {
@@ -114,7 +143,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             break;
         }
 
-        ws_session_t *const session = sessions[(op >> 2) & (WS_TOPIC_FUZZ_SESSIONS - 1)];
+        ws_session_t *const session = sessions[(op >> 3) & (WS_TOPIC_FUZZ_SESSIONS - 1)];
+        ws_server_sub_t *const server_sub =
+            server_subs[(op >> 3) & (WS_TOPIC_FUZZ_SERVER_SUBS - 1)];
 
         /* Every slice hits the pure parsers, valid or not — the string paths get
          * covered even when the command below leaves the tree untouched. */
@@ -125,7 +156,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         ws_topic_prefixes_t prefixes;
         (void)ws_topic_prefixes(slice, slice_len, &prefixes);
 
-        switch (op & 0x3) {
+        switch (op & 0x7) {
             case 0: {   /* subscribe (filter) */
                 zend_string *const filter = zend_string_init(slice, slice_len, 0);
                 (void)ws_topic_subscribe(tree, session, filter, WS_TOPIC_FUZZ_MAX_SUBS);
@@ -149,6 +180,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             case 3:     /* drop every subscription this session holds */
                 ws_topic_unsubscribe_all(tree, session);
                 break;
+
+            case 4: {   /* subscribe a server-side receiver (filter) */
+                zend_string *const filter = zend_string_init(slice, slice_len, 0);
+                (void)ws_topic_subscribe_server(tree, server_sub, filter);
+                zend_string_release(filter);
+                break;
+            }
+
+            case 5: {   /* unsubscribe one server-side receiver */
+                zend_string *const filter = zend_string_init(slice, slice_len, 0);
+                ws_topic_unsubscribe_server(tree, server_sub, filter);
+                zend_string_release(filter);
+                break;
+            }
+
+            default:    /* the parsers above still ran; leave the tree alone */
+                break;
         }
     }
 
@@ -165,6 +213,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         efree(sessions[i]);
     }
 
+    /* Frees the nodes that still point at the stand-ins, so it must come first. */
     ws_topic_tree_free(tree);
+
+    for (uint32_t i = 0; i < WS_TOPIC_FUZZ_SERVER_SUBS; i++) {
+        efree(server_subs[i]);
+    }
+
     return 0;
 }

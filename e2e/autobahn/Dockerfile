@@ -58,9 +58,19 @@ RUN set -eux; \
     ninja; ninja install; cd /; rm -rf libuv; ldconfig
 
 # ---- PHP (true-async fork) + ext/async --------------------------------
+# Fetched by ref, the way SERVER_REF fetches the server below: a branch name is
+# cached forever, which pins php-src to whatever it was when the image was first
+# built, and an engine API added later then reads as undeclared. CI passes the
+# resolved SHAs, so the layer key and its content are the same commit.
+ARG PHP_SRC_REF=${PHP_SRC_BRANCH}
+ARG PHP_ASYNC_REF=${PHP_ASYNC_BRANCH}
 RUN set -eux; \
-    git clone --depth=1 --branch=${PHP_SRC_BRANCH} https://github.com/true-async/php-src.git php-src; \
-    git clone --depth=1 --branch=${PHP_ASYNC_BRANCH} https://github.com/true-async/php-async.git php-src/ext/async
+    mkdir -p php-src; cd php-src; git init -q; \
+    git remote add origin https://github.com/true-async/php-src.git; \
+    git fetch --depth=1 origin ${PHP_SRC_REF}; git checkout -q FETCH_HEAD; \
+    mkdir -p ext/async; cd ext/async; git init -q; \
+    git remote add origin https://github.com/true-async/php-async.git; \
+    git fetch --depth=1 origin ${PHP_ASYNC_REF}; git checkout -q FETCH_HEAD
 
 RUN set -eux; cd php-src; \
     ./buildconf --force; \
