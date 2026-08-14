@@ -58,7 +58,12 @@ RUN set -eux; \
     ninja; ninja install; cd /; rm -rf libuv; ldconfig
 
 # ---- PHP (true-async fork) + ext/async --------------------------------
+# A changed PHP_STACK_REF busts this layer, the way SERVER_REF busts the server's
+# below. Cached forever, the clone pins php-src to whatever it was when the image
+# was first built, and an engine API added later reads as undeclared.
+ARG PHP_STACK_REF=pinned
 RUN set -eux; \
+    echo "php stack: ${PHP_STACK_REF}"; \
     git clone --depth=1 --branch=${PHP_SRC_BRANCH} https://github.com/true-async/php-src.git php-src; \
     git clone --depth=1 --branch=${PHP_ASYNC_BRANCH} https://github.com/true-async/php-async.git php-src/ext/async
 
