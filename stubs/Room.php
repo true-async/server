@@ -83,7 +83,10 @@ final class Room
      *
      * @param int|null $timeoutMs Retry deadline; null uses
      *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
-     * @return int Targets the message was delivered to.
+     * @return int Worker mailboxes that accepted the message. Local subscribers
+     *             on the calling worker are served first and are NOT counted here;
+     *             a mailbox that accepted it can still drop it on a full ring
+     *             (`ws_sub_overflow`).
      * @throws RoomDeliveryException if the deadline passed with a target still
      *         full, or the outbound queue was full at enqueue, or send() was
      *         called outside a coroutine (use trySend() there).

@@ -116,7 +116,10 @@ final class HttpServer
      * a {@see Room} handle.
      *
      * @param int|null $timeoutMs Retry deadline; null uses the configured default.
-     * @return int Targets the message was delivered to.
+     * @return int Worker mailboxes that accepted the message. Local subscribers
+     *             on the calling worker are served first and are NOT counted here;
+     *             a mailbox that accepted it can still drop it on a full ring
+     *             (`ws_sub_overflow`).
      * @throws RoomDeliveryException if the deadline passed with a target still
      *         full, the outbound queue was full, or called outside a coroutine.
      */
@@ -268,6 +271,26 @@ final class HttpServer
      *                             because it was full. This one is data loss:
      *                             a worker is not draining fast enough, or a
      *                             client is flooding publishes.
+     *  - `ws_bodies`            — message bodies allocated. One publish costs
+     *                             one, whatever it reaches: the body is shared
+     *                             by every subscriber and every worker it lands
+     *                             in. Growing faster than the publishes means a
+     *                             copy crept back into a delivery path.
+     *  - `ws_sub_overflow`      — server-side receivers (see {@see Room::recv()})
+     *                             whose 64-message ring dropped its oldest
+     *                             because nobody was reading. Distinct from
+     *                             `ws_topic_dropped`: that is the transport
+     *                             giving up on a worker, this is a receiver too
+     *                             slow for itself. {@see Room::lostCount()}
+     *                             attributes it to one subscription.
+     *  - `ws_retry_queued`, `ws_retry_delivered`, `ws_retry_expired`,
+     *    `ws_retry_rejected`, `ws_retry_gone`, `ws_retry_shutdown` — the
+     *                             reliable path's ledger: parked targets, those
+     *                             a retry landed, those that ran out of
+     *                             deadline, sends the outbound queue refused,
+     *                             targets that had detached by the time a retry
+     *                             came round, and those a worker shutdown
+     *                             abandoned. See {@see Room::send()}.
      *
      * @return array
      */

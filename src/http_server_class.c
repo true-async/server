@@ -5675,6 +5675,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
     add_assoc_long(return_value, "ws_retry_rejected",  (zend_long)ws.retry_rejected);
     add_assoc_long(return_value, "ws_retry_gone",      (zend_long)ws.retry_gone);
     add_assoc_long(return_value, "ws_retry_shutdown",  (zend_long)ws.retry_shutdown);
+    add_assoc_long(return_value, "ws_bodies",          (zend_long)ws.bodies);
     add_assoc_long(return_value, "ws_sub_overflow",    (zend_long)ws.sub_overflow);
 #endif
 }

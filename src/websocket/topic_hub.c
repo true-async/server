@@ -49,6 +49,7 @@ struct topic_hub_s {
     zend_atomic_int64 retry_rejected;    /* sends refused — outbound queue at cap */
     zend_atomic_int64 retry_gone;        /* parked targets whose worker had detached */
     zend_atomic_int64 retry_shutdown;    /* parked targets abandoned by THIS worker's detach */
+    zend_atomic_int64 bodies;            /* message bodies allocated; one per publish */
     zend_atomic_int64 sub_overflow;      /* server subscriber rings that dropped their oldest */
 
     thread_mailbox_t *inbox[TOPIC_HUB_MAX_WORKERS];
@@ -246,11 +247,19 @@ void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out)
     out->retry_rejected  = (uint64_t) zend_atomic_int64_load(&hub->retry_rejected);
     out->retry_gone      = (uint64_t) zend_atomic_int64_load(&hub->retry_gone);
     out->retry_shutdown  = (uint64_t) zend_atomic_int64_load(&hub->retry_shutdown);
+    out->bodies          = (uint64_t) zend_atomic_int64_load(&hub->bodies);
     out->sub_overflow    = (uint64_t) zend_atomic_int64_load(&hub->sub_overflow);
 }
 
-static ws_payload_t *ws_payload_new(const char *data, const size_t len, const bool binary)
+/* `hub` only counts the allocation — it may be NULL for a subscription whose
+ * attachment is already gone. */
+static ws_payload_t *ws_payload_new(topic_hub_t *hub, const char *data, const size_t len,
+                                    const bool binary)
 {
+    if (hub != NULL) {
+        (void) ws_atomic_u64_add(&hub->bodies, 1);
+    }
+
     ws_payload_t *const payload = pemalloc(sizeof(*payload) + len, 1);
     ZEND_ATOMIC_INT_INIT(&payload->refcount, 1);
     payload->len    = len;
@@ -309,6 +318,7 @@ topic_hub_t *topic_hub_create(void)
     ZEND_ATOMIC_INT64_INIT(&hub->retry_rejected, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->retry_gone, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->retry_shutdown, 0);
+    ZEND_ATOMIC_INT64_INIT(&hub->bodies, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->sub_overflow, 0);
 
     hub->admin = tsrm_mutex_alloc();
@@ -536,12 +546,8 @@ bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
     ws_payload_t *payload = *shared;
 
     if (payload == NULL) {
-        payload = ws_payload_new(data, len, binary);
-
-        if (payload == NULL) {
-            return false;
-        }
-
+        payload = ws_payload_new(sub->local != NULL ? sub->local->hub : NULL,
+                                 data, len, binary);
         *shared = payload;
     }
 
@@ -1174,7 +1180,7 @@ static uint32_t topic_hub_fanout_locked(topic_hub_t *hub, const ws_local_t *loca
         }
 
         if (payload == NULL) {
-            payload = ws_payload_new(data, len, binary);
+            payload = ws_payload_new(hub, data, len, binary);
         }
 
         ws_cmd_t *const cmd = ws_cmd_new(WS_CMD_PUBLISH, topic, topic_len);
@@ -1225,14 +1231,14 @@ uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, const size_t top
                            &local_body)
         : 0;
 
-    if (local_body != NULL) {
-        ws_payload_release(local_body);   /* the walk's reference; the rings hold theirs */
-    }
-
     ws_interest_t interest;
     ws_interest_build(&interest, topic, topic_len);
 
-    ws_payload_t *payload = NULL;
+    /* The local walk's body, if it made one, is what goes to the other workers:
+     * seeded here rather than released, so a publish with both local and remote
+     * subscribers still costs one body. The fan-out's release below is the one
+     * that ends this reference. */
+    ws_payload_t *payload = local_body;
     uint64_t      skipped = 0;
     uint64_t      dropped = 0;
 
@@ -1772,15 +1778,11 @@ static uint32_t topic_hub_send_fanout(topic_hub_t *hub, const ws_local_t *local,
         const char *data, const size_t len, const bool binary, const uint64_t except_id,
         retry_target_t *full, uint32_t *nfull, ws_payload_t **payload)
 {
-    if (local != NULL) {
-        void *local_body = NULL;
+    void *local_body = NULL;
 
+    if (local != NULL) {
         (void) ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id,
                                 &local_body);
-
-        if (local_body != NULL) {
-            ws_payload_release(local_body);
-        }
     }
 
     ws_interest_t interest;
@@ -1789,7 +1791,9 @@ static uint32_t topic_hub_send_fanout(topic_hub_t *hub, const ws_local_t *local,
     uint64_t skipped = 0;
     uint64_t dropped = 0;   /* always 0 on the reliable path — full targets park */
 
-    *payload = NULL;
+    /* The local walk's body carries on to the other workers (topic_hub_publish's
+     * reasoning); the caller ends this reference with the rest. */
+    *payload = local_body;
     *nfull   = 0;
 
     tsrm_mutex_lock(hub->admin);
