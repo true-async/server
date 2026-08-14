@@ -16,6 +16,9 @@ namespace TrueAsync;
  * {@see WebSocket::publish()} it needs no connection, so a background producer
  * (a coroutine that is not a socket) can push into a room.
  *
+ * A handle owns a reference to the topic hub, so it keeps publishing after the
+ * {@see HttpServer} that minted it is released.
+ *
  * @strict-properties
  * @not-serializable
  */
