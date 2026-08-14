@@ -62,9 +62,8 @@ bool ws_session_try_send(ws_session_t *session, const char *data, size_t len,
     return true;
 }
 
-/* The server-side subscriber lives in topic_hub.c, so the tree sees it through
- * these three only. A record here is just a mark: what the real one queues is
- * fuzzed where the ring lives, not in the tree. */
+/* The real subscriber is defined in topic_hub.c, which this harness does not
+ * link: the mark is all the tree ever reads of it. */
 struct ws_server_sub {
     uint64_t mark;
 };
@@ -196,7 +195,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 break;
             }
 
-            default:    /* mixed nodes are the point; leave the tree alone here */
+            default:    /* the parsers above still ran; leave the tree alone */
                 break;
         }
     }
@@ -214,8 +213,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         efree(sessions[i]);
     }
 
-    /* The tree drops its own references to these when its nodes go; the records
-     * are ours, so they outlive it by one statement. */
+    /* Frees the nodes that still point at the stand-ins, so it must come first. */
     ws_topic_tree_free(tree);
 
     for (uint32_t i = 0; i < WS_TOPIC_FUZZ_SERVER_SUBS; i++) {

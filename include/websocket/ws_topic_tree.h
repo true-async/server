@@ -55,15 +55,12 @@ typedef struct ws_topic_tree ws_topic_tree_t;
 
 /* ------------------------------------------------------------- subscribers
  *
- * A subscriber is a WebSocket session or a server-side receiver (a coroutine's
- * queue, topic_hub.h). The tree keeps both in one array and tells them apart by
- * `kind`; what a server subscriber IS stays in topic_hub.c, which is why the
- * three calls below are the tree's only view of it.
+ * A subscriber is a WebSocket session or a server-side receiver (topic_hub.h).
+ * The tree keeps both in one array and tells them apart by `kind`; the receiver
+ * is opaque here, so the three calls below are the tree's only view of it.
  *
- * Delivery to a server subscriber enqueues and fires an event — it runs no PHP,
- * so it cannot re-enter unsubscribe mid-walk the way a socket write can. The
- * tombstone machinery exists for sessions; a server subscriber merely lives
- * alongside it. */
+ * Delivery to a server subscriber enqueues and fires an event, running no PHP,
+ * so it cannot re-enter unsubscribe mid-walk the way a socket write can. */
 typedef struct ws_server_sub ws_server_sub_t;
 
 typedef enum {
@@ -76,8 +73,8 @@ typedef struct {
     ws_sub_kind_t kind;
 } ws_subscriber_ref_t;
 
-/* Implemented in topic_hub.c. The mark is the once-per-pass stamp a session
- * carries in ws_session_t.topic_mark. */
+/* The mark is the once-per-pass stamp a session carries in
+ * ws_session_t.topic_mark. */
 uint64_t ws_server_sub_mark(const ws_server_sub_t *sub);
 void     ws_server_sub_set_mark(ws_server_sub_t *sub, uint64_t mark);
 bool     ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
@@ -102,9 +99,9 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
 bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
                           const zend_string *filter);
 
-/* Same tree, same filters, no per-session quota — a server subscriber is code,
- * not a peer, so there is no connection to protect from itself. The caller owns
- * `sub` and must unsubscribe before freeing it. */
+/* No per-session quota: a server subscriber is code, not a peer connection to
+ * protect from itself. The caller owns `sub` and must unsubscribe before freeing
+ * it. */
 bool ws_topic_subscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
                                zend_string *filter);
 void ws_topic_unsubscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,

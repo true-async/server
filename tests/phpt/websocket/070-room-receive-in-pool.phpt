@@ -10,10 +10,8 @@ true_async_server
 true_async
 --FILE--
 <?php
-/* The receive side of a room: the subscriber is a coroutine's queue rather than
- * a WebSocket connection, so a run executing in a pool thread can be told
- * something. Two handles on one topic prove that unsubscribing one leaves the
- * other receiving — they share the thread's attachment. */
+/* Two handles on one topic: unsubscribing either leaves the other receiving,
+ * because they share the thread's attachment. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use Async\ThreadPool;

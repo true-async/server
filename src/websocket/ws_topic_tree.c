@@ -31,13 +31,9 @@ typedef struct ws_topic_node {
     struct ws_topic_node *plus;
     struct ws_topic_node *hash;
 
-    /* Subscribers AT this node. Dense, not a hash: delivery only walks it, and
-     * the walk allocates nothing per SESSION. `dead` counts tombstones
-     * (ws_node_detach). Both kinds share one array, so `count` alone decides
-     * whether a node is still wanted — see ws_node_is_empty.
-     *
-     * A server subscriber costs one payload copy each, since it queues the bytes
-     * rather than writing them to a socket. */
+    /* Subscribers AT this node, both kinds. Dense, not a hash: delivery only
+     * walks it, and the walk allocates nothing per session. `dead` counts
+     * tombstones (ws_node_detach). */
     ws_subscriber_ref_t  *subs;
     uint32_t              count;
     uint32_t              cap;
@@ -473,8 +469,7 @@ static uint32_t ws_sub_count(const ws_session_t *session)
     return count;
 }
 
-/* Walks the filter's levels, creating nodes, and appends one subscriber at the
- * leaf. Returns that node so the caller can record it. */
+/* Creates the missing levels; returns the leaf so the caller can record it. */
 static ws_topic_node_t *ws_node_add(ws_topic_tree_t *tree, const ws_topic_levels_t *levels,
                                     void *subscriber, const ws_sub_kind_t kind)
 {

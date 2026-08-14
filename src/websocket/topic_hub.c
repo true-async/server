@@ -163,8 +163,7 @@ typedef struct ws_local_s {
     thread_mailbox_t  *inbox;
     ws_topic_tree_t   *tree;
 
-    /* Server subscriptions held on this thread — walked by detach and by the
-     * shutdown sweep, which are the only places allowed to close them. */
+    /* Server subscriptions held on this thread; detach closes whatever is left. */
     struct ws_server_sub *subs;
 
     /* Reliable-send outbound queue — thread-local, so NO lock: enqueued by this
@@ -483,13 +482,12 @@ static void topic_hub_drain(void **items, const size_t count, void *arg);
 
 /* ------------------------------------------------------ server subscribers
  *
- * A subscriber that is not a socket: the tree hands it a payload, it queues the
- * payload and wakes the coroutine parked in recv(). Thread-local like the rest
- * of ws_local_t — created, drained and closed on one thread.
+ * A subscriber that queues the payload the tree hands it and wakes the coroutine
+ * parked in recv(). Thread-local like the rest of ws_local_t: created, drained
+ * and closed on one thread.
  *
- * The ring is bounded and overflow drops the OLDEST entry: for a control room
- * the newest command is the authoritative one, and keeping stale commands while
- * discarding a fresh stop is the failure this path exists to prevent. */
+ * The ring is bounded and overflow drops the OLDEST entry, because for a control
+ * room the newest command is the authoritative one. */
 
 #define WS_SERVER_SUB_RING 64
 
@@ -648,9 +646,6 @@ int topic_hub_attach(topic_hub_t *hub)
     return slot;
 }
 
-/* Every attachment this thread still holds, at the end of its request. A thread
- * that attached through subscribe() has no start() epilogue to detach it, and a
- * slot left taken keeps collecting messages nobody will ever read. */
 void topic_hub_thread_sweep(void)
 {
     while (ws_locals != NULL) {
@@ -658,8 +653,7 @@ void topic_hub_thread_sweep(void)
     }
 }
 
-/* Attach unless this thread already has, so a second room does not have to know
- * whether the first one attached. Only the shutdown paths ever detach. */
+/* Attaches once per thread; the shutdown paths are the only detach. */
 static ws_local_t *topic_hub_attach_ensure(topic_hub_t *hub)
 {
     if (hub == NULL) {
@@ -701,9 +695,8 @@ ws_server_sub_t *topic_hub_subscribe(topic_hub_t *hub, zend_string *filter)
     return sub;
 }
 
-/* Removes the subscription from the tree and drops the tree's reference. The
- * thread's attachment stays: a coroutine parked in send() holds no subscription,
- * and detaching under it would wake it with a spurious shutdown. */
+/* The thread's attachment stays: a coroutine parked in send() holds no
+ * subscription, and detaching under it would wake it with a spurious shutdown. */
 void topic_hub_unsubscribe(ws_server_sub_t *sub)
 {
     if (sub == NULL || sub->closed) {
@@ -766,9 +759,8 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
         return TOPIC_HUB_RECV_CLOSED;
     }
 
-    /* Before the ring is touched: whoever is parked owns this subscription, even
-     * while a message happens to be sitting in it. Deciding by "is the ring
-     * empty" lets a second caller steal the parked one's message. */
+    /* Whoever is parked owns this subscription, even with a message sitting in
+     * the ring: an empty-ring test would hand that message to a second caller. */
     if (sub->parked) {
         return TOPIC_HUB_RECV_BUSY;
     }
@@ -794,16 +786,15 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
         return TOPIC_HUB_RECV_TIMEOUT;
     }
 
-    /* Held across the suspend, as every other parked structure in this file is:
-     * unsubscribe() drops the tree's reference and the caller may drop its own,
-     * and the resume below reads this struct. */
+    /* Held across the suspend: unsubscribe() and the caller may both drop their
+     * references while this coroutine is parked. */
     ws_server_sub_addref(sub);
 
     sub->waiter = waiter;
     sub->parked = true;
 
     /* The engine spells "no timer" as 0, which is what a negative timeout means
-     * here — wait until a message or a close, however long that takes. */
+     * here: wait until a message or a close. */
     const zend_ulong waker_timeout = timeout_ms < 0 ? 0 : (zend_ulong) timeout_ms;
 
     if (zend_async_waker_new_with_timeout(coroutine, waker_timeout, NULL) != NULL) {
@@ -894,8 +885,7 @@ void topic_hub_detach(topic_hub_t *hub)
     }
 
     /* Before the tree goes: a subscription outliving its nodes would unsubscribe
-     * into freed memory. Closing wakes a parked recv, which resumes only after
-     * this returns — by then `closed` tells it what happened. */
+     * into freed memory. */
     while (local->subs != NULL) {
         ws_server_sub_t *const sub = local->subs;
 

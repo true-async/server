@@ -66,9 +66,9 @@ int  topic_hub_attach(topic_hub_t *hub);
  * attach() took; the hub may be freed here. */
 void topic_hub_detach(topic_hub_t *hub);
 
-/* Detaches whatever this thread still holds. A thread that attached by
- * subscribing has no start() epilogue to do it, and a slot left taken goes on
- * collecting messages nobody will read. Called at request shutdown. */
+/* Detaches whatever this thread still holds, at request shutdown. A thread that
+ * attached by subscribing has no start() epilogue to do it, and a slot left
+ * taken goes on collecting messages nobody will read. */
 void topic_hub_thread_sweep(void);
 
 /* This thread's topic tree FOR THAT HUB, NULL when it never attached. Keyed by
@@ -195,9 +195,8 @@ typedef struct {
     uint64_t retry_shutdown;
 
     /* A server subscriber's ring was full, so its oldest message was dropped.
-     * Apart from `dropped` deliberately: that one says a WORKER is not draining
-     * and answers "add rate limiting", this one says one consumer inside a
-     * worker is behind. Room::lostCount() reports the same event per room. */
+     * Apart from `dropped` deliberately: that one says a WORKER is not draining,
+     * this one says one consumer inside a worker is behind. */
     uint64_t sub_overflow;
 } topic_hub_stats_t;
 
@@ -205,15 +204,15 @@ void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out);
 
 /* ------------------------------------------------------ server subscribers
  *
- * A receiver that is not a socket. Subscribing attaches this thread if it is not
- * attached already, so a caller never has to know whether someone else got there
- * first; unsubscribing never detaches, because a coroutine parked in send() on
- * the same thread holds no subscription and would be woken with a spurious
- * shutdown. The thread's exit is the only detach.
+ * A receiver that belongs to server-side code rather than to a connection.
+ * Subscribing attaches this thread if nobody has; unsubscribing never detaches,
+ * because a coroutine parked in send() on the same thread holds no subscription
+ * and would be woken with a spurious shutdown. The thread's exit is the only
+ * detach.
  *
- * Every call belongs to the thread that subscribed. A subscription is not a
- * value: it is never carried to another thread. */
-typedef struct ws_payload ws_payload_t;   /* opaque: the ring holds these, PHP never sees one */
+ * Every call belongs to the thread that subscribed; a subscription is never
+ * carried to another thread. */
+typedef struct ws_payload ws_payload_t;   /* opaque; PHP never sees one */
 
 typedef enum {
     TOPIC_HUB_RECV_MESSAGE = 0,

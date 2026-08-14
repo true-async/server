@@ -6055,8 +6055,8 @@ typedef struct {
     zend_string     *topic;   /* owned; concrete name */
     room_retry_cfg_t retry;   /* snapshot; the server's config is locked at construction */
 
-    /* This thread's subscription, NULL until subscribe(). Never transferred: a
-     * transferred room subscribes for itself in the thread it lands in. */
+    /* This thread's subscription, NULL until subscribe(). Never transferred:
+     * a transferred room subscribes again in its new thread. */
     ws_server_sub_t *sub;
 
     /* Losses from subscriptions this handle has already dropped, so lostCount()
@@ -6094,8 +6094,6 @@ static void room_free(zend_object *obj)
 {
     room_object *room = room_from_obj(obj);
 
-    /* A forgotten unsubscribe() is a non-event: the handle going away takes the
-     * subscription with it. */
     if (room->sub != NULL) {
         topic_hub_unsubscribe(room->sub);
         topic_hub_sub_release(room->sub);
@@ -6168,7 +6166,7 @@ static zend_object *room_transfer_obj(
     topic_hub_addref(room->hub);
     room->topic = zend_string_init(ZSTR_VAL(src->topic), ZSTR_LEN(src->topic), persistent);
     room->retry = src->retry;
-    room->sub   = NULL;   /* a subscription belongs to one thread and does not travel */
+    room->sub   = NULL;   /* a subscription belongs to one thread and is not transferred */
 
     return dst;
 }
@@ -6349,9 +6347,7 @@ ZEND_METHOD(TrueAsync_Room, subscriberCount)
 }
 /* }}} */
 
-/* {{{ proto Room::subscribe(): void
- * Joins this room in THIS thread, attaching the thread to the hub if it is not
- * attached yet. Idempotent per handle. */
+/* {{{ proto Room::subscribe(): void */
 ZEND_METHOD(TrueAsync_Room, subscribe)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -6411,9 +6407,8 @@ ZEND_METHOD(TrueAsync_Room, recv)
         return;
     }
 
-    /* Not subscribed is a mistake, never a quiet null: a caller that cannot tell
-     * "nothing arrived" from "nobody ever joined" waits forever for a message
-     * that was never routed here. */
+    /* A missing subscription is a mistake, not a quiet null: the caller cannot
+     * tell "nothing arrived" from "nobody ever joined". */
     if (room->sub == NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Room::recv() needs subscribe() first, in this thread", 0);
@@ -6425,9 +6420,8 @@ ZEND_METHOD(TrueAsync_Room, recv)
     const topic_hub_recv_status_t status =
         topic_hub_recv(room->sub, timeout_is_null ? -1 : (int64_t) timeout_ms, &payload);
 
-    /* The message is handled before the exception check: a cancellation that
-     * lands in the same turn as a delivery must not silently destroy a control
-     * command that was already taken off the ring. */
+    /* The message case comes before the exception check: a cancellation raised in
+     * the same turn must not discard a command already taken off the ring. */
     switch (status) {
         case TOPIC_HUB_RECV_MESSAGE: {
             size_t len;

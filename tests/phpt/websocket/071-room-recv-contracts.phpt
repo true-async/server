@@ -9,9 +9,6 @@ true_async_server
 true_async
 --FILE--
 <?php
-/* The four ways a receiver can be lied to: a zero deadline that blocks anyway,
- * a second consumer stealing the parked one's message, a subscription freed
- * under a parked recv, and a loss counter that forgets. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
@@ -35,7 +32,7 @@ spawn(function () use ($server, $room) {
     echo 'zero timeout: ', $empty === null ? 'null' : $empty,
          ' in ', $elapsed < 100 ? 'no time' : 'A WAIT', "\n";
 
-    /* A parked recv owns the subscription even once a message lands in it. */
+    /* A parked recv owns the subscription even once a message is queued in it. */
     $parked = spawn(fn() => $room->recv(3000));
     delay(50);
     $room->publish('first');

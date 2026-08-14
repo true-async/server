@@ -110,10 +110,10 @@ final class Room
     /**
      * Take the next message, or wait for one.
      *
-     * Returns null when $timeoutMs passes with nothing to take, or immediately
-     * when there is nothing and no coroutine to park (outside a coroutine).
-     * Binary and text messages both come back as a string — the WebSocket frame
-     * type says nothing to a server-side consumer.
+     * Returns null when $timeoutMs passes with nothing to take, or at once when
+     * called outside a coroutine with nothing queued. Binary and text messages
+     * both come back as a string — the WebSocket frame type says nothing to a
+     * server-side consumer.
      *
      * @param int|null $timeoutMs Deadline in milliseconds. null waits without
      *        one; 0 (or a negative, which is what an expired computed deadline
@@ -125,7 +125,7 @@ final class Room
     public function recv(?int $timeoutMs = null): ?string {}
 
     /**
-     * Messages this room's queue dropped because it was full, since subscribe().
+     * Messages this room's queue dropped because it was full.
      *
      * Monotonic for the lifetime of this handle, across unsubscribe/subscribe:
      * snapshot it around a drain and compare. A publisher is never blocked by a
