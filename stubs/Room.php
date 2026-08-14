@@ -96,6 +96,10 @@ final class Room
      * Suspends the calling coroutine until every worker answers or $timeoutMs
      * elapses. Must run on a worker thread (a request/WebSocket handler or a
      * spawned run coroutine); on the pool parent it returns the local count.
+     *
+     * A thread that never attached to the hub — a ThreadPool task the room was
+     * transferred into — gets 0, which reads the same as a room nobody joined.
+     * {@see trySend()} and {@see send()} report that thread honestly; this does not.
      */
     public function subscriberCount(int $timeoutMs = 1000): int {}
 

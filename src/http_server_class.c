@@ -6105,6 +6105,53 @@ static zend_object *room_mint(http_server_object *server, zend_string *topic)
     return obj;
 }
 
+/* Carries a room to another thread. The transit shell owns its own hub reference
+ * and a persistent copy of the topic, so neither outlives the source thread's
+ * allocator; LOAD takes a second reference and a thread-local copy. */
+static zend_object *room_transfer_obj(
+    zend_object *object,
+    zend_async_thread_transfer_ctx_t *ctx,
+    zend_object_transfer_kind_t kind,
+    zend_object_transfer_default_fn default_fn)
+{
+    room_object *src = room_from_obj(object);
+
+    if (kind == ZEND_OBJECT_TRANSFER_RELEASE) {
+        topic_hub_release(src->hub);
+        src->hub = NULL;
+
+        if (src->topic != NULL) {
+            zend_string_release(src->topic);
+            src->topic = NULL;
+        }
+
+        return NULL;
+    }
+
+    if (UNEXPECTED(src->hub == NULL)) {
+        return NULL;   /* unminted; nothing to carry */
+    }
+
+    const bool persistent = (kind == ZEND_OBJECT_TRANSFER);
+
+    /* 0 lets the default size the allocation from the handler offset and the
+     * property count; a literal sizeof() would stop covering declared properties. */
+    zend_object *dst = default_fn(object, ctx, 0);
+
+    if (UNEXPECTED(dst == NULL)) {
+        return NULL;
+    }
+
+    room_object *room = room_from_obj(dst);
+
+    room->hub = src->hub;
+    topic_hub_addref(room->hub);
+    room->topic = zend_string_init(ZSTR_VAL(src->topic), ZSTR_LEN(src->topic), persistent);
+    room->retry = src->retry;
+
+    return dst;
+}
+
 /* Reflection can build a Room past the private constructor: hub and topic NULL. */
 static bool room_is_minted(const room_object *room)
 {
@@ -6746,6 +6793,12 @@ static zend_object *http_server_transfer_obj(
     zend_object_transfer_kind_t kind,
     zend_object_transfer_default_fn default_fn)
 {
+    if (kind == ZEND_OBJECT_TRANSFER_RELEASE) {
+        /* The server owns its shells and frees them in
+         * http_server_release_worker_shell; releasing here would double-free. */
+        return NULL;
+    }
+
     if (kind == ZEND_OBJECT_TRANSFER) {
         http_server_object *src = http_server_from_obj(object);
 
@@ -7014,9 +7067,13 @@ void http_server_class_register(void)
     room_ce->create_object = room_create;
 
     memcpy(&room_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-    room_handlers.offset    = offsetof(room_object, std);
-    room_handlers.free_obj  = room_free;
-    room_handlers.clone_obj = NULL;
+    room_handlers.offset       = offsetof(room_object, std);
+    room_handlers.free_obj     = room_free;
+    room_handlers.clone_obj    = NULL;
+    room_handlers.transfer_obj = room_transfer_obj;
+
+    /* LOAD has no live source object and resolves the handler by class name. */
+    room_ce->default_object_handlers = &room_handlers;
 #endif
 }
 /* }}} */
