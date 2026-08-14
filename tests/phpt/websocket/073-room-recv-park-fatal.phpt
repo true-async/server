@@ -43,10 +43,12 @@ spawn(function () use ($server, $room, $ack) {
         $ack->publish('parked');
         delay(50);
 
-        ini_set('memory_limit', '2M');
-        $eat = str_repeat('x', 64 * 1024 * 1024);
+        /* Not memory_limit: USE_ZEND_ALLOC=0 replaces the allocator that enforces
+         * it, and the valgrind lane would measure a worker that never died. */
+        error_reporting(E_ALL & ~E_DEPRECATED);
+        trigger_error('the worker dies with a receiver parked', E_USER_ERROR);
 
-        return 'not reached' . strlen($eat);
+        return 'not reached';
     });
 
     echo 'ack: ', $ack->recv(3000), "\n";

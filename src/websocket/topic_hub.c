@@ -558,17 +558,26 @@ static void ws_server_sub_addref(ws_server_sub_t *sub)
     sub->refcount++;
 }
 
+/* The ring holds persistent payload references; the subscription itself is
+ * request memory. A reference nobody will ever drop therefore costs a payload
+ * leak rather than a struct leak, which is why the end-of-request path empties
+ * the ring by hand instead of waiting for the last release. */
+static void ws_server_sub_drop_ring(ws_server_sub_t *sub)
+{
+    while (sub->size > 0) {
+        ws_payload_release(sub->ring[sub->head]);
+        sub->head = (sub->head + 1) % WS_SERVER_SUB_RING;
+        sub->size--;
+    }
+}
+
 static void ws_server_sub_release(ws_server_sub_t *sub)
 {
     if (--sub->refcount > 0) {
         return;
     }
 
-    while (sub->size > 0) {
-        ws_payload_release(sub->ring[sub->head]);
-        sub->head = (sub->head + 1) % WS_SERVER_SUB_RING;
-        sub->size--;
-    }
+    ws_server_sub_drop_ring(sub);
 
     if (sub->filter != NULL) {
         zend_string_release(sub->filter);
@@ -579,7 +588,7 @@ static void ws_server_sub_release(ws_server_sub_t *sub)
 
 /* Reliable-send teardown, defined with the rest of the outbound-queue machinery
  * at the foot of the file; detach (above them) needs it. */
-static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local);
+static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local, bool request_over);
 
 int topic_hub_attach(topic_hub_t *hub)
 {
@@ -646,10 +655,12 @@ int topic_hub_attach(topic_hub_t *hub)
     return slot;
 }
 
+static void topic_hub_detach_ex(topic_hub_t *hub, bool request_over);
+
 void topic_hub_thread_sweep(void)
 {
     while (ws_locals != NULL) {
-        topic_hub_detach(ws_locals->hub);
+        topic_hub_detach_ex(ws_locals->hub, /*request_over*/ true);
     }
 }
 
@@ -885,7 +896,23 @@ void topic_hub_payload_release(ws_payload_t *payload)
     ws_payload_release(payload);
 }
 
-void topic_hub_detach(topic_hub_t *hub)
+static void ws_local_unlink(ws_local_t *prev, const ws_local_t *local)
+{
+    if (prev != NULL) {
+        prev->next = local->next;
+    } else {
+        ws_locals = local->next;
+    }
+}
+
+/* `request_over` says the request that owns this attachment can no longer run
+ * PHP — the end-of-request sweep, and after a fatal error the coroutines that
+ * were parked here are dead while their waiter events are still request memory.
+ * Waking one then calls back into the dead, so this teardown wakes nobody and
+ * drops by hand what the absent owners would have released. A detach from a
+ * live request is the opposite: stop() must wake a parked send() and a parked
+ * recv(), or they hang on a queue and a tree that are about to vanish. */
+static void topic_hub_detach_ex(topic_hub_t *hub, const bool request_over)
 {
     ws_local_t *local = ws_locals;
     ws_local_t *prev  = NULL;
@@ -911,27 +938,32 @@ void topic_hub_detach(topic_hub_t *hub)
      * NULL now, so those decrements land nowhere — which is what we want. */
     pefree(counters, 1);
 
+    /* A dead request services nothing: unlink first, so the drain below discards
+     * what is queued instead of publishing it into a tree whose sessions the
+     * request teardown may already have taken apart. */
+    if (request_over) {
+        ws_local_unlink(prev, local);
+    }
+
     /* Tear the outbound retry queue down BEFORE the tree/attachment go: it stops
      * the drainer timer (so no tick starts mid-teardown) and wakes every parked
      * send() with a shutdown outcome, so a blocking caller throws rather than
      * hanging on a queue that is about to vanish. Runs on this same thread, so a
      * woken coroutine resumes only after we return — and its entry refcount keeps
      * the struct alive until it does. */
-    topic_hub_retry_teardown(hub, local);
+    topic_hub_retry_teardown(hub, local, request_over);
 
     /* The slot is retired, so no producer can post any more. Whatever is still
      * queued holds payload/query references and thread_mailbox_free throws the
      * queue away without touching them — drain it first or every rotation of the
-     * pool leaks. The attachment stays on the list across the drain: it is what
-     * the drain resolves the tree through. */
+     * pool leaks. While the request lives the attachment stays on the list across
+     * the drain: it is what the drain resolves the tree through. */
     thread_mailbox_drain_pending(local->inbox);
     thread_mailbox_free(local->inbox);
     local->inbox = NULL;   /* a receiver woken below must not keep a freed loop handle */
 
-    if (prev != NULL) {
-        prev->next = local->next;
-    } else {
-        ws_locals = local->next;
+    if (!request_over) {
+        ws_local_unlink(prev, local);
     }
 
     /* Before the tree goes: a subscription outliving its nodes would unsubscribe
@@ -942,7 +974,17 @@ void topic_hub_detach(topic_hub_t *hub)
         local->subs = sub->next;
         sub->local  = NULL;   /* the tree is going; nothing left to detach from */
 
-        topic_hub_unsubscribe(sub);
+        if (request_over) {
+            /* No wake-up, and the ring emptied here: the receiver parked on this
+             * subscription is gone holding a reference nobody will drop, and the
+             * payloads it queued are persistent. */
+            sub->closed = true;
+            sub->waiter = NULL;
+            ws_server_sub_drop_ring(sub);
+            ws_server_sub_release(sub);   /* the tree's side */
+        } else {
+            topic_hub_unsubscribe(sub);
+        }
     }
 
     ws_topic_tree_free(local->tree);
@@ -952,6 +994,16 @@ void topic_hub_detach(topic_hub_t *hub)
     /* Last touch of the hub — after this the owner may already be gone and the
      * block may be freed here. */
     topic_hub_release(hub);
+}
+
+void topic_hub_detach(topic_hub_t *hub)
+{
+    topic_hub_detach_ex(hub, /*request_over*/ false);
+}
+
+void topic_hub_detach_request_over(topic_hub_t *hub)
+{
+    topic_hub_detach_ex(hub, /*request_over*/ true);
 }
 
 /* ----------------------------------------------------------------- query */
@@ -1002,6 +1054,23 @@ static void ws_query_settle(ws_query_t *query, const uint32_t answered)
     ws_query_release(query);
 }
 
+/* A reply that comes home to a request which is over. The asker cannot be woken —
+ * it is gone, and its event is request memory — and the reference it holds across
+ * its park will never be dropped by it, so this drops it once. `abandoned` is the
+ * handshake that says it already has been, whether by the asker settling normally
+ * or by an earlier reply arriving here. */
+static void ws_query_orphan(ws_query_t *query)
+{
+    if (!query->abandoned) {
+        query->abandoned = true;
+        query->done      = NULL;
+
+        ws_query_release(query);   /* the asker's side */
+    }
+
+    ws_query_release(query);       /* this reply's side */
+}
+
 static void topic_hub_drain(void **items, const size_t count, void *arg)
 {
     topic_hub_t *const hub = arg;
@@ -1027,7 +1096,15 @@ static void topic_hub_drain(void **items, const size_t count, void *arg)
                 break;
 
             case WS_CMD_COUNT_REPLY:
-                ws_query_settle(cmd->query, cmd->count);
+                /* No attachment means this drain runs for a request that is over:
+                 * the end-of-request teardown unlinks before draining, exactly so
+                 * that what is queued is disposed of rather than delivered. */
+                if (local != NULL) {
+                    ws_query_settle(cmd->query, cmd->count);
+                } else {
+                    ws_query_orphan(cmd->query);
+                }
+
                 break;
         }
 
@@ -1226,9 +1303,27 @@ uint32_t topic_hub_count(topic_hub_t *hub, const char *topic, const size_t topic
      * deliberately do not swallow it. */
     if (query->pending > 0
         && zend_async_waker_new_with_timeout(coroutine, timeout_ms, NULL) != NULL) {
-        zend_async_resume_when(coroutine, done, false, zend_async_waker_callback_resolve, NULL);
-        ZEND_ASYNC_SUSPEND();
-        zend_async_waker_clean(coroutine);
+        /* zend_try, because a fatal error longjmps past the settle below. The
+         * query is persistent and a reply is still on its way home: an abandoned
+         * query is the handshake that lets the reply's drain release it instead
+         * of firing an event whose owner is gone. */
+        volatile bool bailout = false;
+
+        zend_try {
+            zend_async_resume_when(coroutine, done, false, zend_async_waker_callback_resolve, NULL);
+            ZEND_ASYNC_SUSPEND();
+            zend_async_waker_clean(coroutine);
+        } zend_catch {
+            bailout = true;
+        } zend_end_try();
+
+        if (UNEXPECTED(bailout)) {
+            query->abandoned = true;
+            query->done      = NULL;
+            done->dispose(done);
+            ws_query_release(query);
+            zend_bailout();
+        }
     }
 
     const uint32_t total = query->total;
@@ -1550,7 +1645,7 @@ static void topic_hub_retry_drain(topic_hub_t *hub, ws_local_t *local)
  * woken (→ throws on shutdown rather than hanging), the payload and queue refs are
  * dropped. A send() that has not resumed yet is protected by its own entry
  * refcount, so its post-resume read of the struct is still valid. */
-static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local)
+static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local, const bool request_over)
 {
     topic_hub_retry_timer_dispose(local);
 
@@ -1560,9 +1655,25 @@ static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local)
     while (e != NULL) {
         retry_entry_t *const next = e->next;
 
+        /* An entry with a waiter carries a second reference, taken by the sender
+         * parked on it. When the request is over that sender is gone and will
+         * never drop it, and the entry is persistent memory. */
+        const bool orphaned = request_over && e->waiter != NULL && !e->abandoned;
+
         lost += e->npending;
         e->shutdown = true;      /* a woken send() reports SHUTDOWN, not a false timeout */
+
+        if (request_over) {
+            /* Its waiter is request memory owned by a coroutine that cannot
+             * resume: firing it calls back into the dead. */
+            e->abandoned = true;
+        }
+
         retry_entry_finish(e);   /* fires the waiter iff still live and not abandoned */
+
+        if (orphaned) {
+            retry_entry_release(e);
+        }
 
         e = next;
     }
