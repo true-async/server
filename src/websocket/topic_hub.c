@@ -750,6 +750,29 @@ static ws_payload_t *ws_server_sub_pop(ws_server_sub_t *sub)
     return payload;
 }
 
+/* Keep this thread's reactor alive while a recv() is parked on it.
+ *
+ * The wake source is the inbox trigger, and a mailbox does not hold the loop by
+ * default — it wakes a loop other handles keep running. A thread whose only
+ * coroutine waits on a room therefore has no live handle at all: the reactor
+ * reports no work, and the scheduler cancels every waiter as a deadlock. Timed
+ * receivers escape only because their timeout waker arms a timer.
+ *
+ * Nesting belongs to the reactor: start()/stop() count the event's loop_ref_count
+ * and only the 0<->1 edge touches uv_ref, so two parked receivers hold the loop
+ * until the second one leaves. The ref lasts exactly as long as a park, and an
+ * idle thread stays mortal.
+ *
+ * NULL on either side means the attachment is being torn down — topic_hub_detach
+ * frees the mailbox and clears both fields before it wakes the subscriptions it
+ * still holds, and a receiver resuming into that has no loop left to keep. */
+static void ws_local_recv_keepalive(ws_local_t *local, const bool parked)
+{
+    if (local != NULL && local->inbox != NULL) {
+        thread_mailbox_keepalive(local->inbox, parked);
+    }
+}
+
 topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeout_ms,
                                        ws_payload_t **out)
 {
@@ -798,8 +821,30 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
     const zend_ulong waker_timeout = timeout_ms < 0 ? 0 : (zend_ulong) timeout_ms;
 
     if (zend_async_waker_new_with_timeout(coroutine, waker_timeout, NULL) != NULL) {
+        ws_local_recv_keepalive(sub->local, true);
         zend_async_resume_when(coroutine, waiter, false, zend_async_waker_callback_resolve, NULL);
-        ZEND_ASYNC_SUSPEND();
+
+        /* zend_try, because a fatal error longjmps straight past the release: the
+         * trigger would stay ref'd, the thread would reach shutdown with a live
+         * handle, and the scheduler asserts on that ("The event loop must be
+         * stopped"). Same trap the deadline timer hit in HttpServer::start(). */
+        volatile bool bailout = false;
+
+        zend_try {
+            ZEND_ASYNC_SUSPEND();
+        } zend_catch {
+            bailout = true;
+        } zend_end_try();
+
+        /* Released here and not after the branches below, so a cancellation —
+         * which resumes us with an exception pending — drops the ref too. The
+         * attachment is re-read because a sweep can have cleared it under us. */
+        ws_local_recv_keepalive(sub->local, false);
+
+        if (UNEXPECTED(bailout)) {
+            zend_bailout();
+        }
+
         zend_async_waker_clean(coroutine);
     }
 
@@ -881,6 +926,7 @@ void topic_hub_detach(topic_hub_t *hub)
      * the drain resolves the tree through. */
     thread_mailbox_drain_pending(local->inbox);
     thread_mailbox_free(local->inbox);
+    local->inbox = NULL;   /* a receiver woken below must not keep a freed loop handle */
 
     if (prev != NULL) {
         prev->next = local->next;
