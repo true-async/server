@@ -811,6 +811,10 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
 
     if (sub->closed) {
         status = TOPIC_HUB_RECV_CLOSED;
+    } else if (EG(exception) != NULL) {
+        /* Cancelled across the park: the message stays in the ring. This
+         * coroutine is unwinding and cannot use it; the next reader can. */
+        status = TOPIC_HUB_RECV_TIMEOUT;
     } else {
         *out   = ws_server_sub_pop(sub);
         status = *out != NULL ? TOPIC_HUB_RECV_MESSAGE : TOPIC_HUB_RECV_TIMEOUT;

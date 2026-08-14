@@ -61,6 +61,25 @@ spawn(function () use ($server, $room) {
 
     echo 'under unsubscribe: ', await($waiting), "\n";
 
+    /* A cancellation landing in the same turn as a delivery must not consume the
+     * message: the cancelled coroutine cannot use it, the next reader can. */
+    $room->subscribe();
+
+    $doomed = spawn(fn() => $room->recv(5000));
+    delay(50);
+    $room->publish('survivor');
+    $doomed->cancel();
+
+    try {
+        await($doomed);
+        echo "cancelled recv: returned\n";
+    } catch (\Throwable $e) {
+        echo "cancelled recv: cancelled\n";
+    }
+
+    echo 'message survived: ', $room->recv(0) ?? '(lost)', "\n";
+    $room->unsubscribe();
+
     /* Losses survive an unsubscribe: the counter belongs to the handle. */
     $room->subscribe();
 
@@ -84,6 +103,8 @@ zero timeout: null in no time
 second recv: refused (TrueAsync\HttpServerRuntimeException)
 parked got: first
 under unsubscribe: threw: Room::recv() was interrupted: the subscription closed
+cancelled recv: cancelled
+message survived: survivor
 lost after 70 into a 64 ring: 6
 lost after unsubscribe: 6
 lost after resubscribe: 6

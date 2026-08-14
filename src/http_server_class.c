@@ -6417,11 +6417,16 @@ ZEND_METHOD(TrueAsync_Room, recv)
 
     ws_payload_t *payload = NULL;
 
-    const topic_hub_recv_status_t status =
-        topic_hub_recv(room->sub, timeout_is_null ? -1 : (int64_t) timeout_ms, &payload);
+    /* Only null waits without a deadline. A negative argument is an expired
+     * computed deadline and takes what is queued, so the signed tri-state stays
+     * a C convention rather than a PHP one. */
+    const int64_t timeout = timeout_is_null ? -1 : (timeout_ms > 0 ? (int64_t) timeout_ms : 0);
 
-    /* The message case comes before the exception check: a cancellation raised in
-     * the same turn must not discard a command already taken off the ring. */
+    const topic_hub_recv_status_t status = topic_hub_recv(room->sub, timeout, &payload);
+
+    /* A message is never dropped for a pending cancellation: one taken off the
+     * ring is returned here, and one that arrived during a cancelled park was
+     * left in the ring for the next reader. */
     switch (status) {
         case TOPIC_HUB_RECV_MESSAGE: {
             size_t len;
