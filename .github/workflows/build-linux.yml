@@ -734,6 +734,25 @@ jobs:
           git commit -m "ci: refresh coverage baseline [skip ci]"
           git push origin HEAD:main
 
+      # ----------------------------------------------------------------
+      # The rooms leak lane. A reference to the topic hub that is taken
+      # and never dropped is invisible from PHP: every assertion still
+      # passes and the hub simply outlives the process. valgrind with
+      # leak checking turned into an error is the only instrument that
+      # sees it, and run-tests does not turn it on by itself — the
+      # script carries the two knobs and the reasoning.
+      # Release leg only, and last, so the coverage numbers above are
+      # captured from the ordinary run rather than from this one.
+      # ----------------------------------------------------------------
+      - name: Rooms leak lane (valgrind)
+        if: matrix.debug == false
+        working-directory: http-server
+        run: |
+          set -eux
+          sudo apt-get install -y --no-install-recommends valgrind
+          RUN_TESTS="$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            tests/valgrind-rooms.sh /usr/local/bin/php
+
   # --------------------------------------------------------------------
   # Stage 5a: standalone fuzz smoke. Builds the no-PHP multipart
   # harness and runs it on a 60 s budget. Independent of the deps

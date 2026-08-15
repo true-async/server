@@ -67,7 +67,14 @@ spawn(function () use ($server, $room, $ack) {
         return 'not reached';
     });
 
-    echo 'ack: ', $ack->recv(3000), "\n";
+    /* Received first, and written as ONE string: the doomed worker writes its
+     * fatal to the same stream from another thread, and an echo that suspends
+     * between its arguments — or writes them one by one — lets that text land
+     * inside this line. Which side of the line it lands on is not ours to order:
+     * under the valgrind lane it arrived BEFORE it, which is what the leading %A
+     * in the expectation is for. */
+    $parked = $ack->recv(3000);
+    echo "ack: $parked\n";
 
     for ($i = 0; $i < 200; $i++) {
         $room->publish("q$i");
@@ -112,12 +119,24 @@ spawn(function () use ($server, $room, $ack) {
 
     $pool->close();
     $ack->unsubscribe();
+
+    /* What the dead worker was holding: 200 bodies in its mailbox and its
+     * receiver's ring, persistent memory whose owner died with it. valgrind
+     * cannot see this class — a body still pointed at from a leaked structure is
+     * not "definitely lost" — so the balance is the instrument. Nothing is queued
+     * anywhere by now, so the two counters must meet. */
+    $st = $server->getRuntimeStats();
+    echo 'bodies balanced: ',
+        $st['ws_bodies'] === $st['ws_bodies_freed']
+            ? 'yes'
+            : "no ({$st['ws_bodies']} allocated, {$st['ws_bodies_freed']} freed)", "\n";
 });
 ?>
 --EXPECTF--
-ack: parked
+%Aack: parked
 %Adoomed: Async\ThreadTransferException
 slot released: yes
 send: refused, delivered=0
 dropped moved: false
 retry_expired moved: false
+bodies balanced: yes

@@ -54,6 +54,7 @@ struct topic_hub_s {
     zend_atomic_int64 retry_gone;        /* parked targets whose worker had detached */
     zend_atomic_int64 retry_shutdown;    /* parked targets abandoned by THIS worker's detach */
     zend_atomic_int64 bodies;            /* message bodies allocated; one per publish */
+    zend_atomic_int64 bodies_freed;      /* ...and released; the two are equal at rest */
     zend_atomic_int64 sub_overflow;      /* server subscriber rings that dropped their oldest */
 
     thread_mailbox_t *inbox[TOPIC_HUB_MAX_WORKERS];
@@ -80,6 +81,11 @@ struct topic_hub_s {
 /* One copy shared by refcount across the whole fan-out, rather than one per
  * worker. The topic rides inline in each command instead — it is short. */
 typedef struct ws_payload {
+    /* Borrowed, never referenced: a body cannot outlive its hub, because every
+     * place one can rest — a mailbox, a subscriber's ring, a retry entry — is
+     * emptied by the attachment's teardown, and the attachment drops its hub
+     * reference after that. NULL for a body made without a hub in hand. */
+    topic_hub_t    *hub;
     zend_atomic_int refcount;
     size_t          len;
     bool            binary;
@@ -252,6 +258,7 @@ void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out)
     out->retry_gone      = (uint64_t) zend_atomic_int64_load(&hub->retry_gone);
     out->retry_shutdown  = (uint64_t) zend_atomic_int64_load(&hub->retry_shutdown);
     out->bodies          = (uint64_t) zend_atomic_int64_load(&hub->bodies);
+    out->bodies_freed    = (uint64_t) zend_atomic_int64_load(&hub->bodies_freed);
     out->sub_overflow    = (uint64_t) zend_atomic_int64_load(&hub->sub_overflow);
 }
 
@@ -265,6 +272,7 @@ static ws_payload_t *ws_payload_new(topic_hub_t *hub, const char *data, const si
     }
 
     ws_payload_t *const payload = pemalloc(sizeof(*payload) + len, 1);
+    payload->hub    = hub;
     ZEND_ATOMIC_INT_INIT(&payload->refcount, 1);
     payload->len    = len;
     payload->binary = binary;
@@ -281,6 +289,10 @@ static void ws_payload_addref(ws_payload_t *payload)
 static void ws_payload_release(ws_payload_t *payload)
 {
     if (zend_atomic_int_fetch_add(&payload->refcount, -1) == 1) {
+        if (payload->hub != NULL) {
+            (void) ws_atomic_u64_add(&payload->hub->bodies_freed, 1);
+        }
+
         pefree(payload, 1);
     }
 }
@@ -325,6 +337,7 @@ topic_hub_t *topic_hub_create(const uint32_t retry_interval_ms)
     ZEND_ATOMIC_INT64_INIT(&hub->retry_gone, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->retry_shutdown, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->bodies, 0);
+    ZEND_ATOMIC_INT64_INIT(&hub->bodies_freed, 0);
     ZEND_ATOMIC_INT64_INIT(&hub->sub_overflow, 0);
 
     hub->admin = tsrm_mutex_alloc();

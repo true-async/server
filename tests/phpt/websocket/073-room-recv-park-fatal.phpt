@@ -51,7 +51,13 @@ spawn(function () use ($server, $room, $ack) {
         return 'not reached';
     });
 
-    echo 'ack: ', $ack->recv(3000), "\n";
+    /* Received first, and written as ONE string: the doomed worker writes its
+     * fatal to the same stream from another thread, and an echo that suspends
+     * between its arguments — or writes them one by one — lets that text land
+     * inside this line. Which side of the line it lands on is not ours to order,
+     * which is what the leading %A in the expectation is for. */
+    $parked = $ack->recv(3000);
+    echo "ack: $parked\n";
 
     try {
         $outcome = var_export(await($task), true);
@@ -66,6 +72,6 @@ spawn(function () use ($server, $room, $ack) {
 });
 ?>
 --EXPECTF--
-ack: parked
+%Aack: parked
 %Atask: threw Async\ThreadTransferException
 main: alive
