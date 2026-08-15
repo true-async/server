@@ -30,11 +30,17 @@ final class Room
     /**
      * Publish a text message to this room (best-effort, no retry).
      *
-     * @return array{served: int, posted: int, dropped: int} Per-call delivery
-     *         breakdown: `served` local subscribers on the calling worker,
-     *         `posted` remote worker mailboxes that accepted the copy, `dropped`
-     *         full remote mailboxes that lost it. Delivery to other workers is
-     *         asynchronous, so `served` is a local count, not a total.
+     * @return array{served: int, posted: int, dropped: int, workers: int}
+     *         Per-call delivery breakdown: `served` local subscribers on the
+     *         calling worker, `posted` remote worker mailboxes that accepted the
+     *         copy, `dropped` full remote mailboxes that lost it, `workers`
+     *         threads attached to this room's hub at all. Delivery to other
+     *         workers is asynchronous, so `served` is a local count, not a total.
+     *
+     *         `workers` is what tells a publish that reached nobody why: 0 means
+     *         nothing was running to receive it and no later attach can rescue
+     *         this message; a non-zero `workers` with served+posted == 0 means
+     *         the workers are there and the room is simply empty.
      */
     public function publish(string $message): array {}
 
@@ -55,10 +61,13 @@ final class Room
      * @param int|null $timeoutMs How long the background drainer keeps retrying a
      *        still-full target. Null uses
      *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
-     * @return bool True if delivered outright or parked for retry; false if the
-     *         outbound queue is at {@see HttpServerConfig::setWsPublishRetryQueueMax()}
-     *         and nothing was parked — the caller must handle this now. The
-     *         eventual outcome of a parked message is in {@see HttpServer::getRuntimeStats()}.
+     * @return bool True if delivered outright or parked for retry; false if
+     *         nothing took responsibility for the message — the outbound queue is
+     *         at {@see HttpServerConfig::setWsPublishRetryQueueMax()}, or this
+     *         thread has no outbound queue to park on, or no thread is attached to
+     *         the hub at all, so there was nowhere to deliver. The caller must
+     *         handle this now; the eventual outcome of a PARKED message is in
+     *         {@see HttpServer::getRuntimeStats()}.
      */
     public function trySend(string $message, ?int $timeoutMs = null): bool {}
 
@@ -83,13 +92,16 @@ final class Room
      *
      * @param int|null $timeoutMs Retry deadline; null uses
      *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
-     * @return int Worker mailboxes that accepted the message. Local subscribers
-     *             on the calling worker are served first and are NOT counted here;
-     *             a mailbox that accepted it can still drop it on a full ring
-     *             (`ws_sub_overflow`).
+     * @return int Targets the message reached: subscribers served on the calling
+     *             worker plus worker mailboxes that accepted it. A mailbox that
+     *             accepted it can still drop it on a full ring (`ws_sub_overflow`).
+     *             0 means the room is empty — the workers were there and nobody
+     *             had joined.
      * @throws RoomDeliveryException if the deadline passed with a target still
      *         full, or the outbound queue was full at enqueue, or send() was
-     *         called outside a coroutine (use trySend() there).
+     *         called outside a coroutine (use trySend() there), or no thread is
+     *         attached to the hub — the message had nowhere to go, which is a
+     *         different fact from an empty room and is not reported as a 0.
      */
     public function send(string $message, ?int $timeoutMs = null): int {}
 

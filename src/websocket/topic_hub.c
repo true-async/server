@@ -35,6 +35,10 @@ struct topic_hub_s {
      * worker's own tree. */
     MUTEX_T admin;
 
+    /* The reliable-send drainer's cadence, handed to every thread at attach.
+     * Written once at create() and read-only afterwards, so no lock. */
+    uint32_t          retry_interval_ms;
+
     zend_atomic_int64 next_ws_id;
     zend_atomic_int64 posted;
     zend_atomic_int64 skipped;
@@ -174,7 +178,7 @@ typedef struct ws_local_s {
     retry_entry_t     *retry_head;
     retry_entry_t     *retry_tail;
     uint32_t           retry_count;
-    uint32_t           retry_interval_ms;   /* drainer cadence, fixed at the first arm */
+    uint32_t           retry_interval_ms;   /* drainer cadence, the hub's, copied at attach */
 
     /* ONE reused MULTISHOT timer (the deadline_tick model), created lazily on the
      * first enqueue and kept for the worker's life. A one-shot would have to be
@@ -304,9 +308,11 @@ static ws_cmd_t *ws_cmd_new(const ws_cmd_kind_t kind, const char *topic,
 
 /* ------------------------------------------------------------------- hub */
 
-topic_hub_t *topic_hub_create(void)
+topic_hub_t *topic_hub_create(const uint32_t retry_interval_ms)
 {
     topic_hub_t *const hub = pecalloc(1, sizeof(*hub), 1);
+
+    hub->retry_interval_ms = retry_interval_ms != 0 ? retry_interval_ms : 50u;
 
     ZEND_ATOMIC_INT64_INIT(&hub->next_ws_id, 1);
     ZEND_ATOMIC_INT64_INIT(&hub->posted, 0);
@@ -671,6 +677,9 @@ int topic_hub_attach(topic_hub_t *hub)
     local->inbox = inbox;
     local->tree  = ws_topic_tree_create(hub);
     local->next  = ws_locals;
+    /* The cadence is the hub's, taken here rather than from whichever send
+     * happens to arm the timer first. */
+    local->retry_interval_ms = hub->retry_interval_ms;
     ws_locals    = local;
 
     return slot;
@@ -886,12 +895,14 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
 
     topic_hub_recv_status_t status;
 
-    if (sub->closed) {
-        status = TOPIC_HUB_RECV_CLOSED;
-    } else if (EG(exception) != NULL) {
+    if (EG(exception) != NULL) {
         /* Cancelled across the park: the message stays in the ring. This
-         * coroutine is unwinding and cannot use it; the next reader can. */
-        status = TOPIC_HUB_RECV_TIMEOUT;
+         * coroutine is unwinding and cannot use it; the next reader can. Named
+         * ahead of a close for the same reason it is named at all — the caller
+         * must not have to re-read EG(exception) to tell the two apart. */
+        status = TOPIC_HUB_RECV_CANCELLED;
+    } else if (sub->closed) {
+        status = TOPIC_HUB_RECV_CLOSED;
     } else {
         *out   = ws_server_sub_pop(sub);
         status = *out != NULL ? TOPIC_HUB_RECV_MESSAGE : TOPIC_HUB_RECV_TIMEOUT;
@@ -1162,15 +1173,25 @@ static uint32_t topic_hub_fanout_locked(topic_hub_t *hub, const ws_local_t *loca
         const char *data, const size_t len, const bool binary, const uint64_t except_id,
         const ws_interest_t *interest, ws_payload_t **payload_io,
         retry_target_t *full, uint32_t *nfull,
-        uint64_t *skipped_out, uint64_t *dropped_out)
+        uint64_t *skipped_out, uint64_t *dropped_out, uint32_t *workers_out)
 {
     ws_payload_t *payload = *payload_io;
     uint32_t      posted  = 0;
+    uint32_t      workers = 0;
     uint64_t      skipped = 0;
     uint64_t      dropped = 0;
 
     for (int slot = 0; slot < hub->slots_used; slot++) {
-        if (hub->inbox[slot] == NULL || (local != NULL && slot == local->slot)) {
+        if (hub->inbox[slot] == NULL) {
+            continue;
+        }
+
+        /* Counted before the sender's own slot is skipped: this is how many
+         * workers EXIST, not how many were posted to, and it is the difference
+         * between "the room is empty" and "nothing is running". */
+        workers++;
+
+        if (local != NULL && slot == local->slot) {
             continue;
         }
 
@@ -1208,18 +1229,19 @@ static uint32_t topic_hub_fanout_locked(topic_hub_t *hub, const ws_local_t *loca
     *payload_io  = payload;
     *skipped_out = skipped;
     *dropped_out = dropped;
+    *workers_out = workers;
     return posted;
 }
 
-uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, const size_t topic_len,
+topic_hub_publish_result_t topic_hub_publish(topic_hub_t *hub,
+                        const char *topic, const size_t topic_len,
                         const char *data, const size_t len, const bool binary,
-                        const uint64_t except_id,
-                        uint64_t *posted_out, uint64_t *dropped_out)
+                        const uint64_t except_id)
 {
+    topic_hub_publish_result_t result = { 0, 0, 0, 0 };
+
     if (hub == NULL) {
-        if (posted_out  != NULL) *posted_out  = 0;
-        if (dropped_out != NULL) *dropped_out = 0;
-        return 0;
+        return result;
     }
 
     const ws_local_t *const local = ws_local_of(hub);
@@ -1239,13 +1261,14 @@ uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, const size_t top
      * subscribers still costs one body. The fan-out's release below is the one
      * that ends this reference. */
     ws_payload_t *payload = local_body;
+    uint32_t      workers = 0;
     uint64_t      skipped = 0;
     uint64_t      dropped = 0;
 
     tsrm_mutex_lock(hub->admin);
     const uint32_t posted = topic_hub_fanout_locked(hub, local, topic, topic_len,
         data, len, binary, except_id, &interest, &payload,
-        /*full*/ NULL, /*nfull*/ NULL, &skipped, &dropped);
+        /*full*/ NULL, /*nfull*/ NULL, &skipped, &dropped, &workers);
     tsrm_mutex_unlock(hub->admin);
 
     (void) ws_atomic_u64_add(&hub->posted,  (int64_t) posted);
@@ -1256,10 +1279,12 @@ uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, const size_t top
         ws_payload_release(payload);
     }
 
-    if (posted_out  != NULL) *posted_out  = posted;
-    if (dropped_out != NULL) *dropped_out = dropped;
+    result.served  = sent;
+    result.workers = workers;
+    result.posted  = posted;
+    result.dropped = dropped;
 
-    return sent;
+    return result;
 }
 
 /* Posts the query to every worker that might hold a match, and counts what went
@@ -1505,7 +1530,9 @@ static bool topic_hub_retry_arm(topic_hub_t *hub, ws_local_t *local)
     }
 
     if (local->retry_timer == NULL) {
-        const zend_ulong ms = local->retry_interval_ms != 0 ? local->retry_interval_ms : 50;
+        /* Non-zero for the attachment's whole life: create() substitutes the
+         * default and attach copies it. */
+        const zend_ulong ms = local->retry_interval_ms;
 
         /* Periodic MULTISHOT: the reactor does NOT close it on fire, so one handle
          * serves every tick and we own its single dispose() at detach. */
@@ -1711,10 +1738,9 @@ static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local, const 
         e = next;
     }
 
-    local->retry_head        = NULL;
-    local->retry_tail        = NULL;
-    local->retry_count       = 0;
-    local->retry_interval_ms = 0;   /* queue is gone — let a future attach re-clock */
+    local->retry_head  = NULL;
+    local->retry_tail  = NULL;
+    local->retry_count = 0;
 
     if (lost != 0) {
         /* Clean-shutdown loss — charged to its own counter, never to retry_expired
@@ -1728,11 +1754,9 @@ static void topic_hub_retry_teardown(topic_hub_t *hub, ws_local_t *local, const 
  * armed — the entry is then unlinked and the queue restored exactly as it was, so
  * the caller can refuse the send rather than park behind a timer that will never
  * tick (pending_post_defer's discipline). */
-static bool topic_hub_retry_enqueue(topic_hub_t *hub, ws_local_t *local,
-                                    retry_entry_t *e, const uint32_t interval_ms)
+static bool topic_hub_retry_enqueue(topic_hub_t *hub, ws_local_t *local, retry_entry_t *e)
 {
-    retry_entry_t *const prev_tail     = local->retry_tail;
-    const uint32_t       prev_interval = local->retry_interval_ms;
+    retry_entry_t *const prev_tail = local->retry_tail;
 
     e->next = NULL;
 
@@ -1745,25 +1769,16 @@ static bool topic_hub_retry_enqueue(topic_hub_t *hub, ws_local_t *local,
     local->retry_tail = e;
     local->retry_count++;
 
-    /* The very first enqueue fixes the drainer cadence for the worker's life: the
-     * MULTISHOT timer is created once at that interval and only paused/resumed
-     * thereafter, never re-clocked (a per-call interval on a later send is ignored —
-     * first-wins). */
-    if (local->retry_interval_ms == 0) {
-        local->retry_interval_ms = interval_ms != 0 ? interval_ms : 50;
-    }
-
     if (UNEXPECTED(!topic_hub_retry_arm(hub, local))) {
-        /* Undo the append — restore head/tail/count/cadence to the prior state. */
+        /* Undo the append — restore head/tail/count to the prior state. */
         if (prev_tail != NULL) {
             prev_tail->next = NULL;
         } else {
             local->retry_head = NULL;
         }
 
-        local->retry_tail        = prev_tail;
+        local->retry_tail = prev_tail;
         local->retry_count--;
-        local->retry_interval_ms = prev_interval;
         return false;
     }
 
@@ -1771,23 +1786,27 @@ static bool topic_hub_retry_enqueue(topic_hub_t *hub, ws_local_t *local,
 }
 
 /* The fan-out common to both reliable calls: local tree first (like publish),
- * then the locked slot walk collecting full targets into `full`. Returns posted
- * count; fills *nfull and *payload (base ref transferred to the caller). */
-static uint32_t topic_hub_send_fanout(topic_hub_t *hub, const ws_local_t *local,
+ * then the locked slot walk collecting full targets into `full`. Fills *nfull and
+ * *payload (base ref transferred to the caller), and returns the delivery so far:
+ * `served` local subscribers, `posted` remote mailboxes, `workers` live slots. */
+static topic_hub_publish_result_t topic_hub_send_fanout(topic_hub_t *hub, const ws_local_t *local,
         const char *topic, const size_t topic_len,
         const char *data, const size_t len, const bool binary, const uint64_t except_id,
         retry_target_t *full, uint32_t *nfull, ws_payload_t **payload)
 {
+    topic_hub_publish_result_t result = { 0, 0, 0, 0 };
+
     void *local_body = NULL;
 
     if (local != NULL) {
-        (void) ws_topic_publish(local->tree, topic, topic_len, data, len, binary, except_id,
-                                &local_body);
+        result.served = ws_topic_publish(local->tree, topic, topic_len, data, len, binary,
+                                         except_id, &local_body);
     }
 
     ws_interest_t interest;
     ws_interest_build(&interest, topic, topic_len);
 
+    uint32_t workers = 0;
     uint64_t skipped = 0;
     uint64_t dropped = 0;   /* always 0 on the reliable path — full targets park */
 
@@ -1799,21 +1818,27 @@ static uint32_t topic_hub_send_fanout(topic_hub_t *hub, const ws_local_t *local,
     tsrm_mutex_lock(hub->admin);
     const uint32_t posted = topic_hub_fanout_locked(hub, local, topic, topic_len,
         data, len, binary, except_id, &interest, payload,
-        full, nfull, &skipped, &dropped);
+        full, nfull, &skipped, &dropped, &workers);
     tsrm_mutex_unlock(hub->admin);
 
     (void) ws_atomic_u64_add(&hub->posted,  (int64_t) posted);
     (void) ws_atomic_u64_add(&hub->skipped, (int64_t) skipped);
 
-    return posted;
+    result.workers = workers;
+    result.posted  = posted;
+
+    return result;
 }
 
-bool topic_hub_try_send(topic_hub_t *hub, const char *topic, const size_t topic_len,
+topic_hub_send_result_t topic_hub_try_send(topic_hub_t *hub, const char *topic, const size_t topic_len,
         const char *data, const size_t len, const bool binary, const uint64_t except_id,
-        const uint32_t timeout_ms, const uint32_t interval_ms, const uint32_t queue_max)
+        const uint32_t timeout_ms, const uint32_t queue_max)
 {
+    topic_hub_send_result_t result = { TOPIC_HUB_SEND_OK, 0, 0, 0 };
+
     if (hub == NULL) {
-        return false;
+        result.status = TOPIC_HUB_SEND_NO_WORKERS;
+        return result;
     }
 
     ws_local_t *const local = ws_local_of(hub);
@@ -1822,8 +1847,11 @@ bool topic_hub_try_send(topic_hub_t *hub, const char *topic, const size_t topic_
     uint32_t       nfull;
     ws_payload_t  *payload;
 
-    (void) topic_hub_send_fanout(hub, local, topic, topic_len, data, len, binary,
-                                 except_id, full, &nfull, &payload);
+    const topic_hub_publish_result_t out = topic_hub_send_fanout(hub, local, topic, topic_len,
+        data, len, binary, except_id, full, &nfull, &payload);
+
+    result.delivered = out.served + (uint32_t) out.posted;
+    result.workers   = out.workers;
 
     if (nfull == 0) {
         /* Delivered outright — no target needed parking. */
@@ -1831,7 +1859,13 @@ bool topic_hub_try_send(topic_hub_t *hub, const char *topic, const size_t topic_
             ws_payload_release(payload);
         }
 
-        return true;
+        /* With no worker attached anywhere there was nothing to deliver TO, and a
+         * later attach cannot rescue this message: an honest refusal, not an OK. */
+        if (out.workers == 0) {
+            result.status = TOPIC_HUB_SEND_NO_WORKERS;
+        }
+
+        return result;
     }
 
     /* No attachment ⇒ no outbound queue to retry on. Not a queue-full refusal:
@@ -1841,7 +1875,9 @@ bool topic_hub_try_send(topic_hub_t *hub, const char *topic, const size_t topic_
             ws_payload_release(payload);
         }
 
-        return false;
+        result.status  = TOPIC_HUB_SEND_NO_QUEUE;
+        result.pending = nfull;
+        return result;
     }
 
     /* The cap is checked before we commit the (whole) entry, so the queue is never
@@ -1852,31 +1888,38 @@ bool topic_hub_try_send(topic_hub_t *hub, const char *topic, const size_t topic_
         }
 
         (void) ws_atomic_u64_add(&hub->retry_rejected, 1);
-        return false;
+        result.status  = TOPIC_HUB_SEND_QUEUE_FULL;
+        result.pending = nfull;
+        return result;
     }
 
     retry_entry_t *const e = retry_entry_new(topic, topic_len, payload, except_id,
         ZEND_ASYNC_NOW() + timeout_ms, full, nfull, /*waiter*/ NULL);
 
-    if (UNEXPECTED(!topic_hub_retry_enqueue(hub, local, e, interval_ms))) {
+    if (UNEXPECTED(!topic_hub_retry_enqueue(hub, local, e))) {
         /* Drainer would not arm — nothing is parked, so this is a refusal. */
         retry_entry_discard(e);
         (void) ws_atomic_u64_add(&hub->retry_rejected, 1);
-        return false;
+        result.status  = TOPIC_HUB_SEND_QUEUE_FULL;
+        result.pending = nfull;
+        return result;
     }
 
     (void) ws_atomic_u64_add(&hub->retry_queued, (int64_t) nfull);
 
-    return true;
+    result.pending = nfull;   /* parked, not lost — the drainer owns them now */
+
+    return result;
 }
 
 topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, const size_t topic_len,
         const char *data, const size_t len, const bool binary, const uint64_t except_id,
-        const uint32_t timeout_ms, const uint32_t interval_ms, const uint32_t queue_max)
+        const uint32_t timeout_ms, const uint32_t queue_max)
 {
-    topic_hub_send_result_t result = { TOPIC_HUB_SEND_OK, 0, 0 };
+    topic_hub_send_result_t result = { TOPIC_HUB_SEND_OK, 0, 0, 0 };
 
     if (hub == NULL) {
+        result.status = TOPIC_HUB_SEND_NO_WORKERS;
         return result;
     }
 
@@ -1896,15 +1939,25 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
     uint32_t       nfull;
     ws_payload_t  *payload;
 
-    const uint32_t posted = topic_hub_send_fanout(hub, local, topic, topic_len,
+    const topic_hub_publish_result_t out = topic_hub_send_fanout(hub, local, topic, topic_len,
         data, len, binary, except_id, full, &nfull, &payload);
+
+    const uint32_t delivered = out.served + (uint32_t) out.posted;
+
+    result.delivered = delivered;
+    result.workers   = out.workers;
 
     if (nfull == 0) {
         if (payload != NULL) {
             ws_payload_release(payload);
         }
 
-        result.delivered = posted;
+        /* Nobody is attached, so the message reached nothing and never will —
+         * reported rather than returned as a delivered-to-nobody OK. */
+        if (out.workers == 0) {
+            result.status = TOPIC_HUB_SEND_NO_WORKERS;
+        }
+
         return result;   /* OK — delivered outright */
     }
 
@@ -1915,9 +1968,8 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
             ws_payload_release(payload);
         }
 
-        result.status    = TOPIC_HUB_SEND_NO_QUEUE;
-        result.delivered = posted;
-        result.pending   = nfull;
+        result.status  = TOPIC_HUB_SEND_NO_QUEUE;
+        result.pending = nfull;
         return result;
     }
 
@@ -1927,9 +1979,8 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
         }
 
         (void) ws_atomic_u64_add(&hub->retry_rejected, 1);
-        result.status    = TOPIC_HUB_SEND_QUEUE_FULL;
-        result.delivered = posted;
-        result.pending   = nfull;
+        result.status  = TOPIC_HUB_SEND_QUEUE_FULL;
+        result.pending = nfull;
         return result;
     }
 
@@ -1945,9 +1996,8 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
         }
 
         (void) ws_atomic_u64_add(&hub->retry_rejected, 1);
-        result.status    = TOPIC_HUB_SEND_QUEUE_FULL;
-        result.delivered = posted;
-        result.pending   = nfull;
+        result.status  = TOPIC_HUB_SEND_QUEUE_FULL;
+        result.pending = nfull;
         return result;
     }
 
@@ -1955,16 +2005,15 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
     retry_entry_t *const e = retry_entry_new(topic, topic_len, payload, except_id,
         ZEND_ASYNC_NOW() + timeout_ms, full, nfull, /*waiter*/ done);
 
-    if (UNEXPECTED(!topic_hub_retry_enqueue(hub, local, e, interval_ms))) {
+    if (UNEXPECTED(!topic_hub_retry_enqueue(hub, local, e))) {
         /* The drainer would not arm; parking here would suspend on an event nothing
          * ever fires (we run no timeout waker of our own). Refuse before suspending:
          * dispose our event, discard the never-serviced entry, report queue-full. */
         done->dispose(done);
         retry_entry_discard(e);
         (void) ws_atomic_u64_add(&hub->retry_rejected, 1);
-        result.status    = TOPIC_HUB_SEND_QUEUE_FULL;
-        result.delivered = posted;
-        result.pending   = nfull;
+        result.status  = TOPIC_HUB_SEND_QUEUE_FULL;
+        result.pending = nfull;
         return result;
     }
 
@@ -1974,10 +2023,13 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
      * and fires this on success OR expiry (arm-failure above guarantees a tick is
      * coming). Cooperative scheduling guarantees the first tick cannot fire before
      * we suspend (count()'s structural guarantee). An exception on resume is a
-     * cancellation and we do not swallow it. */
+     * cancellation: we do not swallow it, and we name it in the status rather than
+     * leaving the caller to read EG(exception) behind our back. */
     zend_async_resume_when(coroutine, done, false, zend_async_waker_callback_resolve, NULL);
     ZEND_ASYNC_SUSPEND();
     zend_async_waker_clean(coroutine);
+
+    const bool cancelled = EG(exception) != NULL;
 
     /* Resumed. We still hold a reference, so these reads are valid even though the
      * drainer may already have unlinked and payload-released the entry. */
@@ -1993,9 +2045,14 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
     done->dispose(done);
     retry_entry_release(e);
 
-    result.delivered = posted + entry_delivered;
+    result.delivered = delivered + entry_delivered;
 
-    if (entry_shutdown) {
+    if (cancelled) {
+        /* Whatever the entry's own verdict was, this coroutine is unwinding: the
+         * counts are still true, the status says why they stopped where they did. */
+        result.status  = TOPIC_HUB_SEND_CANCELLED;
+        result.pending = entry_pending;
+    } else if (entry_shutdown) {
         result.status  = TOPIC_HUB_SEND_SHUTDOWN;   /* our worker detached — not a timeout */
         result.pending = entry_pending;
     } else if (entry_pending == 0) {
