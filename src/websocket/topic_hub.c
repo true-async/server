@@ -820,11 +820,15 @@ static ws_payload_t *ws_server_sub_pop(ws_server_sub_t *sub)
  * NULL on either side means the attachment is being torn down — topic_hub_detach
  * frees the mailbox and clears both fields before it wakes the subscriptions it
  * still holds, and a receiver resuming into that has no loop left to keep. */
-static void ws_local_recv_keepalive(ws_local_t *local, const bool parked)
+static bool ws_local_recv_keepalive(ws_local_t *local, const bool parked)
 {
-    if (local != NULL && local->inbox != NULL) {
-        thread_mailbox_keepalive(local->inbox, parked);
+    if (local == NULL || local->inbox == NULL) {
+        return false;
     }
+
+    thread_mailbox_keepalive(local->inbox, parked);
+
+    return true;
 }
 
 /* ------------------------------------------------------------- park event
@@ -860,8 +864,20 @@ static void ws_local_recv_keepalive(ws_local_t *local, const bool parked)
  * later. */
 typedef struct {
     zend_async_event_t  base;
-    ws_server_sub_t    *sub;     /* recv(): whose reactor to hold, and who points back */
-    bool                latched; /* our 0/1 loop reference, edge-forwarding only */
+
+    /* BORROWED, never referenced. The frame that parked holds the reference that
+     * keeps this alive, and it releases it last — after this event is gone, on
+     * every path: the scheduler cleans the waker's events at the resume, and a
+     * frame that dies instead never releases at all, which pins the subscription
+     * rather than freeing it. So this event must never be the one to free `sub`;
+     * a reference here would buy nothing today and would make it the last owner
+     * the day the sweep starts releasing an abandoned frame's reference. */
+    ws_server_sub_t    *sub;
+
+    /* Our 0/1 loop reference, edge-forwarding only, and true ONLY while a
+     * reference is really held — the keepalive declines when the attachment is
+     * already torn down. */
+    bool                latched;
 } ws_park_event_t;
 
 static bool ws_park_add_callback(zend_async_event_t *event, zend_async_event_callback_t *callback)
@@ -882,8 +898,7 @@ static bool ws_park_start(zend_async_event_t *event)
         return true;
     }
 
-    park->latched = true;
-    ws_local_recv_keepalive(park->sub->local, true);
+    park->latched = ws_local_recv_keepalive(park->sub->local, true);
 
     return true;
 }
@@ -892,12 +907,16 @@ static bool ws_park_stop(zend_async_event_t *event)
 {
     ws_park_event_t *const park = (ws_park_event_t *) event;
 
-    if (!park->latched) {
+    /* The NULL check is not decoration: dispose clears `sub` and then calls
+     * zend_async_callbacks_free, which reaches the waker callback's own dispose —
+     * and that calls stop() again unless the waker has already stopped its
+     * events. */
+    if (!park->latched || park->sub == NULL) {
         return true;
     }
 
     park->latched = false;
-    ws_local_recv_keepalive(park->sub->local, false);
+    (void) ws_local_recv_keepalive(park->sub->local, false);
 
     return true;
 }
@@ -915,22 +934,36 @@ static bool ws_park_dispose(zend_async_event_t *event)
     ws_park_stop(event);
 
     if (park->sub != NULL) {
-        /* Nobody may fire an event that is about to be freed. The `parked` flag
-         * stays as it is: it belongs to the frame, which clears it when it has
-         * finished reading the ring — and a frame that died leaves a subscription
-         * its request's sweep is about to take anyway. */
+        /* Nobody may fire an event that is about to be freed. `parked` is left as
+         * it is — it belongs to the frame, which clears it after reading the ring
+         * — and a frame that died leaves it set for good. That is harmless for one
+         * reason and one only: every teardown that abandons a frame also sets
+         * `closed`, and topic_hub_recv tests `closed` BEFORE `parked`. Swap those
+         * two checks and an abandoned subscription answers BUSY for ever. */
         if (park->sub->waiter == event) {
             park->sub->waiter = NULL;
         }
 
-        ws_server_sub_release(park->sub);   /* the reference this event holds */
-        park->sub = NULL;
+        park->sub = NULL;   /* borrowed; the frame owns the reference */
     }
 
     zend_async_callbacks_free(event);
     pefree(event, 0);
 
     return true;
+}
+
+/* What a stuck-loop report prints for this waiter. Without it the one park the
+ * whole mechanism exists to make possible shows up in that report as nothing. */
+static zend_string *ws_park_info(zend_async_event_t *event)
+{
+    const ws_park_event_t *const park = (const ws_park_event_t *) event;
+
+    if (park->sub == NULL || park->sub->filter == NULL) {
+        return zend_string_init(ZEND_STRL("Room recv"), 0);
+    }
+
+    return zend_strpprintf(0, "Room recv: %s", ZSTR_VAL(park->sub->filter));
 }
 
 /* One reference, handed to the waker. */
@@ -944,6 +977,7 @@ static ws_park_event_t *ws_park_event_new(ws_server_sub_t *sub)
     park->base.start        = ws_park_start;
     park->base.stop         = ws_park_stop;
     park->base.dispose      = ws_park_dispose;
+    park->base.info         = ws_park_info;
 
     park->sub = sub;
 
@@ -979,14 +1013,12 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
         return TOPIC_HUB_RECV_TIMEOUT;
     }
 
-    /* Two references for the park, and they answer different questions. The FRAME
-     * holds one because unsubscribe() and the caller may both drop theirs while we
-     * sleep, and because the ring is read after the resume — by which time the
-     * scheduler has already disposed the event. The EVENT holds the other because
-     * it dereferences the subscription in start/stop/dispose, and a fatal error
-     * can reach those with the frame long gone. */
-    ws_server_sub_addref(sub);   /* the frame's */
-    ws_server_sub_addref(sub);   /* the event's, released in its dispose */
+    /* One reference, and it is the frame's: unsubscribe() and the caller may both
+     * drop theirs while we sleep, and the ring is read after the resume — by which
+     * time the scheduler has already disposed the event. The event borrows the
+     * subscription and is gone before this reference is released on every path,
+     * including a fatal error, where the release never happens at all. */
+    ws_server_sub_addref(sub);
 
     ws_park_event_t *const park = ws_park_event_new(sub);
 
@@ -997,23 +1029,46 @@ topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, const int64_t timeo
      * here: wait until a message or a close. */
     const zend_ulong waker_timeout = timeout_ms < 0 ? 0 : (zend_ulong) timeout_ms;
 
+    bool did_park = true;
+
     if (EXPECTED(zend_async_waker_new_with_timeout(coroutine, waker_timeout, NULL) != NULL)) {
         /* trans_event: the waker takes our only reference to the EVENT, so the
          * scheduler's own teardown disposes it — after a normal resume, after a
          * cancellation, and after a fatal error that longjmps past every line
          * below. The reactor reference goes with it, which is the whole of what
          * the zend_try here used to protect. */
-        zend_async_resume_when(coroutine, &park->base, /*trans_event*/ true,
-                               zend_async_waker_callback_resolve, NULL);
-        ZEND_ASYNC_SUSPEND();
-        zend_async_waker_clean(coroutine);   /* a no-op when the scheduler got there first */
+        if (EXPECTED(zend_async_resume_when(coroutine, &park->base, /*trans_event*/ true,
+                                            zend_async_waker_callback_resolve, NULL))) {
+            ZEND_ASYNC_SUSPEND();
+            zend_async_waker_clean(coroutine);   /* a no-op if the scheduler got there first */
+        } else {
+            /* It disposed the event itself (trans_event), and suspending now would
+             * be a wait nothing can end. */
+            did_park = false;
+        }
     } else {
-        /* Nothing will ever wake us; hand the event straight back. */
+        /* No waker, so no park. Unreachable today — the coroutine was checked
+         * above and the embedded waker cannot fail — but if it ever runs, this
+         * must not be reported as a timeout: recv(null) means "wait until a
+         * message or a close", and answering null instantly would be a lie. */
         park->base.dispose(&park->base);
+        did_park = false;
     }
 
+    /* Blind, and safe only because `parked` is cleared in the same breath: no
+     * second park can have replaced the pointer, and nothing suspends between
+     * these two lines. The pair is what an earlier version of this code broke from
+     * the other end, by letting the event clear `parked` one resume too early. */
     sub->waiter = NULL;
     sub->parked = false;
+
+    if (UNEXPECTED(!did_park)) {
+        ws_server_sub_release(sub);
+
+        /* Whatever refused the park left its own exception; do not throw a second
+         * one over it. */
+        return EG(exception) != NULL ? TOPIC_HUB_RECV_CANCELLED : TOPIC_HUB_RECV_CLOSED;
+    }
 
     topic_hub_recv_status_t status;
 
