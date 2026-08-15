@@ -1419,16 +1419,16 @@ void *http_server_get_topic_hub(http_server_object *server)
     return server != NULL ? server->topic_hub : NULL;
 }
 
-/* The reliable-send drainer's cadence for this server's hub, with the documented
- * default when the config leaves it unset. Read once, when the hub is created:
- * the drainer is one timer per worker, so a per-send interval could only be
- * honoured for whoever armed it first. */
+/* The reliable-send drainer's cadence for this server's hub, read once when the
+ * hub is created: the drainer is one timer per worker, so a per-send interval
+ * could only ever be honoured for whoever armed it first. 0 means "unset" and is
+ * passed on as such — topic_hub_create() owns the default, so the number lives in
+ * one place rather than in every caller. */
 static uint32_t http_server_retry_interval_ms(http_server_object *server)
 {
     const http_server_config_t *const cfg = http_server_get_config(server);
 
-    return (cfg != NULL && cfg->ws_publish_retry_interval_ms != 0)
-        ? cfg->ws_publish_retry_interval_ms : 50u;
+    return cfg != NULL ? cfg->ws_publish_retry_interval_ms : 0u;
 }
 
 http_log_state_t *http_server_get_log_state(http_server_object *server)
@@ -5788,7 +5788,14 @@ static void room_send_apply(zval *return_value, const topic_hub_send_result_t *r
         case TOPIC_HUB_SEND_NO_WORKERS:
             room_throw_delivery(
                 "Reliable send reached nothing: no thread is attached to this room's hub, so the "
-                "message had nowhere to go (an empty room delivers to 0 with no error)",
+                "message had nowhere to go — the server is not running, or this is a thread that "
+                "never joined it",
+                r->delivered, r->pending);
+            return;
+        case TOPIC_HUB_SEND_NO_TARGETS:
+            room_throw_delivery(
+                "Reliable send reached nothing: the workers are running, but nobody has subscribed "
+                "to this room — use publish() for a message that may legitimately reach no one",
                 r->delivered, r->pending);
             return;
         case TOPIC_HUB_SEND_QUEUE_FULL:

@@ -95,10 +95,18 @@ spawn(function () use ($server, $room, $ack) {
     echo 'slot released: ', $posted === 0 ? 'yes' : 'no', "\n";
 
     $before = $server->getRuntimeStats();
-    $sent   = $room->send('reliable, nobody home', timeoutMs: 300);
-    $after  = $server->getRuntimeStats();
 
-    echo 'send delivered: ', $sent, "\n";
+    /* The dead worker's slot is gone, so this send reaches nobody — refused, and
+     * refused for the room-is-empty reason rather than charged to a full mailbox
+     * that no longer exists. */
+    try {
+        $room->send('reliable, nobody home', timeoutMs: 300);
+        echo "send: NOT refused\n";
+    } catch (\TrueAsync\RoomDeliveryException $e) {
+        echo 'send: refused, delivered=', $e->delivered, "\n";
+    }
+
+    $after  = $server->getRuntimeStats();
     echo 'dropped moved: ', var_export($after['ws_topic_dropped'] !== $before['ws_topic_dropped'], true), "\n";
     echo 'retry_expired moved: ', var_export($after['ws_retry_expired'] !== $before['ws_retry_expired'], true), "\n";
 
@@ -110,6 +118,6 @@ spawn(function () use ($server, $room, $ack) {
 ack: parked
 %Adoomed: Async\ThreadTransferException
 slot released: yes
-send delivered: 0
+send: refused, delivered=0
 dropped moved: false
 retry_expired moved: false

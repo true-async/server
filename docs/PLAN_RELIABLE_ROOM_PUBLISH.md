@@ -24,22 +24,28 @@ bypasses the queue entirely — it is meant to be lossy and instant.
 
 ## The palette — three calls, mirroring `WebSocket`'s trio
 
-### `Room::publish(string $message): int` — best-effort, no queue
+### `Room::publish(string $message): array` — best-effort, no queue
 
-Post to every interested worker now; no retry, no throw; returns how many were
-accepted on the calling worker. Full-mailbox drops are in `getRuntimeStats()`.
-Unchanged behaviour, honest docs.
+Post to every interested worker now; no retry, no throw. Returns the call's
+breakdown — `served` local subscribers, `posted` remote mailboxes that took the
+copy, `dropped` full ones that lost it, `workers` threads attached to the hub at
+all. Full-mailbox drops are also in `getRuntimeStats()`.
 
 ### `Room::trySend(string $message, ?int $timeoutMs = null): bool` — non-blocking
 
 Fan out now; for every target whose mailbox is full, park a retry entry and return
-immediately: `true` if delivered outright or parked, `false` if the queue is at
-`retryQueueMax` (nothing parked). The eventual outcome is in `getRuntimeStats()`.
+immediately: `true` if delivered outright or parked, `false` if a target was left
+unserved with nothing parked for it — the queue is at `retryQueueMax`, this thread
+has no queue to park on, or the message reached nobody. `false` does not mean
+nothing was delivered: the fan-out ran first. The eventual outcome of a parked
+message is in `getRuntimeStats()`.
 
 ### `Room::send(string $message, ?int $timeoutMs = null): int` — blocking
 
 Same fan-out-and-park; the caller **awaits the entry** and returns targets
-delivered, or throws.
+delivered — local subscribers plus remote mailboxes, never zero — or throws. A
+send that reached nobody throws too: on this path arriving nowhere is a failure,
+and "nothing is running" is a different status from "nobody has joined".
 
 - **Semantics are at-least-once with partial delivery** (finding 3): the fast
   targets are posted during the fan-out, *before* any failure verdict. So a throw

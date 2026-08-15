@@ -61,13 +61,16 @@ final class Room
      * @param int|null $timeoutMs How long the background drainer keeps retrying a
      *        still-full target. Null uses
      *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
-     * @return bool True if delivered outright or parked for retry; false if
-     *         nothing took responsibility for the message — the outbound queue is
-     *         at {@see HttpServerConfig::setWsPublishRetryQueueMax()}, or this
-     *         thread has no outbound queue to park on, or no thread is attached to
-     *         the hub at all, so there was nowhere to deliver. The caller must
-     *         handle this now; the eventual outcome of a PARKED message is in
-     *         {@see HttpServer::getRuntimeStats()}.
+     * @return bool True if delivered outright or parked for retry; false if some
+     *         target was left unserved and nothing was parked for it — the
+     *         outbound queue is at {@see HttpServerConfig::setWsPublishRetryQueueMax()},
+     *         or this thread has no outbound queue to park on, or the message
+     *         reached nobody at all (no worker attached, or nobody subscribed).
+     *
+     *         False is NOT a promise that nothing was delivered: the fan-out runs
+     *         before the refusal, so the fast targets may already hold the
+     *         message and a re-send duplicates on them. The eventual outcome of a
+     *         PARKED message is in {@see HttpServer::getRuntimeStats()}.
      */
     public function trySend(string $message, ?int $timeoutMs = null): bool {}
 
@@ -92,16 +95,27 @@ final class Room
      *
      * @param int|null $timeoutMs Retry deadline; null uses
      *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
-     * @return int Targets the message reached: subscribers served on the calling
-     *             worker plus worker mailboxes that accepted it. A mailbox that
-     *             accepted it can still drop it on a full ring (`ws_sub_overflow`).
-     *             0 means the room is empty — the workers were there and nobody
-     *             had joined.
+     * A send that reaches NOBODY throws rather than returning 0: on this path a
+     * message that arrived nowhere is a failure, and the two reasons — nothing is
+     * running, or nobody has joined the room — are told apart by the message,
+     * because they are fixed differently. Use {@see publish()} for a message that
+     * may legitimately reach no one.
+     *
+     * A cancellation of the calling coroutine says nothing about the message: it
+     * stays on the retry queue until it lands or expires, and its outcome is then
+     * only in {@see HttpServer::getRuntimeStats()}. Re-sending in a cancellation
+     * handler duplicates.
+     *
+     * @return int Targets the message reached, always 1 or more: subscribers
+     *             served on the calling worker plus worker mailboxes that accepted
+     *             it. Not a subscriber census and not comparable between senders —
+     *             a remote worker is one target however many subscribers sit
+     *             behind it, and a mailbox that accepted the message can still
+     *             drop it on a full ring (`ws_sub_overflow`).
      * @throws RoomDeliveryException if the deadline passed with a target still
      *         full, or the outbound queue was full at enqueue, or send() was
-     *         called outside a coroutine (use trySend() there), or no thread is
-     *         attached to the hub — the message had nowhere to go, which is a
-     *         different fact from an empty room and is not reported as a 0.
+     *         called outside a coroutine (use trySend() there), or the message
+     *         reached nobody.
      */
     public function send(string $message, ?int $timeoutMs = null): int {}
 

@@ -107,9 +107,10 @@ final class HttpServer
      * {@see Room} handle.
      *
      * @param int|null $timeoutMs Retry deadline; null uses the configured default.
-     * @return bool True if delivered or parked; false if nothing took
-     *         responsibility for the message — the outbound queue is full, this
-     *         thread has none to park on, or no thread is attached to the hub.
+     * @return bool True if delivered or parked; false if a target was left
+     *         unserved with nothing parked for it — the outbound queue is full,
+     *         this thread has none to park on, or the message reached nobody.
+     *         False does not mean nothing was delivered: see {@see Room::trySend()}.
      */
     public function trySend(string $topic, string $message, ?int $timeoutMs = null): bool {}
 
@@ -120,12 +121,12 @@ final class HttpServer
      * a {@see Room} handle.
      *
      * @param int|null $timeoutMs Retry deadline; null uses the configured default.
-     * @return int Targets the message reached: subscribers served on the calling
-     *             worker plus worker mailboxes that accepted it; a mailbox that
-     *             accepted it can still drop it on a full ring (`ws_sub_overflow`).
+     * @return int Targets the message reached, always 1 or more: subscribers
+     *             served on the calling worker plus worker mailboxes that accepted
+     *             it. See {@see Room::send()} for what that number is and is not.
      * @throws RoomDeliveryException if the deadline passed with a target still
      *         full, the outbound queue was full, the call was made outside a
-     *         coroutine, or no thread is attached to the hub.
+     *         coroutine, or the message reached nobody.
      */
     public function send(string $topic, string $message, ?int $timeoutMs = null): int {}
 

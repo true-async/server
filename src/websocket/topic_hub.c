@@ -1859,10 +1859,14 @@ topic_hub_send_result_t topic_hub_try_send(topic_hub_t *hub, const char *topic, 
             ws_payload_release(payload);
         }
 
-        /* With no worker attached anywhere there was nothing to deliver TO, and a
-         * later attach cannot rescue this message: an honest refusal, not an OK. */
+        /* Reaching nobody is a refusal on the reliable path, whatever the cause:
+         * the message is gone and no retry is coming for it. The two causes are
+         * separate statuses because the remedies are — nothing is running, versus
+         * nothing has joined the room yet. */
         if (out.workers == 0) {
             result.status = TOPIC_HUB_SEND_NO_WORKERS;
+        } else if (result.delivered == 0) {
+            result.status = TOPIC_HUB_SEND_NO_TARGETS;
         }
 
         return result;
@@ -1952,10 +1956,12 @@ topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, cons
             ws_payload_release(payload);
         }
 
-        /* Nobody is attached, so the message reached nothing and never will —
-         * reported rather than returned as a delivered-to-nobody OK. */
+        /* try_send's reasoning: a send that reached nothing is refused, and the
+         * two causes are told apart because they are fixed differently. */
         if (out.workers == 0) {
             result.status = TOPIC_HUB_SEND_NO_WORKERS;
+        } else if (delivered == 0) {
+            result.status = TOPIC_HUB_SEND_NO_TARGETS;
         }
 
         return result;   /* OK — delivered outright */

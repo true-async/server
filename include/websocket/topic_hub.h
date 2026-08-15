@@ -146,6 +146,7 @@ typedef enum {
     TOPIC_HUB_SEND_NO_QUEUE,    /* thread never attached — no outbound queue to retry on */
     TOPIC_HUB_SEND_SHUTDOWN,    /* the worker detached while the send was parked */
     TOPIC_HUB_SEND_NO_WORKERS,  /* no thread is attached to the hub — nowhere to deliver */
+    TOPIC_HUB_SEND_NO_TARGETS,  /* workers are running, but the room has no subscriber */
     TOPIC_HUB_SEND_CANCELLED,   /* the parked sender was cancelled; EG(exception) is set */
 } topic_hub_send_status_t;
 
@@ -154,7 +155,15 @@ typedef struct {
     /* Targets the message reached: local subscribers served on this thread plus
      * remote mailboxes that took a copy. The two are added because a caller asks
      * "did it arrive anywhere", not "by which road" — and a send whose whole room
-     * sits on the calling thread used to answer 0 having served all of it. */
+     * sits on the calling thread used to answer 0 having served all of it.
+     *
+     * It is not a subscriber census, and it is not comparable between senders: a
+     * remote worker is ONE target however many subscribers sit behind it, so the
+     * same room answers 5 from the thread that holds it and 1 from anywhere else.
+     * A worker also counts as reached once its mailbox takes the copy, and the
+     * interest filter is a Bloom summary that may hit for a worker whose tree then
+     * matches nothing (ws_topic_tree.h). Only zero is exact — and zero never comes
+     * back as OK, it comes back as NO_TARGETS. */
     uint32_t                delivered;
     uint32_t                pending;     /* targets still unfilled at give-up */
     uint32_t                workers;     /* worker slots live in the hub, this thread's included */
@@ -163,7 +172,11 @@ typedef struct {
 /* Non-blocking: fan out, park full targets, return at once. Any thread; never
  * suspends, so it never returns CANCELLED, EXPIRED or SHUTDOWN — a parked
  * message's fate is in topic_hub_get_stats(). OK means delivered outright or
- * parked for retry (`pending` says which). */
+ * parked for retry (`pending` says which).
+ *
+ * A refusal is not a promise that nothing was delivered: the fan-out runs first,
+ * so QUEUE_FULL and NO_QUEUE can both follow targets that already took a copy.
+ * `delivered` says how many, which is what makes a re-send a decision. */
 topic_hub_send_result_t topic_hub_try_send(topic_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary, uint64_t except_id,
                         uint32_t timeout_ms, uint32_t queue_max);
@@ -173,7 +186,9 @@ topic_hub_send_result_t topic_hub_try_send(topic_hub_t *hub, const char *topic, 
  * coroutine it returns TOPIC_HUB_SEND_NO_CONTEXT rather than degrading to
  * best-effort (the caller chose the reliable path). A cancellation across the
  * park comes back as CANCELLED with the exception still pending, so the caller
- * reads one status instead of re-reading EG(exception) behind our back. */
+ * reads one status instead of re-reading EG(exception) behind our back — and it
+ * says nothing about the message, which stays on the retry queue until it lands
+ * or expires: the sender was cancelled, not the send. */
 topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary, uint64_t except_id,
                         uint32_t timeout_ms, uint32_t queue_max);
@@ -253,7 +268,10 @@ typedef enum {
     TOPIC_HUB_RECV_TIMEOUT,     /* the deadline passed, or there was nothing and nowhere to park */
     TOPIC_HUB_RECV_CLOSED,      /* unsubscribed, here or under a parked recv */
     TOPIC_HUB_RECV_BUSY,        /* another coroutine is already parked on this subscription */
-    TOPIC_HUB_RECV_CANCELLED,   /* the park was cancelled; EG(exception) is set, the message stays in the ring */
+    /* An exception is pending across this call and the caller is unwinding — a
+     * cancellation of the park, or a waiter this thread could not arm. Whatever
+     * had arrived stays in the ring for the next reader. */
+    TOPIC_HUB_RECV_CANCELLED,
 } topic_hub_recv_status_t;
 
 /* NULL when the thread could not attach (every slot taken). The caller owns one
