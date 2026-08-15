@@ -154,11 +154,13 @@ spawn(function () use ($server, $room, $ack) {
      * subscription still held there.
      *
      * Measured, and deliberately not asserted before this point: a task cancelled
-     * while parked keeps its room object — and so its subscription — for as long
-     * as the pool holds that task's closure, which outlives the task itself when
-     * another one is submitted straight after (5 s of polling, unchanged, until
-     * the pool closed). That lifetime belongs to Async\ThreadPool, not to rooms;
-     * what is ours is that the sweep takes it in the end. */
+     * while parked keeps its room object — and so its subscription — until the
+     * POOL closes, whether or not another task follows it. That is
+     * Async\ThreadPool's lifetime, not rooms': a cancelled task's captured objects
+     * are released at close() while a task that ends normally releases them as it
+     * goes (true-async/php-async#233, with a repro that needs no rooms at all).
+     * What is ours is that the thread's sweep takes the subscription in the end,
+     * which is what the two settle checks below assert. */
     $pool->close();
     echo 'slot given back: ', workers_settle($room, 1), "\n";
     echo 'subscriptions given back: ', subs_settle($room, 1), "\n";
