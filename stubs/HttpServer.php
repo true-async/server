@@ -281,6 +281,12 @@ final class HttpServer
      *                             by every subscriber and every worker it lands
      *                             in. Growing faster than the publishes means a
      *                             copy crept back into a delivery path.
+     *  - `ws_bodies_freed`      — and released. Bodies are persistent memory
+     *                             owned by whatever holds them — a mailbox, a
+     *                             receiver's ring, a parked retry — so a teardown
+     *                             that forgets to empty one of those leaks them.
+     *                             At rest, with nothing queued anywhere, this
+     *                             equals `ws_bodies`; a standing gap is that leak.
      *  - `ws_sub_overflow`      — server-side receivers (see {@see Room::recv()})
      *                             whose 64-message ring dropped its oldest
      *                             because nobody was reading. Distinct from

@@ -246,6 +246,15 @@ typedef struct {
      * than the publishes means a copy crept back into a delivery path. */
     uint64_t bodies;
 
+    /* ...and released. Bodies are persistent memory whose owner is a mailbox, a
+     * subscriber's ring or a retry entry, so a teardown that forgets to empty one
+     * of those leaks them — invisibly, because a leak inside a structure valgrind
+     * still sees a pointer to is not "definitely lost" (measured: removing the
+     * ring drop from the dead-request sweep stays green under every leak-kind
+     * filter). The difference `bodies - bodies_freed` is what sees it: at rest,
+     * with nothing queued anywhere, the two are equal. */
+    uint64_t bodies_freed;
+
     uint64_t sub_overflow;
 } topic_hub_stats_t;
 

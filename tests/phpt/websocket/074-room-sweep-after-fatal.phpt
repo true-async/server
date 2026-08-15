@@ -118,6 +118,17 @@ spawn(function () use ($server, $room, $ack) {
 
     $pool->close();
     $ack->unsubscribe();
+
+    /* What the dead worker was holding: 200 bodies in its mailbox and its
+     * receiver's ring, persistent memory whose owner died with it. valgrind
+     * cannot see this class — a body still pointed at from a leaked structure is
+     * not "definitely lost" — so the balance is the instrument. Nothing is queued
+     * anywhere by now, so the two counters must meet. */
+    $st = $server->getRuntimeStats();
+    echo 'bodies balanced: ',
+        $st['ws_bodies'] === $st['ws_bodies_freed']
+            ? 'yes'
+            : "no ({$st['ws_bodies']} allocated, {$st['ws_bodies_freed']} freed)", "\n";
 });
 ?>
 --EXPECTF--
@@ -127,3 +138,4 @@ slot released: yes
 send: refused, delivered=0
 dropped moved: false
 retry_expired moved: false
+bodies balanced: yes
