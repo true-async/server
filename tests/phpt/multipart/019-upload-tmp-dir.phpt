@@ -30,8 +30,10 @@ $stream = $file->getStream();
 $path = stream_get_meta_data($stream)['uri'];
 fclose($stream);
 
+/* The core resolves the directory before it creates the file, and on Darwin /tmp is a
+ * symlink to /private/tmp, so the two sides are only comparable once both are resolved. */
 echo "Error: " . $file->getError() . "\n";
-echo "In configured dir: " . (dirname($path) === $dir ? 'yes' : 'no') . "\n";
+echo "In configured dir: " . (realpath(dirname($path)) === realpath($dir) ? 'yes' : 'no') . "\n";
 
 unset($file, $request);
 @rmdir($dir);
