@@ -500,6 +500,11 @@ final class HttpServerConfig
      *
      * Default: 50. Applies to Room::send()/HttpServer::send() only; publish()
      * never retries.
+     *
+     * Read once, when the server's room machinery is created (enableRooms(), the
+     * first room(), or start()), and used by every thread that joins it: the
+     * drainer is one timer per worker, so there is nothing a later per-send value
+     * could change.
      */
     public function setWsPublishRetryIntervalMs(int $ms): static {}
 

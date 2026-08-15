@@ -1234,12 +1234,11 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
 
     const uint64_t except_id = exclude_self && w->session != NULL ? w->session->ws_id : 0;
 
-    const uint32_t sent = topic_hub_publish(ws_topic_hub_of(w),
+    const topic_hub_publish_result_t r = topic_hub_publish(ws_topic_hub_of(w),
         ZSTR_VAL(topic), ZSTR_LEN(topic),
-        ZSTR_VAL(data), ZSTR_LEN(data), binary, except_id,
-        /* posted_out */ NULL, /* dropped_out */ NULL);
+        ZSTR_VAL(data), ZSTR_LEN(data), binary, except_id);
 
-    RETURN_LONG((zend_long) sent);
+    RETURN_LONG((zend_long) r.served);
 }
 
 ZEND_METHOD(TrueAsync_WebSocket, publish)

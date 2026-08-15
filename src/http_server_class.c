@@ -38,7 +38,7 @@
 # include "websocket/php_websocket.h"
 #else
 /* Topics are a WebSocket feature; without it the hub calls compile away. */
-# define topic_hub_create()      NULL
+# define topic_hub_create(interval_ms)  ((void)(interval_ms), NULL)
 # define topic_hub_addref(hub)   ((void)(hub))
 # define topic_hub_release(hub)  ((void)(hub))
 # define topic_hub_attach(hub)   (-1)
@@ -1417,6 +1417,18 @@ http_server_config_t *http_server_get_config(http_server_object *server)
 void *http_server_get_topic_hub(http_server_object *server)
 {
     return server != NULL ? server->topic_hub : NULL;
+}
+
+/* The reliable-send drainer's cadence for this server's hub, read once when the
+ * hub is created: the drainer is one timer per worker, so a per-send interval
+ * could only ever be honoured for whoever armed it first. 0 means "unset" and is
+ * passed on as such — topic_hub_create() owns the default, so the number lives in
+ * one place rather than in every caller. */
+static uint32_t http_server_retry_interval_ms(http_server_object *server)
+{
+    const http_server_config_t *const cfg = http_server_get_config(server);
+
+    return cfg != NULL ? cfg->ws_publish_retry_interval_ms : 0u;
 }
 
 http_log_state_t *http_server_get_log_state(http_server_object *server)
@@ -3424,7 +3436,7 @@ static int http_server_start_pool(http_server_object *server,
     server->pool_ctl = pool_ctl;
 
     if (server->topic_hub == NULL) {
-        server->topic_hub = topic_hub_create();
+        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
     }
 
     /* One persistent shell per worker. Allocate the whole array up
@@ -4341,7 +4353,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     /* Topics (issue #2). Attach needs a live reactor on this thread, which we
      * have here — the mailbox handle is created on it. */
     if (server->topic_hub == NULL && !server->is_worker_clone) {
-        server->topic_hub = topic_hub_create();
+        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
     }
 
     /* A worker that fails to attach gets no topic tree, and then every
@@ -5682,21 +5694,24 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
 /* }}} */
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-/* {served, posted, dropped} — publish()'s per-call delivery breakdown: local
- * subscribers served synchronously on the calling worker, remote mailboxes that
- * accepted the copy, and full remote mailboxes that dropped it. */
-static void room_publish_result(zval *return_value, uint32_t served,
-                                uint64_t posted, uint64_t dropped)
+/* {served, posted, dropped, workers} — publish()'s per-call delivery breakdown:
+ * local subscribers served synchronously on the calling worker, remote mailboxes
+ * that accepted the copy, full remote mailboxes that dropped it, and the worker
+ * slots that were live at all — which is what tells a publish that reached nobody
+ * from one that had nowhere to go. */
+static void room_publish_result(zval *return_value, const topic_hub_publish_result_t *r)
 {
     array_init(return_value);
-    add_assoc_long(return_value, "served",  (zend_long) served);
-    add_assoc_long(return_value, "posted",  (zend_long) posted);
-    add_assoc_long(return_value, "dropped", (zend_long) dropped);
+    add_assoc_long(return_value, "served",  (zend_long) r->served);
+    add_assoc_long(return_value, "posted",  (zend_long) r->posted);
+    add_assoc_long(return_value, "dropped", (zend_long) r->dropped);
+    add_assoc_long(return_value, "workers", (zend_long) r->workers);
 }
 
-/* The reliable-send knobs as configured; queue_max is per worker, in entries. */
+/* The per-call reliable-send knobs as configured; queue_max is per worker, in
+ * entries. The drainer's cadence is not here: it belongs to the hub, which takes
+ * it once at creation. */
 typedef struct {
-    uint32_t interval_ms;
     uint32_t timeout_ms;    /* used when a call passes no timeout of its own */
     uint32_t queue_max;
 } room_retry_cfg_t;
@@ -5707,8 +5722,6 @@ static room_retry_cfg_t room_retry_cfg(http_server_object *server)
     const http_server_config_t *const cfg = http_server_get_config(server);
 
     room_retry_cfg_t out;
-    out.interval_ms = (cfg != NULL && cfg->ws_publish_retry_interval_ms != 0)
-        ? cfg->ws_publish_retry_interval_ms : 50u;
     out.timeout_ms  = (cfg != NULL && cfg->ws_publish_retry_timeout_ms != 0)
         ? cfg->ws_publish_retry_timeout_ms : 5000u;
     out.queue_max   = (cfg != NULL && cfg->ws_publish_retry_queue_max != 0)
@@ -5719,9 +5732,8 @@ static room_retry_cfg_t room_retry_cfg(http_server_object *server)
 
 /* One call's knobs: a null timeoutMs means the configured default. */
 static void room_retry_knobs(const room_retry_cfg_t *cfg, bool timeout_is_null,
-        zend_long timeout_ms, uint32_t *timeout, uint32_t *interval, uint32_t *queue_max)
+        zend_long timeout_ms, uint32_t *timeout, uint32_t *queue_max)
 {
-    *interval  = cfg->interval_ms;
     *queue_max = cfg->queue_max;
 
     if (timeout_is_null) {
@@ -5762,12 +5774,29 @@ static void room_throw_delivery(const char *msg, uint32_t delivered, uint32_t pe
 }
 
 /* Map a reliable-send result onto return_value (int = targets delivered, on OK)
- * or a thrown RoomDeliveryException carrying delivered/pending. */
+ * or a thrown RoomDeliveryException carrying delivered/pending. A cancellation
+ * resumed the sender with its own exception already pending — nothing to map and
+ * nothing to add. */
 static void room_send_apply(zval *return_value, const topic_hub_send_result_t *r)
 {
     switch (r->status) {
         case TOPIC_HUB_SEND_OK:
             ZVAL_LONG(return_value, (zend_long) r->delivered);
+            return;
+        case TOPIC_HUB_SEND_CANCELLED:
+            return;
+        case TOPIC_HUB_SEND_NO_WORKERS:
+            room_throw_delivery(
+                "Reliable send reached nothing: no thread is attached to this room's hub, so the "
+                "message had nowhere to go — the server is not running, or this is a thread that "
+                "never joined it",
+                r->delivered, r->pending);
+            return;
+        case TOPIC_HUB_SEND_NO_TARGETS:
+            room_throw_delivery(
+                "Reliable send reached nothing: the workers are running, but nobody has subscribed "
+                "to this room — use publish() for a message that may legitimately reach no one",
+                r->delivered, r->pending);
             return;
         case TOPIC_HUB_SEND_QUEUE_FULL:
             room_throw_delivery(
@@ -5817,7 +5846,7 @@ ZEND_METHOD(TrueAsync_HttpServer, enableRooms)
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (server->topic_hub == NULL) {
-        server->topic_hub = topic_hub_create();
+        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
     }
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -5860,18 +5889,15 @@ ZEND_METHOD(TrueAsync_HttpServer, publish)
         return;
     }
 
-    uint64_t posted = 0, dropped = 0;
-
-    const uint32_t served = topic_hub_publish(
+    const topic_hub_publish_result_t r = topic_hub_publish(
         (topic_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         binary,
-        /* except_id: 0 = server origin, exclude nobody */ 0,
-        &posted, &dropped
+        /* except_id: 0 = server origin, exclude nobody */ 0
     );
 
-    room_publish_result(return_value, served, posted, dropped);
+    room_publish_result(return_value, &r);
 #else
     (void) topic;
     (void) message;
@@ -5916,18 +5942,18 @@ ZEND_METHOD(TrueAsync_HttpServer, trySend)
         return;
     }
 
-    uint32_t timeout, interval, queue_max;
+    uint32_t timeout, queue_max;
     const room_retry_cfg_t cfg = room_retry_cfg(server);
-    room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
-    const bool ok = topic_hub_try_send(
+    const topic_hub_send_result_t r = topic_hub_try_send(
         (topic_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
-        timeout, interval, queue_max);
+        timeout, queue_max);
 
-    RETURN_BOOL(ok);
+    RETURN_BOOL(r.status == TOPIC_HUB_SEND_OK);
 #else
     (void) topic; (void) message; (void) timeout_ms; (void) timeout_is_null; (void) server;
     zend_throw_exception(http_server_runtime_exception_ce,
@@ -5968,22 +5994,16 @@ ZEND_METHOD(TrueAsync_HttpServer, send)
         return;
     }
 
-    uint32_t timeout, interval, queue_max;
+    uint32_t timeout, queue_max;
     const room_retry_cfg_t cfg = room_retry_cfg(server);
-    room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
     const topic_hub_send_result_t r = topic_hub_send(
         (topic_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
-        timeout, interval, queue_max);
-
-    /* A cancellation left an exception pending across the suspend — let it
-     * propagate rather than mapping the (now meaningless) result. */
-    if (EG(exception) != NULL) {
-        return;
-    }
+        timeout, queue_max);
 
     room_send_apply(return_value, &r);
 #else
@@ -6208,18 +6228,15 @@ ZEND_METHOD(TrueAsync_Room, publish)
         return;
     }
 
-    uint64_t posted = 0, dropped = 0;
-
-    const uint32_t served = topic_hub_publish(
+    const topic_hub_publish_result_t r = topic_hub_publish(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false,
-        /* except_id */ 0,
-        &posted, &dropped
+        /* except_id */ 0
     );
 
-    room_publish_result(return_value, served, posted, dropped);
+    room_publish_result(return_value, &r);
 }
 /* }}} */
 
@@ -6242,17 +6259,17 @@ ZEND_METHOD(TrueAsync_Room, trySend)
         return;
     }
 
-    uint32_t timeout, interval, queue_max;
-    room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    uint32_t timeout, queue_max;
+    room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
-    const bool ok = topic_hub_try_send(
+    const topic_hub_send_result_t r = topic_hub_try_send(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
-        timeout, interval, queue_max);
+        timeout, queue_max);
 
-    RETURN_BOOL(ok);
+    RETURN_BOOL(r.status == TOPIC_HUB_SEND_OK);
 }
 /* }}} */
 
@@ -6275,19 +6292,15 @@ ZEND_METHOD(TrueAsync_Room, send)
         return;
     }
 
-    uint32_t timeout, interval, queue_max;
-    room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &interval, &queue_max);
+    uint32_t timeout, queue_max;
+    room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
     const topic_hub_send_result_t r = topic_hub_send(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
-        timeout, interval, queue_max);
-
-    if (EG(exception) != NULL) {
-        return;   /* a cancellation is already pending across the suspend */
-    }
+        timeout, queue_max);
 
     room_send_apply(return_value, &r);
 }
@@ -6308,16 +6321,15 @@ ZEND_METHOD(TrueAsync_Room, publishBinary)
         return;
     }
 
-    const uint32_t served = topic_hub_publish(
+    const topic_hub_publish_result_t r = topic_hub_publish(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(data), ZSTR_LEN(data),
         /* binary */ true,
-        /* except_id */ 0,
-        /* posted_out */ NULL, /* dropped_out */ NULL
+        /* except_id */ 0
     );
 
-    RETURN_LONG((zend_long) served);
+    RETURN_LONG((zend_long) r.served);
 }
 /* }}} */
 
@@ -6437,36 +6449,26 @@ ZEND_METHOD(TrueAsync_Room, recv)
             bool   binary;
             const char *const data = topic_hub_payload_data(payload, &len, &binary);
 
-            if (EG(exception) == NULL) {
-                RETVAL_STRINGL(data, len);
-            }
-
+            RETVAL_STRINGL(data, len);
             topic_hub_payload_release(payload);
             return;
         }
 
         case TOPIC_HUB_RECV_BUSY:
-            if (EG(exception) == NULL) {
-                zend_throw_exception(http_server_runtime_exception_ce,
-                    "Room::recv() is already parked in another coroutine on this room", 0);
-            }
-
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "Room::recv() is already parked in another coroutine on this room", 0);
             return;
 
         case TOPIC_HUB_RECV_CLOSED:
-            if (EG(exception) == NULL) {
-                zend_throw_exception(http_server_runtime_exception_ce,
-                    "Room::recv() was interrupted: the subscription closed", 0);
-            }
-
+            zend_throw_exception(http_server_runtime_exception_ce,
+                "Room::recv() was interrupted: the subscription closed", 0);
             return;
+
+        case TOPIC_HUB_RECV_CANCELLED:
+            return;   /* the cancellation's own exception is already pending */
 
         case TOPIC_HUB_RECV_TIMEOUT:
         default:
-            if (EG(exception) != NULL) {
-                return;   /* a cancellation crossed the park */
-            }
-
             RETURN_NULL();
     }
 }
@@ -6531,7 +6533,7 @@ ZEND_METHOD(TrueAsync_HttpServer, room)
             return;
         }
 
-        server->topic_hub = topic_hub_create();
+        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
     }
 
     RETURN_OBJ(room_mint(server, topic));

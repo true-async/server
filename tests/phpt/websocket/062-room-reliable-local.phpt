@@ -8,8 +8,9 @@ true_async
 /* One worker: the calling coroutine and the subscribers share it, so delivery is
  * entirely LOCAL — there is no remote mailbox to fill, so nothing parks. publish()
  * reports the local subscribers under 'served'; trySend() returns true; send()
- * returns its remote delivered count (0 here — the subscribers are local, not a
- * remote target) and does NOT throw; all three reach the subscribers. The
+ * counts those same local subscribers in what it returns (they are targets it
+ * reached, not a road it took) and does NOT throw; all three reach the
+ * subscribers. The
  * full-mailbox park path needs a wedged REMOTE worker and is out of reach in one
  * worker — see 063 for the real cross-worker delivery test, and the report for
  * what remains beyond a .phpt. */
@@ -80,7 +81,7 @@ spawn(function () use ($port, $server) {
     try { $r = $server->send('ops/room', 's'); }
     catch (\Throwable $e) { $threw = true; }
     echo 'send threw: ', $threw ? 'yes' : 'no', "\n";
-    echo 'send returned int: ', is_int($r) ? 'yes' : 'no', "\n";
+    echo 'send delivered: ', $r === WATCHERS ? 'yes' : "no (" . var_export($r, true) . ")", "\n";
     delay(300);
     echo 'send reached: ', $reached('s') === WATCHERS ? 'yes' : 'no', "\n";
 
@@ -102,6 +103,6 @@ publish reached: yes
 trySend returned: true
 trySend reached: yes
 send threw: no
-send returned int: yes
+send delivered: yes
 send reached: yes
 has retry stats: yes%A

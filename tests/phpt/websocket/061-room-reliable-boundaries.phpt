@@ -13,9 +13,11 @@ use TrueAsync\RoomDeliveryException;
  *   - send() outside a coroutine must THROW (it does NOT degrade to best-effort
  *     publish() — the one caller who chose the reliable path must not silently get
  *     lossy semantics), and the exception carries delivered/pending;
- *   - trySend() needs no coroutine and, with nothing to park, reports delivered-
- *     outright (true);
- *   - publish() returns its {served, posted, dropped} breakdown;
+ *   - trySend() needs no coroutine, and with no thread attached to the hub it
+ *     reports false: there was nothing to deliver to and no later attach can
+ *     rescue the message, so "nothing was parked" is the honest answer;
+ *   - publish() returns its {served, posted, dropped, workers} breakdown, where
+ *     workers=0 is what separates "nowhere to go" from "the room is empty";
  *   - a wildcard topic is rejected on the reliable path as it is on publish();
  *   - the reliable-path retry_* counters are exposed by getRuntimeStats(). */
 $s = new HttpServer((new HttpServerConfig())->addListener('127.0.0.1', 34110));
@@ -32,7 +34,7 @@ var_dump($s->trySend('ops/room', 'hi'));
 
 $p = $s->publish('ops/room', 'hi');
 echo "publish keys: ", implode(',', array_keys($p)), "\n";
-echo "publish served/posted/dropped: {$p['served']}/{$p['posted']}/{$p['dropped']}\n";
+echo "publish served/posted/dropped/workers: {$p['served']}/{$p['posted']}/{$p['dropped']}/{$p['workers']}\n";
 
 try {
     $s->send('ops/#', 'hi');
@@ -51,9 +53,9 @@ echo "retry stat keys: ", implode(',', $keys), "\n";
 echo "Done\n";
 --EXPECT--
 no-coroutine send throws RoomDeliveryException; delivered=0 pending=0
-bool(true)
-publish keys: served,posted,dropped
-publish served/posted/dropped: 0/0/0
+bool(false)
+publish keys: served,posted,dropped,workers
+publish served/posted/dropped/workers: 0/0/0/0
 wildcard send rejected: TrueAsync\HttpServerInvalidArgumentException
 retry stat keys: ws_retry_delivered,ws_retry_expired,ws_retry_gone,ws_retry_queued,ws_retry_rejected,ws_retry_shutdown
 Done

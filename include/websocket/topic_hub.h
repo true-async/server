@@ -52,8 +52,14 @@ typedef struct topic_hub_s topic_hub_t;
 
 /* Reference counted. A new reference is derived from one the caller already
  * holds and taken where the pointer is copied, not at first use: a later addref
- * races the owner's release. addref/release take NULL. */
-topic_hub_t *topic_hub_create(void);
+ * races the owner's release. addref/release take NULL.
+ *
+ * `retry_interval_ms` is the reliable-send drainer's cadence, in milliseconds,
+ * for every thread that attaches to this hub. It belongs to the hub because the
+ * drainer is one timer per worker: a per-call interval could only ever be
+ * honoured by whichever call armed the timer first, and every later sender would
+ * inherit that stranger's cadence without being told. 0 means the default (50). */
+topic_hub_t *topic_hub_create(uint32_t retry_interval_ms);
 void      topic_hub_addref(topic_hub_t *hub);
 void      topic_hub_release(topic_hub_t *hub);
 
@@ -88,22 +94,28 @@ struct ws_topic_tree *topic_hub_tree(const topic_hub_t *hub);
  * can skip its own sender. */
 uint64_t topic_hub_next_id(topic_hub_t *hub);
 
+/* One publish's delivery breakdown. The global counters in topic_hub_stats_t are
+ * still accumulated; this is the same news for one call. */
+typedef struct {
+    uint32_t served;    /* local subscribers served synchronously on this thread */
+    uint32_t workers;   /* worker slots live in the hub, this thread's included */
+    uint64_t posted;    /* remote mailboxes that accepted the copy */
+    uint64_t dropped;   /* full remote mailboxes that lost it */
+} topic_hub_publish_result_t;
+
 /* Fans `topic` out to every worker; each matches it against its own tree.
  * Never suspends — a peer whose transport is backed up drops the message
- * (trySend semantics). Returns the subscribers served on THIS worker; delivery
- * to the others is asynchronous, so an exact total would be a lie.
+ * (trySend semantics). Delivery to the other workers is asynchronous, so an
+ * exact total would be a lie: `served` is this thread's own count.
  *
- * A worker whose mailbox is full also drops the message, and that one is NOT in
- * the return value: it is counted in topic_hub_get_stats().dropped instead.
- *
- * `posted_out`/`dropped_out` (either may be NULL) report THIS call's remote
- * breakdown — mailboxes that accepted the copy vs full ones that dropped it — so
- * a caller can surface a per-publish delivery result without reading the
- * process-wide stats. The global counters are still accumulated regardless. */
-uint32_t topic_hub_publish(topic_hub_t *hub, const char *topic, size_t topic_len,
+ * `workers` is what tells a caller that reached nobody WHY: zero means no thread
+ * is attached to this hub at all, so the message had nowhere to go and no later
+ * attach can rescue it; non-zero with served+posted == 0 means the workers are
+ * there and the room is simply empty. */
+topic_hub_publish_result_t topic_hub_publish(topic_hub_t *hub,
+                        const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary,
-                        uint64_t except_id,
-                        uint64_t *posted_out, uint64_t *dropped_out);
+                        uint64_t except_id);
 
 /* Scatter/gather: no global tally exists, so each worker answers with its own
  * match count. SUSPENDS the caller; a worker that misses `timeout_ms` is left
@@ -121,8 +133,8 @@ uint32_t topic_hub_count(topic_hub_t *hub, const char *topic, size_t topic_len,
  * cap), never between the sender and the slowest consumer (the NATS model). See
  * docs/PLAN_RELIABLE_ROOM_PUBLISH.md.
  *
- * `queue_max`/`interval_ms`/`timeout_ms` come from HttpServerConfig; the hub
- * holds no config of its own. The local delivery (this worker's own tree) is
+ * `queue_max`/`timeout_ms` come from HttpServerConfig; the drainer's cadence is
+ * the hub's (topic_hub_create). The local delivery (this worker's own tree) is
  * done synchronously first, exactly as publish() does.
  */
 
@@ -133,29 +145,53 @@ typedef enum {
     TOPIC_HUB_SEND_NO_CONTEXT,  /* blocking send() called with no coroutine to park */
     TOPIC_HUB_SEND_NO_QUEUE,    /* thread never attached — no outbound queue to retry on */
     TOPIC_HUB_SEND_SHUTDOWN,    /* the worker detached while the send was parked */
+    TOPIC_HUB_SEND_NO_WORKERS,  /* no thread is attached to the hub — nowhere to deliver */
+    TOPIC_HUB_SEND_NO_TARGETS,  /* workers are running, but the room has no subscriber */
+    TOPIC_HUB_SEND_CANCELLED,   /* the parked sender was cancelled; EG(exception) is set */
 } topic_hub_send_status_t;
 
 typedef struct {
     topic_hub_send_status_t status;
-    uint32_t                delivered;   /* targets the message reached */
+    /* Targets the message reached: local subscribers served on this thread plus
+     * remote mailboxes that took a copy. The two are added because a caller asks
+     * "did it arrive anywhere", not "by which road" — and a send whose whole room
+     * sits on the calling thread used to answer 0 having served all of it.
+     *
+     * It is not a subscriber census, and it is not comparable between senders: a
+     * remote worker is ONE target however many subscribers sit behind it, so the
+     * same room answers 5 from the thread that holds it and 1 from anywhere else.
+     * A worker also counts as reached once its mailbox takes the copy, and the
+     * interest filter is a Bloom summary that may hit for a worker whose tree then
+     * matches nothing (ws_topic_tree.h). Only zero is exact — and zero never comes
+     * back as OK, it comes back as NO_TARGETS. */
+    uint32_t                delivered;
     uint32_t                pending;     /* targets still unfilled at give-up */
+    uint32_t                workers;     /* worker slots live in the hub, this thread's included */
 } topic_hub_send_result_t;
 
-/* Non-blocking: fan out, park full targets, return at once. `true` = delivered
- * or parked; `false` = nothing was parked — the queue is at `queue_max` or the
- * drainer could not arm (counted retry_rejected), or the thread has no worker
- * attachment (not counted). Any thread; never suspends. */
-bool topic_hub_try_send(topic_hub_t *hub, const char *topic, size_t topic_len,
+/* Non-blocking: fan out, park full targets, return at once. Any thread; never
+ * suspends, so it never returns CANCELLED, EXPIRED or SHUTDOWN — a parked
+ * message's fate is in topic_hub_get_stats(). OK means delivered outright or
+ * parked for retry (`pending` says which).
+ *
+ * A refusal is not a promise that nothing was delivered: the fan-out runs first,
+ * so QUEUE_FULL and NO_QUEUE can both follow targets that already took a copy.
+ * `delivered` says how many, which is what makes a re-send a decision. */
+topic_hub_send_result_t topic_hub_try_send(topic_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary, uint64_t except_id,
-                        uint32_t timeout_ms, uint32_t interval_ms, uint32_t queue_max);
+                        uint32_t timeout_ms, uint32_t queue_max);
 
 /* Blocking: fan out, park full targets, then SUSPEND the calling coroutine until
  * every target lands or the deadline passes. Coroutine context only — with no
  * coroutine it returns TOPIC_HUB_SEND_NO_CONTEXT rather than degrading to
- * best-effort (the caller chose the reliable path). */
+ * best-effort (the caller chose the reliable path). A cancellation across the
+ * park comes back as CANCELLED with the exception still pending, so the caller
+ * reads one status instead of re-reading EG(exception) behind our back — and it
+ * says nothing about the message, which stays on the retry queue until it lands
+ * or expires: the sender was cancelled, not the send. */
 topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary, uint64_t except_id,
-                        uint32_t timeout_ms, uint32_t interval_ms, uint32_t queue_max);
+                        uint32_t timeout_ms, uint32_t queue_max);
 
 /* Process-wide since start, for HttpServer::getRuntimeStats(). */
 typedef struct {
@@ -232,6 +268,10 @@ typedef enum {
     TOPIC_HUB_RECV_TIMEOUT,     /* the deadline passed, or there was nothing and nowhere to park */
     TOPIC_HUB_RECV_CLOSED,      /* unsubscribed, here or under a parked recv */
     TOPIC_HUB_RECV_BUSY,        /* another coroutine is already parked on this subscription */
+    /* An exception is pending across this call and the caller is unwinding — a
+     * cancellation of the park, or a waiter this thread could not arm. Whatever
+     * had arrived stays in the ring for the next reader. */
+    TOPIC_HUB_RECV_CANCELLED,
 } topic_hub_recv_status_t;
 
 /* NULL when the thread could not attach (every slot taken). The caller owns one
