@@ -67,13 +67,14 @@ spawn(function () use ($server, $room, $ack) {
         return 'not reached';
     });
 
-    /* Received BEFORE the line is echoed: the doomed worker writes its fatal to
-     * the same stream from another thread, and an echo that suspends halfway
-     * through its arguments lets that text land inside this line. Which SIDE of
-     * the line it lands on is not ours to order, so the expectation tolerates it
-     * either way — under valgrind it arrives first. */
+    /* Received first, and written as ONE string: the doomed worker writes its
+     * fatal to the same stream from another thread, and an echo that suspends
+     * between its arguments — or writes them one by one — lets that text land
+     * inside this line. Which side of the line it lands on is not ours to order:
+     * under the valgrind lane it arrived BEFORE it, which is what the leading %A
+     * in the expectation is for. */
     $parked = $ack->recv(3000);
-    echo 'ack: ', $parked, "\n";
+    echo "ack: $parked\n";
 
     for ($i = 0; $i < 200; $i++) {
         $room->publish("q$i");
