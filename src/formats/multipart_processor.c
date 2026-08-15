@@ -52,10 +52,6 @@
 # endif
 #endif
 
-#ifndef MP_DEFAULT_TMP_DIR
-# define MP_DEFAULT_TMP_DIR "/tmp"
-#endif
-
 #define INITIAL_FILES_CAPACITY  4
 #define INITIAL_FIELDS_CAPACITY 8
 #define INITIAL_FIELD_VALUE_CAP 256
@@ -126,14 +122,25 @@ static char* generate_tmp_path(mp_processor_t* proc, const char* original_filena
         return proc->config.tmp_path_generator(proc, original_filename);
     }
 
-    const char* tmp_dir = proc->config.tmp_dir ? proc->config.tmp_dir : MP_DEFAULT_TMP_DIR;
+    /* The directory follows PHP's own upload handler (main/rfc1867.c): upload_tmp_dir where
+     * it is set, and NULL otherwise, which leaves the choice of the system temporary
+     * directory to the core. Naming a directory the core cannot use is what makes it fall
+     * back and say so, and this code runs in an event-loop callback with no PHP frame above
+     * it: a user error handler that throws there — Laravel installs one — has nothing to
+     * unwind to, and the request is dropped without a response. PHP_TMP_FILE_SILENT keeps
+     * that fallback quiet; a temporary file that cannot be created at all is still reported,
+     * through MP_UPLOAD_ERR_NO_TMP_DIR. */
+    const char* tmp_dir = proc->config.tmp_dir ? proc->config.tmp_dir : PG(upload_tmp_dir);
 
     /* php_open_temporary_fd_ex picks a unique name in tmp_dir with our
      * prefix and returns an fd + zend_string path. Works on POSIX
      * (mkstemp) and Windows (GetTempFileName). We close the fd here
      * and reopen via fopen later — same pattern as before, just portable. */
     zend_string *opened_path = NULL;
-    int fd = php_open_temporary_fd(tmp_dir, "trueasync_upload_", &opened_path);
+    int fd = php_open_temporary_fd_ex(tmp_dir,
+                                      "trueasync_upload_",
+                                      &opened_path,
+                                      PHP_TMP_FILE_SILENT | PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ON_FALLBACK);
 
     if (fd < 0) {
         if (opened_path) {
