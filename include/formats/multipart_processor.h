@@ -85,7 +85,7 @@ typedef struct {
     size_t   max_field_size;   /* Max size per field (0 = default) */
     size_t   max_files;        /* Max number of files (0 = default) */
     size_t   max_fields;       /* Max number of fields (0 = default) */
-    char*    tmp_dir;          /* Temp directory (NULL = /tmp) */
+    char*    tmp_dir;          /* Temp directory (NULL = upload_tmp_dir, else the system one) */
     mp_tmp_path_generator_t tmp_path_generator; /* Custom temp path generator */
 } mp_config_t;
 
