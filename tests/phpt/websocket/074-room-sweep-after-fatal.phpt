@@ -67,7 +67,13 @@ spawn(function () use ($server, $room, $ack) {
         return 'not reached';
     });
 
-    echo 'ack: ', $ack->recv(3000), "\n";
+    /* Received BEFORE the line is echoed: the doomed worker writes its fatal to
+     * the same stream from another thread, and an echo that suspends halfway
+     * through its arguments lets that text land inside this line. Which SIDE of
+     * the line it lands on is not ours to order, so the expectation tolerates it
+     * either way — under valgrind it arrives first. */
+    $parked = $ack->recv(3000);
+    echo 'ack: ', $parked, "\n";
 
     for ($i = 0; $i < 200; $i++) {
         $room->publish("q$i");
@@ -115,7 +121,7 @@ spawn(function () use ($server, $room, $ack) {
 });
 ?>
 --EXPECTF--
-ack: parked
+%Aack: parked
 %Adoomed: Async\ThreadTransferException
 slot released: yes
 send: refused, delivered=0
