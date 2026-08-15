@@ -204,6 +204,12 @@ typedef struct {
     /* A server subscriber's ring was full, so its oldest message was dropped.
      * Apart from `dropped` deliberately: that one says a WORKER is not draining,
      * this one says one consumer inside a worker is behind. */
+    /* Message bodies allocated. One publish costs one, whatever the node holds
+     * and however many workers it reaches — a body is refcounted and shared by
+     * every ring and every mailbox it lands in. So this number growing faster
+     * than the publishes means a copy crept back into a delivery path. */
+    uint64_t bodies;
+
     uint64_t sub_overflow;
 } topic_hub_stats_t;
 

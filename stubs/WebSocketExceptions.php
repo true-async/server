@@ -68,7 +68,7 @@ final class WebSocketConcurrentReadException extends WebSocketException
  */
 final class RoomDeliveryException extends WebSocketException
 {
-    /** Targets the message was delivered to before the failure. */
+    /** Worker mailboxes that had accepted the message when the send failed. */
     public readonly int $delivered;
 
     /** Targets still unfilled when the send gave up. */

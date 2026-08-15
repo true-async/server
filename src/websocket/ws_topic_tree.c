@@ -647,7 +647,11 @@ typedef struct {
     size_t      len;
     bool        binary;
     uint64_t    except_id;
-    bool        should_deliver;
+
+    /* The caller's one-message scratch (see the header) — and the walk's mode:
+     * a counting walk has none, so "deliver" and "have somewhere to put the
+     * body" cannot drift apart into a pair of flags that disagree. */
+    void      **shared;
 
     uint32_t    hits;
 } ws_topic_visit_t;
@@ -672,12 +676,13 @@ static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
 
             ws_server_sub_set_mark(server_sub, visit->tree->mark);
 
-            if (!visit->should_deliver) {
+            if (visit->shared == NULL) {
                 visit->hits++;
                 continue;
             }
 
-            if (ws_server_sub_try_deliver(server_sub, visit->data, visit->len, visit->binary)) {
+            if (ws_server_sub_try_deliver(server_sub, visit->data, visit->len, visit->binary,
+                                          visit->shared)) {
                 visit->hits++;
             }
 
@@ -697,7 +702,7 @@ static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
 
         session->topic_mark = visit->tree->mark;
 
-        if (!visit->should_deliver) {
+        if (visit->shared == NULL) {
             visit->hits++;
             continue;
         }
@@ -761,14 +766,14 @@ static uint32_t ws_topic_match(ws_topic_tree_t *tree, const char *topic,
 
 uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t topic_len,
                           const char *data, const size_t len, const bool binary,
-                          const uint64_t except_id)
+                          const uint64_t except_id, void **shared)
 {
     ws_topic_visit_t visit = {
         .data      = data,
         .len       = len,
         .binary    = binary,
         .except_id = except_id,
-        .should_deliver = true,
+        .shared    = shared,
     };
 
     return ws_topic_match(tree, topic, topic_len, &visit);
@@ -776,7 +781,7 @@ uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t
 
 uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, const size_t topic_len)
 {
-    ws_topic_visit_t visit = { .should_deliver = false };
+    ws_topic_visit_t visit = { .shared = NULL };   /* counting walk: nothing to deliver into */
 
     return ws_topic_match(tree, topic, topic_len, &visit);
 }
