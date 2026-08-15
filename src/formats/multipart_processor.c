@@ -122,14 +122,13 @@ static char* generate_tmp_path(mp_processor_t* proc, const char* original_filena
         return proc->config.tmp_path_generator(proc, original_filename);
     }
 
-    /* The directory follows PHP's own upload handler (main/rfc1867.c): upload_tmp_dir where
-     * it is set, and NULL otherwise, which leaves the choice of the system temporary
-     * directory to the core. Naming a directory the core cannot use is what makes it fall
-     * back and say so, and this code runs in an event-loop callback with no PHP frame above
-     * it: a user error handler that throws there — Laravel installs one — has nothing to
-     * unwind to, and the request is dropped without a response. PHP_TMP_FILE_SILENT keeps
-     * that fallback quiet; a temporary file that cannot be created at all is still reported,
-     * through MP_UPLOAD_ERR_NO_TMP_DIR. */
+    /* Directory as in PHP's own upload handler (main/rfc1867.c): upload_tmp_dir where it is
+     * set, NULL otherwise, which leaves the system temporary directory to the core.
+     * PHP_TMP_FILE_SILENT suppresses the notice the core raises when it falls back from a
+     * directory it cannot use. That notice would be raised in an event-loop callback with no
+     * PHP frame above it, where a user error handler that throws has nothing to unwind to
+     * and the request is dropped; a temporary file that cannot be created at all is still
+     * reported, through MP_UPLOAD_ERR_NO_TMP_DIR. */
     const char* tmp_dir = proc->config.tmp_dir ? proc->config.tmp_dir : PG(upload_tmp_dir);
 
     /* php_open_temporary_fd_ex picks a unique name in tmp_dir with our
