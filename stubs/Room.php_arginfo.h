@@ -1,5 +1,5 @@
 /* This is a generated file, edit Room.php.stub.php instead.
- * Stub hash: 8a42b7aea7e652900b020c7ca5918e1583fc946d */
+ * Stub hash: 03ed983497d6e7339623c8d66e2cce46182e6957 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_Room___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()

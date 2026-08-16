@@ -61,8 +61,8 @@ typedef struct room_hub_s room_hub_t;
  * honoured by whichever call armed the timer first, and every later sender would
  * inherit that stranger's cadence without being told. 0 means the default (50). */
 room_hub_t *room_hub_create(uint32_t retry_interval_ms);
-void      room_hub_addref(room_hub_t *hub);
-void      room_hub_release(room_hub_t *hub);
+void        room_hub_addref(room_hub_t *hub);
+void        room_hub_release(room_hub_t *hub);
 
 /* Claims a slot, publishes this thread's mailbox and takes a reference. Returns
  * the slot, or -1 when every slot is taken or this thread is already attached —
@@ -113,7 +113,7 @@ room_hub_publish_result_t room_hub_publish(room_hub_t *hub,
  * out of the sum, so the result is a snapshot, not a live number. Coroutine
  * context only. */
 uint32_t room_hub_count(room_hub_t *hub, const char *topic, size_t topic_len,
-                      uint32_t timeout_ms);
+                        uint32_t timeout_ms);
 
 /* -------------------------------------------------------------- reliable send
  *
@@ -145,8 +145,8 @@ typedef struct {
     room_hub_send_status_t status;
     /* Targets the message reached: local subscribers served on this thread plus
      * remote mailboxes that took a copy. The two are added because a caller asks
-     * "did it arrive anywhere", not "by which road" — and a send whose whole room
-     * sits on the calling thread used to answer 0 having served all of it.
+     * "did it arrive anywhere", not "by which road": counting only the remote
+     * road would answer 0 for a send whose whole room sits on the calling thread.
      *
      * It is not a subscriber census, and it is not comparable between senders: a
      * remote worker is ONE target however many subscribers sit behind it, so the
@@ -228,9 +228,6 @@ typedef struct {
      * so a shutdown is never mislabelled a timeout. */
     uint64_t retry_shutdown;
 
-    /* A server subscriber's ring was full, so its oldest message was dropped.
-     * Apart from `dropped` deliberately: that one says a WORKER is not draining,
-     * this one says one consumer inside a worker is behind. */
     /* Message bodies allocated. One publish costs one, whatever the node holds
      * and however many workers it reaches — a body is refcounted and shared by
      * every ring and every mailbox it lands in. So this number growing faster
@@ -246,6 +243,9 @@ typedef struct {
      * with nothing queued anywhere, the two are equal. */
     uint64_t bodies_freed;
 
+    /* A server subscriber's ring was full, so its oldest message was dropped.
+     * Apart from `dropped` deliberately: that one says a WORKER is not draining,
+     * this one says one consumer inside a worker is behind. */
     uint64_t sub_overflow;
 } room_hub_stats_t;
 
@@ -281,30 +281,28 @@ typedef enum {
  * may hold, 0 for none. The receiver takes its cross-thread id here, on its
  * first subscription, because nothing else about it needs one. */
 room_hub_subscribe_status_t room_hub_receiver_subscribe(room_hub_t *hub,
-                                                          room_receiver_t *receiver,
-                                                          zend_string *filter, uint32_t max);
+                                                        room_receiver_t *receiver,
+                                                        zend_string *filter, uint32_t max);
 
 /* A no-op on a filter the receiver never held. On a thread that has detached it
  * is a no-op too, and the subscription stays in the receiver's own list — which
  * getTopics() reads and the teardown below clears. */
 void room_hub_receiver_unsubscribe(room_hub_t *hub, room_receiver_t *receiver,
-                                    const zend_string *filter);
+                                   const zend_string *filter);
 
 /* Drops every filter the receiver holds, from the tree and from the receiver.
  * Called when a receiver goes away — for a connection, on every close, the
- * bailout path included —
- * there this thread's tree is gone already and only the receiver's list is left
- * to free. */
+ * bailout path included; on that path this thread's tree is gone already and
+ * only the receiver's own list is left to free. */
 void room_hub_receiver_unsubscribe_all(room_hub_t *hub, room_receiver_t *receiver);
 
 /* ------------------------------------------------------ server subscribers
  *
  * A receiver the hub itself mints, for server-side code that has no object of
- * its own to embed one in.
- * Subscribing attaches this thread if nobody has; unsubscribing never detaches,
- * because a coroutine parked in send() on the same thread holds no subscription
- * and would be woken with a spurious shutdown. The thread's exit is the only
- * detach.
+ * its own to embed one in. Subscribing attaches this thread if nobody has;
+ * unsubscribing never detaches, because a coroutine parked in send() on the same
+ * thread holds no subscription and would be woken with a spurious shutdown. The
+ * thread's exit is the only detach.
  *
  * Every call belongs to the thread that subscribed; a subscription is never
  * carried to another thread. */
@@ -325,8 +323,8 @@ typedef enum {
 /* NULL when the thread could not attach (every slot taken). The caller owns one
  * reference and releases it with room_hub_sub_release. */
 room_server_sub_t *room_hub_subscribe(room_hub_t *hub, zend_string *filter);
-void             room_hub_unsubscribe(room_server_sub_t *sub);
-void             room_hub_sub_release(room_server_sub_t *sub);
+void               room_hub_unsubscribe(room_server_sub_t *sub);
+void               room_hub_sub_release(room_server_sub_t *sub);
 
 /* Messages this subscription's ring dropped because it was full. Monotonic and
  * never reset, so two readers cannot destroy each other's evidence. */
@@ -339,7 +337,7 @@ uint64_t room_hub_sub_lost(const room_server_sub_t *sub);
  * `timeout_ms`: negative waits with no deadline, 0 takes whatever is already
  * there and returns, positive waits that many milliseconds. */
 room_hub_recv_status_t room_hub_recv(room_server_sub_t *sub, int64_t timeout_ms,
-                                       room_payload_t **out);
+                                     room_payload_t **out);
 
 const char *room_hub_payload_data(const room_payload_t *payload, size_t *len, bool *binary);
 void        room_hub_payload_release(room_payload_t *payload);

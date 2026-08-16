@@ -141,7 +141,8 @@ static void room_send_apply(zval *return_value, const room_hub_send_result_t *r)
             return;
         case ROOM_HUB_SEND_QUEUE_FULL:
             room_throw_delivery(
-                "Reliable send refused: the outbound retry queue is at its cap (setWsPublishRetryQueueMax)",
+                "Reliable send refused: the outbound retry queue is at its cap "
+                "(setWsPublishRetryQueueMax)",
                 r->delivered, r->pending);
             return;
         case ROOM_HUB_SEND_NO_CONTEXT:
@@ -190,10 +191,10 @@ ZEND_METHOD(TrueAsync_HttpServer, enableRooms)
 }
 /* }}} */
 
-/* {{{ proto HttpServer::publish(string $topic, string $message, bool $binary = false): int
+/* {{{ proto HttpServer::publish(string $topic, string $message, bool $binary = false): array
  * Server-side publish to a room — no connection, so no sender is excluded; the
  * message reaches every subscriber of $topic on every worker. Returns the
- * subscribers served on the calling worker (other workers are asynchronous). */
+ * per-call delivery breakdown (room_publish_result). */
 ZEND_METHOD(TrueAsync_HttpServer, publish)
 {
     zend_string *topic;
@@ -217,7 +218,8 @@ ZEND_METHOD(TrueAsync_HttpServer, publish)
 
     if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "Invalid room name: a publish topic must be a concrete name (no '+' or '#' wildcards)", 0);
+            "Invalid room name: a publish topic must be a concrete name "
+            "(no '+' or '#' wildcards)", 0);
         return;
     }
 
@@ -349,7 +351,8 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
 
     if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "Invalid room name: a count topic must be a concrete name (no '+' or '#' wildcards)", 0);
+            "Invalid room name: a count topic must be a concrete name "
+            "(no '+' or '#' wildcards)", 0);
         return;
     }
 
@@ -376,9 +379,9 @@ static zend_class_entry   *room_ce = NULL;
 static zend_object_handlers room_handlers;
 
 typedef struct {
-    room_hub_t     *hub;     /* owns a reference; NULL only on an unminted object */
-    zend_string     *topic;   /* owned; concrete name */
-    room_retry_cfg_t retry;   /* snapshot; the server's config is locked at construction */
+    room_hub_t        *hub;     /* owns a reference; NULL only on an unminted object */
+    zend_string       *topic;   /* owned; concrete name */
+    room_retry_cfg_t   retry;   /* snapshot; the server's config is locked at construction */
 
     /* This thread's subscription, NULL until subscribe(). Never transferred:
      * a transferred room subscribes again in its new thread. */
@@ -386,9 +389,9 @@ typedef struct {
 
     /* Losses from subscriptions this handle has already dropped, so lostCount()
      * stays monotonic across an unsubscribe/subscribe pair. */
-    uint64_t         lost_before;
+    uint64_t           lost_before;
 
-    zend_object      std;
+    zend_object        std;
 } room_object;
 
 static zend_always_inline room_object *room_from_obj(zend_object *obj)
@@ -514,7 +517,7 @@ ZEND_METHOD(TrueAsync_Room, __construct)
     ZEND_PARSE_PARAMETERS_NONE();
 }
 
-/* {{{ proto Room::publish(string $message): int */
+/* {{{ proto Room::publish(string $message): array */
 ZEND_METHOD(TrueAsync_Room, publish)
 {
     zend_string *message;

@@ -94,8 +94,6 @@ final class Room
      * exception carries how many landed, so re-sending — which duplicates on those
      * — is a decision, not an accident.
      *
-     * @param int|null $timeoutMs Retry deadline; null uses
-     *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
      * A send that reaches NOBODY throws rather than returning 0: on this path a
      * message that arrived nowhere is a failure, and the two reasons — nothing is
      * running, or nobody has joined the room — are told apart by the message,
@@ -107,6 +105,8 @@ final class Room
      * only in {@see HttpServer::getRuntimeStats()}. Re-sending in a cancellation
      * handler duplicates.
      *
+     * @param int|null $timeoutMs Retry deadline; null uses
+     *        {@see HttpServerConfig::setWsPublishRetryTimeoutMs()}.
      * @return int Targets the message reached, always 1 or more: subscribers
      *             served on the calling worker plus worker mailboxes that accepted
      *             it. Not a subscriber census and not comparable between senders —
