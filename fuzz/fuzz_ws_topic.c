@@ -78,10 +78,13 @@ void ws_server_sub_set_mark(ws_server_sub_t *sub, uint64_t mark)
     sub->mark = mark;
 }
 
+/* The ring lives in topic_hub.c, which is not in this TU set, so delivery always
+ * succeeds and the walk's shared body is never made — what is fuzzed here is the
+ * tree, not what a subscriber does with a message. */
 bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data, size_t len,
-                               bool binary)
+                               bool binary, void **shared)
 {
-    (void)sub; (void)data; (void)len; (void)binary;
+    (void)sub; (void)data; (void)len; (void)binary; (void)shared;
     return true;
 }
 
@@ -171,11 +174,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 break;
             }
 
-            case 2:     /* publish + count (concrete name) */
+            case 2: {   /* publish + count (concrete name) */
+                void *shared = NULL;   /* the walk's one-message scratch */
+
                 (void)ws_topic_publish(tree, slice, slice_len, "x", 1, false,
-                                       session->ws_id);
+                                       session->ws_id, &shared);
                 (void)ws_topic_count(tree, slice, slice_len);
                 break;
+            }
 
             case 3:     /* drop every subscription this session holds */
                 ws_topic_unsubscribe_all(tree, session);
