@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 23369,
-      "hit": 19218
+      "hit": 19217
     },
     "functions": {
       "total": 1632,
@@ -722,8 +722,8 @@
     },
     "src/room/php_room.c": {
       "lines": {
-        "total": 380,
-        "hit": 313
+        "total": 382,
+        "hit": 315
       },
       "functions": {
         "total": 27,
@@ -822,8 +822,8 @@
     },
     "src/websocket/php_websocket.c": {
       "lines": {
-        "total": 605,
-        "hit": 476
+        "total": 603,
+        "hit": 473
       },
       "functions": {
         "total": 48,
