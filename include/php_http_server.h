@@ -582,6 +582,14 @@ http_server_config_t *http_server_get_config         (http_server_object *server
  * start(). */
 void *http_server_get_topic_hub(http_server_object *server);
 
+/* The same hub, created on demand — what lets a room be minted before start().
+ * NULL in a build without WebSocket. */
+void *http_server_topic_hub_ensure(http_server_object *server);
+
+/* Between start() and stop(). The room layer refuses to create a hub on a
+ * running server, where the workers would never see it. */
+bool http_server_is_running(const http_server_object *server);
+
 /* Embedded per-server log_state (PLAN_LOG.md). Long-lived structures
  * (http_connection_t, http3_connection_t, mp_processor_t) cache the
  * result at create time. Returns &http_log_state_default for NULL. */

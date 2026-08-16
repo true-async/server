@@ -520,6 +520,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   dnl Phase 1: HTTP/1.1 Parser
   dnl Phase 2: Server classes
   http_server_sources="
+    src/room/php_room.c
     deps/llhttp/llhttp.c
     deps/llhttp/api.c
     deps/llhttp/http.c
