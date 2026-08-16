@@ -13,7 +13,6 @@
 #include "php.h"
 #include "zend_exceptions.h"
 #include "websocket/topic_hub.h"
-#include "websocket/ws_session.h"
 #include "websocket/ws_topic_tree.h"
 #include "core/thread_mailbox.h"
 #include "core/async_plain_event.h"
@@ -368,10 +367,14 @@ void topic_hub_release(topic_hub_t *hub)
     }
 }
 
-/* Identifies a session across threads, so a publish can skip its own sender. */
-static uint64_t topic_hub_next_id(topic_hub_t *hub)
+/* The counter starts at 1, so an id is never 0 — which is the invariant the
+ * tree's except_id rests on (ws_topic_tree.h). Assigned on the first subscribe,
+ * because nothing else about a receiver needs one. */
+static void topic_hub_assign_id(topic_hub_t *hub, ws_topic_receiver_t *receiver)
 {
-    return ws_atomic_u64_add(&hub->next_ws_id, 1);
+    if (receiver->id == 0) {
+        receiver->id = ws_atomic_u64_add(&hub->next_ws_id, 1);
+    }
 }
 
 /* This thread's tree for that hub, NULL when it never attached or has detached.
@@ -384,8 +387,10 @@ static ws_topic_tree_t *topic_hub_local_tree(const topic_hub_t *hub)
     return local != NULL ? local->tree : NULL;
 }
 
-topic_hub_subscribe_status_t topic_hub_session_subscribe(topic_hub_t *hub, ws_session_t *session,
-                                                         zend_string *filter, const uint32_t max)
+topic_hub_subscribe_status_t topic_hub_receiver_subscribe(topic_hub_t *hub,
+                                                          ws_topic_receiver_t *receiver,
+                                                          zend_string *filter,
+                                                          const uint32_t max)
 {
     ws_topic_tree_t *const tree = topic_hub_local_tree(hub);
 
@@ -393,26 +398,22 @@ topic_hub_subscribe_status_t topic_hub_session_subscribe(topic_hub_t *hub, ws_se
         return TOPIC_HUB_SUBSCRIBE_DETACHED;
     }
 
-    /* Only a subscriber needs an id, so it costs nothing on a connection that
-     * never subscribes. */
-    if (session->ws_id == 0) {
-        session->ws_id = topic_hub_next_id(hub);
-    }
+    topic_hub_assign_id(hub, receiver);
 
-    return ws_topic_subscribe(tree, session, filter, max)
+    return ws_topic_subscribe(tree, receiver, filter, max)
         ? TOPIC_HUB_SUBSCRIBE_OK
         : TOPIC_HUB_SUBSCRIBE_AT_CAP;
 }
 
-void topic_hub_session_unsubscribe(topic_hub_t *hub, ws_session_t *session,
-                                   const zend_string *filter)
+void topic_hub_receiver_unsubscribe(topic_hub_t *hub, ws_topic_receiver_t *receiver,
+                                    const zend_string *filter)
 {
-    (void) ws_topic_unsubscribe(topic_hub_local_tree(hub), session, filter);
+    (void) ws_topic_unsubscribe(topic_hub_local_tree(hub), receiver, filter);
 }
 
-void topic_hub_session_unsubscribe_all(topic_hub_t *hub, ws_session_t *session)
+void topic_hub_receiver_unsubscribe_all(topic_hub_t *hub, ws_topic_receiver_t *receiver)
 {
-    ws_topic_unsubscribe_all(topic_hub_local_tree(hub), session);
+    ws_topic_unsubscribe_all(topic_hub_local_tree(hub), receiver);
 }
 
 /* -------------------------------------------------------------- interest */
@@ -563,8 +564,8 @@ static void topic_hub_drain(void **items, const size_t count, void *arg);
 struct ws_server_sub {
     struct ws_server_sub *next;
     ws_local_t           *local;
-    zend_string          *filter;    /* owned */
-    uint64_t              mark;
+    zend_string          *filter;    /* owned; the subscription's name, for diagnostics */
+    ws_topic_receiver_t   receiver;  /* what the tree holds */
     bool                  parked;    /* a recv holds this subscription; a second one is refused */
 
     ws_payload_t         *ring[WS_SERVER_SUB_RING];
@@ -577,19 +578,12 @@ struct ws_server_sub {
     uint32_t              refcount;  /* the tree's side and the caller's side */
 };
 
-uint64_t ws_server_sub_mark(const ws_server_sub_t *sub)
+static bool ws_server_sub_deliver(ws_topic_receiver_t *receiver, const char *data,
+                                  const size_t len, const bool binary, void **shared)
 {
-    return sub->mark;
-}
+    ws_server_sub_t *const sub =
+        (ws_server_sub_t *)((char *) receiver - offsetof(ws_server_sub_t, receiver));
 
-void ws_server_sub_set_mark(ws_server_sub_t *sub, const uint64_t mark)
-{
-    sub->mark = mark;
-}
-
-bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
-                               const size_t len, const bool binary, void **shared)
-{
     if (sub->closed) {
         return false;
     }
@@ -627,6 +621,12 @@ bool ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
 
     return true;
 }
+
+/* Delivery here enqueues and fires an event, running no PHP, so it cannot
+ * re-enter unsubscribe mid-walk the way a socket write can. */
+static const ws_topic_receiver_ops_t ws_server_sub_ops = {
+    .deliver = ws_server_sub_deliver,
+};
 
 static void ws_server_sub_addref(ws_server_sub_t *sub)
 {
@@ -767,11 +767,16 @@ ws_server_sub_t *topic_hub_subscribe(topic_hub_t *hub, zend_string *filter)
     }
 
     ws_server_sub_t *const sub = ecalloc(1, sizeof(*sub));
-    sub->local    = local;
-    sub->filter   = zend_string_copy(filter);
-    sub->refcount = 1;   /* the tree's side; the caller takes its own below */
+    sub->local        = local;
+    sub->filter       = zend_string_copy(filter);
+    sub->receiver.ops = &ws_server_sub_ops;
+    sub->refcount     = 1;   /* the tree's side; the caller takes its own below */
 
-    if (!ws_topic_subscribe_server(local->tree, sub, filter)) {
+    topic_hub_assign_id(hub, &sub->receiver);
+
+    /* No quota: a server subscriber is code, not a peer connection to protect
+     * from itself. */
+    if (!ws_topic_subscribe(local->tree, &sub->receiver, filter, 0)) {
         ws_server_sub_release(sub);
         return NULL;
     }
@@ -797,7 +802,7 @@ void topic_hub_unsubscribe(ws_server_sub_t *sub)
     sub->closed = true;
 
     if (local != NULL) {
-        ws_topic_unsubscribe_server(local->tree, sub, sub->filter);
+        ws_topic_unsubscribe_all(local->tree, &sub->receiver);
 
         for (ws_server_sub_t **it = &local->subs; *it != NULL; it = &(*it)->next) {
             if (*it == sub) {
@@ -1217,6 +1222,11 @@ static void topic_hub_detach_ex(topic_hub_t *hub, const bool request_over)
 
         local->subs = sub->next;
         sub->local  = NULL;   /* the tree is going; nothing left to detach from */
+
+        /* The nodes go with the tree below, so the filter list is dropped
+         * without detaching from them — and without an interest decrement, whose
+         * counters were retired at the top of this function. */
+        ws_topic_unsubscribe_all(NULL, &sub->receiver);
 
         if (request_over) {
             /* No wake-up, and the ring emptied here: the receiver parked on this

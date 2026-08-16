@@ -1146,7 +1146,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
 
     const uint32_t max = cfg != NULL ? cfg->ws_max_subscriptions : 0;
 
-    switch (topic_hub_session_subscribe(session->hub, session, filter, max)) {
+    switch (topic_hub_receiver_subscribe(session->hub, &session->receiver, filter, max)) {
         case TOPIC_HUB_SUBSCRIBE_OK:
             break;
 
@@ -1174,7 +1174,7 @@ ZEND_METHOD(TrueAsync_WebSocket, unsubscribe)
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
     if (w->session != NULL) {
-        topic_hub_session_unsubscribe(w->session->hub, w->session, filter);
+        topic_hub_receiver_unsubscribe(w->session->hub, &w->session->receiver, filter);
     }
 }
 
@@ -1188,7 +1188,7 @@ ZEND_METHOD(TrueAsync_WebSocket, getTopics)
         RETURN_EMPTY_ARRAY();
     }
 
-    ws_topic_list(w->session, return_value);
+    ws_topic_list(&w->session->receiver, return_value);
 }
 
 static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
@@ -1228,7 +1228,7 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
         RETURN_THROWS();
     }
 
-    const uint64_t except_id = exclude_self && w->session != NULL ? w->session->ws_id : 0;
+    const uint64_t except_id = exclude_self && w->session != NULL ? w->session->receiver.id : 0;
 
     const topic_hub_publish_result_t r = topic_hub_publish(ws_topic_hub_of(w),
         ZSTR_VAL(topic), ZSTR_LEN(topic),

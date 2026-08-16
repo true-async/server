@@ -999,6 +999,23 @@ bool ws_session_try_send(ws_session_t *session, const char *data, const size_t l
     return ws_session_queue_and_flush(session, opcode, data, len, true) == WS_SEND_OK;
 }
 
+/* The tree's view of a connection. `shared` stays untouched: a frame is copied
+ * into the wslay queue here and now, so there is no persistent body to share. */
+static bool ws_session_topic_deliver(ws_topic_receiver_t *receiver, const char *data,
+                                     const size_t len, const bool binary, void **shared)
+{
+    ws_session_t *const session =
+        (ws_session_t *)((char *) receiver - offsetof(ws_session_t, receiver));
+
+    (void) shared;
+
+    return ws_session_try_send(session, data, len, binary);
+}
+
+static const ws_topic_receiver_ops_t ws_session_topic_ops = {
+    .deliver = ws_session_topic_deliver,
+};
+
 ws_writable_t ws_session_wait_writable(ws_session_t *session, uint32_t timeout_ms)
 {
     if (!ws_session_over_highwater(session)) {
@@ -1071,6 +1088,7 @@ ws_session_t *ws_session_init_ex(http_connection_t *conn,
     s->transport     = transport;
     s->transport_ctx = transport_ctx;
     s->hub           = conn != NULL ? http_server_get_topic_hub(conn->server) : NULL;
+    s->receiver.ops  = &ws_session_topic_ops;
 
     static const struct wslay_event_callbacks cb = {
         .recv_callback         = ws_session_recv_callback,
@@ -1150,7 +1168,7 @@ void ws_session_destroy(ws_session_t *session)
 
     /* Single teardown point for both transports — H1 via the strategy, H2 via
      * the stream — so a subscription cannot outlive the session. */
-    topic_hub_session_unsubscribe_all(session->hub, session);
+    topic_hub_receiver_unsubscribe_all(session->hub, &session->receiver);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct
