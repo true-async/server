@@ -67,10 +67,10 @@ void *http_server_get_topic_hub(http_server_object *server)
     return NULL;
 }
 
-void topic_hub_session_unsubscribe_all(struct topic_hub_s *hub, ws_session_t *session)
+void topic_hub_receiver_unsubscribe_all(struct topic_hub_s *hub, ws_topic_receiver_t *receiver)
 {
     (void)hub;
-    (void)session;
+    (void)receiver;
 }
 
 /* The deferred-teardown seam ws_session_queue_and_flush reaches on a send that

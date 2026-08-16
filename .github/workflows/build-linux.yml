@@ -957,10 +957,8 @@ jobs:
       # The WebSocket pair carries no third-party corpus and runs on the
       # committed seeds alone. Building them is half the point: both harnesses
       # bind their stubs by name, so a signature change in the server is caught
-      # here or nowhere — fuzz_ws_topic went a whole step uncompiled. The frame
-      # target executes ~1 case a second (a full session per input), so it gets
-      # a shorter budget than the parsers above.
-      - name: Run fuzz_ws_frame + fuzz_ws_topic
+      # here or nowhere — fuzz_ws_topic went a whole step uncompiled.
+      - name: Run fuzz_ws_frame + fuzz_ws_topic 60s each
         working-directory: http-server/fuzz
         env:
           ASAN_OPTIONS: "abort_on_error=1:print_stacktrace=1:detect_leaks=0"
@@ -968,7 +966,7 @@ jobs:
         run: |
           set -eux
           ./fuzz_ws_frame \
-            -max_total_time=30 \
+            -max_total_time=60 \
             -print_final_stats=1 \
             -timeout=10 \
             -rss_limit_mb=4096 \
