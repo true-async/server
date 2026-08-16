@@ -15,11 +15,12 @@
 /*
  * Cross-worker topics (issue #2).
  *
- * Only the owning thread may write to a socket, so a topic is NOT a shared list
- * of connections. Each worker keeps its own topic tree (room_tree.h) over
- * the sessions IT owns, and a publish is handed to every worker through its
- * mailbox (thread_mailbox.h), carrying the topic as a STRING. Each worker then
- * matches that string against its own tree. A receiver pointer never leaves its
+ * A receiver belongs to one thread — a connection may only be written to by the
+ * thread that owns it, and a coroutine's ring is thread memory — so a topic is
+ * NOT a shared list. Each worker keeps its own topic tree (room_tree.h) over the
+ * receivers IT owns, and a publish is handed to every worker through its mailbox
+ * (thread_mailbox.h), carrying the topic as a STRING. Each worker then matches
+ * that string against its own tree. A receiver pointer never leaves its
  * thread — a use-after-free is impossible by construction rather than by
  * discipline.
  *
@@ -37,8 +38,7 @@
  *   - create()/release() on the owning server.
  *   - attach()/detach() on each worker (they own that thread's mailbox); detach
  *     drops the worker's reference and may free the hub there.
- *   - every subscribe/unsubscribe, session or server receiver, on the thread
- *     that owns the subscriber.
+ *   - every subscribe/unsubscribe on the thread that owns the receiver.
  *   - publish()/count() from any thread.
  */
 
@@ -270,7 +270,7 @@ void room_hub_get_stats(room_hub_t *hub, room_hub_stats_t *out);
 typedef enum {
     ROOM_HUB_SUBSCRIBE_OK = 0,
     ROOM_HUB_SUBSCRIBE_DETACHED,   /* this thread is not attached to the hub */
-    ROOM_HUB_SUBSCRIBE_AT_CAP,     /* the session already holds `max` filters */
+    ROOM_HUB_SUBSCRIBE_AT_CAP,     /* the receiver already holds `max` filters */
 } room_hub_subscribe_status_t;
 
 /* `filter` has already passed room_topic_is_valid_filter: a malformed one comes
@@ -291,14 +291,16 @@ void room_hub_receiver_unsubscribe(room_hub_t *hub, room_receiver_t *receiver,
                                     const zend_string *filter);
 
 /* Drops every filter the receiver holds, from the tree and from the receiver.
- * Called from ws_session_destroy on every close, the bailout path included —
+ * Called when a receiver goes away — for a connection, on every close, the
+ * bailout path included —
  * there this thread's tree is gone already and only the receiver's list is left
  * to free. */
 void room_hub_receiver_unsubscribe_all(room_hub_t *hub, room_receiver_t *receiver);
 
 /* ------------------------------------------------------ server subscribers
  *
- * A receiver that belongs to server-side code rather than to a connection.
+ * A receiver the hub itself mints, for server-side code that has no object of
+ * its own to embed one in.
  * Subscribing attaches this thread if nobody has; unsubscribing never detaches,
  * because a coroutine parked in send() on the same thread holds no subscription
  * and would be woken with a spurious shutdown. The thread's exit is the only
@@ -355,7 +357,7 @@ void        room_hub_payload_release(room_payload_t *payload);
  * It degrades honestly: an unbounded topic space ("order/{uuid}/status")
  * saturates the filter, every probe hits, and the hub is back to waking everyone.
  *
- * Called on the thread owning the session; a no-op on a thread that never
+ * Called on the thread owning the receiver; a no-op on a thread that never
  * attached. `prefix_len` is a byte count into `filter`.
  */
 void room_hub_interest_add(room_hub_t *hub, const char *filter, size_t prefix_len);

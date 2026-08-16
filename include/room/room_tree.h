@@ -15,7 +15,7 @@ struct room_hub_s;
 
 /*
  * Per-worker topic tree (issue #2). Thread-local: no locks, no atomics, no
- * shared registry. Each worker indexes only the sessions IT owns, and a publish
+ * shared registry. Each worker indexes only the receivers IT owns, and a publish
  * is handed to every worker, which matches the topic against its own tree — the
  * same "broadcast the message, let each node filter" model Socket.IO's Redis
  * adapter uses. Nobody has to know who holds what, so nothing has to be kept in
@@ -106,7 +106,7 @@ bool room_topic_is_valid_name(const char *topic, size_t len);
 /* Idempotent: subscribing twice through the same filter is one subscription, and
  * it does not spend quota. `max` is the cap on distinct filters this receiver may
  * hold, 0 for none — false means it was already at the cap, which the caller
- * reports on the filter without tearing the connection down (what EMQX answers
+ * reports on the filter without dropping the subscriber (what EMQX answers
  * with SUBACK 0x97 and NATS with -ERR 'Maximum Subscriptions Exceeded'). A
  * malformed filter is refused the same way, so the caller validates first.
  *

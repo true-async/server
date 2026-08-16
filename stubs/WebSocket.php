@@ -210,9 +210,10 @@ final class WebSocket implements \Iterator
      *        message fanned out to a pattern has no well-defined destination.
      * @param bool $excludeSelf Skip this connection — the "everyone but the
      *        sender" case that a chat wants.
-     * @return int Subscribers served on the CALLING worker. Delivery to the
-     *         other workers is asynchronous and cannot be counted here, so this
-     *         is a local number, not a process-wide one.
+     * @return int Subscribers served on the CALLING worker — connections and
+     *         server-side receivers alike. Delivery to the other workers is
+     *         asynchronous and cannot be counted here, so this is a local
+     *         number, not a process-wide one.
      * @throws WebSocketException on a malformed topic, or one carrying a wildcard.
      * @throws WebSocketBackpressureException when the connection is over its
      *         HttpServerConfig::setWsPublishRateLimit(). The connection stays up.
@@ -225,8 +226,10 @@ final class WebSocket implements \Iterator
     public function publishBinary(string $topic, string $data, bool $excludeSelf = true): int {}
 
     /**
-     * Connections across all workers that a publish to $topic would reach —
-     * including those subscribed through a wildcard that matches it.
+     * Subscribers across all workers that a publish to $topic would reach — a
+     * WebSocket connection, or a server-side receiver that called
+     * {@see Room::subscribe()} — including those subscribed through a wildcard
+     * that matches it.
      *
      * Each worker answers with its own count and the answers are summed, so this
      * is a snapshot rather than a live number: a worker that does not answer in

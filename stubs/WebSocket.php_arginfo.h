@@ -1,5 +1,5 @@
 /* This is a generated file, edit WebSocket.php.stub.php instead.
- * Stub hash: a0dea67ed33d880640465ea00a15add56cf9526d */
+ * Stub hash: 7a822f7e6e972bf76eedb35655150bc592d6ca85 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_WebSocket___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
