@@ -28,7 +28,7 @@
 #include "http_send_file.h"
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 # include "websocket/php_websocket.h"
-# include "websocket/topic_hub.h"
+# include "room/room_hub.h"
 #endif
 
 #ifdef HAVE_HTTP2
@@ -223,7 +223,7 @@ PHP_MINIT_FUNCTION(http_server)
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 	/* Reliable-room fault-injection hook; a no-op unless built with TAS_TEST_HOOKS. */
-	topic_hub_test_register(type);
+	room_hub_test_register(type);
 #endif
 
 	return SUCCESS;
@@ -280,7 +280,7 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 	 * reactor is torn down by ZEND_ASYNC_ENGINE_SHUTDOWN inside zend_deactivate(),
 	 * which php_request_shutdown reaches several steps after it has run every
 	 * module's RSHUTDOWN. */
-	topic_hub_thread_sweep();
+	room_hub_thread_sweep();
 #endif
 
 	return SUCCESS;

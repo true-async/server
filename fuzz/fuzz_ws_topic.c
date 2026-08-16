@@ -8,10 +8,10 @@
 
 /*
  * libFuzzer harness for the WebSocket pub/sub topic engine (src/websocket/
- * ws_topic_tree.c). Topic names and subscribe filters arrive verbatim from
+ * room_tree.c). Topic names and subscribe filters arrive verbatim from
  * the network — a client picks the bytes — so the MQTT-style parser
- * (ws_topic_split / ws_topic_is_valid_*), the level-prefix builder that feeds
- * the cross-worker interest filter (ws_topic_prefixes / _interest_prefix), and
+ * (room_topic_split / room_topic_is_valid_*), the level-prefix builder that feeds
+ * the cross-worker interest filter (room_topic_prefixes / _interest_prefix), and
  * the wildcard matcher + node lifecycle (subscribe / unsubscribe / publish with
  * tombstone-and-compact) are all reachable with attacker-chosen input. The
  * frame fuzzer (fuzz_ws_frame) stubs this whole TU out; this harness drives it.
@@ -35,22 +35,22 @@
  */
 
 #include "harness_common.h"
-#include "websocket/ws_topic_tree.h"
+#include "room/room_tree.h"
 
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 
-/* ws_topic_tree.c publishes each subscribe/unsubscribe into the owning worker's
+/* room_tree.c publishes each subscribe/unsubscribe into the owning worker's
  * cross-worker interest filter; that filter lives in topic_hub.c, which is not in
  * this TU. A no-op keeps the tree self-contained — the prefix it hands us is
- * already exercised directly via ws_topic_interest_prefix below. */
-void topic_hub_interest_add(struct topic_hub_s *hub, const char *filter, size_t prefix_len)
+ * already exercised directly via room_topic_interest_prefix below. */
+void room_hub_interest_add(struct room_hub_s *hub, const char *filter, size_t prefix_len)
 {
     (void)hub; (void)filter; (void)prefix_len;
 }
 
-void topic_hub_interest_remove(struct topic_hub_s *hub, const char *filter, size_t prefix_len)
+void room_hub_interest_remove(struct room_hub_s *hub, const char *filter, size_t prefix_len)
 {
     (void)hub; (void)filter; (void)prefix_len;
 }
@@ -59,14 +59,14 @@ void topic_hub_interest_remove(struct topic_hub_s *hub, const char *filter, size
  * reaches; the real sends (wslay and the transport, the server ring) belong to
  * fuzz_ws_frame and topic_hub.c. None of them writes `shared`, so no persistent
  * body is made in this TU. */
-static bool ws_fuzz_deliver_ok(ws_topic_receiver_t *receiver, const char *data,
+static bool ws_fuzz_deliver_ok(room_receiver_t *receiver, const char *data,
                                size_t len, bool binary, void **shared)
 {
     (void)receiver; (void)data; (void)len; (void)binary; (void)shared;
     return true;
 }
 
-static bool ws_fuzz_deliver_refused(ws_topic_receiver_t *receiver, const char *data,
+static bool ws_fuzz_deliver_refused(room_receiver_t *receiver, const char *data,
                                     size_t len, bool binary, void **shared)
 {
     (void)receiver; (void)data; (void)len; (void)binary; (void)shared;
@@ -77,29 +77,29 @@ static bool ws_fuzz_deliver_refused(ws_topic_receiver_t *receiver, const char *d
  * in the middle of the walk — the case the tombstone-and-compact path exists for.
  * One receiver of the pool does it on every message it is handed. */
 typedef struct {
-    ws_topic_receiver_t base;      /* first: the ops callback casts straight back */
-    ws_topic_tree_t    *tree;
+    room_receiver_t base;      /* first: the ops callback casts straight back */
+    room_tree_t    *tree;
 } ws_fuzz_receiver_t;
 
-static bool ws_fuzz_deliver_self_closing(ws_topic_receiver_t *receiver, const char *data,
+static bool ws_fuzz_deliver_self_closing(room_receiver_t *receiver, const char *data,
                                          size_t len, bool binary, void **shared)
 {
     (void)data; (void)len; (void)binary; (void)shared;
 
-    ws_topic_unsubscribe_all(((ws_fuzz_receiver_t *)receiver)->tree, receiver);
+    room_topic_unsubscribe_all(((ws_fuzz_receiver_t *)receiver)->tree, receiver);
 
     return false;
 }
 
-static const ws_topic_receiver_ops_t ws_fuzz_ops_ok      = { .deliver = ws_fuzz_deliver_ok };
-static const ws_topic_receiver_ops_t ws_fuzz_ops_refused = { .deliver = ws_fuzz_deliver_refused };
-static const ws_topic_receiver_ops_t ws_fuzz_ops_closing = { .deliver = ws_fuzz_deliver_self_closing };
+static const room_receiver_ops_t ws_fuzz_ops_ok      = { .deliver = ws_fuzz_deliver_ok };
+static const room_receiver_ops_t ws_fuzz_ops_refused = { .deliver = ws_fuzz_deliver_refused };
+static const room_receiver_ops_t ws_fuzz_ops_closing = { .deliver = ws_fuzz_deliver_self_closing };
 
-#define WS_TOPIC_FUZZ_RECEIVERS 8u
-#define WS_TOPIC_FUZZ_MAX_SUBS 32u   /* exercise the at-cap SUBACK-refused path */
+#define ROOM_TOPIC_FUZZ_RECEIVERS 8u
+#define ROOM_TOPIC_FUZZ_MAX_SUBS 32u   /* exercise the at-cap SUBACK-refused path */
 
 /* One byte of length, so a single slice is 0..255 bytes — long enough to reach
- * WS_TOPIC_MAX_LEVELS (128) with single-char levels, and to overrun a segment
+ * ROOM_TOPIC_MAX_LEVELS (128) with single-char levels, and to overrun a segment
  * buffer if one existed. */
 static size_t read_slice(const uint8_t *data, size_t size, size_t *pos,
                          const char **out)
@@ -123,7 +123,7 @@ static size_t read_slice(const uint8_t *data, size_t size, size_t *pos,
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    ws_topic_tree_t *const tree = ws_topic_tree_create(NULL);
+    room_tree_t *const tree = room_tree_create(NULL);
     if (tree == NULL) {
         return 0;
     }
@@ -131,11 +131,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* The hub hands out ids in production; here the index does, non-zero as the
      * tree requires, so exclude-self can actually exclude. The last one drops its
      * own subscriptions from inside the walk. */
-    ws_fuzz_receiver_t receivers[WS_TOPIC_FUZZ_RECEIVERS] = { 0 };
-    for (uint32_t i = 0; i < WS_TOPIC_FUZZ_RECEIVERS; i++) {
+    ws_fuzz_receiver_t receivers[ROOM_TOPIC_FUZZ_RECEIVERS] = { 0 };
+    for (uint32_t i = 0; i < ROOM_TOPIC_FUZZ_RECEIVERS; i++) {
         receivers[i].tree    = tree;
         receivers[i].base.id = (uint64_t)i + 1;
-        receivers[i].base.ops = i == WS_TOPIC_FUZZ_RECEIVERS - 1
+        receivers[i].base.ops = i == ROOM_TOPIC_FUZZ_RECEIVERS - 1
             ? &ws_fuzz_ops_closing
             : ((i % 2) == 0 ? &ws_fuzz_ops_ok : &ws_fuzz_ops_refused);
     }
@@ -151,29 +151,29 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             break;
         }
 
-        ws_topic_receiver_t *const receiver =
-            &receivers[(op >> 3) & (WS_TOPIC_FUZZ_RECEIVERS - 1)].base;
+        room_receiver_t *const receiver =
+            &receivers[(op >> 3) & (ROOM_TOPIC_FUZZ_RECEIVERS - 1)].base;
 
         /* Every slice hits the pure parsers, valid or not — the string paths get
          * covered even when the command below leaves the tree untouched. */
-        (void)ws_topic_is_valid_filter(slice, slice_len);
-        (void)ws_topic_is_valid_name(slice, slice_len);
-        (void)ws_topic_interest_prefix(slice, slice_len);
+        (void)room_topic_is_valid_filter(slice, slice_len);
+        (void)room_topic_is_valid_name(slice, slice_len);
+        (void)room_topic_interest_prefix(slice, slice_len);
 
-        ws_topic_prefixes_t prefixes;
-        (void)ws_topic_prefixes(slice, slice_len, &prefixes);
+        room_topic_prefixes_t prefixes;
+        (void)room_topic_prefixes(slice, slice_len, &prefixes);
 
         switch (op & 0x7) {
             case 0: {   /* subscribe (filter) */
                 zend_string *const filter = zend_string_init(slice, slice_len, 0);
-                (void)ws_topic_subscribe(tree, receiver, filter, WS_TOPIC_FUZZ_MAX_SUBS);
+                (void)room_topic_subscribe(tree, receiver, filter, ROOM_TOPIC_FUZZ_MAX_SUBS);
                 zend_string_release(filter);
                 break;
             }
 
             case 1: {   /* unsubscribe one filter */
                 zend_string *const filter = zend_string_init(slice, slice_len, 0);
-                (void)ws_topic_unsubscribe(tree, receiver, filter);
+                (void)room_topic_unsubscribe(tree, receiver, filter);
                 zend_string_release(filter);
                 break;
             }
@@ -181,19 +181,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             case 2: {   /* publish + count (concrete name) */
                 void *shared = NULL;   /* the walk's one-message scratch */
 
-                (void)ws_topic_publish(tree, slice, slice_len, "x", 1, false,
+                (void)room_topic_publish(tree, slice, slice_len, "x", 1, false,
                                        receiver->id, &shared);
-                (void)ws_topic_count(tree, slice, slice_len);
+                (void)room_topic_count(tree, slice, slice_len);
                 break;
             }
 
             case 3:     /* drop every subscription this receiver holds */
-                ws_topic_unsubscribe_all(tree, receiver);
+                room_topic_unsubscribe_all(tree, receiver);
                 break;
 
             case 4: {   /* subscribe with no quota, as a server receiver does */
                 zend_string *const filter = zend_string_init(slice, slice_len, 0);
-                (void)ws_topic_subscribe(tree, receiver, filter, 0);
+                (void)room_topic_subscribe(tree, receiver, filter, 0);
                 zend_string_release(filter);
                 break;
             }
@@ -201,7 +201,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             case 5: {   /* publish that excludes nobody */
                 void *shared = NULL;
 
-                (void)ws_topic_publish(tree, slice, slice_len, "x", 1, true, 0, &shared);
+                (void)room_topic_publish(tree, slice, slice_len, "x", 1, true, 0, &shared);
                 break;
             }
 
@@ -213,16 +213,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* Exercise the topic listing, then leave through the destroy path a closing
      * receiver takes: unsubscribe-all detaches every node under the tree before
      * the tree itself is freed (a leak or a dangling node shows up here). */
-    for (uint32_t i = 0; i < WS_TOPIC_FUZZ_RECEIVERS; i++) {
+    for (uint32_t i = 0; i < ROOM_TOPIC_FUZZ_RECEIVERS; i++) {
         zval list;
         ZVAL_UNDEF(&list);
-        ws_topic_list(&receivers[i].base, &list);
+        room_topic_list(&receivers[i].base, &list);
         zval_ptr_dtor(&list);
 
-        ws_topic_unsubscribe_all(tree, &receivers[i].base);
+        room_topic_unsubscribe_all(tree, &receivers[i].base);
     }
 
-    ws_topic_tree_free(tree);
+    room_tree_free(tree);
 
     return 0;
 }

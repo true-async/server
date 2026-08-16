@@ -653,8 +653,8 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       deps/wslay/lib/wslay_stack.c
       src/websocket/websocket_strategy.c
       src/websocket/ws_session.c
-      src/websocket/topic_hub.c
-      src/websocket/ws_topic_tree.c
+      src/room/room_hub.c
+      src/room/room_tree.c
       src/websocket/ws_handshake.c
       src/websocket/ws_dispatch.c
       src/websocket/php_websocket.c
@@ -732,6 +732,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   PHP_ADD_BUILD_DIR([$ext_builddir/src/formats])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/log])
   PHP_ADD_BUILD_DIR([$ext_builddir/src/static])
+  PHP_ADD_BUILD_DIR([$ext_builddir/src/room])
   PHP_ADD_BUILD_DIR([$ext_builddir/deps/llhttp])
 
   if test "$PHP_HTTP2" = "yes"; then

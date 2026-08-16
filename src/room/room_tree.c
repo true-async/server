@@ -11,41 +11,41 @@
 #endif
 
 #include "php.h"
-#include "websocket/ws_topic_tree.h"
-#include "websocket/topic_hub.h"   /* the interest filter this worker publishes upward */
+#include "room/room_tree.h"
+#include "room/room_hub.h"   /* the interest filter this worker publishes upward */
 
 typedef enum {
-    WS_NODE_ROOT,
-    WS_NODE_LITERAL,
-    WS_NODE_PLUS,
-    WS_NODE_HASH,
-} ws_node_kind_t;
+    ROOM_NODE_ROOT,
+    ROOM_NODE_LITERAL,
+    ROOM_NODE_PLUS,
+    ROOM_NODE_HASH,
+} room_node_kind_t;
 
-typedef struct ws_topic_node {
-    struct ws_topic_node *parent;
-    ws_node_kind_t        kind;
+typedef struct room_topic_node {
+    struct room_topic_node *parent;
+    room_node_kind_t        kind;
     zend_string          *level;      /* LITERAL only — the key under parent->children */
 
     HashTable            *children;   /* level -> node*, allocated on first literal child */
-    struct ws_topic_node *plus;
-    struct ws_topic_node *hash;
+    struct room_topic_node *plus;
+    struct room_topic_node *hash;
 
     /* Receivers AT this node. Dense, not a hash: delivery only walks it, and the
      * walk allocates nothing per receiver. NULL is a tombstone, and `dead` counts
-     * them (ws_node_detach). */
-    ws_topic_receiver_t **subs;
+     * them (room_node_detach). */
+    room_receiver_t **subs;
     uint32_t              count;
     uint32_t              cap;
     uint32_t              dead;
 
     bool                  dirty;      /* queued for compaction once the walk ends */
-} ws_topic_node_t;
+} room_topic_node_t;
 
-struct ws_topic_tree {
-    ws_topic_node_t   root;
+struct room_tree {
+    room_topic_node_t   root;
 
-    /* Where this worker's interest filter lives — see topic_hub.h. */
-    struct topic_hub_s  *hub;
+    /* Where this worker's interest filter lives — see room_hub.h. */
+    struct room_hub_s  *hub;
 
     /* Bumped once per publish/count. A receiver stamped with the current mark
      * has already been served this pass, so overlapping filters (`a/b` and
@@ -57,7 +57,7 @@ struct ws_topic_tree {
      * queued here — compacting or pruning it under the walk would free the very
      * node the walk is standing on. */
     uint32_t          walking;
-    ws_topic_node_t **dirty;
+    room_topic_node_t **dirty;
     uint32_t          dirty_count;
     uint32_t          dirty_cap;
 };
@@ -65,14 +65,14 @@ struct ws_topic_tree {
 /* ---------------------------------------------------------------- parsing */
 
 typedef struct {
-    const char *level[WS_TOPIC_MAX_LEVELS];
-    size_t      len[WS_TOPIC_MAX_LEVELS];
+    const char *level[ROOM_TOPIC_MAX_LEVELS];
+    size_t      len[ROOM_TOPIC_MAX_LEVELS];
     uint32_t    count;
-} ws_topic_levels_t;
+} room_topic_levels_t;
 
 /* Levels point into `topic` — valid only while it is. An empty level is legal
  * (MQTT allows "a//b"), an empty topic is not. */
-static bool ws_topic_split(const char *topic, const size_t len, ws_topic_levels_t *out)
+static bool room_topic_split(const char *topic, const size_t len, room_topic_levels_t *out)
 {
     if (len == 0) {
         return false;
@@ -88,7 +88,7 @@ static bool ws_topic_split(const char *topic, const size_t len, ws_topic_levels_
             continue;
         }
 
-        if (out->count == WS_TOPIC_MAX_LEVELS) {
+        if (out->count == ROOM_TOPIC_MAX_LEVELS) {
             return false;
         }
 
@@ -102,11 +102,11 @@ static bool ws_topic_split(const char *topic, const size_t len, ws_topic_levels_
     return true;
 }
 
-static bool ws_topic_check(const char *topic, const size_t len, const bool wildcards_ok)
+static bool room_topic_check(const char *topic, const size_t len, const bool wildcards_ok)
 {
-    ws_topic_levels_t levels;
+    room_topic_levels_t levels;
 
-    if (!ws_topic_split(topic, len, &levels)) {
+    if (!room_topic_split(topic, len, &levels)) {
         return false;
     }
 
@@ -139,21 +139,21 @@ static bool ws_topic_check(const char *topic, const size_t len, const bool wildc
     return true;
 }
 
-bool ws_topic_is_valid_filter(const char *topic, const size_t len)
+bool room_topic_is_valid_filter(const char *topic, const size_t len)
 {
-    return ws_topic_check(topic, len, true);
+    return room_topic_check(topic, len, true);
 }
 
-bool ws_topic_is_valid_name(const char *topic, const size_t len)
+bool room_topic_is_valid_name(const char *topic, const size_t len)
 {
-    return ws_topic_check(topic, len, false);
+    return room_topic_check(topic, len, false);
 }
 
-size_t ws_topic_interest_prefix(const char *filter, const size_t len)
+size_t room_topic_interest_prefix(const char *filter, const size_t len)
 {
-    ws_topic_levels_t levels;
+    room_topic_levels_t levels;
 
-    if (!ws_topic_split(filter, len, &levels)) {
+    if (!room_topic_split(filter, len, &levels)) {
         return 0;
     }
 
@@ -172,11 +172,11 @@ size_t ws_topic_interest_prefix(const char *filter, const size_t len)
     return prefix;
 }
 
-bool ws_topic_prefixes(const char *topic, const size_t topic_len, ws_topic_prefixes_t *out)
+bool room_topic_prefixes(const char *topic, const size_t topic_len, room_topic_prefixes_t *out)
 {
-    ws_topic_levels_t levels;
+    room_topic_levels_t levels;
 
-    if (!ws_topic_split(topic, topic_len, &levels)) {
+    if (!room_topic_split(topic, topic_len, &levels)) {
         return false;
     }
 
@@ -192,14 +192,14 @@ bool ws_topic_prefixes(const char *topic, const size_t topic_len, ws_topic_prefi
 
 /* ------------------------------------------------------------------ nodes */
 
-static ws_topic_node_t *ws_node_child(ws_topic_node_t *parent, const char *level,
+static room_topic_node_t *room_node_child(room_topic_node_t *parent, const char *level,
                                       const size_t len, const bool create)
 {
     if (len == 1 && level[0] == '+') {
         if (parent->plus == NULL && create) {
             parent->plus         = ecalloc(1, sizeof(*parent->plus));
             parent->plus->parent = parent;
-            parent->plus->kind   = WS_NODE_PLUS;
+            parent->plus->kind   = ROOM_NODE_PLUS;
         }
 
         return parent->plus;
@@ -209,7 +209,7 @@ static ws_topic_node_t *ws_node_child(ws_topic_node_t *parent, const char *level
         if (parent->hash == NULL && create) {
             parent->hash         = ecalloc(1, sizeof(*parent->hash));
             parent->hash->parent = parent;
-            parent->hash->kind   = WS_NODE_HASH;
+            parent->hash->kind   = ROOM_NODE_HASH;
         }
 
         return parent->hash;
@@ -224,7 +224,7 @@ static ws_topic_node_t *ws_node_child(ws_topic_node_t *parent, const char *level
         zend_hash_init(parent->children, 4, NULL, NULL, 0);
     }
 
-    ws_topic_node_t *node = zend_hash_str_find_ptr(parent->children, level, len);
+    room_topic_node_t *node = zend_hash_str_find_ptr(parent->children, level, len);
 
     if (node != NULL || !create) {
         return node;
@@ -232,7 +232,7 @@ static ws_topic_node_t *ws_node_child(ws_topic_node_t *parent, const char *level
 
     node         = ecalloc(1, sizeof(*node));
     node->parent = parent;
-    node->kind   = WS_NODE_LITERAL;
+    node->kind   = ROOM_NODE_LITERAL;
     node->level  = zend_string_init(level, len, 0);
 
     zend_hash_add_new_ptr(parent->children, node->level, node);
@@ -240,15 +240,15 @@ static ws_topic_node_t *ws_node_child(ws_topic_node_t *parent, const char *level
     return node;
 }
 
-static void ws_node_free(ws_topic_node_t *node);
+static void room_node_free(room_topic_node_t *node);
 
 /* The root is embedded in the tree, so it is emptied but never freed. */
-static void ws_node_free_contents(ws_topic_node_t *node)
+static void room_node_free_contents(room_topic_node_t *node)
 {
     if (node->children != NULL) {
-        ws_topic_node_t *child;
+        room_topic_node_t *child;
         ZEND_HASH_FOREACH_PTR(node->children, child) {
-            ws_node_free(child);
+            room_node_free(child);
         } ZEND_HASH_FOREACH_END();
 
         zend_hash_destroy(node->children);
@@ -256,11 +256,11 @@ static void ws_node_free_contents(ws_topic_node_t *node)
     }
 
     if (node->plus != NULL) {
-        ws_node_free(node->plus);
+        room_node_free(node->plus);
     }
 
     if (node->hash != NULL) {
-        ws_node_free(node->hash);
+        room_node_free(node->hash);
     }
 
     if (node->subs != NULL) {
@@ -272,14 +272,14 @@ static void ws_node_free_contents(ws_topic_node_t *node)
     }
 }
 
-static void ws_node_free(ws_topic_node_t *node)
+static void room_node_free(room_topic_node_t *node)
 {
-    ws_node_free_contents(node);
+    room_node_free_contents(node);
 
     efree(node);
 }
 
-static bool ws_node_is_empty(const ws_topic_node_t *node)
+static bool room_node_is_empty(const room_topic_node_t *node)
 {
     return node->count == 0
         && node->plus == NULL
@@ -290,17 +290,17 @@ static bool ws_node_is_empty(const ws_topic_node_t *node)
 /* A dynamic topic space ("order/{uuid}/status") would grow the tree forever, so
  * a node that lost its last subscriber and has no children goes away, and its
  * parent is then reconsidered. */
-static void ws_node_prune(ws_topic_node_t *node)
+static void room_node_prune(room_topic_node_t *node)
 {
-    while (node->kind != WS_NODE_ROOT && ws_node_is_empty(node)) {
-        ws_topic_node_t *const parent = node->parent;
+    while (node->kind != ROOM_NODE_ROOT && room_node_is_empty(node)) {
+        room_topic_node_t *const parent = node->parent;
 
         switch (node->kind) {
-            case WS_NODE_PLUS:
+            case ROOM_NODE_PLUS:
                 parent->plus = NULL;
                 break;
 
-            case WS_NODE_HASH:
+            case ROOM_NODE_HASH:
                 parent->hash = NULL;
                 break;
 
@@ -309,13 +309,13 @@ static void ws_node_prune(ws_topic_node_t *node)
                 break;
         }
 
-        ws_node_free(node);
+        room_node_free(node);
 
         node = parent;
     }
 }
 
-static void ws_node_compact(ws_topic_node_t *node)
+static void room_node_compact(room_topic_node_t *node)
 {
     if (node->dead == 0) {
         return;
@@ -335,16 +335,16 @@ static void ws_node_compact(ws_topic_node_t *node)
 
 /* ------------------------------------------------------------- receivers */
 
-typedef struct ws_topic_sub {
-    struct ws_topic_sub *next;
-    ws_topic_node_t     *node;
+typedef struct room_topic_sub {
+    struct room_topic_sub *next;
+    room_topic_node_t     *node;
     zend_string         *filter;
-} ws_topic_sub_t;
+} room_topic_sub_t;
 
-static ws_topic_sub_t *ws_sub_find(const ws_topic_receiver_t *receiver,
+static room_topic_sub_t *room_sub_find(const room_receiver_t *receiver,
                                    const zend_string *filter)
 {
-    for (ws_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
+    for (room_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         if (zend_string_equals(sub->filter, filter)) {
             return sub;
         }
@@ -353,7 +353,7 @@ static ws_topic_sub_t *ws_sub_find(const ws_topic_receiver_t *receiver,
     return NULL;
 }
 
-static void ws_tree_mark_dirty(ws_topic_tree_t *tree, ws_topic_node_t *node)
+static void room_tree_mark_dirty(room_tree_t *tree, room_topic_node_t *node)
 {
     if (node->dirty) {
         return;
@@ -369,22 +369,22 @@ static void ws_tree_mark_dirty(ws_topic_tree_t *tree, ws_topic_node_t *node)
     tree->dirty[tree->dirty_count++] = node;
 }
 
-static void ws_tree_settle(ws_topic_tree_t *tree)
+static void room_tree_settle(room_tree_t *tree)
 {
     for (uint32_t i = 0; i < tree->dirty_count; i++) {
-        ws_topic_node_t *const node = tree->dirty[i];
+        room_topic_node_t *const node = tree->dirty[i];
 
         node->dirty = false;
 
-        ws_node_compact(node);
-        ws_node_prune(node);
+        room_node_compact(node);
+        room_node_prune(node);
     }
 
     tree->dirty_count = 0;
 }
 
-static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
-                           const ws_topic_receiver_t *receiver)
+static void room_node_detach(room_tree_t *tree, room_topic_node_t *node,
+                           const room_receiver_t *receiver)
 {
     uint32_t idx = node->count;
 
@@ -400,43 +400,43 @@ static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
     }
 
     /* Mid-walk the array must not shift under the iterator — tombstone instead,
-     * and let ws_tree_settle compact once the walk unwinds.
+     * and let room_tree_settle compact once the walk unwinds.
      *
      * `count` deliberately still counts the tombstone, and that is what keeps
-     * ws_tree_settle safe: a node it has not reached yet never looks empty, so
+     * room_tree_settle safe: a node it has not reached yet never looks empty, so
      * pruning a dirty CHILD cannot cascade up and free a dirty parent still
      * sitting in the list. Decrement `count` here and settle becomes a UAF. */
     if (tree->walking > 0) {
         node->subs[idx] = NULL;
         node->dead++;
-        ws_tree_mark_dirty(tree, node);
+        room_tree_mark_dirty(tree, node);
         return;
     }
 
     node->subs[idx] = node->subs[node->count - 1];
     node->count--;
 
-    ws_node_prune(node);
+    room_node_prune(node);
 }
 
 /* ------------------------------------------------------------------- tree */
 
-ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub)
+room_tree_t *room_tree_create(struct room_hub_s *hub)
 {
-    ws_topic_tree_t *const tree = ecalloc(1, sizeof(*tree));
-    tree->root.kind = WS_NODE_ROOT;
+    room_tree_t *const tree = ecalloc(1, sizeof(*tree));
+    tree->root.kind = ROOM_NODE_ROOT;
     tree->hub       = hub;
 
     return tree;
 }
 
-void ws_topic_tree_free(ws_topic_tree_t *tree)
+void room_tree_free(room_tree_t *tree)
 {
     if (tree == NULL) {
         return;
     }
 
-    ws_node_free_contents(&tree->root);
+    room_node_free_contents(&tree->root);
 
     if (tree->dirty != NULL) {
         efree(tree->dirty);
@@ -445,24 +445,24 @@ void ws_topic_tree_free(ws_topic_tree_t *tree)
     efree(tree);
 }
 
-static void ws_interest_publish(struct topic_hub_s *hub, const zend_string *filter,
+static void room_interest_publish(struct room_hub_s *hub, const zend_string *filter,
                                 const bool joining)
 {
     const size_t prefix =
-        ws_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter));
+        room_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter));
 
     if (joining) {
-        topic_hub_interest_add(hub, ZSTR_VAL(filter), prefix);
+        room_hub_interest_add(hub, ZSTR_VAL(filter), prefix);
     } else {
-        topic_hub_interest_remove(hub, ZSTR_VAL(filter), prefix);
+        room_hub_interest_remove(hub, ZSTR_VAL(filter), prefix);
     }
 }
 
-static uint32_t ws_sub_count(const ws_topic_receiver_t *receiver)
+static uint32_t room_sub_count(const room_receiver_t *receiver)
 {
     uint32_t count = 0;
 
-    for (const ws_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
+    for (const room_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         count++;
     }
 
@@ -470,13 +470,13 @@ static uint32_t ws_sub_count(const ws_topic_receiver_t *receiver)
 }
 
 /* Creates the missing levels; returns the leaf so the caller can record it. */
-static ws_topic_node_t *ws_node_add(ws_topic_tree_t *tree, const ws_topic_levels_t *levels,
-                                    ws_topic_receiver_t *receiver)
+static room_topic_node_t *room_node_add(room_tree_t *tree, const room_topic_levels_t *levels,
+                                    room_receiver_t *receiver)
 {
-    ws_topic_node_t *node = &tree->root;
+    room_topic_node_t *node = &tree->root;
 
     for (uint32_t i = 0; i < levels->count; i++) {
-        node = ws_node_child(node, levels->level[i], levels->len[i], true);
+        node = room_node_child(node, levels->level[i], levels->len[i], true);
     }
 
     if (node->count == node->cap) {
@@ -490,7 +490,7 @@ static ws_topic_node_t *ws_node_add(ws_topic_tree_t *tree, const ws_topic_levels
     return node;
 }
 
-bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
+bool room_topic_subscribe(room_tree_t *tree, room_receiver_t *receiver,
                         zend_string *filter, const uint32_t max)
 {
     /* An id of 0 collides with "exclude nobody" and the receiver would then be
@@ -498,37 +498,37 @@ bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
      * fuzzers and the debug build. */
     ZEND_ASSERT(receiver->id != 0);
 
-    ws_topic_levels_t levels;
+    room_topic_levels_t levels;
 
-    if (!ws_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
+    if (!room_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
         return false;
     }
 
-    if (ws_sub_find(receiver, filter) != NULL) {
+    if (room_sub_find(receiver, filter) != NULL) {
         return true;   /* idempotent */
     }
 
-    if (max != 0 && ws_sub_count(receiver) >= max) {
+    if (max != 0 && room_sub_count(receiver) >= max) {
         return false;
     }
 
-    ws_topic_node_t *const node = ws_node_add(tree, &levels, receiver);
+    room_topic_node_t *const node = room_node_add(tree, &levels, receiver);
 
-    ws_topic_sub_t *const sub = emalloc(sizeof(*sub));
+    room_topic_sub_t *const sub = emalloc(sizeof(*sub));
     sub->node         = node;
     sub->filter       = zend_string_copy(filter);
     sub->next         = receiver->filters;
     receiver->filters = sub;
 
-    ws_interest_publish(tree->hub, filter, true);
+    room_interest_publish(tree->hub, filter, true);
 
     return true;
 }
 
-static void ws_sub_drop(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
-                        ws_topic_sub_t *sub, ws_topic_sub_t *prev)
+static void room_sub_drop(room_tree_t *tree, room_receiver_t *receiver,
+                        room_topic_sub_t *sub, room_topic_sub_t *prev)
 {
-    ws_node_detach(tree, sub->node, receiver);
+    room_node_detach(tree, sub->node, receiver);
 
     if (prev != NULL) {
         prev->next = sub->next;
@@ -538,25 +538,25 @@ static void ws_sub_drop(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
 
     /* After the tree, never before: while a subscription is live the interest
      * filter must not understate it, or a publish would skip this worker. */
-    ws_interest_publish(tree->hub, sub->filter, false);
+    room_interest_publish(tree->hub, sub->filter, false);
 
     zend_string_release(sub->filter);
 
     efree(sub);
 }
 
-bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
+bool room_topic_unsubscribe(room_tree_t *tree, room_receiver_t *receiver,
                           const zend_string *filter)
 {
     if (tree == NULL) {
-        return false;   /* the worker detached; see ws_topic_unsubscribe_all */
+        return false;   /* the worker detached; see room_topic_unsubscribe_all */
     }
 
-    ws_topic_sub_t *prev = NULL;
+    room_topic_sub_t *prev = NULL;
 
-    for (ws_topic_sub_t *sub = receiver->filters; sub != NULL; prev = sub, sub = sub->next) {
+    for (room_topic_sub_t *sub = receiver->filters; sub != NULL; prev = sub, sub = sub->next) {
         if (zend_string_equals(sub->filter, filter)) {
-            ws_sub_drop(tree, receiver, sub, prev);
+            room_sub_drop(tree, receiver, sub, prev);
             return true;
         }
     }
@@ -568,15 +568,15 @@ bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
  * bailout path, where start() cannot drain the receivers before letting go of
  * the tree. Their nodes are freed memory by then, so drop the list without
  * touching a single one of them. */
-void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver)
+void room_topic_unsubscribe_all(room_tree_t *tree, room_receiver_t *receiver)
 {
     while (receiver->filters != NULL) {
         if (tree != NULL) {
-            ws_sub_drop(tree, receiver, receiver->filters, NULL);
+            room_sub_drop(tree, receiver, receiver->filters, NULL);
             continue;
         }
 
-        ws_topic_sub_t *const sub = receiver->filters;
+        room_topic_sub_t *const sub = receiver->filters;
 
         receiver->filters = sub->next;
 
@@ -586,11 +586,11 @@ void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_topic_receiver_t *receiv
     }
 }
 
-void ws_topic_list(const ws_topic_receiver_t *receiver, zval *return_value)
+void room_topic_list(const room_receiver_t *receiver, zval *return_value)
 {
     array_init(return_value);
 
-    for (const ws_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
+    for (const room_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         add_next_index_str(return_value, zend_string_copy(sub->filter));
     }
 }
@@ -598,7 +598,7 @@ void ws_topic_list(const ws_topic_receiver_t *receiver, zval *return_value)
 /* ---------------------------------------------------------------- matching */
 
 typedef struct {
-    ws_topic_tree_t *tree;
+    room_tree_t *tree;
 
     /* publish */
     const char *data;
@@ -612,12 +612,12 @@ typedef struct {
     void      **shared;
 
     uint32_t    hits;
-} ws_topic_visit_t;
+} room_topic_visit_t;
 
-static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
+static void room_topic_visit(room_topic_visit_t *visit, room_topic_node_t *node)
 {
     for (uint32_t i = 0; i < node->count; i++) {
-        ws_topic_receiver_t *const receiver = node->subs[i];
+        room_receiver_t *const receiver = node->subs[i];
 
         if (receiver == NULL) {
             continue;
@@ -648,40 +648,40 @@ static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
     }
 }
 
-static void ws_topic_walk(ws_topic_visit_t *visit, ws_topic_node_t *node,
-                          const ws_topic_levels_t *levels, const uint32_t i)
+static void room_topic_walk(room_topic_visit_t *visit, room_topic_node_t *node,
+                          const room_topic_levels_t *levels, const uint32_t i)
 {
     /* '#' takes the whole remainder — including none of it, which is why
      * "sport/#" matches "sport" itself. */
     if (node->hash != NULL) {
-        ws_topic_visit(visit, node->hash);
+        room_topic_visit(visit, node->hash);
     }
 
     if (i == levels->count) {
-        ws_topic_visit(visit, node);
+        room_topic_visit(visit, node);
         return;
     }
 
     if (node->children != NULL) {
-        ws_topic_node_t *const literal = zend_hash_str_find_ptr(
+        room_topic_node_t *const literal = zend_hash_str_find_ptr(
             node->children, levels->level[i], levels->len[i]);
 
         if (literal != NULL) {
-            ws_topic_walk(visit, literal, levels, i + 1);
+            room_topic_walk(visit, literal, levels, i + 1);
         }
     }
 
     if (node->plus != NULL) {
-        ws_topic_walk(visit, node->plus, levels, i + 1);
+        room_topic_walk(visit, node->plus, levels, i + 1);
     }
 }
 
-static uint32_t ws_topic_match(ws_topic_tree_t *tree, const char *topic,
-                               const size_t topic_len, ws_topic_visit_t *visit)
+static uint32_t room_topic_match(room_tree_t *tree, const char *topic,
+                               const size_t topic_len, room_topic_visit_t *visit)
 {
-    ws_topic_levels_t levels;
+    room_topic_levels_t levels;
 
-    if (!ws_topic_split(topic, topic_len, &levels)) {
+    if (!room_topic_split(topic, topic_len, &levels)) {
         return 0;
     }
 
@@ -689,21 +689,21 @@ static uint32_t ws_topic_match(ws_topic_tree_t *tree, const char *topic,
     visit->tree = tree;
 
     tree->walking++;
-    ws_topic_walk(visit, &tree->root, &levels, 0);
+    room_topic_walk(visit, &tree->root, &levels, 0);
     tree->walking--;
 
     if (tree->walking == 0) {
-        ws_tree_settle(tree);
+        room_tree_settle(tree);
     }
 
     return visit->hits;
 }
 
-uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t topic_len,
+uint32_t room_topic_publish(room_tree_t *tree, const char *topic, const size_t topic_len,
                           const char *data, const size_t len, const bool binary,
                           const uint64_t except_id, void **shared)
 {
-    ws_topic_visit_t visit = {
+    room_topic_visit_t visit = {
         .data      = data,
         .len       = len,
         .binary    = binary,
@@ -711,12 +711,12 @@ uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, const size_t
         .shared    = shared,
     };
 
-    return ws_topic_match(tree, topic, topic_len, &visit);
+    return room_topic_match(tree, topic, topic_len, &visit);
 }
 
-uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, const size_t topic_len)
+uint32_t room_topic_count(room_tree_t *tree, const char *topic, const size_t topic_len)
 {
-    ws_topic_visit_t visit = { .shared = NULL };   /* counting walk: nothing to deliver into */
+    room_topic_visit_t visit = { .shared = NULL };   /* counting walk: nothing to deliver into */
 
-    return ws_topic_match(tree, topic, topic_len, &visit);
+    return room_topic_match(tree, topic, topic_len, &visit);
 }

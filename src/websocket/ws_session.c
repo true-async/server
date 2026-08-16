@@ -12,8 +12,8 @@
 
 #include "php.h"
 #include "websocket/ws_session.h"
-#include "websocket/topic_hub.h"
-#include "websocket/ws_topic_tree.h"
+#include "room/room_hub.h"
+#include "room/room_tree.h"
 #include "websocket/websocket_strategy.h"  /* ws_strategy_get_session — drain hook */
 #include "core/async_plain_event.h"        /* in-thread coroutine wakeup event */
 #include "core/http_connection.h"
@@ -1001,7 +1001,7 @@ bool ws_session_try_send(ws_session_t *session, const char *data, const size_t l
 
 /* The tree's view of a connection. `shared` stays untouched: a frame is copied
  * into the wslay queue here and now, so there is no persistent body to share. */
-static bool ws_session_topic_deliver(ws_topic_receiver_t *receiver, const char *data,
+static bool ws_session_topic_deliver(room_receiver_t *receiver, const char *data,
                                      const size_t len, const bool binary, void **shared)
 {
     ws_session_t *const session =
@@ -1012,7 +1012,7 @@ static bool ws_session_topic_deliver(ws_topic_receiver_t *receiver, const char *
     return ws_session_try_send(session, data, len, binary);
 }
 
-static const ws_topic_receiver_ops_t ws_session_topic_ops = {
+static const room_receiver_ops_t ws_session_topic_ops = {
     .deliver = ws_session_topic_deliver,
 };
 
@@ -1168,7 +1168,7 @@ void ws_session_destroy(ws_session_t *session)
 
     /* Single teardown point for both transports — H1 via the strategy, H2 via
      * the stream — so a subscription cannot outlive the session. */
-    topic_hub_receiver_unsubscribe_all(session->hub, &session->receiver);
+    room_hub_receiver_unsubscribe_all(session->hub, &session->receiver);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct

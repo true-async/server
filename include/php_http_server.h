@@ -272,7 +272,7 @@ struct _http_server_config_t {
 
     /* Reliable room-send (Room::send/trySend) knobs. The hub holds no config of
      * its own — these are read at call time and passed down to
-     * topic_hub_send/try_send.
+     * room_hub_send/try_send.
      *   ws_publish_retry_interval_ms — drainer cadence (default 50).
      *   ws_publish_retry_timeout_ms  — default deadline; a per-call timeoutMs
      *                                  overrides (default 5000).
@@ -577,7 +577,7 @@ http_server_object *http_server_object_from_zend(zend_object *obj);
  * the config object's zval is held inside http_server_object. */
 http_server_config_t *http_server_get_config         (http_server_object *server);
 
-/* This server's WebSocket topic hub (topic_hub_t*, void to keep the build gate out
+/* This server's WebSocket topic hub (room_hub_t*, void to keep the build gate out
  * of this header). NULL when the extension is built without WebSocket, or before
  * start(). */
 void *http_server_get_topic_hub(http_server_object *server);

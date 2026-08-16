@@ -6,12 +6,12 @@
   +----------------------------------------------------------------------+
 */
 
-#ifndef WS_TOPIC_TREE_H
-#define WS_TOPIC_TREE_H
+#ifndef ROOM_TREE_H
+#define ROOM_TREE_H
 
 #include "php.h"
 
-struct topic_hub_s;
+struct room_hub_s;
 
 /*
  * Per-worker topic tree (issue #2). Thread-local: no locks, no atomics, no
@@ -32,7 +32,7 @@ struct topic_hub_s;
  *
  * Wildcards are legal in a SUBSCRIBE filter only. A publish topic must be
  * concrete: a message that fans out to a pattern has no well-defined
- * destination. ws_topic_is_valid_name() enforces that.
+ * destination. room_topic_is_valid_name() enforces that.
  *
  * Matching walks the tree, trying the literal, '+' and '#' branch at each level
  * — O(topic length), not O(2^levels) as expanding a topic into every filter
@@ -45,23 +45,23 @@ struct topic_hub_s;
 
 /* Deeper filters are rejected — the walk recurses per level. Same ceiling as
  * EMQX's max_topic_levels, which is the only broker that caps this by default. */
-#define WS_TOPIC_MAX_LEVELS 128
+#define ROOM_TOPIC_MAX_LEVELS 128
 
 /* Every level-prefix of a topic, plus the empty one. */
-#define WS_TOPIC_MAX_PREFIXES (WS_TOPIC_MAX_LEVELS + 1)
+#define ROOM_TOPIC_MAX_PREFIXES (ROOM_TOPIC_MAX_LEVELS + 1)
 
-typedef struct ws_topic_tree ws_topic_tree_t;
+typedef struct room_tree room_tree_t;
 
 /* ------------------------------------------------------------- subscribers
  *
- * A subscriber is a `ws_topic_receiver_t` embedded in whatever receives — a
- * WebSocket connection, a server-side ring (topic_hub.h) — and the tree sees
- * nothing else of it. One kind in a node, one delivery call, no branch.
+ * A subscriber is a `room_receiver_t` embedded in whatever receives — a
+ * connection, a server-side ring (room_hub.h) — and the tree sees nothing else
+ * of it. One kind in a node, one delivery call, no branch.
  *
  * The owner embeds the struct ZERO-INITIALISED, and fills `ops` before the first
  * subscribe; `id` comes from the hub, which assigns it at subscribe. The tree
  * owns the rest, the filter list included. */
-typedef struct ws_topic_receiver ws_topic_receiver_t;
+typedef struct room_receiver room_receiver_t;
 
 typedef struct {
     /* Hands one message over and answers whether it was taken. `shared` is the
@@ -72,17 +72,17 @@ typedef struct {
      *
      * Runs inside the walk, which tolerates the receiver tearing ITSELF down —
      * a socket write can close its own connection — and nothing beyond that. */
-    bool (*deliver)(ws_topic_receiver_t *receiver, const char *data, size_t len,
+    bool (*deliver)(room_receiver_t *receiver, const char *data, size_t len,
                     bool binary, void **shared);
-} ws_topic_receiver_ops_t;
+} room_receiver_ops_t;
 
-struct ws_topic_receiver {
-    const ws_topic_receiver_ops_t *ops;
+struct room_receiver {
+    const room_receiver_ops_t *ops;
 
     /* Identifies the receiver across threads, so a publish can skip its own
      * sender. NON-ZERO for every receiver the tree holds — that invariant is
      * what lets `except_id` 0 mean "skip nobody" without a second test. The
-     * hub's counter (topic_hub.h) is the only source. */
+     * hub's counter (room_hub.h) is the only source. */
     uint64_t id;
 
     /* The last publish pass that served this receiver. */
@@ -91,17 +91,17 @@ struct ws_topic_receiver {
     /* Filters this receiver holds, in no particular order. Owned by the tree,
      * which is why unsubscribe finds a node through the list rather than by
      * walking the topic again. */
-    struct ws_topic_sub *filters;
+    struct room_topic_sub *filters;
 };
 
-/* `hub` is where this tree publishes its interest filter (topic_hub.h). */
-ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub);
-void             ws_topic_tree_free(ws_topic_tree_t *tree);
+/* `hub` is where this tree publishes its interest filter (room_hub.h). */
+room_tree_t *room_tree_create(struct room_hub_s *hub);
+void             room_tree_free(room_tree_t *tree);
 
 /* A filter may carry wildcards; a name may not. Both reject an empty string and
- * anything past WS_TOPIC_MAX_LEVELS. */
-bool ws_topic_is_valid_filter(const char *topic, size_t len);
-bool ws_topic_is_valid_name(const char *topic, size_t len);
+ * anything past ROOM_TOPIC_MAX_LEVELS. */
+bool room_topic_is_valid_filter(const char *topic, size_t len);
+bool room_topic_is_valid_name(const char *topic, size_t len);
 
 /* Idempotent: subscribing twice through the same filter is one subscription, and
  * it does not spend quota. `max` is the cap on distinct filters this receiver may
@@ -111,30 +111,30 @@ bool ws_topic_is_valid_name(const char *topic, size_t len);
  * malformed filter is refused the same way, so the caller validates first.
  *
  * The caller owns the receiver and unsubscribes it before freeing it. */
-bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
+bool room_topic_subscribe(room_tree_t *tree, room_receiver_t *receiver,
                         zend_string *filter, uint32_t max);
-bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
+bool room_topic_unsubscribe(room_tree_t *tree, room_receiver_t *receiver,
                           const zend_string *filter);
 
 /* Every filter the receiver holds. `tree` may be NULL: a worker that detached
  * took its nodes with it, and only the receiver's own list is left to free. */
-void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver);
+void room_topic_unsubscribe_all(room_tree_t *tree, room_receiver_t *receiver);
 
 /* Filters this receiver subscribed through, in no particular order. */
-void ws_topic_list(const ws_topic_receiver_t *receiver, zval *return_value);
+void room_topic_list(const room_receiver_t *receiver, zval *return_value);
 
 /* Receivers on THIS worker matching `topic`, each served once. Never suspends:
  * a peer whose transport is backed up drops the message (trySend semantics). */
-uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, size_t topic_len,
+uint32_t room_topic_publish(room_tree_t *tree, const char *topic, size_t topic_len,
                           const char *data, size_t len, bool binary,
                           uint64_t except_id, void **shared);
 
 /* Receivers on THIS worker matching `topic`, counted once each. */
-uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, size_t topic_len);
+uint32_t room_topic_count(room_tree_t *tree, const char *topic, size_t topic_len);
 
 /* ---------------------------------------------------------------- interest
  *
- * These two feed the cross-worker interest filter (topic_hub.h), and only make
+ * These two feed the cross-worker interest filter (room_hub.h), and only make
  * sense together — they are the two halves of one claim:
  *
  *   if a filter matches a concrete topic, the filter's leading literal prefix
@@ -148,15 +148,15 @@ uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, size_t topic_l
 
 /* Byte length of `filter`'s leading literal prefix. Zero when it opens with a
  * wildcard — `#` and `+/x` match topics that share no prefix with them at all. */
-size_t ws_topic_interest_prefix(const char *filter, size_t len);
+size_t room_topic_interest_prefix(const char *filter, size_t len);
 
 /* Byte lengths of `topic`'s level-prefixes, shortest first, starting with the
  * empty one: "a/b" yields 0, 1, 3. False when `topic` will not split. */
 typedef struct {
-    size_t   len[WS_TOPIC_MAX_PREFIXES];
+    size_t   len[ROOM_TOPIC_MAX_PREFIXES];
     uint32_t count;
-} ws_topic_prefixes_t;
+} room_topic_prefixes_t;
 
-bool ws_topic_prefixes(const char *topic, size_t topic_len, ws_topic_prefixes_t *out);
+bool room_topic_prefixes(const char *topic, size_t topic_len, room_topic_prefixes_t *out);
 
-#endif /* WS_TOPIC_TREE_H */
+#endif /* ROOM_TREE_H */
