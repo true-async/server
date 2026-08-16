@@ -33,18 +33,18 @@
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-# include "websocket/topic_hub.h"
-# include "websocket/ws_topic_tree.h"
+# include "room/room_hub.h"
+# include "room/room_tree.h"
 # include "websocket/php_websocket.h"
 #else
 /* Topics are a WebSocket feature; without it the hub calls compile away. */
-# define topic_hub_create(interval_ms)  ((void)(interval_ms), NULL)
-# define topic_hub_addref(hub)   ((void)(hub))
-# define topic_hub_release(hub)  ((void)(hub))
-# define topic_hub_attach(hub)   (-1)
-# define topic_hub_detach(hub)   ((void)(hub))
-# define topic_hub_detach_request_over(hub)  ((void)(hub))
-# define TOPIC_HUB_MAX_WORKERS   0
+# define room_hub_create(interval_ms)  ((void)(interval_ms), NULL)
+# define room_hub_addref(hub)   ((void)(hub))
+# define room_hub_release(hub)  ((void)(hub))
+# define room_hub_attach(hub)   (-1)
+# define room_hub_detach(hub)   ((void)(hub))
+# define room_hub_detach_request_over(hub)  ((void)(hub))
+# define ROOM_HUB_MAX_WORKERS   0
 #endif
 #include "core/stats_registry.h"
 #include "core/response_wire.h"
@@ -1422,7 +1422,7 @@ void *http_server_get_topic_hub(http_server_object *server)
 /* The reliable-send drainer's cadence for this server's hub, read once when the
  * hub is created: the drainer is one timer per worker, so a per-send interval
  * could only ever be honoured for whoever armed it first. 0 means "unset" and is
- * passed on as such — topic_hub_create() owns the default, so the number lives in
+ * passed on as such — room_hub_create() owns the default, so the number lives in
  * one place rather than in every caller. */
 static uint32_t http_server_retry_interval_ms(http_server_object *server)
 {
@@ -3436,7 +3436,7 @@ static int http_server_start_pool(http_server_object *server,
     server->pool_ctl = pool_ctl;
 
     if (server->topic_hub == NULL) {
-        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
+        server->topic_hub = room_hub_create(http_server_retry_interval_ms(server));
     }
 
     /* One persistent shell per worker. Allocate the whole array up
@@ -4353,20 +4353,20 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     /* Topics (issue #2). Attach needs a live reactor on this thread, which we
      * have here — the mailbox handle is created on it. */
     if (server->topic_hub == NULL && !server->is_worker_clone) {
-        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
+        server->topic_hub = room_hub_create(http_server_retry_interval_ms(server));
     }
 
     /* A worker that fails to attach gets no topic tree, and then every
      * subscribe() on it throws while every publish() quietly does nothing. That
      * is worse than not starting, so it is fatal rather than a degradation. */
-    const bool topic_hub_attached = server->topic_hub != NULL
-        && topic_hub_attach(server->topic_hub) >= 0;
+    const bool room_hub_attached = server->topic_hub != NULL
+        && room_hub_attach(server->topic_hub) >= 0;
 
-    if (server->topic_hub != NULL && !topic_hub_attached) {
+    if (server->topic_hub != NULL && !room_hub_attached) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Failed to attach this worker to the WebSocket topic hub: all %d slots "
             "are taken",
-            TOPIC_HUB_MAX_WORKERS);
+            ROOM_HUB_MAX_WORKERS);
         RETURN_FALSE;
     }
 
@@ -4382,8 +4382,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
         /* This path never reaches the exits below, so the slot and the hub
          * reference are dropped here instead. */
-        if (topic_hub_attached) {
-            topic_hub_detach(server->topic_hub);
+        if (room_hub_attached) {
+            room_hub_detach(server->topic_hub);
         }
 
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -4425,12 +4425,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     if (UNEXPECTED(bailout)) {
         /* Nothing drains here — the sessions are torn down later, during request
-         * shutdown, with the tree already gone. ws_topic_unsubscribe_all copes
+         * shutdown, with the tree already gone. room_topic_unsubscribe_all copes
          * with that; it is the one path where it has to. */
-        if (topic_hub_attached) {
+        if (room_hub_attached) {
             /* The request is over — this teardown wakes nobody, because whoever
              * was parked on a room here unwinds with us. */
-            topic_hub_detach_request_over(server->topic_hub);
+            room_hub_detach_request_over(server->topic_hub);
         }
 
         zend_bailout();
@@ -4451,8 +4451,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * the drain above is what destroys them. Detaching first frees the topic
      * tree out from under that teardown, which walks it — SIGSEGV on any stop()
      * with a subscriber still connected. */
-    if (topic_hub_attached) {
-        topic_hub_detach(server->topic_hub);
+    if (room_hub_attached) {
+        room_hub_detach(server->topic_hub);
     }
 
     RETURN_TRUE;
@@ -5674,8 +5674,8 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
                    (zend_long)total_pool_bytes);
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-    topic_hub_stats_t ws;
-    topic_hub_get_stats(server->topic_hub, &ws);
+    room_hub_stats_t ws;
+    room_hub_get_stats(server->topic_hub, &ws);
 
     add_assoc_long(return_value, "ws_topic_posted",  (zend_long)ws.posted);
     add_assoc_long(return_value, "ws_topic_skipped", (zend_long)ws.skipped);
@@ -5700,7 +5700,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
  * that accepted the copy, full remote mailboxes that dropped it, and the worker
  * slots that were live at all — which is what tells a publish that reached nobody
  * from one that had nowhere to go. */
-static void room_publish_result(zval *return_value, const topic_hub_publish_result_t *r)
+static void room_publish_result(zval *return_value, const room_hub_publish_result_t *r)
 {
     array_init(return_value);
     add_assoc_long(return_value, "served",  (zend_long) r->served);
@@ -5778,48 +5778,48 @@ static void room_throw_delivery(const char *msg, uint32_t delivered, uint32_t pe
  * or a thrown RoomDeliveryException carrying delivered/pending. A cancellation
  * resumed the sender with its own exception already pending — nothing to map and
  * nothing to add. */
-static void room_send_apply(zval *return_value, const topic_hub_send_result_t *r)
+static void room_send_apply(zval *return_value, const room_hub_send_result_t *r)
 {
     switch (r->status) {
-        case TOPIC_HUB_SEND_OK:
+        case ROOM_HUB_SEND_OK:
             ZVAL_LONG(return_value, (zend_long) r->delivered);
             return;
-        case TOPIC_HUB_SEND_CANCELLED:
+        case ROOM_HUB_SEND_CANCELLED:
             return;
-        case TOPIC_HUB_SEND_NO_WORKERS:
+        case ROOM_HUB_SEND_NO_WORKERS:
             room_throw_delivery(
                 "Reliable send reached nothing: no thread is attached to this room's hub, so the "
                 "message had nowhere to go — the server is not running, or this is a thread that "
                 "never joined it",
                 r->delivered, r->pending);
             return;
-        case TOPIC_HUB_SEND_NO_TARGETS:
+        case ROOM_HUB_SEND_NO_TARGETS:
             room_throw_delivery(
                 "Reliable send reached nothing: the workers are running, but nobody has subscribed "
                 "to this room — use publish() for a message that may legitimately reach no one",
                 r->delivered, r->pending);
             return;
-        case TOPIC_HUB_SEND_QUEUE_FULL:
+        case ROOM_HUB_SEND_QUEUE_FULL:
             room_throw_delivery(
                 "Reliable send refused: the outbound retry queue is at its cap (setWsPublishRetryQueueMax)",
                 r->delivered, r->pending);
             return;
-        case TOPIC_HUB_SEND_NO_CONTEXT:
+        case ROOM_HUB_SEND_NO_CONTEXT:
             room_throw_delivery(
                 "Room::send() must be called from a coroutine; use trySend() outside one",
                 r->delivered, r->pending);
             return;
-        case TOPIC_HUB_SEND_NO_QUEUE:
+        case ROOM_HUB_SEND_NO_QUEUE:
             room_throw_delivery(
                 "Reliable send unavailable: this thread has no worker outbound queue to retry on",
                 r->delivered, r->pending);
             return;
-        case TOPIC_HUB_SEND_SHUTDOWN:
+        case ROOM_HUB_SEND_SHUTDOWN:
             room_throw_delivery(
                 "Reliable send interrupted: the worker shut down while the message was in flight",
                 r->delivered, r->pending);
             return;
-        case TOPIC_HUB_SEND_EXPIRED:
+        case ROOM_HUB_SEND_EXPIRED:
         default:
             room_throw_delivery(
                 "Reliable send timed out: a target mailbox was still full at the deadline",
@@ -5847,7 +5847,7 @@ ZEND_METHOD(TrueAsync_HttpServer, enableRooms)
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (server->topic_hub == NULL) {
-        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
+        server->topic_hub = room_hub_create(http_server_retry_interval_ms(server));
     }
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -5884,14 +5884,14 @@ ZEND_METHOD(TrueAsync_HttpServer, publish)
         return;
     }
 
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Invalid room name: a publish topic must be a concrete name (no '+' or '#' wildcards)", 0);
         return;
     }
 
-    const topic_hub_publish_result_t r = topic_hub_publish(
-        (topic_hub_t *) server->topic_hub,
+    const room_hub_publish_result_t r = room_hub_publish(
+        (room_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         binary,
@@ -5937,7 +5937,7 @@ ZEND_METHOD(TrueAsync_HttpServer, trySend)
         return;
     }
 
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Invalid room name: a send topic must be a concrete name (no '+' or '#' wildcards)", 0);
         return;
@@ -5947,14 +5947,14 @@ ZEND_METHOD(TrueAsync_HttpServer, trySend)
     const room_retry_cfg_t cfg = room_retry_cfg(server);
     room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
-    const topic_hub_send_result_t r = topic_hub_try_send(
-        (topic_hub_t *) server->topic_hub,
+    const room_hub_send_result_t r = room_hub_try_send(
+        (room_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
         timeout, queue_max);
 
-    RETURN_BOOL(r.status == TOPIC_HUB_SEND_OK);
+    RETURN_BOOL(r.status == ROOM_HUB_SEND_OK);
 #else
     (void) topic; (void) message; (void) timeout_ms; (void) timeout_is_null; (void) server;
     zend_throw_exception(http_server_runtime_exception_ce,
@@ -5989,7 +5989,7 @@ ZEND_METHOD(TrueAsync_HttpServer, send)
         return;
     }
 
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Invalid room name: a send topic must be a concrete name (no '+' or '#' wildcards)", 0);
         return;
@@ -5999,8 +5999,8 @@ ZEND_METHOD(TrueAsync_HttpServer, send)
     const room_retry_cfg_t cfg = room_retry_cfg(server);
     room_retry_knobs(&cfg, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
-    const topic_hub_send_result_t r = topic_hub_send(
-        (topic_hub_t *) server->topic_hub,
+    const room_hub_send_result_t r = room_hub_send(
+        (room_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
@@ -6038,7 +6038,7 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
         return;
     }
 
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Invalid room name: a count topic must be a concrete name (no '+' or '#' wildcards)", 0);
         return;
@@ -6048,8 +6048,8 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
         timeout_ms = 0;
     }
 
-    const uint32_t count = topic_hub_count(
-        (topic_hub_t *) server->topic_hub,
+    const uint32_t count = room_hub_count(
+        (room_hub_t *) server->topic_hub,
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         (uint32_t) timeout_ms
     );
@@ -6076,13 +6076,13 @@ static zend_class_entry   *room_ce = NULL;
 static zend_object_handlers room_handlers;
 
 typedef struct {
-    topic_hub_t     *hub;     /* owns a reference; NULL only on an unminted object */
+    room_hub_t     *hub;     /* owns a reference; NULL only on an unminted object */
     zend_string     *topic;   /* owned; concrete name */
     room_retry_cfg_t retry;   /* snapshot; the server's config is locked at construction */
 
     /* This thread's subscription, NULL until subscribe(). Never transferred:
      * a transferred room subscribes again in its new thread. */
-    ws_server_sub_t *sub;
+    room_server_sub_t *sub;
 
     /* Losses from subscriptions this handle has already dropped, so lostCount()
      * stays monotonic across an unsubscribe/subscribe pair. */
@@ -6120,8 +6120,8 @@ static void room_free(zend_object *obj)
     room_object *room = room_from_obj(obj);
 
     if (room->sub != NULL) {
-        topic_hub_unsubscribe(room->sub);
-        topic_hub_sub_release(room->sub);
+        room_hub_unsubscribe(room->sub);
+        room_hub_sub_release(room->sub);
         room->sub = NULL;
     }
 
@@ -6129,7 +6129,7 @@ static void room_free(zend_object *obj)
         zend_string_release(room->topic);
     }
 
-    topic_hub_release(room->hub);
+    room_hub_release(room->hub);
     zend_object_std_dtor(&room->std);
 }
 
@@ -6139,8 +6139,8 @@ static zend_object *room_mint(http_server_object *server, zend_string *topic)
     zend_object *obj  = room_create(room_ce);
     room_object *room = room_from_obj(obj);
 
-    room->hub = (topic_hub_t *) server->topic_hub;
-    topic_hub_addref(room->hub);
+    room->hub = (room_hub_t *) server->topic_hub;
+    room_hub_addref(room->hub);
 
     room->topic = zend_string_copy(topic);
     room->retry = room_retry_cfg(server);
@@ -6160,7 +6160,7 @@ static zend_object *room_transfer_obj(
     room_object *src = room_from_obj(object);
 
     if (kind == ZEND_OBJECT_TRANSFER_RELEASE) {
-        topic_hub_release(src->hub);
+        room_hub_release(src->hub);
         src->hub = NULL;
 
         if (src->topic != NULL) {
@@ -6188,7 +6188,7 @@ static zend_object *room_transfer_obj(
     room_object *room = room_from_obj(dst);
 
     room->hub = src->hub;
-    topic_hub_addref(room->hub);
+    room_hub_addref(room->hub);
     room->topic = zend_string_init(ZSTR_VAL(src->topic), ZSTR_LEN(src->topic), persistent);
     room->retry = src->retry;
     room->sub   = NULL;   /* a subscription belongs to one thread and is not transferred */
@@ -6229,7 +6229,7 @@ ZEND_METHOD(TrueAsync_Room, publish)
         return;
     }
 
-    const topic_hub_publish_result_t r = topic_hub_publish(
+    const room_hub_publish_result_t r = room_hub_publish(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
@@ -6263,14 +6263,14 @@ ZEND_METHOD(TrueAsync_Room, trySend)
     uint32_t timeout, queue_max;
     room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
-    const topic_hub_send_result_t r = topic_hub_try_send(
+    const room_hub_send_result_t r = room_hub_try_send(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
         /* binary */ false, /* except_id */ 0,
         timeout, queue_max);
 
-    RETURN_BOOL(r.status == TOPIC_HUB_SEND_OK);
+    RETURN_BOOL(r.status == ROOM_HUB_SEND_OK);
 }
 /* }}} */
 
@@ -6296,7 +6296,7 @@ ZEND_METHOD(TrueAsync_Room, send)
     uint32_t timeout, queue_max;
     room_retry_knobs(&room->retry, timeout_is_null, timeout_ms, &timeout, &queue_max);
 
-    const topic_hub_send_result_t r = topic_hub_send(
+    const room_hub_send_result_t r = room_hub_send(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(message), ZSTR_LEN(message),
@@ -6322,7 +6322,7 @@ ZEND_METHOD(TrueAsync_Room, publishBinary)
         return;
     }
 
-    const topic_hub_publish_result_t r = topic_hub_publish(
+    const room_hub_publish_result_t r = room_hub_publish(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         ZSTR_VAL(data), ZSTR_LEN(data),
@@ -6354,7 +6354,7 @@ ZEND_METHOD(TrueAsync_Room, subscriberCount)
         timeout_ms = 0;
     }
 
-    const uint32_t count = topic_hub_count(
+    const uint32_t count = room_hub_count(
         room->hub,
         ZSTR_VAL(room->topic), ZSTR_LEN(room->topic),
         (uint32_t) timeout_ms
@@ -6379,7 +6379,7 @@ ZEND_METHOD(TrueAsync_Room, subscribe)
         return;
     }
 
-    room->sub = topic_hub_subscribe(room->hub, room->topic);
+    room->sub = room_hub_subscribe(room->hub, room->topic);
 
     if (room->sub == NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -6399,10 +6399,10 @@ ZEND_METHOD(TrueAsync_Room, unsubscribe)
         return;
     }
 
-    room->lost_before += topic_hub_sub_lost(room->sub);
+    room->lost_before += room_hub_sub_lost(room->sub);
 
-    topic_hub_unsubscribe(room->sub);
-    topic_hub_sub_release(room->sub);
+    room_hub_unsubscribe(room->sub);
+    room_hub_sub_release(room->sub);
     room->sub = NULL;
 }
 /* }}} */
@@ -6432,43 +6432,43 @@ ZEND_METHOD(TrueAsync_Room, recv)
         return;
     }
 
-    ws_payload_t *payload = NULL;
+    room_payload_t *payload = NULL;
 
     /* Only null waits without a deadline. A negative argument is an expired
      * computed deadline and takes what is queued, so the signed tri-state stays
      * a C convention rather than a PHP one. */
     const int64_t timeout = timeout_is_null ? -1 : (timeout_ms > 0 ? (int64_t) timeout_ms : 0);
 
-    const topic_hub_recv_status_t status = topic_hub_recv(room->sub, timeout, &payload);
+    const room_hub_recv_status_t status = room_hub_recv(room->sub, timeout, &payload);
 
     /* A message is never dropped for a pending cancellation: one taken off the
      * ring is returned here, and one that arrived during a cancelled park was
      * left in the ring for the next reader. */
     switch (status) {
-        case TOPIC_HUB_RECV_MESSAGE: {
+        case ROOM_HUB_RECV_MESSAGE: {
             size_t len;
             bool   binary;
-            const char *const data = topic_hub_payload_data(payload, &len, &binary);
+            const char *const data = room_hub_payload_data(payload, &len, &binary);
 
             RETVAL_STRINGL(data, len);
-            topic_hub_payload_release(payload);
+            room_hub_payload_release(payload);
             return;
         }
 
-        case TOPIC_HUB_RECV_BUSY:
+        case ROOM_HUB_RECV_BUSY:
             zend_throw_exception(http_server_runtime_exception_ce,
                 "Room::recv() is already parked in another coroutine on this room", 0);
             return;
 
-        case TOPIC_HUB_RECV_CLOSED:
+        case ROOM_HUB_RECV_CLOSED:
             zend_throw_exception(http_server_runtime_exception_ce,
                 "Room::recv() was interrupted: the subscription closed", 0);
             return;
 
-        case TOPIC_HUB_RECV_CANCELLED:
+        case ROOM_HUB_RECV_CANCELLED:
             return;   /* the cancellation's own exception is already pending */
 
-        case TOPIC_HUB_RECV_TIMEOUT:
+        case ROOM_HUB_RECV_TIMEOUT:
         default:
             RETURN_NULL();
     }
@@ -6486,7 +6486,7 @@ ZEND_METHOD(TrueAsync_Room, lostCount)
         return;
     }
 
-    RETURN_LONG((zend_long) (room->lost_before + topic_hub_sub_lost(room->sub)));
+    RETURN_LONG((zend_long) (room->lost_before + room_hub_sub_lost(room->sub)));
 }
 /* }}} */
 
@@ -6519,7 +6519,7 @@ ZEND_METHOD(TrueAsync_HttpServer, room)
     ZEND_PARSE_PARAMETERS_END();
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Invalid room name: a room topic must be a concrete name (no '+' or '#' wildcards)", 0);
         return;
@@ -6534,7 +6534,7 @@ ZEND_METHOD(TrueAsync_HttpServer, room)
             return;
         }
 
-        server->topic_hub = topic_hub_create(http_server_retry_interval_ms(server));
+        server->topic_hub = room_hub_create(http_server_retry_interval_ms(server));
     }
 
     RETURN_OBJ(room_mint(server, topic));
@@ -6744,7 +6744,7 @@ static void http_server_free(zend_object *obj)
 
     /* A server object holds at most one reference, from create() or from the
      * clone load, so the release is unconditional. */
-    topic_hub_release(server->topic_hub);
+    room_hub_release(server->topic_hub);
     server->topic_hub = NULL;
 
     /* Release this worker's stats slab slot (no-op for a standalone/parent
@@ -6910,7 +6910,7 @@ static void http_server_release_worker_shell(zval *transit)
     pool_ctl_release(shell->pool_ctl);
     shell->pool_ctl = NULL;
 
-    topic_hub_release(shell->topic_hub);
+    room_hub_release(shell->topic_hub);
     shell->topic_hub = NULL;
 
     http_server_transit_handlers_t *th = shell->transit_handlers;
@@ -7064,7 +7064,7 @@ static zend_object *http_server_transfer_obj(
         /* Topic hub (issue #2). The shell outlives this call and the parent may
          * be freed meanwhile, so the reference is taken here, from the live one. */
         dst_shell->topic_hub        = src->topic_hub;
-        topic_hub_addref(dst_shell->topic_hub);
+        room_hub_addref(dst_shell->topic_hub);
 
         /* Control channel (issue #117). The shell holds a ref; the clone it
          * loads into takes its own. */
@@ -7098,7 +7098,7 @@ static zend_object *http_server_transfer_obj(
     /* Topic hub (issue #2). Derived from the shell's reference, live for the whole
      * of this load, and held for the clone's lifetime. */
     dst_obj->topic_hub = src_shell->topic_hub;
-    topic_hub_addref(dst_obj->topic_hub);
+    room_hub_addref(dst_obj->topic_hub);
 
     /* Control channel (issue #117): the clone joins it from start() on its own
      * thread — the wakeup is a libuv handle and can only be created there. The

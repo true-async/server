@@ -17,8 +17,8 @@
 #include "Zend/zend_async_API.h"
 #include "websocket/php_websocket.h"
 #include "websocket/ws_session.h"
-#include "websocket/topic_hub.h"
-#include "websocket/ws_topic_tree.h"
+#include "room/room_hub.h"
+#include "room/room_tree.h"
 #include "websocket/ws_handshake.h"
 #include "websocket/websocket_strategy.h"
 #include "core/http_connection.h"
@@ -1079,7 +1079,7 @@ ZEND_METHOD(TrueAsync_WebSocket, getSubprotocol)
  * The session is built lazily, so subscribing has to commit the upgrade like
  * send()/recv() do: a handler that subscribes before its first I/O has none yet.
  */
-static ws_session_t *ws_topic_session_of(zval *zv_this)
+static ws_session_t *room_topic_session_of(zval *zv_this)
 {
     websocket_object *const w = Z_WEBSOCKET_P(zv_this);
 
@@ -1109,7 +1109,7 @@ static http_connection_t *ws_live_conn_of(const websocket_object *w)
 }
 
 /* Usable before the upgrade is committed — publish() does not need a session. */
-static topic_hub_t *ws_topic_hub_of(const websocket_object *w)
+static room_hub_t *room_topic_hub_of(const websocket_object *w)
 {
     if (w->session != NULL) {
         return w->session->hub;
@@ -1127,7 +1127,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
         Z_PARAM_STR(filter)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!ws_topic_is_valid_filter(ZSTR_VAL(filter), ZSTR_LEN(filter))) {
+    if (!room_topic_is_valid_filter(ZSTR_VAL(filter), ZSTR_LEN(filter))) {
         zend_throw_exception_ex(websocket_exception_ce, 0,
             "Malformed topic filter \"%s\": levels are separated by '/', "
             "'+' stands for exactly one level, '#' for the rest and must come last",
@@ -1135,7 +1135,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
         RETURN_THROWS();
     }
 
-    ws_session_t *const session = ws_topic_session_of(ZEND_THIS);
+    ws_session_t *const session = room_topic_session_of(ZEND_THIS);
 
     if (session == NULL) {
         RETURN_THROWS();
@@ -1146,16 +1146,16 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
 
     const uint32_t max = cfg != NULL ? cfg->ws_max_subscriptions : 0;
 
-    switch (topic_hub_receiver_subscribe(session->hub, &session->receiver, filter, max)) {
-        case TOPIC_HUB_SUBSCRIBE_OK:
+    switch (room_hub_receiver_subscribe(session->hub, &session->receiver, filter, max)) {
+        case ROOM_HUB_SUBSCRIBE_OK:
             break;
 
-        case TOPIC_HUB_SUBSCRIBE_DETACHED:
+        case ROOM_HUB_SUBSCRIBE_DETACHED:
             zend_throw_exception(websocket_exception_ce,
                 "Cannot subscribe — this worker is not attached to the topic hub", 0);
             RETURN_THROWS();
 
-        case TOPIC_HUB_SUBSCRIBE_AT_CAP:
+        case ROOM_HUB_SUBSCRIBE_AT_CAP:
             zend_throw_exception_ex(websocket_exception_ce, 0,
                 "Cannot subscribe to \"%s\": this connection already holds its limit "
                 "of %u subscriptions (HttpServerConfig::setWsMaxSubscriptions)",
@@ -1174,7 +1174,7 @@ ZEND_METHOD(TrueAsync_WebSocket, unsubscribe)
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
     if (w->session != NULL) {
-        topic_hub_receiver_unsubscribe(w->session->hub, &w->session->receiver, filter);
+        room_hub_receiver_unsubscribe(w->session->hub, &w->session->receiver, filter);
     }
 }
 
@@ -1188,7 +1188,7 @@ ZEND_METHOD(TrueAsync_WebSocket, getTopics)
         RETURN_EMPTY_ARRAY();
     }
 
-    ws_topic_list(&w->session->receiver, return_value);
+    room_topic_list(&w->session->receiver, return_value);
 }
 
 static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
@@ -1204,7 +1204,7 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
         Z_PARAM_BOOL(exclude_self)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception_ex(websocket_exception_ce, 0,
             "Cannot publish to \"%s\": a publish topic must be concrete — "
             "a message fanned out to a wildcard has no destination",
@@ -1230,7 +1230,7 @@ static void ws_do_publish(INTERNAL_FUNCTION_PARAMETERS, const bool binary)
 
     const uint64_t except_id = exclude_self && w->session != NULL ? w->session->receiver.id : 0;
 
-    const topic_hub_publish_result_t r = topic_hub_publish(ws_topic_hub_of(w),
+    const room_hub_publish_result_t r = room_hub_publish(room_topic_hub_of(w),
         ZSTR_VAL(topic), ZSTR_LEN(topic),
         ZSTR_VAL(data), ZSTR_LEN(data), binary, except_id);
 
@@ -1249,7 +1249,7 @@ ZEND_METHOD(TrueAsync_WebSocket, publishBinary)
 
 /* A worker that does not answer within this bound is left out of the tally
  * rather than hanging the caller. */
-#define WS_TOPIC_COUNT_TIMEOUT_MS 1000
+#define ROOM_TOPIC_COUNT_TIMEOUT_MS 1000
 
 ZEND_METHOD(TrueAsync_WebSocket, subscriberCount)
 {
@@ -1258,7 +1258,7 @@ ZEND_METHOD(TrueAsync_WebSocket, subscriberCount)
         Z_PARAM_STR(topic)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!ws_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
+    if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception_ex(websocket_exception_ce, 0,
             "Cannot count subscribers of \"%s\": the topic must be concrete",
             ZSTR_VAL(topic));
@@ -1267,8 +1267,8 @@ ZEND_METHOD(TrueAsync_WebSocket, subscriberCount)
 
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
-    const uint32_t total = topic_hub_count(ws_topic_hub_of(w),
-        ZSTR_VAL(topic), ZSTR_LEN(topic), WS_TOPIC_COUNT_TIMEOUT_MS);
+    const uint32_t total = room_hub_count(room_topic_hub_of(w),
+        ZSTR_VAL(topic), ZSTR_LEN(topic), ROOM_TOPIC_COUNT_TIMEOUT_MS);
 
     /* An exception here is a cancellation (server stop), never a timeout — it
      * must not come back as a number. */

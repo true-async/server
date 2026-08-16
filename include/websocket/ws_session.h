@@ -11,7 +11,7 @@
 
 #include "php.h"
 #include "php_http_server.h"
-#include "websocket/ws_topic_tree.h"
+#include "room/room_tree.h"
 #include "Zend/zend_async_API.h"
 #include "zend_smart_str.h"
 
@@ -29,7 +29,7 @@ typedef struct ws_pending_message_t {
     bool                         binary;
 } ws_pending_message_t;
 
-struct topic_hub_s;
+struct room_hub_s;
 
 /*
  * Per-connection WebSocket runtime state. Allocated when an Upgrade
@@ -78,7 +78,7 @@ typedef struct ws_session_t {
     /* Owning wslay context. NULL until ws_session_init() succeeds. */
     wslay_event_context_ptr ctx;
 
-    /* Topics (ws_topic_tree.h). A session pointer never leaves its thread, so
+    /* Topics (room_tree.h). A session pointer never leaves its thread, so
      * cross-thread the connection is addressed by `receiver.id`, which is used
      * only to skip the publisher. The tree sees the receiver and nothing else of
      * the session; ws_session_init wires its ops.
@@ -86,8 +86,8 @@ typedef struct ws_session_t {
      * `hub` is this session's server's hub, snapshotted at init rather than
      * looked up per call: teardown must still find it after conn has begun to
      * come apart. */
-    struct topic_hub_s      *hub;
-    ws_topic_receiver_t   receiver;
+    struct room_hub_s      *hub;
+    room_receiver_t   receiver;
 
     /* Borrowed back-pointer for callbacks. The session's lifetime is
      * a strict subset of conn's, so no refcount needed. For H2 this is

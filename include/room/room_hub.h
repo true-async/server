@@ -6,17 +6,17 @@
   +----------------------------------------------------------------------+
 */
 
-#ifndef TOPIC_HUB_H
-#define TOPIC_HUB_H
+#ifndef ROOM_HUB_H
+#define ROOM_HUB_H
 
 #include "php.h"
-#include "websocket/ws_topic_tree.h"
+#include "room/room_tree.h"
 
 /*
- * Cross-worker WebSocket topics (issue #2).
+ * Cross-worker topics (issue #2).
  *
  * Only the owning thread may write to a socket, so a topic is NOT a shared list
- * of connections. Each worker keeps its own topic tree (ws_topic_tree.h) over
+ * of connections. Each worker keeps its own topic tree (room_tree.h) over
  * the sessions IT owns, and a publish is handed to every worker through its
  * mailbox (thread_mailbox.h), carrying the topic as a STRING. Each worker then
  * matches that string against its own tree. A receiver pointer never leaves its
@@ -30,7 +30,8 @@
  * upward is only a Bloom summary of its interest, never the topics themselves.
  *
  * What the hub does own is the worker slot table (one mailbox per worker), the
- * ws_id counter, and one interest filter per worker. `admin` guards the slots.
+ * receiver-id counter, and one interest filter per worker. `admin` guards the
+ * slots.
  *
  * Threading:
  *   - create()/release() on the owning server.
@@ -46,9 +47,9 @@
  * publish() quietly does nothing — a half-working server. The table costs ~21KB
  * per hub; the 4KB interest filter is allocated per worker that actually
  * attaches, not per slot. */
-#define TOPIC_HUB_MAX_WORKERS 1024
+#define ROOM_HUB_MAX_WORKERS 1024
 
-typedef struct topic_hub_s topic_hub_t;
+typedef struct room_hub_s room_hub_t;
 
 /* Reference counted. A new reference is derived from one the caller already
  * holds and taken where the pointer is copied, not at first use: a later addref
@@ -59,39 +60,39 @@ typedef struct topic_hub_s topic_hub_t;
  * drainer is one timer per worker: a per-call interval could only ever be
  * honoured by whichever call armed the timer first, and every later sender would
  * inherit that stranger's cadence without being told. 0 means the default (50). */
-topic_hub_t *topic_hub_create(uint32_t retry_interval_ms);
-void      topic_hub_addref(topic_hub_t *hub);
-void      topic_hub_release(topic_hub_t *hub);
+room_hub_t *room_hub_create(uint32_t retry_interval_ms);
+void      room_hub_addref(room_hub_t *hub);
+void      room_hub_release(room_hub_t *hub);
 
 /* Claims a slot, publishes this thread's mailbox and takes a reference. Returns
  * the slot, or -1 when every slot is taken or this thread is already attached —
  * start() treats that as fatal. Every exit path must detach, on this thread. */
-int  topic_hub_attach(topic_hub_t *hub);
+int  room_hub_attach(room_hub_t *hub);
 
 /* Retires this thread's slot, tree and outbound queue, then drops the reference
  * attach() took; the hub may be freed here. Whoever is parked on a subscription
  * or a send is woken, so a live request learns its room went away. */
-void topic_hub_detach(topic_hub_t *hub);
+void room_hub_detach(room_hub_t *hub);
 
 /* The same teardown for a request that can no longer run PHP — a fatal error, or
  * the end of the request. It wakes nobody, because the coroutines that parked
  * here are gone while their events are still request memory, and it releases by
  * hand what those absent owners would have released. */
-void topic_hub_detach_request_over(topic_hub_t *hub);
+void room_hub_detach_request_over(room_hub_t *hub);
 
 /* Detaches whatever this thread still holds, at request shutdown. A thread that
  * attached by subscribing has no start() epilogue to do it, and a slot left
  * taken goes on collecting messages nobody will read. */
-void topic_hub_thread_sweep(void);
+void room_hub_thread_sweep(void);
 
-/* One publish's delivery breakdown. The global counters in topic_hub_stats_t are
+/* One publish's delivery breakdown. The global counters in room_hub_stats_t are
  * still accumulated; this is the same news for one call. */
 typedef struct {
     uint32_t served;    /* local subscribers served synchronously on this thread */
     uint32_t workers;   /* worker slots live in the hub, this thread's included */
     uint64_t posted;    /* remote mailboxes that accepted the copy */
     uint64_t dropped;   /* full remote mailboxes that lost it */
-} topic_hub_publish_result_t;
+} room_hub_publish_result_t;
 
 /* Fans `topic` out to every worker; each matches it against its own tree.
  * Never suspends — a peer whose transport is backed up drops the message
@@ -102,7 +103,7 @@ typedef struct {
  * is attached to this hub at all, so the message had nowhere to go and no later
  * attach can rescue it; non-zero with served+posted == 0 means the workers are
  * there and the room is simply empty. */
-topic_hub_publish_result_t topic_hub_publish(topic_hub_t *hub,
+room_hub_publish_result_t room_hub_publish(room_hub_t *hub,
                         const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary,
                         uint64_t except_id);
@@ -111,7 +112,7 @@ topic_hub_publish_result_t topic_hub_publish(topic_hub_t *hub,
  * match count. SUSPENDS the caller; a worker that misses `timeout_ms` is left
  * out of the sum, so the result is a snapshot, not a live number. Coroutine
  * context only. */
-uint32_t topic_hub_count(topic_hub_t *hub, const char *topic, size_t topic_len,
+uint32_t room_hub_count(room_hub_t *hub, const char *topic, size_t topic_len,
                       uint32_t timeout_ms);
 
 /* -------------------------------------------------------------- reliable send
@@ -124,24 +125,24 @@ uint32_t topic_hub_count(topic_hub_t *hub, const char *topic, size_t topic_len,
  * docs/PLAN_RELIABLE_ROOM_PUBLISH.md.
  *
  * `queue_max`/`timeout_ms` come from HttpServerConfig; the drainer's cadence is
- * the hub's (topic_hub_create). The local delivery (this worker's own tree) is
+ * the hub's (room_hub_create). The local delivery (this worker's own tree) is
  * done synchronously first, exactly as publish() does.
  */
 
 typedef enum {
-    TOPIC_HUB_SEND_OK = 0,      /* delivered to every target (delivered = count) */
-    TOPIC_HUB_SEND_QUEUE_FULL,  /* outbound queue at cap; nothing parked */
-    TOPIC_HUB_SEND_EXPIRED,     /* deadline passed with a target still full */
-    TOPIC_HUB_SEND_NO_CONTEXT,  /* blocking send() called with no coroutine to park */
-    TOPIC_HUB_SEND_NO_QUEUE,    /* thread never attached — no outbound queue to retry on */
-    TOPIC_HUB_SEND_SHUTDOWN,    /* the worker detached while the send was parked */
-    TOPIC_HUB_SEND_NO_WORKERS,  /* no thread is attached to the hub — nowhere to deliver */
-    TOPIC_HUB_SEND_NO_TARGETS,  /* workers are running, but the room has no subscriber */
-    TOPIC_HUB_SEND_CANCELLED,   /* the parked sender was cancelled; EG(exception) is set */
-} topic_hub_send_status_t;
+    ROOM_HUB_SEND_OK = 0,      /* delivered to every target (delivered = count) */
+    ROOM_HUB_SEND_QUEUE_FULL,  /* outbound queue at cap; nothing parked */
+    ROOM_HUB_SEND_EXPIRED,     /* deadline passed with a target still full */
+    ROOM_HUB_SEND_NO_CONTEXT,  /* blocking send() called with no coroutine to park */
+    ROOM_HUB_SEND_NO_QUEUE,    /* thread never attached — no outbound queue to retry on */
+    ROOM_HUB_SEND_SHUTDOWN,    /* the worker detached while the send was parked */
+    ROOM_HUB_SEND_NO_WORKERS,  /* no thread is attached to the hub — nowhere to deliver */
+    ROOM_HUB_SEND_NO_TARGETS,  /* workers are running, but the room has no subscriber */
+    ROOM_HUB_SEND_CANCELLED,   /* the parked sender was cancelled; EG(exception) is set */
+} room_hub_send_status_t;
 
 typedef struct {
-    topic_hub_send_status_t status;
+    room_hub_send_status_t status;
     /* Targets the message reached: local subscribers served on this thread plus
      * remote mailboxes that took a copy. The two are added because a caller asks
      * "did it arrive anywhere", not "by which road" — and a send whose whole room
@@ -152,34 +153,34 @@ typedef struct {
      * same room answers 5 from the thread that holds it and 1 from anywhere else.
      * A worker also counts as reached once its mailbox takes the copy, and the
      * interest filter is a Bloom summary that may hit for a worker whose tree then
-     * matches nothing (ws_topic_tree.h). Only zero is exact — and zero never comes
+     * matches nothing (room_tree.h). Only zero is exact — and zero never comes
      * back as OK, it comes back as NO_TARGETS. */
     uint32_t                delivered;
     uint32_t                pending;     /* targets still unfilled at give-up */
     uint32_t                workers;     /* worker slots live in the hub, this thread's included */
-} topic_hub_send_result_t;
+} room_hub_send_result_t;
 
 /* Non-blocking: fan out, park full targets, return at once. Any thread; never
  * suspends, so it never returns CANCELLED, EXPIRED or SHUTDOWN — a parked
- * message's fate is in topic_hub_get_stats(). OK means delivered outright or
+ * message's fate is in room_hub_get_stats(). OK means delivered outright or
  * parked for retry (`pending` says which).
  *
  * A refusal is not a promise that nothing was delivered: the fan-out runs first,
  * so QUEUE_FULL and NO_QUEUE can both follow targets that already took a copy.
  * `delivered` says how many, which is what makes a re-send a decision. */
-topic_hub_send_result_t topic_hub_try_send(topic_hub_t *hub, const char *topic, size_t topic_len,
+room_hub_send_result_t room_hub_try_send(room_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary, uint64_t except_id,
                         uint32_t timeout_ms, uint32_t queue_max);
 
 /* Blocking: fan out, park full targets, then SUSPEND the calling coroutine until
  * every target lands or the deadline passes. Coroutine context only — with no
- * coroutine it returns TOPIC_HUB_SEND_NO_CONTEXT rather than degrading to
+ * coroutine it returns ROOM_HUB_SEND_NO_CONTEXT rather than degrading to
  * best-effort (the caller chose the reliable path). A cancellation across the
  * park comes back as CANCELLED with the exception still pending, so the caller
  * reads one status instead of re-reading EG(exception) behind our back — and it
  * says nothing about the message, which stays on the retry queue until it lands
  * or expires: the sender was cancelled, not the send. */
-topic_hub_send_result_t topic_hub_send(topic_hub_t *hub, const char *topic, size_t topic_len,
+room_hub_send_result_t room_hub_send(room_hub_t *hub, const char *topic, size_t topic_len,
                         const char *data, size_t len, bool binary, uint64_t except_id,
                         uint32_t timeout_ms, uint32_t queue_max);
 
@@ -199,7 +200,7 @@ typedef struct {
      * running without setWsPublishRateLimit(). */
     uint64_t dropped;
 
-    /* --- reliable send (topic_hub_send / topic_hub_try_send) ---------------
+    /* --- reliable send (room_hub_send / room_hub_try_send) ---------------
      * The best-effort `dropped` above is never conflated with these: a full
      * mailbox on the reliable path is PARKED, not lost, and only these count. */
 
@@ -246,16 +247,16 @@ typedef struct {
     uint64_t bodies_freed;
 
     uint64_t sub_overflow;
-} topic_hub_stats_t;
+} room_hub_stats_t;
 
-void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out);
+void room_hub_get_stats(room_hub_t *hub, room_hub_stats_t *out);
 
 /* --------------------------------------------------------- caller receivers
  *
- * A receiver the caller owns and embeds — a WebSocket connection is the one in
- * the tree today. It subscribes through the hub, so the tree stays inside it:
- * the tree belongs to this thread's attachment, and the hub is the only place
- * that knows whether the thread still has one.
+ * A receiver the caller owns and embeds, rather than one the hub mints. It
+ * subscribes through the hub, so the tree stays inside it: the tree belongs to
+ * this thread's attachment, and the hub is the only place that knows whether the
+ * thread still has one.
  *
  * These never cause an attach, which is where they part company with the
  * server-side receiver below. An HTTP worker attaches in start(); a thread
@@ -267,33 +268,33 @@ void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out);
  * topics is carried into a handler. */
 
 typedef enum {
-    TOPIC_HUB_SUBSCRIBE_OK = 0,
-    TOPIC_HUB_SUBSCRIBE_DETACHED,   /* this thread is not attached to the hub */
-    TOPIC_HUB_SUBSCRIBE_AT_CAP,     /* the session already holds `max` filters */
-} topic_hub_subscribe_status_t;
+    ROOM_HUB_SUBSCRIBE_OK = 0,
+    ROOM_HUB_SUBSCRIBE_DETACHED,   /* this thread is not attached to the hub */
+    ROOM_HUB_SUBSCRIBE_AT_CAP,     /* the session already holds `max` filters */
+} room_hub_subscribe_status_t;
 
-/* `filter` has already passed ws_topic_is_valid_filter: a malformed one comes
+/* `filter` has already passed room_topic_is_valid_filter: a malformed one comes
  * back as AT_CAP, which is the wrong story to tell a caller.
  *
  * Idempotent — subscribing twice through the same filter is one subscription,
  * and the second spends no quota. `max` caps the distinct filters this receiver
  * may hold, 0 for none. The receiver takes its cross-thread id here, on its
  * first subscription, because nothing else about it needs one. */
-topic_hub_subscribe_status_t topic_hub_receiver_subscribe(topic_hub_t *hub,
-                                                          ws_topic_receiver_t *receiver,
+room_hub_subscribe_status_t room_hub_receiver_subscribe(room_hub_t *hub,
+                                                          room_receiver_t *receiver,
                                                           zend_string *filter, uint32_t max);
 
 /* A no-op on a filter the receiver never held. On a thread that has detached it
  * is a no-op too, and the subscription stays in the receiver's own list — which
  * getTopics() reads and the teardown below clears. */
-void topic_hub_receiver_unsubscribe(topic_hub_t *hub, ws_topic_receiver_t *receiver,
+void room_hub_receiver_unsubscribe(room_hub_t *hub, room_receiver_t *receiver,
                                     const zend_string *filter);
 
 /* Drops every filter the receiver holds, from the tree and from the receiver.
  * Called from ws_session_destroy on every close, the bailout path included —
  * there this thread's tree is gone already and only the receiver's list is left
  * to free. */
-void topic_hub_receiver_unsubscribe_all(topic_hub_t *hub, ws_topic_receiver_t *receiver);
+void room_hub_receiver_unsubscribe_all(room_hub_t *hub, room_receiver_t *receiver);
 
 /* ------------------------------------------------------ server subscribers
  *
@@ -305,41 +306,41 @@ void topic_hub_receiver_unsubscribe_all(topic_hub_t *hub, ws_topic_receiver_t *r
  *
  * Every call belongs to the thread that subscribed; a subscription is never
  * carried to another thread. */
-typedef struct ws_server_sub ws_server_sub_t;
-typedef struct ws_payload    ws_payload_t;   /* opaque; PHP never sees one */
+typedef struct room_server_sub room_server_sub_t;
+typedef struct room_payload    room_payload_t;   /* opaque; PHP never sees one */
 
 typedef enum {
-    TOPIC_HUB_RECV_MESSAGE = 0,
-    TOPIC_HUB_RECV_TIMEOUT,     /* the deadline passed, or there was nothing and nowhere to park */
-    TOPIC_HUB_RECV_CLOSED,      /* unsubscribed, here or under a parked recv */
-    TOPIC_HUB_RECV_BUSY,        /* another coroutine is already parked on this subscription */
+    ROOM_HUB_RECV_MESSAGE = 0,
+    ROOM_HUB_RECV_TIMEOUT,     /* the deadline passed, or there was nothing and nowhere to park */
+    ROOM_HUB_RECV_CLOSED,      /* unsubscribed, here or under a parked recv */
+    ROOM_HUB_RECV_BUSY,        /* another coroutine is already parked on this subscription */
     /* An exception is pending across this call and the caller is unwinding — a
      * cancellation of the park, or a waiter this thread could not arm. Whatever
      * had arrived stays in the ring for the next reader. */
-    TOPIC_HUB_RECV_CANCELLED,
-} topic_hub_recv_status_t;
+    ROOM_HUB_RECV_CANCELLED,
+} room_hub_recv_status_t;
 
 /* NULL when the thread could not attach (every slot taken). The caller owns one
- * reference and releases it with topic_hub_sub_release. */
-ws_server_sub_t *topic_hub_subscribe(topic_hub_t *hub, zend_string *filter);
-void             topic_hub_unsubscribe(ws_server_sub_t *sub);
-void             topic_hub_sub_release(ws_server_sub_t *sub);
+ * reference and releases it with room_hub_sub_release. */
+room_server_sub_t *room_hub_subscribe(room_hub_t *hub, zend_string *filter);
+void             room_hub_unsubscribe(room_server_sub_t *sub);
+void             room_hub_sub_release(room_server_sub_t *sub);
 
 /* Messages this subscription's ring dropped because it was full. Monotonic and
  * never reset, so two readers cannot destroy each other's evidence. */
-uint64_t topic_hub_sub_lost(const ws_server_sub_t *sub);
+uint64_t room_hub_sub_lost(const room_server_sub_t *sub);
 
 /* Pops one message, or parks the calling coroutine until one arrives, the
  * deadline passes, or the subscription closes. On MESSAGE the caller owns
- * `*out` and releases it with topic_hub_payload_release.
+ * `*out` and releases it with room_hub_payload_release.
  *
  * `timeout_ms`: negative waits with no deadline, 0 takes whatever is already
  * there and returns, positive waits that many milliseconds. */
-topic_hub_recv_status_t topic_hub_recv(ws_server_sub_t *sub, int64_t timeout_ms,
-                                       ws_payload_t **out);
+room_hub_recv_status_t room_hub_recv(room_server_sub_t *sub, int64_t timeout_ms,
+                                       room_payload_t **out);
 
-const char *topic_hub_payload_data(const ws_payload_t *payload, size_t *len, bool *binary);
-void        topic_hub_payload_release(ws_payload_t *payload);
+const char *room_hub_payload_data(const room_payload_t *payload, size_t *len, bool *binary);
+void        room_hub_payload_release(room_payload_t *payload);
 
 /* ---------------------------------------------------------------- interest
  *
@@ -348,7 +349,7 @@ void        topic_hub_payload_release(ws_payload_t *payload);
  * every one of them — the "interest" NATS propagates between nodes.
  *
  * Counting, because a Bloom bit cannot be cleared on unsubscribe. The key is the
- * subscription's leading literal prefix, never its full name: ws_topic_tree.h
+ * subscription's leading literal prefix, never its full name: room_tree.h
  * argues why that can only cost a wasted wake-up and never lose a message.
  *
  * It degrades honestly: an unbounded topic space ("order/{uuid}/status")
@@ -357,12 +358,12 @@ void        topic_hub_payload_release(ws_payload_t *payload);
  * Called on the thread owning the session; a no-op on a thread that never
  * attached. `prefix_len` is a byte count into `filter`.
  */
-void topic_hub_interest_add(topic_hub_t *hub, const char *filter, size_t prefix_len);
-void topic_hub_interest_remove(topic_hub_t *hub, const char *filter, size_t prefix_len);
+void room_hub_interest_add(room_hub_t *hub, const char *filter, size_t prefix_len);
+void room_hub_interest_remove(room_hub_t *hub, const char *filter, size_t prefix_len);
 
 /* Registers the reliable-room test hook (TrueAsync\__test_force_topic_post_full).
  * A no-op unless the extension was built with --enable-tas-test-hooks. Called from
  * MINIT. */
-void topic_hub_test_register(int module_type);
+void room_hub_test_register(int module_type);
 
-#endif /* TOPIC_HUB_H */
+#endif /* ROOM_HUB_H */
