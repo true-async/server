@@ -368,16 +368,51 @@ void topic_hub_release(topic_hub_t *hub)
     }
 }
 
-uint64_t topic_hub_next_id(topic_hub_t *hub)
+/* Identifies a session across threads, so a publish can skip its own sender. */
+static uint64_t topic_hub_next_id(topic_hub_t *hub)
 {
     return ws_atomic_u64_add(&hub->next_ws_id, 1);
 }
 
-ws_topic_tree_t *topic_hub_tree(const topic_hub_t *hub)
+/* This thread's tree for that hub, NULL when it never attached or has detached.
+ * Keyed by hub because a tree is per-SERVER state, which CODING_STANDARDS §1.2
+ * keeps out of thread-globals. */
+static ws_topic_tree_t *topic_hub_local_tree(const topic_hub_t *hub)
 {
     const ws_local_t *const local = hub != NULL ? ws_local_of(hub) : NULL;
 
     return local != NULL ? local->tree : NULL;
+}
+
+topic_hub_subscribe_status_t topic_hub_session_subscribe(topic_hub_t *hub, ws_session_t *session,
+                                                         zend_string *filter, const uint32_t max)
+{
+    ws_topic_tree_t *const tree = topic_hub_local_tree(hub);
+
+    if (tree == NULL) {
+        return TOPIC_HUB_SUBSCRIBE_DETACHED;
+    }
+
+    /* Only a subscriber needs an id, so it costs nothing on a connection that
+     * never subscribes. */
+    if (session->ws_id == 0) {
+        session->ws_id = topic_hub_next_id(hub);
+    }
+
+    return ws_topic_subscribe(tree, session, filter, max)
+        ? TOPIC_HUB_SUBSCRIBE_OK
+        : TOPIC_HUB_SUBSCRIBE_AT_CAP;
+}
+
+void topic_hub_session_unsubscribe(topic_hub_t *hub, ws_session_t *session,
+                                   const zend_string *filter)
+{
+    (void) ws_topic_unsubscribe(topic_hub_local_tree(hub), session, filter);
+}
+
+void topic_hub_session_unsubscribe_all(topic_hub_t *hub, ws_session_t *session)
+{
+    ws_topic_unsubscribe_all(topic_hub_local_tree(hub), session);
 }
 
 /* -------------------------------------------------------------- interest */

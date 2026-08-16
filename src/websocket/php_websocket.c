@@ -1141,30 +1141,26 @@ ZEND_METHOD(TrueAsync_WebSocket, subscribe)
         RETURN_THROWS();
     }
 
-    ws_topic_tree_t *const tree = topic_hub_tree(session->hub);
-
-    if (tree == NULL) {
-        zend_throw_exception(websocket_exception_ce,
-            "Cannot subscribe — this worker is not attached to the topic hub", 0);
-        RETURN_THROWS();
-    }
-
-    /* Only a subscriber needs an id, and only so a publish can skip its sender. */
-    if (session->ws_id == 0) {
-        session->ws_id = topic_hub_next_id(session->hub);
-    }
-
     const http_server_config_t *const cfg = session->conn != NULL
         ? http_server_get_config(session->conn->server) : NULL;
 
     const uint32_t max = cfg != NULL ? cfg->ws_max_subscriptions : 0;
 
-    if (!ws_topic_subscribe(tree, session, filter, max)) {
-        zend_throw_exception_ex(websocket_exception_ce, 0,
-            "Cannot subscribe to \"%s\": this connection already holds its limit "
-            "of %u subscriptions (HttpServerConfig::setWsMaxSubscriptions)",
-            ZSTR_VAL(filter), max);
-        RETURN_THROWS();
+    switch (topic_hub_session_subscribe(session->hub, session, filter, max)) {
+        case TOPIC_HUB_SUBSCRIBE_OK:
+            break;
+
+        case TOPIC_HUB_SUBSCRIBE_DETACHED:
+            zend_throw_exception(websocket_exception_ce,
+                "Cannot subscribe — this worker is not attached to the topic hub", 0);
+            RETURN_THROWS();
+
+        case TOPIC_HUB_SUBSCRIBE_AT_CAP:
+            zend_throw_exception_ex(websocket_exception_ce, 0,
+                "Cannot subscribe to \"%s\": this connection already holds its limit "
+                "of %u subscriptions (HttpServerConfig::setWsMaxSubscriptions)",
+                ZSTR_VAL(filter), max);
+            RETURN_THROWS();
     }
 }
 
@@ -1178,7 +1174,7 @@ ZEND_METHOD(TrueAsync_WebSocket, unsubscribe)
     const websocket_object *const w = Z_WEBSOCKET_P(ZEND_THIS);
 
     if (w->session != NULL) {
-        (void) ws_topic_unsubscribe(topic_hub_tree(w->session->hub), w->session, filter);
+        topic_hub_session_unsubscribe(w->session->hub, w->session, filter);
     }
 }
 

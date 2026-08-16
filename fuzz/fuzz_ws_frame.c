@@ -67,15 +67,9 @@ void *http_server_get_topic_hub(http_server_object *server)
     return NULL;
 }
 
-struct ws_topic_tree *topic_hub_tree(const struct topic_hub_s *hub)
+void topic_hub_session_unsubscribe_all(struct topic_hub_s *hub, ws_session_t *session)
 {
     (void)hub;
-    return NULL;
-}
-
-void ws_topic_unsubscribe_all(struct ws_topic_tree *tree, ws_session_t *session)
-{
-    (void)tree;
     (void)session;
 }
 
