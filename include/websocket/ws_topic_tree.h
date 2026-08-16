@@ -110,7 +110,8 @@ bool ws_topic_subscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
 void ws_topic_unsubscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
                                  const zend_string *filter);
 
-/* Called from ws_session_destroy — a closing connection leaves every topic. */
+/* A closing connection leaves every topic. Reached through
+ * topic_hub_session_unsubscribe_all, which is what supplies the tree. */
 void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_session_t *session);
 
 /* Filters this session subscribed through, in no particular order. */

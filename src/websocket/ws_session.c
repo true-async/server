@@ -1150,7 +1150,7 @@ void ws_session_destroy(ws_session_t *session)
 
     /* Single teardown point for both transports — H1 via the strategy, H2 via
      * the stream — so a subscription cannot outlive the session. */
-    ws_topic_unsubscribe_all(topic_hub_tree(session->hub), session);
+    topic_hub_session_unsubscribe_all(session->hub, session);
 
     /* Tear down the keepalive timer first so a late fire cannot
      * race against the wslay context free below. The cb struct

@@ -805,10 +805,11 @@ jobs:
 
   # --------------------------------------------------------------------
   # Stage 5b: PHP-embedded fuzz gate. Builds libphp via --enable-embed,
-  # then builds and runs fuzz_http1_parser + fuzz_h2_session for 60 s
-  # each on the seed corpora. ~5–10× slower than the standalone smoke
-  # but covers the production parser wiring (emalloc/zend_string,
-  # llhttp, nghttp2 HPACK).
+  # then builds and runs the four PHP-embedded targets — the HTTP/1 and
+  # HTTP/2 parsers, the WebSocket frame decoder and the topic tree — for
+  # 60 s each on the seed corpora. ~5–10× slower than the standalone
+  # smoke but covers the production wiring (emalloc/zend_string, llhttp,
+  # nghttp2 HPACK).
   # --------------------------------------------------------------------
   fuzz-embedded:
     needs: deps
@@ -900,12 +901,14 @@ jobs:
           sudo make install
           sudo ldconfig
 
-      - name: Build fuzz_http1_parser + fuzz_h2_session
+      - name: Build fuzz_http1_parser + fuzz_h2_session + the WebSocket targets
         working-directory: http-server/fuzz
         run: |
           set -eux
           PATH="/usr/local/bin:$PATH" make fuzz_http1_parser
           PATH="/usr/local/bin:$PATH" make fuzz_h2_session
+          PATH="/usr/local/bin:$PATH" make fuzz_ws_frame
+          PATH="/usr/local/bin:$PATH" make fuzz_ws_topic
 
       # h2o ships much larger seed corpora than ours (1972 + 1272
        # vs 3 + 3 committed). Their corpora are raw HTTP/1 & HTTP/2
@@ -950,6 +953,32 @@ jobs:
             -timeout=10 \
             -rss_limit_mb=4096 \
             corpus/h2/ /tmp/h2o/fuzz/http2-corpus/
+
+      # The WebSocket pair carries no third-party corpus and runs on the
+      # committed seeds alone. Building them is half the point: both harnesses
+      # bind their stubs by name, so a signature change in the server is caught
+      # here or nowhere — fuzz_ws_topic went a whole step uncompiled. The frame
+      # target executes ~1 case a second (a full session per input), so it gets
+      # a shorter budget than the parsers above.
+      - name: Run fuzz_ws_frame + fuzz_ws_topic
+        working-directory: http-server/fuzz
+        env:
+          ASAN_OPTIONS: "abort_on_error=1:print_stacktrace=1:detect_leaks=0"
+          USE_ZEND_ALLOC: "0"
+        run: |
+          set -eux
+          ./fuzz_ws_frame \
+            -max_total_time=30 \
+            -print_final_stats=1 \
+            -timeout=10 \
+            -rss_limit_mb=4096 \
+            corpus/ws/
+          ./fuzz_ws_topic \
+            -max_total_time=60 \
+            -print_final_stats=1 \
+            -timeout=10 \
+            -rss_limit_mb=4096 \
+            corpus/ws_topic/
 
       - name: Upload crash artifacts
         if: failure()
