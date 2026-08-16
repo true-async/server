@@ -10,7 +10,6 @@
 #define WS_TOPIC_TREE_H
 
 #include "php.h"
-#include "websocket/ws_session.h"
 
 struct topic_hub_s;
 
@@ -39,9 +38,9 @@ struct topic_hub_s;
  * — O(topic length), not O(2^levels) as expanding a topic into every filter
  * that could match it would be.
  *
- * A session subscribed through several filters that all match one topic
- * (`a/b` and `a/#`) must still receive ONE copy: delivery stamps each session
- * with the pass number and skips a session already stamped.
+ * A subscriber holding several filters that all match one topic (`a/b` and
+ * `a/#`) still receives ONE copy: delivery stamps each receiver with the pass
+ * number and skips a receiver already stamped.
  */
 
 /* Deeper filters are rejected — the walk recurses per level. Same ceiling as
@@ -55,33 +54,45 @@ typedef struct ws_topic_tree ws_topic_tree_t;
 
 /* ------------------------------------------------------------- subscribers
  *
- * A subscriber is a WebSocket session or a server-side receiver (topic_hub.h).
- * The tree keeps both in one array and tells them apart by `kind`; the receiver
- * is opaque here, so the three calls below are the tree's only view of it.
+ * A subscriber is a `ws_topic_receiver_t` embedded in whatever receives — a
+ * WebSocket connection, a server-side ring (topic_hub.h) — and the tree sees
+ * nothing else of it. One kind in a node, one delivery call, no branch.
  *
- * Delivery to a server subscriber enqueues and fires an event, running no PHP,
- * so it cannot re-enter unsubscribe mid-walk the way a socket write can. */
-typedef struct ws_server_sub ws_server_sub_t;
-
-typedef enum {
-    WS_SUB_SESSION = 0,
-    WS_SUB_SERVER,
-} ws_sub_kind_t;
+ * The owner embeds the struct ZERO-INITIALISED, and fills `ops` before the first
+ * subscribe; `id` comes from the hub, which assigns it at subscribe. The tree
+ * owns the rest, the filter list included. */
+typedef struct ws_topic_receiver ws_topic_receiver_t;
 
 typedef struct {
-    void         *ptr;    /* NULL is a tombstone, whatever the kind */
-    ws_sub_kind_t kind;
-} ws_subscriber_ref_t;
+    /* Hands one message over and answers whether it was taken. `shared` is the
+     * walk's one-message scratch, owned by whoever started the walk: the first
+     * receiver that needs a persistent body puts it there and the rest take a
+     * reference, so one publish costs one body however many receivers matched.
+     * A receiver that copies into a transport queue leaves it untouched.
+     *
+     * Runs inside the walk, which tolerates the receiver tearing ITSELF down —
+     * a socket write can close its own connection — and nothing beyond that. */
+    bool (*deliver)(ws_topic_receiver_t *receiver, const char *data, size_t len,
+                    bool binary, void **shared);
+} ws_topic_receiver_ops_t;
 
-/* The mark is the once-per-pass stamp a session carries in
- * ws_session_t.topic_mark. */
-uint64_t ws_server_sub_mark(const ws_server_sub_t *sub);
-void     ws_server_sub_set_mark(ws_server_sub_t *sub, uint64_t mark);
-/* `shared` is the walk's one-message scratch, owned by whoever started the walk:
- * the first server subscriber served puts the body there, the rest take a
- * reference to it. NULL in, one message out, however many subscribers matched. */
-bool     ws_server_sub_try_deliver(ws_server_sub_t *sub, const char *data,
-                                   size_t len, bool binary, void **shared);
+struct ws_topic_receiver {
+    const ws_topic_receiver_ops_t *ops;
+
+    /* Identifies the receiver across threads, so a publish can skip its own
+     * sender. NON-ZERO for every receiver the tree holds — that invariant is
+     * what lets `except_id` 0 mean "skip nobody" without a second test. The
+     * hub's counter (topic_hub.h) is the only source. */
+    uint64_t id;
+
+    /* The last publish pass that served this receiver. */
+    uint64_t mark;
+
+    /* Filters this receiver holds, in no particular order. Owned by the tree,
+     * which is why unsubscribe finds a node through the list rather than by
+     * walking the topic again. */
+    struct ws_topic_sub *filters;
+};
 
 /* `hub` is where this tree publishes its interest filter (topic_hub.h). */
 ws_topic_tree_t *ws_topic_tree_create(struct topic_hub_s *hub);
@@ -93,37 +104,32 @@ bool ws_topic_is_valid_filter(const char *topic, size_t len);
 bool ws_topic_is_valid_name(const char *topic, size_t len);
 
 /* Idempotent: subscribing twice through the same filter is one subscription, and
- * it does not spend quota. `max` is the cap on distinct filters this session may
+ * it does not spend quota. `max` is the cap on distinct filters this receiver may
  * hold, 0 for none — false means it was already at the cap, which the caller
  * reports on the filter without tearing the connection down (what EMQX answers
- * with SUBACK 0x97 and NATS with -ERR 'Maximum Subscriptions Exceeded'). */
-bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
+ * with SUBACK 0x97 and NATS with -ERR 'Maximum Subscriptions Exceeded'). A
+ * malformed filter is refused the same way, so the caller validates first.
+ *
+ * The caller owns the receiver and unsubscribes it before freeing it. */
+bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
                         zend_string *filter, uint32_t max);
-bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
+bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
                           const zend_string *filter);
 
-/* No per-session quota: a server subscriber is code, not a peer connection to
- * protect from itself. The caller owns `sub` and must unsubscribe before freeing
- * it. */
-bool ws_topic_subscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
-                               zend_string *filter);
-void ws_topic_unsubscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
-                                 const zend_string *filter);
+/* Every filter the receiver holds. `tree` may be NULL: a worker that detached
+ * took its nodes with it, and only the receiver's own list is left to free. */
+void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver);
 
-/* A closing connection leaves every topic. Reached through
- * topic_hub_session_unsubscribe_all, which is what supplies the tree. */
-void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_session_t *session);
+/* Filters this receiver subscribed through, in no particular order. */
+void ws_topic_list(const ws_topic_receiver_t *receiver, zval *return_value);
 
-/* Filters this session subscribed through, in no particular order. */
-void ws_topic_list(const ws_session_t *session, zval *return_value);
-
-/* Sessions on THIS worker matching `topic`, each served once. Never suspends:
+/* Receivers on THIS worker matching `topic`, each served once. Never suspends:
  * a peer whose transport is backed up drops the message (trySend semantics). */
 uint32_t ws_topic_publish(ws_topic_tree_t *tree, const char *topic, size_t topic_len,
                           const char *data, size_t len, bool binary,
                           uint64_t except_id, void **shared);
 
-/* Sessions on THIS worker matching `topic`, counted once each. */
+/* Receivers on THIS worker matching `topic`, counted once each. */
 uint32_t ws_topic_count(ws_topic_tree_t *tree, const char *topic, size_t topic_len);
 
 /* ---------------------------------------------------------------- interest

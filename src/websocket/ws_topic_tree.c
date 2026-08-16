@@ -12,7 +12,6 @@
 
 #include "php.h"
 #include "websocket/ws_topic_tree.h"
-#include "websocket/ws_session.h"
 #include "websocket/topic_hub.h"   /* the interest filter this worker publishes upward */
 
 typedef enum {
@@ -31,10 +30,10 @@ typedef struct ws_topic_node {
     struct ws_topic_node *plus;
     struct ws_topic_node *hash;
 
-    /* Subscribers AT this node, both kinds. Dense, not a hash: delivery only
-     * walks it, and the walk allocates nothing per session. `dead` counts
-     * tombstones (ws_node_detach). */
-    ws_subscriber_ref_t  *subs;
+    /* Receivers AT this node. Dense, not a hash: delivery only walks it, and the
+     * walk allocates nothing per receiver. NULL is a tombstone, and `dead` counts
+     * them (ws_node_detach). */
+    ws_topic_receiver_t **subs;
     uint32_t              count;
     uint32_t              cap;
     uint32_t              dead;
@@ -48,9 +47,9 @@ struct ws_topic_tree {
     /* Where this worker's interest filter lives — see topic_hub.h. */
     struct topic_hub_s  *hub;
 
-    /* Bumped once per publish/count. A session stamped with the current mark has
-     * already been served this pass, so overlapping filters (`a/b` and `a/#`)
-     * deliver one copy, not two. */
+    /* Bumped once per publish/count. A receiver stamped with the current mark
+     * has already been served this pass, so overlapping filters (`a/b` and
+     * `a/#`) deliver one copy, not two. */
     uint64_t          mark;
 
     /* A send can tear its own session down, re-entering unsubscribe mid-walk.
@@ -325,7 +324,7 @@ static void ws_node_compact(ws_topic_node_t *node)
     uint32_t kept = 0;
 
     for (uint32_t i = 0; i < node->count; i++) {
-        if (node->subs[i].ptr != NULL) {
+        if (node->subs[i] != NULL) {
             node->subs[kept++] = node->subs[i];
         }
     }
@@ -334,7 +333,7 @@ static void ws_node_compact(ws_topic_node_t *node)
     node->dead  = 0;
 }
 
-/* --------------------------------------------------------------- sessions */
+/* ------------------------------------------------------------- receivers */
 
 typedef struct ws_topic_sub {
     struct ws_topic_sub *next;
@@ -342,9 +341,10 @@ typedef struct ws_topic_sub {
     zend_string         *filter;
 } ws_topic_sub_t;
 
-static ws_topic_sub_t *ws_sub_find(const ws_session_t *session, const zend_string *filter)
+static ws_topic_sub_t *ws_sub_find(const ws_topic_receiver_t *receiver,
+                                   const zend_string *filter)
 {
-    for (ws_topic_sub_t *sub = session->topics; sub != NULL; sub = sub->next) {
+    for (ws_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         if (zend_string_equals(sub->filter, filter)) {
             return sub;
         }
@@ -384,12 +384,12 @@ static void ws_tree_settle(ws_topic_tree_t *tree)
 }
 
 static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
-                           const void *subscriber)
+                           const ws_topic_receiver_t *receiver)
 {
     uint32_t idx = node->count;
 
     for (uint32_t i = 0; i < node->count; i++) {
-        if (node->subs[i].ptr == subscriber) {
+        if (node->subs[i] == receiver) {
             idx = i;
             break;
         }
@@ -407,7 +407,7 @@ static void ws_node_detach(ws_topic_tree_t *tree, ws_topic_node_t *node,
      * pruning a dirty CHILD cannot cascade up and free a dirty parent still
      * sitting in the list. Decrement `count` here and settle becomes a UAF. */
     if (tree->walking > 0) {
-        node->subs[idx].ptr = NULL;
+        node->subs[idx] = NULL;
         node->dead++;
         ws_tree_mark_dirty(tree, node);
         return;
@@ -458,11 +458,11 @@ static void ws_interest_publish(struct topic_hub_s *hub, const zend_string *filt
     }
 }
 
-static uint32_t ws_sub_count(const ws_session_t *session)
+static uint32_t ws_sub_count(const ws_topic_receiver_t *receiver)
 {
     uint32_t count = 0;
 
-    for (const ws_topic_sub_t *sub = session->topics; sub != NULL; sub = sub->next) {
+    for (const ws_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         count++;
     }
 
@@ -471,7 +471,7 @@ static uint32_t ws_sub_count(const ws_session_t *session)
 
 /* Creates the missing levels; returns the leaf so the caller can record it. */
 static ws_topic_node_t *ws_node_add(ws_topic_tree_t *tree, const ws_topic_levels_t *levels,
-                                    void *subscriber, const ws_sub_kind_t kind)
+                                    ws_topic_receiver_t *receiver)
 {
     ws_topic_node_t *node = &tree->root;
 
@@ -484,52 +484,56 @@ static ws_topic_node_t *ws_node_add(ws_topic_tree_t *tree, const ws_topic_levels
         node->subs = erealloc(node->subs, node->cap * sizeof(*node->subs));
     }
 
-    node->subs[node->count].ptr  = subscriber;
-    node->subs[node->count].kind = kind;
+    node->subs[node->count] = receiver;
     node->count++;
 
     return node;
 }
 
-bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_session_t *session,
+bool ws_topic_subscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
                         zend_string *filter, const uint32_t max)
 {
+    /* An id of 0 collides with "exclude nobody" and the receiver would then be
+     * skipped by every publish, silently. Free in release, loud under the
+     * fuzzers and the debug build. */
+    ZEND_ASSERT(receiver->id != 0);
+
     ws_topic_levels_t levels;
 
     if (!ws_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
         return false;
     }
 
-    if (ws_sub_find(session, filter) != NULL) {
+    if (ws_sub_find(receiver, filter) != NULL) {
         return true;   /* idempotent */
     }
 
-    if (max != 0 && ws_sub_count(session) >= max) {
+    if (max != 0 && ws_sub_count(receiver) >= max) {
         return false;
     }
 
-    ws_topic_node_t *const node = ws_node_add(tree, &levels, session, WS_SUB_SESSION);
+    ws_topic_node_t *const node = ws_node_add(tree, &levels, receiver);
 
     ws_topic_sub_t *const sub = emalloc(sizeof(*sub));
-    sub->node      = node;
-    sub->filter    = zend_string_copy(filter);
-    sub->next      = session->topics;
-    session->topics = sub;
+    sub->node         = node;
+    sub->filter       = zend_string_copy(filter);
+    sub->next         = receiver->filters;
+    receiver->filters = sub;
 
     ws_interest_publish(tree->hub, filter, true);
 
     return true;
 }
 
-static void ws_sub_drop(ws_topic_tree_t *tree, ws_session_t *session,
+static void ws_sub_drop(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
                         ws_topic_sub_t *sub, ws_topic_sub_t *prev)
 {
-    ws_node_detach(tree, sub->node, session);
+    ws_node_detach(tree, sub->node, receiver);
 
     if (prev != NULL) {
         prev->next = sub->next;
     } else {
-        session->topics = sub->next;
+        receiver->filters = sub->next;
     }
 
     /* After the tree, never before: while a subscription is live the interest
@@ -541,7 +545,7 @@ static void ws_sub_drop(ws_topic_tree_t *tree, ws_session_t *session,
     efree(sub);
 }
 
-bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
+bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver,
                           const zend_string *filter)
 {
     if (tree == NULL) {
@@ -550,9 +554,9 @@ bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
 
     ws_topic_sub_t *prev = NULL;
 
-    for (ws_topic_sub_t *sub = session->topics; sub != NULL; prev = sub, sub = sub->next) {
+    for (ws_topic_sub_t *sub = receiver->filters; sub != NULL; prev = sub, sub = sub->next) {
         if (zend_string_equals(sub->filter, filter)) {
-            ws_sub_drop(tree, session, sub, prev);
+            ws_sub_drop(tree, receiver, sub, prev);
             return true;
         }
     }
@@ -560,67 +564,21 @@ bool ws_topic_unsubscribe(ws_topic_tree_t *tree, ws_session_t *session,
     return false;
 }
 
-bool ws_topic_subscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
-                               zend_string *filter)
-{
-    ws_topic_levels_t levels;
-
-    if (!ws_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
-        return false;
-    }
-
-    ws_node_add(tree, &levels, sub, WS_SUB_SERVER);
-
-    ws_interest_publish(tree->hub, filter, true);
-
-    return true;
-}
-
-void ws_topic_unsubscribe_server(ws_topic_tree_t *tree, ws_server_sub_t *sub,
-                                 const zend_string *filter)
-{
-    if (tree == NULL) {
-        return;   /* the thread detached; the nodes are gone with it */
-    }
-
-    ws_topic_levels_t levels;
-
-    if (!ws_topic_split(ZSTR_VAL(filter), ZSTR_LEN(filter), &levels)) {
-        return;
-    }
-
-    ws_topic_node_t *node = &tree->root;
-
-    for (uint32_t i = 0; i < levels.count && node != NULL; i++) {
-        node = ws_node_child(node, levels.level[i], levels.len[i], false);
-    }
-
-    if (node == NULL) {
-        return;
-    }
-
-    ws_node_detach(tree, node, sub);
-
-    /* After the tree, as for a session: an understated interest filter would let
-     * a publisher skip this worker while the subscription is still live. */
-    ws_interest_publish(tree->hub, filter, false);
-}
-
 /* `tree` is NULL when the worker already detached — which happens only on the
- * bailout path, where start() cannot drain the sessions before letting go of the
- * tree. Their nodes are freed memory by then, so drop the list without touching
- * a single one of them. */
-void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_session_t *session)
+ * bailout path, where start() cannot drain the receivers before letting go of
+ * the tree. Their nodes are freed memory by then, so drop the list without
+ * touching a single one of them. */
+void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_topic_receiver_t *receiver)
 {
-    while (session->topics != NULL) {
+    while (receiver->filters != NULL) {
         if (tree != NULL) {
-            ws_sub_drop(tree, session, session->topics, NULL);
+            ws_sub_drop(tree, receiver, receiver->filters, NULL);
             continue;
         }
 
-        ws_topic_sub_t *const sub = session->topics;
+        ws_topic_sub_t *const sub = receiver->filters;
 
-        session->topics = sub->next;
+        receiver->filters = sub->next;
 
         zend_string_release(sub->filter);
 
@@ -628,11 +586,11 @@ void ws_topic_unsubscribe_all(ws_topic_tree_t *tree, ws_session_t *session)
     }
 }
 
-void ws_topic_list(const ws_session_t *session, zval *return_value)
+void ws_topic_list(const ws_topic_receiver_t *receiver, zval *return_value)
 {
     array_init(return_value);
 
-    for (const ws_topic_sub_t *sub = session->topics; sub != NULL; sub = sub->next) {
+    for (const ws_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         add_next_index_str(return_value, zend_string_copy(sub->filter));
     }
 }
@@ -659,55 +617,32 @@ typedef struct {
 static void ws_topic_visit(ws_topic_visit_t *visit, ws_topic_node_t *node)
 {
     for (uint32_t i = 0; i < node->count; i++) {
-        const ws_subscriber_ref_t ref = node->subs[i];
+        ws_topic_receiver_t *const receiver = node->subs[i];
 
-        if (ref.ptr == NULL) {
+        if (receiver == NULL) {
             continue;
         }
 
-        if (ref.kind == WS_SUB_SERVER) {
-            ws_server_sub_t *const server_sub = ref.ptr;
-
-            /* A server subscriber has no ws_id, so except_id cannot address it:
-             * a publisher that also subscribes hears its own message. */
-            if (ws_server_sub_mark(server_sub) == visit->tree->mark) {
-                continue;
-            }
-
-            ws_server_sub_set_mark(server_sub, visit->tree->mark);
-
-            if (visit->shared == NULL) {
-                visit->hits++;
-                continue;
-            }
-
-            if (ws_server_sub_try_deliver(server_sub, visit->data, visit->len, visit->binary,
-                                          visit->shared)) {
-                visit->hits++;
-            }
-
+        /* Every receiver in the tree has a non-zero id, so except_id 0 skips
+         * nobody and a publisher that never subscribed excludes nothing. */
+        if (receiver->id == visit->except_id) {
             continue;
         }
 
-        ws_session_t *const session = ref.ptr;
-
-        if (session->ws_id == visit->except_id) {
+        /* Two filters of one receiver can match the same topic — serve it once. */
+        if (receiver->mark == visit->tree->mark) {
             continue;
         }
 
-        /* Two filters of one session can match the same topic — serve it once. */
-        if (session->topic_mark == visit->tree->mark) {
-            continue;
-        }
-
-        session->topic_mark = visit->tree->mark;
+        receiver->mark = visit->tree->mark;
 
         if (visit->shared == NULL) {
             visit->hits++;
             continue;
         }
 
-        if (ws_session_try_send(session, visit->data, visit->len, visit->binary)) {
+        if (receiver->ops->deliver(receiver, visit->data, visit->len, visit->binary,
+                                   visit->shared)) {
             visit->hits++;
         }
     }

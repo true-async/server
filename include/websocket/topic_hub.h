@@ -10,7 +10,6 @@
 #define TOPIC_HUB_H
 
 #include "php.h"
-#include "websocket/ws_session.h"
 #include "websocket/ws_topic_tree.h"
 
 /*
@@ -20,8 +19,8 @@
  * of connections. Each worker keeps its own topic tree (ws_topic_tree.h) over
  * the sessions IT owns, and a publish is handed to every worker through its
  * mailbox (thread_mailbox.h), carrying the topic as a STRING. Each worker then
- * matches that string against its own tree. A ws_session_t pointer never leaves
- * its thread — a use-after-free is impossible by construction rather than by
+ * matches that string against its own tree. A receiver pointer never leaves its
+ * thread — a use-after-free is impossible by construction rather than by
  * discipline.
  *
  * The consequence worth stating: there is no shared topic registry. The hub
@@ -251,18 +250,19 @@ typedef struct {
 
 void topic_hub_get_stats(topic_hub_t *hub, topic_hub_stats_t *out);
 
-/* ------------------------------------------------------ WebSocket sessions
+/* --------------------------------------------------------- caller receivers
  *
- * A connection subscribes through the hub, so the tree stays inside it: the tree
- * belongs to this thread's attachment, and the hub is the only place that knows
- * whether the thread still has one.
+ * A receiver the caller owns and embeds — a WebSocket connection is the one in
+ * the tree today. It subscribes through the hub, so the tree stays inside it:
+ * the tree belongs to this thread's attachment, and the hub is the only place
+ * that knows whether the thread still has one.
  *
- * A session never causes an attach, which is where it parts company with the
+ * These never cause an attach, which is where they part company with the
  * server-side receiver below. An HTTP worker attaches in start(); a thread
  * without an attachment is refused rather than given a slot the server never
  * accounted for.
  *
- * Called on the thread owning the session, which never lets it go. A connection
+ * Called on the thread owning the receiver, which never lets it go. A connection
  * finds its hub through its server (http_server_get_topic_hub), so nothing about
  * topics is carried into a handler. */
 
@@ -276,23 +276,24 @@ typedef enum {
  * back as AT_CAP, which is the wrong story to tell a caller.
  *
  * Idempotent — subscribing twice through the same filter is one subscription,
- * and the second spends no quota. `max` caps the distinct filters this session
- * may hold, 0 for none. The session takes its cross-thread id here, on its first
- * subscription, because nothing else about it needs one. */
-topic_hub_subscribe_status_t topic_hub_session_subscribe(topic_hub_t *hub, ws_session_t *session,
-                                                         zend_string *filter, uint32_t max);
+ * and the second spends no quota. `max` caps the distinct filters this receiver
+ * may hold, 0 for none. The receiver takes its cross-thread id here, on its
+ * first subscription, because nothing else about it needs one. */
+topic_hub_subscribe_status_t topic_hub_receiver_subscribe(topic_hub_t *hub,
+                                                          ws_topic_receiver_t *receiver,
+                                                          zend_string *filter, uint32_t max);
 
-/* A no-op on a filter the session never held. On a thread that has detached it
- * is a no-op too, and the subscription stays in the session's own list — which
- * getTopics() reads and ws_session_destroy clears. */
-void topic_hub_session_unsubscribe(topic_hub_t *hub, ws_session_t *session,
-                                   const zend_string *filter);
+/* A no-op on a filter the receiver never held. On a thread that has detached it
+ * is a no-op too, and the subscription stays in the receiver's own list — which
+ * getTopics() reads and the teardown below clears. */
+void topic_hub_receiver_unsubscribe(topic_hub_t *hub, ws_topic_receiver_t *receiver,
+                                    const zend_string *filter);
 
-/* Drops every filter the session holds, from the tree and from the session.
+/* Drops every filter the receiver holds, from the tree and from the receiver.
  * Called from ws_session_destroy on every close, the bailout path included —
- * there this thread's tree is gone already and only the session's list is left
+ * there this thread's tree is gone already and only the receiver's list is left
  * to free. */
-void topic_hub_session_unsubscribe_all(topic_hub_t *hub, ws_session_t *session);
+void topic_hub_receiver_unsubscribe_all(topic_hub_t *hub, ws_topic_receiver_t *receiver);
 
 /* ------------------------------------------------------ server subscribers
  *
@@ -304,7 +305,8 @@ void topic_hub_session_unsubscribe_all(topic_hub_t *hub, ws_session_t *session);
  *
  * Every call belongs to the thread that subscribed; a subscription is never
  * carried to another thread. */
-typedef struct ws_payload ws_payload_t;   /* opaque; PHP never sees one */
+typedef struct ws_server_sub ws_server_sub_t;
+typedef struct ws_payload    ws_payload_t;   /* opaque; PHP never sees one */
 
 typedef enum {
     TOPIC_HUB_RECV_MESSAGE = 0,
