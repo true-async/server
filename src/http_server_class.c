@@ -33,18 +33,9 @@
 #include "core/worker_inbox.h"
 #include "core/worker_registry.h"
 #include "room/php_room.h"
+#include "room/room_hub.h"
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
-# include "room/room_hub.h"
 # include "websocket/php_websocket.h"
-#else
-/* Topics are a WebSocket feature; without it the hub calls compile away. */
-# define room_hub_create(interval_ms)  ((void)(interval_ms), NULL)
-# define room_hub_addref(hub)   ((void)(hub))
-# define room_hub_release(hub)  ((void)(hub))
-# define room_hub_attach(hub)   (-1)
-# define room_hub_detach(hub)   ((void)(hub))
-# define room_hub_detach_request_over(hub)  ((void)(hub))
-# define ROOM_HUB_MAX_WORKERS   0
 #endif
 #include "core/stats_registry.h"
 #include "core/response_wire.h"
@@ -508,8 +499,8 @@ struct http_server_object {
      * tasks. NULL outside pool mode; owned ref released in start_pool cleanup. */
     zend_async_thread_pool_t *worker_pool;
 
-    /* Cross-worker WebSocket topics (topic_hub.h, issue #2). The pointer is fanned
-     * out to the worker clones through the transfer shells; every copy holds a
+    /* Cross-worker rooms (room/room_hub.h, issue #2). The pointer is fanned out
+     * to the worker clones through the transfer shells; every copy holds a
      * reference of its own, and this server's is dropped in free_obj. */
     void                    *topic_hub;
 
@@ -4382,7 +4373,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     if (server->topic_hub != NULL && !room_hub_attached) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-            "Failed to attach this worker to the WebSocket topic hub: all %d slots "
+            "Failed to attach this worker to the room hub: all %d slots "
             "are taken",
             ROOM_HUB_MAX_WORKERS);
         RETURN_FALSE;
@@ -5691,7 +5682,8 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
     add_assoc_long(return_value, "body_pool_total_bytes",
                    (zend_long)total_pool_bytes);
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    /* The room counters are the core's, so they are reported by every build.
+     * The ws_* key names are a contract php-claw and the tests read. */
     room_hub_stats_t ws;
     room_hub_get_stats(server->topic_hub, &ws);
 
@@ -5708,7 +5700,6 @@ ZEND_METHOD(TrueAsync_HttpServer, getRuntimeStats)
     add_assoc_long(return_value, "ws_bodies",          (zend_long)ws.bodies);
     add_assoc_long(return_value, "ws_bodies_freed",    (zend_long)ws.bodies_freed);
     add_assoc_long(return_value, "ws_sub_overflow",    (zend_long)ws.sub_overflow);
-#endif
 }
 /* }}} */
 

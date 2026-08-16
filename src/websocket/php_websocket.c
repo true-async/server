@@ -36,7 +36,6 @@ zend_class_entry *websocket_exception_ce                = NULL;
 zend_class_entry *websocket_closed_exception_ce         = NULL;
 zend_class_entry *websocket_backpressure_exception_ce   = NULL;
 zend_class_entry *websocket_concurrent_read_exception_ce = NULL;
-zend_class_entry *room_delivery_exception_ce            = NULL;
 
 /* http_server_exception_ce — base of the WebSocketException hierarchy.
  * Defined in http_server_exceptions.c, registered before us at MINIT. */
@@ -1347,6 +1346,4 @@ void ws_php_classes_register(void)
         register_class_TrueAsync_WebSocketBackpressureException(websocket_exception_ce);
     websocket_concurrent_read_exception_ce =
         register_class_TrueAsync_WebSocketConcurrentReadException(websocket_exception_ce);
-    room_delivery_exception_ce =
-        register_class_TrueAsync_RoomDeliveryException(websocket_exception_ce);
 }

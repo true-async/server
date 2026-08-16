@@ -149,8 +149,8 @@ enqueue), `retry_gone`. Existing `dropped` stays for best-effort `publish`.
 
 ## Exception (finding 6)
 
-A **distinct** exception for reliable-send failure — `RoomDeliveryException` (a
-`WebSocketException` subclass) — NOT the existing `WebSocketBackpressureException`,
+A **distinct** exception for reliable-send failure — `RoomDeliveryException` (an
+`HttpServerException` subclass) — NOT the existing `WebSocketBackpressureException`,
 which means "rate limiter tripped, nothing sent, back off." The two must be
 catch-distinguishable. It carries `delivered` and `pending` counts so a caller
 knows how much landed before it decides whether re-sending (a duplicate) is safe.

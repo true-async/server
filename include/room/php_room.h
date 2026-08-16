@@ -11,10 +11,13 @@
 
 #include "php.h"
 
-/* Registers the Room class and its object handlers, from MINIT. A no-op in a
- * build without WebSocket, where every room entry point throws instead — the
- * HttpServer methods that address a room are registered by the generated arginfo
- * either way, so this file compiles in every configuration. */
+/* Thrown by Room::send()/trySend() and HttpServer::send() when delivery failed;
+ * carries what had landed. Registered by php_room_minit(). */
+extern zend_class_entry *room_delivery_exception_ce;
+
+/* Registers the Room class, its object handlers and RoomDeliveryException, from
+ * MINIT and after the server's own exceptions. Every build runs it: rooms do not
+ * depend on WebSocket. */
 void php_room_minit(void);
 
 #endif /* PHP_ROOM_H */

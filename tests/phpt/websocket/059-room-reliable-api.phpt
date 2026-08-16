@@ -8,14 +8,15 @@ true_async_server
 namespace TrueAsync;
 
 /* Reliable room delivery adds send()/trySend() beside the best-effort publish(),
- * plus a DISTINCT RoomDeliveryException (a WebSocketException, NOT the
- * WebSocketBackpressureException a rate-limit trip raises) carrying how much of an
- * at-least-once send landed. This asserts the shape only; behaviour with a running
- * worker is in 061/062. */
+ * plus a DISTINCT RoomDeliveryException carrying how much of an at-least-once
+ * send landed. It hangs off HttpServerException rather than WebSocketException,
+ * because rooms are served by a build configured with --disable-websocket, where
+ * that class does not exist. This asserts the shape only; behaviour with a
+ * running worker is in 061/062. */
 
 echo "RoomDeliveryException: ", class_exists(RoomDeliveryException::class) ? 'class' : 'missing', "\n";
 
-// hierarchy: RoomDeliveryException -> WebSocketException -> HttpServerException -> Exception
+// hierarchy: RoomDeliveryException -> HttpServerException -> Exception
 $h = RoomDeliveryException::class;
 while ($h !== false) {
     echo "  ", $h, "\n";
@@ -48,7 +49,6 @@ echo "Done\n";
 --EXPECT--
 RoomDeliveryException: class
   TrueAsync\RoomDeliveryException
-  TrueAsync\WebSocketException
   TrueAsync\HttpServerException
   Exception
 distinct from backpressure: yes

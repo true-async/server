@@ -15,11 +15,10 @@
  * object itself is opaque here — this file reaches it through the pinpoint
  * accessors in php_http_server.h, the same way src/http3/ does.
  *
- * Without WebSocket the class is not registered and every entry point throws.
- * The room core underneath is free of WebSocket (room/room_hub.h); what still
- * ties this file to it is RoomDeliveryException, whose stub makes it a
- * WebSocketException — every send()/trySend() failure goes through it, so a
- * build without WebSocket needs that exception a base of its own first.
+ * Nothing here is behind the WebSocket build flag: a build configured with
+ * --disable-websocket registers the same classes and serves the same rooms. A
+ * connection is one receiver among others (room/room_tree.h), and it is the
+ * connection that is optional, not the room.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -29,18 +28,13 @@
 #include "php.h"
 #include "php_http_server.h"
 #include "room/php_room.h"
+#include "../stubs/RoomExceptions.php_arginfo.h"
 #include "Zend/zend_exceptions.h"
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
-# include "room/room_hub.h"
-# include "room/room_tree.h"
-/* RoomDeliveryException is registered with the WebSocket exception tree, which
- * the stubs make its parent — moving it needs a base of its own. */
-# include "websocket/php_websocket.h"
-# include "../stubs/Room.php_arginfo.h"
-#endif
+#include "room/room_hub.h"
+#include "room/room_tree.h"
+#include "../stubs/Room.php_arginfo.h"
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
 /* {served, posted, dropped, workers} — publish()'s per-call delivery breakdown:
  * local subscribers served synchronously on the calling worker, remote mailboxes
  * that accepted the copy, full remote mailboxes that dropped it, and the worker
@@ -173,7 +167,6 @@ static void room_send_apply(zval *return_value, const room_hub_send_result_t *r)
             return;
     }
 }
-#endif /* HAVE_HTTP_SERVER_WEBSOCKET */
 
 /* {{{ proto HttpServer::enableRooms(): static
  * Opt into cross-worker rooms: allocate the topic hub up front so room
@@ -191,14 +184,9 @@ ZEND_METHOD(TrueAsync_HttpServer, enableRooms)
         return;
     }
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
     http_server_topic_hub_ensure(server);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
-#else
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
-#endif
 }
 /* }}} */
 
@@ -221,10 +209,9 @@ ZEND_METHOD(TrueAsync_HttpServer, publish)
 
     http_server_object *server = http_server_object_from_zend(Z_OBJ_P(ZEND_THIS));
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (http_server_get_topic_hub(server) == NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: call enableRooms() or addWebSocketHandler() before start()", 0);
+            "Rooms are not available: call enableRooms() before start()", 0);
         return;
     }
 
@@ -243,15 +230,6 @@ ZEND_METHOD(TrueAsync_HttpServer, publish)
     );
 
     room_publish_result(return_value, &r);
-#else
-    (void) topic;
-    (void) message;
-    (void) binary;
-    (void) server;
-
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
-#endif
 }
 /* }}} */
 
@@ -274,10 +252,9 @@ ZEND_METHOD(TrueAsync_HttpServer, trySend)
 
     http_server_object *server = http_server_object_from_zend(Z_OBJ_P(ZEND_THIS));
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (http_server_get_topic_hub(server) == NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: call enableRooms() or addWebSocketHandler() before start()", 0);
+            "Rooms are not available: call enableRooms() before start()", 0);
         return;
     }
 
@@ -299,11 +276,6 @@ ZEND_METHOD(TrueAsync_HttpServer, trySend)
         timeout, queue_max);
 
     RETURN_BOOL(r.status == ROOM_HUB_SEND_OK);
-#else
-    (void) topic; (void) message; (void) timeout_ms; (void) timeout_is_null; (void) server;
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
-#endif
 }
 /* }}} */
 
@@ -326,10 +298,9 @@ ZEND_METHOD(TrueAsync_HttpServer, send)
 
     http_server_object *server = http_server_object_from_zend(Z_OBJ_P(ZEND_THIS));
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (http_server_get_topic_hub(server) == NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: call enableRooms() or addWebSocketHandler() before start()", 0);
+            "Rooms are not available: call enableRooms() before start()", 0);
         return;
     }
 
@@ -351,11 +322,6 @@ ZEND_METHOD(TrueAsync_HttpServer, send)
         timeout, queue_max);
 
     room_send_apply(return_value, &r);
-#else
-    (void) topic; (void) message; (void) timeout_ms; (void) timeout_is_null; (void) server;
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
-#endif
 }
 /* }}} */
 
@@ -375,10 +341,9 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
 
     http_server_object *server = http_server_object_from_zend(Z_OBJ_P(ZEND_THIS));
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (http_server_get_topic_hub(server) == NULL) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "Rooms are not available: call enableRooms() or addWebSocketHandler() before start()", 0);
+            "Rooms are not available: call enableRooms() before start()", 0);
         return;
     }
 
@@ -399,18 +364,9 @@ ZEND_METHOD(TrueAsync_HttpServer, subscriberCount)
     );
 
     RETURN_LONG((zend_long) count);
-#else
-    (void) topic;
-    (void) timeout_ms;
-    (void) server;
-
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
-#endif
 }
 /* }}} */
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
 /* ---- Room -----------------------------------------------------------------
  *
  * A server-side handle to a topic, minted by HttpServer::room(). It owns a hub
@@ -848,7 +804,6 @@ ZEND_METHOD(TrueAsync_Room, name)
     RETURN_STR_COPY(room->topic);
 }
 /* }}} */
-#endif /* HAVE_HTTP_SERVER_WEBSOCKET */
 
 /* {{{ proto HttpServer::room(string $topic): Room
  * A server-side handle to a room (topic) for publishing/counting without a
@@ -862,7 +817,6 @@ ZEND_METHOD(TrueAsync_HttpServer, room)
         Z_PARAM_STR(topic)
     ZEND_PARSE_PARAMETERS_END();
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
     if (!room_topic_is_valid_name(ZSTR_VAL(topic), ZSTR_LEN(topic))) {
         zend_throw_exception(http_server_invalid_argument_exception_ce,
             "Invalid room name: a room topic must be a concrete name (no '+' or '#' wildcards)", 0);
@@ -882,22 +836,20 @@ ZEND_METHOD(TrueAsync_HttpServer, room)
     }
 
     RETURN_OBJ(room_mint(server, topic));
-#else
-    (void) topic;
-
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Rooms require the extension built with WebSocket support (--enable-websocket)", 0);
-#endif
 }
 /* }}} */
 
-/* Registers Room, which inherits nothing and so orders against no other class.
- * What DOES order: room_delivery_exception_ce, which every send() failure throws
- * and which ws_php_classes_register() registers earlier from src/http_server.c.
- * Whoever gives that exception its own base owes this file the registration. */
+/* Ordering: RoomDeliveryException extends HttpServerException, so MINIT must
+ * have run http_server_exceptions_register() before this — it does, four steps
+ * earlier (src/http_server.c). Room itself inherits nothing and orders against
+ * nobody. */
+zend_class_entry *room_delivery_exception_ce = NULL;
+
 void php_room_minit(void)
 {
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+    room_delivery_exception_ce =
+        register_class_TrueAsync_RoomDeliveryException(http_server_exception_ce);
+
     room_ce = register_class_TrueAsync_Room();
     room_ce->create_object = room_create;
 
@@ -909,5 +861,4 @@ void php_room_minit(void)
 
     /* LOAD has no live source object and resolves the handler by class name. */
     room_ce->default_object_handlers = &room_handlers;
-#endif
 }

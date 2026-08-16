@@ -26,9 +26,9 @@
 #include "log/http_log.h"
 #include "static/static_handler.h"
 #include "http_send_file.h"
+#include "room/room_hub.h"
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 # include "websocket/php_websocket.h"
-# include "room/room_hub.h"
 #endif
 
 #ifdef HAVE_HTTP2
@@ -221,10 +221,8 @@ PHP_MINIT_FUNCTION(http_server)
 	/* Test-only C hooks; a no-op unless built with HTTP_SERVER_TEST_HOOKS. */
 	reactor_pool_test_register(type);
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
 	/* Reliable-room fault-injection hook; a no-op unless built with TAS_TEST_HOOKS. */
 	room_hub_test_register(type);
-#endif
 
 	return SUCCESS;
 }
@@ -275,13 +273,12 @@ PHP_RSHUTDOWN_FUNCTION(http_server)
 	http_compression_pool_shutdown();
 #endif
 
-#ifdef HAVE_HTTP_SERVER_WEBSOCKET
 	/* Runs while async's loop is still up, and not because of module order: the
 	 * reactor is torn down by ZEND_ASYNC_ENGINE_SHUTDOWN inside zend_deactivate(),
 	 * which php_request_shutdown reaches several steps after it has run every
-	 * module's RSHUTDOWN. */
+	 * module's RSHUTDOWN. Unconditional: a thread that subscribed to a room has
+	 * no other detach, whether or not WebSocket is built.  */
 	room_hub_thread_sweep();
-#endif
 
 	return SUCCESS;
 }
