@@ -96,7 +96,7 @@ struct room_receiver {
 
 /* `hub` is where this tree publishes its interest filter (room_hub.h). */
 room_tree_t *room_tree_create(struct room_hub_s *hub);
-void             room_tree_free(room_tree_t *tree);
+void         room_tree_free(room_tree_t *tree);
 
 /* A filter may carry wildcards; a name may not. Both reject an empty string and
  * anything past ROOM_TOPIC_MAX_LEVELS. */
@@ -112,9 +112,9 @@ bool room_topic_is_valid_name(const char *topic, size_t len);
  *
  * The caller owns the receiver and unsubscribes it before freeing it. */
 bool room_topic_subscribe(room_tree_t *tree, room_receiver_t *receiver,
-                        zend_string *filter, uint32_t max);
+                          zend_string *filter, uint32_t max);
 bool room_topic_unsubscribe(room_tree_t *tree, room_receiver_t *receiver,
-                          const zend_string *filter);
+                            const zend_string *filter);
 
 /* Every filter the receiver holds. `tree` may be NULL: a worker that detached
  * took its nodes with it, and only the receiver's own list is left to free. */
@@ -126,8 +126,8 @@ void room_topic_list(const room_receiver_t *receiver, zval *return_value);
 /* Receivers on THIS worker matching `topic`, each served once. Never suspends:
  * a peer whose transport is backed up drops the message (trySend semantics). */
 uint32_t room_topic_publish(room_tree_t *tree, const char *topic, size_t topic_len,
-                          const char *data, size_t len, bool binary,
-                          uint64_t except_id, void **shared);
+                            const char *data, size_t len, bool binary,
+                            uint64_t except_id, void **shared);
 
 /* Receivers on THIS worker matching `topic`, counted once each. */
 uint32_t room_topic_count(room_tree_t *tree, const char *topic, size_t topic_len);

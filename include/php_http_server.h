@@ -577,13 +577,14 @@ http_server_object *http_server_object_from_zend(zend_object *obj);
  * the config object's zval is held inside http_server_object. */
 http_server_config_t *http_server_get_config         (http_server_object *server);
 
-/* This server's WebSocket topic hub (room_hub_t*, void to keep the build gate out
- * of this header). NULL when the extension is built without WebSocket, or before
- * start(). */
+/* This server's room hub (room_hub_t*, void so this header need not pull in
+ * room/room_hub.h). Non-owning. NULL until something asks for one — start(), or
+ * an explicit enableRooms()/room() before it. */
 void *http_server_get_topic_hub(http_server_object *server);
 
 /* The same hub, created on demand — what lets a room be minted before start().
- * NULL in a build without WebSocket. */
+ * A worker clone never mints one: it returns whatever it inherited from the
+ * parent, NULL included. */
 void *http_server_topic_hub_ensure(http_server_object *server);
 
 /* Between start() and stop(). The room layer refuses to create a hub on a

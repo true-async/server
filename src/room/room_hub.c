@@ -84,7 +84,7 @@ typedef struct room_payload {
      * place one can rest — a mailbox, a subscriber's ring, a retry entry — is
      * emptied by the attachment's teardown, and the attachment drops its hub
      * reference after that. NULL for a body made without a hub in hand. */
-    room_hub_t    *hub;
+    room_hub_t     *hub;
     zend_atomic_int refcount;
     size_t          len;
     bool            binary;
@@ -116,10 +116,10 @@ typedef struct {
     room_cmd_kind_t kind;
     room_payload_t *payload;     /* PUBLISH — holds a reference */
     room_query_t   *query;       /* COUNT, COUNT_REPLY — holds a reference */
-    uint32_t      count;       /* COUNT_REPLY */
-    uint64_t      except_id;   /* PUBLISH */
-    size_t        topic_len;   /* PUBLISH, COUNT */
-    char          topic[1];
+    uint32_t        count;       /* COUNT_REPLY */
+    uint64_t        except_id;   /* PUBLISH */
+    size_t          topic_len;   /* PUBLISH, COUNT */
+    char            topic[1];
 } room_cmd_t;
 
 /* One still-unfilled destination in a parked reliable send: the target worker's
@@ -146,19 +146,22 @@ typedef struct retry_entry_s {
     struct retry_entry_s *next;
 
     zend_atomic_int       refcount;    /* caller (send) holds 1 across the park; queue holds 1 */
-    bool                  abandoned;   /* set by whoever resumes/cancels first; the other side skips the fire */
-    bool                  shutdown;    /* set by detach teardown so a woken send() reports SHUTDOWN, not a false timeout */
+    /* Set by whoever resumes or cancels first; the other side then skips the fire. */
+    bool                  abandoned;
+    /* Set by the detach teardown, so a woken send() reports SHUTDOWN and not a false timeout. */
+    bool                  shutdown;
 
-    room_payload_t         *payload;     /* shared body — the entry owns one ref */
+    room_payload_t       *payload;     /* shared body — the entry owns one ref */
     retry_target_t       *pending;     /* npending still-unfilled targets, compacted in place */
     uint32_t              npending;
 
     uint32_t              delivered;   /* targets a retry has landed on */
-    uint32_t              gone;         /* targets resolved as detached (mis-delivery avoided) */
+    uint32_t              gone;        /* targets resolved as detached (mis-delivery avoided) */
 
     uint64_t              except_id;   /* the publish's origin, excluded on the far tree */
     uint64_t              deadline_ms; /* ZEND_ASYNC_NOW() ms; the DRAINER owns this deadline */
-    zend_async_event_t   *waiter;      /* non-NULL only for a blocking send(); the caller disposes it */
+    /* Non-NULL only for a blocking send(); the caller disposes it. */
+    zend_async_event_t   *waiter;
 
     size_t                topic_len;
     char                  topic[1];    /* inline — rebuilt into each retry's room_cmd_t */
@@ -168,10 +171,10 @@ typedef struct retry_entry_s {
 typedef struct room_local_s {
     struct room_local_s *next;
     room_hub_t          *hub;
-    int                slot;
-    uint32_t           gen;
-    thread_mailbox_t  *inbox;
-    room_tree_t   *tree;
+    int                  slot;
+    uint32_t             gen;
+    thread_mailbox_t    *inbox;
+    room_tree_t         *tree;
 
     /* Server subscriptions held on this thread; detach closes whatever is left. */
     struct room_server_sub *subs;
@@ -202,7 +205,7 @@ typedef struct room_local_s {
  * may have freed. */
 typedef struct {
     zend_async_event_callback_t base;
-    room_hub_t                *hub;
+    room_hub_t                 *hub;
 } retry_cb_t;
 
 /* Keyed by hub, not one-per-thread: a topic tree is per-SERVER state, and
@@ -264,7 +267,7 @@ void room_hub_get_stats(room_hub_t *hub, room_hub_stats_t *out)
 /* `hub` only counts the allocation — it may be NULL for a subscription whose
  * attachment is already gone. */
 static room_payload_t *room_payload_new(room_hub_t *hub, const char *data, const size_t len,
-                                    const bool binary)
+                                        const bool binary)
 {
     if (hub != NULL) {
         (void) room_atomic_u64_add(&hub->bodies, 1);
@@ -304,7 +307,7 @@ static void room_query_release(room_query_t *query)
 }
 
 static room_cmd_t *room_cmd_new(const room_cmd_kind_t kind, const char *topic,
-                            const size_t topic_len)
+                                const size_t topic_len)
 {
     room_cmd_t *const cmd = pecalloc(1, sizeof(*cmd) + topic_len, 1);
     cmd->kind      = kind;
@@ -388,9 +391,9 @@ static room_tree_t *room_hub_local_tree(const room_hub_t *hub)
 }
 
 room_hub_subscribe_status_t room_hub_receiver_subscribe(room_hub_t *hub,
-                                                          room_receiver_t *receiver,
-                                                          zend_string *filter,
-                                                          const uint32_t max)
+                                                        room_receiver_t *receiver,
+                                                        zend_string *filter,
+                                                        const uint32_t max)
 {
     room_tree_t *const tree = room_hub_local_tree(hub);
 
@@ -406,7 +409,7 @@ room_hub_subscribe_status_t room_hub_receiver_subscribe(room_hub_t *hub,
 }
 
 void room_hub_receiver_unsubscribe(room_hub_t *hub, room_receiver_t *receiver,
-                                    const zend_string *filter)
+                                   const zend_string *filter)
 {
     (void) room_topic_unsubscribe(room_hub_local_tree(hub), receiver, filter);
 }
@@ -421,7 +424,7 @@ void room_hub_receiver_unsubscribe_all(room_hub_t *hub, room_receiver_t *receive
 /* Two independent hashes, then Kirsch-Mitzenmacher: the i-th probe is
  * h1 + i*h2. h2 is forced odd so the sequence cannot get stuck on one bucket. */
 static void room_interest_probe(const char *key, const size_t len,
-                              uint32_t bucket[ROOM_INTEREST_PROBES])
+                                uint32_t bucket[ROOM_INTEREST_PROBES])
 {
     const uint32_t h1 = (uint32_t) zend_inline_hash_func(key, len);
 
@@ -441,7 +444,7 @@ static void room_interest_probe(const char *key, const size_t len,
 /* A no-op once the slot is retired: detach nulls hub->interest[slot] before
  * draining, and that drain can tear a session down and unsubscribe it. */
 static void room_interest_bump(room_hub_t *hub, const char *filter,
-                             const size_t prefix_len, const int delta)
+                               const size_t prefix_len, const int delta)
 {
     const room_local_t *const local = room_local_of(hub);
 
@@ -477,7 +480,7 @@ typedef struct {
 } room_interest_t;
 
 static void room_interest_build(room_interest_t *interest, const char *topic,
-                              const size_t topic_len)
+                                const size_t topic_len)
 {
     room_topic_prefixes_t prefixes;
 
@@ -496,7 +499,7 @@ static void room_interest_build(room_interest_t *interest, const char *topic,
 /* Called under `admin`, which is also what keeps the filter from being freed
  * under us by a concurrent detach. */
 static bool room_interest_matches(const room_hub_t *hub, const int slot,
-                                const room_interest_t *interest)
+                                  const room_interest_t *interest)
 {
     zend_atomic_int *const counters = hub->interest[slot];
 
@@ -564,22 +567,22 @@ static void room_hub_drain(void **items, const size_t count, void *arg);
 struct room_server_sub {
     struct room_server_sub *next;
     room_local_t           *local;
-    zend_string          *filter;    /* owned; the subscription's name, for diagnostics */
-    room_receiver_t   receiver;  /* what the tree holds */
-    bool                  parked;    /* a recv holds this subscription; a second one is refused */
+    zend_string            *filter;    /* owned; the subscription's name, for diagnostics */
+    room_receiver_t         receiver;  /* what the tree holds */
+    bool                    parked;    /* a recv holds this subscription; a second is refused */
 
     room_payload_t         *ring[ROOM_SERVER_SUB_RING];
-    uint32_t              head;
-    uint32_t              size;
-    uint64_t              lost;      /* monotonic, never reset */
+    uint32_t                head;
+    uint32_t                size;
+    uint64_t                lost;      /* monotonic, never reset */
 
-    zend_async_event_t   *waiter;    /* non-NULL only while a recv is parked */
-    bool                  closed;
-    uint32_t              refcount;  /* the tree's side and the caller's side */
+    zend_async_event_t     *waiter;    /* non-NULL only while a recv is parked */
+    bool                    closed;
+    uint32_t                refcount;  /* the tree's side and the caller's side */
 };
 
 static bool room_server_sub_deliver(room_receiver_t *receiver, const char *data,
-                                  const size_t len, const bool binary, void **shared)
+                                    const size_t len, const bool binary, void **shared)
 {
     room_server_sub_t *const sub =
         (room_server_sub_t *)((char *) receiver - offsetof(room_server_sub_t, receiver));
@@ -728,7 +731,7 @@ int room_hub_attach(room_hub_t *hub)
     /* The cadence is the hub's, taken here rather than from whichever send
      * happens to arm the timer first. */
     local->retry_interval_ms = hub->retry_interval_ms;
-    room_locals    = local;
+    room_locals = local;
 
     return slot;
 }
@@ -873,12 +876,11 @@ static bool room_local_recv_keepalive(room_local_t *local, const bool parked)
 
 /* ------------------------------------------------------------- park event
  *
- * The reactor reference a parked receiver takes used to be released by the C frame
- * that parked, and a frame runs its epilogue only if it unwinds: a fatal error
- * longjmps past it, leaving the worker with a live handle, and the scheduler
- * aborts the process on that. A zend_try was the plaster. The reference now
- * belongs to the event the coroutine parks on, whose start() and stop() the
- * scheduler drives itself:
+ * The reactor reference a parked receiver takes belongs to the EVENT the coroutine
+ * parks on, not to the C frame that parked. A frame runs its epilogue only if it
+ * unwinds — a fatal error longjmps past it, and a reference released there would
+ * leave the worker holding a live handle the scheduler aborts the process over.
+ * The event's start() and stop() are driven by the scheduler itself:
  *
  *   start()   — the coroutine is going to sleep: hold this thread's reactor open,
  *   stop()    — it is ready to run again: let go,
@@ -1025,7 +1027,7 @@ static room_park_event_t *room_park_event_new(room_server_sub_t *sub)
 }
 
 room_hub_recv_status_t room_hub_recv(room_server_sub_t *sub, const int64_t timeout_ms,
-                                       room_payload_t **out)
+                                     room_payload_t **out)
 {
     *out = NULL;
 
@@ -1075,8 +1077,8 @@ room_hub_recv_status_t room_hub_recv(room_server_sub_t *sub, const int64_t timeo
         /* trans_event: the waker takes our only reference to the EVENT, so the
          * scheduler's own teardown disposes it — after a normal resume, after a
          * cancellation, and after a fatal error that longjmps past every line
-         * below. The reactor reference goes with it, which is the whole of what
-         * the zend_try here used to protect. */
+         * below. The reactor reference goes with it, which is why no zend_try is
+         * needed around the park. */
         if (EXPECTED(zend_async_resume_when(coroutine, &park->base, /*trans_event*/ true,
                                             zend_async_waker_callback_resolve, NULL))) {
             ZEND_ASYNC_SUSPEND();
@@ -1097,8 +1099,9 @@ room_hub_recv_status_t room_hub_recv(room_server_sub_t *sub, const int64_t timeo
 
     /* Blind, and safe only because `parked` is cleared in the same breath: no
      * second park can have replaced the pointer, and nothing suspends between
-     * these two lines. The pair is what an earlier version of this code broke from
-     * the other end, by letting the event clear `parked` one resume too early. */
+     * these two lines. The two belong to this frame and are cleared only here —
+     * an event that cleared `parked` on resume would open a gap a second recv()
+     * slips through. */
     sub->waiter = NULL;
     sub->parked = false;
 
@@ -1398,10 +1401,10 @@ static uint32_t room_hub_fanout_locked(room_hub_t *hub, const room_local_t *loca
         uint64_t *skipped_out, uint64_t *dropped_out, uint32_t *workers_out)
 {
     room_payload_t *payload = *payload_io;
-    uint32_t      posted  = 0;
-    uint32_t      workers = 0;
-    uint64_t      skipped = 0;
-    uint64_t      dropped = 0;
+    uint32_t        posted  = 0;
+    uint32_t        workers = 0;
+    uint64_t        skipped = 0;
+    uint64_t        dropped = 0;
 
     for (int slot = 0; slot < hub->slots_used; slot++) {
         if (hub->inbox[slot] == NULL) {
@@ -1483,9 +1486,9 @@ room_hub_publish_result_t room_hub_publish(room_hub_t *hub,
      * subscribers still costs one body. The fan-out's release below is the one
      * that ends this reference. */
     room_payload_t *payload = local_body;
-    uint32_t      workers = 0;
-    uint64_t      skipped = 0;
-    uint64_t      dropped = 0;
+    uint32_t        workers = 0;
+    uint64_t        skipped = 0;
+    uint64_t        dropped = 0;
 
     tsrm_mutex_lock(hub->admin);
     const uint32_t posted = room_hub_fanout_locked(hub, local, topic, topic_len,
@@ -1513,7 +1516,7 @@ room_hub_publish_result_t room_hub_publish(room_hub_t *hub,
  * out in query->pending. A worker with no interest would answer 0, so skipping it
  * is not a shortcut — it is the same answer, sooner. */
 static void room_hub_ask_others(room_hub_t *hub, const int own_slot, room_query_t *query,
-                              const char *topic, const size_t topic_len)
+                                const char *topic, const size_t topic_len)
 {
     room_interest_t interest;
     room_interest_build(&interest, topic, topic_len);
@@ -1544,7 +1547,7 @@ static void room_hub_ask_others(room_hub_t *hub, const int own_slot, room_query_
 }
 
 uint32_t room_hub_count(room_hub_t *hub, const char *topic, const size_t topic_len,
-                      const uint32_t timeout_ms)
+                        const uint32_t timeout_ms)
 {
     const room_local_t *const local = hub != NULL ? room_local_of(hub) : NULL;
 
@@ -1709,7 +1712,7 @@ static void retry_entry_finish(retry_entry_t *e)
 /* -------------------------------------------------------------- the drainer */
 
 static void room_hub_retry_cb_dispose(zend_async_event_callback_t *cb,
-                                       zend_async_event_t *event)
+                                      zend_async_event_t *event)
 {
     (void) event;
     efree(cb);
@@ -1720,9 +1723,9 @@ static void room_hub_retry_tick_fn(zend_async_event_t *event,
 {
     (void) event; (void) result;
 
-    retry_cb_t *const  cb    = (retry_cb_t *) callback;
-    room_hub_t *const hub   = cb->hub;
-    room_local_t *const  local = room_local_of(hub);
+    retry_cb_t *const   cb    = (retry_cb_t *) callback;
+    room_hub_t *const   hub   = cb->hub;
+    room_local_t *const local = room_local_of(hub);
 
     if (exception != NULL) {
         return;   /* loop teardown — the reactor is going away */
@@ -2070,9 +2073,9 @@ room_hub_send_result_t room_hub_try_send(room_hub_t *hub, const char *topic, con
 
     room_local_t *const local = room_local_of(hub);
 
-    retry_target_t full[ROOM_HUB_MAX_WORKERS];
-    uint32_t       nfull;
-    room_payload_t  *payload;
+    retry_target_t  full[ROOM_HUB_MAX_WORKERS];
+    uint32_t        nfull;
+    room_payload_t *payload;
 
     const room_hub_publish_result_t out = room_hub_send_fanout(hub, local, topic, topic_len,
         data, len, binary, except_id, full, &nfull, &payload);
@@ -2166,9 +2169,9 @@ room_hub_send_result_t room_hub_send(room_hub_t *hub, const char *topic, const s
 
     room_local_t *const local = room_local_of(hub);
 
-    retry_target_t full[ROOM_HUB_MAX_WORKERS];
-    uint32_t       nfull;
-    room_payload_t  *payload;
+    retry_target_t  full[ROOM_HUB_MAX_WORKERS];
+    uint32_t        nfull;
+    room_payload_t *payload;
 
     const room_hub_publish_result_t out = room_hub_send_fanout(hub, local, topic, topic_len,
         data, len, binary, except_id, full, &nfull, &payload);

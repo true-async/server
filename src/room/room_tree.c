@@ -24,21 +24,21 @@ typedef enum {
 typedef struct room_topic_node {
     struct room_topic_node *parent;
     room_node_kind_t        kind;
-    zend_string          *level;      /* LITERAL only — the key under parent->children */
+    zend_string            *level;    /* LITERAL only — the key under parent->children */
 
-    HashTable            *children;   /* level -> node*, allocated on first literal child */
+    HashTable              *children; /* level -> node*, allocated on first literal child */
     struct room_topic_node *plus;
     struct room_topic_node *hash;
 
     /* Receivers AT this node. Dense, not a hash: delivery only walks it, and the
      * walk allocates nothing per receiver. NULL is a tombstone, and `dead` counts
      * them (room_node_detach). */
-    room_receiver_t **subs;
-    uint32_t              count;
-    uint32_t              cap;
-    uint32_t              dead;
+    room_receiver_t       **subs;
+    uint32_t                count;
+    uint32_t                cap;
+    uint32_t                dead;
 
-    bool                  dirty;      /* queued for compaction once the walk ends */
+    bool                    dirty;    /* queued for compaction once the walk ends */
 } room_topic_node_t;
 
 struct room_tree {
@@ -50,16 +50,16 @@ struct room_tree {
     /* Bumped once per publish/count. A receiver stamped with the current mark
      * has already been served this pass, so overlapping filters (`a/b` and
      * `a/#`) deliver one copy, not two. */
-    uint64_t          mark;
+    uint64_t            mark;
 
     /* A send can tear its own session down, re-entering unsubscribe mid-walk.
      * While the walk is in flight a removal only tombstones, and the node is
      * queued here — compacting or pruning it under the walk would free the very
      * node the walk is standing on. */
-    uint32_t          walking;
+    uint32_t            walking;
     room_topic_node_t **dirty;
-    uint32_t          dirty_count;
-    uint32_t          dirty_cap;
+    uint32_t            dirty_count;
+    uint32_t            dirty_cap;
 };
 
 /* ---------------------------------------------------------------- parsing */
@@ -193,7 +193,7 @@ bool room_topic_prefixes(const char *topic, const size_t topic_len, room_topic_p
 /* ------------------------------------------------------------------ nodes */
 
 static room_topic_node_t *room_node_child(room_topic_node_t *parent, const char *level,
-                                      const size_t len, const bool create)
+                                          const size_t len, const bool create)
 {
     if (len == 1 && level[0] == '+') {
         if (parent->plus == NULL && create) {
@@ -338,11 +338,11 @@ static void room_node_compact(room_topic_node_t *node)
 typedef struct room_topic_sub {
     struct room_topic_sub *next;
     room_topic_node_t     *node;
-    zend_string         *filter;
+    zend_string           *filter;
 } room_topic_sub_t;
 
 static room_topic_sub_t *room_sub_find(const room_receiver_t *receiver,
-                                   const zend_string *filter)
+                                       const zend_string *filter)
 {
     for (room_topic_sub_t *sub = receiver->filters; sub != NULL; sub = sub->next) {
         if (zend_string_equals(sub->filter, filter)) {
@@ -384,7 +384,7 @@ static void room_tree_settle(room_tree_t *tree)
 }
 
 static void room_node_detach(room_tree_t *tree, room_topic_node_t *node,
-                           const room_receiver_t *receiver)
+                             const room_receiver_t *receiver)
 {
     uint32_t idx = node->count;
 
@@ -446,7 +446,7 @@ void room_tree_free(room_tree_t *tree)
 }
 
 static void room_interest_publish(struct room_hub_s *hub, const zend_string *filter,
-                                const bool joining)
+                                  const bool joining)
 {
     const size_t prefix =
         room_topic_interest_prefix(ZSTR_VAL(filter), ZSTR_LEN(filter));
@@ -471,7 +471,7 @@ static uint32_t room_sub_count(const room_receiver_t *receiver)
 
 /* Creates the missing levels; returns the leaf so the caller can record it. */
 static room_topic_node_t *room_node_add(room_tree_t *tree, const room_topic_levels_t *levels,
-                                    room_receiver_t *receiver)
+                                        room_receiver_t *receiver)
 {
     room_topic_node_t *node = &tree->root;
 
@@ -491,7 +491,7 @@ static room_topic_node_t *room_node_add(room_tree_t *tree, const room_topic_leve
 }
 
 bool room_topic_subscribe(room_tree_t *tree, room_receiver_t *receiver,
-                        zend_string *filter, const uint32_t max)
+                          zend_string *filter, const uint32_t max)
 {
     /* An id of 0 collides with "exclude nobody" and the receiver would then be
      * skipped by every publish, silently. Free in release, loud under the
@@ -526,7 +526,7 @@ bool room_topic_subscribe(room_tree_t *tree, room_receiver_t *receiver,
 }
 
 static void room_sub_drop(room_tree_t *tree, room_receiver_t *receiver,
-                        room_topic_sub_t *sub, room_topic_sub_t *prev)
+                          room_topic_sub_t *sub, room_topic_sub_t *prev)
 {
     room_node_detach(tree, sub->node, receiver);
 
@@ -546,7 +546,7 @@ static void room_sub_drop(room_tree_t *tree, room_receiver_t *receiver,
 }
 
 bool room_topic_unsubscribe(room_tree_t *tree, room_receiver_t *receiver,
-                          const zend_string *filter)
+                            const zend_string *filter)
 {
     if (tree == NULL) {
         return false;   /* the worker detached; see room_topic_unsubscribe_all */
@@ -649,7 +649,7 @@ static void room_topic_visit(room_topic_visit_t *visit, room_topic_node_t *node)
 }
 
 static void room_topic_walk(room_topic_visit_t *visit, room_topic_node_t *node,
-                          const room_topic_levels_t *levels, const uint32_t i)
+                            const room_topic_levels_t *levels, const uint32_t i)
 {
     /* '#' takes the whole remainder — including none of it, which is why
      * "sport/#" matches "sport" itself. */
@@ -677,7 +677,7 @@ static void room_topic_walk(room_topic_visit_t *visit, room_topic_node_t *node,
 }
 
 static uint32_t room_topic_match(room_tree_t *tree, const char *topic,
-                               const size_t topic_len, room_topic_visit_t *visit)
+                                 const size_t topic_len, room_topic_visit_t *visit)
 {
     room_topic_levels_t levels;
 
@@ -700,8 +700,8 @@ static uint32_t room_topic_match(room_tree_t *tree, const char *topic,
 }
 
 uint32_t room_topic_publish(room_tree_t *tree, const char *topic, const size_t topic_len,
-                          const char *data, const size_t len, const bool binary,
-                          const uint64_t except_id, void **shared)
+                            const char *data, const size_t len, const bool binary,
+                            const uint64_t except_id, void **shared)
 {
     room_topic_visit_t visit = {
         .data      = data,

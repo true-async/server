@@ -86,8 +86,8 @@ typedef struct ws_session_t {
      * `hub` is this session's server's hub, snapshotted at init rather than
      * looked up per call: teardown must still find it after conn has begun to
      * come apart. */
-    struct room_hub_s      *hub;
-    room_receiver_t   receiver;
+    struct room_hub_s *hub;
+    room_receiver_t    receiver;
 
     /* Borrowed back-pointer for callbacks. The session's lifetime is
      * a strict subset of conn's, so no refcount needed. For H2 this is
