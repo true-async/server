@@ -11,10 +11,11 @@ namespace TrueAsync;
  * {@see HttpServer::room()}.
  *
  * Publishing through it reaches every subscriber of the topic across all
- * workers — WebSocket connections that called {@see WebSocket::subscribe()} —
- * with no sending connection, so nobody is excluded. Unlike
- * {@see WebSocket::publish()} it needs no connection, so a background producer
- * (a coroutine that is not a socket) can push into a room.
+ * workers — a coroutine that called {@see Room::subscribe()}, or, in a build
+ * with WebSocket, a connection that called `WebSocket::subscribe()` — with no
+ * sending connection, so nobody is excluded. A room needs no connection at all:
+ * a background producer can push into one, and a build configured with
+ * --disable-websocket serves rooms the same way.
  *
  * A handle owns a reference to the topic hub, so it keeps publishing after the
  * {@see HttpServer} that minted it is released.

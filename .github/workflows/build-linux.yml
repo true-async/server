@@ -548,6 +548,50 @@ jobs:
             --set-timeout 120 \
             tests/phpt
 
+      # A room is not a WebSocket feature, and the only thing that proves it is
+      # building the configuration that has no WebSocket. Two defects reached
+      # main before this gate existed, both invisible to every other job: an
+      # extension that linked and then failed at dlopen, and a thread that never
+      # detached because its sweep sat behind the WebSocket guard. Debug leg
+      # only — one build of the extension, against the PHP already built here.
+      - name: Rooms without WebSocket — build and probe
+        if: matrix.debug == true
+        run: |
+          set -eux
+          cp -a "$GITHUB_WORKSPACE/http-server" "$GITHUB_WORKSPACE/http-server-nows"
+          cd "$GITHUB_WORKSPACE/http-server-nows"
+          make clean >/dev/null || true
+          phpize --clean >/dev/null 2>&1 || true
+          phpize
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          ./configure \
+            --with-php-config=/usr/local/bin/php-config \
+            --enable-http-server \
+            --enable-http2 \
+            --enable-http3 \
+            --with-openssl \
+            --with-nghttp2=/usr/local \
+            --with-nghttp3=/usr/local \
+            --with-ngtcp2=/usr/local \
+            --disable-websocket
+          make -j"$(nproc)"
+          # A shared object may carry undefined symbols, so linking proves
+          # nothing — loading is the test. extension_dir, not extension: the
+          # scan dir already loads this module by name from the WebSocket build,
+          # and a second load of the same name is discarded with a warning.
+          /usr/local/bin/php -d extension_dir="$PWD/modules" \
+            -r 'exit(class_exists("TrueAsync\\Room") && !class_exists("TrueAsync\\WebSocket") ? 0 : 1);'
+          # run-tests exits 0 when every test skips, so count what ran: a
+          # gate that runs nothing passes and reads like coverage.
+          /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            -d opcache.protect_memory=0 \
+            -d extension_dir="$PWD/modules" \
+            -P -q -g FAIL,BORK,LEAK,XLEAK \
+            --no-progress --offline --show-diff --set-timeout 120 \
+            tests/phpt/room | tee /tmp/nows-tests.log
+          passed=$(sed -n 's/^Tests passed *: *\([0-9]*\).*/\1/p' /tmp/nows-tests.log)
+          test "${passed:-0}" -ge 10
+
       - name: Collect core dumps + backtraces
         if: failure()
         run: |

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BC: `RoomDeliveryException` extends `HttpServerException`, not `WebSocketException`.** A build configured with `--disable-websocket` serves rooms, and in it `WebSocketException` does not exist. A handler that caught `WebSocketException` around `Room::send()`, `Room::trySend()` or `HttpServer::send()` no longer catches it — catch `RoomDeliveryException` or `HttpServerException` instead. Nothing else about the exception changed: the `delivered` and `pending` counts and the message are what they were.
+- **Rooms build without WebSocket.** The pub/sub core is `src/room/` and no longer knows what a connection is; `--disable-websocket` compiles it, registers `Room` and `RoomDeliveryException`, and delivers a publish from one thread to a `recv()` in another. `getRuntimeStats()` reports the room counters in every build, and the request-shutdown sweep that detaches a subscribed thread now runs in every build — without WebSocket it did not, so such a thread leaked its mailbox and left a live libuv handle behind.
+
 ## [0.12.0] - 2026-08-15
 
 ### Added

@@ -72,11 +72,10 @@ final class HttpServer
      * Enable cross-worker rooms (pub/sub topics) on this server.
      *
      * A room is a topic that any code can publish to — the message fans out to
-     * every subscriber across all workers, over the same engine WebSocket
-     * connections use with {@see WebSocket::subscribe()}. Registering a
-     * WebSocket handler already allocates the room hub, so call this only when
-     * you want to publish rooms without a WebSocket handler, or to make the
-     * opt-in explicit. Must be called before start().
+     * every subscriber across all workers, over the same engine a WebSocket
+     * connection uses with {@see WebSocket::subscribe()}. This is the only way
+     * to allocate the room hub, and it must be called before start(); a build
+     * configured with --disable-websocket serves rooms the same way.
      *
      * @return static
      */

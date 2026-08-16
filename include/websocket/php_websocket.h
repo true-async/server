@@ -29,7 +29,6 @@ extern zend_class_entry *websocket_exception_ce;
 extern zend_class_entry *websocket_closed_exception_ce;
 extern zend_class_entry *websocket_backpressure_exception_ce;
 extern zend_class_entry *websocket_concurrent_read_exception_ce;
-extern zend_class_entry *room_delivery_exception_ce;
 
 /*
  * Register all five WebSocket-related classes (+ the close-code enum

@@ -520,6 +520,8 @@ if test "$PHP_HTTP_SERVER" != "no"; then
   dnl Phase 1: HTTP/1.1 Parser
   dnl Phase 2: Server classes
   http_server_sources="
+    src/room/room_hub.c
+    src/room/room_tree.c
     src/room/php_room.c
     deps/llhttp/llhttp.c
     deps/llhttp/api.c
@@ -654,8 +656,6 @@ if test "$PHP_HTTP_SERVER" != "no"; then
       deps/wslay/lib/wslay_stack.c
       src/websocket/websocket_strategy.c
       src/websocket/ws_session.c
-      src/room/room_hub.c
-      src/room/room_tree.c
       src/websocket/ws_handshake.c
       src/websocket/ws_dispatch.c
       src/websocket/php_websocket.c

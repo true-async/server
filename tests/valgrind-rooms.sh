@@ -40,15 +40,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EXT_DIR="${2:-$ROOT/modules}"
 
 TESTS=(
-    tests/phpt/websocket/068-room-outlives-server.phpt
+    tests/phpt/room/001-rooms-without-websocket.phpt
+    tests/phpt/room/068-room-outlives-server.phpt
     tests/phpt/websocket/069-room-transfers-to-pool.phpt
-    tests/phpt/websocket/070-room-receive-in-pool.phpt
-    tests/phpt/websocket/071-room-recv-contracts.phpt
-    tests/phpt/websocket/072-room-recv-no-timeout.phpt
-    tests/phpt/websocket/075-room-loss-across-threads.phpt
-    tests/phpt/websocket/076-room-one-body-per-publish.phpt
-    tests/phpt/websocket/077-room-send-reports-reach.phpt
-    tests/phpt/websocket/078-room-detach-every-exit.phpt
+    tests/phpt/room/070-room-receive-in-pool.phpt
+    tests/phpt/room/071-room-recv-contracts.phpt
+    tests/phpt/room/072-room-recv-no-timeout.phpt
+    tests/phpt/room/075-room-loss-across-threads.phpt
+    tests/phpt/room/076-room-one-body-per-publish.phpt
+    tests/phpt/room/077-room-send-reports-reach.phpt
+    tests/phpt/room/078-room-detach-every-exit.phpt
 )
 
 cd "$ROOT"
