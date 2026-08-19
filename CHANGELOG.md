@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A handler can ask whether the client is still there (#175).** `HttpResponse::isWritable()` reports whether output is still possible — `end()` was not called, the response is not sealed by `sendFile()`, and the peer has not gone. The only predicate before it was `sendable()`, which also answers false on a full queue, so a streaming loop could not separate "yield and continue" from "stop"; our own SSE example read it as the latter, and so did the loop that truncated a proxied body at ~100 KB in YanGusik/laravel-spawn#60. A false answer from `isWritable()` is final, which is what makes it safe to break on. An optional `is_alive` op on the stream vtable backs it in all four transports; on HTTP/1 a peer's departure only becomes visible when a write fails, so that discovery is recorded on the request and answered afterwards instead of being rediscovered by a second doomed write.
+
 ### Changed
 
 - **BC: `RoomDeliveryException` extends `HttpServerException`, not `WebSocketException`.** A build configured with `--disable-websocket` serves rooms, and in it `WebSocketException` does not exist. A handler that caught `WebSocketException` around `Room::send()`, `Room::trySend()` or `HttpServer::send()` no longer catches it — catch `RoomDeliveryException` or `HttpServerException` instead. Nothing else about the exception changed: the `delivered` and `pending` counts and the message are what they were.
