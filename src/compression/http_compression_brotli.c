@@ -185,6 +185,42 @@ static http_encoder_status_t br_finish(http_encoder_t *base,
     return HTTP_ENC_NEED_OUTPUT;
 }
 
+static http_encoder_status_t br_flush(http_encoder_t *base,
+                                      void *out, size_t out_cap, size_t *out_produced)
+{
+    brotli_encoder_t *enc = (brotli_encoder_t *)base;
+
+    /* BROTLI_OPERATION_FLUSH terminates the current meta-block and pads
+     * to a byte boundary, which makes everything fed so far decodable
+     * while the stream stays open. */
+    size_t          avail_in  = 0;
+    const uint8_t  *next_in   = NULL;
+    size_t          avail_out = out_cap;
+    uint8_t        *next_out  = (uint8_t *)out;
+
+    if (UNEXPECTED(!BrotliEncoderCompressStream(enc->state, BROTLI_OPERATION_FLUSH,
+                                                &avail_in, &next_in,
+                                                &avail_out, &next_out, NULL))) {
+        if (out_produced) *out_produced = out_cap - avail_out;
+        return HTTP_ENC_ERROR;
+    }
+
+    size_t produced = out_cap - avail_out;
+
+    if (UNEXPECTED(BrotliEncoderHasMoreOutput(enc->state))) {
+        produced += br_drain_output(enc->state,
+            (unsigned char *)out + produced, out_cap - produced);
+    }
+
+    if (out_produced) *out_produced = produced;
+
+    if (BrotliEncoderHasMoreOutput(enc->state)) {
+        return HTTP_ENC_NEED_OUTPUT;
+    }
+
+    return HTTP_ENC_DONE;
+}
+
 static void br_destroy(http_encoder_t *base)
 {
     if (base == NULL) return;
@@ -252,6 +288,7 @@ const http_encoder_vtable_t http_compression_brotli_vt = {
     .create              = br_create,
     .write               = br_write,
     .finish              = br_finish,
+    .flush               = br_flush,
     .destroy             = br_destroy,
     .compress_oneshot    = br_compress_oneshot,
     .max_compressed_size = br_max_compressed_size,

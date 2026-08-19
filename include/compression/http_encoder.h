@@ -31,7 +31,8 @@ typedef enum {
 typedef enum {
     HTTP_ENC_OK = 0,         /* progress made; caller may loop */
     HTTP_ENC_NEED_OUTPUT,    /* output buffer full — drain and call again */
-    HTTP_ENC_DONE,           /* finish() flushed everything */
+    HTTP_ENC_DONE,           /* the op has nothing left to give: finish()
+                                closed the stream, flush() closed a block */
     HTTP_ENC_ERROR
 } http_encoder_status_t;
 
@@ -60,6 +61,17 @@ typedef struct http_encoder_vtable {
      * called repeatedly with a refreshed output buffer until DONE. */
     http_encoder_status_t (*finish)(http_encoder_t *enc,
                                     void *out, size_t out_cap, size_t *out_produced);
+
+    /* Optional: close the current block so that everything handed to
+     * write() so far decodes on the receiving side, leaving the stream
+     * open for further write() calls. May need to be called repeatedly
+     * with a refreshed output buffer until DONE. NULL on the slot means
+     * the codec offers no mid-stream flush; the caller skips it. The
+     * call costs a block boundary — for gzip, closing the current block
+     * plus a 5-byte empty stored block, about 8 bytes per call at level
+     * 6 — so flushing per small chunk trades ratio for immediacy. */
+    http_encoder_status_t (*flush)(http_encoder_t *enc,
+                                   void *out, size_t out_cap, size_t *out_produced);
 
     /* Optional: cheap re-init for pool reuse. Returns true on success.
      * NULL or false → caller must destroy and create a fresh encoder.

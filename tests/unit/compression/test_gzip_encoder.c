@@ -72,6 +72,45 @@ static unsigned char *gunzip(const unsigned char *in, size_t in_len, size_t *out
     return out;
 }
 
+/* Inflate a gzip stream that is not finished yet, returning what the
+ * decoder can emit from the bytes seen so far. Everything a flush closed
+ * comes out here; anything the encoder still holds does not. Caller frees. */
+static unsigned char *gunzip_prefix(const unsigned char *in, size_t in_len, size_t *out_len)
+{
+    ZS s;
+    memset(&s, 0, sizeof(s));
+    assert_int_equal(ZS_INFLATE_INIT2(&s, 15 + 32), Z_OK);
+
+    size_t cap = in_len * 8 + 256;
+    unsigned char *out = malloc(cap);
+    size_t produced = 0;
+
+    s.next_in  = (void *)(uintptr_t)in;
+    s.avail_in = (unsigned)in_len;
+
+    for (;;) {
+        s.next_out  = out + produced;
+        s.avail_out = (unsigned)(cap - produced);
+        const int rc = ZS_INFLATE(&s, Z_SYNC_FLUSH);
+        produced = cap - s.avail_out;
+
+        if (rc == Z_STREAM_END || rc == Z_BUF_ERROR) break;
+        assert_int_equal(rc, Z_OK);
+
+        if (s.avail_out == 0) {
+            cap *= 2;
+            out = realloc(out, cap);
+            continue;
+        }
+
+        if (s.avail_in == 0) break;
+    }
+
+    ZS_INFLATE_END(&s);
+    *out_len = produced;
+    return out;
+}
+
 /* Drive the encoder through write+finish with a chosen output buffer
  * size, accumulating into a fresh malloc'd byte vector. */
 static unsigned char *gzip_via_encoder(const unsigned char *in, size_t in_len,
@@ -182,6 +221,111 @@ static void test_tiny_output_buffer_forces_loop(void **state)
     roundtrip_assert((const unsigned char *)msg, strlen(msg), 16);
 }
 
+/* Write one chunk, flush, and assert the decoder can already read that
+ * chunk in full — the mid-stream contract of the flush slot. Then write a
+ * second chunk and finish, and assert the whole stream reads back. The
+ * output buffer size is a parameter so the same body covers the case
+ * where every call has room and the case where flush() must loop on
+ * NEED_OUTPUT. */
+static void flush_prefix_assert(size_t out_chunk, bool expect_flush_loop)
+{
+    const char *first  = "first chunk, flushed while the stream is still open. ";
+    const char *second = "second chunk, written after the flush.";
+
+    const http_encoder_vtable_t *vt = http_compression_lookup(HTTP_CODEC_GZIP);
+    assert_non_null(vt->flush);
+    http_encoder_t *enc = vt->create(6);
+    assert_non_null(enc);
+
+    const size_t cap = 4096;                 /* both chunks compress well under this */
+    unsigned char *out = malloc(cap);
+    size_t produced = 0;
+    size_t flush_need_output = 0;
+    unsigned char *chunk = malloc(out_chunk);
+
+    const char *parts[2] = { first, second };
+
+    for (int i = 0; i < 2; i++) {
+        const unsigned char *in = (const unsigned char *)parts[i];
+        const size_t in_len = strlen(parts[i]);
+        size_t fed = 0;
+
+        while (fed < in_len) {
+            size_t consumed = 0, written = 0;
+            const http_encoder_status_t st = vt->write(enc,
+                in + fed, in_len - fed, &consumed, chunk, out_chunk, &written);
+            assert_true(st == HTTP_ENC_OK || st == HTTP_ENC_NEED_OUTPUT);
+            assert_true(produced + written <= cap);
+            memcpy(out + produced, chunk, written);
+            produced += written;
+            fed += consumed;
+        }
+
+        if (i == 0) {
+            for (;;) {
+                size_t written = 0;
+                const http_encoder_status_t st = vt->flush(enc, chunk, out_chunk, &written);
+                assert_true(produced + written <= cap);
+                memcpy(out + produced, chunk, written);
+                produced += written;
+
+                if (st == HTTP_ENC_DONE) break;
+                assert_int_equal(st, HTTP_ENC_NEED_OUTPUT);
+                flush_need_output++;
+            }
+
+            /* The flushed prefix decodes to exactly the first chunk. */
+            size_t seen_len = 0;
+            unsigned char *seen = gunzip_prefix(out, produced, &seen_len);
+            assert_int_equal(seen_len, strlen(first));
+            assert_memory_equal(seen, first, seen_len);
+            free(seen);
+        }
+    }
+
+    for (;;) {
+        size_t written = 0;
+        const http_encoder_status_t st = vt->finish(enc, chunk, out_chunk, &written);
+        assert_true(produced + written <= cap);
+        memcpy(out + produced, chunk, written);
+        produced += written;
+
+        if (st == HTTP_ENC_DONE) break;
+        assert_int_equal(st, HTTP_ENC_NEED_OUTPUT);
+    }
+
+    vt->destroy(enc);
+
+    if (expect_flush_loop) {
+        assert_true(flush_need_output > 0);
+    }
+
+    size_t back_len = 0;
+    unsigned char *back = gunzip(out, produced, &back_len);
+    assert_int_equal(back_len, strlen(first) + strlen(second));
+    assert_memory_equal(back, first, strlen(first));
+    assert_memory_equal(back + strlen(first), second, strlen(second));
+
+    free(back);
+    free(chunk);
+    free(out);
+}
+
+static void test_flush_exposes_first_chunk(void **state)
+{
+    (void)state;
+    flush_prefix_assert(4096, false);
+}
+
+static void test_flush_tiny_output_buffer_forces_loop(void **state)
+{
+    (void)state;
+    /* 8 bytes is smaller than the closed block plus the empty stored
+     * block a sync flush emits, so flush() answers NEED_OUTPUT at least
+     * once and the caller's loop has to carry it to DONE. */
+    flush_prefix_assert(8, true);
+}
+
 static void test_create_clamps_level(void **state)
 {
     (void)state;
@@ -201,6 +345,8 @@ int main(void)
         cmocka_unit_test(test_empty_body),
         cmocka_unit_test(test_large_body_crosses_chunks),
         cmocka_unit_test(test_tiny_output_buffer_forces_loop),
+        cmocka_unit_test(test_flush_exposes_first_chunk),
+        cmocka_unit_test(test_flush_tiny_output_buffer_forces_loop),
         cmocka_unit_test(test_create_clamps_level),
     };
     int rc = cmocka_run_group_tests(tests, NULL, NULL);
