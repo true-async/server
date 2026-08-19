@@ -13,6 +13,11 @@ set(HTTP1_PARSER_SRC
     # RFC 5987 / header-param parse — referenced by multipart_processor.c.
     ${CMAKE_SOURCE_DIR}/../src/http_rfc5987.c
     ${CMAKE_SOURCE_DIR}/../src/http_param_parse.c
+    # Request builders and the protocol classifier that http_parser.c calls.
+    ${CMAKE_SOURCE_DIR}/../src/http_request.c
+    ${CMAKE_SOURCE_DIR}/../src/core/http_protocol_handlers.c
+    # http_body_stream.c wakes its reader through a plain event.
+    ${CMAKE_SOURCE_DIR}/../src/core/async_plain_event.c
     ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
 )
 

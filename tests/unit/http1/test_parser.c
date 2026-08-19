@@ -347,7 +347,7 @@ static void test_parser_reset(void **state) {
     assert_string_equal(ZSTR_VAL(req1->uri), "/first");
 
     /* Reset parser */
-    http_parser_reset(ctx);
+    http_parser_reset_for_reuse(ctx);
     assert_false(http_parser_is_complete(ctx));
 
     /* Parse second request */

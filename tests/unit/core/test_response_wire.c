@@ -54,7 +54,6 @@ static void test_empty_wire(void **state)
     assert_int_equal(len, 0);
 
     assert_int_equal(response_wire_header_count(rw), 0);
-    assert_false(response_wire_body_complete(rw));
 
     assert_int_equal(response_wire_reactor_id(rw), 7);
     assert_int_equal(response_wire_stream_id(rw), 42);
@@ -72,13 +71,12 @@ static void test_status_headers_body(void **state)
 
     response_wire_set_status(rw, 200);
     assert_true(response_wire_add_header(rw, "content-type", 12, "text/plain", 10));
-    assert_true(response_wire_set_body(rw, "hello", 5, true));
+    assert_true(response_wire_set_body(rw, "hello", 5));
 
     assert_int_equal(response_wire_status(rw), 200);
 
     size_t len;
     ASSERT_SPAN(response_wire_body(rw, &len), len, "hello");
-    assert_true(response_wire_body_complete(rw));
 
     const char *np, *vp;
     size_t nl, vl;
@@ -146,34 +144,19 @@ static void test_headers(void **state)
     response_wire_free(rw);
 }
 
-static void test_empty_body_complete(void **state)
+static void test_empty_body(void **state)
 {
     (void) state;
 
-    /* 204-style: body set, zero length, complete. */
+    /* 204-style: body set, zero length. */
     response_wire_t *rw = response_wire_create(0, 0, NULL);
 
     response_wire_set_status(rw, 204);
-    assert_true(response_wire_set_body(rw, NULL, 0, true));
+    assert_true(response_wire_set_body(rw, NULL, 0));
 
     size_t len = 99;
     response_wire_body(rw, &len);
     assert_int_equal(len, 0);
-    assert_true(response_wire_body_complete(rw));
-
-    response_wire_free(rw);
-}
-
-static void test_streaming_body_flag(void **state)
-{
-    (void) state;
-
-    response_wire_t *rw = response_wire_create(0, 0, NULL);
-    assert_true(response_wire_set_body(rw, "first-chunk", 11, false));
-
-    size_t len;
-    ASSERT_SPAN(response_wire_body(rw, &len), len, "first-chunk");
-    assert_false(response_wire_body_complete(rw)); /* more streamed later */
 
     response_wire_free(rw);
 }
@@ -201,7 +184,7 @@ static void test_arena_growth_keeps_spans(void **state)
 
     /* Body set last, then re-read — but status set before all the growth must
      * still be intact. */
-    assert_true(response_wire_set_body(rw, "tail-body", 9, true));
+    assert_true(response_wire_set_body(rw, "tail-body", 9));
 
     assert_int_equal(response_wire_status(rw), 200);
 
@@ -239,8 +222,7 @@ int main(void)
         cmocka_unit_test(test_status_replaced),
         cmocka_unit_test(test_non_nul_terminated_span),
         cmocka_unit_test(test_headers),
-        cmocka_unit_test(test_empty_body_complete),
-        cmocka_unit_test(test_streaming_body_flag),
+        cmocka_unit_test(test_empty_body),
         cmocka_unit_test(test_arena_growth_keeps_spans),
         cmocka_unit_test(test_free_null),
     };
