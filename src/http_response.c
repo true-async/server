@@ -1359,6 +1359,33 @@ ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent)
 }
 /* }}} */
 
+/* {{{ proto HttpResponse::isWritable(): bool
+ *
+ * True while output is still possible: end() was not called, the response is
+ * not sealed by sendFile(), and the peer has not gone. Unlike sendable(),
+ * which swings with queue depth, a false answer here is final — so a
+ * streaming loop stops on !isWritable() and yields on !sendable(). */
+ZEND_METHOD(TrueAsync_HttpResponse, isWritable)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->closed
+        || response->send_file_req != NULL
+        || response->stream_ops == NULL) {
+        RETURN_FALSE;
+    }
+
+    /* No liveness op — the response state above is all we know. */
+    if (response->stream_ops->is_alive == NULL) {
+        RETURN_TRUE;
+    }
+
+    RETURN_BOOL(response->stream_ops->is_alive(response->stream_ctx));
+}
+/* }}} */
+
 /* {{{ proto HttpResponse::isClosed(): bool */
 ZEND_METHOD(TrueAsync_HttpResponse, isClosed)
 {

@@ -89,6 +89,11 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
+    if (ctx->stream_dead) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     http_connection_t *conn = ctx->conn;
 
     if (Z_ISUNDEF(ctx->response_zv)) {
@@ -103,6 +108,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
      * allowed", which happens at the PHP boundary, not on the wire). */
     if (!ctx->h1_stream_headers_sent) {
         if (!h1_emit_headers_once(ctx)) {
+            ctx->stream_dead = true;
             zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
@@ -138,6 +144,9 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
     if (!http_connection_send(conn, header, (size_t)header_len) ||
         !http_connection_send(conn, ZSTR_VAL(chunk), chunk_len) ||
         !http_connection_send(conn, "\r\n", 2)) {
+        /* The write is how the peer's departure becomes visible on H1 — record
+         * it so isWritable() can answer without a second doomed write. */
+        ctx->stream_dead = true;
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -188,8 +197,18 @@ static zend_async_event_t *h1_stream_get_wait_event(void *ctx)
     return NULL;
 }
 
+/* Same three conditions append_chunk refuses on, asked without a chunk. */
+static bool h1_stream_is_alive(void *opaque)
+{
+    const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)opaque;
+
+    return ctx != NULL && ctx->conn != NULL && !ctx->stream_dead
+           && !ctx->conn->write_timed_out && !Z_ISUNDEF(ctx->response_zv);
+}
+
 const http_response_stream_ops_t h1_stream_ops = {
     .append_chunk         = h1_stream_append_chunk,
+    .is_alive             = h1_stream_is_alive,
     .mark_ended           = h1_stream_mark_ended,
     .get_wait_event       = h1_stream_get_wait_event,
     .send_static_response = h1_stream_send_static_response,

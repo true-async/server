@@ -397,6 +397,19 @@ static bool worker_stream_sendable(void *vctx)
                   < WORKER_STREAM_INFLIGHT_CAP;
 }
 
+/* The reactor side kills the credit when the stream dies, and stream_failed
+ * records a credit wait this worker already lost. */
+static bool worker_stream_is_alive(void *vctx)
+{
+    const worker_dispatch_ctx_t *const ctx = (const worker_dispatch_ctx_t *)vctx;
+
+    if (ctx->stream_ended || ctx->stream_failed) {
+        return false;
+    }
+
+    return ctx->credit == NULL || !stream_credit_is_dead(ctx->credit);
+}
+
 static void worker_stream_mark_ended(void *vctx)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
@@ -427,6 +440,7 @@ static void worker_stream_mark_ended(void *vctx)
 static const http_response_stream_ops_t worker_stream_ops = {
     .append_chunk   = worker_stream_append_chunk,
     .sendable       = worker_stream_sendable,
+    .is_alive       = worker_stream_is_alive,
     .mark_ended     = worker_stream_mark_ended,
     .get_wait_event = NULL,   /* backpressure parks inside append_chunk */
 };

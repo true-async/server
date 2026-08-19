@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: 14984263ea86d343e0adf70437811f37593bb96e */
+ * Stub hash: 8e3381806654b44692470e369c6cf3c01b2d13b7 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -137,6 +137,8 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpResponse_isHeadersSent arginfo_class_TrueAsync_HttpResponse_sendable
 
+#define arginfo_class_TrueAsync_HttpResponse_isWritable arginfo_class_TrueAsync_HttpResponse_sendable
+
 #define arginfo_class_TrueAsync_HttpResponse_isClosed arginfo_class_TrueAsync_HttpResponse_sendable
 
 ZEND_METHOD(TrueAsync_HttpResponse, __construct);
@@ -177,6 +179,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseEvent);
 ZEND_METHOD(TrueAsync_HttpResponse, sseComment);
 ZEND_METHOD(TrueAsync_HttpResponse, sseRetry);
 ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent);
+ZEND_METHOD(TrueAsync_HttpResponse, isWritable);
 ZEND_METHOD(TrueAsync_HttpResponse, isClosed);
 
 static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
@@ -218,6 +221,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, sseComment, arginfo_class_TrueAsync_HttpResponse_sseComment, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseRetry, arginfo_class_TrueAsync_HttpResponse_sseRetry, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isHeadersSent, arginfo_class_TrueAsync_HttpResponse_isHeadersSent, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, isWritable, arginfo_class_TrueAsync_HttpResponse_isWritable, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isClosed, arginfo_class_TrueAsync_HttpResponse_isClosed, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };

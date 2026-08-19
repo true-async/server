@@ -1797,9 +1797,25 @@ static bool h2_stream_sendable(void *ctx)
     return max_bytes == 0 || stream->chunk_queue_bytes < max_bytes;
 }
 
+/* Peer reset and a timed-out write are both terminal; the ring being full is
+ * not, and belongs to sendable() instead. */
+static bool h2_stream_is_alive(void *ctx)
+{
+    const http2_stream_t *stream = (const http2_stream_t *)ctx;
+
+    if (stream == NULL || stream->peer_closed) {
+        return false;
+    }
+
+    const http_connection_t *conn = http2_session_get_conn(stream->session);
+
+    return conn != NULL && !conn->write_timed_out;
+}
+
 const http_response_stream_ops_t h2_stream_ops = {
     .append_chunk        = h2_stream_append_chunk,
     .sendable            = h2_stream_sendable,
+    .is_alive            = h2_stream_is_alive,
     .mark_ended          = h2_stream_mark_ended,
     .get_wait_event      = h2_stream_get_wait_event,
     .send_static_response = h2_stream_send_static_response,
