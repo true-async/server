@@ -188,7 +188,7 @@ void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk);
  * (http3_static_response.c). Pumping a file through chunk_queue is
  * exactly the streaming path: append chunks until EOF, then mark_ended.
  * The static TU calls these from its coroutine entry. */
-int  h3_stream_append_chunk(void *ctx, zend_string *chunk, bool nonblocking);
+int  h3_stream_append_chunk(void *ctx, zend_string *chunk);
 void h3_stream_mark_ended(void *ctx);
 
 /* Per-worker memory accounting for static delivery: alloc on push, debit on

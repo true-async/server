@@ -225,7 +225,7 @@ static void sse_append_field(smart_str *out, const char *field, size_t field_len
  * a dead stream surfaces as a 499 the handler may catch. */
 static void sse_dispatch(http_response_object *response, zend_string *payload)
 {
-	const int rc = response->stream_ops->append_chunk(response->stream_ctx, payload, false);
+	const int rc = response->stream_ops->append_chunk(response->stream_ctx, payload);
 
 	if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
 		zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");

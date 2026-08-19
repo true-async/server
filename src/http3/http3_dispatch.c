@@ -956,7 +956,7 @@ static void h3_grpc_append_frame_and_end(void *ctx, zend_string *frame)
 {
     http3_stream_t *s = (http3_stream_t *)ctx;
 
-    (void)h3_stream_ops.append_chunk(s, frame, false);   /* consumes the ref */
+    (void)h3_stream_ops.append_chunk(s, frame);   /* consumes the ref */
 
     h3_stream_finish_streaming(s);
 }

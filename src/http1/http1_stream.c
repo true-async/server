@@ -80,25 +80,7 @@ static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
     return ok;
 }
 
-/* Write without suspending, the recipe WebSocket's non-blocking path uses:
- * TLS goes through the FSM's atomic SSL_write, plaintext through the batched
- * writer, which appends behind the in-flight write instead of awaiting one. */
-static bool h1_stream_send_now(http_connection_t *conn, const char *data, size_t len)
-{
-#ifdef HAVE_OPENSSL
-    if (conn->tls != NULL) {
-        return http_connection_tls_fsm_send_plaintext_atomic(conn, data, len);
-    }
-#endif
-
-    char *copy = emalloc(len);
-    memcpy(copy, data, len);
-
-    return http_connection_send_batched(conn, copy, len);
-}
-
-static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
-                                  const bool nonblocking)
+static int h1_stream_append_chunk(void *opaque, zend_string *chunk)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
 
@@ -110,13 +92,6 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     if (ctx->stream_dead) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
-
-    /* Refuse before the header emit below, so a refusal leaves the response
-     * uncommitted and the same chunk can be offered again. */
-    if (nonblocking && http_connection_outbound_over_highwater(ctx->conn)) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     http_connection_t *conn = ctx->conn;
@@ -166,15 +141,9 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    const bool sent = nonblocking
-        ? (h1_stream_send_now(conn, header, (size_t)header_len)
-           && h1_stream_send_now(conn, ZSTR_VAL(chunk), chunk_len)
-           && h1_stream_send_now(conn, "\r\n", 2))
-        : (http_connection_send(conn, header, (size_t)header_len)
-           && http_connection_send(conn, ZSTR_VAL(chunk), chunk_len)
-           && http_connection_send(conn, "\r\n", 2));
-
-    if (!sent) {
+    if (!http_connection_send(conn, header, (size_t)header_len) ||
+        !http_connection_send(conn, ZSTR_VAL(chunk), chunk_len) ||
+        !http_connection_send(conn, "\r\n", 2)) {
         /* The write is how the peer's departure becomes visible on H1 — record
          * it so isWritable() can answer without a second doomed write. */
         ctx->stream_dead = true;
@@ -228,14 +197,7 @@ static zend_async_event_t *h1_stream_get_wait_event(void *ctx)
     return NULL;
 }
 
-/* The conditions append_chunk refuses on, asked without spending a chunk. */
-static bool h1_stream_sendable(void *opaque)
-{
-    const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)opaque;
-
-    return !http_connection_outbound_over_highwater(ctx->conn);
-}
-
+/* Same three conditions append_chunk refuses on, asked without a chunk. */
 static bool h1_stream_is_alive(void *opaque)
 {
     const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)opaque;
@@ -246,7 +208,6 @@ static bool h1_stream_is_alive(void *opaque)
 
 const http_response_stream_ops_t h1_stream_ops = {
     .append_chunk         = h1_stream_append_chunk,
-    .sendable             = h1_stream_sendable,
     .is_alive             = h1_stream_is_alive,
     .mark_ended           = h1_stream_mark_ended,
     .get_wait_event       = h1_stream_get_wait_event,

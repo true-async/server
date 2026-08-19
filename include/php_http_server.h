@@ -707,15 +707,8 @@ struct http_response_stream_ops_t {
     /* Append a chunk (caller already bumped its refcount). Returns
      * one of http_stream_append_result_t. The op itself knows the
      * threshold (it lives in the context), so send() doesn't need
-     * to see server config.
-     *
-     * `nonblocking` forbids suspending the calling coroutine: a transport
-     * that would have parked returns HTTP_STREAM_APPEND_BACKPRESSURE
-     * INSTEAD, having queued nothing and committed nothing, so the caller
-     * may offer the same chunk again. Deciding inside the op is what makes
-     * that atomic — a predicate consulted beforehand answers about a moment
-     * that has already passed. */
-    int     (*append_chunk)(void *ctx, zend_string *chunk, bool nonblocking);
+     * to see server config. */
+    int     (*append_chunk)(void *ctx, zend_string *chunk);
 
     /* Advisory, non-blocking: true when append_chunk would accept a
      * chunk without suspending the handler (the per-stream staging
