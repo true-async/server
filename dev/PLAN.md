@@ -74,9 +74,9 @@ it and expects a tag within days.
   `http_response_header_allowed_h2h3`. Needs the abort op from #171 — the vtable
   carries only the clean `mark_ended` (`include/php_http_server.h:723`).
 - [ ] **Migration.** Seven BC entries in the CHANGELOG. laravel-spawn is a two-line
-  diff: `Sse::connected()` calls `isWritable()`, `send()` becomes `write()`. Tell
-  YanGusik separately that the `connected()` docstring is wrong today, before the
-  rename rather than after.
+  diff: `Sse::connected()` calls `isWritable()`, `send()` becomes `write()`. Its
+  docblock was corrected ahead of the rename in YanGusik/laravel-spawn#63, so the
+  wording stops teaching the loop that truncated #60 in the meantime.
 
 ## The cmocka suite rots unnoticed
 
