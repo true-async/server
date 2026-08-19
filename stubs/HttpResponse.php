@@ -187,6 +187,10 @@ final class HttpResponse
      * room, nothing was queued and no header was committed, so the same chunk
      * can be offered again later.
      *
+     * The refusal is the transport's own answer, taken at the moment of
+     * queueing rather than from a predicate consulted beforehand, so nothing
+     * can slip in between. No transport parks the coroutine for it.
+     *
      * A client that has gone is not reported as false — it throws
      * HttpException 499, because "wait" and "stop" need opposite reactions.
      * The refused chunk is a slice of one byte stream, so dropping it corrupts

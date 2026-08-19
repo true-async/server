@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: d91a4d980b3d6a1b2478a10396e5685760e96282 */
+ * Stub hash: 71a8665997495e333637c6f932fbf42109f11b29 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()

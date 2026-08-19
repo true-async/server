@@ -1020,7 +1020,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
      * protocols use them as keepalive signals). */
     zend_string_addref(chunk);
     const int rc = response->stream_ops->append_chunk(
-        response->stream_ctx, chunk);
+        response->stream_ctx, chunk, false);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         /* Peer aborted between dispatch and now. Emulate the
@@ -1071,13 +1071,6 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
         return;
     }
 
-    /* Asked before the encoder and before the commit, so a refusal leaves the
-     * response exactly as it was. */
-    if (response->stream_ops->sendable != NULL
-        && !response->stream_ops->sendable(response->stream_ctx)) {
-        RETURN_FALSE;
-    }
-
     /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is accepted and
      * dropped, as send() does. */
     if (response->is_head) {
@@ -1088,7 +1081,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
 
     zend_string_addref(chunk);
     const int rc = response->stream_ops->append_chunk(
-        response->stream_ctx, chunk);
+        response->stream_ctx, chunk, true);
+
+    /* append_chunk consumes the ref on every path, refusals included. */
+    if (rc == HTTP_STREAM_APPEND_BACKPRESSURE) {
+        RETURN_FALSE;
+    }
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
@@ -1228,7 +1226,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
     }
 
     const int rc = response->stream_ops->append_chunk(
-        response->stream_ctx, framed);
+        response->stream_ctx, framed, false);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         zend_throw_exception_ex(http_exception_ce, 499,
@@ -1392,7 +1390,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
         if (data != NULL && ZSTR_LEN(data) > 0) {
             zend_string_addref(data);
             (void)response->stream_ops->append_chunk(
-                response->stream_ctx, data);
+                response->stream_ctx, data, false);
         }
 
         response->stream_ops->mark_ended(response->stream_ctx);

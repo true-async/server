@@ -563,7 +563,7 @@ static int forward_compressed(ws_ctx_t *w, zend_string *zs)
         return HTTP_STREAM_APPEND_OK;
     }
 
-    return w->underlying_ops->append_chunk(w->underlying_ctx, zs);
+    return w->underlying_ops->append_chunk(w->underlying_ctx, zs, false);
 }
 
 /* An encoder that answered HTTP_ENC_ERROR is left mid-block and cannot
@@ -585,7 +585,8 @@ static void drop_faulted_encoder(ws_ctx_t *w)
     w->encoder = NULL;
 }
 
-static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
+static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
+                           const bool nonblocking)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
 
@@ -596,6 +597,15 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
     if (UNEXPECTED(w->encoder == NULL)) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* Asked before the encoder is fed: the encoder cannot be un-fed, and a
+     * closed block would leave the stream one boundary ahead of what the
+     * transport actually took. */
+    if (nonblocking && w->underlying_ops->sendable != NULL
+        && !w->underlying_ops->sendable(w->underlying_ctx)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     if (UNEXPECTED(!w->first_chunk_done)) {
