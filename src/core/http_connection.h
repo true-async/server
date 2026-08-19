@@ -365,6 +365,10 @@ typedef struct {
     bool               handler_bailout;          /* zend_bailout caught in handler entry —
                                                   * dispose must skip PHP API on zvals and
                                                   * emit a synthetic 500 response. */
+    bool               stream_dead;              /* a streamed write failed or the peer went
+                                                  * away: TCP reports that only on a write,
+                                                  * so the discovery is recorded here for
+                                                  * isWritable() to answer afterwards. */
     bool               skip_php_handler;         /* static handler (issue #13) populated the
                                                   * response in C; coroutine entry must NOT
                                                   * call the user PHP handler. Dispose still

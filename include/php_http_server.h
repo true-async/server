@@ -717,6 +717,14 @@ struct http_response_stream_ops_t {
      * kernel socket buffer) leave it NULL and sendable() reports true. */
     bool    (*sendable)(void *ctx);
 
+    /* True while output is still possible: the peer has not gone and the
+     * transport can still carry bytes. Every input is a one-way latch, so a
+     * false answer never turns true again — which is what separates this from
+     * sendable(), whose answer swings with queue depth. Backs
+     * HttpResponse::isWritable(). MAY be NULL — the response state alone then
+     * decides. */
+    bool    (*is_alive)(void *ctx);
+
     /* Mark stream ended. After all queued chunks drain, the data
      * provider emits EOF (plus trailer HEADERS frame if set).
      * Idempotent. */

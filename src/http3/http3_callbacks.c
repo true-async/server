@@ -1393,8 +1393,18 @@ static zend_async_event_t *h3_stream_get_wait_event(void *ctx)
                : NULL;
 }
 
+/* The four terminal conditions h3_stream_append_chunk refuses on. */
+static bool h3_stream_is_alive(void *ctx)
+{
+    const http3_stream_t *const s = (const http3_stream_t *)ctx;
+
+    return s != NULL && s->conn != NULL && !s->peer_closed
+           && !s->conn->closed && s->conn->nghttp3_conn != NULL;
+}
+
 const http_response_stream_ops_t h3_stream_ops = {
     .append_chunk        = h3_stream_append_chunk,
+    .is_alive            = h3_stream_is_alive,
     .mark_ended          = h3_stream_mark_ended,
     .get_wait_event      = h3_stream_get_wait_event,
     .send_static_response = h3_stream_send_static_response,

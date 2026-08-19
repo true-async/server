@@ -453,6 +453,15 @@ final class HttpResponse
     public function isHeadersSent(): bool {}
 
     /**
+     * True while output is still possible: end() was not called, the response
+     * is not sealed by sendFile(), and the client has not gone.
+     *
+     * A false answer is final, which is what separates this from sendable():
+     * stop a streaming loop on !isWritable(), yield on !sendable().
+     */
+    public function isWritable(): bool {}
+
+    /**
      * Check if response is closed
      */
     public function isClosed(): bool {}
