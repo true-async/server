@@ -589,6 +589,15 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
 
+    /* An earlier chunk faulted the encoder and dropped it. The stream
+     * cannot be resumed mid-block, so a handler that caught the 499 and
+     * called send() again gets the same refusal rather than a NULL
+     * encoder handed to encoder_drain_write. */
+    if (UNEXPECTED(w->encoder == NULL)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     if (UNEXPECTED(!w->first_chunk_done)) {
         /* Header mutation deferred to first chunk: by now the handler
          * has finalised setHeader/setStatusCode (committed=true was set
@@ -614,9 +623,9 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
 
     /* Encode, then close the block so the client decodes this chunk now
      * rather than at end of stream: handing a chunk to send() is the
-     * handler stating that this much is ready to go (#170). An empty
-     * chunk skips the flush — a block boundary with no payload behind
-     * it costs bytes and tells the client nothing. */
+     * handler stating that this much is ready to go. An empty chunk
+     * skips the flush — a block boundary with no payload behind it
+     * costs bytes and tells the client nothing. */
     if (UNEXPECTED(encoder_drain_write(w->encoder, in, in_len, &out) == HTTP_ENC_ERROR)
         || (in_len > 0
             && UNEXPECTED(encoder_drain_flush(w->encoder, &out) == HTTP_ENC_ERROR))) {
