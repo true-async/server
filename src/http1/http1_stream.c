@@ -197,7 +197,7 @@ static zend_async_event_t *h1_stream_get_wait_event(void *ctx)
     return NULL;
 }
 
-/* Same three conditions append_chunk refuses on, asked without a chunk. */
+/* The conditions append_chunk refuses on, asked without spending a chunk. */
 static bool h1_stream_is_alive(void *opaque)
 {
     const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)opaque;
