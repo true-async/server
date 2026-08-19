@@ -13,6 +13,11 @@ set(HTTP1_PARSER_SRC
     # RFC 5987 / header-param parse — referenced by multipart_processor.c.
     ${CMAKE_SOURCE_DIR}/../src/http_rfc5987.c
     ${CMAKE_SOURCE_DIR}/../src/http_param_parse.c
+    # Request builders and the protocol classifier that http_parser.c calls.
+    ${CMAKE_SOURCE_DIR}/../src/http_request.c
+    ${CMAKE_SOURCE_DIR}/../src/core/http_protocol_handlers.c
+    # http_body_stream.c wakes its reader through a plain event.
+    ${CMAKE_SOURCE_DIR}/../src/core/async_plain_event.c
     ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
 )
 
@@ -513,6 +518,71 @@ if(_compr_test_ok)
         target_link_libraries(test_compression_gzip m pthread rt)
     endif()
     add_test(NAME CompressionGzip COMMAND test_compression_gzip)
+
+    # Mid-stream flush for the Brotli and zstd backends (#170): the codec's
+    # own decoder reads the flushed prefix. Each backend is linked only when
+    # pkg-config finds it, and the test compiles its cases behind the same
+    # HAVE_HTTP_* defines the extension build uses.
+    set(_flush_test_srcs
+        compression/test_codec_flush.c
+        ${CMAKE_SOURCE_DIR}/../src/compression/http_compression.c
+        ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_gzip.c
+        # The zstd and brotli TUs carry the request-side decoders too, which
+        # allocate the decoded body out of the slab pool.
+        ${CMAKE_SOURCE_DIR}/../src/core/body_pool.c
+    )
+    set(_flush_test_defs HAVE_HTTP_COMPRESSION=1 ${_compr_test_def})
+    set(_flush_test_libs "")
+    set(_flush_test_incs "")
+    set(_flush_codecs FALSE)
+
+    pkg_check_modules(ZSTD_TEST QUIET libzstd)
+    if(ZSTD_TEST_FOUND)
+        list(APPEND _flush_test_srcs
+             ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_zstd.c)
+        list(APPEND _flush_test_defs HAVE_HTTP_ZSTD=1)
+        list(APPEND _flush_test_libs ${ZSTD_TEST_LIBRARIES})
+        list(APPEND _flush_test_incs ${ZSTD_TEST_INCLUDE_DIRS})
+        set(_flush_codecs TRUE)
+    endif()
+
+    pkg_check_modules(BROTLI_ENC_TEST QUIET libbrotlienc)
+    pkg_check_modules(BROTLI_DEC_TEST QUIET libbrotlidec)
+    if(BROTLI_ENC_TEST_FOUND AND BROTLI_DEC_TEST_FOUND)
+        list(APPEND _flush_test_srcs
+             ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_brotli.c)
+        list(APPEND _flush_test_defs HAVE_HTTP_BROTLI=1)
+        list(APPEND _flush_test_libs ${BROTLI_ENC_TEST_LIBRARIES} ${BROTLI_DEC_TEST_LIBRARIES})
+        list(APPEND _flush_test_incs ${BROTLI_ENC_TEST_INCLUDE_DIRS} ${BROTLI_DEC_TEST_INCLUDE_DIRS})
+        set(_flush_codecs TRUE)
+    endif()
+
+    if(_flush_codecs)
+        add_executable(test_compression_flush ${_flush_test_srcs})
+        target_compile_definitions(test_compression_flush PRIVATE ${_flush_test_defs})
+        target_include_directories(test_compression_flush PRIVATE
+            ${CMAKE_SOURCE_DIR}/../include
+            ${CMAKE_SOURCE_DIR}/../src
+            ${_compr_test_incs}
+            ${_flush_test_incs}
+        )
+        target_link_libraries(test_compression_flush
+            test_common
+            ${CMOCKA_LIBRARIES}
+            ${_compr_test_libs}
+            ${_flush_test_libs}
+            ${CMAKE_DL_LIBS}
+        )
+        if(UNIX)
+            target_link_libraries(test_compression_flush m pthread rt)
+        endif()
+        add_test(NAME CompressionFlush COMMAND test_compression_flush)
+        if(UNIX AND NOT APPLE)
+            set_tests_properties(CompressionFlush PROPERTIES
+                ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+            )
+        endif()
+    endif()
     if(UNIX AND NOT APPLE)
         set_tests_properties(CompressionGzip PROPERTIES
             ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"

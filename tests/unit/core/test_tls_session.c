@@ -239,7 +239,7 @@ static void test_handshake_tls13_success(void **state)
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
     assert_non_null(ctx);
 
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
     assert_non_null(server);
     assert_int_equal(server->state, TLS_HANDSHAKING);
 
@@ -272,7 +272,7 @@ static void test_bulk_1mb_byte_exact(void **state)
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
     assert_non_null(ctx);
 
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
     tls_test_client_t client;
     client_init(&client);
     assert_int_equal(pump_handshake(server, &client, 6) > 0, 1);
@@ -349,7 +349,7 @@ static void test_clean_shutdown(void **state)
     char err[TLS_ERR_BUF_SIZE] = {0};
     tls_context_t *const ctx = tls_context_new(
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
     tls_test_client_t client;
     client_init(&client);
     assert_true(pump_handshake(server, &client, 6) > 0);
@@ -379,7 +379,7 @@ static void test_truncated_ciphertext_error(void **state)
     char err[TLS_ERR_BUF_SIZE] = {0};
     tls_context_t *const ctx = tls_context_new(
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
     tls_test_client_t client;
     client_init(&client);
     assert_true(pump_handshake(server, &client, 6) > 0);
@@ -424,14 +424,17 @@ static void test_feed_backpressure(void **state)
     char err[TLS_ERR_BUF_SIZE] = {0};
     tls_context_t *const ctx = tls_context_new(
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
     tls_test_client_t client;
     client_init(&client);
     assert_true(pump_handshake(server, &client, 6) > 0);
 
-    /* Accumulate > TLS_BIO_RING_SIZE of ciphertext by interleaving the
-     * client's SSL_write with drains of its network_bio — the client
-     * pair is itself only 17 KiB, so we must drain between writes. */
+    /* Accumulate more ciphertext than the server's intake ring holds, by
+     * interleaving the client's SSL_write with drains of its network_bio:
+     * the client pair is itself only 17 KiB, so we must drain between
+     * writes. The intake is the CT-in half of the pair, sized
+     * TLS_BIO_RING_SIZE_SMALL; TLS_BIO_RING_SIZE is the CT-out half and
+     * is not what saturates here. */
     enum { PAYLOAD_CHUNK = 4 * 1024, GATHER_CAP = 64 * 1024 };
     uint8_t payload[PAYLOAD_CHUNK];
     memset(payload, 'A', sizeof(payload));
@@ -451,19 +454,19 @@ static void test_feed_backpressure(void **state)
             if (got <= 0) break;
             gathered += (size_t)got;
         }
-        if (gathered >= (size_t)TLS_BIO_RING_SIZE + 4096) {
+        if (gathered >= (size_t)TLS_BIO_RING_SIZE_SMALL + 4096) {
             break;  /* enough to overflow the server's intake */
         }
         (void)n;
     }
-    assert_true(gathered > TLS_BIO_RING_SIZE);  /* enough to overflow */
+    assert_true(gathered > TLS_BIO_RING_SIZE_SMALL);  /* enough to overflow */
 
     size_t consumed = 0;
     const tls_io_result_t rc1 = tls_feed_ciphertext(
         server, (const char *)gather, gathered, &consumed);
     assert_true(rc1 == TLS_IO_OK || rc1 == TLS_IO_WANT_READ);
     assert_true(consumed < gathered);         /* partial — ring saturated */
-    assert_true(consumed <= TLS_BIO_RING_SIZE);
+    assert_true(consumed <= TLS_BIO_RING_SIZE_SMALL);
 
     /* Drain plaintext, which frees space on the network_bio. */
     char plain[TLS_BIO_RING_SIZE];
@@ -497,7 +500,7 @@ static void test_error_info_default_zero(void **state)
     char err[TLS_ERR_BUF_SIZE] = {0};
     tls_context_t *const ctx = tls_context_new(
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
 
     const tls_error_info_t *const info = tls_session_last_error(server);
     assert_non_null(info);
@@ -527,7 +530,7 @@ static void test_error_info_recorded_on_bad_ciphertext(void **state)
     char err[TLS_ERR_BUF_SIZE] = {0};
     tls_context_t *const ctx = tls_context_new(
         suite_cert.cert_path, suite_cert.key_path, err, sizeof(err));
-    tls_session_t *const server = tls_session_new(ctx);
+    tls_session_t *const server = tls_session_new(ctx, 0)  /* 0: compiled default ring size */;
     tls_test_client_t client;
     client_init(&client);
     assert_true(pump_handshake(server, &client, 6) > 0);

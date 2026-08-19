@@ -22,7 +22,9 @@
  *     DONE; the unit test does the same.
  *   - finish() returning HTTP_ENC_OK is impossible by design — every
  *     successful exit is either NEED_OUTPUT (more flushing required)
- *     or DONE (footer emitted, stream closed).
+ *     or DONE (footer emitted, stream closed). flush() answers on the
+ *     same two, with DONE meaning the block is closed and the stream
+ *     still open.
  */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -165,6 +167,36 @@ static http_encoder_status_t gz_finish(http_encoder_t *base,
     return HTTP_ENC_ERROR;
 }
 
+static http_encoder_status_t gz_flush(http_encoder_t *base,
+                                      void *out, size_t out_cap, size_t *out_produced)
+{
+    gzip_encoder_t *enc = (gzip_encoder_t *)base;
+
+    enc->stream.next_in   = NULL;
+    enc->stream.avail_in  = 0;
+    enc->stream.next_out  = (unsigned char *)out;
+    enc->stream.avail_out = (unsigned)out_cap;
+
+    /* Z_SYNC_FLUSH closes the current deflate block and appends an
+     * empty stored block, so an inflater that has seen the bytes so far
+     * can emit them. The stream stays open for further deflate() calls. */
+    const int rc = ZS_DEFLATE(&enc->stream, Z_SYNC_FLUSH);
+
+    if (out_produced) *out_produced = out_cap - enc->stream.avail_out;
+
+    /* Z_BUF_ERROR means no progress was possible; with output space left
+     * that is the "nothing buffered" case, not a failure. */
+    if (UNEXPECTED(rc != Z_OK && rc != Z_BUF_ERROR)) {
+        return HTTP_ENC_ERROR;
+    }
+
+    if (enc->stream.avail_out == 0) {
+        return HTTP_ENC_NEED_OUTPUT;
+    }
+
+    return HTTP_ENC_DONE;
+}
+
 static void gz_destroy(http_encoder_t *base)
 {
     if (base == NULL) return;
@@ -184,6 +216,7 @@ const http_encoder_vtable_t http_compression_gzip_vt = {
     .create  = gz_create,
     .write   = gz_write,
     .finish  = gz_finish,
+    .flush   = gz_flush,
     .reset   = gz_reset,
     .destroy = gz_destroy,
 };

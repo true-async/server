@@ -152,6 +152,27 @@ static http_encoder_status_t zs_finish(http_encoder_t *base,
     return HTTP_ENC_NEED_OUTPUT;
 }
 
+static http_encoder_status_t zs_flush(http_encoder_t *base,
+                                      void *out, size_t out_cap, size_t *out_produced)
+{
+    zstd_encoder_t *enc = (zstd_encoder_t *)base;
+
+    ZSTD_inBuffer  ibuf = { .src = NULL, .size = 0, .pos = 0 };
+    ZSTD_outBuffer obuf = { .dst = out,  .size = out_cap, .pos = 0 };
+
+    /* ZSTD_e_flush ends the current block and keeps the frame open, so
+     * the decoder can produce everything written so far. Return value
+     * is the residual still held by the encoder; 0 means fully flushed. */
+    const size_t remaining = ZSTD_compressStream2(enc->cstream, &obuf, &ibuf, ZSTD_e_flush);
+
+    if (out_produced) *out_produced = obuf.pos;
+
+    if (UNEXPECTED(ZSTD_isError(remaining))) return HTTP_ENC_ERROR;
+
+    if (EXPECTED(remaining == 0))            return HTTP_ENC_DONE;
+    return HTTP_ENC_NEED_OUTPUT;
+}
+
 static void zs_destroy(http_encoder_t *base)
 {
     if (base == NULL) return;
@@ -171,6 +192,7 @@ const http_encoder_vtable_t http_compression_zstd_vt = {
     .create  = zs_create,
     .write   = zs_write,
     .finish  = zs_finish,
+    .flush   = zs_flush,
     .reset   = zs_reset,
     .destroy = zs_destroy,
 };

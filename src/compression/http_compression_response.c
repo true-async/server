@@ -16,9 +16,11 @@
  *                       the size-threshold check is exact.
  *   - stream wrapper  : on first send() we substitute the installed
  *                       stream_ops with a compressing one. The wrapper's
- *                       append_chunk feeds chunks through the encoder and
- *                       forwards compressed slices to the underlying ops;
- *                       mark_ended drains finish() before delegating.
+ *                       append_chunk feeds each chunk through the encoder,
+ *                       closes the block with flush() so the client can
+ *                       decode it right away, and forwards the result to
+ *                       the underlying ops; mark_ended drains finish()
+ *                       before delegating.
  *
  * `decide()` is the single source of truth: it reads request headers,
  * response headers, server config, and the opt-out flag, returning
@@ -368,22 +370,38 @@ static http_encoder_status_t encoder_drain_write(http_encoder_t *enc,
     return HTTP_ENC_OK;
 }
 
-/* Drive enc->vt->finish until HTTP_ENC_DONE, appending the trailer (and
- * any encoder-buffered bytes) to `out` (must already be pre-allocated).
- * Returns HTTP_ENC_DONE on success or HTTP_ENC_ERROR — caller owns cleanup. */
-static http_encoder_status_t encoder_drain_finish(http_encoder_t *enc,
+/* Smallest output window an encoder op is offered, and how much `out`
+ * grows when less than that is left. A trailer or a flushed block is
+ * tens of bytes, so a window this size ends most ops in one pass. */
+#define DRAIN_MIN_WINDOW  32
+#define DRAIN_GROW_BY     64
+
+typedef http_encoder_status_t (*encoder_out_op_t)(http_encoder_t *enc,
+                                                  void *out, size_t out_cap,
+                                                  size_t *out_produced);
+
+/* Drive one output-only encoder op (finish or flush) until it answers
+ * HTTP_ENC_DONE, appending everything it produces to `out` (must already
+ * be pre-allocated). Returns HTTP_ENC_DONE, or HTTP_ENC_ERROR — which
+ * also covers an op that asks for more output without having produced
+ * anything and without a grown buffer to try again with, since looping
+ * on it would never terminate. Caller owns cleanup. */
+static http_encoder_status_t encoder_drain_out_op(http_encoder_t *enc,
+                                                  encoder_out_op_t op,
                                                   smart_str *out)
 {
     for (;;) {
         size_t avail = out->a - ZSTR_LEN(out->s);
+        bool   grown = false;
 
-        if (UNEXPECTED(avail < 32)) {
-            smart_str_alloc(out, 64, 0);
+        if (UNEXPECTED(avail < DRAIN_MIN_WINDOW)) {
+            smart_str_alloc(out, DRAIN_GROW_BY, 0);
             avail = out->a - ZSTR_LEN(out->s);
+            grown = true;
         }
 
         size_t produced = 0;
-        const http_encoder_status_t s = enc->vt->finish(enc,
+        const http_encoder_status_t s = op(enc,
             ZSTR_VAL(out->s) + ZSTR_LEN(out->s), avail, &produced);
         ZSTR_LEN(out->s) += produced;
 
@@ -391,10 +409,29 @@ static http_encoder_status_t encoder_drain_finish(http_encoder_t *enc,
             return HTTP_ENC_DONE;
         }
 
-        if (s != HTTP_ENC_NEED_OUTPUT) {
+        if (s != HTTP_ENC_NEED_OUTPUT || (produced == 0 && !grown)) {
             return HTTP_ENC_ERROR;
         }
     }
+}
+
+/* Append the codec trailer and whatever the encoder still holds. */
+static http_encoder_status_t encoder_drain_finish(http_encoder_t *enc,
+                                                  smart_str *out)
+{
+    return encoder_drain_out_op(enc, enc->vt->finish, out);
+}
+
+/* Close the current block, leaving the stream open. A codec without a
+ * flush slot answers DONE with nothing appended. */
+static http_encoder_status_t encoder_drain_flush(http_encoder_t *enc,
+                                                 smart_str *out)
+{
+    if (enc->vt->flush == NULL) {
+        return HTTP_ENC_DONE;
+    }
+
+    return encoder_drain_out_op(enc, enc->vt->flush, out);
 }
 
 void http_compression_apply_buffered(zend_object *response_obj)
@@ -529,9 +566,37 @@ static int forward_compressed(ws_ctx_t *w, zend_string *zs)
     return w->underlying_ops->append_chunk(w->underlying_ctx, zs);
 }
 
+/* An encoder that answered HTTP_ENC_ERROR is left mid-block and cannot
+ * be trusted for another stream, so it is destroyed instead of returning
+ * to the per-thread pool — the same call the buffered path makes on its
+ * own error branch. The wrapper and the response state both forget it;
+ * mark_ended and state_free tolerate the NULL. */
+static void drop_faulted_encoder(ws_ctx_t *w)
+{
+    if (w->encoder == NULL) return;
+
+    http_compression_state_t *st = state_of(w->response_obj);
+
+    if (st != NULL && st->encoder == w->encoder) {
+        st->encoder = NULL;
+    }
+
+    w->encoder->vt->destroy(w->encoder);
+    w->encoder = NULL;
+}
+
 static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    /* An earlier chunk faulted the encoder and dropped it. The stream
+     * cannot be resumed mid-block, so a handler that caught the 499 and
+     * called send() again gets the same refusal rather than a NULL
+     * encoder handed to encoder_drain_write. */
+    if (UNEXPECTED(w->encoder == NULL)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
 
     if (UNEXPECTED(!w->first_chunk_done)) {
         /* Header mutation deferred to first chunk: by now the handler
@@ -552,11 +617,19 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
     const size_t in_len = ZSTR_LEN(chunk);
     smart_str out = {0};
     /* Pre-size: gzipped text is typically <50% of source. The estimate
-     * reduces realloc churn on the common case; finish() is not called
-     * here (mark_ended drains it) so 0-bytes-produced is also valid. */
+     * reduces realloc churn on the common case; the flush below adds a
+     * block boundary on top (5 bytes for gzip). */
     smart_str_alloc(&out, in_len + 32, 0);
 
-    if (UNEXPECTED(encoder_drain_write(w->encoder, in, in_len, &out) == HTTP_ENC_ERROR)) {
+    /* Encode, then close the block so the client decodes this chunk now
+     * rather than at end of stream: handing a chunk to send() is the
+     * handler stating that this much is ready to go. An empty chunk
+     * skips the flush — a block boundary with no payload behind it
+     * costs bytes and tells the client nothing. */
+    if (UNEXPECTED(encoder_drain_write(w->encoder, in, in_len, &out) == HTTP_ENC_ERROR)
+        || (in_len > 0
+            && UNEXPECTED(encoder_drain_flush(w->encoder, &out) == HTTP_ENC_ERROR))) {
+        drop_faulted_encoder(w);
         smart_str_free(&out);
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
@@ -565,7 +638,8 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
     zend_string_release(chunk);
 
     if (out.s == NULL || ZSTR_LEN(out.s) == 0) {
-        /* Encoder had nothing to flush yet (deflate buffers internally). */
+        /* An empty chunk, or a codec whose vtable has no flush slot and
+         * is still buffering: nothing to hand downstream. */
         smart_str_free(&out);
         return HTTP_STREAM_APPEND_OK;
     }
@@ -589,18 +663,30 @@ static void ws_mark_ended(void *ctx_opaque)
 
     /* Same accumulator pattern as append_chunk: build the trailer (and
      * any deflate-buffered bytes finish() emits) into one zend_string
-     * and ship as a single underlying chunk. */
-    smart_str out = {0};
-    smart_str_alloc(&out, 64, 0);
-    /* Error mid-finish: forward whatever was produced and still close
-     * the underlying stream below. */
-    (void)encoder_drain_finish(w->encoder, &out);
+     * and ship as a single underlying chunk. A faulted encoder was
+     * already dropped by append_chunk; there is no trailer to write and
+     * the stream ends truncated, which is what the client's decoder
+     * will report. */
+    if (w->encoder != NULL) {
+        smart_str out = {0};
+        smart_str_alloc(&out, 64, 0);
+        /* Error mid-finish: forward whatever was produced and still close
+         * the underlying stream below. */
+        const http_encoder_status_t s = encoder_drain_finish(w->encoder, &out);
 
-    if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
-        smart_str_0(&out);
-        (void)forward_compressed(w, out.s);  /* transfers ownership */
-    } else {
-        smart_str_free(&out);
+        if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
+            smart_str_0(&out);
+            (void)forward_compressed(w, out.s);  /* transfers ownership */
+        } else {
+            smart_str_free(&out);
+        }
+
+        /* A trailer that faulted leaves the same indeterminate state as a
+         * faulted chunk, so the encoder is dropped here too rather than
+         * released to the pool by state_free. */
+        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
+            drop_faulted_encoder(w);
+        }
     }
 
     w->underlying_ops->mark_ended(w->underlying_ctx);
