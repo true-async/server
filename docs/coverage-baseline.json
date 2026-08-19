@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 23426,
-      "hit": 19271
+      "total": 23458,
+      "hit": 19287
     },
     "functions": {
-      "total": 1637,
-      "hit": 1488
+      "total": 1642,
+      "hit": 1487
     }
   },
   "files": {
@@ -272,11 +272,11 @@
     },
     "src/core/worker_dispatch.c": {
       "lines": {
-        "total": 353,
+        "total": 357,
         "hit": 280
       },
       "functions": {
-        "total": 17,
+        "total": 18,
         "hit": 14
       }
     },
@@ -362,12 +362,12 @@
     },
     "src/http1/http1_stream.c": {
       "lines": {
-        "total": 60,
-        "hit": 42
+        "total": 69,
+        "hit": 48
       },
       "functions": {
-        "total": 4,
-        "hit": 3
+        "total": 5,
+        "hit": 4
       }
     },
     "src/http1/http_parser.c": {
@@ -402,11 +402,11 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 865,
+        "total": 870,
         "hit": 725
       },
       "functions": {
-        "total": 48,
+        "total": 49,
         "hit": 44
       }
     },
@@ -422,12 +422,12 @@
     },
     "src/http3/http3_callbacks.c": {
       "lines": {
-        "total": 905,
-        "hit": 761
+        "total": 909,
+        "hit": 751
       },
       "functions": {
-        "total": 48,
-        "hit": 43
+        "total": 49,
+        "hit": 40
       }
     },
     "src/http3/http3_connection.c": {
@@ -463,7 +463,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 666,
-        "hit": 512
+        "hit": 520
       },
       "functions": {
         "total": 46,
@@ -483,7 +483,7 @@
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 237,
-        "hit": 178
+        "hit": 181
       },
       "functions": {
         "total": 17,
@@ -602,12 +602,12 @@
     },
     "src/http_response.c": {
       "lines": {
-        "total": 681,
-        "hit": 587
+        "total": 691,
+        "hit": 595
       },
       "functions": {
-        "total": 57,
-        "hit": 54
+        "total": 58,
+        "hit": 55
       }
     },
     "src/http_response_internal.h": {
@@ -673,7 +673,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2479,
-        "hit": 1860
+        "hit": 1861
       },
       "functions": {
         "total": 133,
