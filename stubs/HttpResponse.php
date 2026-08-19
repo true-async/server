@@ -152,7 +152,11 @@ final class HttpResponse
     // === Body methods ===
 
     /**
-     * Write data to response body buffer
+     * Append data to the buffered response body.
+     *
+     * Nothing reaches the client here: the whole body goes out on end(),
+     * with Content-Length computed from it. Use send() to stream instead —
+     * that is the call which commits headers and applies backpressure.
      *
      * @param string $data Data to write
      * @return static
@@ -219,6 +223,10 @@ final class HttpResponse
      *
      * send() is always safe to call regardless; sendable() just lets a
      * handler do other work instead of blocking on a slow peer.
+     *
+     * False does not report a departed client: a peer that is gone surfaces
+     * as HttpException 499 out of send(). A loop that breaks on false stops a
+     * stream that is merely slow.
      *
      * @return bool
      */

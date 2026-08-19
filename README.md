@@ -274,7 +274,6 @@ $server->addHttpHandler(function ($request, $response) {
             event: 'tick',            // addEventListener('tick', …) on the client
             id:    (string) $i,       // echoed back as Last-Event-ID on reconnect
         );
-        if (!$response->sendable()) break;   // peer gone — stop early
     }
 
     $response->end();
