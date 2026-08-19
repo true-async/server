@@ -672,13 +672,20 @@ static void ws_mark_ended(void *ctx_opaque)
         smart_str_alloc(&out, 64, 0);
         /* Error mid-finish: forward whatever was produced and still close
          * the underlying stream below. */
-        (void)encoder_drain_finish(w->encoder, &out);
+        const http_encoder_status_t s = encoder_drain_finish(w->encoder, &out);
 
         if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
             smart_str_0(&out);
             (void)forward_compressed(w, out.s);  /* transfers ownership */
         } else {
             smart_str_free(&out);
+        }
+
+        /* A trailer that faulted leaves the same indeterminate state as a
+         * faulted chunk, so the encoder is dropped here too rather than
+         * released to the pool by state_free. */
+        if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
+            drop_faulted_encoder(w);
         }
     }
 

@@ -31,7 +31,7 @@ Nothing builds these targets in CI, so production signatures move and the tests 
 compiling against the old ones. Two were repaired on 2026-08-19 (`ResponseWire`: the
 `bool complete` argument dropped in 6fbe731 on 2026-07-07; `TLSSession`: the ring size
 the backpressure case measures is the CT-in half, `TLS_BIO_RING_SIZE_SMALL`, not the
-CT-out one). `ctest` now runs 10 of 15. What is left:
+CT-out one). `ctest` now runs 10 of 16. What is left:
 
 - [ ] **Five targets do not link.** `test_http1_parser`, `…_edge_cases`, `…_security`,
   `test_http2_strategy`, `test_http2_session` miss `grpc_*`, `h2_*`,
