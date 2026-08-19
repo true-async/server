@@ -698,8 +698,29 @@ static zend_async_event_t *ws_get_wait_event(void *ctx_opaque)
     return w->underlying_ops->get_wait_event(w->underlying_ctx);
 }
 
+/* Both questions are about the transport underneath, not about the encoder:
+ * the wrapper holds no queue of its own. Without these the wrapper hid the
+ * answers behind a NULL slot, which reads as "always writable, never full". */
+static bool ws_sendable(void *ctx_opaque)
+{
+    const ws_ctx_t *w = (const ws_ctx_t *)ctx_opaque;
+
+    return w->underlying_ops->sendable == NULL
+           || w->underlying_ops->sendable(w->underlying_ctx);
+}
+
+static bool ws_is_alive(void *ctx_opaque)
+{
+    const ws_ctx_t *w = (const ws_ctx_t *)ctx_opaque;
+
+    return w->underlying_ops->is_alive == NULL
+           || w->underlying_ops->is_alive(w->underlying_ctx);
+}
+
 static const http_response_stream_ops_t compressing_stream_ops = {
     .append_chunk   = ws_append_chunk,
+    .sendable       = ws_sendable,
+    .is_alive       = ws_is_alive,
     .mark_ended     = ws_mark_ended,
     .get_wait_event = ws_get_wait_event,
 };
