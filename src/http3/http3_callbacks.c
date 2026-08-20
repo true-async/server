@@ -876,7 +876,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
      * runs here too — must precede the headers-flatten loop so the
      * mutated Content-Encoding/Vary land in the HEADERS frame. The
      * streaming path (`streaming==true`) is handled by the stream
-     * wrapper installed at first send(); the apply call is a cheap
+     * wrapper installed at first write(); the apply call is a cheap
      * no-op there. */
     {
         extern void http_compression_apply_buffered(zend_object *);
@@ -1341,7 +1341,7 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking
 
         if (EG(exception) != NULL) {
             /* Timeout exception expected for genuinely stalled peers;
-             * cancel-from-RST also lands here. send() surfaces this as
+             * cancel-from-RST also lands here. write() surfaces this as
              * HttpException to the user handler. */
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
@@ -1533,7 +1533,7 @@ static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,
 
 /* Mark the stream peer-closed and wake any handler suspended on
  * write_event. After this point append_chunk short-circuits
- * to STREAM_DEAD so HttpResponse::send() unwinds cleanly with an
+ * to STREAM_DEAD so HttpResponse::write() unwinds cleanly with an
  * exception; mirrors the H2 peer_closed discipline. */
 static void h3_stream_mark_peer_closed(http3_stream_t *s)
 {

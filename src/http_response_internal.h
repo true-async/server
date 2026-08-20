@@ -40,7 +40,7 @@ typedef struct {
     zend_string     *body_view;
 
     /* Streaming ops + ctx. Installed by the protocol strategy at
-     * dispatch; NULL for buffered-mode responses. send() activates
+     * dispatch; NULL for buffered-mode responses. write() activates
      * streaming by reading these; the ops interpret ctx (opaque
      * pointer to the protocol-specific stream state). */
     const http_response_stream_ops_t *stream_ops;
@@ -56,9 +56,9 @@ typedef struct {
     bool             headers_sent;
     bool             closed;
     bool             committed;
-    bool             streaming;         /* send() has been called — setBody/setHeader now throw */
-    bool             sse_mode;           /* SSE helpers committed the stream — send() now throws, sse* re-entry is allowed */
-    bool             is_head;            /* HEAD: send() drops chunks (RFC 9110 §9.3.2) */
+    bool             streaming;         /* write() has been called — setBody/setHeader now throw */
+    bool             sse_mode;           /* SSE helpers committed the stream — write() now throws, sse* re-entry is allowed */
+    bool             is_head;            /* HEAD: write() drops chunks (RFC 9110 §9.3.2) */
 
     /* grpc_mode_t stamped at dispatch; picks the per-frame transform.
      * 0 = not a gRPC call. */

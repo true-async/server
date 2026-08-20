@@ -56,7 +56,7 @@ $server->addHttpHandler(function ($req, $res) use ($chunks) {
         ->setHeader('content-type', 'text/plain; charset=utf-8');
 
     for ($i = 1; $i <= $chunks; $i++) {
-        $res->send("chunk{$i};");
+        $res->write("chunk{$i};");
     }
 
     $res->end();

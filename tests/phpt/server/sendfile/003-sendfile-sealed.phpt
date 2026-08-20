@@ -32,6 +32,7 @@ $server->addHttpHandler(function ($req, $res) use ($tmp) {
         ['resetHeaders',  fn() => $res->resetHeaders()],
         ['setBody',       fn() => $res->setBody('x')],
         ['write',         fn() => $res->write('x')],
+        ['appendBody',    fn() => $res->appendBody('x')],
         ['json',          fn() => $res->json(['a'=>1])],
         ['html',          fn() => $res->html('<p>')],
         ['redirect',      fn() => $res->redirect('/ok')],
@@ -80,6 +81,7 @@ addHeader: throw
 resetHeaders: throw
 setBody: throw
 write: throw
+appendBody: throw
 json: throw
 html: throw
 redirect: throw

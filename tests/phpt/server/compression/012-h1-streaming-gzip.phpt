@@ -26,7 +26,7 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 
-/* Streaming handler emits the same payload over four send() chunks +
+/* Streaming handler emits the same payload over four write() chunks +
  * an end() finaliser. Compression wrapper must produce a single valid
  * gzip stream regardless of chunk boundaries. */
 $payload = str_repeat("Hello, streaming gzip!\n", 100);
@@ -34,9 +34,9 @@ $payload = str_repeat("Hello, streaming gzip!\n", 100);
 $server->addHttpHandler(function ($req, $resp) use ($payload) {
     $resp->setHeader('Content-Type', 'text/html');
     $q = strlen($payload) / 4;
-    $resp->send(substr($payload, 0,        $q));
-    $resp->send(substr($payload, $q,       $q));
-    $resp->send(substr($payload, 2*$q,     $q));
+    $resp->write(substr($payload, 0,        $q));
+    $resp->write(substr($payload, $q,       $q));
+    $resp->write(substr($payload, 2*$q,     $q));
     $resp->end(substr($payload, 3*$q));
 });
 

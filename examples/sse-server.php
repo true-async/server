@@ -44,9 +44,9 @@ $server->addHttpHandler(function ($req, $res) {
             id:    (string) $i,
         );
 
-        // sendable() is an advisory backpressure check — skip the sleep and
-        // bail early if the peer has gone away.
-        if (!$res->sendable()) {
+        // Stop when the peer has gone. sseEvent() waits for room on its own,
+        // so a full queue is not a reason to leave the loop.
+        if (!$res->isWritable()) {
             break;
         }
 

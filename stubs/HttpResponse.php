@@ -152,35 +152,20 @@ final class HttpResponse
     // === Body methods ===
 
     /**
-     * Append data to the buffered response body.
+     * Stream a chunk to the client.
      *
-     * Nothing reaches the client here: the whole body goes out on end(),
-     * with Content-Length computed from it. Use send() to stream instead —
-     * that is the call which commits headers and applies backpressure.
+     * The first call commits status and headers; afterwards setStatusCode(),
+     * setHeader() and setBody() throw. Later calls append chunked-transfer
+     * segments (HTTP/1) or DATA frames (HTTP/2, HTTP/3). To append to a
+     * buffered body instead, call appendBody().
      *
-     * @param string $data Data to write
-     * @return static
+     * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
+     * park while every ring slot is live or the queued bytes stand at
+     * HttpServerConfig::setStreamWriteBufferBytes (256 KiB by default),
+     * HTTP/1 parks on the socket write. tryWrite() offers a chunk without
+     * committing to that wait. A peer that has gone throws HttpException 499.
      */
-    public function write(string $data): static {}
-
-    /**
-     * Send a chunk to the client (streaming response).
-     *
-     * First call commits status + headers (they can no longer be
-     * changed). Subsequent calls append DATA frames (HTTP/2) or
-     * chunked-transfer segments (HTTP/1).
-     *
-     * Blocks the handler coroutine ONLY under backpressure — when the
-     * per-stream staging buffer is full (HTTP/2: all ring slots live
-     * OR queued bytes reach HttpServerConfig::setStreamWriteBufferBytes,
-     * default 256 KiB). Otherwise returns immediately. send() is always
-     * safe to call; use sendable() to check first if you'd rather do
-     * other work than block.
-     *
-     * @param string $chunk
-     * @return static
-     */
-    public function send(string $chunk): static {}
+    public function write(string $chunk): static {}
 
     /**
      * Offer a chunk without waiting for room: false means the outbound queue
@@ -195,7 +180,7 @@ final class HttpResponse
      *
      * HTTP/1 is the exception, and it is not a small one: that transport keeps
      * no queue of its own, so it never refuses AND an accepted chunk waits for
-     * the socket exactly as send() does — up to the write timeout. A handler
+     * the socket exactly as write() does — up to the write timeout. A handler
      * that must not be parked has to check getProtocolVersion(). Over HTTP/2,
      * HTTP/3 and the worker pool neither happens. Issue #179 removes the
      * exception.
@@ -241,7 +226,7 @@ final class HttpResponse
      *
      * Prepends the 5-byte gRPC length prefix to $message and streams it as
      * a single gRPC message. Activates streaming mode on the first call,
-     * exactly like send(). Call once for a unary reply, repeatedly for
+     * exactly like write(). Call once for a unary reply, repeatedly for
      * server-streaming. Pass the already protobuf-encoded bytes; the
      * grpc-status is carried separately via setTrailer() (defaults to 0
      * when unset). Compressed automatically when setGrpcEncoding('gzip')
@@ -253,21 +238,17 @@ final class HttpResponse
     public function writeMessage(string $message): static {}
 
     /**
-     * Advisory, non-blocking backpressure check for streaming responses.
+     * Removed. One bool answered four questions, and a loop that read it as
+     * liveness stopped streams that were merely slow.
      *
-     * Returns true when send() would accept a chunk without suspending
-     * the handler coroutine — the per-stream staging buffer has room.
-     * Returns false when send() would block on backpressure, or when the
-     * response is closed / sealed by sendFile() / not streaming-capable.
+     * Ask the two questions separately: isWritable() reports whether output is
+     * still possible, tryWrite() and awaitWritable() report whether the
+     * outbound queue has room.
      *
-     * send() is always safe to call regardless; sendable() just lets a
-     * handler do other work instead of blocking on a slow peer.
+     * The declaration stays for one minor release so a call names its
+     * replacements instead of failing as an undefined method.
      *
-     * False does not report a departed client: a peer that is gone surfaces
-     * as HttpException 499 out of send(). A loop that breaks on false stops a
-     * stream that is merely slow.
-     *
-     * @return bool
+     * @throws HttpServerRuntimeException always
      */
     public function sendable(): bool {}
 
@@ -290,26 +271,17 @@ final class HttpResponse
 
     /**
      * Set body content (replaces buffer)
-     *
-     * @param string $body Body content
-     * @return static
      */
     public function setBody(string $body): static {}
 
     /**
-     * Get body stream (TODO)
+     * Append to the buffered response body.
      *
-     * @return mixed Stream resource or null
+     * Nothing reaches the client here: the whole body goes out on end(), with
+     * Content-Length computed from it. Call write() to stream instead — that
+     * is the call which commits headers and applies backpressure.
      */
-    public function getBodyStream(): mixed {}
-
-    /**
-     * Set body stream (TODO)
-     *
-     * @param mixed $stream Stream resource
-     * @return static
-     */
-    public function setBodyStream(mixed $stream): static {}
+    public function appendBody(string $data): static {}
 
     // === Helper methods ===
 
@@ -403,7 +375,7 @@ final class HttpResponse
      * response; without it events stall behind the proxy buffer until it
      * fills) — and marks the response as not-compressible (a buffering
      * gzip stream would defeat real-time delivery). The response then
-     * enters streaming mode exactly as the first {@see self::send()} would:
+     * enters streaming mode exactly as the first {@see self::write()} would:
      * status + headers are committed and may no longer change, but no event
      * data is emitted until the first sseEvent()/sseComment().
      *
@@ -495,13 +467,18 @@ final class HttpResponse
      * True while output is still possible: end() was not called, the response
      * is not sealed by sendFile(), and the client has not gone.
      *
-     * A false answer is final, which is what separates this from sendable():
-     * stop a streaming loop on !isWritable(), yield on !sendable().
+     * A false answer is final: stop a streaming loop on !isWritable(). For the
+     * separate question of room in the outbound queue, use tryWrite() or
+     * awaitWritable().
      */
     public function isWritable(): bool {}
 
     /**
-     * Check if response is closed
+     * True once end() has been called.
+     *
+     * Reports the response, not the connection: a peer that has gone leaves
+     * this false until the handler ends the response. Use isWritable() for
+     * liveness.
      */
-    public function isClosed(): bool {}
+    public function isEnded(): bool {}
 }

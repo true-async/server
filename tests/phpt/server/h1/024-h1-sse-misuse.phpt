@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse SSE API — mixing send() and SSE throws (symmetric sse_mode guard)
+HttpResponse SSE API — mixing write() and SSE throws (symmetric sse_mode guard)
 --EXTENSIONS--
 true_async_server
 true_async
@@ -9,12 +9,12 @@ if (!shell_exec('which curl')) die('skip curl not installed');
 ?>
 --FILE--
 <?php
-/* send() and the sse* helpers drive the same streaming pipeline but in
+/* write() and the sse* helpers drive the same streaming pipeline but in
  * incompatible framings. Once one side commits the stream the other must
  * refuse rather than silently corrupt it:
- *   - send() first  -> sseEvent()/sseComment()/sseRetry() throw (the
+ *   - write() first  -> sseEvent()/sseComment()/sseRetry() throw (the
  *     stream is plain, not text/event-stream),
- *   - sseStart()/sseEvent() first -> send() throws (the stream is SSE).
+ *   - sseStart()/sseEvent() first -> write() throws (the stream is SSE).
  * Both raise HttpServerRuntimeException; the handler can catch it and keep
  * streaming through the channel it already committed to. */
 
@@ -39,7 +39,7 @@ $mark = function (callable $fn): string {
         $cls   = $e::class;
         $short = substr($cls, strrpos($cls, '\\') + 1);
         $m     = $e->getMessage();
-        $kind  = str_contains($m, 'already streaming via send()') ? 'sse-after-send'
+        $kind  = str_contains($m, 'already streaming via write()') ? 'sse-after-send'
                : (str_contains($m, 'in SSE mode')                 ? 'send-in-sse'
                : 'other');
         return "$short:$kind";
@@ -49,16 +49,16 @@ $mark = function (callable $fn): string {
 $server->addHttpHandler(function ($req, $res) use ($mark) {
     if ($req->getPath() === '/sse-then-send') {
         $res->sseStart();
-        $k = $mark(fn () => $res->send("x"));   // SSE committed -> send() throws
+        $k = $mark(fn () => $res->write("x"));   // SSE committed -> write() throws
         $res->sseEvent($k);                      // report back over SSE
         $res->end();
         return;
     }
 
     // /send-then-sse
-    $res->send("a=");                            // plain stream committed
+    $res->write("a=");                            // plain stream committed
     $k = $mark(fn () => $res->sseEvent("x"));    // -> sseEvent() throws
-    $res->send($k);                              // report back over the plain stream
+    $res->write($k);                              // report back over the plain stream
     $res->end();
 });
 

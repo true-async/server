@@ -25,7 +25,7 @@ $server->addHttpHandler(function ($req, $res) use ($server) {
     $res->setStatusCode(200)->setHeader('Content-Type', 'text/plain');
     // 100 small chunks — exercises the chunk-header sprintf path repeatedly
     for ($i = 1; $i <= 100; $i++) {
-        $res->send(sprintf("%03d\n", $i));
+        $res->write(sprintf("%03d\n", $i));
     }
     $res->end();
     $server->stop();

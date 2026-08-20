@@ -246,7 +246,7 @@ int http2_session_submit_response(http2_session_t *session,
 
 /* Submit a streaming response: HEADERS go on the wire immediately,
  * but the DATA source is the stream's chunk_queue (populated by
- * `HttpResponse::send()`). The data
+ * `HttpResponse::write()`). The data
  * provider returns NGHTTP2_ERR_DEFERRED whenever the queue is
  * transiently empty; caller must call
  * `nghttp2_session_resume_data(stream_id)` after each queue append

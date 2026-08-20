@@ -43,15 +43,15 @@ $server->addHttpHandler(function ($req, $resp) use (&$gate, $head, $tail) {
      * the gated route above. */
     if ($req->getPath() === '/empties') {
         $resp->setHeader('Content-Type', 'text/html');
-        $resp->send('');
-        $resp->send('');
-        $resp->send($head);
+        $resp->write('');
+        $resp->write('');
+        $resp->write($head);
         $resp->end($tail);
         return;
     }
 
     $resp->setHeader('Content-Type', 'text/html');
-    $resp->send($head);
+    $resp->write($head);
 
     while (!$gate) {
         delay(10);

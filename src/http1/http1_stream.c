@@ -109,9 +109,9 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* First send() — commit status + headers with chunked framing.
+    /* First write() — commit status + headers with chunked framing.
      * We track wire-commit on ctx->h1_stream_headers_sent rather than
-     * response->committed because send() sets committed=true before
+     * response->committed because write() sets committed=true before
      * calling us (committed means "no more setHeader / setStatusCode
      * allowed", which happens at the PHP boundary, not on the wire). */
     if (!ctx->h1_stream_headers_sent) {
@@ -187,7 +187,7 @@ static void h1_stream_mark_ended(void *opaque)
 
     http_connection_t *conn = ctx->conn;
 
-    /* If send() was never called but mark_ended fires anyway (rare:
+    /* If write() was never called but mark_ended fires anyway (rare:
      * handler flipped streaming mode then immediately closed), we
      * still need to commit the headers so the peer isn't left
      * waiting for a response that never starts. */
@@ -218,7 +218,7 @@ static void h1_stream_mark_ended(void *opaque)
 
 /* HTTP/1 push streaming has no internal queue — kernel backpressure
  * suspends directly inside http_connection_send — so there's nothing
- * for the handler to await on. Returning NULL signals to the send()
+ * for the handler to await on. Returning NULL signals to the write()
  * implementation that the wait-event path doesn't apply. */
 static zend_async_event_t *h1_stream_get_wait_event(void *ctx)
 {

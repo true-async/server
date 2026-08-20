@@ -83,14 +83,14 @@ struct http2_stream_t {
 
     /* Streaming-response chunk queue.
      *
-     * Active only when the handler called HttpResponse::send(); a
+     * Active only when the handler called HttpResponse::write(); a
      * plain setBody() handler leaves these NULL and uses the legacy
      * response_body pointer path above.
      *
      * Grow-only ring-ish queue: chunks are appended at tail, drained
      * from head. We never shrink the array — steady-state traffic
      * reaches a plateau. Each slot holds a refcount'ed zend_string
-     * handed over from send()'s zval; released once fully drained. */
+     * handed over from write()'s zval; released once fully drained. */
     zend_string        **chunk_queue;
     size_t               chunk_queue_cap;
     size_t               chunk_queue_head;   /* next chunk to drain from */

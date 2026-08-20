@@ -361,7 +361,7 @@ zend_string *http_response_format(zend_object *obj)
  * `Transfer-Encoding: chunked` in its place. Headers end with the
  * empty line; the caller writes the body as a sequence of chunks.
  *
- * Used by h1_stream_ops at first send(). Separate from http_response_format
+ * Used by h1_stream_ops at first write(). Separate from http_response_format
  * because the latter builds status + Content-Length + headers + body
  * as a single atomic payload, which is exactly what chunked avoids. */
 zend_string *http_response_format_streaming_headers(zend_object *obj)

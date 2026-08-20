@@ -54,7 +54,7 @@ $server->addHttpHandler(function ($req, $res) use ($chunks, $chunk_len) {
 
     for ($i = 0; $i < $chunks; $i++) {
         /* Deterministic per-chunk fill so truncation/reorder breaks the hash. */
-        $res->send(str_repeat(chr(65 + ($i % 26)), $chunk_len));
+        $res->write(str_repeat(chr(65 + ($i % 26)), $chunk_len));
     }
 
     $res->end();

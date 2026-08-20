@@ -75,12 +75,12 @@ struct _http3_stream_s {
      * on http3_stream_release. Set in http3_stream_submit_response
      * from http_response_get_body; mutually exclusive with the
      * streaming chunk queue below — the data_reader picks one or the
-     * other depending on whether HttpResponse::send() was called. */
+     * other depending on whether HttpResponse::write() was called. */
     zend_string      *response_body;
     size_t            response_body_offset;
 
     /* Streaming response chunk queue.
-     * Active only when the handler called HttpResponse::send(); a plain
+     * Active only when the handler called HttpResponse::write(); a plain
      * setBody() handler leaves these NULL and uses response_body above.
      *
      * Three positions instead of H2's two — nghttp3 keeps iov pointers

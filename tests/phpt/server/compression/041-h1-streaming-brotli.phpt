@@ -45,7 +45,7 @@ $server->addHttpHandler(function ($req, $resp) use ($chunk, $rounds) {
     }
     $resp->setHeader('Content-Type', 'text/html');
     for ($i = 0; $i < $rounds; $i++) {
-        $resp->send($chunk);
+        $resp->write($chunk);
     }
     $resp->end();
 });

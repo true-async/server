@@ -41,10 +41,12 @@ $server->addHttpHandler(function ($req, $resp) {
         return;
     }
     $resp->setStatusCode(200)
-         ->setHeader('Content-Type', 'application/octet-stream')
-         ->send();
+         ->setHeader('Content-Type', 'application/octet-stream');
     $payload = str_repeat('x', $chunk);
     $left    = $total;
+    /* The first write() commits status and headers; a commit call taking no
+     * chunk never existed, and the one that stood here raised
+     * ArgumentCountError before the profile measured anything. */
     while ($left > 0) {
         $n = $left < $chunk ? $left : $chunk;
         $resp->write($n === $chunk ? $payload : substr($payload, 0, $n));

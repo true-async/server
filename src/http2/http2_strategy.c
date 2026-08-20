@@ -279,9 +279,9 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     http_response_set_head(Z_OBJ(stream->response_zv),
                            http_request_method_is_head(stream->request));
 
-    /* Let HttpResponse::send() reach this stream's chunk queue via
+    /* Let HttpResponse::write() reach this stream's chunk queue via
      * the vtable. Ops installed once at dispatch;
-     * streaming mode is a handler opt-in (only activated when send()
+     * streaming mode is a handler opt-in (only activated when write()
      * is actually called). */
     http_response_install_stream_ops(Z_OBJ(stream->response_zv),
                                      &h2_stream_ops, stream);
@@ -1114,7 +1114,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
 }
 
 /* -------------------------------------------------------------------------
- * Streaming response — vtable exported for HttpResponse::send().
+ * Streaming response — vtable exported for HttpResponse::write().
  * All three ops take the http2_stream_t* ctx that dispatch stashed
  * into the PHP response object. They rely on the stream's
  * http2_session + owning connection staying alive for as long as the
@@ -1790,7 +1790,7 @@ static bool h2_stream_sendable(void *ctx)
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
     if (stream->chunk_queue == NULL) {
-        return true;   /* not started — first send() always proceeds */
+        return true;   /* not started — first write() always proceeds */
     }
 
     if (stream->chunk_queue_tail - stream->chunk_queue_head

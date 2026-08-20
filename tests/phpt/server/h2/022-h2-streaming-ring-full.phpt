@@ -1,11 +1,11 @@
 --TEST--
-HttpResponse::send() — streaming fills the 16-slot chunk ring, producer suspends on full
+HttpResponse::write() — streaming fills the 16-slot chunk ring, producer suspends on full
 --EXTENSIONS--
 true_async_server
 true_async
 --FILE--
 <?php
-/* Streaming backpressure — ring-full path. The handler send()s 64
+/* Streaming backpressure — ring-full path. The handler write()s 64
  * chunks of 8 KiB = 512 KiB. The per-stream chunk ring is fixed at 16
  * slots (H2_CHUNK_RING_SLOTS in src/http2/http2_strategy.c); 64 >> 16
  * forces h2_stream_append_chunk's suspend-on-full branch and the
@@ -13,7 +13,7 @@ true_async
  * cycles.
  *
  * The single-threaded scheduler makes the ring-fill deterministic: the
- * handler runs its send() loop uninterrupted until the ring is full and
+ * handler runs its write() loop uninterrupted until the ring is full and
  * it suspends, so the client physically cannot credit the flow-control
  * window before the suspend has happened at least once.
  *
@@ -50,7 +50,7 @@ $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS) {
     $res->setStatusCode(200)->setHeader('Content-Type', 'application/octet-stream');
     for ($i = 0; $i < $N_CHUNKS; $i++) {
-        $res->send(str_repeat(chr(33 + ($i % 90)), $CHUNK_SZ));
+        $res->write(str_repeat(chr(33 + ($i % 90)), $CHUNK_SZ));
     }
     $res->end();
 });

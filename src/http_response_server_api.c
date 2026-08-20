@@ -60,7 +60,7 @@ bool http_response_is_committed(zend_object *obj)
     return http_response_from_obj(obj)->committed;
 }
 
-/* True once HttpResponse::send() has been called. Dispose paths use
+/* True once HttpResponse::write() has been called. Dispose paths use
  * this to skip the buffered-mode commit (headers are already on the
  * wire, the data provider drives the body via chunk_queue). */
 bool http_response_is_streaming(zend_object *obj)
@@ -123,7 +123,7 @@ zend_string *http_response_get_body_str(zend_object *obj)
 }
 
 /* Install streaming ops + ctx on the response. Protocol strategies
- * call this once at dispatch; reading after send() activates
+ * call this once at dispatch; reading after write() activates
  * streaming mode. Passing ops=NULL clears (not currently used). */
 void http_response_install_stream_ops(zend_object *obj,
                                       const http_response_stream_ops_t *ops,

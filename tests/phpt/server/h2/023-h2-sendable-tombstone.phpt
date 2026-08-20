@@ -1,20 +1,19 @@
 --TEST--
-HttpResponse::sendable() — advisory backpressure check flips under a full ring
+HttpResponse::sendable() — the tombstone throws on a live stream
 --EXTENSIONS--
 true_async_server
 true_async
 --FILE--
 <?php
-/* sendable() is the non-blocking companion to send(): true when send()
- * would accept a chunk without suspending, false when the per-stream
- * staging buffer is full.
+/* sendable() answered liveness and queue depth with one bool, and a loop
+ * reading it as liveness truncated a stream that was merely slow
+ * (YanGusik/laravel-spawn#60). The declaration outlives the method for one
+ * minor release so shipped adapter code is told what to call instead.
  *
- * The handler send()s 48 chunks of 8 KiB. The single-threaded scheduler
- * runs the handler uninterrupted until it suspends, so the client
- * cannot credit the flow-control window meanwhile — the ring fills and
- * sendable() must be observed flipping from true to false. send()
- * itself still delivers every byte (it just blocks once full), so the
- * byte-exact hash must also hold.
+ * Asserted here rather than on a fresh response because HTTP/2 with a filling
+ * ring is where sendable() used to return a meaningful answer: the throw is
+ * unconditional, not a side effect of a detached or closed response. write()
+ * still delivers every byte, so the byte-exact hash holds alongside it.
  *
  * Pure-PHP H2 client (_h2_client.inc) — same reason as 015/022. */
 
@@ -36,8 +35,8 @@ for ($i = 0; $i < $N_CHUNKS; $i++) {
     $expected .= str_repeat(chr(33 + ($i % 90)), $CHUNK_SZ);
 }
 
-/* Shared with the handler — observed sendable() states. */
-$obs = ['true' => false, 'false' => false];
+/* Shared with the handler — what the tombstone raised. */
+$obs = ['class' => '', 'message' => ''];
 
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
@@ -48,12 +47,14 @@ $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS, &$obs) {
     $res->setStatusCode(200)->setHeader('Content-Type', 'application/octet-stream');
     for ($i = 0; $i < $N_CHUNKS; $i++) {
-        if ($res->sendable()) {
-            $obs['true'] = true;
-        } else {
-            $obs['false'] = true;
+        try {
+            $res->sendable();
+            $obs['class'] = 'NO-THROW';
+        } catch (\Throwable $e) {
+            $obs['class']   = get_class($e);
+            $obs['message'] = $e->getMessage();
         }
-        $res->send(str_repeat(chr(33 + ($i % 90)), $CHUNK_SZ));
+        $res->write(str_repeat(chr(33 + ($i % 90)), $CHUNK_SZ));
     }
     $res->end();
 });
@@ -79,8 +80,8 @@ $client = spawn(function () use ($port, $server, $expected) {
 $server->start();
 await($client);
 
-echo "saw_sendable_true=",  (int)$obs['true'],  "\n";
-echo "saw_sendable_false=", (int)$obs['false'], "\n";
+echo "class=", $obs['class'], "\n";
+echo "message=", $obs['message'], "\n";
 echo "done\n";
 ?>
 --EXPECT--
@@ -88,6 +89,6 @@ status=200
 len=393216
 ended=1
 hash_match=1
-saw_sendable_true=1
-saw_sendable_false=1
+class=TrueAsync\HttpServerRuntimeException
+message=sendable() is gone: it answered liveness and queue depth with one bool. Use isWritable() for liveness, tryWrite()/awaitWritable() for room
 done

@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse::send() — HTTP/2 peer RST mid-stream surfaces as HttpException(499)
+HttpResponse::write() — HTTP/2 peer RST mid-stream surfaces as HttpException(499)
 --EXTENSIONS--
 true_async_server
 true_async
@@ -11,15 +11,15 @@ h2_skipif(['curl_h2' => true]);
 --FILE--
 <?php
 /* PLAN_STREAMING §9.2 (088-cancel): handler drives a streaming response
- * via repeated send() calls; curl aborts after the first chunk has been
+ * via repeated write() calls; curl aborts after the first chunk has been
  * delivered. The stream-close callback (cb_on_stream_close in
  * src/http2/http2_session.c) must cancel the handler coroutine with
- * HttpException(499), so the next send() — or any pending write — throws
+ * HttpException(499), so the next write() — or any pending write — throws
  * and the handler's try/catch observes the abort.
  *
  * Verifies:
  *  - cancel reaches the handler while it is still suspended between
- *    send() calls,
+ *    write() calls,
  *  - exception carries code=499 + the "stream reset by peer" message,
  *  - server state survives (subsequent connection succeeds). */
 
@@ -56,9 +56,9 @@ $server->addHttpHandler(function ($req, $res)
     try {
         $res->setStatusCode(200)->setHeader('Content-Type', 'text/plain');
         /* Stream slowly enough that curl's --max-time kills us between
-         * chunks. One send() per iteration, delay in between. */
+         * chunks. One write() per iteration, delay in between. */
         for ($i = 0; $i < 20; $i++) {
-            $res->send("chunk-$i\n");
+            $res->write("chunk-$i\n");
             $chunks_sent++;
             delay(100);
         }
@@ -80,7 +80,7 @@ $client = spawn(function () use ($port, $server) {
      * RST_STREAM emission differs from POSIX). The pure-PHP H2 client
      * gives the test exact frame-level control: open a stream, wait
      * for the first DATA frame from the server (handler is past the
-     * first send()), then send RST_STREAM. The server's
+     * first write()), then send RST_STREAM. The server's
      * cb_on_stream_close fires the same code path the curl variant
      * was exercising. */
     $cli = new H2TestClient('127.0.0.1', $port);
@@ -95,7 +95,7 @@ $client = spawn(function () use ($port, $server) {
             continue;
         }
         /* First DATA frame on our stream → handler made it past the
-         * first send(); RST_STREAM now reaches it suspended between
+         * first write(); RST_STREAM now reaches it suspended between
          * chunks, mirroring the curl --max-time-during-stream window. */
         if ($type === H2_FRAME_DATA && $sid_in === $sid && !$rst_sent) {
             $cli->sendRstStream($sid, /* CANCEL */ 0x08);

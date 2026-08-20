@@ -5,13 +5,13 @@ true_async_server
 true_async
 --FILE--
 <?php
-/* tryWrite() is send() without the wait, and awaitWritable() is how a handler
+/* tryWrite() is write() without the wait, and awaitWritable() is how a handler
  * waits for the room it was refused. False means the per-stream ring had
  * no room; it says nothing about the client, whose departure arrives as
  * HttpException 499 instead.
  *
  * The handler offers 8 KiB chunks and, whenever one is refused, hands the SAME
- * chunk to send(), which waits for room. The byte-exact body hash is what
+ * chunk to write(), which waits for room. The byte-exact body hash is what
  * proves a refusal queued nothing: had the refused chunk been queued too, it
  * would appear twice. The single-threaded scheduler runs the handler until it
  * suspends, so the client cannot credit the window meanwhile and a refusal is
@@ -64,7 +64,7 @@ $server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS, &$refus
 
             if (!$res->tryWrite($chunk)) {
                 $fellBack++;
-                $res->send($chunk);
+                $res->write($chunk);
             }
         }
     }

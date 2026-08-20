@@ -27,18 +27,18 @@ $snap = function (string $tag, $val) use (&$lines) {
 
 $server->addHttpHandler(function ($req, $res) use ($snap, $server) {
     // Snapshot value test: getBody() must return a deep copy that
-    // does NOT change when the body buffer is later mutated by write()
+    // does NOT change when the body buffer is later mutated by appendBody()
     // or setBody(). Each $b<N> below is checked AFTER all subsequent
     // mutations have happened, so any aliasing surfaces as a wrong
     // value here.
     $b0 = $res->getBody();
-    $res->write('hello ');
+    $res->appendBody('hello ');
     $b1 = $res->getBody();
-    $res->write('world');
+    $res->appendBody('world');
     $b2 = $res->getBody();
     $res->setBody('replaced');
     $b3 = $res->getBody();
-    $res->write('+more');
+    $res->appendBody('+more');
     $b4 = $res->getBody();
     $res->setBody('');
     $b5 = $res->getBody();

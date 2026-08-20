@@ -188,11 +188,11 @@ codec to bypass the bomb cap.
 
 ## Streaming
 
-When handlers stream via `$response->send($chunk)`, the encoder is
+When handlers stream via `$response->write($chunk)`, the encoder is
 installed transparently on the first call (subject to negotiation).
 The wrapper accumulates compressed output across an entire encoder
 iteration and ships it as a single underlying chunk — one chunked-H1
-size line, one H2 DATA frame per `send()` call, regardless of how many
+size line, one H2 DATA frame per `write()` call, regardless of how many
 internal inflate passes deflate needed.
 
 `mark_ended()` (called by `$response->end()`) drains the gzip trailer

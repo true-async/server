@@ -900,9 +900,9 @@ final class HttpServerConfig
     // === Streaming responses ===
 
     /**
-     * Per-stream chunk-queue cap for HttpResponse::send() backpressure.
+     * Per-stream chunk-queue cap for HttpResponse::write() backpressure.
      *
-     * When handler's send() call grows the stream's chunk queue past
+     * When the handler's write() call grows the stream's chunk queue past
      * this many bytes, the coroutine suspends until nghttp2 drains
      * enough to drop below. HTTP/2 only; HTTP/1 chunked path uses
      * the kernel send buffer instead.
@@ -2273,44 +2273,33 @@ final class HttpResponse
     // === Body methods ===
 
     /**
-     * Write data to response body buffer.
+     * Stream a chunk to the client.
      *
-     * @param string $data Data to write
-     * @return static
+     * The first call commits status and headers; afterwards setStatusCode(),
+     * setHeader() and setBody() throw. Later calls append chunked-transfer
+     * segments (HTTP/1) or DATA frames (HTTP/2, HTTP/3). To append to a
+     * buffered body instead, call appendBody().
+     *
+     * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
+     * park while every ring slot is live or the queued bytes stand at
+     * HttpServerConfig::setStreamWriteBufferBytes (256 KiB by default),
+     * HTTP/1 parks on the socket write. tryWrite() offers a chunk without
+     * committing to that wait. A peer that has gone throws HttpException 499.
      */
-    public function write(string $data): static {}
+    public function write(string $chunk): static {}
 
     /**
-     * Send a chunk to the client (streaming response).
+     * Removed. One bool answered four questions, and a loop that read it as
+     * liveness stopped streams that were merely slow.
      *
-     * First call commits status + headers (they can no longer be
-     * changed). Subsequent calls append DATA frames (HTTP/2) or
-     * chunked-transfer segments (HTTP/1).
+     * Ask the two questions separately: isWritable() reports whether output is
+     * still possible, tryWrite() and awaitWritable() report whether the
+     * outbound queue has room.
      *
-     * Blocks the handler coroutine ONLY under backpressure — when the
-     * per-stream staging buffer is full (HTTP/2: all ring slots live
-     * OR queued bytes reach HttpServerConfig::setStreamWriteBufferBytes,
-     * default 256 KiB). Otherwise returns immediately. send() is always
-     * safe to call; use sendable() to check first if you'd rather do
-     * other work than block.
+     * The declaration stays for one minor release so a call names its
+     * replacements instead of failing as an undefined method.
      *
-     * @param string $chunk
-     * @return static
-     */
-    public function send(string $chunk): static {}
-
-    /**
-     * Advisory, non-blocking backpressure check for streaming responses.
-     *
-     * Returns true when send() would accept a chunk without suspending
-     * the handler coroutine — the per-stream staging buffer has room.
-     * Returns false when send() would block on backpressure, or when the
-     * response is closed / sealed by sendFile() / not streaming-capable.
-     *
-     * send() is always safe to call regardless; sendable() just lets a
-     * handler do other work instead of blocking on a slow peer.
-     *
-     * @return bool
+     * @throws HttpServerRuntimeException always
      */
     public function sendable(): bool {}
 
@@ -2321,7 +2310,7 @@ final class HttpResponse
      * answering false, because "wait" and "stop" need opposite reactions.
      *
      * HTTP/1 keeps no queue of its own, so it never refuses and an accepted
-     * chunk waits for the socket exactly as send() does.
+     * chunk waits for the socket exactly as write() does.
      */
     public function tryWrite(string $chunk): bool {}
 
@@ -2336,7 +2325,7 @@ final class HttpResponse
     /**
      * True while output is still possible: end() was not called, the response
      * is not sealed by sendFile(), and the client has not gone. A false answer
-     * is final, which is what separates it from sendable().
+     * is final, unlike the queue depth tryWrite() reports.
      */
     public function isWritable(): bool {}
 
@@ -2434,7 +2423,7 @@ final class HttpResponse
 
     /**
      * Frame and stream one gRPC message: the 5-byte length prefix is prepended
-     * for you. The first call activates streaming, exactly as send() does — so
+     * for you. The first call activates streaming, exactly as write() does — so
      * call it once for a unary reply and repeatedly for server-streaming.
      *
      * Pass already-protobuf-encoded bytes. The grpc-status travels separately, on
@@ -2463,26 +2452,17 @@ final class HttpResponse
 
     /**
      * Set body content (replaces buffer).
-     *
-     * @param string $body Body content
-     * @return static
      */
     public function setBody(string $body): static {}
 
     /**
-     * Get body stream.
+     * Append to the buffered response body.
      *
-     * @return mixed Stream resource or null
+     * Nothing reaches the client here: the whole body goes out on end(), with
+     * Content-Length computed from it. Call write() to stream instead — that
+     * is the call which commits headers and applies backpressure.
      */
-    public function getBodyStream(): mixed {}
-
-    /**
-     * Set body stream.
-     *
-     * @param mixed $stream Stream resource
-     * @return static
-     */
-    public function setBodyStream(mixed $stream): static {}
+    public function appendBody(string $data): static {}
 
     // === Helper methods ===
 
@@ -2573,9 +2553,13 @@ final class HttpResponse
     public function isHeadersSent(): bool {}
 
     /**
-     * Check if response is closed.
+     * True once end() has been called.
+     *
+     * Reports the response, not the connection: a peer that has gone leaves
+     * this false until the handler ends the response. Use isWritable() for
+     * liveness.
      */
-    public function isClosed(): bool {}
+    public function isEnded(): bool {}
 }
 
 // ---------------------------------------------------------------------------
