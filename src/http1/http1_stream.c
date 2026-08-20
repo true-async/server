@@ -41,6 +41,13 @@
 /* Maximum hex chunk-size line (16 hex digits for 64-bit len) + CRLF. */
 #define H1_CHUNK_HEADER_MAX  18
 
+/* Above this chunk size the frame goes out as three writes rather than one
+ * copy: coalescing trades two syscalls and two scheduler round-trips, worth
+ * about 10 us together, against one user-space copy of the chunk. The two
+ * are equal between 32 and 64 KiB — measured at 1 MiB total, +25% at a
+ * 32 KiB chunk and -16% at 64 KiB (dev/BENCHMARKS.md, 2026-08-20). */
+#define H1_CHUNK_COALESCE_MAX  (32 * 1024)
+
 static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 {
     http_connection_t *conn = ctx->conn;
@@ -149,9 +156,29 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    if (!http_connection_send(conn, header, (size_t)header_len) ||
-        !http_connection_send(conn, ZSTR_VAL(chunk), chunk_len) ||
-        !http_connection_send(conn, "\r\n", 2)) {
+    /* One write per frame while the copy is cheaper than the two syscalls it
+     * removes; a large chunk keeps the three-write path and stays copy-free.
+     * Each http_connection_send suspends the handler until its write
+     * completes, so the count of them is the count of scheduler round-trips. */
+    bool frame_ok;
+
+    if (chunk_len <= H1_CHUNK_COALESCE_MAX) {
+        const size_t frame_len = (size_t)header_len + chunk_len + 2;
+        char *const frame = emalloc(frame_len);
+
+        memcpy(frame, header, (size_t)header_len);
+        memcpy(frame + header_len, ZSTR_VAL(chunk), chunk_len);
+        memcpy(frame + header_len + chunk_len, "\r\n", 2);
+
+        frame_ok = http_connection_send(conn, frame, frame_len);
+        efree(frame);
+    } else {
+        frame_ok = http_connection_send(conn, header, (size_t)header_len)
+                   && http_connection_send(conn, ZSTR_VAL(chunk), chunk_len)
+                   && http_connection_send(conn, "\r\n", 2);
+    }
+
+    if (!frame_ok) {
         /* The write is how the peer's departure becomes visible on H1 — record
          * it so isWritable() can answer without a second doomed write. */
         ctx->stream_dead = true;
