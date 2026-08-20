@@ -2853,7 +2853,15 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     conn->state = CONN_STATE_SENDING;
 
     if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
-        if (!http_response_is_closed(Z_OBJ(ctx->response_zv))) {
+        if (UNEXPECTED(ctx->stream_dead)) {
+            /* A cancellation can cut a frame in half, and the peer has been
+             * promised the bytes its size line named. Sealing that with the
+             * terminator would say the body ended cleanly and hand the
+             * connection on, and the peer would read the terminator as the
+             * first bytes of what it is still waiting for. mark_ended refuses
+             * the same way; this is the path that skips mark_ended. */
+            conn->keep_alive = 0;
+        } else if (!http_response_is_closed(Z_OBJ(ctx->response_zv))) {
             /* Handler fell through without end() — emit the terminator. */
             (void)http_connection_send(conn, "0\r\n\r\n", 5);
         }
