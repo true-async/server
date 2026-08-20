@@ -18,7 +18,12 @@ PHP_HTTP3_DISABLE_RETRY=1
  * worker posts STREAM_HEADERS on first call (streaming submit on the
  * reactor), each chunk as STREAM_CHUNK (reactor chunk ring + resume), and
  * end() as STREAM_END (EOF). Before this, write() under the pool threw
- * "streaming not available". Chunk ORDER and CONTENT prove the FIFO wire. */
+ * "streaming not available". Chunk ORDER and CONTENT prove the FIFO wire.
+ *
+ * The backpressure trio rides along on the same response, because the pool is
+ * the only path where their answers come from a credit the reactor holds
+ * rather than from a queue the worker can see: isWritable() reads the credit,
+ * tryWrite() posts without waiting on it, and awaitWritable() waits for it. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -52,6 +57,11 @@ $server->addHttpHandler(function ($req, $res) {
         $res->write("chunk{$i};");
     }
 
+    $alive = $res->isWritable();
+    $try   = $res->tryWrite('chunk6;');
+    $room  = $res->awaitWritable(1000);
+    $res->write('probe:' . (int)$alive . (int)$try . (int)$room . ';');
+
     $res->end();
 });
 
@@ -79,5 +89,5 @@ $server->start();
 ?>
 --EXPECTF--
 %Astatus=200
-body=chunk1;chunk2;chunk3;chunk4;chunk5;
+body=chunk1;chunk2;chunk3;chunk4;chunk5;chunk6;probe:111;
 %A
