@@ -105,6 +105,35 @@ static void h1_stream_headers_committed(http1_request_ctx_t *ctx)
     http_server_on_streaming_response_started(ctx->conn->counters);
 }
 
+#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
+static void h1_stream_headers_committed_if(http1_request_ctx_t *ctx, const bool sent)
+{
+    if (sent) {
+        h1_stream_headers_committed(ctx);
+    }
+}
+#endif
+
+#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
+/* The CRLF every chunk frame ends with. Interned, because the vectored send
+ * takes a reference it will release: an interned string ignores both, so one
+ * literal serves every frame of every connection. A persistent-but-not-interned
+ * string would be decremented per frame and freed under the next one. */
+static zend_string *h1_crlf_interned(void)
+{
+    static zend_string *crlf = NULL;
+
+    if (UNEXPECTED(crlf == NULL)) {
+        crlf = zend_string_init_interned("\r\n", 2, 1);
+        ZEND_ASSERT(ZSTR_IS_INTERNED(crlf));
+    }
+
+    return crlf;
+}
+
+static void h1_stream_headers_committed_if(http1_request_ctx_t *ctx, bool sent);
+#endif
+
 static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 {
     zend_string *headers = h1_streaming_headers_build(ctx);
@@ -221,7 +250,49 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
      * over — today's ABI offers one or the other, never both. */
     const size_t head_len  = headers != NULL ? ZSTR_LEN(headers) : 0;
     const size_t frame_len = head_len + (size_t)header_len + chunk_len + 2;
-    const bool   coalesce  = frame_len <= H1_CHUNK_COALESCE_MAX;
+
+#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
+    /* Plaintext: hand the pieces over as slots. One submit, one suspension, no
+     * copy of the body — and every piece belongs to the reactor until libuv is
+     * done with it, so a handler cancelled while parked cannot leave a queued
+     * write pointing at memory its C frame has released.
+     *
+     * TLS keeps the coalesced copy below: http_connection_send routes through
+     * tls_push, which copies into the BIO ring anyway, and a vectored write
+     * aimed straight at the socket would put plaintext on a TLS connection. */
+#ifdef HAVE_OPENSSL
+    const bool plaintext = conn->tls == NULL;
+#else
+    const bool plaintext = true;
+#endif
+
+    if (plaintext) {
+        zend_string *slots[4];
+        unsigned     n = 0;
+
+        if (headers != NULL) {
+            slots[n++] = headers;            /* ownership moves to the reactor */
+            headers    = NULL;
+        }
+
+        slots[n++] = zend_string_init(header, (size_t)header_len, 0);
+        slots[n++] = chunk;                  /* the caller's ref, handed over */
+        slots[n++] = h1_crlf_interned();
+
+        const bool sent = http_connection_send_strv_awaited(conn, slots, n);
+
+        if (UNEXPECTED(!sent || EG(exception) != NULL)) {
+            ctx->stream_dead = true;
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
+
+        h1_stream_headers_committed_if(ctx, head_len != 0);
+        http_server_on_stream_send(conn->counters, chunk_len);
+        return HTTP_STREAM_APPEND_OK;
+    }
+#endif
+
+    const bool coalesce = frame_len <= H1_CHUNK_COALESCE_MAX;
     bool frame_ok = true;
 
     /* Too large to carry the block along: the headers go out on their own, and
