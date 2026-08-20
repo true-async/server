@@ -78,6 +78,18 @@ builds — start, three `wrk` runs, stop, swap — three rounds each.
 | 64 KiB | 2362, 2409, 2511 | 2473, 2573, 2577 | same code path either side of the threshold; the spread is the noise floor |
 | 4 KiB | 197, 243, 208 | 367, 376, 377 | +81%, and every run of one build is outside the other's range |
 
+### The header block in the same frame
+
+The first `write()` sent the status line and headers, then the frame. Carrying
+the block inside the frame removes one write and one round trip from the byte a
+client waits for. Alternating builds again, three rounds, median of three runs
+each:
+
+| response | frame only | headers in the frame | |
+|---|---|---|---|
+| one 4 KiB chunk | 22981, 23868, 23387 | 30057, 31601, 29732 | +28.5%, the shape an SSE response has |
+| one 64 KiB chunk | 16738, 16565, 16709 | 16376, 16657, 16477 | unchanged: the block is small against the frame |
+
 ## 2026-08-19 — cost of the per-chunk flush on a streamed response (#170)
 
 Base commit 22a8d37 plus the #170 working tree. Machine: WSL2, Linux 6.6.114.1,
