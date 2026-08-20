@@ -556,14 +556,24 @@ typedef struct {
  * wire. Compared with emitting per-loop slices, this trades a small
  * temporary buffer for fewer protocol-level frames (H2 DATA / chunked
  * size-line). zs is consumed; the underlying owns the refcount. */
-static int forward_compressed(ws_ctx_t *w, zend_string *zs)
+static int forward_compressed(ws_ctx_t *w, zend_string *zs, const bool nonblocking)
 {
     if (UNEXPECTED(zs == NULL || ZSTR_LEN(zs) == 0)) {
         if (zs) zend_string_release(zs);
         return HTTP_STREAM_APPEND_OK;
     }
 
-    return w->underlying_ops->append_chunk(w->underlying_ctx, zs);
+    const int rc = w->underlying_ops->append_chunk(w->underlying_ctx, zs, nonblocking);
+
+    /* By now the encoder has eaten the chunk and closed a block, so a refusal
+     * is not retryable: the same plaintext offered again would be deflated
+     * against a window the decoder never saw. A truncated body with a 499 is
+     * recoverable; a corrupted stream is not. */
+    if (UNEXPECTED(rc == HTTP_STREAM_APPEND_BACKPRESSURE)) {
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    return rc;
 }
 
 /* An encoder that answered HTTP_ENC_ERROR is left mid-block and cannot
@@ -585,7 +595,8 @@ static void drop_faulted_encoder(ws_ctx_t *w)
     w->encoder = NULL;
 }
 
-static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
+static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
+                           const bool nonblocking)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
 
@@ -596,6 +607,15 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
     if (UNEXPECTED(w->encoder == NULL)) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* Asked before the encoder is fed: the encoder cannot be un-fed, and a
+     * closed block would leave the stream one boundary ahead of what the
+     * transport actually took. */
+    if (nonblocking && w->underlying_ops->sendable != NULL
+        && !w->underlying_ops->sendable(w->underlying_ctx)) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     if (UNEXPECTED(!w->first_chunk_done)) {
@@ -645,7 +665,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk)
     }
 
     smart_str_0(&out);
-    return forward_compressed(w, out.s);  /* transfers ownership */
+    return forward_compressed(w, out.s, nonblocking);  /* transfers ownership */
 }
 
 static void ws_mark_ended(void *ctx_opaque)
@@ -676,7 +696,7 @@ static void ws_mark_ended(void *ctx_opaque)
 
         if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
             smart_str_0(&out);
-            (void)forward_compressed(w, out.s);  /* transfers ownership */
+            (void)forward_compressed(w, out.s, false);  /* transfers ownership */
         } else {
             smart_str_free(&out);
         }
@@ -695,11 +715,48 @@ static void ws_mark_ended(void *ctx_opaque)
 static zend_async_event_t *ws_get_wait_event(void *ctx_opaque)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    if (w->underlying_ops->get_wait_event == NULL) {
+        return NULL;
+    }
+
     return w->underlying_ops->get_wait_event(w->underlying_ctx);
+}
+
+static bool ws_wait_writable(void *ctx_opaque, const uint32_t timeout_ms)
+{
+    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    if (w->underlying_ops->wait_writable == NULL) {
+        return true;
+    }
+
+    return w->underlying_ops->wait_writable(w->underlying_ctx, timeout_ms);
+}
+
+/* The wrapper holds no queue of its own, so both answers come from the
+ * transport underneath rather than from the encoder. */
+static bool ws_sendable(void *ctx_opaque)
+{
+    const ws_ctx_t *w = (const ws_ctx_t *)ctx_opaque;
+
+    return w->underlying_ops->sendable == NULL
+           || w->underlying_ops->sendable(w->underlying_ctx);
+}
+
+static bool ws_is_alive(void *ctx_opaque)
+{
+    const ws_ctx_t *w = (const ws_ctx_t *)ctx_opaque;
+
+    return w->underlying_ops->is_alive == NULL
+           || w->underlying_ops->is_alive(w->underlying_ctx);
 }
 
 static const http_response_stream_ops_t compressing_stream_ops = {
     .append_chunk   = ws_append_chunk,
+    .sendable       = ws_sendable,
+    .is_alive       = ws_is_alive,
+    .wait_writable  = ws_wait_writable,
     .mark_ended     = ws_mark_ended,
     .get_wait_event = ws_get_wait_event,
 };

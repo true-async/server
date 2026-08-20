@@ -1204,7 +1204,7 @@ void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk)
     s->chunk_pending_bytes += ZSTR_LEN(chunk);
 }
 
-int h3_stream_append_chunk(void *ctx, zend_string *chunk)
+int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking)
 {
     http3_stream_t *const s = (http3_stream_t *)ctx;
 
@@ -1218,6 +1218,14 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
     if (c->closed || c->nghttp3_conn == NULL) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* Refusal, not a silent accept: the previous chunk has not drained into
+     * the peer's window, so queueing this one would grow memory that the
+     * blocking path bounds by waiting. */
+    if (nonblocking && s->chunk_pending_bytes > 0) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     const bool first_call = s->chunk_queue == NULL;
@@ -1284,7 +1292,7 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk)
      * passes and the suspend never returns: it parks a libuv callback frame that
      * the sender itself would have had to wake. It backpressures in
      * h3_static_try_read instead. */
-    const bool nonblocking_producer = s->static_body_state != NULL;
+    const bool nonblocking_producer = s->static_body_state != NULL || nonblocking;
 
     /* Pull write_timeout_s once — config can't change mid-handler.
      * 0 = wait forever (used in tests / bring-up). Pre-multiply to ms so
@@ -1393,6 +1401,16 @@ static zend_async_event_t *h3_stream_get_wait_event(void *ctx)
                : NULL;
 }
 
+/* Room means the previous chunk has reached nghttp3, which is what the
+ * non-blocking refusal below tests. Published because the compressing wrapper
+ * asks it before feeding the encoder. */
+static bool h3_stream_sendable(void *ctx)
+{
+    const http3_stream_t *const s = (const http3_stream_t *)ctx;
+
+    return s != NULL && s->chunk_pending_bytes == 0;
+}
+
 /* The four terminal conditions h3_stream_append_chunk refuses on. */
 static bool h3_stream_is_alive(void *ctx)
 {
@@ -1404,6 +1422,7 @@ static bool h3_stream_is_alive(void *ctx)
 
 const http_response_stream_ops_t h3_stream_ops = {
     .append_chunk        = h3_stream_append_chunk,
+    .sendable            = h3_stream_sendable,
     .is_alive            = h3_stream_is_alive,
     .mark_ended          = h3_stream_mark_ended,
     .get_wait_event      = h3_stream_get_wait_event,

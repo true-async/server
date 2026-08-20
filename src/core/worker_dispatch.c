@@ -313,7 +313,8 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
     return true;
 }
 
-static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
+static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
+                                      const bool nonblocking)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
@@ -321,6 +322,17 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
         || (ctx->credit != NULL && stream_credit_is_dead(ctx->credit))) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* Refused on the depth already in flight, letting this chunk overshoot the
+     * cap — the rule H2 applies too. Counting the candidate's length instead
+     * would refuse a chunk larger than the cap for ever, whatever the peer
+     * did, and the caller would spin on it. */
+    if (nonblocking && ctx->credit != NULL
+        && ctx->posted_bytes - stream_credit_acked(ctx->credit)
+               >= WORKER_STREAM_INFLIGHT_CAP) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     /* first send(): open the stream; the reactor adopts one credit ref */
@@ -366,10 +378,21 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
 
     const size_t chunk_len = ZSTR_LEN(chunk);
 
-    worker_wire_post(ctx, cw);
+    /* A refused wire is a dropped chunk: the sink exhausted its retries and
+     * worker_wire_post has already marked the stream failed. Reporting OK here
+     * would tell the handler it wrote bytes the peer will never see. */
+    if (UNEXPECTED(!worker_wire_post(ctx, cw))) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     zend_string_release(chunk);   /* bytes copied into the wire arena */
 
     ctx->posted_bytes += chunk_len;
+
+    if (nonblocking) {
+        return HTTP_STREAM_APPEND_OK;   /* room was checked above; never parks */
+    }
 
     if (!worker_stream_wait_credit(ctx)) {
         ctx->stream_failed = true;   /* credit timeout / cancelled while parked */
@@ -437,12 +460,24 @@ static void worker_stream_mark_ended(void *vctx)
     worker_wire_post(ctx, ew);
 }
 
+/* The credit wait the blocking path takes, offered to a non-blocking caller
+ * that asked to be told when room comes back. */
+static bool worker_stream_wait_writable(void *vctx, const uint32_t timeout_ms)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    (void)timeout_ms;   /* the credit wait uses the configured write deadline */
+
+    return worker_stream_wait_credit(ctx);
+}
+
 static const http_response_stream_ops_t worker_stream_ops = {
     .append_chunk   = worker_stream_append_chunk,
     .sendable       = worker_stream_sendable,
     .is_alive       = worker_stream_is_alive,
+    .wait_writable  = worker_stream_wait_writable,
     .mark_ended     = worker_stream_mark_ended,
-    .get_wait_event = NULL,   /* backpressure parks inside append_chunk */
+    .get_wait_event = NULL,   /* the wait above is the one to take */
 };
 
 /* grpc-web in-body trailer frame; consumes the ref. */
@@ -452,7 +487,7 @@ static void worker_grpc_append_frame_and_end(void *vctx, zend_string *frame)
 
     if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
         /* append_chunk consumes the ref (success or failure). */
-        if (worker_stream_append_chunk(ctx, frame) == HTTP_STREAM_APPEND_OK) {
+        if (worker_stream_append_chunk(ctx, frame, false) == HTTP_STREAM_APPEND_OK) {
             worker_stream_mark_ended(ctx);
         }
 

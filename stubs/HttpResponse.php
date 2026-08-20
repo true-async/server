@@ -183,6 +183,45 @@ final class HttpResponse
     public function send(string $chunk): static {}
 
     /**
+     * Offer a chunk without waiting for room: false means the outbound queue
+     * had no room and nothing was queued, so the same chunk can be offered
+     * again later. The transport answers at the moment of queueing, not from
+     * a predicate read beforehand, so nothing slips in between.
+     *
+     * A client that has gone is not reported as false — it throws
+     * HttpException 499, because "wait" and "stop" need opposite reactions.
+     * The refused chunk is a slice of one byte stream, so dropping it corrupts
+     * the body: retry it, or stop.
+     *
+     * HTTP/1 is the exception, and it is not a small one: that transport keeps
+     * no queue of its own, so it never refuses AND an accepted chunk waits for
+     * the socket exactly as send() does — up to the write timeout. A handler
+     * that must not be parked has to check getProtocolVersion(). Over HTTP/2,
+     * HTTP/3 and the worker pool neither happens. Issue #179 removes the
+     * exception.
+     */
+    public function tryWrite(string $chunk): bool {}
+
+    /**
+     * Wait until the outbound queue has room again, and report whether it has.
+     *
+     * The companion to tryWrite(): that call says "not now", this one waits for
+     * "now" instead of spinning. The wait belongs to the transport, which keeps
+     * its own deadline and re-pumps its drain on each wake.
+     *
+     * True at once on HTTP/1, which keeps no queue and so has nothing to wait
+     * for. False without waiting on a transport that can be full but offers no
+     * wait — better than "go ahead", which would spin a handler that trusts it.
+     * A timeout or a cancellation arrives as an exception; false after a wait
+     * means the queue is still full.
+     *
+     * @param int|null $timeoutMs Milliseconds to wait; null leaves the deadline
+     *                            to the transport, which uses the connection's
+     *                            write timeout.
+     */
+    public function awaitWritable(?int $timeoutMs = null): bool {}
+
+    /**
      * Declare the gRPC response message encoding.
      *
      * Must be called before the first writeMessage() — the encoding rides

@@ -2314,6 +2314,32 @@ final class HttpResponse
      */
     public function sendable(): bool {}
 
+    /**
+     * Offer a chunk without waiting for room: false means the outbound queue
+     * had no room and nothing was queued, so the same chunk can be offered
+     * again later. A client that has gone throws HttpException 499 instead of
+     * answering false, because "wait" and "stop" need opposite reactions.
+     *
+     * HTTP/1 keeps no queue of its own, so it never refuses and an accepted
+     * chunk waits for the socket exactly as send() does.
+     */
+    public function tryWrite(string $chunk): bool {}
+
+    /**
+     * Wait until the outbound queue has room again, and report whether it has.
+     * True at once on a transport with no queue; false without waiting on one
+     * that cannot be waited on. A timeout or a cancellation arrives as an
+     * exception.
+     */
+    public function awaitWritable(?int $timeoutMs = null): bool {}
+
+    /**
+     * True while output is still possible: end() was not called, the response
+     * is not sealed by sendFile(), and the client has not gone. A false answer
+     * is final, which is what separates it from sendable().
+     */
+    public function isWritable(): bool {}
+
     // === Server-Sent Events ===
 
     /**
