@@ -159,6 +159,16 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
+    /* Each of those writes suspends. A cancellation that lands between them
+     * returns success for the writes already done, leaving the frame partly
+     * written — the same state a failure leaves, and it is recorded the same
+     * way so mark_ended does not seal it. */
+    if (UNEXPECTED(EG(exception) != NULL)) {
+        ctx->stream_dead = true;
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     zend_string_release(chunk);
 
     http_server_on_stream_send(conn->counters, chunk_len);
@@ -187,6 +197,17 @@ static void h1_stream_mark_ended(void *opaque)
         }
 
         ctx->h1_stream_headers_sent = true;
+    }
+
+    /* A chunk is three writes — size line, body, CRLF — with a suspension
+     * between them, so a cancellation can leave a frame half on the wire.
+     * Sealing that with a terminal chunk would tell the peer the body ended
+     * cleanly and hand the connection on for reuse, and it would read the
+     * terminator as the first bytes of the chunk the size line promised.
+     * Refuse both: no terminator, no keep-alive. */
+    if (UNEXPECTED(ctx->stream_dead)) {
+        conn->keep_alive = false;
+        return;
     }
 
     /* Terminal zero-chunk. Trailers not emitted — RFC requires the
