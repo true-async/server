@@ -2310,7 +2310,7 @@ final class HttpResponse
      * answering false, because "wait" and "stop" need opposite reactions.
      *
      * HTTP/1 keeps no queue of its own, so it never refuses and an accepted
-     * chunk waits for the socket exactly as write() does.
+     * chunk waits on the socket for as long as a blocking write() would.
      */
     public function tryWrite(string $chunk): bool {}
 

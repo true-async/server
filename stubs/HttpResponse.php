@@ -180,7 +180,8 @@ final class HttpResponse
      *
      * HTTP/1 is the exception, and it is not a small one: that transport keeps
      * no queue of its own, so it never refuses AND an accepted chunk waits for
-     * the socket exactly as write() does — up to the write timeout. A handler
+     * the socket for as long as a blocking write() would — up to the write
+     * timeout. A handler
      * that must not be parked has to check getProtocolVersion(). Over HTTP/2,
      * HTTP/3 and the worker pool neither happens. Issue #179 removes the
      * exception.

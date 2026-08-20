@@ -1046,9 +1046,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
  * messages) carry droppable units.
  *
  * HTTP/1 neither refuses nor returns promptly: it keeps no queue of its own,
- * so the kernel socket buffer is the queue, and an accepted chunk waits for
- * the write exactly as write() does. Issue #179 gives the connection its own
- * outbound queue, after which both halves hold under this same signature. */
+ * so the kernel socket buffer is the queue, and an accepted chunk waits on the
+ * socket for as long as a blocking write() would. Issue #179 gives the
+ * connection its own outbound queue, after which both halves hold under this
+ * same signature. */
 ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
 {
     zend_string *chunk;
@@ -1324,9 +1325,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 
 /* {{{ proto HttpResponse::sendable(): bool
  *
- * Tombstone. The declaration outlives the method for one minor release
- * because shipped adapter code calls it: an undefined-method fatal names
- * no successor, this message does. */
+ * Tombstone: the declaration outlives the method for one minor release,
+ * because shipped adapter code calls it and its two replacements cannot be
+ * guessed from the name. */
 ZEND_METHOD(TrueAsync_HttpResponse, sendable)
 {
     (void)return_value;
