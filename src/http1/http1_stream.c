@@ -105,25 +105,6 @@ static void h1_stream_headers_committed(http1_request_ctx_t *ctx)
     http_server_on_streaming_response_started(ctx->conn->counters);
 }
 
-
-#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
-/* The CRLF every chunk frame ends with. Interned, because the send releases
- * every slot and an interned string ignores that: a persistent one would be
- * decremented per frame and freed under the next. */
-static zend_string *h1_crlf_interned(void)
-{
-    static zend_string *crlf = NULL;
-
-    if (UNEXPECTED(crlf == NULL)) {
-        crlf = zend_string_init_interned("\r\n", 2, 1);
-        ZEND_ASSERT(ZSTR_IS_INTERNED(crlf));
-    }
-
-    return crlf;
-}
-
-#endif
-
 static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 {
     zend_string *headers = h1_streaming_headers_build(ctx);
@@ -263,7 +244,10 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
 
         slots[n++] = zend_string_init(header, (size_t)header_len, 0);
         slots[n++] = chunk;                  /* the caller's ref, handed over */
-        slots[n++] = h1_crlf_interned();
+        /* Two bytes per frame rather than one shared literal: the send releases
+         * every slot, and interning at runtime would write the process-wide
+         * permanent table from a worker thread. */
+        slots[n++] = zend_string_init("\r\n", 2, 0);
 
         const bool sent = http_connection_send_strv_awaited(conn, slots, n);
 
