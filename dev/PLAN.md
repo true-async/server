@@ -37,14 +37,17 @@ wire unverified. The contract is settled; the steps are ordered so the
 documentation lands first, because the reporter is writing a proxy recipe against
 it and expects a tag within days.
 
-- [ ] **Document the three body modes first.** `docs/USAGE.md` says nothing about
+- [x] **Document the three body modes first.** `docs/USAGE.md` says nothing about
   the response body at all. It gains a section naming the modes — buffered
   (`setBody`), streamed (`write`), file (`sendFile`) — the state each commits, and
   a framing table: a buffered body gets its `Content-Length` computed, an
   undeclared stream is chunked or DATA frames, a declared stream keeps the header.
   `README.md:277` and the `write()` docblock (`stubs/HttpResponse.php:160`, which
   never says that nothing leaves before `end()`) are corrected in the same step.
-- [ ] **`isWritable(): bool` — liveness, with the op behind it.** A new optional
+  Done in #174: the README guard is gone and both docblocks say what they mean.
+  The `docs/USAGE.md` section is deliberately deferred to land with the renames,
+  so it is written once against the final names.
+- [x] **`isWritable(): bool` — liveness, with the op behind it.** A new optional
   `is_alive` in `http_response_stream_ops_t` (`include/php_http_server.h:706`);
   every backend already computes it inside `append_chunk` (`peer_closed` for H2,
   `stream_credit_is_dead` for the worker). Sound as a predicate because every
@@ -56,15 +59,28 @@ it and expects a tag within days.
   shipped adapter code calls it; `setBodyStream()`/`getBodyStream()`
   (`stubs/HttpResponse.php:257,265`) are deleted — one throws "not yet
   implemented", the other returns null.
-- [ ] **`tryWrite(): bool` and the dialect twins.** The non-blocking half of the
+- [~] **`tryWrite(): bool` and the dialect twins.** In #178, without the twins. The non-blocking half of the
   pair, matching `WebSocket::trySend()`; `trySseEvent()` and `tryWriteMessage()`
   follow, so the idiom is not half-applied. Invariant: false means nothing was
   queued and no header was committed, and a dead peer is still the 499 exception.
   Blocked by the compressing wrapper — `ws_append_chunk` feeds the encoder and
   closes a block before it consults the underlying ops, so a refusal there is not
   retryable, and the capacity check has to move ahead of the encoder.
-  `compressing_stream_ops` (`src/compression/http_compression_response.c:701`) has
-  no `sendable` slot either, so under compression the answer is a constant true.
+  Three review passes reshaped it. The refusal moved into `append_chunk` as a
+  `nonblocking` argument, because a predicate read beforehand cannot be atomic at
+  the PHP boundary; the wait moved into a `wait_writable` op, because each
+  transport's own wait carries a deadline, a wake source and a re-pump of the
+  drain that a wait assembled outside would drop; `awaitWritable()` answers false
+  rather than true where a transport can be full but offers no wait, since "go
+  ahead" spins a handler that trusts it. `compressing_stream_ops` and
+  `h3_stream_ops` gained the missing `sendable` slots — without them a refusal
+  under compression threw away a block the encoder had already emitted, and the
+  retry the caller was told to make corrupted the deflate stream.
+
+  **HTTP/1 is the open exception**: it keeps no queue of its own, so it never
+  refuses and an accepted chunk waits for the socket. Two ways to close it were
+  tried and rejected — see below. The twins (`trySseEvent`, `tryWriteMessage`)
+  wait for that to settle.
 - [ ] **Framing by declared length.** A `Content-Length` set before the first
   `write()` reaches the client verbatim on every protocol, and the server becomes
   the auditor: excess throws at the offending write, a shortfall aborts the stream
@@ -77,6 +93,40 @@ it and expects a tag within days.
   diff: `Sse::connected()` calls `isWritable()`, `send()` becomes `write()`. Its
   docblock was corrected ahead of the rename in YanGusik/laravel-spawn#63, so the
   wording stops teaching the loop that truncated #60 in the meantime.
+
+## HTTP/1 has no non-blocking write, and the two candidate fixes are both wrong
+
+`tryWrite()` cannot refuse on HTTP/1: the streaming path writes through
+`http_connection_send` → `send_raw`, which submits a `uv_write` and awaits it, so
+backpressure is the kernel socket buffer and there is no depth to read. Two
+designs were worked out and both fail on something mechanical.
+
+- **A second writer for the non-blocking case** (`http_connection_send_batched`,
+  the one WebSocket uses). It is an unordered channel: a chunk body parked in
+  `out_pending_buf` waits behind an in-flight write while the headers, a blocking
+  `send()` and `mark_ended`'s terminal chunk go out through the raw path and reach
+  the peer first. Chunked framing does not survive that.
+- **A queue on the response** (`http1_request_ctx_t`). Dead twice over: on TLS the
+  drain writer would run in scheduler context, where `tls_wait_space` refuses
+  outright (`src/core/http_connection_tls.c:97`), so it could not push a byte on
+  HTTPS; and the context is freed in `http_request_finalize`, while a queue drained
+  by write completions outlives the handler by definition. The precedents cited for
+  it — the H2 per-stream ring and the wslay FIFO — both live on connection-lifetime
+  objects, not on a per-request one.
+
+- [ ] **Answer from the queues the connection already has.** Plaintext:
+  `out_pending_buf` carries a byte count, a high-water predicate on the same knob,
+  low-water hysteresis, a drain hook and a destroy defer gate — all implemented and
+  all exercised by WebSocket. TLS: `BIO_ctrl_get_write_guarantee` on the plaintext
+  BIO is the exact predicate `tls_wait_space` loops on, so a refusal built from it
+  is exact by construction. Neither needs a new structure. What it does need is the
+  out-of-band writers brought under one order first — `send_strv_owned` ignores the
+  pending tail, and `emit_parse_error` writes with a direct `send(2)` syscall.
+  Measure before deciding: the case for it is three submits and up to three
+  suspensions per chunk, and that number has never been taken.
+- [ ] **#179 — one serialized outbound path per HTTP/1 connection.** The larger
+  version of the same idea. Filed, and to be judged against the measurement rather
+  than against the argument.
 
 ## The cmocka suite rots unnoticed
 
