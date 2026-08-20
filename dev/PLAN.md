@@ -131,6 +131,18 @@ designs were worked out and both fail on something mechanical.
   it — the H2 per-stream ring and the wslay FIFO — both live on connection-lifetime
   objects, not on a per-request one.
 
+- [x] **Measure the HTTP/1 chunk path before deciding.** Taken on 2026-08-20, on a
+  release PHP built for it (`dev/BENCHMARKS.md`). `strace` confirms three `write(2)`
+  and three loop turns per chunk, flat in the chunk size. A one-hunk prototype that
+  copies the three pieces into one awaited write gains 42.7% at four chunks, 77.3%
+  at sixteen and 84.8% at sixty-four, cutting the per-chunk cost from ~18.5 µs to
+  ~8.8 µs. The copy is only there because the ABI has no awaitable vectored write:
+  `io_pipe_writev_cb` sends no NOTIFY and frees the request itself.
+
+  What it decides: the win needs no queue, no second writer and no per-response
+  structure, so it is not an argument for #179. Next step is to land the coalesced
+  frame as its own change, with the copy or with a new ext/async op.
+
 - [ ] **Answer from the queues the connection already has.** Plaintext:
   `out_pending_buf` carries a byte count, a high-water predicate on the same knob,
   low-water hysteresis, a drain hook and a destroy defer gate — all implemented and
