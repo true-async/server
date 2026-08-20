@@ -513,7 +513,7 @@ static void h3_static_read_dispatch(zend_async_event_t *event,
      * nghttp3 and drains. Never suspends — s->static_body_state is what tells
      * append_chunk this producer backpressures itself. */
     state->busy = true;
-    const int rc = h3_stream_append_chunk(state->stream, chunk);
+    const int rc = h3_stream_append_chunk(state->stream, chunk, false);
     state->busy = false;
 
     if (UNEXPECTED(rc != HTTP_STREAM_APPEND_OK)) {

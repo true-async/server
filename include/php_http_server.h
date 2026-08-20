@@ -707,8 +707,15 @@ struct http_response_stream_ops_t {
     /* Append a chunk (caller already bumped its refcount). Returns
      * one of http_stream_append_result_t. The op itself knows the
      * threshold (it lives in the context), so send() doesn't need
-     * to see server config. */
-    int     (*append_chunk)(void *ctx, zend_string *chunk);
+     * to see server config.
+     *
+     * `nonblocking` forbids suspending the calling coroutine: a transport
+     * that would have parked returns HTTP_STREAM_APPEND_BACKPRESSURE
+     * INSTEAD, having queued nothing and committed nothing, so the caller
+     * may offer the same chunk again. Deciding inside the op is what makes
+     * that atomic — a predicate consulted beforehand answers about a moment
+     * that has already passed. */
+    int     (*append_chunk)(void *ctx, zend_string *chunk, bool nonblocking);
 
     /* Advisory, non-blocking: true when append_chunk would accept a
      * chunk without suspending the handler (the per-stream staging
@@ -716,6 +723,12 @@ struct http_response_stream_ops_t {
      * protocols without a userspace staging ring (HTTP/1, paced by the
      * kernel socket buffer) leave it NULL and sendable() reports true. */
     bool    (*sendable)(void *ctx);
+    /* REQUIRED of any op whose append_chunk can answer
+     * HTTP_STREAM_APPEND_BACKPRESSURE: the compressing wrapper reads it to
+     * decide whether it may feed the encoder, and an encoder cannot be
+     * un-fed. A NULL slot therefore promises "this transport never refuses",
+     * and a transport that refuses anyway loses the bytes of a flushed
+     * block on every refusal. */
 
     /* True while output is still possible: the peer has not gone and the
      * transport can still carry bytes. Every input is a one-way latch, so a

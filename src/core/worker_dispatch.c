@@ -313,7 +313,8 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
     return true;
 }
 
-static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
+static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
+                                      const bool nonblocking)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
@@ -321,6 +322,17 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
         || (ctx->credit != NULL && stream_credit_is_dead(ctx->credit))) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    /* Refused on the depth already in flight, letting this chunk overshoot the
+     * cap — the rule H2 applies too. Counting the candidate's length instead
+     * would refuse a chunk larger than the cap for ever, whatever the peer
+     * did, and the caller would spin on it. */
+    if (nonblocking && ctx->credit != NULL
+        && ctx->posted_bytes - stream_credit_acked(ctx->credit)
+               >= WORKER_STREAM_INFLIGHT_CAP) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     /* first send(): open the stream; the reactor adopts one credit ref */
@@ -370,6 +382,10 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk)
     zend_string_release(chunk);   /* bytes copied into the wire arena */
 
     ctx->posted_bytes += chunk_len;
+
+    if (nonblocking) {
+        return HTTP_STREAM_APPEND_OK;   /* room was checked above; never parks */
+    }
 
     if (!worker_stream_wait_credit(ctx)) {
         ctx->stream_failed = true;   /* credit timeout / cancelled while parked */
@@ -452,7 +468,7 @@ static void worker_grpc_append_frame_and_end(void *vctx, zend_string *frame)
 
     if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
         /* append_chunk consumes the ref (success or failure). */
-        if (worker_stream_append_chunk(ctx, frame) == HTTP_STREAM_APPEND_OK) {
+        if (worker_stream_append_chunk(ctx, frame, false) == HTTP_STREAM_APPEND_OK) {
             worker_stream_mark_ended(ctx);
         }
 

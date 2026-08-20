@@ -927,6 +927,62 @@ ZEND_METHOD(TrueAsync_HttpResponse, redirect)
 }
 /* }}} */
 
+/* Guards shared by every streaming entry point, so send() and tryWrite()
+ * cannot drift apart. Returns true after throwing; `method` names the caller
+ * in the message. */
+static bool response_check_stream_usable(const http_response_object *response,
+                                         const char *method)
+{
+    if (response->closed) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Response already closed — cannot %s() after end()", method);
+        return true;
+    }
+
+    if (response->sse_mode) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Response is in SSE mode — use sseEvent()/sseComment() instead of %s()", method);
+        return true;
+    }
+
+    if (response->send_file_req != NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response is sealed by sendFile() — no further mutation allowed", 0);
+        return true;
+    }
+
+    if (response->stream_ops == NULL) {
+        /* No stream ops installed — response is detached from a
+         * connection (e.g. constructed standalone in user code). */
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Response streaming (%s()) is not available on this response", method);
+        return true;
+    }
+
+    return false;
+}
+
+/* First chunk locks headers and switches to streaming mode. After this,
+ * setBody / setHeader / setStatusCode throw. */
+static void http_response_stream_commit_once(zend_object *obj,
+                                             http_response_object *response)
+{
+    if (response->streaming) {
+        return;
+    }
+
+    response->streaming = true;
+    response->committed = true;
+    response->headers_sent = true;
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Wrap stream_ops with a compressing one if Accept-Encoding +
+     * response state allow gzip. Mutates Content-Encoding/Vary on
+     * the response so the stream's underlying header-commit picks
+     * them up on the next line. */
+    http_compression_maybe_install_stream_wrapper(obj);
+#endif
+}
+
 /* {{{ proto HttpResponse::send(string $chunk): static
  *
  * Streaming response — append a chunk to the outbound queue. First
@@ -948,29 +1004,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response->closed) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response already closed — cannot send() after end()", 0);
-        return;
-    }
-
-    if (response->sse_mode) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response is in SSE mode — use sseEvent()/sseComment() instead of send()", 0);
-        return;
-    }
-
-    if (response->send_file_req != NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response is sealed by sendFile() — no further mutation allowed", 0);
-        return;
-    }
-
-    if (response->stream_ops == NULL) {
-        /* No stream ops installed — response is detached from a
-         * connection (e.g. constructed standalone in user code). */
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response streaming (send()) is not available on this response", 0);
+    if (response_check_stream_usable(response, "send")) {
         return;
     }
 
@@ -979,27 +1013,14 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
-    /* First send() — lock headers and switch to streaming mode.
-     * After this, setBody / setHeader / setStatusCode throw. */
-    if (!response->streaming) {
-        response->streaming = true;
-        response->committed = true;
-        response->headers_sent = true;
-#ifdef HAVE_HTTP_COMPRESSION
-        /* Wrap stream_ops with a compressing one if Accept-Encoding +
-         * response state allow gzip. Mutates Content-Encoding/Vary on
-         * the response so the stream's underlying header-commit picks
-         * them up on the next line. */
-        http_compression_maybe_install_stream_wrapper(Z_OBJ_P(ZEND_THIS));
-#endif
-    }
+    http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
 
     /* Hand ownership of the chunk to the queue — the ops layer
      * takes a refcount. Empty chunks are still accepted (some
      * protocols use them as keepalive signals). */
     zend_string_addref(chunk);
     const int rc = response->stream_ops->append_chunk(
-        response->stream_ctx, chunk);
+        response->stream_ctx, chunk, false);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         /* Peer aborted between dispatch and now. Emulate the
@@ -1015,6 +1036,76 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
     (void)rc;
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::tryWrite(string $chunk): bool
+ *
+ * Non-blocking send(). Returns false when the outbound queue has no room —
+ * nothing was queued and no header was committed, so the same chunk can be
+ * offered again later. A peer that is gone is NOT reported as false: it
+ * throws HttpException 499, because "wait" and "stop" call for opposite
+ * reactions and one bool cannot carry both.
+ *
+ * The refused chunk is a slice of one byte stream, so dropping it corrupts
+ * the body — retry it or stop. Only the framed dialects (SSE events, gRPC
+ * messages) carry droppable units.
+ *
+ * HTTP/1 neither refuses nor returns promptly: it keeps no queue of its own,
+ * so the kernel socket buffer is the queue, and an accepted chunk waits for
+ * the write exactly as send() does. Issue #179 gives the connection its own
+ * outbound queue, after which both halves hold under this same signature. */
+ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
+{
+    zend_string *chunk;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(chunk)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response_check_stream_usable(response, "tryWrite")) {
+        return;
+    }
+
+    /* Dead peer first: false must mean "full", and only that. */
+    if (response->stream_ops->is_alive != NULL
+        && !response->stream_ops->is_alive(response->stream_ctx)) {
+        zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+        return;
+    }
+
+    /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is accepted and
+     * dropped, as send() does. */
+    if (response->is_head) {
+        RETURN_TRUE;
+    }
+
+    /* The commit precedes the append because the wrapper installed here is
+     * what encodes the chunk, and the transport emits headers from inside.
+     * No transport can refuse a first offer — each opens its queue on that
+     * call and answers "room" while the queue is absent — so a refusal never
+     * arrives with the response still uncommitted. #179 is where that stops
+     * being true, and where a refusal will have to unwind the commit and the
+     * wrapper together. */
+    http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
+
+    zend_string_addref(chunk);
+    const int rc = response->stream_ops->append_chunk(
+        response->stream_ctx, chunk, true);
+
+    /* append_chunk consumes the ref on every path, refusals included. */
+    if (rc == HTTP_STREAM_APPEND_BACKPRESSURE) {
+        RETURN_FALSE;
+    }
+
+    if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+        return;
+    }
+
+    RETURN_TRUE;
 }
 /* }}} */
 
@@ -1147,7 +1238,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
     }
 
     const int rc = response->stream_ops->append_chunk(
-        response->stream_ctx, framed);
+        response->stream_ctx, framed, false);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         zend_throw_exception_ex(http_exception_ce, 499,
@@ -1311,7 +1402,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
         if (data != NULL && ZSTR_LEN(data) > 0) {
             zend_string_addref(data);
             (void)response->stream_ops->append_chunk(
-                response->stream_ctx, data);
+                response->stream_ctx, data, false);
         }
 
         response->stream_ops->mark_ended(response->stream_ctx);

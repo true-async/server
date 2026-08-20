@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A streaming handler can offer a chunk without waiting for room (#177).** `HttpResponse::tryWrite()` returns false when the outbound queue is full, having queued nothing, so the same chunk can be offered again; a client that has gone still throws `HttpException` 499, because "wait" and "stop" need opposite reactions and one bool cannot carry both. The pair mirrors `WebSocket::send()`/`trySend()` and shares their high-water mark, `HttpServerConfig::setStreamWriteBufferBytes()`. The transport answers where the chunk is queued rather than through a predicate read beforehand: `append_chunk` gained a `nonblocking` argument, and a transport that would have parked returns `HTTP_STREAM_APPEND_BACKPRESSURE` instead. HTTP/1 is the exception in both halves — it keeps no queue of its own, so it never refuses and an accepted chunk waits for the socket as `send()` does; #179 removes that.
+
 ### Fixed
 
-- **`sendable()` answered a constant true under compression, and on HTTP/3 (#177).** The compressing stream wrapper installed on the first `send()` carried neither a `sendable` nor an `is_alive` slot, and a NULL slot means "no queue of its own, report writable" — so on a compressed response both questions were answered by the absence of an implementation rather than by the transport holding the queue. HTTP/3 had no `sendable` at all, for a stream that does queue. Both now report from the transport: the wrapper delegates, and HTTP/3 answers whether the previous chunk has reached nghttp3, which is the granularity its `append_chunk` waits on.
+- **`sendable()` answered a constant true under compression, and on HTTP/3 (#177).** A transport that can refuse must publish the predicate, because the compressing wrapper reads it to decide whether it may feed the encoder, and an encoder cannot be un-fed: without it a refusal on HTTP/3 threw away a block deflate had already emitted, and the retry the caller was told to make wrote the same bytes into a window that already held them. The compressing stream wrapper installed on the first `send()` carried neither a `sendable` nor an `is_alive` slot, and a NULL slot means "no queue of its own, report writable" — so on a compressed response both questions were answered by the absence of an implementation rather than by the transport holding the queue. HTTP/3 had no `sendable` at all, for a stream that does queue. Both now report from the transport: the wrapper delegates, and HTTP/3 answers whether the previous chunk has reached nghttp3, which is the granularity its `append_chunk` waits on.
 
 ### Added
 
