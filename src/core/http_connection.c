@@ -1416,21 +1416,15 @@ bool http_connection_send_raw(http_connection_t *conn,
 #ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
 /* {{{ http_connection_send_strv_awaited
  *
- * Vectored plaintext send the caller waits for. Takes one reference per slot
- * and never gives it back: the reactor holds them until libuv is done, which
- * is what makes this safe where the awaited single-buffer write is not. There
- * the buffer stays the caller's, so the caller frees it when its own wait
- * ends — and a cancelled caller's wait ends while the write is still queued.
- *
- * Returns false on a dead peer or a refused submit, with every reference
- * consumed either way. Slots reach the wire in array order.
- */
+ * Vectored plaintext send the caller waits for. Slots go out in array order;
+ * every reference is consumed whatever happens, including a cancellation while
+ * parked — the reactor holds them until libuv is done, which is exactly what
+ * the awaited single-buffer write cannot promise. */
 bool http_connection_send_strv_awaited(http_connection_t *conn,
                                        zend_string *const *bufs,
                                        const unsigned nbufs)
 {
-    /* nbufs == 0 is the one submit refusal that neither throws nor consumes,
-     * so it cannot be told apart afterwards. Refuse it before that. */
+    /* The one refusal that neither throws nor consumes: unrecognisable after. */
     ZEND_ASSERT(nbufs > 0);
 
     if (UNEXPECTED(conn->write_timed_out)) {
@@ -1474,9 +1468,7 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
         req->dispose(req);
         ok_total = ok && !had_exc && transferred == (ssize_t)total;
     } else {
-        /* Every refusal past the nbufs guard released the slots already;
-         * absorb the reactor's exception so one dropped connection does not
-         * reach the top level. */
+        /* Past the guard every refusal has released the slots already. */
         http_absorb_io_submission_exception(conn, __func__);
     }
 

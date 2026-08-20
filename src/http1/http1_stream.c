@@ -105,20 +105,11 @@ static void h1_stream_headers_committed(http1_request_ctx_t *ctx)
     http_server_on_streaming_response_started(ctx->conn->counters);
 }
 
-#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
-static void h1_stream_headers_committed_if(http1_request_ctx_t *ctx, const bool sent)
-{
-    if (sent) {
-        h1_stream_headers_committed(ctx);
-    }
-}
-#endif
 
 #ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
-/* The CRLF every chunk frame ends with. Interned, because the vectored send
- * takes a reference it will release: an interned string ignores both, so one
- * literal serves every frame of every connection. A persistent-but-not-interned
- * string would be decremented per frame and freed under the next one. */
+/* The CRLF every chunk frame ends with. Interned, because the send releases
+ * every slot and an interned string ignores that: a persistent one would be
+ * decremented per frame and freed under the next. */
 static zend_string *h1_crlf_interned(void)
 {
     static zend_string *crlf = NULL;
@@ -131,7 +122,6 @@ static zend_string *h1_crlf_interned(void)
     return crlf;
 }
 
-static void h1_stream_headers_committed_if(http1_request_ctx_t *ctx, bool sent);
 #endif
 
 static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
@@ -252,14 +242,10 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     const size_t frame_len = head_len + (size_t)header_len + chunk_len + 2;
 
 #ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
-    /* Plaintext: hand the pieces over as slots. One submit, one suspension, no
-     * copy of the body — and every piece belongs to the reactor until libuv is
-     * done with it, so a handler cancelled while parked cannot leave a queued
-     * write pointing at memory its C frame has released.
-     *
-     * TLS keeps the coalesced copy below: http_connection_send routes through
-     * tls_push, which copies into the BIO ring anyway, and a vectored write
-     * aimed straight at the socket would put plaintext on a TLS connection. */
+    /* Plaintext: the pieces go over as slots the reactor owns — one submit, no
+     * copy of the body, and nothing a cancelled frame could leave dangling.
+     * TLS keeps the copy below: tls_push copies into the BIO ring anyway, and a
+     * vectored write at the socket would put plaintext on a TLS connection. */
 #ifdef HAVE_OPENSSL
     const bool plaintext = conn->tls == NULL;
 #else
@@ -286,7 +272,10 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
 
-        h1_stream_headers_committed_if(ctx, head_len != 0);
+        if (head_len != 0) {
+            h1_stream_headers_committed(ctx);
+        }
+
         http_server_on_stream_send(conn->counters, chunk_len);
         return HTTP_STREAM_APPEND_OK;
     }
