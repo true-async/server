@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: 0c00b844ec01e777f24d231785d7f7b6f3aa8500 */
+ * Stub hash: 04373414abd49b9bc9d5487bc29306366e3ce2b0 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -70,6 +70,10 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_tryWrite, 0, 1, _IS_BOOL, 0)
 	ZEND_ARG_TYPE_INFO(0, chunk, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_awaitWritable, 0, 0, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeoutMs, IS_LONG, 1, "null")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_setGrpcEncoding, 0, 1, IS_STATIC, 0)
@@ -166,6 +170,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, getProtocolVersion);
 ZEND_METHOD(TrueAsync_HttpResponse, write);
 ZEND_METHOD(TrueAsync_HttpResponse, send);
 ZEND_METHOD(TrueAsync_HttpResponse, tryWrite);
+ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable);
 ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding);
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage);
 ZEND_METHOD(TrueAsync_HttpResponse, sendable);
@@ -209,6 +214,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, write, arginfo_class_TrueAsync_HttpResponse_write, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, send, arginfo_class_TrueAsync_HttpResponse_send, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, tryWrite, arginfo_class_TrueAsync_HttpResponse_tryWrite, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, awaitWritable, arginfo_class_TrueAsync_HttpResponse_awaitWritable, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setGrpcEncoding, arginfo_class_TrueAsync_HttpResponse_setGrpcEncoding, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, writeMessage, arginfo_class_TrueAsync_HttpResponse_writeMessage, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sendable, arginfo_class_TrueAsync_HttpResponse_sendable, ZEND_ACC_PUBLIC)

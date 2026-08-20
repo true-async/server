@@ -203,6 +203,20 @@ final class HttpResponse
     public function tryWrite(string $chunk): bool {}
 
     /**
+     * Wait until the outbound queue has room again, and report whether it has.
+     *
+     * The companion to tryWrite(): that call says "not now", this one waits for
+     * "now" instead of spinning. Answers true at once where there is nothing to
+     * wait for — HTTP/1, which keeps no queue, and the worker pool, which parks
+     * inside the write. A timeout or a cancellation arrives as an exception;
+     * false means the wait ended and the queue is still full.
+     *
+     * @param int|null $timeoutMs Milliseconds to wait; null waits until the
+     *                            connection's own write deadline decides.
+     */
+    public function awaitWritable(?int $timeoutMs = null): bool {}
+
+    /**
      * Declare the gRPC response message encoding.
      *
      * Must be called before the first writeMessage() — the encoding rides

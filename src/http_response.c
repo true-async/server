@@ -1100,12 +1100,97 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
         RETURN_FALSE;
     }
 
+    /* The transport may already have thrown a more precise reason — an
+     * over-sized chunk, say. 499 is the fallback diagnosis, not an override. */
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
-        zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+        if (EXPECTED(EG(exception) == NULL)) {
+            zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+        }
+
         return;
     }
 
     RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::awaitWritable(?int $timeoutMs = null): bool
+ *
+ * Suspend until the outbound queue has room again, and report whether it has.
+ * The companion to tryWrite(): that call says "not now", this one says when
+ * "now" arrived — without the spin a bare retry loop would otherwise be.
+ *
+ * Answers true at once where there is nothing to wait for: a transport with no
+ * queue of its own (HTTP/1), or one that parks inside the write instead of
+ * exposing a drain event (the worker pool). A timeout and a cancellation both
+ * arrive as exceptions rather than as false — false means the queue is still
+ * full after a legitimate wake. Without a timeout the wait is bounded by the
+ * connection's write deadline, which tears the stream down. */
+ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable)
+{
+    zend_long timeout_ms      = 0;
+    bool      timeout_is_null = true;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG_OR_NULL(timeout_ms, timeout_is_null)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response_check_stream_usable(response, "awaitWritable")) {
+        return;
+    }
+
+    const http_response_stream_ops_t *ops = response->stream_ops;
+
+    if (ops->sendable == NULL || ops->sendable(response->stream_ctx)) {
+        RETURN_TRUE;
+    }
+
+    if (ops->get_wait_event == NULL) {
+        RETURN_TRUE;
+    }
+
+    zend_async_event_t *wake_ev = ops->get_wait_event(response->stream_ctx);
+
+    if (wake_ev == NULL) {
+        RETURN_TRUE;
+    }
+
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "awaitWritable() needs a coroutine to suspend — call it from a handler", 0);
+        return;
+    }
+
+    if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+        RETURN_FALSE;
+    }
+
+    zend_async_resume_when(co, wake_ev, false,
+                           zend_async_waker_callback_resolve, NULL);
+
+    if (!timeout_is_null && timeout_ms > 0) {
+        zend_async_event_t *timer =
+            &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)timeout_ms, false)->base;
+        zend_async_resume_when(co, timer, true,
+                               zend_async_waker_callback_timeout, NULL);
+    }
+
+    ZEND_ASYNC_SUSPEND();
+    zend_async_waker_clean(co);
+
+    /* A timeout or a cancellation arrives as the waker's own exception and is
+     * left to propagate — turning it into a bool here would hide a cancelled
+     * request behind "still full". */
+    if (EG(exception) != NULL) {
+        return;
+    }
+
+    RETURN_BOOL(ops->sendable == NULL || ops->sendable(response->stream_ctx));
 }
 /* }}} */
 

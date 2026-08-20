@@ -5,7 +5,8 @@ true_async_server
 true_async
 --FILE--
 <?php
-/* tryWrite() is send() without the wait. False means the per-stream ring had
+/* tryWrite() is send() without the wait, and awaitWritable() is how a handler
+ * waits for the room it was refused. False means the per-stream ring had
  * no room; it says nothing about the client, whose departure arrives as
  * HttpException 499 instead.
  *
@@ -50,7 +51,15 @@ $server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS, &$refus
 
         if (!$res->tryWrite($chunk)) {
             $refused++;
-            $res->send($chunk);
+
+            /* Wait for room instead of spinning, then offer the same bytes
+             * again — the pair tryWrite()/awaitWritable() is what a producer
+             * uses when it must not park blindly. */
+            $res->awaitWritable(5000);
+
+            if (!$res->tryWrite($chunk)) {
+                $res->send($chunk);
+            }
         }
     }
 

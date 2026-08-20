@@ -324,6 +324,19 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
+    /* The copy below is persistent memory, outside the request's memory_limit
+     * and outside the OOM firewalls, so a chunk that can never fit the credit
+     * is refused loudly rather than accepted and paid for. The blocking path
+     * takes it: it pays with a wait, not with unbounded growth. */
+    if (UNEXPECTED(nonblocking && ZSTR_LEN(chunk) > WORKER_STREAM_INFLIGHT_CAP)) {
+        zend_string_release(chunk);
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "tryWrite(): chunk of %zu bytes exceeds the %d-byte stream credit — "
+            "use send() for it, or split it",
+            ZSTR_LEN(chunk), WORKER_STREAM_INFLIGHT_CAP);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     /* Refused on the depth already in flight, letting this chunk overshoot the
      * cap — the rule H2 applies too. Counting the candidate's length instead
      * would refuse a chunk larger than the cap for ever, whatever the peer
@@ -378,7 +391,14 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
 
     const size_t chunk_len = ZSTR_LEN(chunk);
 
-    worker_wire_post(ctx, cw);
+    /* A refused wire is a dropped chunk: the sink exhausted its retries and
+     * worker_wire_post has already marked the stream failed. Reporting OK here
+     * would tell the handler it wrote bytes the peer will never see. */
+    if (UNEXPECTED(!worker_wire_post(ctx, cw))) {
+        zend_string_release(chunk);
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
     zend_string_release(chunk);   /* bytes copied into the wire arena */
 
     ctx->posted_bytes += chunk_len;
