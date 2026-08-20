@@ -1116,16 +1116,16 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
 
 /* {{{ proto HttpResponse::awaitWritable(?int $timeoutMs = null): bool
  *
- * Suspend until the outbound queue has room again, and report whether it has.
- * The companion to tryWrite(): that call says "not now", this one says when
- * "now" arrived — without the spin a bare retry loop would otherwise be.
+ * Wait until the outbound queue has room again, and report whether it has.
+ * The companion to tryWrite(): that call says "not now", this one waits for
+ * "now" instead of spinning.
  *
- * Answers true at once where there is nothing to wait for: a transport with no
- * queue of its own (HTTP/1), or one that parks inside the write instead of
- * exposing a drain event (the worker pool). A timeout and a cancellation both
- * arrive as exceptions rather than as false — false means the queue is still
- * full after a legitimate wake. Without a timeout the wait is bounded by the
- * connection's write deadline, which tears the stream down. */
+ * The wait belongs to the transport, which keeps its own deadline and re-pumps
+ * its drain on each wake. A transport with no queue (HTTP/1) has nothing to
+ * wait for and answers true at once. A transport that can be full but offers
+ * no way to wait answers false rather than true — a caller told "go ahead"
+ * would spin and never yield, which on a pool worker freezes every other
+ * request on that thread. */
 ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable)
 {
     zend_long timeout_ms      = 0;
@@ -1136,6 +1136,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable)
         Z_PARAM_LONG_OR_NULL(timeout_ms, timeout_is_null)
     ZEND_PARSE_PARAMETERS_END();
 
+    if (UNEXPECTED(!timeout_is_null && timeout_ms < 0)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "awaitWritable(): timeout must not be negative", 0);
+        return;
+    }
+
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response_check_stream_usable(response, "awaitWritable")) {
@@ -1144,18 +1150,13 @@ ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable)
 
     const http_response_stream_ops_t *ops = response->stream_ops;
 
+    /* No queue of its own, or room already: nothing to wait for. */
     if (ops->sendable == NULL || ops->sendable(response->stream_ctx)) {
         RETURN_TRUE;
     }
 
-    if (ops->get_wait_event == NULL) {
-        RETURN_TRUE;
-    }
-
-    zend_async_event_t *wake_ev = ops->get_wait_event(response->stream_ctx);
-
-    if (wake_ev == NULL) {
-        RETURN_TRUE;
+    if (ops->wait_writable == NULL) {
+        RETURN_FALSE;
     }
 
     zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -1166,28 +1167,18 @@ ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable)
         return;
     }
 
-    if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
-        RETURN_FALSE;
-    }
+    const bool woken = ops->wait_writable(response->stream_ctx,
+        timeout_is_null ? 0u : (uint32_t)timeout_ms);
 
-    zend_async_resume_when(co, wake_ev, false,
-                           zend_async_waker_callback_resolve, NULL);
-
-    if (!timeout_is_null && timeout_ms > 0) {
-        zend_async_event_t *timer =
-            &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)timeout_ms, false)->base;
-        zend_async_resume_when(co, timer, true,
-                               zend_async_waker_callback_timeout, NULL);
-    }
-
-    ZEND_ASYNC_SUSPEND();
-    zend_async_waker_clean(co);
-
-    /* A timeout or a cancellation arrives as the waker's own exception and is
-     * left to propagate — turning it into a bool here would hide a cancelled
-     * request behind "still full". */
+    /* A timeout or a cancellation arrives as the transport's exception; it is
+     * left to propagate rather than flattened into false, which would hide a
+     * cancelled request behind "still full". */
     if (EG(exception) != NULL) {
         return;
+    }
+
+    if (!woken) {
+        RETURN_FALSE;
     }
 
     RETURN_BOOL(ops->sendable == NULL || ops->sendable(response->stream_ctx));

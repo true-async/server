@@ -1821,10 +1821,32 @@ static bool h2_stream_is_alive(void *ctx)
     return conn != NULL && !conn->write_timed_out;
 }
 
+/* The same loop append_chunk takes when the ring is full: it re-pumps the
+ * session on each wake, which a bare park on the drain event would not. */
+static bool h2_stream_wait_writable(void *ctx, const uint32_t timeout_ms)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
+    (void)timeout_ms;   /* the drain wait uses conn->write_timeout_ms */
+
+    http_connection_t *conn = http2_session_get_conn(stream->session);
+
+    if (conn == NULL) {
+        return false;
+    }
+
+    const uint32_t max_bytes = conn->server != NULL
+                             ? http_server_get_stream_write_buffer_bytes(conn->server)
+                             : 0;
+
+    return h2_stream_wait_for_room(stream, conn, max_bytes);
+}
+
 const http_response_stream_ops_t h2_stream_ops = {
     .append_chunk        = h2_stream_append_chunk,
     .sendable            = h2_stream_sendable,
     .is_alive            = h2_stream_is_alive,
+    .wait_writable       = h2_stream_wait_writable,
     .mark_ended          = h2_stream_mark_ended,
     .get_wait_event      = h2_stream_get_wait_event,
     .send_static_response = h2_stream_send_static_response,

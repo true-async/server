@@ -36,6 +36,8 @@ for ($i = 0; $i < $N_CHUNKS; $i++) {
 }
 
 $refused = 0;
+$waited = 0;
+$fellBack = 0;
 
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
@@ -43,7 +45,7 @@ $config = (new HttpServerConfig())
     ->setWriteTimeout(15);
 
 $server = new HttpServer($config);
-$server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS, &$refused) {
+$server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS, &$refused, &$waited, &$fellBack) {
     $res->setStatusCode(200)->setHeader('Content-Type', 'application/octet-stream');
 
     for ($i = 0; $i < $N_CHUNKS; $i++) {
@@ -53,11 +55,15 @@ $server->addHttpHandler(function ($req, $res) use ($CHUNK_SZ, $N_CHUNKS, &$refus
             $refused++;
 
             /* Wait for room instead of spinning, then offer the same bytes
-             * again — the pair tryWrite()/awaitWritable() is what a producer
-             * uses when it must not park blindly. */
-            $res->awaitWritable(5000);
+             * again. If awaitWritable() returned without waiting, the retry
+             * below would be refused too and $fellBack would rise — which is
+             * what the expected output rules out. */
+            if ($res->awaitWritable(5000)) {
+                $waited++;
+            }
 
             if (!$res->tryWrite($chunk)) {
+                $fellBack++;
                 $res->send($chunk);
             }
         }
@@ -87,6 +93,8 @@ $server->start();
 await($client);
 
 echo "refused=", $refused > 0 ? 1 : 0, "\n";
+echo "waited=", $waited > 0 ? 1 : 0, "\n";
+echo "fell_back=", $fellBack, "\n";
 echo "done\n";
 ?>
 --EXPECT--
@@ -94,4 +102,6 @@ status=200
 len=393216
 hash_match=1
 refused=1
+waited=1
+fell_back=0
 done

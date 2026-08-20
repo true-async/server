@@ -563,7 +563,17 @@ static int forward_compressed(ws_ctx_t *w, zend_string *zs, const bool nonblocki
         return HTTP_STREAM_APPEND_OK;
     }
 
-    return w->underlying_ops->append_chunk(w->underlying_ctx, zs, nonblocking);
+    const int rc = w->underlying_ops->append_chunk(w->underlying_ctx, zs, nonblocking);
+
+    /* By now the encoder has eaten the chunk and closed a block, so a refusal
+     * is not retryable: the same plaintext offered again would be deflated
+     * against a window the decoder never saw. A truncated body with a 499 is
+     * recoverable; a corrupted stream is not. */
+    if (UNEXPECTED(rc == HTTP_STREAM_APPEND_BACKPRESSURE)) {
+        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    }
+
+    return rc;
 }
 
 /* An encoder that answered HTTP_ENC_ERROR is left mid-block and cannot
@@ -705,7 +715,23 @@ static void ws_mark_ended(void *ctx_opaque)
 static zend_async_event_t *ws_get_wait_event(void *ctx_opaque)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    if (w->underlying_ops->get_wait_event == NULL) {
+        return NULL;
+    }
+
     return w->underlying_ops->get_wait_event(w->underlying_ctx);
+}
+
+static bool ws_wait_writable(void *ctx_opaque, const uint32_t timeout_ms)
+{
+    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    if (w->underlying_ops->wait_writable == NULL) {
+        return true;
+    }
+
+    return w->underlying_ops->wait_writable(w->underlying_ctx, timeout_ms);
 }
 
 /* The wrapper holds no queue of its own, so both answers come from the
@@ -730,6 +756,7 @@ static const http_response_stream_ops_t compressing_stream_ops = {
     .append_chunk   = ws_append_chunk,
     .sendable       = ws_sendable,
     .is_alive       = ws_is_alive,
+    .wait_writable  = ws_wait_writable,
     .mark_ended     = ws_mark_ended,
     .get_wait_event = ws_get_wait_event,
 };

@@ -324,19 +324,6 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
-    /* The copy below is persistent memory, outside the request's memory_limit
-     * and outside the OOM firewalls, so a chunk that can never fit the credit
-     * is refused loudly rather than accepted and paid for. The blocking path
-     * takes it: it pays with a wait, not with unbounded growth. */
-    if (UNEXPECTED(nonblocking && ZSTR_LEN(chunk) > WORKER_STREAM_INFLIGHT_CAP)) {
-        zend_string_release(chunk);
-        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-            "tryWrite(): chunk of %zu bytes exceeds the %d-byte stream credit — "
-            "use send() for it, or split it",
-            ZSTR_LEN(chunk), WORKER_STREAM_INFLIGHT_CAP);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
-    }
-
     /* Refused on the depth already in flight, letting this chunk overshoot the
      * cap — the rule H2 applies too. Counting the candidate's length instead
      * would refuse a chunk larger than the cap for ever, whatever the peer
@@ -473,12 +460,24 @@ static void worker_stream_mark_ended(void *vctx)
     worker_wire_post(ctx, ew);
 }
 
+/* The credit wait the blocking path takes, offered to a non-blocking caller
+ * that asked to be told when room comes back. */
+static bool worker_stream_wait_writable(void *vctx, const uint32_t timeout_ms)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    (void)timeout_ms;   /* the credit wait uses the configured write deadline */
+
+    return worker_stream_wait_credit(ctx);
+}
+
 static const http_response_stream_ops_t worker_stream_ops = {
     .append_chunk   = worker_stream_append_chunk,
     .sendable       = worker_stream_sendable,
     .is_alive       = worker_stream_is_alive,
+    .wait_writable  = worker_stream_wait_writable,
     .mark_ended     = worker_stream_mark_ended,
-    .get_wait_event = NULL,   /* backpressure parks inside append_chunk */
+    .get_wait_event = NULL,   /* the wait above is the one to take */
 };
 
 /* grpc-web in-body trailer frame; consumes the ref. */

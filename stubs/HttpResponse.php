@@ -206,13 +206,18 @@ final class HttpResponse
      * Wait until the outbound queue has room again, and report whether it has.
      *
      * The companion to tryWrite(): that call says "not now", this one waits for
-     * "now" instead of spinning. Answers true at once where there is nothing to
-     * wait for — HTTP/1, which keeps no queue, and the worker pool, which parks
-     * inside the write. A timeout or a cancellation arrives as an exception;
-     * false means the wait ended and the queue is still full.
+     * "now" instead of spinning. The wait belongs to the transport, which keeps
+     * its own deadline and re-pumps its drain on each wake.
      *
-     * @param int|null $timeoutMs Milliseconds to wait; null waits until the
-     *                            connection's own write deadline decides.
+     * True at once on HTTP/1, which keeps no queue and so has nothing to wait
+     * for. False without waiting on a transport that can be full but offers no
+     * wait — better than "go ahead", which would spin a handler that trusts it.
+     * A timeout or a cancellation arrives as an exception; false after a wait
+     * means the queue is still full.
+     *
+     * @param int|null $timeoutMs Milliseconds to wait; null leaves the deadline
+     *                            to the transport, which uses the connection's
+     *                            write timeout.
      */
     public function awaitWritable(?int $timeoutMs = null): bool {}
 

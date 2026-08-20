@@ -743,6 +743,15 @@ struct http_response_stream_ops_t {
      * Idempotent. */
     void    (*mark_ended)(void *ctx);
 
+    /* Wait until append_chunk would accept a chunk, and report whether it
+     * would. `timeout_ms` of 0 means the transport's own write deadline.
+     * Each transport keeps what its internal wait already does — its
+     * deadline, its re-pump of the drain, its wake source — which a wait
+     * assembled at the PHP boundary would drop. MAY be NULL: the caller
+     * then falls back to get_wait_event, and a transport with neither
+     * cannot be waited on at all. */
+    bool    (*wait_writable)(void *ctx, uint32_t timeout_ms);
+
     /* Lazily-created trigger event the handler awaits on under
      * backpressure. Fired by the drain side when the queue drops
      * below threshold. Returns NULL only on alloc failure — callers
