@@ -41,12 +41,23 @@
 /* Maximum hex chunk-size line (16 hex digits for 64-bit len) + CRLF. */
 #define H1_CHUNK_HEADER_MAX  18
 
-/* Above this chunk size the frame goes out as three writes rather than one
- * copy: coalescing trades two syscalls and two scheduler round-trips, worth
- * about 10 us together, against one user-space copy of the chunk. The two
- * are equal between 32 and 64 KiB — measured at 1 MiB total, +25% at a
- * 32 KiB chunk and -16% at 64 KiB (dev/BENCHMARKS.md, 2026-08-20). */
+/* Largest frame — size line, body and CRLF together — that goes out as one
+ * copied write instead of three separate ones. Coalescing trades two syscalls
+ * and two scheduler round-trips against one copy of the chunk, and the two are
+ * worth the same somewhere between 32 and 64 KiB: measured at a 1 MiB body,
+ * +25% at a 32 KiB chunk and -16% at 64 KiB (dev/BENCHMARKS.md, 2026-08-20,
+ * plaintext, wrk on loopback — the crossing moves with the machine).
+ *
+ * The bound is on the frame and not on the chunk because of TLS, where
+ * tls_push splits anything larger than the plaintext ring: a frame one byte
+ * over spends a second ring cycle on a TLS record carrying six bytes. The two
+ * numbers are independent — one is a measured crossing, the other a buffer
+ * size — so the assert below catches them drifting apart rather than tying
+ * the plaintext decision to a TLS constant. */
 #define H1_CHUNK_COALESCE_MAX  (32 * 1024)
+
+ZEND_STATIC_ASSERT(H1_CHUNK_COALESCE_MAX <= HTTP_TLS_PLAINTEXT_RING_BYTES,
+                   "a coalesced frame must fit one TLS plaintext ring cycle");
 
 static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 {
@@ -159,11 +170,17 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     /* One write per frame while the copy is cheaper than the two syscalls it
      * removes; a large chunk keeps the three-write path and stays copy-free.
      * Each http_connection_send suspends the handler until its write
-     * completes, so the count of them is the count of scheduler round-trips. */
+     * completes, so the count of them is the count of scheduler round-trips.
+     *
+     * Both branches hand a buffer the caller owns to a write that outlives the
+     * call when a cancellation lands mid-flight: libuv keeps the pointer until
+     * its completion callback, while dispose only marks the request pending.
+     * Closing that needs a write which reports its status AND takes the buffer
+     * over — today's ABI offers one or the other, never both. */
+    const size_t frame_len = (size_t)header_len + chunk_len + 2;
     bool frame_ok;
 
-    if (chunk_len <= H1_CHUNK_COALESCE_MAX) {
-        const size_t frame_len = (size_t)header_len + chunk_len + 2;
+    if (frame_len <= H1_CHUNK_COALESCE_MAX) {
         char *const frame = emalloc(frame_len);
 
         memcpy(frame, header, (size_t)header_len);
