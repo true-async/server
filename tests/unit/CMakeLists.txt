@@ -355,6 +355,7 @@ if(NGHTTP2_FOUND)
         # HTTP/1 parser is referenced by http_protocol_strategy.c (http1_feed);
         # link the same source set the HTTP/1 unit tests use.
         ${HTTP1_PARSER_SRC}
+        ${CMAKE_SOURCE_DIR}/unit/common/strategy_stubs.c
     )
 
     target_compile_definitions(test_http2_strategy PRIVATE HAVE_HTTP2=1)
@@ -365,6 +366,7 @@ if(NGHTTP2_FOUND)
         ${CMAKE_SOURCE_DIR}/../src
         ${CMAKE_SOURCE_DIR}/../src/core
         ${NGHTTP2_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../src/grpc
     )
 
     target_link_libraries(test_http2_strategy
@@ -397,6 +399,7 @@ if(NGHTTP2_FOUND)
         # parser, and that TU in turn pulls in smart_str / llhttp usage
         # — so link the same source set the HTTP/1 unit tests use.
         ${HTTP1_PARSER_SRC}
+        ${CMAKE_SOURCE_DIR}/unit/common/h2_stubs.c
     )
 
     target_compile_definitions(test_http2_session PRIVATE HAVE_HTTP2=1)
