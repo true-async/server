@@ -142,14 +142,35 @@ designs were worked out and both fail on something mechanical.
   What it decides: the win needs no queue, no second writer and no per-response
   structure, so it is not an argument for #179.
 
-- [x] **Send a streamed chunk as one write below 32 KiB.** Done. The threshold is
-  where the copy stops paying, measured: +25% at a 32 KiB chunk, −16% at 64 KiB, so
-  a larger chunk keeps the copy-free three-write path. Verified against a 9% noise
-  floor by alternating the two builds — +81% at 4 KiB chunks, and no difference at
-  64 KiB, where both take the same path. Test
-  `tests/phpt/server/h1/029-h1-chunk-coalesce.phpt` reads the raw response and
-  checks the chunk-size lines on both sides of the threshold. The copy stays until
-  ext/async gains an awaitable vectored write.
+- [x] **Send a streamed chunk as one write below 32 KiB.** Merged in #184. The
+  threshold is where the copy stops paying, measured: +25% at a 32 KiB chunk, −16%
+  at 64 KiB, so a larger frame keeps the copy-free three-write path. Verified
+  against a 9% noise floor by alternating the two builds — +81% at 4 KiB chunks,
+  and no difference at 64 KiB, where both take the same path. The bound is on the
+  frame rather than the chunk: `HTTP_TLS_PLAINTEXT_RING_BYTES` is also 32 KiB, so a
+  chunk-sized bound made a 32 KiB chunk spend a second ring cycle on a TLS record
+  carrying six bytes, and a static assert now keeps the two from drifting.
+
+  The header block rides inside the first frame when the two fit: +28.5% on a
+  one-chunk response, which is the shape of an SSE reply. `mark_ended` checks
+  `stream_dead` before its header commit, so a stream that died after its headers
+  landed no longer sends them twice.
+
+  The copy stays until ext/async grows a vectored write that reports its status.
+  Its release callback carries none today (`zend_async_API.h:588`) and
+  `io_pipe_writev_cb` destroys the exception before calling it, so a coroutine can
+  be resumed from there but cannot learn whether the write failed — and on this
+  path a failed write is what makes `isWritable()` honest (#176). The same change
+  would close the buffer-lifetime hazard both branches carry: libuv keeps the
+  caller's pointer until its completion callback, while a cancelled request is only
+  marked pending.
+
+- [x] **Cover the three files the #177 work left behind.** The coverage gate on
+  #182 flagged a drop inherited from #178 — the compressing wrapper's four
+  delegating ops, the pool worker's credit-backed answers, and the HTTP/1 branches
+  around the header block. `compression/052`, the trio added to `h3/047`, and two
+  more shapes in `h1/029` close it: compression 75.68 → 78.38, worker_dispatch
+  76.63 → 79.62, http1_stream 66.23 → 71.43.
 
 - [ ] **Answer from the queues the connection already has.** Plaintext:
   `out_pending_buf` carries a byte count, a high-water predicate on the same knob,
@@ -164,6 +185,18 @@ designs were worked out and both fail on something mechanical.
 - [ ] **#179 — one serialized outbound path per HTTP/1 connection.** The larger
   version of the same idea. Filed, and to be judged against the measurement rather
   than against the argument.
+
+## Landed elsewhere
+
+- **php-async #260 / #261.** Every debug CI job broke on 2026-08-20 with
+  `op_array_emalloc_copy_array: Assertion 'zend_hash_num_elements(src) ==
+  src->nNumUsed'`. The helper rebuilds two tables and asserted an invariant that
+  holds for one: static variables need every bucket, because BIND_LEXICAL reaches a
+  captured variable by a byte offset into arData, while a literal array may hold a
+  hole — `[0 => 'a', 2 => 'b']` compiles to a packed hash whose slot 1 is UNDEF.
+  The assert moved to the caller whose offsets depend on it. Server commit `5392ff7`
+  was green at 09:11 UTC and the same commit failed at 12:50 with nothing changed on
+  its side, which is what identified the cause.
 
 ## The cmocka suite rots unnoticed
 
