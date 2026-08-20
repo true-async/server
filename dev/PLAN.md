@@ -64,11 +64,14 @@ it and expects a tag within days.
   and `h2/023-h2-sendable-tombstone.phpt` asserts the throw on a live H2 stream
   where the method used to answer. `docs/USAGE.md` §3.5 documents the three modes.
 
-  One defect surfaced while doing it: **the `stream` perf profile had never run**.
-  `tests/perf/servers/server_stream.php` called `->send()` with no argument against
-  an arginfo requiring one, so the profile answered 500 with `expects exactly 1
-  argument, 0 given` before measuring anything, and its chunk loop buffered through
-  the old `write()`.
+  Two defects surfaced while doing it, both fixed here. **#181**: a buffered body
+  followed by a streaming call was discarded with no error — the streaming path
+  never reads `response->body`, while the reverse direction has always thrown, so
+  only one side of a symmetric-looking mistake reported. **The `stream` perf
+  profile had never run**: `tests/perf/servers/server_stream.php` called `->send()`
+  with no argument against an arginfo requiring one, so the profile answered 500
+  with `expects exactly 1 argument, 0 given` before measuring anything, and its
+  chunk loop buffered through the old `write()`.
 - [~] **`tryWrite(): bool` and the dialect twins.** In #178, without the twins. The non-blocking half of the
   pair, matching `WebSocket::trySend()`; `trySseEvent()` and `tryWriteMessage()`
   follow, so the idiom is not half-applied. Invariant: false means nothing was

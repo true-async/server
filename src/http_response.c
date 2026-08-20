@@ -900,6 +900,17 @@ ZEND_METHOD(TrueAsync_HttpResponse, redirect)
 }
 /* }}} */
 
+/* True when setBody()/appendBody()/json()/html() left bytes waiting for end().
+ * An empty buffer does not count: setBody('') commits the handler to nothing. */
+static bool response_has_buffered_body(const http_response_object *response)
+{
+    if (response->body_view != NULL) {
+        return ZSTR_LEN(response->body_view) > 0;
+    }
+
+    return response->body.s != NULL && ZSTR_LEN(response->body.s) > 0;
+}
+
 /* Guards shared by every streaming entry point, so write() and tryWrite()
  * cannot drift apart. Returns true after throwing; `method` names the caller
  * in the message. */
@@ -929,6 +940,16 @@ static bool response_check_stream_usable(const http_response_object *response,
          * connection (e.g. constructed standalone in user code). */
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Response streaming (%s()) is not available on this response", method);
+        return true;
+    }
+
+    /* A buffered body leaves at end() and the streaming path never reads it,
+     * so the two modes are exclusive. response_check_closed() refuses the
+     * other direction; this is the same refusal from this side. */
+    if (response_has_buffered_body(response)) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Response already has a buffered body — %s() would discard it. "
+            "Choose one mode: setBody()/appendBody() or %s()", method, method);
         return true;
     }
 

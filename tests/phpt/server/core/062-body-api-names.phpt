@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse body API — write() streams, appendBody() buffers, removed names are gone
+HttpResponse body API — write() streams, appendBody() buffers, and the two modes refuse to mix
 --EXTENSIONS--
 true_async_server
 true_async
@@ -7,7 +7,7 @@ true_async
 <?php
 /* The renames of #180, checked from PHP where an adapter would meet them.
  *
- * Two claims. write() streams: the response is chunked, so no
+ * Two claims about the modes. write() streams: the response is chunked, so no
  * Content-Length is computed and a setHeader() after the first chunk throws.
  * appendBody() buffers: nothing leaves before end(), and the header is still
  * writable in between.
@@ -16,7 +16,12 @@ true_async
  * and setBodyStream() are undefined methods, so an old handler fails at the
  * call rather than somewhere downstream. sendable() is the one exception — it
  * keeps its declaration and throws, because its two replacements are not
- * guessable from the name; h2/023 asserts that on a live stream. */
+ * guessable from the name; h2/023 asserts that on a live stream.
+ *
+ * /mixed guards the fourth claim. The streaming path never reads the buffered
+ * body, so streaming on top of one dropped those bytes with no error at all —
+ * the client saw the streamed chunk alone. Both directions throw now, and the
+ * buffered body still reaches the wire after the refusal. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -41,6 +46,18 @@ $server->addHttpHandler(function ($req, $res) use (&$probe, $server) {
         $res->appendBody('two');
         $probe['buffered_headers_sent'] = $res->isHeadersSent();
         $probe['buffered_body']         = $res->getBody();
+        $res->end();
+        return;
+    }
+
+    if ($path === '/mixed') {
+        $res->appendBody('buffered');
+        try {
+            $res->write('streamed');
+            $probe['write_after_append'] = 'NO-THROW';
+        } catch (\Throwable $e) {
+            $probe['write_after_append'] = get_class($e);
+        }
         $res->end();
         return;
     }
@@ -82,7 +99,7 @@ $get = function (int $port, string $path): string {
 
 $cli = spawn(function () use ($port, $get) {
     usleep(30000);
-    foreach (['/buffered', '/two-chunks', '/streamed'] as $path) {
+    foreach (['/buffered', '/mixed', '/two-chunks', '/streamed'] as $path) {
         $wire = $get($port, $path);
         [$head, $body] = explode("\r\n\r\n", $wire, 2);
         echo "== $path\n";
@@ -112,6 +129,11 @@ content_length=7
 chunked=0
 after_append_header=1
 body=one two
+== /mixed
+content_length=8
+chunked=0
+after_append_header=0
+body=buffered
 == /two-chunks
 content_length=none
 chunked=1
@@ -131,6 +153,7 @@ sendable=1
 == probe
 buffered_headers_sent = false
 buffered_body = 'one two'
+write_after_append = 'TrueAsync\\HttpServerRuntimeException'
 stream_headers_sent_early = true
 stream_ended = true
 stream_headers_sent = true
