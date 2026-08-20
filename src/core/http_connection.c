@@ -1413,7 +1413,7 @@ bool http_connection_send_raw(http_connection_t *conn,
 }
 /* }}} */
 
-#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
+#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
 /* {{{ http_connection_send_strv_awaited
  *
  * Vectored plaintext send the caller waits for. Slots go out in array order;
@@ -1483,7 +1483,7 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
     return ok_total;
 }
 /* }}} */
-#endif /* ZEND_ASYNC_IO_WRITEV_AWAIT */
+#endif /* async API >= 0.25 */
 
 /* {{{ http_connection_send_str_owned
  *

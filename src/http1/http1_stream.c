@@ -59,6 +59,28 @@
 ZEND_STATIC_ASSERT(H1_CHUNK_COALESCE_MAX <= HTTP_TLS_PLAINTEXT_RING_BYTES,
                    "a coalesced frame must fit one TLS plaintext ring cycle");
 
+/* Sends a header block the caller owns, consuming its reference. Where the
+ * reactor can take it over it does, so a cancellation cannot leave a queued
+ * write pointing at a released string; elsewhere the copy is unavoidable. */
+static bool h1_send_headers_owned(http_connection_t *conn, zend_string *headers)
+{
+#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
+#ifdef HAVE_OPENSSL
+    const bool plaintext = conn->tls == NULL;
+#else
+    const bool plaintext = true;
+#endif
+
+    if (plaintext) {
+        return http_connection_send_strv_awaited(conn, &headers, 1);
+    }
+#endif
+
+    const bool ok = http_connection_send(conn, ZSTR_VAL(headers), ZSTR_LEN(headers));
+    zend_string_release(headers);
+    return ok;
+}
+
 /* The status line and headers of a streaming response, as bytes. Returns NULL
  * when the response is gone or formats to nothing; the caller owns the string.
  * Separate from the send so the first frame can carry the block with it. */
@@ -113,10 +135,7 @@ static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
         return false;
     }
 
-    const bool ok = http_connection_send(ctx->conn, ZSTR_VAL(headers),
-                                         ZSTR_LEN(headers));
-    zend_string_release(headers);
-    return ok;
+    return h1_send_headers_owned(ctx->conn, headers);
 }
 
 /* `nonblocking` is accepted and ignored: HTTP/1 keeps no queue of its own, so
@@ -179,9 +198,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         zend_string_release(chunk);
 
         if (headers != NULL) {
-            const bool sent = http_connection_send(conn, ZSTR_VAL(headers),
-                                                   ZSTR_LEN(headers));
-            zend_string_release(headers);
+            const bool sent = h1_send_headers_owned(conn, headers);
 
             if (!sent) {
                 ctx->stream_dead = true;
@@ -222,7 +239,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     const size_t head_len  = headers != NULL ? ZSTR_LEN(headers) : 0;
     const size_t frame_len = head_len + (size_t)header_len + chunk_len + 2;
 
-#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
+#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
     /* Plaintext: the pieces go over as slots the reactor owns — one submit, no
      * copy of the body, and nothing a cancelled frame could leave dangling.
      * TLS keeps the copy below: tls_push copies into the BIO ring anyway, and a

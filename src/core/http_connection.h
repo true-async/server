@@ -461,7 +461,7 @@ bool http_connection_send_batched_writev(http_connection_t *conn,
 bool http_connection_send_strv_owned(http_connection_t *conn,
                                      zend_string * const *bufs, unsigned nbufs);
 
-#ifdef ZEND_ASYNC_IO_WRITEV_AWAIT
+#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
 /* Vectored variant the caller waits for. Each slot is an OWNED reference and is
  * consumed in every outcome, a cancellation while parked included — the reactor
  * keeps them until libuv is done, so a queued write never points at freed bytes.
