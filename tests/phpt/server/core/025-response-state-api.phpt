@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse: state observers — isHeadersSent / isClosed across send + end
+HttpResponse: state observers — isHeadersSent / isEnded across setBody + end
 --EXTENSIONS--
 true_async_server
 true_async
@@ -19,23 +19,23 @@ $server = new HttpServer((new HttpServerConfig())
 
 $snap = [];
 $server->addHttpHandler(function ($req, $res) use (&$snap, $server) {
-    // Initial state: nothing sent, not closed.
+    // Initial state: nothing sent, not ended.
     $snap['init_headers_sent'] = $res->isHeadersSent();
-    $snap['init_closed']       = $res->isClosed();
+    $snap['init_ended']       = $res->isEnded();
 
     $res->setStatusCode(200)
         ->setHeader('Content-Type', 'text/plain')
         ->setBody('state-check');
 
-    // Setting buffer doesn't commit on the wire.
+    // Setting the buffer doesn't commit on the wire.
     $snap['post_set_headers_sent'] = $res->isHeadersSent();
-    $snap['post_set_closed']       = $res->isClosed();
+    $snap['post_set_ended']       = $res->isEnded();
 
     $res->end();
 
-    // After end() the response is closed; isHeadersSent depends on
+    // After end() the response is ended; isHeadersSent depends on
     // protocol path (may already be true) — check both consistently.
-    $snap['post_end_closed'] = $res->isClosed();
+    $snap['post_end_ended'] = $res->isEnded();
 
     $server->stop();
 });
@@ -65,7 +65,7 @@ connection: close
 state-check
 === state ===
 init_headers_sent = false
-init_closed = false
+init_ended = false
 post_set_headers_sent = false
-post_set_closed = false
-post_end_closed = %s
+post_set_ended = false
+post_end_ended = %s

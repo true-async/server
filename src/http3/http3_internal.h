@@ -155,7 +155,7 @@ extern const http_response_stream_ops_t h3_stream_ops;
 
 /* Buffered REST response commit. The dispose path of the handler
  * coroutine (in http3_dispatch.c) calls this when nothing was streamed
- * via $res->send() — submit_response with the single-slice data_reader. */
+ * via $res->write() — submit_response with the single-slice data_reader. */
 bool http3_stream_submit_response(http3_connection_t *c,
                                   http3_stream_t *s,
                                   bool streaming);

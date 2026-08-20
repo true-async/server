@@ -192,7 +192,7 @@ struct _http_server_config_t {
     uint32_t drain_cooldown_ms;
 
     /* HTTP/2 streaming response per-stream queue cap.
-     * When handler's chunk queue exceeds this, send() suspends
+     * When handler's chunk queue exceeds this, write() suspends
      * the coroutine until drain brings it back under. HTTP/1 chunked
      * path ignores this — the kernel send buffer IS the queue. */
     uint32_t stream_write_buffer_bytes;
@@ -689,7 +689,7 @@ void http_response_set_alt_svc_if_unset(zend_object *obj,
 
 /*
  * Streaming response — binary interface (vtable) that protocol
- * strategies install on an HttpResponse object so HttpResponse::send()
+ * strategies install on an HttpResponse object so HttpResponse::write()
  * can route chunks without either side seeing the other's layout.
  *
  * HTTP/2 + HTTP/3 plug in stream-aware impls at dispatch time; HTTP/1
@@ -706,7 +706,7 @@ typedef struct http_response_stream_ops_t http_response_stream_ops_t;
 struct http_response_stream_ops_t {
     /* Append a chunk (caller already bumped its refcount). Returns
      * one of http_stream_append_result_t. The op itself knows the
-     * threshold (it lives in the context), so send() doesn't need
+     * threshold (it lives in the context), so write() doesn't need
      * to see server config.
      *
      * `nonblocking` forbids suspending the calling coroutine: a transport
@@ -803,7 +803,7 @@ struct http_response_stream_ops_t {
 };
 
 /* Install the streaming vtable + ctx on a response object. The
- * protocol strategy calls this once at dispatch; send() reads it. */
+ * protocol strategy calls this once at dispatch; write() reads it. */
 void  http_response_install_stream_ops(zend_object *response_obj,
                                        const http_response_stream_ops_t *ops,
                                        void *ctx);
@@ -1371,7 +1371,7 @@ size_t   http_sockaddr_ip(const struct sockaddr *addr, socklen_t addr_len,
                           char *out, size_t out_len);
 uint16_t http_sockaddr_port(const struct sockaddr *addr, socklen_t addr_len);
 void http_response_set_protocol_version(zend_object *obj, const char *version);
-/* RFC 9110 §9.3.2 — HEAD responses must not carry a body; send() drops
+/* RFC 9110 §9.3.2 — HEAD responses must not carry a body; write() drops
  * chunks silently when set. Stamped at dispatch wherever the request is
  * known. */
 void http_response_set_head(zend_object *obj, bool is_head);
@@ -1476,7 +1476,7 @@ const char *http_response_status_line_http11(int code, size_t *out_len);
  * http_connection.c, HTTP/2 in src/http2/http2_strategy.c). */
 bool  http_response_is_committed   (zend_object *obj);
 void  http_response_set_committed  (zend_object *obj);
-bool  http_response_is_streaming   (zend_object *obj);  /* send() activated streaming */
+bool  http_response_is_streaming   (zend_object *obj);  /* write() activated streaming */
 void  http_response_reset_to_error (zend_object *obj, int status_code,
                                     const char *message);
 

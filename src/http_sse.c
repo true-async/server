@@ -10,7 +10,7 @@
  *
  * SSE is not a separate protocol — it is a Content-Type convention plus
  * the small line-oriented framing defined by WHATWG §9.2, layered on top
- * of the existing HttpResponse::send() streaming pipeline (HTTP/1 chunked,
+ * of the existing HttpResponse::write() streaming pipeline (HTTP/1 chunked,
  * HTTP/2 + HTTP/3 DATA frames). These helpers only (1) set the canonical
  * headers so a handler can't ship a broken stream behind nginx/a CDN and
  * (2) format event records correctly so handlers don't reinvent framing.
@@ -18,7 +18,7 @@
  * Wire commit is lazy: the headers are set and the response is locked into
  * streaming mode here, but the actual HEADERS frame / status line is
  * emitted by the protocol stream_ops on the first append_chunk — exactly
- * the same path the first send() drives. */
+ * the same path the first write() drives. */
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -110,13 +110,13 @@ static bool sse_content_type_conflicts(const HashTable *headers)
 static bool sse_ensure_started(http_response_object *response)
 {
 	if (response->streaming) {
-		/* Already streaming via send() (or another non-SSE path) — emitting
+		/* Already streaming via write() (or another non-SSE path) — emitting
 		 * SSE framing now would ship event records without the event-stream
-		 * headers, and possibly through send()'s gzip wrapper. Reject the
+		 * headers, and possibly through write()'s gzip wrapper. Reject the
 		 * misuse instead of silently corrupting the stream. */
 		if (!response->sse_mode) {
 			zend_throw_exception(http_server_runtime_exception_ce,
-								 "Response is already streaming via send() — cannot switch to SSE", 0);
+								 "Response is already streaming via write() — cannot switch to SSE", 0);
 			return false;
 		}
 
@@ -163,7 +163,7 @@ static bool sse_ensure_started(http_response_object *response)
 #ifdef HAVE_HTTP_COMPRESSION
 	/* A buffering gzip stream defeats real-time delivery — never compress
 	 * an event stream. SSE dispatches through the raw stream_ops (not the
-	 * send() wrapper), but mark it explicitly so intent is unambiguous. */
+	 * write() wrapper), but mark it explicitly so intent is unambiguous. */
 	http_compression_mark_no_compression(&response->std);
 #endif
 
@@ -221,7 +221,7 @@ static void sse_append_field(smart_str *out, const char *field, size_t field_len
 
 /* Push a finalised event payload through the installed stream ops.
  * append_chunk takes ownership of the payload ref (so we never release it)
- * and suspends the handler under backpressure on H2/H3. Mirrors send():
+ * and suspends the handler under backpressure on H2/H3. Mirrors write():
  * a dead stream surfaces as a 499 the handler may catch. */
 static void sse_dispatch(http_response_object *response, zend_string *payload)
 {

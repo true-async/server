@@ -45,20 +45,33 @@ it and expects a tag within days.
   `README.md:277` and the `write()` docblock (`stubs/HttpResponse.php:160`, which
   never says that nothing leaves before `end()`) are corrected in the same step.
   Done in #174: the README guard is gone and both docblocks say what they mean.
-  The `docs/USAGE.md` section is deliberately deferred to land with the renames,
-  so it is written once against the final names.
+  The `docs/USAGE.md` section landed with the renames as §3.5, written once
+  against the final names.
 - [x] **`isWritable(): bool` — liveness, with the op behind it.** A new optional
   `is_alive` in `http_response_stream_ops_t` (`include/php_http_server.h:706`);
   every backend already computes it inside `append_chunk` (`peer_closed` for H2,
   `stream_credit_is_dead` for the worker). Sound as a predicate because every
   input is a one-way latch, unlike queue depth.
-- [ ] **`write()` becomes the streaming call.** `send()` stays one minor release as
-  a deprecated alias; buffered incremental appending keeps its behaviour under
-  `appendBody()`; `isClosed()` becomes `isEnded()`, which is all it ever reported;
-  `sendable()` is removed with a tombstone naming its two replacements, because
-  shipped adapter code calls it; `setBodyStream()`/`getBodyStream()`
-  (`stubs/HttpResponse.php:257,265`) are deleted — one throws "not yet
-  implemented", the other returns null.
+- [x] **`write()` becomes the streaming call.** Done in #180. `send()` is removed
+  outright rather than kept as a deprecated alias: it would have covered one call
+  in the shipped laravel-spawn adapter while `isClosed()` breaks three others
+  beside it (`src/Server/TrueAsyncServer.php:106,395,413,492`), so the adapter
+  needs a release either way. Buffered incremental appending keeps its behaviour
+  under `appendBody()`; `isClosed()` became `isEnded()`;
+  `sendable()` throws a tombstone naming `isWritable()` and `tryWrite()`;
+  `setBodyStream()`/`getBodyStream()` are deleted. Evidence:
+  `tests/phpt/server/core/062-body-api-names.phpt` reads the wire for each mode,
+  and `h2/023-h2-sendable-tombstone.phpt` asserts the throw on a live H2 stream
+  where the method used to answer. `docs/USAGE.md` §3.5 documents the three modes.
+
+  Two defects surfaced while doing it, both fixed here. **#181**: a buffered body
+  followed by a streaming call was discarded with no error — the streaming path
+  never reads `response->body`, while the reverse direction has always thrown, so
+  only one side of a symmetric-looking mistake reported. **The `stream` perf
+  profile had never run**: `tests/perf/servers/server_stream.php` called `->send()`
+  with no argument against an arginfo requiring one, so the profile answered 500
+  with `expects exactly 1 argument, 0 given` before measuring anything, and its
+  chunk loop buffered through the old `write()`.
 - [~] **`tryWrite(): bool` and the dialect twins.** In #178, without the twins. The non-blocking half of the
   pair, matching `WebSocket::trySend()`; `trySseEvent()` and `tryWriteMessage()`
   follow, so the idiom is not half-applied. Invariant: false means nothing was
@@ -89,10 +102,14 @@ it and expects a tag within days.
   that passes a handler value today; H2, H3 and the worker strip it in
   `http_response_header_allowed_h2h3`. Needs the abort op from #171 — the vtable
   carries only the clean `mark_ended` (`include/php_http_server.h:723`).
-- [ ] **Migration.** Seven BC entries in the CHANGELOG. laravel-spawn is a two-line
-  diff: `Sse::connected()` calls `isWritable()`, `send()` becomes `write()`. Its
-  docblock was corrected ahead of the rename in YanGusik/laravel-spawn#63, so the
-  wording stops teaching the loop that truncated #60 in the meantime.
+- [~] **Migration.** The CHANGELOG entries are written (#180, five bullets covering
+  the seven renames, plus #181 under Fixed). What is left is laravel-spawn, and it
+  is five call sites rather than the two this plan assumed: `send()` → `write()`
+  at `src/Server/TrueAsyncServer.php:492`, `isClosed()` → `isEnded()` at 106, 395
+  and 413, and `Sse::connected()` → `isWritable()` at `src/Sse/Sse.php:42`. To land
+  once a build carrying the renames is tagged. Its docblock was
+  corrected ahead of the rename in YanGusik/laravel-spawn#63, so the wording stops
+  teaching the loop that truncated #60 in the meantime.
 
 ## HTTP/1 has no non-blocking write, and the two candidate fixes are both wrong
 
@@ -113,6 +130,18 @@ designs were worked out and both fail on something mechanical.
   by write completions outlives the handler by definition. The precedents cited for
   it — the H2 per-stream ring and the wslay FIFO — both live on connection-lifetime
   objects, not on a per-request one.
+
+- [x] **Measure the HTTP/1 chunk path before deciding.** Taken on 2026-08-20, on a
+  release PHP built for it (`dev/BENCHMARKS.md`). `strace` confirms three `write(2)`
+  and three loop turns per chunk, flat in the chunk size. A one-hunk prototype that
+  copies the three pieces into one awaited write gains 42.7% at four chunks, 77.3%
+  at sixteen and 84.8% at sixty-four, cutting the per-chunk cost from ~18.5 µs to
+  ~8.8 µs. The copy is only there because the ABI has no awaitable vectored write:
+  `io_pipe_writev_cb` sends no NOTIFY and frees the request itself.
+
+  What it decides: the win needs no queue, no second writer and no per-response
+  structure, so it is not an argument for #179. Next step is to land the coalesced
+  frame as its own change, with the copy or with a new ext/async op.
 
 - [ ] **Answer from the queues the connection already has.** Plaintext:
   `out_pending_buf` carries a byte count, a high-water predicate on the same knob,

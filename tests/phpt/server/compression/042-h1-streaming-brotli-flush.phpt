@@ -55,7 +55,7 @@ $server->addHttpHandler(function ($req, $resp) use (&$gate, $head, $tail) {
     }
 
     $resp->setHeader('Content-Type', 'text/html');
-    $resp->send($head);
+    $resp->write($head);
 
     while (!$gate) {
         delay(10);

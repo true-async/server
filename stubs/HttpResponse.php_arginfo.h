@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: 04373414abd49b9bc9d5487bc29306366e3ce2b0 */
+ * Stub hash: a589c1d891e3c758c66b880fa5f28accb295a2dc */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -61,10 +61,6 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_TrueAsync_HttpResponse_getProtocolVersion arginfo_class_TrueAsync_HttpResponse_getReasonPhrase
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_write, 0, 1, IS_STATIC, 0)
-	ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_send, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO(0, chunk, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
@@ -95,11 +91,8 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_set
 	ZEND_ARG_TYPE_INFO(0, body, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_getBodyStream, 0, 0, IS_MIXED, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_setBodyStream, 0, 1, IS_STATIC, 0)
-	ZEND_ARG_TYPE_INFO(0, stream, IS_MIXED, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_appendBody, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_json, 0, 1, IS_STATIC, 0)
@@ -147,7 +140,7 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpResponse_isWritable arginfo_class_TrueAsync_HttpResponse_sendable
 
-#define arginfo_class_TrueAsync_HttpResponse_isClosed arginfo_class_TrueAsync_HttpResponse_sendable
+#define arginfo_class_TrueAsync_HttpResponse_isEnded arginfo_class_TrueAsync_HttpResponse_sendable
 
 ZEND_METHOD(TrueAsync_HttpResponse, __construct);
 ZEND_METHOD(TrueAsync_HttpResponse, setStatusCode);
@@ -168,7 +161,6 @@ ZEND_METHOD(TrueAsync_HttpResponse, getTrailers);
 ZEND_METHOD(TrueAsync_HttpResponse, getProtocolName);
 ZEND_METHOD(TrueAsync_HttpResponse, getProtocolVersion);
 ZEND_METHOD(TrueAsync_HttpResponse, write);
-ZEND_METHOD(TrueAsync_HttpResponse, send);
 ZEND_METHOD(TrueAsync_HttpResponse, tryWrite);
 ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable);
 ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding);
@@ -177,8 +169,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendable);
 ZEND_METHOD(TrueAsync_HttpResponse, setNoCompression);
 ZEND_METHOD(TrueAsync_HttpResponse, getBody);
 ZEND_METHOD(TrueAsync_HttpResponse, setBody);
-ZEND_METHOD(TrueAsync_HttpResponse, getBodyStream);
-ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream);
+ZEND_METHOD(TrueAsync_HttpResponse, appendBody);
 ZEND_METHOD(TrueAsync_HttpResponse, json);
 ZEND_METHOD(TrueAsync_HttpResponse, html);
 ZEND_METHOD(TrueAsync_HttpResponse, redirect);
@@ -190,7 +181,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseComment);
 ZEND_METHOD(TrueAsync_HttpResponse, sseRetry);
 ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent);
 ZEND_METHOD(TrueAsync_HttpResponse, isWritable);
-ZEND_METHOD(TrueAsync_HttpResponse, isClosed);
+ZEND_METHOD(TrueAsync_HttpResponse, isEnded);
 
 static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, __construct, arginfo_class_TrueAsync_HttpResponse___construct, ZEND_ACC_PRIVATE)
@@ -212,7 +203,6 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, getProtocolName, arginfo_class_TrueAsync_HttpResponse_getProtocolName, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, getProtocolVersion, arginfo_class_TrueAsync_HttpResponse_getProtocolVersion, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, write, arginfo_class_TrueAsync_HttpResponse_write, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpResponse, send, arginfo_class_TrueAsync_HttpResponse_send, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, tryWrite, arginfo_class_TrueAsync_HttpResponse_tryWrite, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, awaitWritable, arginfo_class_TrueAsync_HttpResponse_awaitWritable, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setGrpcEncoding, arginfo_class_TrueAsync_HttpResponse_setGrpcEncoding, ZEND_ACC_PUBLIC)
@@ -221,8 +211,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, setNoCompression, arginfo_class_TrueAsync_HttpResponse_setNoCompression, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, getBody, arginfo_class_TrueAsync_HttpResponse_getBody, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setBody, arginfo_class_TrueAsync_HttpResponse_setBody, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpResponse, getBodyStream, arginfo_class_TrueAsync_HttpResponse_getBodyStream, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpResponse, setBodyStream, arginfo_class_TrueAsync_HttpResponse_setBodyStream, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, appendBody, arginfo_class_TrueAsync_HttpResponse_appendBody, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, json, arginfo_class_TrueAsync_HttpResponse_json, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, html, arginfo_class_TrueAsync_HttpResponse_html, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, redirect, arginfo_class_TrueAsync_HttpResponse_redirect, ZEND_ACC_PUBLIC)
@@ -234,7 +223,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, sseRetry, arginfo_class_TrueAsync_HttpResponse_sseRetry, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isHeadersSent, arginfo_class_TrueAsync_HttpResponse_isHeadersSent, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isWritable, arginfo_class_TrueAsync_HttpResponse_isWritable, ZEND_ACC_PUBLIC)
-	ZEND_ME(TrueAsync_HttpResponse, isClosed, arginfo_class_TrueAsync_HttpResponse_isClosed, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, isEnded, arginfo_class_TrueAsync_HttpResponse_isEnded, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 

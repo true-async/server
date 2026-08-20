@@ -371,9 +371,9 @@ final class HttpServerConfig
     // === Streaming responses (HTTP/2 Step 5b) ===
 
     /**
-     * Per-stream chunk-queue cap for HttpResponse::send() backpressure.
+     * Per-stream chunk-queue cap for HttpResponse::write() backpressure.
      *
-     * When handler's send() call grows the stream's chunk queue past
+     * When the handler's write() call grows the stream's chunk queue past
      * this many bytes, the coroutine suspends until nghttp2 drains
      * enough to drop below. HTTP/2 only; HTTP/1 chunked path uses
      * the kernel send buffer instead.

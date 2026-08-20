@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse::send() — HTTP/1.1 chunked streaming (PLAN_STREAMING Phase 2)
+HttpResponse::write() — HTTP/1.1 chunked streaming (PLAN_STREAMING Phase 2)
 --EXTENSIONS--
 true_async_server
 true_async
@@ -27,7 +27,7 @@ $server = new HttpServer(
 $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setHeader('Content-Type', 'text/plain');
     for ($i = 1; $i <= 5; $i++) {
-        $res->send("chunk-$i\n");
+        $res->write("chunk-$i\n");
     }
     $res->end();
 });

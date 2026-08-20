@@ -10,7 +10,7 @@ h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
-/* Trailers on the send()/end() STREAMING path — distinct from 003 which
+/* Trailers on the write()/end() STREAMING path — distinct from 003 which
  * uses the buffered setBody() commit. Before the fix, h2_stream_mark_ended
  * resumed + EOF'd the stream but never submitted trailers, so grpc-status
  * after a server-streaming/bidi body was silently dropped. Handler streams
@@ -34,9 +34,9 @@ $server = new HttpServer($config);
 $server->addHttpHandler(function($req, $resp) {
     $resp->setStatusCode(200)
          ->setHeader('Content-Type', 'application/grpc');
-    /* Streaming send() path: commits HEADERS, then two DATA frames. */
-    $resp->send('msg-one');
-    $resp->send('msg-two');
+    /* Streaming write() path: commits HEADERS, then two DATA frames. */
+    $resp->write('msg-one');
+    $resp->write('msg-two');
     /* Trailers set before the stream ends — carried by the terminal
      * HEADERS(trailers) frame that mark_ended now emits. */
     $resp->setTrailer('grpc-status', '0')

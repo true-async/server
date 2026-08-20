@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse::send() — HTTP/2 streaming multi-chunk body within initial window
+HttpResponse::write() — HTTP/2 streaming multi-chunk body within initial window
 --EXTENSIONS--
 true_async_server
 true_async
@@ -39,11 +39,11 @@ $server->addHttpHandler(function ($req, $res) {
      * multi-chunk queue + data-provider walker work end-to-end.
      *
      * Bodies LARGER than the initial window are a Phase 1.1 item
-     * (needs a DP-triggered wake event so send() can suspend
+     * (needs a DP-triggered wake event so write() can suspend
      * properly when flow-control stalls the drain). */
     $chunk = str_repeat('A', 4096);
     for ($i = 0; $i < 12; $i++) {
-        $res->send($chunk);
+        $res->write($chunk);
     }
     $res->end();
 });

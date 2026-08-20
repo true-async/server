@@ -134,6 +134,86 @@ returns or when `$res->end()` is called explicitly.
 
 ---
 
+## 3.5. The response body
+
+A body is produced in one of three modes. The first body call fixes the mode
+for that response, and a call belonging to another one throws
+`HttpServerRuntimeException`.
+
+| Mode | Calls | Reaches the client | Framing |
+|---|---|---|---|
+| Buffered | `setBody()`, `appendBody()`, `json()`, `html()` | at `end()` | `Content-Length`, computed from the buffer |
+| Streamed | `write()`, `sseEvent()`, `writeMessage()` | at each call | chunked encoding (HTTP/1) or DATA frames closed by END_STREAM (HTTP/2, HTTP/3) |
+| File | `sendFile()` | after the handler returns | `Content-Length` from the file; a satisfiable `Range` yields `206` with `Content-Range` |
+
+### Buffered
+
+```php
+$res->setBody('one ')       // replaces the buffer
+    ->appendBody('two')     // appends to it
+    ->setHeader('Content-Type', 'text/plain')
+    ->end();                // 7 bytes leave here, Content-Length: 7
+```
+
+Nothing is committed until `end()`, so status and headers stay writable for as
+long as the handler runs, and `getBody()` returns what has accumulated. This is
+the mode to use when the body fits in memory: one write syscall, and the
+compressor sees the whole payload at once.
+
+### Streamed
+
+```php
+$res->setStatusCode(200)->setHeader('Content-Type', 'text/plain');
+foreach ($rows as $row) {
+    $res->write(format($row));   // the first call commits status + headers
+}
+$res->end();
+```
+
+The first `write()` commits the status line and the headers; from then on
+`setStatusCode()`, `setHeader()` and `setBody()` throw, and `isHeadersSent()`
+answers true. A `Content-Length` the handler set beforehand is dropped and the
+response is framed by chunked encoding — honouring a declared length is issue
+[#171](https://github.com/true-async/server/issues/171)'s successor, not
+today's behaviour.
+
+`write()` parks the handler coroutine while the outbound queue is full: HTTP/2
+and HTTP/3 park once every ring slot is live or the queued bytes reach
+`HttpServerConfig::setStreamWriteBufferBytes()` (256 KiB by default), HTTP/1
+parks on the socket write itself. Three calls cover the cases where parking is
+the wrong answer:
+
+- `tryWrite($chunk)` queues the chunk or answers false, having queued nothing —
+  the same chunk can be offered again. HTTP/1 keeps no queue of its own, so it
+  never refuses and an accepted chunk still waits for the socket.
+- `awaitWritable($timeoutMs = null)` waits for the room `tryWrite()` refused.
+  It answers false where a transport can be full and offers no wait, since
+  "go ahead" would spin a handler that trusts it.
+- `isWritable()` reports whether output is still possible at all: `end()` not
+  called, no `sendFile()` seal, peer still there. A false answer is final,
+  which is what makes it the right condition for leaving a streaming loop.
+
+A peer that departs mid-stream arrives as `HttpException` with code 499 out of
+the next call, so a `try`/`catch` around the loop is how a handler winds down.
+`isEnded()` reports the response, not the connection: it stays false until the
+handler calls `end()`.
+
+`send()` is the previous spelling of `write()` and still works, one minor
+release long.
+
+### File
+
+```php
+$res->sendFile('/srv/assets/app.js');
+```
+
+`sendFile()` seals the response and returns at once; the file is delivered
+after the handler returns. Every mutating call afterwards throws, including a
+second `sendFile()`. Options — cache headers, download disposition, precomputed
+compressed variants — go in a `SendFileOptions` passed as the second argument.
+
+---
+
 ## 4. TLS
 
 Once any listener has `tls: true` (or any HTTP/3 listener exists at all),

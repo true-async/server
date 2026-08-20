@@ -1,5 +1,5 @@
 --TEST--
-HttpServer: streaming telemetry counters advance on send() / reset() clears
+HttpServer: streaming telemetry counters advance on write() / reset() clears
 --EXTENSIONS--
 true_async_server
 true_async
@@ -10,7 +10,7 @@ h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
-/* PLAN_STREAMING §7 telemetry: verify that send()-based responses
+/* PLAN_STREAMING §7 telemetry: verify that write()-based responses
  * bump streaming_responses_total / stream_send_calls_total /
  * stream_bytes_sent_total, while a buffered-mode response leaves
  * them untouched. resetTelemetry() zeros them. */
@@ -35,8 +35,8 @@ $server->addHttpHandler(function ($req, $res) {
     if ($path === '/stream') {
         $res->setStatusCode(200)
             ->setHeader('Content-Type', 'text/plain');
-        $res->send("aaa");   // 3 bytes
-        $res->send("bbbbb"); // 5 bytes
+        $res->write("aaa");   // 3 bytes
+        $res->write("bbbbb"); // 5 bytes
         $res->end();
     } else {
         $res->setStatusCode(200)->setBody("buffered\n")->end();
@@ -53,7 +53,7 @@ $client = spawn(function () use ($port, $server) {
     echo "after-buffered stream_send_calls=",    $t0['stream_send_calls_total'], "\n";
     echo "after-buffered stream_bytes_sent=",    $t0['stream_bytes_sent_total'], "\n";
 
-    /* Two streaming requests, each with 2 send() calls, 8 bytes total. */
+    /* Two streaming requests, each with 2 write() calls, 8 bytes total. */
     exec(sprintf('curl --http2-prior-knowledge -s --max-time 3 http://127.0.0.1:%d/stream -o /dev/null', $port));
     exec(sprintf('curl --http2-prior-knowledge -s --max-time 3 http://127.0.0.1:%d/stream -o /dev/null', $port));
 

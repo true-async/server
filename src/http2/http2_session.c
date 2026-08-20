@@ -1640,7 +1640,7 @@ static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
 /* nghttp2 data provider. Two body sources: buffered (response_body
  * pointer+length, zero-copy) or streaming (chunk_queue of refcounted
  * zend_strings). Empty streaming queue returns NGHTTP2_ERR_DEFERRED;
- * resume fires from the next send()/end() via resume_stream_data. */
+ * resume fires from the next write()/end() via resume_stream_data. */
 static ssize_t http2_response_data_read(nghttp2_session *ng,
                                         const int32_t stream_id,
                                         uint8_t *buf,

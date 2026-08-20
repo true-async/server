@@ -14,7 +14,7 @@
  *                       smart_str body, mutates headers in place. The
  *                       buffered path knows the body length up-front, so
  *                       the size-threshold check is exact.
- *   - stream wrapper  : on first send() we substitute the installed
+ *   - stream wrapper  : on first write() we substitute the installed
  *                       stream_ops with a compressing one. The wrapper's
  *                       append_chunk feeds each chunk through the encoder,
  *                       closes the block with flush() so the client can
@@ -602,7 +602,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
 
     /* An earlier chunk faulted the encoder and dropped it. The stream
      * cannot be resumed mid-block, so a handler that caught the 499 and
-     * called send() again gets the same refusal rather than a NULL
+     * called write() again gets the same refusal rather than a NULL
      * encoder handed to encoder_drain_write. */
     if (UNEXPECTED(w->encoder == NULL)) {
         zend_string_release(chunk);
@@ -642,7 +642,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
     smart_str_alloc(&out, in_len + 32, 0);
 
     /* Encode, then close the block so the client decodes this chunk now
-     * rather than at end of stream: handing a chunk to send() is the
+     * rather than at end of stream: handing a chunk to write() is the
      * handler stating that this much is ready to go. An empty chunk
      * skips the flush — a block boundary with no payload behind it
      * costs bytes and tells the client nothing. */

@@ -5,7 +5,7 @@
  * gRPC bidi bench).
  *
  * Handler pattern: await the request body, then echo it back in
- * 32 KiB chunks via HttpResponse::send(). This exercises:
+ * 32 KiB chunks via HttpResponse::write(). This exercises:
  *
  *   - H2 DATA-frame ingestion path (cb_on_data_chunk_recv + the
  *     OOM-guarded smart_str preallocation),
@@ -44,7 +44,7 @@ $server->addHttp2Handler(function ($req, $res) {
     $req->awaitBody();
     $body = $req->getBody();
 
-    /* Commit status + headers on first send(); everything afterwards
+    /* Commit status + headers on first write(); everything afterwards
      * is DATA frames (Step 4 streaming-OUT). Chunk at 32 KiB so we
      * exercise WINDOW_UPDATE round-trips — smaller than the default
      * SETTINGS_INITIAL_WINDOW but large enough that we're not wasting
@@ -55,7 +55,7 @@ $server->addHttp2Handler(function ($req, $res) {
     $len = strlen($body);
     $chunk = 32 * 1024;
     for ($off = 0; $off < $len; $off += $chunk) {
-        $res->send(substr($body, $off, $chunk));
+        $res->write(substr($body, $off, $chunk));
     }
     $res->end();
 });

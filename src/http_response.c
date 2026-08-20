@@ -40,7 +40,7 @@ static zend_object_handlers http_response_handlers;
 /* Helper: gate every status/header/body mutation. A response is
  * no-longer-mutable in two states:
  *  1. closed   — end() has been called; nothing further is possible.
- *  2. streaming — send() has been called; status + headers are
+ *  2. streaming — write() has been called; status + headers are
  *                 committed on the wire. Trailers are still allowed
  *                 (they're post-DATA) and go through separate
  *                 non-guarded setters — see setTrailer/setTrailers. */
@@ -54,7 +54,7 @@ static inline bool response_check_closed(const http_response_object *response)
 
     if (response->streaming) {
         zend_throw_exception(http_server_runtime_exception_ce,
-            "Cannot modify response — headers already committed by send()", 0);
+            "Cannot modify response — headers already committed by write()", 0);
         return true;
     }
 
@@ -637,8 +637,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, getProtocolVersion)
 }
 /* }}} */
 
-/* {{{ proto HttpResponse::write(string $data): static */
-ZEND_METHOD(TrueAsync_HttpResponse, write)
+/* {{{ proto HttpResponse::appendBody(string $data): static */
+ZEND_METHOD(TrueAsync_HttpResponse, appendBody)
 {
     zend_string *data;
 
@@ -652,11 +652,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
         return;
     }
 
-    /* write() is the buffered-mode incremental API: handler calls it
-     * N times with chunks and the full body goes out on end(). Size is
-     * unknown up front — scalable-grow flips to doubling above 2 MiB
-     * so a handler writing a 256 MiB body doesn't take 40 k mremap
-     * calls. See smart_str_scalable.h. */
+    /* Buffered-mode incremental API: the handler calls it N times and the
+     * full body goes out on end(). Size is unknown up front — scalable-grow
+     * flips to doubling above 2 MiB so a handler appending a 256 MiB body
+     * doesn't take 40 k mremap calls. See smart_str_scalable.h. */
     response_clear_body_view(response);
     http_smart_str_append_scalable(&response->body,
                                    ZSTR_VAL(data), ZSTR_LEN(data));
@@ -714,32 +713,6 @@ ZEND_METHOD(TrueAsync_HttpResponse, setBody)
     smart_str_append(&response->body, body);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
-}
-/* }}} */
-
-/* {{{ proto HttpResponse::getBodyStream(): mixed */
-ZEND_METHOD(TrueAsync_HttpResponse, getBodyStream)
-{
-    ZEND_PARSE_PARAMETERS_NONE();
-
-    /* TODO: Implement body stream support */
-    RETURN_NULL();
-}
-/* }}} */
-
-/* {{{ proto HttpResponse::setBodyStream(mixed $stream): static */
-ZEND_METHOD(TrueAsync_HttpResponse, setBodyStream)
-{
-    (void)return_value;
-    zval *stream;
-
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_ZVAL(stream)
-    ZEND_PARSE_PARAMETERS_END();
-
-    /* TODO: Implement body stream support */
-    zend_throw_exception(http_server_runtime_exception_ce,
-        "Body stream support is not yet implemented", 0);
 }
 /* }}} */
 
@@ -927,7 +900,18 @@ ZEND_METHOD(TrueAsync_HttpResponse, redirect)
 }
 /* }}} */
 
-/* Guards shared by every streaming entry point, so send() and tryWrite()
+/* True when setBody()/appendBody()/json()/html() left bytes waiting for end().
+ * An empty buffer does not count: setBody('') commits the handler to nothing. */
+static bool response_has_buffered_body(const http_response_object *response)
+{
+    if (response->body_view != NULL) {
+        return ZSTR_LEN(response->body_view) > 0;
+    }
+
+    return response->body.s != NULL && ZSTR_LEN(response->body.s) > 0;
+}
+
+/* Guards shared by every streaming entry point, so write() and tryWrite()
  * cannot drift apart. Returns true after throwing; `method` names the caller
  * in the message. */
 static bool response_check_stream_usable(const http_response_object *response,
@@ -959,6 +943,16 @@ static bool response_check_stream_usable(const http_response_object *response,
         return true;
     }
 
+    /* A buffered body leaves at end() and the streaming path never reads it,
+     * so the two modes are exclusive. response_check_closed() refuses the
+     * other direction; this is the same refusal from this side. */
+    if (response_has_buffered_body(response)) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Response already has a buffered body — %s() would discard it. "
+            "Choose one mode: setBody()/appendBody() or %s()", method, method);
+        return true;
+    }
+
     return false;
 }
 
@@ -983,7 +977,7 @@ static void http_response_stream_commit_once(zend_object *obj,
 #endif
 }
 
-/* {{{ proto HttpResponse::send(string $chunk): static
+/* {{{ proto HttpResponse::write(string $chunk): static
  *
  * Streaming response — append a chunk to the outbound queue. First
  * call commits status + headers (they can no longer be changed).
@@ -994,7 +988,7 @@ static void http_response_stream_commit_once(zend_object *obj,
  *
  * Throws when called on a response that has no stream ops installed
  * (typically a response detached from a real connection). */
-ZEND_METHOD(TrueAsync_HttpResponse, send)
+ZEND_METHOD(TrueAsync_HttpResponse, write)
 {
     zend_string *chunk;
 
@@ -1004,7 +998,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_stream_usable(response, "send")) {
+    if (response_check_stream_usable(response, "write")) {
         return;
     }
 
@@ -1041,7 +1035,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
 
 /* {{{ proto HttpResponse::tryWrite(string $chunk): bool
  *
- * Non-blocking send(). Returns false when the outbound queue has no room —
+ * Non-blocking write(). Returns false when the outbound queue has no room —
  * nothing was queued and no header was committed, so the same chunk can be
  * offered again later. A peer that is gone is NOT reported as false: it
  * throws HttpException 499, because "wait" and "stop" call for opposite
@@ -1052,9 +1046,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, send)
  * messages) carry droppable units.
  *
  * HTTP/1 neither refuses nor returns promptly: it keeps no queue of its own,
- * so the kernel socket buffer is the queue, and an accepted chunk waits for
- * the write exactly as send() does. Issue #179 gives the connection its own
- * outbound queue, after which both halves hold under this same signature. */
+ * so the kernel socket buffer is the queue, and an accepted chunk waits on the
+ * socket for as long as a blocking write() would. Issue #179 gives the
+ * connection its own outbound queue, after which both halves hold under this
+ * same signature. */
 ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
 {
     zend_string *chunk;
@@ -1077,7 +1072,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
     }
 
     /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is accepted and
-     * dropped, as send() does. */
+     * dropped, as write() does. */
     if (response->is_head) {
         RETURN_TRUE;
     }
@@ -1243,7 +1238,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding)
 /* }}} */
 
 /* {{{ proto HttpResponse::writeMessage(string $message): static
- * Stream one gRPC length-prefixed message; first call commits, like send().
+ * Stream one gRPC length-prefixed message; first call commits, like write().
  * Compressed automatically when setGrpcEncoding('gzip') was declared. */
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 {
@@ -1330,33 +1325,17 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 
 /* {{{ proto HttpResponse::sendable(): bool
  *
- * Advisory, non-blocking backpressure check. Returns true when send()
- * would accept a chunk without suspending the handler coroutine — the
- * per-stream staging buffer has room. Returns false when send() would
- * block on backpressure, or when the response is closed / sealed by
- * sendFile() / not streaming-capable.
- *
- * send() is always safe to call regardless; sendable() just lets a
- * handler do other work instead of blocking on a slow peer. */
+ * Tombstone: the declaration outlives the method for one minor release,
+ * because shipped adapter code calls it and its two replacements cannot be
+ * guessed from the name. */
 ZEND_METHOD(TrueAsync_HttpResponse, sendable)
 {
+    (void)return_value;
     ZEND_PARSE_PARAMETERS_NONE();
 
-    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
-
-    if (response->closed
-        || response->send_file_req != NULL
-        || response->stream_ops == NULL) {
-        RETURN_FALSE;
-    }
-
-    /* Protocol without a userspace staging ring (HTTP/1, paced by the
-     * kernel socket buffer) leaves the op NULL — report writable. */
-    if (response->stream_ops->sendable == NULL) {
-        RETURN_TRUE;
-    }
-
-    RETURN_BOOL(response->stream_ops->sendable(response->stream_ctx));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "sendable() is gone: it answered liveness and queue depth with one bool. "
+        "Use isWritable() for liveness, tryWrite()/awaitWritable() for room", 0);
 }
 /* }}} */
 
@@ -1529,9 +1508,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent)
 /* {{{ proto HttpResponse::isWritable(): bool
  *
  * True while output is still possible: end() was not called, the response is
- * not sealed by sendFile(), and the peer has not gone. Unlike sendable(),
- * which swings with queue depth, a false answer here is final — so a
- * streaming loop stops on !isWritable() and yields on !sendable(). */
+ * not sealed by sendFile(), and the peer has not gone. A false answer is
+ * final, unlike the queue depth tryWrite() reports — so a streaming loop
+ * stops on !isWritable() and yields on a refused tryWrite(). */
 ZEND_METHOD(TrueAsync_HttpResponse, isWritable)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -1553,8 +1532,11 @@ ZEND_METHOD(TrueAsync_HttpResponse, isWritable)
 }
 /* }}} */
 
-/* {{{ proto HttpResponse::isClosed(): bool */
-ZEND_METHOD(TrueAsync_HttpResponse, isClosed)
+/* {{{ proto HttpResponse::isEnded(): bool
+ *
+ * Reports the response, not the connection: a peer that has gone leaves this
+ * false until the handler ends the response. isWritable() answers liveness. */
+ZEND_METHOD(TrueAsync_HttpResponse, isEnded)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);

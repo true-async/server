@@ -1,5 +1,5 @@
 --TEST--
-HttpServer: streaming send() crosses the reactor/worker split (#80, gated pool)
+HttpServer: streaming write() crosses the reactor/worker split (#80, gated pool)
 --EXTENSIONS--
 true_async_server
 true_async
@@ -14,10 +14,10 @@ TRUE_ASYNC_SERVER_REACTOR_POOL=1
 PHP_HTTP3_DISABLE_RETRY=1
 --FILE--
 <?php
-/* Reactor-pool reverse path, streaming leg: HttpResponse::send() on the
+/* Reactor-pool reverse path, streaming leg: HttpResponse::write() on the
  * worker posts STREAM_HEADERS on first call (streaming submit on the
  * reactor), each chunk as STREAM_CHUNK (reactor chunk ring + resume), and
- * end() as STREAM_END (EOF). Before this, send() under the pool threw
+ * end() as STREAM_END (EOF). Before this, write() under the pool threw
  * "streaming not available". Chunk ORDER and CONTENT prove the FIFO wire. */
 
 use TrueAsync\HttpServer;
@@ -49,7 +49,7 @@ $server->addHttpHandler(function ($req, $res) {
         ->setHeader('content-type', 'text/plain; charset=utf-8');
 
     for ($i = 1; $i <= 5; $i++) {
-        $res->send("chunk{$i};");
+        $res->write("chunk{$i};");
     }
 
     $res->end();

@@ -335,7 +335,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
-    /* first send(): open the stream; the reactor adopts one credit ref */
+    /* first write(): open the stream; the reactor adopts one credit ref */
     if (!ctx->stream_started) {
         response_wire_t *const hw =
             response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
@@ -713,7 +713,7 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
                                  http_server_get_log_state(ctx->server));
         }
 
-        /* ctx dies below; a late send() on a kept $response must throw, not UAF */
+        /* ctx dies below; a late write() on a kept $response must throw, not UAF */
         http_response_replace_stream_ops(resp, NULL, NULL);
     }
 

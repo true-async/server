@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse::send() — streaming exercises backpressure wake via WINDOW_UPDATE
+HttpResponse::write() — streaming exercises backpressure wake via WINDOW_UPDATE
 --EXTENSIONS--
 true_async_server
 true_async
@@ -8,7 +8,7 @@ true_async
 /* Step 5b Phase 1.1 — the critical test that proves the suspend+
  * wake-on-WINDOW_UPDATE path actually works. Server sends 256 KiB
  * in 32 KiB chunks; that's 4× the default 64 KiB stream initial
- * window. Handler must suspend in send() when drain stalls, then
+ * window. Handler must suspend in write() when drain stalls, then
  * wake each time our client sends WINDOW_UPDATE. Byte-exact hash
  * verifies nothing was lost.
  *
@@ -40,7 +40,7 @@ $server->addHttpHandler(function ($req, $res) {
      * — forces the suspend loop in h2_stream_append_chunk. */
     $chunk = str_repeat('A', 32768);
     for ($i = 0; $i < 8; $i++) {
-        $res->send($chunk);
+        $res->write($chunk);
     }
     $res->end();
 });

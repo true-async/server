@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse::send() — HTTP/2 streaming basic round-trip
+HttpResponse::write() — HTTP/2 streaming basic round-trip
 --EXTENSIONS--
 true_async_server
 true_async
@@ -10,9 +10,9 @@ h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
-/* PLAN_STREAMING Phase 1 — handler sends N chunks via send(), then
+/* PLAN_STREAMING Phase 1 — handler sends N chunks via write(), then
  * closes with end(). Client reassembles the full body. Verifies:
- *   - send() commits headers on first call,
+ *   - write() commits headers on first call,
  *   - multiple DATA frames arrive in order,
  *   - end() terminates the stream cleanly,
  *   - buffered-mode response-helpers are unaffected (they coexist
@@ -36,7 +36,7 @@ $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)
         ->setHeader('Content-Type', 'text/plain');
     for ($i = 1; $i <= 5; $i++) {
-        $res->send("chunk-$i\n");
+        $res->write("chunk-$i\n");
     }
     $res->end();
 });

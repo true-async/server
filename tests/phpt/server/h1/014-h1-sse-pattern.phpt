@@ -1,5 +1,5 @@
 --TEST--
-HttpResponse::send() — HTTP/1.1 chunked delivers Server-Sent Events
+HttpResponse::write() — HTTP/1.1 chunked delivers Server-Sent Events
 --EXTENSIONS--
 true_async_server
 true_async
@@ -28,9 +28,9 @@ $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)
         ->setHeader('Content-Type', 'text/event-stream')
         ->setHeader('Cache-Control', 'no-cache');
-    $res->send("data: alpha\n\n");
-    $res->send("data: bravo\n\n");
-    $res->send("data: charlie\n\n");
+    $res->write("data: alpha\n\n");
+    $res->write("data: bravo\n\n");
+    $res->write("data: charlie\n\n");
     $res->end();
 });
 

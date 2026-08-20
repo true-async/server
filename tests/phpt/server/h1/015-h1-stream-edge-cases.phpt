@@ -28,16 +28,16 @@ $server->addHttpHandler(function ($req, $res) use (&$count, $server) {
 
     if ($path === '/empty-chunks') {
         // Empty chunk should be silently dropped (not emit zero-chunk EOF).
-        $res->send("real1\n");
-        $res->send("");           // dropped
-        $res->send("");           // dropped
-        $res->send("real2\n");
+        $res->write("real1\n");
+        $res->write("");           // dropped
+        $res->write("");           // dropped
+        $res->write("real2\n");
     } elseif ($path === '/no-send') {
-        // No send() call. end() must still commit headers + zero chunk
+        // No write() call. end() must still commit headers + zero chunk
         // (covers h1_stream_mark_ended's "headers-not-sent" branch).
     } elseif ($path === '/large') {
         // 8 KB chunk — exercises the hex header path beyond a few digits.
-        $res->send(str_repeat('A', 8192));
+        $res->write(str_repeat('A', 8192));
     } else {
         $res->setStatusCode(404)->setBody('nf');
     }

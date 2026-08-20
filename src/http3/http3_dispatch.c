@@ -615,7 +615,7 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
     http_response_set_head(Z_OBJ(s->response_zv),
                            http_request_method_is_head(s->request));
-    /* Wire the streaming vtable so HttpResponse::send() in the
+    /* Wire the streaming vtable so HttpResponse::write() in the
      * handler enqueues into our chunk_queue. setBody/end (REST) handlers
      * never touch this; they go through the buffered submit_response in
      * dispose. */
@@ -1032,7 +1032,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     /* Streaming-vs-buffered decision (mirror of H2 dispose).
      *
-     * Streaming path: HEADERS were submitted on the first send() via
+     * Streaming path: HEADERS were submitted on the first write() via
      * h3_stream_ops.append_chunk; data_reader is already pulling from
      * chunk_queue. All we have to do here is make sure mark_ended fired
      * — if the handler forgot to call $res->end(), do it now so the

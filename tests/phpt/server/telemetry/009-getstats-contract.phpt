@@ -47,8 +47,8 @@ $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) {
     if ($req->getPath() === '/stream') {
         $res->setStatusCode(200);
-        $res->send('abc');
-        $res->send('de');
+        $res->write('abc');
+        $res->write('de');
         $res->end();
         return;
     }

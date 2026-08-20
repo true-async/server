@@ -1,5 +1,5 @@
 --TEST--
-HttpServer: HTTP/3 streaming response — HttpResponse::send() loop, multi-chunk DATA
+HttpServer: HTTP/3 streaming response — HttpResponse::write() loop, multi-chunk DATA
 --EXTENSIONS--
 true_async_server
 true_async
@@ -10,7 +10,7 @@ h3_skipif(['openssl_cli' => true, 'h3client' => true]);
 ?>
 --FILE--
 <?php
-/* Step 5b regression — handler streams a response via $res->send()
+/* Step 5b regression — handler streams a response via $res->write()
  * loop, exercising:
  *   - h3_stream_ops.append_chunk first-call HEADERS commit + queue alloc
  *   - h3_read_data_cb chunk_queue branch + chunk_read_idx walking
@@ -57,7 +57,7 @@ $config = (new HttpServerConfig())
 $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) use ($chunks) {
     $res->setStatusCode(200)->setHeader('content-type', 'application/octet-stream');
-    foreach ($chunks as $c) { $res->send($c); }
+    foreach ($chunks as $c) { $res->write($c); }
     $res->end();
 });
 
