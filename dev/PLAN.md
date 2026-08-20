@@ -207,6 +207,11 @@ designs were worked out and both fail on something mechanical.
   more shapes in `h1/029` close it: compression 75.68 → 78.38, worker_dispatch
   76.63 → 79.62, http1_stream 66.23 → 71.43.
 
+- [x] **Measure what a chunk costs before deciding.** Taken 2026-08-20, in
+  `dev/BENCHMARKS.md`: one `writev` and one park per streamed chunk on plaintext HTTP/1,
+  flat from 4 KiB to 64 KiB. The three submits the case rested on are one, so what a queue
+  could still remove is the single park — and only by making the write fire-and-forget,
+  which leaves `isWritable()` and `tryWrite()` with nothing honest to answer.
 - [ ] **Answer from the queues the connection already has.** Plaintext:
   `out_pending_buf` carries a byte count, a high-water predicate on the same knob,
   low-water hysteresis, a drain hook and a destroy defer gate — all implemented and
