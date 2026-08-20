@@ -18,7 +18,12 @@ set(HTTP1_PARSER_SRC
     ${CMAKE_SOURCE_DIR}/../src/core/http_protocol_handlers.c
     # http_body_stream.c wakes its reader through a plain event.
     ${CMAKE_SOURCE_DIR}/../src/core/async_plain_event.c
+    # http_request.c classifies gRPC requests and stamps the trace context.
+    # Both are leaf TUs, so the real code answers instead of a stub.
+    ${CMAKE_SOURCE_DIR}/../src/grpc/grpc.c
+    ${CMAKE_SOURCE_DIR}/../src/log/trace_context.c
     ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
+    ${CMAKE_SOURCE_DIR}/unit/common/request_stubs.c
 )
 
 # llhttp library (vendored - disable warnings)

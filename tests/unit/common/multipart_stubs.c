@@ -59,11 +59,3 @@ void http_log_emitf(http_log_state_t *state, http_log_severity_t severity,
 {
     (void)state; (void)severity; (void)attrs; (void)nattrs; (void)tmpl;
 }
-
-/* Trace-context propagation is parsed from the `traceparent` header into
- * req->trace_*. Tests don't assert these fields, so the no-op leaves
- * them at zero (which is the documented "no incoming context" state). */
-void http_request_parse_trace_context(struct http_request_t *req)
-{
-    (void)req;
-}
