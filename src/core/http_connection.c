@@ -1413,6 +1413,78 @@ bool http_connection_send_raw(http_connection_t *conn,
 }
 /* }}} */
 
+#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
+/* {{{ http_connection_send_strv_awaited
+ *
+ * Vectored plaintext send the caller waits for. Slots go out in array order;
+ * every reference is consumed whatever happens, including a cancellation while
+ * parked — the reactor holds them until libuv is done, which is exactly what
+ * the awaited single-buffer write cannot promise. */
+bool http_connection_send_strv_awaited(http_connection_t *conn,
+                                       zend_string *const *bufs,
+                                       const unsigned nbufs)
+{
+    /* The one refusal that neither throws nor consumes: unrecognisable after. */
+    ZEND_ASSERT(nbufs > 0);
+
+    if (UNEXPECTED(conn->write_timed_out)) {
+        for (unsigned i = 0; i < nbufs; i++) {
+            zend_string_release(bufs[i]);
+        }
+
+        return false;
+    }
+
+    const uint32_t write_timeout_ms = conn->write_timeout_ms;
+
+    if (write_timeout_ms > 0 && !http_write_timer_arm(conn, write_timeout_ms)) {
+        for (unsigned i = 0; i < nbufs; i++) {
+            zend_string_release(bufs[i]);
+        }
+
+        return false;
+    }
+
+    size_t total = 0;
+
+    for (unsigned i = 0; i < nbufs; i++) {
+        total += ZSTR_LEN(bufs[i]);
+    }
+
+    bool ok_total = false;
+    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV_AWAITED(conn->io, bufs, nbufs);
+
+    if (req != NULL) {
+        const bool ok = async_io_req_await(req, conn->io, write_timeout_ms,
+                                           HTTP_IO_REQ_WRITE, conn->log_state);
+        const bool had_exc = (req->exception != NULL);
+
+        if (had_exc) {
+            OBJ_RELEASE(req->exception);
+            req->exception = NULL;
+        }
+
+        const ssize_t transferred = req->transferred;
+        req->dispose(req);
+        ok_total = ok && !had_exc && transferred == (ssize_t)total;
+    } else {
+        /* Past the guard every refusal has released the slots already. */
+        http_absorb_io_submission_exception(conn, __func__);
+    }
+
+    if (write_timeout_ms > 0) {
+        http_write_timer_stop(conn);
+    }
+
+    if (UNEXPECTED(conn->write_timed_out)) {
+        return false;
+    }
+
+    return ok_total;
+}
+/* }}} */
+#endif /* async API >= 0.25 */
+
 /* {{{ http_connection_send_str_owned
  *
  * Fire-and-forget plaintext send: transfer ownership of @p body to the
@@ -2781,7 +2853,15 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     conn->state = CONN_STATE_SENDING;
 
     if (http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
-        if (!http_response_is_closed(Z_OBJ(ctx->response_zv))) {
+        if (UNEXPECTED(ctx->stream_dead)) {
+            /* A cancellation can cut a frame in half, and the peer has been
+             * promised the bytes its size line named. Sealing that with the
+             * terminator would say the body ended cleanly and hand the
+             * connection on, and the peer would read the terminator as the
+             * first bytes of what it is still waiting for. mark_ended refuses
+             * the same way; this is the path that skips mark_ended. */
+            conn->keep_alive = 0;
+        } else if (!http_response_is_closed(Z_OBJ(ctx->response_zv))) {
             /* Handler fell through without end() — emit the terminator. */
             (void)http_connection_send(conn, "0\r\n\r\n", 5);
         }
