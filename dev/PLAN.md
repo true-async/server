@@ -165,6 +165,41 @@ designs were worked out and both fail on something mechanical.
   caller's pointer until its completion callback, while a cancelled request is only
   marked pending.
 
+- [x] **A cancelled write no longer outlives the buffer it points at.** Merged as
+  server#186, on true-async/php-src#24 (+#25 into stable) and php-async#262.
+
+  libuv does not copy: `uv_write` keeps the caller's pointer until its completion
+  callback, and the caller freed it when *its own wait* ended — the same moment
+  until a cancellation, after which the wait is over and the write is not.
+  Reproduced with a peer whose `SO_RCVBUF` is 4 KiB and never reads,
+  `setShutdownTimeout(0)` so `stop()` skips the grace window and cancels at once,
+  and a streaming handler: the await returns incomplete, dispose defers because
+  the write is in flight, and the caller frees a 20008-byte frame that the
+  allocator immediately hands back to the next request. The disclosure itself was
+  not demonstrated — the connection closes before the loop writes again — so this
+  is a dangling pointer, not a shown leak.
+
+  The ABI grew one bit: `ZEND_ASYNC_IO_WRITEV_AWAIT`, in the flag word the
+  vectored write already had. The reactor keeps the request alive and notifies
+  `io->event` with the request as the result and **no exception** — passing one
+  would wake every reader and writer on the handle, because each listener
+  forwards an exception unconditionally. On plaintext the HTTP/1 frame is now
+  slots the reactor owns, so the body is not copied either; TLS keeps the copy,
+  since `tls_push` copies into the BIO ring and a vectored write at the socket
+  would put plaintext on a TLS connection.
+
+  Two defects the same work uncovered: `h1_emit_headers_once` and the
+  empty-first-chunk branch had the identical lifetime bug and now go through one
+  helper; and `http_handler_coroutine_dispose` sealed a frame a cancellation cut
+  in half, because it skips `mark_ended` and so skipped the `stream_dead` guard
+  `4c7824c` added — the next request on that connection desyncs. macOS caught it
+  where Linux could not: there the write still lands.
+
+  Guarded by `ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900`, not by the macro name.
+  The name says the header knows the flag; only the version says the reactor
+  keeps it, and a build pairing a new header with an old reactor hung — which is
+  exactly what CI did in the window between the two merges.
+
 - [x] **Cover the three files the #177 work left behind.** The coverage gate on
   #182 flagged a drop inherited from #178 — the compressing wrapper's four
   delegating ops, the pool worker's credit-backed answers, and the HTTP/1 branches
