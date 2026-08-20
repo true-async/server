@@ -140,8 +140,16 @@ designs were worked out and both fail on something mechanical.
   `io_pipe_writev_cb` sends no NOTIFY and frees the request itself.
 
   What it decides: the win needs no queue, no second writer and no per-response
-  structure, so it is not an argument for #179. Next step is to land the coalesced
-  frame as its own change, with the copy or with a new ext/async op.
+  structure, so it is not an argument for #179.
+
+- [x] **Send a streamed chunk as one write below 32 KiB.** Done. The threshold is
+  where the copy stops paying, measured: +25% at a 32 KiB chunk, −16% at 64 KiB, so
+  a larger chunk keeps the copy-free three-write path. Verified against a 9% noise
+  floor by alternating the two builds — +81% at 4 KiB chunks, and no difference at
+  64 KiB, where both take the same path. Test
+  `tests/phpt/server/h1/029-h1-chunk-coalesce.phpt` reads the raw response and
+  checks the chunk-size lines on both sides of the threshold. The copy stays until
+  ext/async gains an awaitable vectored write.
 
 - [ ] **Answer from the queues the connection already has.** Plaintext:
   `out_pending_buf` carries a byte count, a high-water predicate on the same knob,

@@ -48,6 +48,48 @@ three things both rejected designs foundered on. Whatever else #179 wants, a
 non-blocking `tryWrite()` on HTTP/1, has to be argued on its own; this measurement
 does not support it.
 
+### Where the copy stops paying
+
+Coalescing costs one user-space copy of the chunk, so it pays only while that copy
+is cheaper than the two syscalls it removes. Body held at 1 MiB, chunk size moved,
+five runs per cell, median:
+
+| chunk | three writes | one write | gain |
+|---|---|---|---|
+| 1 KiB | 49 | 132 | +167% |
+| 4 KiB | 226 | 374 | +65% |
+| 16 KiB | 857 | 1319 | +54% |
+| 32 KiB | 1486 | 1860 | +25% |
+| 64 KiB | 2606 | 2197 | −16% |
+| 128 KiB | 3616 | 3206 | −11% |
+| 256 KiB | 4457 | 3546 | −20% |
+
+The crossing is between 32 and 64 KiB, so `H1_CHUNK_COALESCE_MAX` is 32 KiB and a
+larger chunk keeps the three-write path.
+
+### The shipped change, verified against the noise
+
+Runs of the same build drift by up to 9% on this machine, which is wider than some
+of the gains above, so the shipped change was re-measured by alternating the two
+builds — start, three `wrk` runs, stop, swap — three rounds each.
+
+| chunk | three writes | shipped | |
+|---|---|---|---|
+| 64 KiB | 2362, 2409, 2511 | 2473, 2573, 2577 | same code path either side of the threshold; the spread is the noise floor |
+| 4 KiB | 197, 243, 208 | 367, 376, 377 | +81%, and every run of one build is outside the other's range |
+
+### The header block in the same frame
+
+The first `write()` sent the status line and headers, then the frame. Carrying
+the block inside the frame removes one write and one round trip from the byte a
+client waits for. Alternating builds again, three rounds, median of three runs
+each:
+
+| response | frame only | headers in the frame | |
+|---|---|---|---|
+| one 4 KiB chunk | 22981, 23868, 23387 | 30057, 31601, 29732 | +28.5%, the shape an SSE response has |
+| one 64 KiB chunk | 16738, 16565, 16709 | 16376, 16657, 16477 | unchanged: the block is small against the frame |
+
 ## 2026-08-19 — cost of the per-chunk flush on a streamed response (#170)
 
 Base commit 22a8d37 plus the #170 working tree. Machine: WSL2, Linux 6.6.114.1,
