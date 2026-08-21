@@ -2822,17 +2822,24 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         (ctx->request != NULL && ctx->request->end_ns != 0)
             ? ctx->request->end_ns : zend_hrtime();
 
-    /* A streaming response settles all of this where it builds its header
-     * block, which is its only chance to tell the peer — at the first write(),
-     * or in the finisher below when the handler wrote nothing. Asking here as
-     * well would advance the drain evaluator's per-connection state twice for
-     * one request, and set a header on bytes that may already have left. */
-    if (!http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
-        if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
+    /* Whether the connection retires is asked here for every response, because
+     * a stream can outlive the answer: its header block is built at the first
+     * write(), and the connection may come of age while the body is still
+     * going out. What a streaming response does not do here is touch the
+     * header block — those bytes may already have left — so the telling, and
+     * the counter that records it, belong to h1_streaming_headers_build, which
+     * asks again and sees the same latched verdict. */
+    const bool streaming = http_response_is_streaming(Z_OBJ(ctx->response_zv));
+
+    if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
+        conn->keep_alive = false;
+
+        if (!streaming) {
             http_response_force_connection_close(Z_OBJ(ctx->response_zv));
-            conn->keep_alive = false;
             http_server_on_h1_connection_close_sent(conn->counters);
-        } else if (!conn->keep_alive) {
+        }
+    } else if (!streaming) {
+        if (!conn->keep_alive) {
             /* Request opted out of keep-alive (Connection: close in request,
              * or HTTP/1.0 default). RFC 9112 §9.6 — the response MUST advertise
              * `Connection: close` so the client knows not to reuse this TCP. */

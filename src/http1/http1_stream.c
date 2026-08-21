@@ -119,8 +119,10 @@ static zend_string *h1_streaming_headers_build(http1_request_ctx_t *ctx)
      * itself delimits, a graceful drain retiring the connection, and a request
      * that asked for close — and RFC 9112 §9.6 wants the peer told in each.
      *
-     * The drain evaluator advances per-connection state, so it is asked once
-     * per response; dispose skips its own call when these headers are away. */
+     * Dispose asks the drain evaluator too, because a stream can outlive the
+     * answer taken here. Its verdict latches, so the second ask sees the same
+     * one; what does not repeat is the header field and the counter below,
+     * which dispose leaves to this function for a streaming response. */
     const h1_framing_t framing = h1_response_framing(response_obj);
     const bool drain = http_server_should_drain_now(conn->server, conn, zend_hrtime());
 

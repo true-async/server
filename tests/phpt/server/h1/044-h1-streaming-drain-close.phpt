@@ -84,8 +84,13 @@ $client = spawn(function () use ($port, $server) {
     echo "r1 chunked: ", (int) (stripos($r1, "\r\nTransfer-Encoding: chunked") !== false), "\n";
     echo "r1 body: ", json_encode(substr($r1, strpos($r1, "\r\n\r\n") + 4)), "\n";
 
+    /* Exact counts, not floors. The defect this test guards is the decision
+     * being taken twice for one response — a floor cannot see that, and the
+     * close counter is the one that would double, because it is the only
+     * thing on either path that is not idempotent. */
     $tel = $server->getTelemetry();
-    echo "drained>=2: ", ($tel['connections_drained_reactive_total'] >= 2 ? 1 : 0), "\n";
+    echo "drained reactive: ", $tel['connections_drained_reactive_total'], "\n";
+    echo "close sent: ", $tel['h1_connection_close_sent_total'], "\n";
 
     $server->stop();
 });
@@ -99,5 +104,6 @@ r1 close: 1
 r2 close: 1
 r1 chunked: 1
 r1 body: "2\r\nok\r\n0\r\n\r\n"
-drained>=2: 1
+drained reactive: 2
+close sent: 2
 done
