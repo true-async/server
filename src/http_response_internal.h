@@ -53,6 +53,12 @@ typedef struct {
      * (identity, not chunked) and the audit below. */
     int64_t          declared_length;
 
+    /* Octets of the body the transport actually put on the wire, or -1 when no
+     * transport reported any. Filled by the two that re-size or bypass the
+     * handler's bytes — a codec, a file pump — and read by the access log,
+     * which cannot derive either from the response. */
+    int64_t          transport_body_size;
+
     /* Body bytes promised to the transport, declaration or not: the audit
      * above reads it against a declaration, the access log reports it.
      * Reserved before the chunk is handed over, because every transport

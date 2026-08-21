@@ -565,7 +565,15 @@ static int forward_compressed(ws_ctx_t *w, zend_string *zs, const bool nonblocki
         return HTTP_STREAM_APPEND_OK;
     }
 
+    const size_t encoded_len = ZSTR_LEN(zs);
     const int rc = w->underlying_ops->append_chunk(w->underlying_ctx, zs, nonblocking);
+
+    /* The handler's byte count describes the plaintext, and the peer receives
+     * this instead, so the access log has to be told which of the two it is
+     * reading. */
+    if (EXPECTED(rc == HTTP_STREAM_APPEND_OK)) {
+        http_response_add_sent_bytes(w->response_obj, encoded_len);
+    }
 
     /* By now the encoder has eaten the chunk and closed a block, so a refusal
      * is not retryable: the same plaintext offered again would be deflated

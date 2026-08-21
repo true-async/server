@@ -281,6 +281,12 @@ static void h3_static_finalize(h3_static_state_t *state)
         state->pending_chunk = NULL;
     }
 
+    if (state->bytes_sent > 0 && state->stream != NULL
+        && !Z_ISUNDEF(state->stream->response_zv)) {
+        http_response_add_sent_bytes(Z_OBJ(state->stream->response_zv),
+                                     state->bytes_sent);
+    }
+
     if (state->file_io != NULL) {
         if (state->file_io->event.dispose != NULL) {
             state->file_io->event.dispose(&state->file_io->event);

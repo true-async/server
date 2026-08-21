@@ -503,6 +503,22 @@ it and expects a tag within days.
   429 passed, 0 failed, 24 skipped on absent tool gates, 1 warn (`core/047`,
   the pre-existing XFAIL that passes); `ctest` 16 of 16.
 
+- [x] **#206 — the access log reports 0 bytes for every `sendFile()` body and the
+  unencoded size for every compressed stream.** Every transport now reports the
+  octets it put on the wire through `http_response_add_sent_bytes`, and the
+  response keeps them in `transport_body_size`, separate from `written_length`
+  because the declared-length audit compares that one with what the handler
+  promised. Two things the report got wrong, both found by writing the test. The
+  file half is narrower: a file at or under the 64 KiB slurp threshold is read
+  into the response body, so a small asset was logged correctly all along, and
+  the defect is larger files and ranges. And the HTTP/1 count did not exist — the
+  claim that all three pumps count holds for HTTP/2, HTTP/3 and HTTP/1 over TLS,
+  while the plain kernel path moves the slice in one `uv_fs_sendfile` and
+  finalized without reading the result; it now adds `req->transferred`.
+  Evidence: `core/067` covers HTTP/1, HTTP/2 and a gzipped stream, and fails
+  against `main` on all three. HTTP/3 takes the same reporting call and has no
+  test of its own.
+
 - [ ] **Measure what the framing work costs per response.** Not today; recorded so
   the number is taken before the next release rather than assumed. #195, #197 and
   #200 each added per-response work to a path that runs for every request. The one
