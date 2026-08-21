@@ -18,7 +18,12 @@ set(HTTP1_PARSER_SRC
     ${CMAKE_SOURCE_DIR}/../src/core/http_protocol_handlers.c
     # http_body_stream.c wakes its reader through a plain event.
     ${CMAKE_SOURCE_DIR}/../src/core/async_plain_event.c
+    # http_request.c classifies gRPC requests and stamps the trace context.
+    # Both are leaf TUs, so the real code answers instead of a stub.
+    ${CMAKE_SOURCE_DIR}/../src/grpc/grpc.c
+    ${CMAKE_SOURCE_DIR}/../src/log/trace_context.c
     ${CMAKE_SOURCE_DIR}/unit/common/multipart_stubs.c
+    ${CMAKE_SOURCE_DIR}/unit/common/request_stubs.c
 )
 
 # llhttp library (vendored - disable warnings)
@@ -350,6 +355,7 @@ if(NGHTTP2_FOUND)
         # HTTP/1 parser is referenced by http_protocol_strategy.c (http1_feed);
         # link the same source set the HTTP/1 unit tests use.
         ${HTTP1_PARSER_SRC}
+        ${CMAKE_SOURCE_DIR}/unit/common/strategy_stubs.c
     )
 
     target_compile_definitions(test_http2_strategy PRIVATE HAVE_HTTP2=1)
@@ -360,6 +366,7 @@ if(NGHTTP2_FOUND)
         ${CMAKE_SOURCE_DIR}/../src
         ${CMAKE_SOURCE_DIR}/../src/core
         ${NGHTTP2_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../src/grpc
     )
 
     target_link_libraries(test_http2_strategy
@@ -392,6 +399,7 @@ if(NGHTTP2_FOUND)
         # parser, and that TU in turn pulls in smart_str / llhttp usage
         # — so link the same source set the HTTP/1 unit tests use.
         ${HTTP1_PARSER_SRC}
+        ${CMAKE_SOURCE_DIR}/unit/common/h2_stubs.c
     )
 
     target_compile_definitions(test_http2_session PRIVATE HAVE_HTTP2=1)

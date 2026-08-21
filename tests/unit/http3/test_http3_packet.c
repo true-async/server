@@ -84,8 +84,6 @@ static void test_account_send_error_buckets(void **state) {
     assert_int_equal(st.quic_send_emsgsize,    1);
     assert_int_equal(st.quic_send_unreach,     1);
     assert_int_equal(st.quic_send_other_error, 1);
-
-    http3_packet_account_send_error(NULL, EAGAIN);   /* NULL-safe, no crash */
 }
 
 int main(void) {

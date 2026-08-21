@@ -945,6 +945,20 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      # The cmocka suite links libphp, so it runs in the only job that builds
+      # one — the same reason the embedded fuzz targets live here. It covers
+      # decoders and pure C surfaces no phpt can reach, and without a job that
+      # builds it, production signatures move while the tests keep compiling
+      # against the old ones (#189).
+      - name: Run cmocka unit suite
+        working-directory: http-server
+        run: |
+          set -eux
+          sudo apt-get install -y --no-install-recommends libcmocka-dev
+          cmake -S tests -B tests/build
+          cmake --build tests/build -j"$(nproc)"
+          ctest --test-dir tests/build --output-on-failure
+
       - name: Build fuzz_http1_parser + fuzz_h2_session + the WebSocket targets
         working-directory: http-server/fuzz
         run: |

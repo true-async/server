@@ -233,22 +233,25 @@ designs were worked out and both fail on something mechanical.
   was green at 09:11 UTC and the same commit failed at 12:50 with nothing changed on
   its side, which is what identified the cause.
 
-## The cmocka suite rots unnoticed
+## The cmocka suite rots unnoticed (#189)
 
-Nothing builds these targets in CI, so production signatures move and the tests keep
+Nothing built these targets in CI, so production signatures moved and the tests kept
 compiling against the old ones. Two were repaired on 2026-08-19 (`ResponseWire`: the
 `bool complete` argument dropped in 6fbe731 on 2026-07-07; `TLSSession`: the ring size
 the backpressure case measures is the CT-in half, `TLS_BIO_RING_SIZE_SMALL`, not the
-CT-out one). `ctest` now runs 10 of 16. What is left:
+CT-out one). `ctest` ran 10 of 16 on 2026-08-20 and runs 16 of 16 now.
 
-- [ ] **Five targets do not link.** `test_http1_parser`, `…_edge_cases`, `…_security`,
-  `test_http2_strategy`, `test_http2_session` miss `grpc_*`, `h2_*`,
-  `http_connection_*`, `http_log_emit_access`, `http_response_get_*`,
-  `http_server_runtime_exception_ce`, `trace_hex_encode`. The choice is per target:
-  add the real TUs and accept what they drag in, or extend
-  `tests/unit/common/*_stubs.c`. A stub that answers wrongly makes a green test that
-  proves nothing, so the choice is not mechanical.
-- [ ] **`test_http3_packet` segfaults** in `test_account_send_error_buckets`. Cause
-  unknown; it is either the accounting or the test.
-- [ ] **Build the unit suite in CI** once the above are green, otherwise the same rot
-  returns.
+- [x] **Five targets do not link.** Closed by linking the real `src/grpc/grpc.c` and
+  `src/log/trace_context.c` — both leaf TUs, so the code under test answers — and by
+  stubbing only what no case reaches: the request-finalize tail for the parser targets,
+  three symbols for the session target and twenty-one for the strategy one. Every new
+  stub aborts instead of answering, which is what keeps a target that starts driving
+  such a path from passing on an invented result. Evidence: 8 + 24 + 3 cases pass with
+  every stub still aborting.
+- [x] **`test_http3_packet` segfaults** in `test_account_send_error_buckets`. It was the
+  test: its last line called `http3_packet_account_send_error(NULL, EAGAIN)` under the
+  comment "NULL-safe, no crash", while the function opens with
+  `ZEND_ASSERT(st != NULL)`. With asserts compiled out the null went through. The line
+  is gone; the contract stays where it was written.
+- [x] **Build the unit suite in CI.** In the embedded-fuzz job, the only one that builds
+  a libphp for the suite to link against.

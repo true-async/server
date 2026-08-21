@@ -47,7 +47,6 @@
 http1_parser_t *parser_pool_acquire(void) { return NULL; }
 void            parser_pool_return (http1_parser_t *p) { (void)p; }
 
-int        http_response_get_status  (zend_object *o) { (void)o; return 0; }
 HashTable *http_response_get_headers (zend_object *o) { (void)o; return NULL; }
 HashTable *http_response_get_trailers(zend_object *o) { (void)o; return NULL; }
 const char *http_response_get_body   (zend_object *o, size_t *l) {
@@ -62,7 +61,6 @@ void http_response_set_protocol_version(zend_object *o, const char *v) {
     (void)o; (void)v;
 }
 zend_class_entry *http_response_ce = NULL;
-zval *http_request_create_from_parsed(http_request_t *r) { (void)r; return NULL; }
 void http_server_on_request_sample(http_server_object *s,
                                    uint64_t sojourn, uint64_t service,
                                    uint64_t now_ns) {
