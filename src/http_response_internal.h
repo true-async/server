@@ -47,9 +47,10 @@ typedef struct {
     void                             *stream_ctx;
 
     /* The Content-Length this response committed to, or -1 when it declared
-     * none. Snapshotted from the header table by the first write(), which is
-     * also the last moment the handler can still change it. A value here binds
-     * the framing (identity, not chunked) and the audit below. */
+     * none. Read off the header table by the first streaming call, which is
+     * also the last moment the handler can still change it, and adopted only
+     * once that call's chunk is accepted. A value here binds the framing
+     * (identity, not chunked) and the audit below. */
     int64_t          declared_length;
 
     /* Body bytes promised to the transport. Reserved before the chunk is
@@ -99,6 +100,16 @@ static inline http_response_object *http_response_from_obj(zend_object *obj) {
 }
 
 #define Z_HTTP_RESPONSE_P(zv) http_response_from_obj(Z_OBJ_P(zv))
+
+/* RFC 9112 §6.3 rule 1: a 1xx, 204 or 304 response ends at the blank line
+ * whatever its headers say. Such a response carries no body to frame, so a
+ * Content-Length on it describes something other than what follows — the
+ * representation a 304 stands for, say — and the server neither audits it nor
+ * replaces it. */
+static inline bool response_status_carries_body(const int status)
+{
+    return status >= 200 && status != 204 && status != 304;
+}
 
 /* Drop the borrowed-body ref if held. Call before any path that
  * mutates the smart_str body — they assume body.s is the truth. */

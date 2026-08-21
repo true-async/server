@@ -107,12 +107,14 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
     return true;
 }
 
-/* The Content-Length this response committed to before it started streaming,
- * or -1 when it declared none. Transports read it to choose their framing:
- * a declared length is carried to the peer and the body is not chunked. */
 int64_t http_response_get_declared_length(zend_object *obj)
 {
     return http_response_from_obj(obj)->declared_length;
+}
+
+bool http_response_has_declared_length(zend_object *obj)
+{
+    return http_response_from_obj(obj)->declared_length >= 0;
 }
 
 /* True once HttpResponse::write() has been called. Dispose paths use

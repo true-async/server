@@ -260,18 +260,22 @@ static void emit_headers_block(smart_str *result, http_response_object *response
     /* Content-Length on a buffered body is the server's to state: it is holding
      * the bytes it is about to send, so a handler value that disagrees would
      * put the peer's read cursor at the wrong byte and desync a reused
-     * connection. The handler's number is kept only where the method
-     * suppresses the body — on HEAD it describes the body a GET would return,
-     * and nothing here could confirm or contradict it. Use
-     * zend_hash_str_exists to skip the zend_string alloc/release round-trip on
-     * the literal name lookup. */
+     * connection. Use zend_hash_str_exists to skip the zend_string
+     * alloc/release round-trip on the literal name lookup. */
     const bool handler_declared =
         zend_hash_str_exists(response->headers, "content-length",
                              sizeof("content-length") - 1);
 
-    /* Both branches pass literals so the emit loop stays specialised: only the
-     * rare response that declared a length pays a name check per header. */
-    if (handler_declared && !response->is_head) {
+    /* The handler's number is kept where the message carries no body to
+     * measure it against: a HEAD, and a status that ends at the blank line.
+     *
+     * Two branches rather than one computed flag: the common response declares
+     * no length, and passing the literal lets the emit loop drop the name check
+     * for it. */
+    const bool body_follows = !response->is_head
+        && response_status_carries_body(response->status_code);
+
+    if (handler_declared && body_follows) {
         emit_content_length(result, body_len);
         emit_headers_only(result, response->headers, true, false);
     } else {

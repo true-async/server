@@ -978,25 +978,18 @@ static bool response_check_stream_usable(const http_response_object *response,
     return false;
 }
 
-/* Longest Content-Length this server frames against. Nineteen digits is one
- * short of where a decimal value can leave int64_t, and a body that size is
- * three orders past any file a process could serve. */
+/* Longest Content-Length this server reads. Nineteen digits is where int64_t
+ * runs out mid-range, so the value is range-checked below as well; the digit
+ * cap is what keeps the accumulator itself from wrapping. */
 #define HTTP_DECLARED_LENGTH_MAX_DIGITS  19
-
-/* RFC 9112 §6.3 rule 1: a 1xx, 204 or 304 response ends at the blank line
- * whatever its headers say, so a length declared on one frames nothing. */
-static bool response_status_carries_body(const int status)
-{
-    return status >= 200 && status != 204 && status != 304;
-}
 
 /* Takes the handler's Content-Length, once, into response->declared_length.
  * Returns false after throwing, which is what a value that is not a length
  * gets: dropping it silently is how a truncated body came to read as complete,
  * and at this point the response is still uncommitted, so the throw can still
  * become a status. */
-static bool response_take_declared_length(http_response_object *response,
-                                          const char *method)
+static bool response_take_declared_length(const http_response_object *response,
+                                          const char *method, int64_t *out)
 {
     const zval *slot = zend_hash_str_find(response->headers, "content-length",
                                           sizeof("content-length") - 1);
@@ -1036,7 +1029,18 @@ static bool response_take_declared_length(http_response_object *response,
         bytes = bytes * 10 + (uint64_t)(digit - '0');
     }
 
-    response->declared_length = (int64_t)bytes;
+    /* Nineteen digits reach past int64_t, and the sentinel for "none declared"
+     * is a negative value: an unchecked cast would turn the largest lengths
+     * into no declaration at all, which is the silent drop this guard exists
+     * to refuse. */
+    if (bytes > (uint64_t)INT64_MAX) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "%s(): Content-Length of %" PRIu64 " is larger than this server frames",
+            method, bytes);
+        return false;
+    }
+
+    *out = (int64_t)bytes;
     return true;
 }
 
@@ -1052,38 +1056,46 @@ static bool response_take_declared_length(http_response_object *response,
 static bool response_check_declared_length(http_response_object *response,
                                            const char *method, const size_t chunk_len)
 {
+    int64_t declared = response->declared_length;
+
     if (!response->streaming) {
         /* gRPC closes its body with a trailer frame the handler never sees, so
-         * a length it declared could not describe the wire. HEAD returns
-         * before this guard, and the SSE dialect starts its stream elsewhere;
-         * both keep the framing they have. */
-        if (response->grpc_mode == 0
+         * a length it declared could not describe the wire. A HEAD response
+         * sends no body to hold to one, and its length belongs to the buffered
+         * path, where it describes what a GET would have returned. The SSE
+         * dialect starts its stream elsewhere and keeps the framing it has. */
+        if (response->grpc_mode == 0 && !response->is_head
             && response_status_carries_body(response->status_code)
-            && !response_take_declared_length(response, method)) {
+            && !response_take_declared_length(response, method, &declared)) {
             return true;
         }
     }
 
-    if (response->declared_length < 0) {
+    if (declared < 0) {
         return false;
     }
 
-    const uint64_t declared = (uint64_t)response->declared_length;
-
-    if (response->written_length + chunk_len > declared) {
+    if (response->written_length + chunk_len > (uint64_t)declared) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "%s(): body would pass the declared Content-Length of %" PRId64
             " bytes — %" PRIu64 " written, %zu offered", method,
-            response->declared_length, response->written_length, chunk_len);
+            declared, response->written_length, chunk_len);
         return true;
     }
 
+    /* The response adopts the declaration only once a chunk of its own is
+     * accepted. A handler whose first offer is refused goes on to answer with
+     * a buffered body, and a length recorded here would then reach the wire
+     * beside a body of another size. */
+    response->declared_length = declared;
     response->written_length += chunk_len;
     return false;
 }
 
-/* Hands back bytes reserved for a transport that then queued nothing — the
- * refusal a non-blocking offer answers with. */
+/* Hands back bytes reserved for a transport that then queued nothing: the
+ * refusal a non-blocking offer answers with, and every dead stream, where the
+ * chunk is released without a byte of it leaving. Keeping them would let a body
+ * that never reached the peer satisfy the declared count. */
 static void response_release_declared_length(http_response_object *response,
                                              const size_t chunk_len)
 {
@@ -1172,6 +1184,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         /* Peer aborted between dispatch and now. Emulate the
          * cancel path — handler may catch and wind down gracefully. */
+        response_release_declared_length(response, ZSTR_LEN(chunk));
         zend_throw_exception_ex(http_exception_ce, 499,
             "stream closed by peer");
         return;
@@ -1261,6 +1274,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
     /* The transport may already have thrown a more precise reason — an
      * over-sized chunk, say. 499 is the fallback diagnosis, not an override. */
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        response_release_declared_length(response, ZSTR_LEN(chunk));
+
         if (EXPECTED(EG(exception) == NULL)) {
             zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
         }
@@ -1491,10 +1506,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
 
     grpc_message_begin_stream(response);
 
-    const int rc = response->stream_ops->append_chunk(
+    const size_t frame_len = ZSTR_LEN(frame);
+    const int    rc         = response->stream_ops->append_chunk(
         response->stream_ctx, frame, false);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        response_release_declared_length(response, frame_len);
         zend_throw_exception_ex(http_exception_ce, 499,
             "stream closed by peer");
         return;
@@ -1540,6 +1557,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
         response->stream_ctx, frame, true);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        response_release_declared_length(response, frame_len);
+
         if (EXPECTED(EG(exception) == NULL)) {
             zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
         }
@@ -1704,8 +1723,14 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
         if (data != NULL && ZSTR_LEN(data) > 0
             && !response_check_declared_length(response, "end", ZSTR_LEN(data))) {
             zend_string_addref(data);
-            (void)response->stream_ops->append_chunk(
-                response->stream_ctx, data, false);
+
+            if (response->stream_ops->append_chunk(response->stream_ctx, data, false)
+                == HTTP_STREAM_APPEND_STREAM_DEAD) {
+                /* Nothing left, so the count must not say it did — the
+                 * finisher below reads it to decide whether the promise was
+                 * kept. */
+                response_release_declared_length(response, ZSTR_LEN(data));
+            }
         }
 
         (void)http_response_finish_stream(Z_OBJ_P(ZEND_THIS), false, -1);

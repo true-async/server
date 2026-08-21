@@ -30,7 +30,7 @@
  * instead (RFC 9112 §6.3 rule 5): the header block carries the length, every
  * chunk goes out as its own bytes, and the body ends at the last of them with
  * no terminator. The response object decides which framing applies and answers
- * through http_response_get_declared_length; nothing here chooses.
+ * through http_response_has_declared_length; nothing here chooses.
  *
  * Context pointer is the http_connection_t* itself — no per-stream
  * heap allocation, no cleanup needed. There is at most one in-flight
@@ -221,7 +221,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     /* A declared length frames the body by itself, so the chunk travels as its
      * own bytes: no size line ahead of it, no CRLF behind it. */
     const bool identity =
-        http_response_get_declared_length(Z_OBJ(ctx->response_zv)) >= 0;
+        http_response_has_declared_length(Z_OBJ(ctx->response_zv));
     const size_t trailer_len = identity ? 0 : 2;
 
     char header[H1_CHUNK_HEADER_MAX];
@@ -421,7 +421,7 @@ static void h1_stream_mark_ended(void *opaque)
 
     /* A body framed by a declared length ends at its last byte: the peer has
      * been counting them down and there is nothing left to say. */
-    if (http_response_get_declared_length(Z_OBJ(ctx->response_zv)) >= 0) {
+    if (http_response_has_declared_length(Z_OBJ(ctx->response_zv))) {
         return;
     }
 

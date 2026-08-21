@@ -94,6 +94,21 @@ $server->addHttpHandler(function ($req, $res) {
             $res->end('defghij');
             return;
 
+        case '/huge':
+            /* Nineteen digits reach past int64_t, and the sentinel for "none
+             * declared" is negative: an unchecked cast would read the largest
+             * lengths as no declaration and drop the header in silence. */
+            $res->setHeader('Content-Length', '9999999999999999999');
+
+            try {
+                $res->write('x');
+            } catch (\Throwable $e) {
+                echo "huge: ", $e->getMessage(), "\n";
+            }
+
+            $res->setStatusCode(500)->setBody("declared too large\n")->end();
+            return;
+
         case '/buffered':
             /* A buffered body never declares — the server states the count it
              * is sending. A handler value that disagreed used to reach the
@@ -154,6 +169,9 @@ spawn(function () use ($port, $server) {
     echo "frame length: ", preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
     echo "frame body: ", json_encode($body), "\n";
 
+    [, $body] = $get('/huge');
+    echo "huge body: ", json_encode($body), "\n";
+
     [$head, $body] = $get('/buffered');
     echo "buffered length: ", preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
     echo "buffered body: ", json_encode($body), "\n";
@@ -180,6 +198,8 @@ late body: "alpha"
 frame: writeMessage(): body would pass the declared Content-Length of 10 bytes — 3 written, 25 offered
 frame length: 10
 frame body: "abcdefghij"
+huge: write(): Content-Length of 9999999999999999999 is larger than this server frames
+huge body: "declared too large\n"
 buffered length: 11
 buffered body: "hello world"
 exact ended: 1

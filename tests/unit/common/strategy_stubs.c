@@ -157,3 +157,9 @@ int64_t http_response_get_declared_length(zend_object *obj)
 	(void) obj;
 	abort();
 }
+
+bool http_response_has_declared_length(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}

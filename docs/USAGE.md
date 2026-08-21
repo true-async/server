@@ -203,13 +203,19 @@ deletes the header when it engages. And a graceful shutdown that interrupts
 such a stream fails it rather than ending it cleanly, unlike an undeclared
 stream, whose bytes were never promised in advance.
 
-A `Content-Length` that is not a decimal byte count, or one set twice through
-`addHeader()`, throws from that first `write()` — while the response is still
-uncommitted, so the handler can still answer with a status. Only `write()` and
-`tryWrite()` declare: `sseEvent()` and `writeMessage()` frame their own
-records, a `HEAD` response keeps the length on the buffered path where it
-describes the body a `GET` would return, and a status that carries no content
-(`1xx`, `204`, `304`) declares nothing.
+A `Content-Length` that is not a decimal byte count, is larger than the server
+frames, or was set twice through `addHeader()`, throws from that first call —
+while the response is still uncommitted, so the handler can still answer with a
+status.
+
+A response declares at its first streaming call, whichever it is: `write()`,
+`tryWrite()`, `writeMessage()` or `tryWriteMessage()`, each counted by the bytes
+it puts on the wire rather than by the payload passed in. Four responses declare
+nothing: a gRPC call, whose body is closed by a trailer frame the handler never
+sees; an SSE stream, which starts through `sseStart()` and keeps its own
+framing; a `HEAD`, which keeps the length on the buffered path where it
+describes the body a `GET` would return; and a status that carries no content
+(`1xx`, `204`, `304`).
 
 `write()` parks the handler coroutine while the outbound queue is full: HTTP/2
 and HTTP/3 park once every ring slot is live or the queued bytes reach

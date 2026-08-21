@@ -215,7 +215,27 @@ it and expects a tag within days.
   `writeMessage()` needs no gRPC mode of its own, so on a plain request it would
   otherwise have put an uncounted frame onto an identity-framed body — found by
   the intent reviewer on the finished diff, fixed here, pinned by `core/064`
-  route `/frame`.
+  route `/frame`. A declaration is therefore taken by whichever streaming call
+  comes first, and the byte counted is the one that call puts on the wire, not
+  the payload it was handed.
+
+  The reservation is given back whenever the transport queued nothing — a
+  non-blocking refusal, and every `HTTP_STREAM_APPEND_STREAM_DEAD`. Keeping it
+  on a dead stream let a body that never reached the peer satisfy the count, so
+  HTTP/2 ended cleanly under a `content-length` that overstated it. And the
+  declaration is adopted only once a chunk is accepted: a first offer refused
+  for over-run leaves the response uncommitted and free to answer buffered, and
+  a length recorded before that check reached the HTTP/3 field section beside a
+  body of another size. Both found by the adversarial reviewer on the finished
+  diff.
+
+  Two limits are known and carried without a test. The header correction on the
+  abort-answers-false branch needs a transport that refuses its first chunk
+  before opening the stream, which no shape reachable from PHP produces today.
+  And on the pool path the worker counts a chunk once the wire is posted, while
+  the reactor may drop it for a stream that has moved on (`http3_dispatch.c`
+  `RESPONSE_WIRE_STREAM_CHUNK`) — the count is a floor there, so a declared
+  length can be reported kept when the reactor discarded part of it.
 
   Evidence: `h1/037` reads nine body bytes with no framing around them and
   completes a second request on the same connection, `h1/038` refuses the

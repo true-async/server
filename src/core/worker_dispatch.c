@@ -357,8 +357,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
         response_wire_set_credit(hw, ctx->credit);
         worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv),
-                              http_response_get_declared_length(
-                                  Z_OBJ(ctx->response_zv)) >= 0);
+                              http_response_has_declared_length(Z_OBJ(ctx->response_zv)));
 
         /* headers undeliverable → the stream never opened; don't copy and
          * post a chunk wire the reactor would only throw away */
