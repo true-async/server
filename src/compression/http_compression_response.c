@@ -232,9 +232,10 @@ static http_codec_id_t decide(http_compression_state_t *st,
     }
 
     /* --- response side --- */
-    const int status = http_response_get_status(response_obj);
-
-    if (status < 200 || status == 204 || status == 304) {
+    /* One predicate rather than a copy of the list: 205 joined the statuses
+     * that carry no content and this test did not move with it, which put
+     * Content-Encoding on a 205 with nothing behind it. */
+    if (!response_status_carries_body(http_response_get_status(response_obj))) {
         return HTTP_CODEC_IDENTITY;
     }
 

@@ -1418,6 +1418,10 @@ HashTable     *http_response_get_trailers(zend_object *obj);
 /* Underlying http_request_t of an HttpRequest object — for contexts that
  * only hold the zval (worker dispatch access-log emit). */
 struct http_request_t *http_request_from_zobj(zend_object *obj);
+/* The buffered body as the peer may receive it: NULL with a zero length when
+ * the message carries none — a 1xx, a 204, a 304, or any response to HEAD.
+ * The buffer itself is untouched, so a length taken from it still describes
+ * the representation. */
 const char    *http_response_get_body    (zend_object *obj, size_t *len_out);
 
 /* Default the grpc-status trailer to `status` unless one is already set.
@@ -1432,8 +1436,9 @@ void           http_response_promote_trailers_to_headers(zend_object *obj);
  * dispose path, which emits trailers as an in-body frame instead. */
 void           http_response_clear_trailers(zend_object *obj);
 
-/* Borrow the body's underlying zend_string. Returns NULL when the body
- * is empty. The string is owned by the response object — addref it if
+/* Borrow the body's underlying zend_string. Returns NULL when the body is
+ * empty, and when the message carries none — a 1xx, a 204, a 304, or any
+ * response to HEAD. The string is owned by the response object — addref it if
  * you need to outlive the response. Avoids a full body memcpy on the
  * H3 submit path where the response object lives only for the duration
  * of the submit call but the data_reader walks the bytes asynchronously. */
@@ -1474,6 +1479,14 @@ void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
 /* Set Connection: keep-alive | close. Multiplex protocols (H2/H3) filter
  * Connection at submit time, so it is harmless to call on any response. */
 void http_response_set_connection(zend_object *obj, bool keep_alive);
+
+/* Whether the handler asked for the connection to be retired after this
+ * response, through setHeader('Connection', 'close'). The field itself is
+ * never stored, because the server states the connection, so this is the
+ * request it left behind. Only the two HTTP/1 paths answer it: on HTTP/2 and HTTP/3 one
+ * response cannot retire a multiplexed connection, so the flag is recorded and
+ * unread there. */
+bool http_response_handler_wants_close(zend_object *obj);
 
 /* H2/H3 forbidden response-header filter (RFC 9113 §8.2.2 / RFC 9114
  * §4.2). Returns false for hop-by-hop names (connection, keep-alive,

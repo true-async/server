@@ -23,7 +23,15 @@ final class HttpResponse
     /**
      * Set response status code
      *
-     * @param int $code HTTP status code (100-599)
+     * Takes 200 to 599. An interim status (1xx) throws: RFC 9110 §15.2 makes
+     * it a response the client reads and then goes on waiting for the final
+     * one, which a handler has no way to send afterwards.
+     *
+     * A status that carries no content changes what the body calls do. 204,
+     * 304 and 205 refuse a streaming call and drop a buffered body; 205 states
+     * Content-Length: 0, the other two state no length at all.
+     *
+     * @param int $code HTTP status code (200-599)
      * @return static
      */
     public function setStatusCode(int $code): static {}
@@ -35,6 +43,12 @@ final class HttpResponse
 
     /**
      * Set response reason phrase
+     *
+     * The phrase sits on the HTTP/1 status line, where RFC 9112 §4 allows
+     * HTAB, SP, VCHAR and obs-text and nothing else. Every other byte is
+     * replaced with a space: a CR or an LF would end the status line early and
+     * let the rest be read as header fields. HTTP/2 and HTTP/3 carry no reason
+     * phrase and ignore this.
      *
      * @param string $phrase Reason phrase (e.g., "OK", "Not Found")
      * @return static
@@ -54,6 +68,28 @@ final class HttpResponse
      * Content-Length is the one header the server reads back: set before the
      * first write() it declares the length of a streamed body (see write()),
      * and on a buffered body the server states the count it is sending.
+     *
+     * Two fields answer differently, because the server states them itself.
+     * Connection is read rather than copied: "close" retires the connection
+     * after this response on HTTP/1 — the field is not copied onto the wire,
+     * the socket is closed — while HTTP/2 and HTTP/3 multiplex, so one response
+     * never retires their connection and the request is recorded and unused
+     * there. "keep-alive" is dropped, being what the server was going to say
+     * anyway; any other value throws. Transfer-Encoding accepts only "chunked",
+     * the framing an undeclared HTTP/1.1 stream gets anyway, and is dropped;
+     * naming any other coding throws, because the server cannot apply it and
+     * would otherwise send encoded bytes with nothing declaring them.
+     *
+     * getHeader() reports neither afterwards: what the server states is not
+     * part of the handler's header set. resetHeaders() takes back a close.
+     *
+     * Throws {@see HttpServerInvalidArgumentException} when the name is not an
+     * RFC 9110 §5.6.2 token, or the value carries a byte that cannot stand in a
+     * field value — a CR or an LF would end the header block and let the rest
+     * be read as a second response — or the value has leading or trailing
+     * whitespace, which §5.5 forbids a sender to generate. The bytes checked
+     * are the bytes stored, so a value given as an object is checked after its
+     * __toString(). Nothing is stored when it throws.
      *
      * @param string $name Header name
      * @param string|array $value Header value(s)
@@ -160,7 +196,7 @@ final class HttpResponse
      *
      * The first call commits status and headers; afterwards setStatusCode(),
      * setHeader() and setBody() throw. Later calls append chunked-transfer
-     * segments (HTTP/1) or DATA frames (HTTP/2, HTTP/3). To append to a
+     * segments (HTTP/1.1) or DATA frames (HTTP/2, HTTP/3). To append to a
      * buffered body instead, call appendBody().
      *
      * A Content-Length set before this first call frames the body instead of
@@ -168,6 +204,20 @@ final class HttpResponse
      * pass the declared count throws HttpServerRuntimeException and is not
      * queued, and a body that ends short of it is failed rather than finished.
      * Such a response is never compressed.
+     *
+     * An HTTP/1.0 client gets neither: it has no chunked decoder, so an
+     * undeclared body reaches it as its own bytes with Connection: close, and
+     * the close is the boundary. The connection carries that one response.
+     *
+     * A status that carries no body — 204, 304, 205 — throws
+     * HttpServerRuntimeException here, while the response is still uncommitted
+     * and can still be given a status that does carry one. A HEAD request is
+     * the exception: the chunk is accepted and dropped, and the response stays
+     * uncommitted, so setHeader() and setStatusCode() go on working and an
+     * uncaught exception still becomes the status. What the dropped chunk does
+     * change is the length: the server states none, because a count taken from
+     * the buffer nobody filled would claim the GET body is empty. Set a
+     * Content-Length to state the length a GET would report.
      *
      * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
      * park while every ring slot is live or the queued bytes stand at
@@ -449,7 +499,9 @@ final class HttpResponse
      * Throws {@see HttpServerInvalidArgumentException} if the handler has
      * already set a Content-Type other than `text/event-stream`, and
      * {@see HttpServerRuntimeException} if the response is already
-     * streaming, closed, or has no connection to stream over.
+     * streaming, closed, has no connection to stream over, or carries a status
+     * that ends at the header block (1xx, 204, 304), where an event stream has
+     * no body to put its records in.
      *
      * @return static
      */

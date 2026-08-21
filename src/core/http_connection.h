@@ -369,6 +369,10 @@ typedef struct {
                                                   * away: TCP reports that only on a write,
                                                   * so the discovery is recorded here for
                                                   * isWritable() to answer afterwards. */
+    bool               close_delimited;           /* the response body is bounded by the
+                                                  * connection close and by nothing else
+                                                  * (H1_FRAMING_CLOSE), so no message may
+                                                  * follow it on this connection. */
     bool               skip_php_handler;         /* static handler (issue #13) populated the
                                                   * response in C; coroutine entry must NOT
                                                   * call the user PHP handler. Dispose still

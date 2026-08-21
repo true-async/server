@@ -22,4 +22,43 @@
  * (commits status line + headers with Transfer-Encoding: chunked). */
 extern const http_response_stream_ops_t h1_stream_ops;
 
+/* How an HTTP/1 response body is delimited on the wire. The answer comes from
+ * four inputs together: the version the peer speaks, the method it used, the
+ * status the handler chose, the length it declared. It is fixed once, when the
+ * header block is built, because every byte after that is framed to match.
+ *
+ * These are the four a server can produce out of the eight cases RFC 9112 §6.3
+ * lists for a receiver. */
+typedef enum {
+    /* Rule 1: a 1xx, 204 or 304, and any response to HEAD. The message ends at
+     * the blank line whatever the header fields say, so nothing is framed and
+     * no body goes out. A handler's own Content-Length survives where the
+     * number still describes something (a 304, a HEAD), and is dropped on a
+     * 1xx and a 204, which RFC 9110 §8.6 forbids it on. A length the server
+     * computed is never one of them; the buffered formatter states that, and a
+     * HEAD does not take this framing there. */
+    H1_FRAMING_NONE = 0,
+    /* Rule 5: Content-Length, and the body is exactly that many bytes. */
+    H1_FRAMING_LENGTH,
+    /* Rule 3: Transfer-Encoding: chunked. Needs a peer that speaks HTTP/1.1 —
+     * §6.1 forbids sending it to one that indicated 1.0. */
+    H1_FRAMING_CHUNKED,
+    /* Rule 7: no boundary but the connection close. The answer for a 1.0 peer
+     * whose body length is not known in advance; it costs the connection, so
+     * nothing may follow such a response on it. */
+    H1_FRAMING_CLOSE,
+} h1_framing_t;
+
+/* The framing @p response_obj will get on the streaming path. Safe to call
+ * before the header block is built and after it: the four inputs are all fixed
+ * by the first streaming call. The buffered formatter reads the same inputs
+ * directly, because it also has a body length of its own to state. */
+h1_framing_t h1_response_framing(zend_object *response_obj);
+
+/* Whether the request this response answers indicated HTTP/1.1 or later, which
+ * decides what the connection may be told and how the body may be framed
+ * (RFC 9112 §6.1, §9.3). A response built outside a connection carries no
+ * version and counts as 1.1, which is what every modern peer reads. */
+bool h1_response_peer_speaks_http11(zend_object *response_obj);
+
 #endif /* HTTP1_STREAM_H */

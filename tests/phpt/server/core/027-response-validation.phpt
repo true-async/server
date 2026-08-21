@@ -33,8 +33,11 @@ $server->addHttpHandler(function ($req, $res) use ($capture, $server) {
     $capture('status_too_high', fn() => $res->setStatusCode(600));
     $capture('status_zero',     fn() => $res->setStatusCode(0));
     $capture('status_negative', fn() => $res->setStatusCode(-1));
-    // Boundary: 100 and 599 should both be accepted
-    $capture('status_100_ok',   fn() => $res->setStatusCode(100));
+    // A 1xx is interim (RFC 9110 §15.2) and cannot be a final response: the
+    // client would go on waiting for one the server has no way to send.
+    $capture('status_100_interim', fn() => $res->setStatusCode(100));
+    // Boundary: 200 and 599 are both accepted
+    $capture('status_200_ok',   fn() => $res->setStatusCode(200));
     $capture('status_599_ok',   fn() => $res->setStatusCode(599));
 
     // Empty header name
@@ -68,8 +71,9 @@ status_too_low: %s
 status_too_high: %s
 status_zero: %s
 status_negative: %s
-status_100_ok: no exception
+status_100_interim: TrueAsync\HttpServerInvalidArgumentException
+status_200_ok: no exception
 status_599_ok: no exception
-empty_name: %s
-crlf_name: %s
-crlf_value: %s
+empty_name: TrueAsync\HttpServerInvalidArgumentException
+crlf_name: TrueAsync\HttpServerInvalidArgumentException
+crlf_value: TrueAsync\HttpServerInvalidArgumentException

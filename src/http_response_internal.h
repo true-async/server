@@ -72,6 +72,15 @@ typedef struct {
     bool             streaming;         /* write() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — write() now throws, sse* re-entry is allowed */
     bool             is_head;            /* HEAD: write() drops chunks (RFC 9110 §9.3.2) */
+    bool             head_streamed;      /* a HEAD whose handler offered a chunk: the bytes
+                                          * were dropped, and the buffered formatter must not
+                                          * state a length measured from the buffer they never
+                                          * reached. The response stays uncommitted, so the
+                                          * handler's own exception can still become a status. */
+    bool             handler_wants_close; /* setHeader('Connection', 'close'): the field is
+                                           * the server's to emit, so the handler's is taken
+                                           * as the request it is and answered by closing the
+                                           * connection, not by copying the bytes. */
 
     /* grpc_mode_t stamped at dispatch; picks the per-frame transform.
      * 0 = not a gRPC call. */
@@ -106,9 +115,24 @@ static inline http_response_object *http_response_from_obj(zend_object *obj) {
  * Content-Length on it describes something other than what follows — the
  * representation a 304 stands for, say — and the server neither audits it nor
  * replaces it. */
+/* Whether a message with this status may carry content at all. 1xx, 204 and
+ * 304 are RFC 9112 §6.3 rule 1 — the message ends at the header block. 205 is
+ * not in that rule and is here all the same: RFC 9110 §15.3.6 forbids content
+ * in it, while a receiver still looks for framing, so it is the one status
+ * that carries nothing and must say so with a length. See
+ * response_status_needs_zero_length. */
 static inline bool response_status_carries_body(const int status)
 {
-    return status >= 200 && status != 204 && status != 304;
+    return status >= 200 && status != 204 && status != 205 && status != 304;
+}
+
+/* The statuses whose framing is a stated zero rather than an absent field.
+ * Only 205: rule 1 excuses the others from framing, and this one it does not
+ * name, so a peer reading a 205 with no Content-Length goes on reading for a
+ * body that is not coming. */
+static inline bool response_status_needs_zero_length(const int status)
+{
+    return status == 205;
 }
 
 /* Drop the borrowed-body ref if held. Call before any path that
@@ -126,6 +150,13 @@ static inline void response_clear_body_view(http_response_object *r)
 
 zend_string                         *http_response_get_body_string(zend_object *obj);
 smart_str                           *http_response_get_body_smart_str(zend_object *obj);
+
+/* Replace the reason phrase with what RFC 9112 §4 allows on a status line:
+ * HTAB, SP, VCHAR and obs-text. Every other byte becomes a space, because the
+ * value reaches this field from handler data — an uncaught exception's message
+ * is the usual route — and a CR or an LF in it ends the status line, so the
+ * bytes behind it are read as headers and as a second response. */
+void http_response_set_reason_phrase(zend_object *obj, const char *phrase, size_t len);
 
 const http_response_stream_ops_t    *http_response_get_stream_ops(zend_object *obj);
 void                                *http_response_get_stream_ctx(zend_object *obj);

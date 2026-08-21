@@ -147,9 +147,26 @@ HashTable *http_response_get_trailers(zend_object *obj)
     return http_response_from_obj(obj)->trailers;
 }
 
+/* Whether the buffered body is bytes the peer may receive. Two messages hold
+ * one and send none: a status that ends at the header block (RFC 9112 §6.3
+ * rule 1 — 1xx, 204, 304), and a response to HEAD, where the buffer holds what
+ * a GET would have returned and only its length is allowed out
+ * (RFC 9110 §9.3.2). The HTTP/1 formatters answer the same question from the
+ * same two inputs; every other transport asks it here. */
+static bool response_body_reaches_peer(const http_response_object *response)
+{
+    return !response->is_head
+        && response_status_carries_body(response->status_code);
+}
+
 const char *http_response_get_body(zend_object *obj, size_t *len_out)
 {
     http_response_object *response = http_response_from_obj(obj);
+
+    if (!response_body_reaches_peer(response)) {
+        if (len_out != NULL) { *len_out = 0; }
+        return NULL;
+    }
 
     if (response->body_view != NULL) {
         if (len_out != NULL) { *len_out = ZSTR_LEN(response->body_view); }
@@ -171,6 +188,10 @@ zend_string *http_response_get_body_str(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
 
+    if (!response_body_reaches_peer(response)) {
+        return NULL;
+    }
+
     if (response->body_view != NULL) {
         return response->body_view;
     }
@@ -189,6 +210,11 @@ void http_response_install_stream_ops(zend_object *obj,
     http_response_object *response = http_response_from_obj(obj);
     response->stream_ops = ops;
     response->stream_ctx = ctx;
+}
+
+bool http_response_handler_wants_close(zend_object *obj)
+{
+    return http_response_from_obj(obj)->handler_wants_close;
 }
 
 /* Force `Connection: close` into the response headers, overwriting any
@@ -351,6 +377,29 @@ void http_response_set_error(zend_object *obj, int status, const char *message)
     smart_str_0(&r->body);
 }
 
+void http_response_set_reason_phrase(zend_object *obj, const char *phrase, const size_t len)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    zend_string *clean = zend_string_init(phrase, len, 0);
+
+    for (size_t i = 0; i < len; i++) {
+        const unsigned char c = (unsigned char)ZSTR_VAL(clean)[i];
+
+        /* CTL, minus the horizontal tab the grammar keeps. DEL goes with them;
+         * obs-text (0x80..0xFF) stays, which is what lets a UTF-8 message
+         * through unmangled. */
+        if ((c < 0x20 && c != '\t') || c == 0x7F) {
+            ZSTR_VAL(clean)[i] = ' ';
+        }
+    }
+
+    if (response->reason_phrase) {
+        zend_string_release(response->reason_phrase);
+    }
+
+    response->reason_phrase = clean;
+}
+
 void http_response_reset_to_error(zend_object *obj, int status_code, const char *message)
 {
     http_response_object *response = http_response_from_obj(obj);
@@ -365,11 +414,7 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
         zend_hash_clean(response->headers);
     }
 
-    if (response->reason_phrase) {
-        zend_string_release(response->reason_phrase);
-    }
-
-    response->reason_phrase = zend_string_init(message, msg_len, 0);
+    http_response_set_reason_phrase(obj, message, msg_len);
 
     response->committed = true;
 }

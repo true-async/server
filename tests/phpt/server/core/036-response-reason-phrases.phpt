@@ -18,12 +18,14 @@ use function Async\await;
 
 /* The status table from src/http_response.c (canonical RFC 9110 set). */
 $codes = [
-    100 => 'Continue',
-    101 => 'Switching Protocols',
+    /* 100 and 101 are absent on purpose: setStatusCode() refuses an interim
+     * status (RFC 9110 §15.2), so their arms in http_status_reason are no
+     * longer reachable from PHP. */
     200 => 'OK',
     201 => 'Created',
     202 => 'Accepted',
     204 => 'No Content',
+    205 => 'Reset Content',
     206 => 'Partial Content',
     301 => 'Moved Permanently',
     302 => 'Found',
