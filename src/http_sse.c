@@ -137,6 +137,17 @@ static bool sse_ensure_started(http_response_object *response)
 		return false;
 	}
 
+	/* RFC 9112 §6.3 rule 1: a 1xx, a 204 and a 304 end at the blank line, so an
+	 * event stream on one has no body to put its records in and every event
+	 * would be refused. Said here, at the gate the whole dialect passes,
+	 * while the response is uncommitted and can still become a status. */
+	if (!response_status_carries_body(response->status_code)) {
+		zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+								"Cannot start SSE on status %d — it carries no body",
+								response->status_code);
+		return false;
+	}
+
 	if (response->send_file_req != NULL) {
 		zend_throw_exception(http_server_runtime_exception_ce,
 							 "Response is sealed by sendFile() — cannot switch to SSE", 0);
@@ -235,6 +246,14 @@ static void sse_append_field(smart_str *out, const char *field, size_t field_len
  * a refusal from a delivery. */
 static int sse_dispatch(http_response_object *response, zend_string *payload, const bool nonblocking)
 {
+	/* A HEAD response carries the headers a GET would and none of its body
+	 * (RFC 9110 §9.3.2). The record is built so the handler runs the same code
+	 * for both methods, then dropped — the answer write() gives a HEAD. */
+	if (response->is_head) {
+		zend_string_release(payload);
+		return HTTP_STREAM_APPEND_OK;
+	}
+
 	const int rc = response->stream_ops->append_chunk(response->stream_ctx, payload, nonblocking);
 
 	if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {

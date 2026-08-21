@@ -351,6 +351,29 @@ void http_response_set_error(zend_object *obj, int status, const char *message)
     smart_str_0(&r->body);
 }
 
+void http_response_set_reason_phrase(zend_object *obj, const char *phrase, const size_t len)
+{
+    http_response_object *response = http_response_from_obj(obj);
+    zend_string *clean = zend_string_init(phrase, len, 0);
+
+    for (size_t i = 0; i < len; i++) {
+        const unsigned char c = (unsigned char)ZSTR_VAL(clean)[i];
+
+        /* CTL, minus the horizontal tab the grammar keeps. DEL goes with them;
+         * obs-text (0x80..0xFF) stays, which is what lets a UTF-8 message
+         * through unmangled. */
+        if ((c < 0x20 && c != '\t') || c == 0x7F) {
+            ZSTR_VAL(clean)[i] = ' ';
+        }
+    }
+
+    if (response->reason_phrase) {
+        zend_string_release(response->reason_phrase);
+    }
+
+    response->reason_phrase = clean;
+}
+
 void http_response_reset_to_error(zend_object *obj, int status_code, const char *message)
 {
     http_response_object *response = http_response_from_obj(obj);
@@ -365,11 +388,7 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
         zend_hash_clean(response->headers);
     }
 
-    if (response->reason_phrase) {
-        zend_string_release(response->reason_phrase);
-    }
-
-    response->reason_phrase = zend_string_init(message, msg_len, 0);
+    http_response_set_reason_phrase(obj, message, msg_len);
 
     response->committed = true;
 }

@@ -18,6 +18,7 @@
 #include "zend_smart_str.h"
 #include "php_http_server.h"
 #include "http_response_internal.h"
+#include "http1/http1_stream.h"
 #include "http_date.h"
 #include <time.h>
 
@@ -120,6 +121,39 @@ const char *http_response_status_line_http11(const int code, size_t *out_len)
     }
 
     return e->line;
+}
+
+bool h1_response_peer_speaks_http11(zend_object *response_obj)
+{
+    const http_response_object *response = http_response_from_obj(response_obj);
+
+    return response->protocol_version == NULL
+        || ZSTR_LEN(response->protocol_version) != 3
+        || memcmp(ZSTR_VAL(response->protocol_version), "1.0", 3) != 0;
+}
+
+/* RFC 9110 §8.6: a 1xx or a 204 carries no Content-Length, whoever set it. A
+ * 304 is the exception in the other direction — §15.4.5 wants the field to
+ * describe the representation the 200 would have carried. */
+static inline bool response_status_forbids_content_length(const int status)
+{
+    return status < 200 || status == 204;
+}
+
+h1_framing_t h1_response_framing(zend_object *response_obj)
+{
+    const http_response_object *response = http_response_from_obj(response_obj);
+
+    if (response->is_head || !response_status_carries_body(response->status_code)) {
+        return H1_FRAMING_NONE;
+    }
+
+    if (response->declared_length >= 0) {
+        return H1_FRAMING_LENGTH;
+    }
+
+    return h1_response_peer_speaks_http11(response_obj)
+        ? H1_FRAMING_CHUNKED : H1_FRAMING_CLOSE;
 }
 
 /* Emit status line into result. Fast path: HTTP/1.1 + no custom reason
@@ -266,24 +300,33 @@ static void emit_headers_block(smart_str *result, http_response_object *response
         zend_hash_str_exists(response->headers, "content-length",
                              sizeof("content-length") - 1);
 
-    /* The handler's number is kept where the message carries no body to
-     * measure it against: a HEAD, and a status that ends at the blank line.
+    /* The handler's number is kept on a HEAD, where the message carries no body
+     * to measure it against and the value describes the one a GET would have
+     * returned. A status that ends at the blank line keeps it only where the
+     * number still means something — see the branch below.
      *
-     * Two branches rather than one computed flag: the common response declares
-     * no length, and passing the literal lets the emit loop drop the name check
-     * for it. */
-    const bool body_follows = !response->is_head
-        && response_status_carries_body(response->status_code);
+     * Three branches rather than one computed flag: the common response
+     * declares no length, and passing the literal lets the emit loop drop the
+     * name check for it. */
+    const bool carries_body = response_status_carries_body(response->status_code);
+    const bool body_follows = !response->is_head && carries_body;
 
-    if (handler_declared && body_follows) {
+    if (UNEXPECTED(!carries_body)) {
+        /* RFC 9112 §6.3 rule 1: the message ends at the blank line, so the
+         * server has no count to state. A 304 keeps the handler's, which
+         * describes the representation a 200 would have carried (RFC 9110
+         * §15.4.5); a 1xx and a 204 lose it, which §8.6 requires. */
+        emit_headers_only(result, response->headers,
+                          response_status_forbids_content_length(response->status_code), true);
+    } else if (handler_declared && body_follows) {
         emit_content_length(result, body_len);
-        emit_headers_only(result, response->headers, true, false);
+        emit_headers_only(result, response->headers, true, true);
     } else {
         if (!handler_declared) {
             emit_content_length(result, body_len);
         }
 
-        emit_headers_only(result, response->headers, false, false);
+        emit_headers_only(result, response->headers, false, true);
     }
 
     /* End of headers */
@@ -338,7 +381,12 @@ void http_response_format_parts(zend_object *obj,
     smart_str_0(&result);
 
     *headers_out = result.s ? result.s : zend_empty_string;
-    if (view != NULL) {
+
+    /* No body part on a message that ends at the blank line — see the same
+     * rule in http_response_format. */
+    if (UNEXPECTED(!response_status_carries_body(response->status_code))) {
+        *body_out = NULL;
+    } else if (view != NULL) {
         zend_string_addref(view);
         *body_out = view;
     } else if (response->body.s != NULL && body_len > 0) {
@@ -375,10 +423,15 @@ zend_string *http_response_format(zend_object *obj)
 
     emit_headers_block(&result, response, body_len);
 
-    if (view != NULL) {
-        smart_str_append(&result, view);
-    } else if (response->body.s && body_len > 0) {
-        smart_str_append(&result, response->body.s);
+    /* The message ends at the blank line on a 1xx, a 204 and a 304 (RFC 9112
+     * §6.3 rule 1). Bytes appended past it are read as the next message's
+     * status line, which desynchronises a connection the peer may reuse. */
+    if (EXPECTED(response_status_carries_body(response->status_code))) {
+        if (view != NULL) {
+            smart_str_append(&result, view);
+        } else if (response->body.s && body_len > 0) {
+            smart_str_append(&result, response->body.s);
+        }
     }
 
     smart_str_0(&result);
@@ -389,12 +442,14 @@ zend_string *http_response_format(zend_object *obj)
 /* Serialize status line + headers for an HTTP/1 streaming response. Headers
  * end with the empty line; the caller writes the body after them.
  *
- * Which of the two framings the block announces is the response's own answer.
- * A stream that declared a Content-Length keeps it and is framed by it, byte
- * for byte, with no chunk headers around the body. One that declared none is
- * framed by chunked encoding, and any handler Content-Length is dropped as
- * incompatible with it (RFC 9112 §6.3). A handler Transfer-Encoding is dropped
- * either way: the framing is the server's to state.
+ * The block announces whichever framing h1_response_framing picked, and only
+ * chunked coding has a header of its own to announce. A Content-Length
+ * survives in two of the four: the declared length the server is auditing, and
+ * a handler value on a message with no body, where the number describes
+ * something else the peer still wants — the representation a 304 stands for,
+ * the body a GET would have returned for a HEAD. A handler Transfer-Encoding
+ * is dropped in all four: the framing is the server's to state, and the pair
+ * with Content-Length is the shape RFC 9112 §6.3 names as smuggling.
  *
  * Used by h1_stream_ops at first write(). Separate from http_response_format
  * because the latter builds status + Content-Length + headers + body
@@ -402,19 +457,22 @@ zend_string *http_response_format(zend_object *obj)
 zend_string *http_response_format_streaming_headers(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
-    const bool declared = response->declared_length >= 0;
+    const h1_framing_t framing = h1_response_framing(obj);
+    const bool drop_content_length = framing == H1_FRAMING_NONE
+        ? response_status_forbids_content_length(response->status_code)
+        : framing != H1_FRAMING_LENGTH;
     smart_str result = {0};
     smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
     emit_date_header(&result, response->headers);
 
-    if (!declared) {
+    if (framing == H1_FRAMING_CHUNKED) {
         smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
                           sizeof("Transfer-Encoding: chunked\r\n") - 1);
     }
 
-    emit_headers_only(&result, response->headers, !declared, true);
+    emit_headers_only(&result, response->headers, drop_content_length, true);
 
     smart_str_appendl(&result, "\r\n", 2);
     smart_str_0(&result);

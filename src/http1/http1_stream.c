@@ -26,11 +26,12 @@
  *     ...
  *     0\r\n\r\n
  *
- * A response whose handler declared a Content-Length is framed by that number
- * instead (RFC 9112 §6.3 rule 5): the header block carries the length, every
- * chunk goes out as its own bytes, and the body ends at the last of them with
- * no terminator. The response object decides which framing applies and answers
- * through http_response_has_declared_length; nothing here chooses.
+ * That is one of four framings, and h1_response_framing picks between them from
+ * the request version, the method, the status and the declaration; nothing here
+ * chooses. The other three put no wrapping around the bytes at all: a declared
+ * Content-Length frames the body by its count (§6.3 rule 5), an HTTP/1.0 peer
+ * with no declaration gets a body the connection close delimits (rule 7), and a
+ * message that ends at the blank line carries no body to frame (rule 1).
  *
  * Context pointer is the http_connection_t* itself — no per-stream
  * heap allocation, no cleanup needed. There is at most one in-flight
@@ -110,6 +111,33 @@ static zend_string *h1_streaming_headers_build(http1_request_ctx_t *ctx)
             http_response_set_alt_svc_if_unset(
                 response_obj, ZSTR_VAL(alt), ZSTR_LEN(alt));
         }
+    }
+
+    /* How this connection ends has to be stated here or not at all: the
+     * dispose-time decision in http_handler_coroutine_dispose runs long after
+     * these bytes are on the wire. Three things can end it — a body the close
+     * itself delimits, a graceful drain retiring the connection, and a request
+     * that asked for close — and RFC 9112 §9.6 wants the peer told in each.
+     *
+     * The drain evaluator advances per-connection state, so it is asked once
+     * per response; dispose skips its own call when these headers are away. */
+    const h1_framing_t framing = h1_response_framing(response_obj);
+    const bool drain = http_server_should_drain_now(conn->server, conn, zend_hrtime());
+
+    if (framing == H1_FRAMING_CLOSE || drain || !conn->keep_alive) {
+        http_response_set_connection(response_obj, false);
+        conn->keep_alive = false;
+        ctx->close_delimited = framing == H1_FRAMING_CLOSE;
+
+        if (drain) {
+            http_server_on_h1_connection_close_sent(conn->counters);
+        }
+    } else if (!h1_response_peer_speaks_http11(response_obj)) {
+        /* An HTTP/1.0 peer treats every response as the last unless the server
+         * confirms otherwise (RFC 2068 §19.7.1), so a connection this server
+         * intends to keep has to say so. On 1.1 the default is the opposite and
+         * the header would be noise. */
+        http_response_set_connection(response_obj, true);
     }
 
     zend_string *headers =
@@ -194,13 +222,20 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         }
     }
 
+    const h1_framing_t framing = h1_response_framing(Z_OBJ(ctx->response_zv));
+
     /* Empty chunk is legal on the wire but would be indistinguishable
      * from the zero-chunk EOF marker — drop it silently. mark_ended()
      * is the only place that emits the zero-chunk. It still commits the
-     * headers, which is what a handler opening a stream with one expects. */
+     * headers, which is what a handler opening a stream with one expects.
+     *
+     * A message that ends at the blank line takes the same route with a chunk
+     * of any size: it has nowhere to put the bytes. The calls that emit refuse
+     * such a response before they reach here, so this is the backstop rather
+     * than the guard. */
     const size_t chunk_len = ZSTR_LEN(chunk);
 
-    if (chunk_len == 0) {
+    if (chunk_len == 0 || framing == H1_FRAMING_NONE) {
         zend_string_release(chunk);
 
         if (headers != NULL) {
@@ -218,10 +253,10 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_OK;
     }
 
-    /* A declared length frames the body by itself, so the chunk travels as its
-     * own bytes: no size line ahead of it, no CRLF behind it. */
-    const bool identity =
-        http_response_has_declared_length(Z_OBJ(ctx->response_zv));
+    /* Only chunked coding wraps the bytes. A declared length frames them by the
+     * count and a close-delimited body by the close, so in both the chunk
+     * travels as its own bytes: no size line ahead of it, no CRLF behind it. */
+    const bool identity = framing != H1_FRAMING_CHUNKED;
     const size_t trailer_len = identity ? 0 : 2;
 
     char header[H1_CHUNK_HEADER_MAX];
@@ -419,9 +454,11 @@ static void h1_stream_mark_ended(void *opaque)
         h1_stream_headers_committed(ctx);
     }
 
-    /* A body framed by a declared length ends at its last byte: the peer has
-     * been counting them down and there is nothing left to say. */
-    if (http_response_has_declared_length(Z_OBJ(ctx->response_zv))) {
+    /* Only a chunked body has a terminator to write. One framed by a declared
+     * length ends at its last byte, with the peer counting them down; one
+     * framed by the close ends with the close; one that carries no body ended
+     * at the blank line. */
+    if (h1_response_framing(Z_OBJ(ctx->response_zv)) != H1_FRAMING_CHUNKED) {
         return;
     }
 

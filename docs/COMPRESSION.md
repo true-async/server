@@ -167,9 +167,12 @@ Content-Encoding: <gzip | br | zstd>
 Vary: Accept-Encoding              (appended if Vary already exists)
 ```
 
-`Content-Length` is recomputed for buffered responses; on streaming
-responses (`HttpResponse::send`) it is dropped — chunked H1 and H2
-DATA framing carry length implicitly.
+`Content-Length` is recomputed for buffered responses. A streaming
+response (`HttpResponse::write`) is compressed only when it declared no
+length, and then carries none: chunked H1 and H2 DATA framing carry the
+boundary themselves. A stream that did declare a `Content-Length` is sent
+identity, because a codec would put a different number of bytes on the
+wire than the header promises.
 
 ## Inbound (request body) decoding
 

@@ -143,7 +143,7 @@ for that response, and a call belonging to another one throws
 | Mode | Calls | Reaches the client | Framing |
 |---|---|---|---|
 | Buffered | `setBody()`, `appendBody()`, `json()`, `html()` | at `end()` | `Content-Length`, computed from the buffer |
-| Streamed | `write()`, `sseEvent()`, `writeMessage()` | at each call | chunked encoding (HTTP/1) or DATA frames closed by END_STREAM (HTTP/2, HTTP/3); a `Content-Length` set before the first `write()` frames the body instead — see below |
+| Streamed | `write()`, `sseEvent()`, `writeMessage()` | at each call | chunked encoding (HTTP/1.1) or DATA frames closed by END_STREAM (HTTP/2, HTTP/3); a `Content-Length` set before the first `write()` frames the body instead, and an HTTP/1.0 client gets a body the connection close delimits — see below |
 | File | `sendFile()` | after the handler returns | `Content-Length` from the file; a satisfiable `Range` yields `206` with `Content-Range` |
 
 ### Buffered
@@ -210,12 +210,62 @@ status.
 
 A response declares at its first streaming call, whichever it is: `write()`,
 `tryWrite()`, `writeMessage()` or `tryWriteMessage()`, each counted by the bytes
-it puts on the wire rather than by the payload passed in. Four responses declare
-nothing: a gRPC call, whose body is closed by a trailer frame the handler never
-sees; an SSE stream, which starts through `sseStart()` and keeps its own
-framing; a `HEAD`, which keeps the length on the buffered path where it
-describes the body a `GET` would return; and a status that carries no content
-(`1xx`, `204`, `304`).
+it puts on the wire rather than by the payload passed in. Three responses
+declare nothing: a gRPC call, whose body is closed by a trailer frame the
+handler never sees; an SSE stream, which starts through `sseStart()` and keeps
+its own framing; and a `HEAD`, which keeps the length on the buffered path where
+it describes the body a `GET` would return. A status that carries no content has
+no body to declare a length for — see below.
+
+#### An HTTP/1.0 client
+
+Chunked coding arrived with HTTP/1.1, so a 1.0 client has no decoder for it and
+RFC 9112 §6.1 forbids sending it one. A streamed body with no declared length
+reaches such a client as its own bytes, with `Connection: close` in the header
+block and the close as the boundary:
+
+```
+HTTP/1.0 200 OK
+Content-Type: text/plain
+Connection: close
+
+alphabeta
+```
+
+The close is the framing, so the connection carries this one response and ends;
+a request the client pipelined behind it goes unanswered, because a reply would
+arrive as the body's last bytes. Declaring a `Content-Length` avoids all of
+this — the peer gets its boundary and the connection stays open, and the server
+confirms that with `Connection: keep-alive`, which a 1.0 client needs before it
+will reuse a socket.
+
+HTTP/1.1 clients are unaffected: they keep chunked encoding.
+
+#### A status that carries no body
+
+`1xx`, `204` and `304` end at the header block, and so does every response to a
+`HEAD` (RFC 9112 §6.3). Bytes written past that point are read by the client as
+the start of the next response, so the server does not send them, and the two
+body modes say so differently:
+
+```php
+$res->setStatusCode(204);
+$res->write('anything');        // throws: the response is still uncommitted,
+                                // so the handler can answer with a real status
+
+$res->setStatusCode(204)->setBody('anything')->end();   // 204, no body sent
+```
+
+A streaming call refuses because at that moment the response can still become
+something else. A buffered body is dropped instead, because the status may have
+been decided after the body was built — a conditional `GET` renders a
+representation and then finds the `ETag` matches — and by the time the response
+is serialised there is nothing left to tell. `sseStart()` refuses on such a
+status for the same reason `write()` does.
+
+A `HEAD` is the one case that drops on both paths: there the handler is meant to
+produce the body a `GET` would return, since that is where its `Content-Length`
+comes from, and only the bytes are held back.
 
 `write()` parks the handler coroutine while the outbound queue is full: HTTP/2
 and HTTP/3 park once every ring slot is live or the queued bytes reach
@@ -270,8 +320,15 @@ exactly one way to report a body that stopped:
 | | On the wire | What the client sees |
 |---|---|---|
 | HTTP/1.1 | no terminating chunk, connection closed | `curl` exits 18, `CURLE_PARTIAL_FILE` |
+| HTTP/1.0 | connection closed | a complete body — see below |
 | HTTP/2 | `RST_STREAM(INTERNAL_ERROR)` | a stream error; other streams on the connection are unaffected |
 | HTTP/3 | `RESET_STREAM(H3_INTERNAL_ERROR)` | the same, per stream |
+
+HTTP/1.0 is the row with nothing to report. A body with no declared length is
+delimited there by the connection close, so a stream that stopped and a stream
+that finished end with the same byte and the client cannot tell them apart. A
+handler that needs the distinction on 1.0 declares a `Content-Length`: a short
+body then fails the way it fails everywhere else.
 
 `abort($errorCode)` names the code instead. It is the reset code of whichever
 protocol is carrying the response and does not travel between them — HTTP/2 and

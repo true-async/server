@@ -127,6 +127,13 @@ static inline void response_clear_body_view(http_response_object *r)
 zend_string                         *http_response_get_body_string(zend_object *obj);
 smart_str                           *http_response_get_body_smart_str(zend_object *obj);
 
+/* Replace the reason phrase with what RFC 9112 §4 allows on a status line:
+ * HTAB, SP, VCHAR and obs-text. Every other byte becomes a space, because the
+ * value reaches this field from handler data — an uncaught exception's message
+ * is the usual route — and a CR or an LF in it ends the status line, so the
+ * bytes behind it are read as headers and as a second response. */
+void http_response_set_reason_phrase(zend_object *obj, const char *phrase, size_t len);
+
 const http_response_stream_ops_t    *http_response_get_stream_ops(zend_object *obj);
 void                                *http_response_get_stream_ctx(zend_object *obj);
 void                                 http_response_replace_stream_ops(zend_object *obj,

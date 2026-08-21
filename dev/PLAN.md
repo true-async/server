@@ -265,14 +265,75 @@ it and expects a tag within days.
   where the `writeMessage()` hole and the missing test for the buffered fix came
   from. Each finding is fixed above or an open step below.
 
-- [ ] **HTTP/1.0 responses are framed by chunked encoding, which they may not
-  be.** `http_response_format_streaming_headers` emits `Transfer-Encoding:
-  chunked` without reading the request version, while `emit_status_line` answers
-  `HTTP/1.0` when the request was 1.0 — RFC 9112 §6.1 forbids sending
-  `Transfer-Encoding` unless the request indicated 1.1 or later, so a 1.0 client
-  reads the hex size lines as body. The answer is the framing the declared-length
-  work just built: identity, `Connection: close`, body delimited by the close.
-  Found by the protocol critic on that design; pre-existing, and untouched by it.
+- [x] **#197 — an HTTP/1 message carries the body its status and method allow,
+  framed the way the request can read.** The step opened as one defect and the
+  critics turned it into six, all of the same shape: the response frames itself
+  from the declaration alone and reads neither the request version, nor the
+  method, nor its own status.
+
+  One predicate now answers for all of it — `h1_response_framing` in
+  `src/http1/http1_format.c`, four values from RFC 9112 §6.3's eight receiver
+  rules: none (rule 1), length (5), chunked (3), close-delimited (7). Both
+  formatters and the stream vtable read it; nothing else chooses.
+
+  **HTTP/1.0.** `Transfer-Encoding: chunked` went to every 1.0 client, which has
+  no decoder for it (§6.1). Such a body is delimited by the close now, with
+  `Connection: close` in the header block. That costs the connection, so a
+  pipelined request behind it goes unanswered: `ctx->close_delimited` joins
+  `stream_dead` in the `framing_lost` gate, without which the drain answers the
+  next request *into* the body and `http_connection_on_request_ready` re-raises
+  `conn->keep_alive` from it, so the EOF that ends the first response never
+  arrives. Two critics found that independently.
+
+  **The connection was never told how it ends.** A streaming response committed
+  its header block at the first `write()` and the `Connection` decision was
+  taken in dispose, after those bytes had left — so a request that asked for
+  close and a graceful drain both went unmentioned to every streaming client.
+  The decision moved into `h1_streaming_headers_build`, which asks the drain
+  evaluator once; dispose skips its own call when the headers are away, because
+  that evaluator advances per-connection state. The 1.0 keep-alive echo
+  (RFC 2068 §19.7.1) lands in the same place and in dispose for the buffered
+  path — without it "a 1.0 client that declares a length keeps keep-alive" was
+  server-side fiction.
+
+  **A status that carries no body.** Deferred here by the declared-length step.
+  A streaming call throws while the response is uncommitted; a buffered body is
+  dropped at format time, because the status may legitimately be chosen after
+  the body was built and there is no one left to tell. `sseStart()` refuses;
+  a 304 keeps a handler `Content-Length` (RFC 9110 §15.4.5) and a 1xx and a 204
+  lose it (§8.6). The refusal is in the shared `write()`, so it reaches HTTP/2
+  and HTTP/3 too.
+
+  **`HEAD` shipped a body** through `sseEvent()` and `writeMessage()`, which
+  never had the drop `write()` and `tryWrite()` do.
+
+  **The buffered path sent `Content-Length` beside a handler
+  `Transfer-Encoding`** — the pair §6.1 forbids and §6.3 names as the smuggling
+  shape. The streaming path stopped in #195; the buffered one drops it now.
+
+  Evidence: `h1/040` reads the 1.0 body with no framing around it against a 1.1
+  control, `h1/041` proves the pipelined request is neither answered nor run,
+  `h1/042` reads the keep-alive echo back and completes a second request on the
+  socket, `core/065` walks the bodiless-status contract from PHP on both paths
+  and the `HEAD` dialect, `h2/055` shows the refusal reaching HTTP/2,
+  `compression/075` decodes a gzipped close-delimited body, `tls/016` drives the
+  identity write branch over TLS. 449 phpt, 424 passed, 0 failed on 2026-08-21.
+
+  Reviewed by four critics against the design before any code: 32 findings, 12
+  survived verification, every one of them fixed above. The RST findings were
+  refuted and are worth recording — a plain HTTP/1.0 request already closes the
+  connection today, so close-delimited framing changes no byte of that path.
+
+- [x] **#198 — an exception message reached the HTTP/1 status line unfiltered.**
+  Found while reading `emit_status_line` for the step above. A CRLF in the
+  message ended the status line, so the bytes behind it were read as header
+  fields and, past a blank line, as a second response (CWE-113) — reachable from
+  any handler that puts request data into an exception message, and from
+  `setReasonPhrase()`. The phrase now keeps only what RFC 9112 §4 allows;
+  everything else becomes a space. Cleaned rather than refused, because
+  `reset_to_error` runs while an exception is already being handled. Evidence:
+  `h1/043`. Not addressed: the phrase still carries the whole message, so a 500
+  puts application text of any length on the status line.
 
 - [ ] **HTTP/2 and HTTP/3 strip `Content-Length` from every response, `HEAD`
   and static files included.** `http_response_header_allowed_h2h3` drops the name

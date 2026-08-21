@@ -16,6 +16,7 @@
 #include "Zend/zend_hrtime.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h"
+#include "http1/http1_stream.h"
 #include "http_connection.h"
 #include "http_connection_internal.h"
 #include "conn_arena.h"
@@ -2821,15 +2822,27 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         (ctx->request != NULL && ctx->request->end_ns != 0)
             ? ctx->request->end_ns : zend_hrtime();
 
-    if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
-        http_response_force_connection_close(Z_OBJ(ctx->response_zv));
-        conn->keep_alive = false;
-        http_server_on_h1_connection_close_sent(conn->counters);
-    } else if (!conn->keep_alive) {
-        /* Request opted out of keep-alive (Connection: close in request,
-         * or HTTP/1.0 default). RFC 9112 §9.6 — the response MUST advertise
-         * `Connection: close` so the client knows not to reuse this TCP. */
-        http_response_force_connection_close(Z_OBJ(ctx->response_zv));
+    /* A streaming response settled all of this when it committed its header
+     * block — that was its only chance to tell the peer — and asked the drain
+     * evaluator its one question there. Asking again would advance the
+     * evaluator's per-connection state a second time for one request, and set
+     * a header on bytes that have already left. */
+    if (!ctx->h1_stream_headers_sent) {
+        if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
+            http_response_force_connection_close(Z_OBJ(ctx->response_zv));
+            conn->keep_alive = false;
+            http_server_on_h1_connection_close_sent(conn->counters);
+        } else if (!conn->keep_alive) {
+            /* Request opted out of keep-alive (Connection: close in request,
+             * or HTTP/1.0 default). RFC 9112 §9.6 — the response MUST advertise
+             * `Connection: close` so the client knows not to reuse this TCP. */
+            http_response_force_connection_close(Z_OBJ(ctx->response_zv));
+        } else if (!h1_response_peer_speaks_http11(Z_OBJ(ctx->response_zv))) {
+            /* An HTTP/1.0 peer treats every response as the last unless the
+             * server confirms otherwise (RFC 2068 §19.7.1), and a connection
+             * this server is keeping has to say so or the peer closes it. */
+            http_response_set_connection(Z_OBJ(ctx->response_zv), true);
+        }
     }
 
     /* sendFile() handoff (issue #13): handler called $res->sendFile()
@@ -2999,10 +3012,12 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
                              conn->counters, conn->log_state);
     }
 
-    /* A chunked body that stopped short of its terminator leaves the
-     * connection with no message boundary, so nothing more may be written to
-     * it — read below, before ctx is freed. */
-    const bool framing_lost = ctx->stream_dead;
+    /* Two ways a connection is left with no boundary the peer can find, and
+     * nothing more may be written to it in either. A chunked body that stopped
+     * short of its terminator is one. A body the close delimits is the other:
+     * there the peer reads to EOF, so a second response would arrive as the
+     * first one's last bytes. Read below, before ctx is freed. */
+    const bool framing_lost = ctx->stream_dead || ctx->close_delimited;
 
     /* Tear down per-request state. Zvals + ctx are owned solely by
      * this finalize; no other path looks at them after the caller

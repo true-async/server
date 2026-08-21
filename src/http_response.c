@@ -247,11 +247,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setReasonPhrase)
         return;
     }
 
-    if (response->reason_phrase) {
-        zend_string_release(response->reason_phrase);
-    }
-
-    response->reason_phrase = zend_string_copy(phrase);
+    http_response_set_reason_phrase(Z_OBJ_P(ZEND_THIS), ZSTR_VAL(phrase), ZSTR_LEN(phrase));
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -941,6 +937,21 @@ static bool response_check_stream_usable(const http_response_object *response,
         return true;
     }
 
+    /* RFC 9112 §6.3 rule 1: a 1xx, a 204 and a 304 end at the blank line
+     * whatever the header fields say, so a body queued behind one is read by
+     * the peer as the next message. The refusal is here, at the call, because
+     * the response is still uncommitted and the handler can answer with a
+     * status it means. A buffered body is dropped at format time instead:
+     * there the status may legitimately have been chosen after the body was
+     * built — a conditional GET that renders a representation and then answers
+     * 304 — and there is no one left to tell. */
+    if (emits && !response_status_carries_body(response->status_code)) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "%s(): status %d carries no body — the message ends at the header block",
+            method, response->status_code);
+        return true;
+    }
+
     /* SSE owns the framing, so a call that would put its own bytes on the wire
      * is refused. One that only waits is not: an SSE handler refused by
      * trySseEvent() has nowhere else to wait for room. */
@@ -1493,6 +1504,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
+    /* HEAD carries no body (RFC 9110 §9.3.2); the message is dropped, as
+     * write() drops its chunk. */
+    if (response->is_head) {
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
     /* The framed message is this response's own body bytes, so a declared
      * length counts them as it counts a write(). The frame is built first
      * because its length is what reaches the wire, and the guard runs before
@@ -1541,6 +1558,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
         && !response->stream_ops->is_alive(response->stream_ctx)) {
         zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
         return;
+    }
+
+    /* HEAD carries no body (RFC 9110 §9.3.2); the message is accepted and
+     * dropped, as tryWrite() does with its chunk. */
+    if (response->is_head) {
+        RETURN_TRUE;
     }
 
     zend_string *frame = grpc_message_frame(response, message);
