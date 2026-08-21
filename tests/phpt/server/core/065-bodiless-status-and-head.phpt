@@ -19,7 +19,7 @@ sockets
  * ETag matches — and at format time there is no one left to tell.
  *
  * A 304 keeps a handler Content-Length, because there the number describes the
- * representation a 200 would have carried (RFC 9110 §15.4.5); a 204 loses it,
+ * representation a 200 would have carried (RFC 9110 §8.6); a 204 loses it,
  * which §8.6 requires. A HEAD keeps the headers a GET would have sent and drops
  * the body through every call that emits one, dialects included. */
 
@@ -40,7 +40,19 @@ $server = new HttpServer(
 $server->addHttpHandler(function ($req, $res) {
     switch ($req->getPath()) {
         case '/buffered':
-            $res->setStatusCode(204)->setBody('oops')->end();
+            /* Over the writev threshold on purpose: a body that size is sent
+             * by the two-part formatter, and the guard that drops it there is
+             * a second one. Four bytes only ever reach the single-buffer
+             * formatter, and left it uncovered. */
+            $res->setStatusCode(204)->setBody(str_repeat('a', 2048))->end();
+            return;
+
+        case '/message':
+            /* The HEAD drop on the gRPC dialect. writeMessage() frames its own
+             * bytes, so a message let through here would arrive under a status
+             * line that promised none. */
+            $res->writeMessage("\x00\x00\x00\x00\x02hi");
+            $res->end();
             return;
 
         case '/streamed':
@@ -194,6 +206,25 @@ spawn(function () use ($port, $server) {
     echo "HEAD sse transfer-encoding: ",
         preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
 
+    /* Pipelined behind the HEAD so the next status line is read from wherever
+     * the message really ended: a frame let through would put it inside one. */
+    fwrite($fp, "HEAD /message HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    $head = '';
+
+    while (!str_contains($head, "\r\n\r\n")) {
+        $c = fread($fp, 1);
+
+        if ($c === false || $c === '') {
+            break;
+        }
+
+        $head .= $c;
+    }
+
+    echo "HEAD message: ", strtok($head, "\r\n"), "\n";
+    [$head, $body] = $read_message($fp);
+    echo "next after HEAD message: ", strtok($head, "\r\n"), " ", json_encode($body), "\n";
+
     fwrite($fp, "GET /streamed HTTP/1.1\r\nHost: x\r\n\r\n");
     [$head, $body] = $read_message($fp);
     echo "streamed answer: ", strtok($head, "\r\n"), " ", json_encode($body), "\n";
@@ -223,6 +254,8 @@ handler TE body: "hello"
 HEAD sse: HTTP/1.1 200 OK
 HEAD sse content-type: text/event-stream
 HEAD sse transfer-encoding: <absent>
+HEAD message: HTTP/1.1 200 OK
+next after HEAD message: HTTP/1.1 200 OK "root"
 streamed: TrueAsync\HttpServerRuntimeException: write(): status 204 carries no body — the message ends at the header block
 streamed committed: 0
 streamed answer: HTTP/1.1 500 Internal Server Error "refused\n"

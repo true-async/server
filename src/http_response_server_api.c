@@ -147,9 +147,26 @@ HashTable *http_response_get_trailers(zend_object *obj)
     return http_response_from_obj(obj)->trailers;
 }
 
+/* Whether the buffered body is bytes the peer may receive. Two messages hold
+ * one and send none: a status that ends at the header block (RFC 9112 §6.3
+ * rule 1 — 1xx, 204, 304), and a response to HEAD, where the buffer holds what
+ * a GET would have returned and only its length is allowed out
+ * (RFC 9110 §9.3.2). The HTTP/1 formatters answer the same question from the
+ * same two inputs; every other transport asks it here. */
+static bool response_body_reaches_peer(const http_response_object *response)
+{
+    return !response->is_head
+        && response_status_carries_body(response->status_code);
+}
+
 const char *http_response_get_body(zend_object *obj, size_t *len_out)
 {
     http_response_object *response = http_response_from_obj(obj);
+
+    if (!response_body_reaches_peer(response)) {
+        if (len_out != NULL) { *len_out = 0; }
+        return NULL;
+    }
 
     if (response->body_view != NULL) {
         if (len_out != NULL) { *len_out = ZSTR_LEN(response->body_view); }
@@ -170,6 +187,10 @@ const char *http_response_get_body(zend_object *obj, size_t *len_out)
 zend_string *http_response_get_body_str(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
+
+    if (!response_body_reaches_peer(response)) {
+        return NULL;
+    }
 
     if (response->body_view != NULL) {
         return response->body_view;

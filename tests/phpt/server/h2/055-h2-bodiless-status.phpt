@@ -1,29 +1,30 @@
 --TEST--
-HttpResponse — a status that carries no body refuses a streaming call on HTTP/2 too
+HttpResponse — a message that carries no body sends none on HTTP/2 either
 --EXTENSIONS--
 true_async_server
 true_async
---SKIPIF--
-<?php
-require __DIR__ . '/_h2_skipif.inc';
-h2_skipif(['curl_h2' => true]);
-?>
 --FILE--
 <?php
 /* The framing rules that make a 204 with a body unreadable belong to HTTP/1,
- * but the refusal does not: write() has one implementation and every transport
- * reaches it, so the contract is the same on HTTP/2. RFC 9113 §8.1.1 says the
- * same thing in its own terms — a response with a 204 status and a DATA frame
- * is a malformed message.
+ * but neither half of the contract does. write() has one implementation and
+ * every transport reaches it, so a streaming call on such a status throws
+ * here as well. The buffered body is dropped instead of refused — the status
+ * may have been chosen after the body was built — and that drop is taken
+ * where each transport reads the body for the wire, so HTTP/2 answers to it
+ * too. RFC 9110 §6.4.1 puts 204 and 304 among the statuses defined to carry
+ * no content; §9.3.2 says the same of every response to HEAD.
  *
- * A buffered body on such a status is dropped rather than refused, here as on
- * HTTP/1: the status may have been chosen after the body was built, and by the
- * time the frames are assembled there is nobody to tell. */
+ * Read with this repository's own client rather than curl: curl discards
+ * content on a 204 whatever the server sent, so an empty body at that end
+ * proves nothing about this one. The frames are counted here, and
+ * lastResetCode() is asserted null — an empty body because the peer rejected
+ * a malformed message would show up as a reset, not as a drop. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
+require_once __DIR__ . '/_h2_client.inc';
 require_once __DIR__ . '/../_free_port.inc';
 
 $port = tas_free_port();
@@ -56,6 +57,14 @@ $server->addHttpHandler(function ($req, $res) {
         case '/buffered':
             $res->setStatusCode(204)->setBody('oops')->end();
             return;
+
+        case '/notmodified':
+            $res->setStatusCode(304)->setBody('stale')->end();
+            return;
+
+        case '/head':
+            $res->setBody('0123456789')->end();
+            return;
     }
 
     $res->end('fine');
@@ -64,22 +73,24 @@ $server->addHttpHandler(function ($req, $res) {
 spawn(function () use ($port, $server) {
     usleep(50000);
 
-    $curl = static function (string $path) use ($port) {
-        $cmd = 'curl -sS -D - --http2-prior-knowledge '
-             . '--max-time 10 ' . escapeshellarg("http://127.0.0.1:$port$path") . ' 2>/dev/null';
-        $raw   = (string) shell_exec($cmd);
-        $split = strpos($raw, "\r\n\r\n");
+    /* One connection for all four: a stream the peer had to reset would
+     * leave the next one unanswered, so the last row also proves the first
+     * three were framed as the client could read them. */
+    $c = new H2TestClient('127.0.0.1', $port, 5);
 
-        return [substr($raw, 0, (int) $split), substr($raw, (int) $split + 4)];
-    };
+    foreach ([
+        ['GET',  '/streamed'],
+        ['GET',  '/buffered'],
+        ['GET',  '/notmodified'],
+        ['HEAD', '/head'],
+    ] as [$method, $path]) {
+        $sid = $c->sendRequest($method, $path, "127.0.0.1:$port");
+        [$status, $body] = $c->collectResponse($sid);
+        printf("%s %s: status=%d body=%s\n", $method, $path, $status, json_encode($body));
+    }
 
-    [$head, $body] = $curl('/streamed');
-    echo "streamed status: ", rtrim(strtok($head, "\r\n")), "\n";
-    echo "streamed body: ", json_encode($body), "\n";
-
-    [$head, $body] = $curl('/buffered');
-    echo "buffered status: ", rtrim(strtok($head, "\r\n")), "\n";
-    echo "buffered body: ", json_encode($body), "\n";
+    echo "reset: ", var_export($c->lastResetCode(), true), "\n";
+    $c->close();
 
     $server->stop();
 });
@@ -89,7 +100,8 @@ $server->start();
 --EXPECT--
 streamed: TrueAsync\HttpServerRuntimeException
 streamed committed: 0
-streamed status: HTTP/2 500
-streamed body: "refused\n"
-buffered status: HTTP/2 204
-buffered body: ""
+GET /streamed: status=500 body="refused\n"
+GET /buffered: status=204 body=""
+GET /notmodified: status=304 body=""
+HEAD /head: status=200 body=""
+reset: NULL
