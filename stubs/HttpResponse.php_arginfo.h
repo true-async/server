@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: e1d2d752d815f089981eb99ad6776d5e97d06fa5 */
+ * Stub hash: 360483eb0214f7450f6ea120409e95123a110044 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -118,6 +118,10 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_end
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, data, IS_STRING, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_abort, 0, 0, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, errorCode, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sendFile, 0, 1, IS_VOID, 0)
 	ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, options, TrueAsync\\SendFileOptions, 1, "null")
@@ -186,6 +190,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json);
 ZEND_METHOD(TrueAsync_HttpResponse, html);
 ZEND_METHOD(TrueAsync_HttpResponse, redirect);
 ZEND_METHOD(TrueAsync_HttpResponse, end);
+ZEND_METHOD(TrueAsync_HttpResponse, abort);
 ZEND_METHOD(TrueAsync_HttpResponse, sendFile);
 ZEND_METHOD(TrueAsync_HttpResponse, sseStart);
 ZEND_METHOD(TrueAsync_HttpResponse, sseEvent);
@@ -230,6 +235,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, html, arginfo_class_TrueAsync_HttpResponse_html, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, redirect, arginfo_class_TrueAsync_HttpResponse_redirect, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, end, arginfo_class_TrueAsync_HttpResponse_end, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, abort, arginfo_class_TrueAsync_HttpResponse_abort, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sendFile, arginfo_class_TrueAsync_HttpResponse_sendFile, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseStart, arginfo_class_TrueAsync_HttpResponse_sseStart, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseEvent, arginfo_class_TrueAsync_HttpResponse_sseEvent, ZEND_ACC_PUBLIC)

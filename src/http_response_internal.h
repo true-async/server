@@ -55,6 +55,7 @@ typedef struct {
     /* State flags (clustered) */
     bool             headers_sent;
     bool             closed;
+    bool             aborted;           /* abort(): finished as failed; implies `closed` */
     bool             committed;
     bool             streaming;         /* write() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — write() now throws, sse* re-entry is allowed */

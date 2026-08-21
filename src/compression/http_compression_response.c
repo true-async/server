@@ -549,6 +549,7 @@ typedef struct {
     http_encoder_t                   *encoder;
     http_codec_id_t                   codec;
     bool                              first_chunk_done;
+    bool                              aborted;
 } ws_ctx_t;
 
 /* Hand off an accumulated zend_string to the underlying stream ops.
@@ -604,7 +605,7 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
      * cannot be resumed mid-block, so a handler that caught the 499 and
      * called write() again gets the same refusal rather than a NULL
      * encoder handed to encoder_drain_write. */
-    if (UNEXPECTED(w->encoder == NULL)) {
+    if (UNEXPECTED(w->encoder == NULL || w->aborted)) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -668,9 +669,32 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
     return forward_compressed(w, out.s, nonblocking);  /* transfers ownership */
 }
 
+/* A closed codec stream is a claim that the body is whole — the decoder on
+ * the other side checks the trailer and says so. Writing one over half a body
+ * would forge exactly the assurance the abort exists to withhold, so the
+ * encoder is left unfinished; the pool resets it on the next acquire, and
+ * state_free returns it either way. */
+static bool ws_abort(void *ctx_opaque, const int64_t error_code)
+{
+    ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    if (w->underlying_ops->abort == NULL
+        || !w->underlying_ops->abort(w->underlying_ctx, error_code)) {
+        return false;
+    }
+
+    w->aborted = true;
+    return true;
+}
+
 static void ws_mark_ended(void *ctx_opaque)
 {
     ws_ctx_t *w = (ws_ctx_t *)ctx_opaque;
+
+    if (w->aborted) {
+        return;
+    }
+
     /* Drain finish() into the underlying stream. If the handler never
      * sent a single byte we still need to commit headers, encode the
      * empty stream's footer (10-byte gzip header + CRC trailer), and
@@ -687,6 +711,8 @@ static void ws_mark_ended(void *ctx_opaque)
      * already dropped by append_chunk; there is no trailer to write and
      * the stream ends truncated, which is what the client's decoder
      * will report. */
+    int forwarded = HTTP_STREAM_APPEND_OK;
+
     if (w->encoder != NULL) {
         smart_str out = {0};
         smart_str_alloc(&out, 64, 0);
@@ -696,7 +722,7 @@ static void ws_mark_ended(void *ctx_opaque)
 
         if (out.s != NULL && ZSTR_LEN(out.s) > 0) {
             smart_str_0(&out);
-            (void)forward_compressed(w, out.s, false);  /* transfers ownership */
+            forwarded = forward_compressed(w, out.s, false);  /* transfers ownership */
         } else {
             smart_str_free(&out);
         }
@@ -707,6 +733,15 @@ static void ws_mark_ended(void *ctx_opaque)
         if (UNEXPECTED(s == HTTP_ENC_ERROR)) {
             drop_faulted_encoder(w);
         }
+    }
+
+    /* The trailer never reached the wire, so the codec stream out there is
+     * unfinished and a clean end would claim otherwise. */
+    if (UNEXPECTED(forwarded != HTTP_STREAM_APPEND_OK)
+        && w->underlying_ops->abort != NULL
+        && w->underlying_ops->abort(w->underlying_ctx, -1)) {
+        w->aborted = true;
+        return;
     }
 
     w->underlying_ops->mark_ended(w->underlying_ctx);
@@ -735,21 +770,25 @@ static bool ws_wait_writable(void *ctx_opaque, const uint32_t timeout_ms)
 }
 
 /* The wrapper holds no queue of its own, so both answers come from the
- * transport underneath rather than from the encoder. */
+ * transport underneath rather than from the encoder — except once the stream
+ * has been failed here, which the transport underneath may not know about when
+ * it has no abort of its own. */
 static bool ws_sendable(void *ctx_opaque)
 {
     const ws_ctx_t *w = (const ws_ctx_t *)ctx_opaque;
 
-    return w->underlying_ops->sendable == NULL
-           || w->underlying_ops->sendable(w->underlying_ctx);
+    return !w->aborted
+           && (w->underlying_ops->sendable == NULL
+               || w->underlying_ops->sendable(w->underlying_ctx));
 }
 
 static bool ws_is_alive(void *ctx_opaque)
 {
     const ws_ctx_t *w = (const ws_ctx_t *)ctx_opaque;
 
-    return w->underlying_ops->is_alive == NULL
-           || w->underlying_ops->is_alive(w->underlying_ctx);
+    return !w->aborted
+           && (w->underlying_ops->is_alive == NULL
+               || w->underlying_ops->is_alive(w->underlying_ctx));
 }
 
 static const http_response_stream_ops_t compressing_stream_ops = {
@@ -758,6 +797,7 @@ static const http_response_stream_ops_t compressing_stream_ops = {
     .is_alive       = ws_is_alive,
     .wait_writable  = ws_wait_writable,
     .mark_ended     = ws_mark_ended,
+    .abort          = ws_abort,
     .get_wait_event = ws_get_wait_event,
 };
 

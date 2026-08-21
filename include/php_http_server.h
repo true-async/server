@@ -743,6 +743,36 @@ struct http_response_stream_ops_t {
      * Idempotent. */
     void    (*mark_ended)(void *ctx);
 
+    /* End the stream as FAILED, so the peer can tell a body that stopped from
+     * a body that finished. HTTP/1 writes no terminating chunk and drops
+     * keep-alive, HTTP/2 sends RST_STREAM, HTTP/3 resets the write side, the
+     * pool worker posts an abort down its wire.
+     *
+     * `error_code` is the protocol's own reset code and is not portable
+     * between them: the HTTP/2 and HTTP/3 registries number the same
+     * conditions differently, and HTTP/1 has no field to put one in. A
+     * negative value asks for the transport's own default, which is its
+     * INTERNAL_ERROR.
+     *
+     * Emits no body bytes, no terminator and no trailers. Idempotent, and a
+     * no-op once mark_ended has run — whichever finisher comes first decides
+     * what the peer sees.
+     *
+     * Answers false when the transport has not put a byte of this response on
+     * the wire yet, and has therefore failed nothing: sseStart() commits the
+     * response object without committing the stream, and every transport
+     * commits an empty one lazily instead. The caller then owes the peer that
+     * empty response rather than a connection that merely stops.
+     *
+     * After a true answer append_chunk gives HTTP_STREAM_APPEND_STREAM_DEAD,
+     * is_alive and sendable answer false, and mark_ended does nothing.
+     *
+     * MAY be NULL — the transport cannot fail a stream in protocol, and the
+     * caller is left with the clean end as the closest thing to the truth its
+     * wire can carry. Every transport here implements it; a NULL slot is a
+     * claim that some future one cannot, not a shortcut. */
+    bool    (*abort)(void *ctx, int64_t error_code);
+
     /* Wait until append_chunk would accept a chunk, and report whether it
      * would. `timeout_ms` of 0 means the transport's own write deadline.
      * Each transport keeps what its internal wait already does — its
@@ -1477,6 +1507,54 @@ const char *http_response_status_line_http11(int code, size_t *out_len);
 bool  http_response_is_committed   (zend_object *obj);
 void  http_response_set_committed  (zend_object *obj);
 bool  http_response_is_streaming   (zend_object *obj);  /* write() activated streaming */
+/* Finish a started stream, as failed when @p failed and cleanly otherwise, and
+ * through the response's own ops rather than at transport level — so a wrapper
+ * installed above the transport, the compressing one, closes its stream before
+ * the transport writes its terminator.
+ *
+ * A response already finished is left alone; a failed finish that the
+ * transport cannot deliver falls back to the clean one, which is the closest
+ * thing to the truth available on that wire. False means the response had no
+ * started stream to finish at all, and the caller still owes the peer
+ * whatever its protocol allows. Backs HttpResponse::end() and abort().
+ *
+ * @p error_code reaches the transport's abort op unchanged; negative asks for
+ * that transport's default, and it is what every caller but abort($code)
+ * passes. */
+bool  http_response_finish_stream  (zend_object *obj, bool failed,
+                                    int64_t error_code);
+
+/* The handler did not reach its end, and a committed streaming response cannot
+ * be given the status that says so — it has to be failed on the wire.
+ *
+ * One cancellation does not count, and it is identified by the exception's
+ * class rather than by the cancelled flag. The server has three cancel
+ * sources and only the scheduler's own is benign: a graceful shutdown cuts a
+ * feed that has produced every byte it promised. The other two — a parse error
+ * on the next pipelined request, and a peer reset — arrive as HttpException
+ * through the same door and both mean the body stopped short, so the flag
+ * alone would seal exactly the truncations this exists to prevent. */
+static zend_always_inline bool http_handler_failed(const zend_coroutine_t *coroutine,
+                                                   const bool bailout)
+{
+    if (bailout) {
+        return true;
+    }
+
+    if (coroutine->exception == NULL) {
+        return false;
+    }
+
+    if (!ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+        return true;
+    }
+
+    zend_class_entry *const cancellation_ce =
+        ZEND_ASYNC_GET_EXCEPTION_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION);
+
+    return cancellation_ce == NULL
+           || !instanceof_function(coroutine->exception->ce, cancellation_ce);
+}
 void  http_response_reset_to_error (zend_object *obj, int status_code,
                                     const char *message);
 

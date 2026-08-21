@@ -71,6 +71,7 @@ typedef struct {
     bool                    stream_started;
     bool                    stream_ended;
     bool                    stream_failed;  /* terminal wire becomes STREAM_ABORT */
+    int64_t                 abort_code;     /* reset code; <0 = the reactor's own */
 
     stream_credit_t        *credit;         /* shared with the reactor */
     zend_async_trigger_event_t *credit_wake; /* worker-owned; reactor signals it */
@@ -350,7 +351,6 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
         response_wire_set_credit(hw, ctx->credit);
         worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv));
-        ctx->stream_started = true;
 
         /* headers undeliverable → the stream never opened; don't copy and
          * post a chunk wire the reactor would only throw away */
@@ -358,6 +358,12 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
             zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
+
+        /* Set only once the headers wire is away: this flag is what the
+         * terminal wires read as "the reactor has a stream to end", and an
+         * abort posted against a stream that never opened is applied to
+         * nothing. */
+        ctx->stream_started = true;
     }
 
     response_wire_t *const cw =
@@ -407,7 +413,7 @@ static bool worker_stream_sendable(void *vctx)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
-    if (ctx->stream_ended) {
+    if (ctx->stream_ended || ctx->stream_failed) {
         return false;
     }
 
@@ -452,12 +458,33 @@ static void worker_stream_mark_ended(void *vctx)
 
     if (ctx->stream_failed) {
         response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_ABORT);
+        response_wire_set_abort_code(ew, ctx->abort_code);
     } else {
         response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_END);
         worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv));
     }
 
     worker_wire_post(ctx, ew);
+}
+
+/* The terminal wire above is already the abort one when stream_failed is set,
+ * and the reactor answers that kind with a stream reset — so failing a stream
+ * from this side is one flag plus the finisher that reads it. */
+static bool worker_stream_abort(void *vctx, const int64_t error_code)
+{
+    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+
+    /* No headers wire has been posted, so the reactor has no stream to reset
+     * and would drop the abort on the floor. Report it, and let the caller
+     * take the clean finish that commits an empty response instead. */
+    if (!ctx->stream_started) {
+        return false;
+    }
+
+    ctx->stream_failed = true;
+    ctx->abort_code    = error_code;
+    worker_stream_mark_ended(ctx);
+    return true;
 }
 
 /* The credit wait the blocking path takes, offered to a non-blocking caller
@@ -477,6 +504,7 @@ static const http_response_stream_ops_t worker_stream_ops = {
     .is_alive       = worker_stream_is_alive,
     .wait_writable  = worker_stream_wait_writable,
     .mark_ended     = worker_stream_mark_ended,
+    .abort          = worker_stream_abort,
     .get_wait_event = NULL,   /* the wait above is the one to take */
 };
 
@@ -668,7 +696,8 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
         if (ctx->is_grpc) {
             grpc_call_finish(resp, &worker_grpc_finish_ops, ctx);
         } else if (http_response_is_streaming(resp)) {
-            worker_stream_mark_ended(ctx);
+            (void)http_response_finish_stream(
+                resp, http_handler_failed(coroutine, ctx->handler_bailout), -1);
         }
 
         /* a started stream must always get a terminal wire */
@@ -790,6 +819,7 @@ bool worker_dispatch_request(http_server_object *server,
     ctx->sink_arg   = sink_arg;
     ctx->is_head    = is_head;
     ctx->is_grpc    = is_grpc;
+    ctx->abort_code = -1;   /* until abort($code) names one */
 
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
     efree(req_obj);                 /* the heap zval wrapper, not the object */

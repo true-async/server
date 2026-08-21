@@ -48,6 +48,11 @@ class H2TestClient
     private $sock;
     private int $next_stream_id = 1;  /* client streams are odd */
 
+    /* Error code of the last RST_STREAM collectResponse() stopped on, or null
+     * if it has not seen one. Kept beside the return tuple rather than in it:
+     * a reset is the exception, and nine call sites destructure that tuple. */
+    private ?int $last_reset_code = null;
+
     /** @param int $timeout_sec read timeout */
     public function __construct(string $host, int $port, int $timeout_sec = 5)
     {
@@ -244,6 +249,9 @@ class H2TestClient
     /** The next client stream id without consuming it. */
     public function peekStreamId(): int { return $this->next_stream_id; }
 
+    /** Error code of the last RST_STREAM seen, or null if there was none. */
+    public function lastResetCode(): ?int { return $this->last_reset_code; }
+
     /** Build the HPACK block for a request (pseudo-headers + extras). */
     public static function encodeRequestHeaders(
         string $method, string $path, string $authority, array $headers = []): string
@@ -382,6 +390,10 @@ class H2TestClient
             }
 
             if ($type === H2_FRAME_RST_STREAM) {
+                if (strlen($payload) >= 4) {
+                    $this->last_reset_code = unpack('N', substr($payload, 0, 4))[1];
+                }
+
                 break;
             }
         }

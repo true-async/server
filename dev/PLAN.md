@@ -14,7 +14,7 @@ a test that fails without it, a measurement, or both. Issue numbers point at
   Brotli and zstd going from nothing on the wire to a flushed block; `CompressionGzip`
   and the new `CompressionFlush` unit tests decode the flushed prefix with each
   codec's own decoder, including through the `NEED_OUTPUT` loop; cost measured in
-  `dev/BENCHMARKS.md`. Not merged yet.
+  `dev/BENCHMARKS.md`. Merged.
 
 ## Next
 
@@ -22,8 +22,61 @@ a test that fails without it, a measurement, or both. Issue numbers point at
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
   (YanGusik/laravel-spawn#57). Remove it once a build with the flush is in use, and
   re-measure the CSV timeline from the issue.
-- [ ] **#171 — a streaming response cannot be aborted.** A body truncated by an
-  exception reads as complete on the wire. Filed, deliberately not implemented.
+- [x] **#171 — a streaming response cannot be aborted.** A body truncated by an
+  exception read as complete on the wire. `abort` is an op on
+  `http_response_stream_ops_t` answering `bool`, and the answer carries the
+  distinction the design first missed: false means the transport has not put a
+  byte of this response on the wire, so there is nothing to fail and the empty
+  response each transport commits lazily is the better answer —
+  `sseStart()` followed by a throw keeps its 200. HTTP/1 withholds the
+  terminator and drops keep-alive, HTTP/2 sends RST_STREAM(INTERNAL_ERROR),
+  HTTP/3 resets the write side with H3_INTERNAL_ERROR, the pool worker posts
+  `RESPONSE_WIRE_STREAM_ABORT`, which already existed and was reachable only
+  from the two places a wire is lost — an undeliverable post and a credit wait
+  that timed out — never from the API. Dispose routes to it on an uncaught exception but **not** on a
+  cancellation: the server cancels its own handlers at graceful shutdown, and
+  an open feed cut short there has produced every byte it promised.
+
+  Evidence: `h1/033` reads the wire and finds the frames but no terminator,
+  `h1/034` keeps the empty-200 shape, `h1/035` proves the pipelined request
+  behind a failed stream is not answered, `core/063` walks the state machine,
+  `h2/053` reads error code 2 off the RST frame and completes a second request
+  on the same connection, `h3/058` and `h3/059` get `RESET(err=258)` out of
+  aioquic, `h2/053` also reads back a code the handler named, `grpc/018` keeps
+  `grpc-status: 13`, `compression/072` makes the
+  decoder refuse the bytes, `h1/036` holds the carve-out — a handler parked in
+  a delay and cancelled by `stop()` still gets its terminator, and loses it
+  when the carve-out is removed — and `compression/073` runs the whole
+  dispose-through-the-wrapper route against a peer that has gone.
+
+  Six defects the work uncovered, all fixed here. **A compressed stream whose
+  handler forgot `end()` was undecodable**: dispose finished at transport level,
+  below the wrapper that owns the codec trailer, so `gzdecode()` refused a body
+  the framing called complete — every dispose path now finishes through
+  `response->stream_ops` (`compression/071`). **The pool's abort could ship a
+  clean FIN**: the reactor applies a response's wires in one tick and flushes at
+  the end of it, so raising the end flag before that flush let the data reader
+  emit EOF first; observed once in three runs. **A pipelined request behind a
+  failed HTTP/1 stream was still answered**, which put a whole `HTTP/1.1 200 OK`
+  where the peer was counting down an unfinished chunk. **A locally sent
+  RST_STREAM came back as a peer reset**, cancelling the handler that asked for
+  it with "stream reset by peer" and inflating the peer-reset metric. **HTTP/2
+  published its chunk ring before the headers it belongs to**, so a failed
+  header commit left a ring behind and abort read it as "the peer has heard
+  from us". **The pool marked a stream started before its headers wire was
+  away**, so an abort was posted against a stream the reactor never opened.
+
+  Two corrections came from review and are carried without a test, which is
+  worth naming. The cancel carve-out keys on the exception's class rather than
+  on the cancelled flag, so that the parse-error and peer-reset cancels — both
+  real truncations — cannot be mistaken for a graceful shutdown; on today's
+  paths the peer-closed latches already stop the terminator, and no shape
+  reached from PHP tells the two versions apart. And the HTTP/2 wait for ring
+  room refuses to park on a peer that has gone, which matters because dispose
+  now reaches that wait through the compressing wrapper and a coroutine parked
+  there is past cancellation; the ring drains as a handler fills it, so the
+  reproduction needs a peer that is simultaneously alive enough to hold the
+  window shut and gone enough to be latched, and I could not build one.
 
 ## The response body contract (YanGusik/laravel-spawn#50, #60)
 
@@ -127,8 +180,14 @@ it and expects a tag within days.
   at `end()` instead of finishing cleanly under a header that lies. Compression is
   disabled for such a response. `src/http1/http1_format.c:249` is the only path
   that passes a handler value today; H2, H3 and the worker strip it in
-  `http_response_header_allowed_h2h3`. Needs the abort op from #171 — the vtable
-  carries only the clean `mark_ended` (`include/php_http_server.h:723`).
+  `http_response_header_allowed_h2h3`. The abort op it waited on landed with #171.
+- [ ] **An aborted request is logged and counted as the status it committed.**
+  `http_request_telemetry` reads `http_response_get_status()`, which is the 200 the
+  handler put on the wire before it failed, so a truncated body reads as complete
+  in `requests_2xx_total` and in the access log — the same defect #171 fixed one
+  layer down. Deliberately left out of #171: the access-log record is a
+  user-visible format and deserves its own decision rather than a silent column.
+  `core/027`, `h2/051` and `h3/051` pin the shapes it would change.
 - [~] **Migration.** The CHANGELOG entries are written (#180, five bullets covering
   the seven renames, plus #181 under Fixed). What is left is laravel-spawn, and it
   is five call sites rather than the two this plan assumed: `send()` → `write()`

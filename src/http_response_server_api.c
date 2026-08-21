@@ -60,6 +60,35 @@ bool http_response_is_committed(zend_object *obj)
     return http_response_from_obj(obj)->committed;
 }
 
+bool http_response_finish_stream(zend_object *obj, const bool failed,
+                                 const int64_t error_code)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    if (response->closed) {
+        return true;
+    }
+
+    if (!response->streaming || response->stream_ops == NULL) {
+        return false;
+    }
+
+    /* A false answer from abort means the transport has not put a byte of this
+     * response on the wire — sseStart() with no event is the usual way there.
+     * There is no half body to disown then, and the empty response every
+     * transport commits lazily says more to the peer than a stream that merely
+     * stops, so the clean finish below is taken instead. */
+    if (failed && response->stream_ops->abort != NULL
+        && response->stream_ops->abort(response->stream_ctx, error_code)) {
+        response->aborted = true;
+    } else {
+        response->stream_ops->mark_ended(response->stream_ctx);
+    }
+
+    response->closed = true;
+    return true;
+}
+
 /* True once HttpResponse::write() has been called. Dispose paths use
  * this to skip the buffered-mode commit (headers are already on the
  * wire, the data provider drives the body via chunk_queue). */

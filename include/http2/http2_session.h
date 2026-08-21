@@ -267,6 +267,13 @@ int http2_session_submit_response_streaming(http2_session_t *session,
 int http2_session_resume_stream_data(http2_session_t *session,
                                      uint32_t stream_id);
 
+/* Queue RST_STREAM for @p stream_id. nghttp2 puts the stream into its closing
+ * state at once, so the data provider is not consulted again and whatever is
+ * still queued never leaves. The caller drives the send. */
+int http2_session_submit_rst_stream(http2_session_t *session,
+                                    uint32_t stream_id,
+                                    uint32_t error_code);
+
 /* Queue a terminal HEADERS(trailers) frame for @p stream_id.
  * Must be called AFTER http2_session_submit_response but
  * BEFORE the final DATA slice drains — flipping the stream's

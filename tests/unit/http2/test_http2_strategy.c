@@ -54,6 +54,17 @@ const char *http_response_get_body   (zend_object *o, size_t *l) {
 }
 bool http_response_is_committed(zend_object *o)  { (void)o; return false; }
 void http_response_set_committed(zend_object *o) { (void)o; }
+
+/* The dispose finisher. It aborts rather than answers: no smoke test here
+ * drives a stream to its end, and a silent stub would let one that started to
+ * pass without a response object behind it. */
+bool http_response_finish_stream(zend_object *o, bool failed, int64_t error_code)
+{
+	(void) o;
+	(void) failed;
+	(void) error_code;
+	abort();
+}
 void http_response_reset_to_error(zend_object *o, int s, const char *m) {
     (void)o; (void)s; (void)m;
 }
