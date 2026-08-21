@@ -2826,9 +2826,9 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * a stream can outlive the answer: its header block is built at the first
      * write(), and the connection may come of age while the body is still
      * going out. What a streaming response does not do here is touch the
-     * header block — those bytes may already have left — so the telling, and
-     * the counter that records it, belong to h1_streaming_headers_build, which
-     * asks again and sees the same latched verdict. */
+     * header block, whose bytes may already have left; the telling and the
+     * counter that records it belong to h1_streaming_headers_build, which asks
+     * again and sees the same latched verdict. */
     const bool streaming = http_response_is_streaming(Z_OBJ(ctx->response_zv));
 
     /* A handler that asked for the connection to be retired is obeyed here,

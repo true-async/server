@@ -1482,8 +1482,8 @@ void http_response_set_connection(zend_object *obj, bool keep_alive);
 
 /* Whether the handler asked for the connection to be retired after this
  * response, through setHeader('Connection', 'close'). The field itself is
- * never stored — the server states the connection — so this is the request it
- * left behind. Only the two HTTP/1 paths answer it: on HTTP/2 and HTTP/3 one
+ * never stored, because the server states the connection, so this is the
+ * request it left behind. Only the two HTTP/1 paths answer it: on HTTP/2 and HTTP/3 one
  * response cannot retire a multiplexed connection, so the flag is recorded and
  * unread there. */
 bool http_response_handler_wants_close(zend_object *obj);

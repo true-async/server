@@ -23,10 +23,9 @@
 extern const http_response_stream_ops_t h1_stream_ops;
 
 /* How an HTTP/1 response body is delimited on the wire. The answer comes from
- * the request and the response together — the version the peer speaks, the
- * method it used, the status the handler chose, the length it declared — and
- * it is fixed once, when the header block is built, because every byte after
- * that is framed to match.
+ * four inputs together: the version the peer speaks, the method it used, the
+ * status the handler chose, the length it declared. It is fixed once, when the
+ * header block is built, because every byte after that is framed to match.
  *
  * These are the four a server can produce out of the eight cases RFC 9112 §6.3
  * lists for a receiver. */
@@ -34,11 +33,10 @@ typedef enum {
     /* Rule 1: a 1xx, 204 or 304, and any response to HEAD. The message ends at
      * the blank line whatever the header fields say, so nothing is framed and
      * no body goes out. A handler's own Content-Length survives where the
-     * number still describes something — a 304, a HEAD — and is dropped on a
-     * 1xx and a 204, which RFC 9110 §8.6 forbids it on. What this framing
-     * never carries is a length the server computed: on the buffered path a
-     * HEAD is not this framing at all, and the count of the body a GET would
-     * have returned is emitted there. */
+     * number still describes something (a 304, a HEAD), and is dropped on a
+     * 1xx and a 204, which RFC 9110 §8.6 forbids it on. A length the server
+     * computed is never one of them; the buffered formatter states that, and a
+     * HEAD does not take this framing there. */
     H1_FRAMING_NONE = 0,
     /* Rule 5: Content-Length, and the body is exactly that many bytes. */
     H1_FRAMING_LENGTH,

@@ -154,8 +154,8 @@ static bool header_name_char_allowed(const unsigned char c)
 }
 
 /* Refuses a field the server cannot put on the wire as one field, and says
- * which one. Unlike the reason phrase — cleaned, because `reset_to_error`
- * runs inside exception handling with no one left to tell — a header is set
+ * which one. The reason phrase is cleaned instead, because `reset_to_error`
+ * runs inside exception handling with no one left to tell; a header is set
  * while the handler is still running, so it is told. */
 static bool header_field_check(zend_string *name, const zval *value)
 {
@@ -198,7 +198,7 @@ static bool header_field_check(zend_string *name, const zval *value)
 
     /* RFC 9110 §5.5: a field value has no leading or trailing whitespace, and
      * a sender must not generate one that does. Recipients strip it, so this
-     * refuses a value that would travel as something other than what was set. */
+     * refuses a value that would arrive as something other than what was set. */
     if (ZSTR_LEN(str) > 0) {
         const char first = ZSTR_VAL(str)[0];
         const char last  = ZSTR_VAL(str)[ZSTR_LEN(str) - 1];
@@ -281,8 +281,7 @@ static bool response_take_server_field(http_response_object *response,
     return true;
 }
 
-/* Lowercases the name once and hands it to response_take_server_field. True
- * means the caller must not store the field — either it was taken or it was
+/* True means the caller must not store the field: it was either taken or
  * refused, and an exception is pending in the second case. */
 static bool response_take_header_for_server(http_response_object *response,
                                             zend_string *name, zval *value)
@@ -294,7 +293,7 @@ static bool response_take_header_for_server(http_response_object *response,
 }
 
 /* Every value a handler offers, checked before any of them is stored: a field
- * set as an array must not land half-written when its third element is the bad
+ * set as an array must not be stored half-written when its third element is the bad
  * one. Non-string scalars are converted at storage time and cannot carry a
  * forbidden byte. */
 static bool header_values_check(zend_string *name, zval *value)
@@ -769,7 +768,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailer)
      * HTTP/1 emits no trailers at all, and nghttp2 and nghttp3 have their own
      * checks — which is exactly why the guard belongs here rather than in the
      * emitters: gRPC puts an exception message into `grpc-message`, and the day
-     * a chunked-trailer emitter lands on HTTP/1 that is CWE-113 with nothing
+     * a chunked-trailer emitter arrives on HTTP/1 that is CWE-113 with nothing
      * in its way. */
     {
         zval value_zv;
@@ -1503,8 +1502,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
         return;
     }
 
-    /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is accepted and
-     * dropped, as write() does, and the offer is recorded for the same reason. */
+    /* Dropped and recorded, as in write(). */
     if (response->is_head) {
         response->head_streamed = true;
         RETURN_TRUE;
@@ -1760,8 +1758,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
-    /* HEAD carries no body (RFC 9110 §9.3.2); the message is dropped, as
-     * write() drops its chunk, and the offer is recorded the same way. */
+    /* Dropped and recorded, as in write(). */
     if (response->is_head) {
         response->head_streamed = true;
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -1817,8 +1814,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
         return;
     }
 
-    /* HEAD carries no body (RFC 9110 §9.3.2); the message is accepted and
-     * dropped, as tryWrite() does with its chunk, and the offer is recorded. */
+    /* Dropped and recorded, as in write(). */
     if (response->is_head) {
         response->head_streamed = true;
         RETURN_TRUE;

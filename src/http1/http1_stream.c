@@ -115,9 +115,7 @@ static zend_string *h1_streaming_headers_build(http1_request_ctx_t *ctx)
 
     /* How this connection ends has to be stated here or not at all: the
      * dispose-time decision in http_handler_coroutine_dispose runs long after
-     * these bytes are on the wire. Three things can end it — a body the close
-     * itself delimits, a graceful drain retiring the connection, and a request
-     * that asked for close — and RFC 9112 §9.6 wants the peer told in each.
+     * these bytes are on the wire, and RFC 9112 §9.6 requires the peer be told.
      *
      * Dispose asks the drain evaluator too, because a stream can outlive the
      * answer taken here. Its verdict latches, so the second ask sees the same
@@ -259,9 +257,9 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_OK;
     }
 
-    /* Only chunked coding wraps the bytes. A declared length frames them by the
-     * count and a close-delimited body by the close, so in both the chunk
-     * travels as its own bytes: no size line ahead of it, no CRLF behind it. */
+    /* A declared length frames the body by the count and a close-delimited one
+     * by the close, so in both the chunk goes out as its own bytes: no size
+     * line ahead of it, no CRLF behind it. */
     const bool identity = framing != H1_FRAMING_CHUNKED;
     const size_t trailer_len = identity ? 0 : 2;
 

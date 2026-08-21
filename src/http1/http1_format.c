@@ -129,8 +129,8 @@ bool h1_response_peer_speaks_http11(zend_object *response_obj)
 {
     const http_response_object *response = http_response_from_obj(response_obj);
 
-    /* Asked as the rule is written — "the request indicated 1.1 or later"
-     * (RFC 9112 §6.1) — rather than as "not 1.0". The parser admits only 1.0
+    /* Asked as RFC 9112 §6.1 writes the rule, "the request indicated 1.1 or
+     * later", rather than as "not 1.0". The parser admits only 1.0
      * and 1.1 today, so the two agree; they stop agreeing the moment anything
      * else gets through, and this answer decides how a body is framed. A
      * response built outside a connection carries no version and counts as
@@ -471,8 +471,8 @@ zend_string *http_response_format(zend_object *obj)
  * chunked coding has a header of its own to announce. A Content-Length
  * survives in two of the four: the declared length the server is auditing, and
  * a handler value on a message with no body, where the number describes
- * something else the peer still wants — the representation a 304 stands for,
- * the body a GET would have returned for a HEAD. A handler Transfer-Encoding
+ * something else the peer still wants (the representation a 304 stands for,
+ * the body a GET would have returned for a HEAD). A handler Transfer-Encoding
  * is dropped in all four: the framing is the server's to state, and the pair
  * with Content-Length is the shape RFC 9112 §6.3 names as smuggling.
  *
@@ -488,7 +488,7 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
         : framing != H1_FRAMING_LENGTH;
     /* A 205 states a zero length wherever it is framed. No streaming call can
      * reach this today — the shared guard refuses a status that carries no
-     * body before any of them commits — but the rule lives in
+     * body before any of them commits — but the rule is stated in
      * http_response_internal.h and both formatters have to honour it, or the
      * next path to reach here inherits the gap the 205 leg was built to close. */
     const bool state_zero_length =
