@@ -105,6 +105,88 @@ static zend_string *normalize_header_name(zend_string *name)
     return lower;
 }
 
+/* Whether a byte may stand in a header field value: everything visible, plus
+ * the horizontal tab (RFC 9110 §5.5 — field-vchar is VCHAR / obs-text, and
+ * SP / HTAB may separate them). What this excludes is the point of it: a CR or
+ * an LF ends the header block, so the bytes behind one are read as further
+ * fields and, past a blank line, as a second response the server never sent
+ * (CWE-113). */
+static bool header_value_byte_allowed(const unsigned char c)
+{
+    return c >= 0x20 ? c != 0x7F : c == '\t';
+}
+
+/* RFC 9110 §5.6.2 token — the grammar a field name has to satisfy. A space or
+ * a colon in a name splits the line the same way a CR does. */
+static bool header_name_char_allowed(const unsigned char c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+        return true;
+    }
+
+    return memchr("!#$%&'*+-.^_`|~", c, sizeof("!#$%&'*+-.^_`|~") - 1) != NULL;
+}
+
+/* Refuses a field the server cannot put on the wire as one field, and says
+ * which one. Unlike the reason phrase — cleaned, because `reset_to_error`
+ * runs inside exception handling with no one left to tell — a header is set
+ * while the handler is still running, so it is told. */
+static bool header_field_check(zend_string *name, const zval *value)
+{
+    if (ZSTR_LEN(name) == 0) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Header name must not be empty", 0);
+        return false;
+    }
+
+    for (size_t i = 0; i < ZSTR_LEN(name); i++) {
+        if (!header_name_char_allowed((unsigned char) ZSTR_VAL(name)[i])) {
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "Header name \"%s\" is not a token: byte 0x%02X at offset %zu is not allowed",
+                ZSTR_VAL(name), (unsigned char) ZSTR_VAL(name)[i], i);
+            return false;
+        }
+    }
+
+    if (Z_TYPE_P(value) != IS_STRING) {
+        return true;
+    }
+
+    const zend_string *str = Z_STR_P(value);
+
+    for (size_t i = 0; i < ZSTR_LEN(str); i++) {
+        if (!header_value_byte_allowed((unsigned char) ZSTR_VAL(str)[i])) {
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "Header \"%s\" carries byte 0x%02X at offset %zu, which cannot "
+                "stand in a field value",
+                ZSTR_VAL(name), (unsigned char) ZSTR_VAL(str)[i], i);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* Every value a handler offers, checked before any of them is stored: a field
+ * set as an array must not land half-written when its third element is the bad
+ * one. Non-string scalars are converted at storage time and cannot carry a
+ * forbidden byte. */
+static bool header_values_check(zend_string *name, zval *value)
+{
+    if (Z_TYPE_P(value) != IS_ARRAY) {
+        return header_field_check(name, value);
+    }
+
+    zval *item;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(value), item) {
+        if (!header_field_check(name, item)) {
+            return false;
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    return true;
+}
+
 /* Helper: Add value to header.
  *
  * Storage shape:
@@ -284,6 +366,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, setHeader)
         return;
     }
 
+    if (!header_values_check(name, value)) {
+        return;
+    }
+
     add_header_value(response->headers, name, value, true);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -304,6 +390,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, addHeader)
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
     if (response_check_closed(response)) {
+        return;
+    }
+
+    if (!header_values_check(name, value)) {
         return;
     }
 
@@ -894,12 +984,21 @@ ZEND_METHOD(TrueAsync_HttpResponse, redirect)
         return;
     }
 
-    response->status_code = (int)status;
-
-    /* Set Location header */
+    /* The URL is handler data, and request data behind it more often than not,
+     * so it answers to the same field-value rule as setHeader(). Checked before
+     * the status is assigned: a refused redirect leaves the response as it was,
+     * which is what lets the handler answer with something else. */
     zval location;
     ZVAL_STR_COPY(&location, url);
     zend_string *header_name = zend_string_init("location", sizeof("location") - 1, 0);
+
+    if (!header_field_check(header_name, &location)) {
+        zend_string_release(header_name);
+        zval_ptr_dtor(&location);
+        return;
+    }
+
+    response->status_code = (int)status;
     add_header_value(response->headers, header_name, &location, true);
     zend_string_release(header_name);
     zval_ptr_dtor(&location);
