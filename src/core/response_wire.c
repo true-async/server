@@ -38,6 +38,7 @@ struct response_wire_s {
     void    *credit;             /* opaque stream_credit_t*, not owned */
     void    *chunk;              /* persistent zend_string*, owned until taken */
     int      status;
+    int64_t  abort_code;         /* STREAM_ABORT: reset code; <0 = the reactor's own */
 
     /* Growable byte arena: every span's bytes are copied in here. */
     char   *arena;
@@ -133,6 +134,7 @@ response_wire_t *response_wire_create(const uint32_t reactor_id, const int64_t s
     rw->reactor_id = reactor_id;
     rw->stream_id  = stream_id;
     rw->conn       = conn;
+    rw->abort_code = -1;
 
     return rw;
 }
@@ -264,6 +266,16 @@ bool response_wire_get_send_file(const response_wire_t *rw,
 void response_wire_set_status(response_wire_t *rw, const int status)
 {
     rw->status = status;
+}
+
+void response_wire_set_abort_code(response_wire_t *rw, const int64_t error_code)
+{
+    rw->abort_code = error_code;
+}
+
+int64_t response_wire_abort_code(const response_wire_t *rw)
+{
+    return rw->abort_code;
 }
 
 /* Append one (name, value) pair to a wire_header_t list (headers or trailers),

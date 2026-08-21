@@ -2529,6 +2529,33 @@ final class HttpResponse
     public function end(?string $data = null): void {}
 
     /**
+     * Finish a started stream as failed, so the client can tell a body that
+     * stopped from a body that finished.
+     *
+     * HTTP/1 writes no terminating chunk and loses the connection — chunked
+     * framing has no other way to say it, and curl reports CURLE_PARTIAL_FILE.
+     * HTTP/2 sends RST_STREAM and HTTP/3 resets the stream, leaving the rest of
+     * the connection alone.
+     *
+     * $errorCode is the reset code of whichever protocol carries the response,
+     * and it does not travel between them: HTTP/2 and HTTP/3 number the same
+     * conditions differently, and HTTP/1 has no field for one. Omitted, each
+     * transport uses its own INTERNAL_ERROR.
+     *
+     * A response that never started streaming has nothing to disown and is left
+     * alone: the exception the handler is carrying goes on to become the
+     * status. A stream started with nothing yet on the wire is finished
+     * cleanly instead — the client gets the empty response the transport
+     * commits for it. Calling abort() twice is a no-op for the same reason
+     * neither of those throws: its place is a catch block, where a method that
+     * throws buries the handler's own error.
+     *
+     * @throws HttpServerRuntimeException if end() has already told the client
+     *         the body is whole.
+     */
+    public function abort(?int $errorCode = null): void {}
+
+    /**
      * Send a file as the response body. Defers actual transmission to
      * the dispose phase — this method records the path + options on
      * the response and returns immediately.
@@ -2553,10 +2580,10 @@ final class HttpResponse
     public function isHeadersSent(): bool {}
 
     /**
-     * True once end() has been called.
+     * True once the response has been finished, by end() or by abort().
      *
      * Reports the response, not the connection: a peer that has gone leaves
-     * this false until the handler ends the response. Use isWritable() for
+     * this false until the handler finishes the response. Use isWritable() for
      * liveness.
      */
     public function isEnded(): bool {}

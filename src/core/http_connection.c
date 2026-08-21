@@ -2751,6 +2751,11 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * Just Works without further plumbing. */
     bool should_continue = false;
 
+    /* Read before the exception is turned into a status below, which consumes
+     * nothing but reads better next to the branch that needs it. */
+    const bool handler_failed =
+        http_handler_failed(coroutine, ctx->handler_bailout);
+
     if (coroutine->exception != NULL
         && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {
         zval rv;
@@ -2864,9 +2869,12 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
              * first bytes of what it is still waiting for. mark_ended refuses
              * the same way; this is the path that skips mark_ended. */
             conn->keep_alive = 0;
-        } else if (!http_response_is_closed(Z_OBJ(ctx->response_zv))) {
-            /* Handler fell through without end() — emit the terminator. */
-            (void)http_connection_send(conn, "0\r\n\r\n", 5);
+        } else if (!http_response_finish_stream(Z_OBJ(ctx->response_zv),
+                                                handler_failed, -1)) {
+            /* Nothing could be finished, so the peer has been left waiting on
+             * a size line with no chunk behind it. The connection cannot carry
+             * another message after that. */
+            conn->keep_alive = 0;
         }
 
         should_continue = conn->keep_alive != 0;
@@ -2991,6 +2999,11 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
                              conn->counters, conn->log_state);
     }
 
+    /* A chunked body that stopped short of its terminator leaves the
+     * connection with no message boundary, so nothing more may be written to
+     * it — read below, before ctx is freed. */
+    const bool framing_lost = ctx->stream_dead;
+
     /* Tear down per-request state. Zvals + ctx are owned solely by
      * this finalize; no other path looks at them after the caller
      * cleared its own back-pointer. */
@@ -3053,10 +3066,15 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
     /* Drain any pipelined request before honouring a close decision: an
      * EOF observed in read_cb may have flipped keep_alive=false while a
      * pipelined chain is still in the buffer, and clients expect every
-     * request they sent to get a response. */
+     * request they sent to get a response.
+     *
+     * Not when the framing is gone. The peer is still counting down the bytes
+     * an unfinished chunk promised it, so the next response would be read as
+     * that chunk's data — the very desynchronisation withholding the
+     * terminator exists to prevent. */
     conn->request_in_flight = false;
 
-    if (conn->read_buffer_len > 0) {
+    if (conn->read_buffer_len > 0 && !framing_lost) {
         bool should_destroy = false;
 
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {

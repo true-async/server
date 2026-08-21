@@ -117,6 +117,11 @@ bool response_wire_get_send_file(const response_wire_t *rw,
 /* Builders — copy bytes into the arena; pair builders return false on
  * allocation failure. set_body is FULL wires only. */
 void response_wire_set_status(response_wire_t *rw, int status);
+
+/* STREAM_ABORT: the reset code the worker was given. Negative — the usual
+ * case — leaves the choice to the reactor, which uses H3_INTERNAL_ERROR. */
+void    response_wire_set_abort_code(response_wire_t *rw, int64_t error_code);
+int64_t response_wire_abort_code(const response_wire_t *rw);
 bool response_wire_add_header(response_wire_t *rw,
                               const char *name_ptr, size_t name_len,
                               const char *value_ptr, size_t value_len);

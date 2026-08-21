@@ -798,9 +798,15 @@ static int cb_on_stream_close(nghttp2_session *ng,
     http2_stream_t *stream = (http2_stream_t *)
         nghttp2_session_get_stream_user_data(ng, stream_id);
 
+    /* A reset the server sent itself comes back through this same callback,
+     * carrying the code we chose. It is neither a peer reset to count nor a
+     * reason to cancel the handler that asked for it. */
+    const bool locally_aborted = stream != NULL && stream->local_aborted;
+
     /* Peer-initiated reset visibility (RST_STREAM with a non-NO_ERROR
      * code). NO_ERROR is a clean END_STREAM on both sides, not a reset. */
     if (error_code != NGHTTP2_NO_ERROR
+        && !locally_aborted
         && session->conn != NULL) {
         http_server_on_h2_stream_reset_by_peer(session->conn->counters);
     }
@@ -834,7 +840,11 @@ static int cb_on_stream_close(nghttp2_session *ng,
         on_close(user, error_code);
     }
 
-    if (stream != NULL && stream->coroutine != NULL &&
+    /* A reset the server sent on the handler's own instruction must not come
+     * back as "stream reset by peer" and cancel it. Keyed on the latch and not
+     * on which coroutine is current, because the emit that carries the reset
+     * can be deferred behind an in-flight write and run from the loop instead. */
+    if (stream != NULL && stream->coroutine != NULL && !locally_aborted &&
         error_code != NGHTTP2_NO_ERROR && http_exception_ce != NULL) {
         zend_coroutine_t *co = (zend_coroutine_t *)stream->coroutine;
 
@@ -1945,6 +1955,19 @@ int http2_session_resume_stream_data(http2_session_t *session,
     }
 
     return nghttp2_session_resume_data(session->ng, (int32_t)stream_id) == 0
+               ? 0 : -1;
+}
+
+int http2_session_submit_rst_stream(http2_session_t *session,
+                                    const uint32_t stream_id,
+                                    const uint32_t error_code)
+{
+    if (session == NULL || session->ng == NULL) {
+        return -1;
+    }
+
+    return nghttp2_submit_rst_stream(session->ng, NGHTTP2_FLAG_NONE,
+                                     (int32_t)stream_id, error_code) == 0
                ? 0 : -1;
 }
 

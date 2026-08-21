@@ -205,10 +205,66 @@ path and offers no wait to park on.
 A peer that departs mid-stream arrives as `HttpException` with code 499 out of
 the next call, so a `try`/`catch` around the loop is how a handler winds down.
 `isEnded()` reports the response, not the connection: it stays false until the
-handler calls `end()`.
+handler finishes it, with `end()` or with `abort()`.
 
-`send()` is the previous spelling of `write()` and still works, one minor
-release long.
+### A stream that failed
+
+`end()` tells the client the body is whole, and once the status is on the wire
+there is no status left to say otherwise. `abort()` is the other ending:
+
+```php
+try {
+    foreach ($rows as $row) {
+        $res->write(format($row));
+    }
+    $res->end();
+} catch (\Throwable $e) {
+    $res->abort();      // the client must not read this as a complete export
+    throw $e;
+}
+```
+
+What it costs is protocol-specific, and that is the point — each protocol has
+exactly one way to report a body that stopped:
+
+| | On the wire | What the client sees |
+|---|---|---|
+| HTTP/1.1 | no terminating chunk, connection closed | `curl` exits 18, `CURLE_PARTIAL_FILE` |
+| HTTP/2 | `RST_STREAM(INTERNAL_ERROR)` | a stream error; other streams on the connection are unaffected |
+| HTTP/3 | `RESET_STREAM(H3_INTERNAL_ERROR)` | the same, per stream |
+
+`abort($errorCode)` names the code instead. It is the reset code of whichever
+protocol is carrying the response and does not travel between them — HTTP/2 and
+HTTP/3 number the same conditions differently, and HTTP/1 has no field for one,
+so a handler that names a code should know its protocol from
+`getProtocolVersion()`. The range is 0 to 4294967295; anything else throws.
+
+A handler that throws without catching gets this anyway: the server aborts a
+committed stream on its own rather than finishing it. A cancellation is not a
+failure and still ends cleanly, so a graceful shutdown does not truncate the
+feeds it interrupts.
+
+How much of the partial body the client keeps is the transport's business, not
+a promise: HTTP/1 has already written everything the handler handed over,
+HTTP/2 discards whatever it had queued but not yet framed, and HTTP/3 flushes
+what it holds before resetting. A client must discard the body of an aborted
+response either way, which is the point.
+
+There is a body to disown only in the third of these states, and only the
+fourth is an error:
+
+| State when `abort()` is called | What happens |
+|---|---|
+| never started streaming — buffered, or a `HEAD` | nothing; the handler's own exception still becomes the status |
+| started, nothing on the wire yet — `sseStart()` with no event | finished cleanly: the client gets the empty `200` the transport commits for it |
+| started, and bytes have reached the client | the stream is failed as above |
+| `end()` already called | throws — the client has been told the body is whole |
+
+A second `abort()` is a no-op, because its place is a catch block where a throw
+would bury the handler's own error.
+
+Under compression the codec stream is left unclosed too. A gzip trailer is a
+second claim that the body is whole, and a decoder checks it.
 
 ### File
 

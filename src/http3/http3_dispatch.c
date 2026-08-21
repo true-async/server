@@ -461,12 +461,36 @@ void http3_reactor_apply_response(void *arg)
                 break;
             }
 
+            /* The wires arrive together and the flush is queued for the end of
+             * the tick, so the headers and chunks of this very response can
+             * still be sitting in the send buffer — and a reset discards
+             * everything not yet on the wire. Drained here so the peer gets
+             * what the handler did produce, as it does on the in-thread path
+             * where every write() drains for itself.
+             *
+             * Before the latch, not after: streaming_ended is what tells the
+             * data reader an empty queue means EOF, so draining with it
+             * already set hands the peer a clean FIN and the reset arrives
+             * too late to mean anything. */
+            http3_connection_drain_out(c);
+
             s->streaming_ended = true;
+            s->local_aborted   = true;
+
+            /* Stops nghttp3 asking the data reader for more of a body that is
+             * not coming; the RESET_STREAM below is what the peer sees. Same
+             * pair as h3_stream_abort, which is the in-thread route here. */
+            if (c->nghttp3_conn != NULL) {
+                (void)nghttp3_conn_shutdown_stream_write(
+                    (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
+            }
 
             if (c->ngtcp2_conn != NULL) {
+                const int64_t code = response_wire_abort_code(rw);
+
                 (void)ngtcp2_conn_shutdown_stream_write(
                     (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
-                    NGHTTP3_H3_INTERNAL_ERROR);
+                    code < 0 ? NGHTTP3_H3_INTERNAL_ERROR : (uint64_t) code);
             }
 
             http3_listener_mark_flush(c->listener, c);
@@ -1049,7 +1073,14 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
             /* Delivery shape is gRPC policy — grpc_call_finish decides. */
             grpc_call_finish(Z_OBJ(s->response_zv), &h3_grpc_finish_ops, s);
         } else if (is_streaming) {
-            h3_stream_finish_streaming(s);
+            /* Trailers are captured here and nowhere else on the streaming
+             * path: the data reader submits them at EOF, and by then the
+             * response object may be gone. */
+            http3_stream_capture_trailers(s);
+
+            (void)http_response_finish_stream(
+                Z_OBJ(s->response_zv),
+                http_handler_failed(coroutine, s->handler_bailout), -1);
         } else if (http_response_has_send_file(Z_OBJ(s->response_zv))) {
             /* sendFile: hand off to the static pump. On success it owns the
              * stream + response until on_done runs the tail — the pump

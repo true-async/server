@@ -46,6 +46,12 @@ static zend_object_handlers http_response_handlers;
  *                 non-guarded setters — see setTrailer/setTrailers. */
 static inline bool response_check_closed(const http_response_object *response)
 {
+    if (response->aborted) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot modify response after abort() has been called", 0);
+        return true;
+    }
+
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot modify response after end() has been called", 0);
@@ -71,6 +77,12 @@ static inline bool response_check_closed(const http_response_object *response)
  * only end() and sendFile() sealing forbid them. */
 static inline bool response_check_trailer_sealed(const http_response_object *response)
 {
+    if (response->aborted) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot set trailers after abort() has been called", 0);
+        return true;
+    }
+
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot set trailers after end() has been called", 0);
@@ -917,6 +929,12 @@ static bool response_has_buffered_body(const http_response_object *response)
 static bool response_check_stream_usable(const http_response_object *response,
                                          const char *method, const bool emits)
 {
+    if (response->aborted) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "Response already closed — cannot %s() after abort()", method);
+        return true;
+    }
+
     if (response->closed) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Response already closed — cannot %s() after end()", method);
@@ -1489,6 +1507,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
+    if (response->aborted) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response has already been aborted", 0);
+        return;
+    }
+
     if (response->closed) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Response has already been closed", 0);
@@ -1510,8 +1534,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
                 response->stream_ctx, data, false);
         }
 
-        response->stream_ops->mark_ended(response->stream_ctx);
-        response->closed = true;
+        (void)http_response_finish_stream(Z_OBJ_P(ZEND_THIS), false, -1);
         return;
     }
 
@@ -1527,6 +1550,68 @@ ZEND_METHOD(TrueAsync_HttpResponse, end)
 
     /* Note: Actual sending to socket happens in connection handler,
      * which will call http_response_format() to get the raw response */
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::abort(): void
+ *
+ * Finish a started stream as failed, so the peer can tell a body that stopped
+ * from a body that finished. What that costs is protocol-specific and is the
+ * whole point: HTTP/1 loses the connection, because chunked framing has no
+ * other way to say it.
+ *
+ * $errorCode is the reset code of whichever protocol carries the response, and
+ * it does not travel between them: HTTP/2 and HTTP/3 number the same
+ * conditions differently, and HTTP/1 has no field for one. Omitted, each
+ * transport uses its own INTERNAL_ERROR — which is what a handler that does
+ * not know its protocol wants.
+ *
+ * How much there is to disown decides the rest. A response that never started
+ * streaming — a buffered one, or a HEAD, whose write() drops every chunk — is
+ * left alone, and the handler's own exception goes on to become the status. A
+ * stream started with nothing yet on the wire is finished cleanly instead: the
+ * peer gets the empty response the transport commits for it, which tells it
+ * more than a stream that merely stops.
+ *
+ * Neither of those is an error. The natural call site is a catch or finally
+ * block, and a method that throws from there replaces the diagnosis the
+ * handler was carrying; for the same reason a second abort() is a no-op rather
+ * than a complaint.
+ *
+ * end() already on the wire is different: the client has been told the body is
+ * whole, and no later call can take that back. That one throws. */
+ZEND_METHOD(TrueAsync_HttpResponse, abort)
+{
+    zend_long error_code  = 0;
+    bool      code_is_null = true;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG_OR_NULL(error_code, code_is_null)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* Both registries keep their codes in a 32-bit field, so anything wider is
+     * a mistake rather than a code this server has no name for. */
+    if (!code_is_null && (error_code < 0 || error_code > 0xFFFFFFFFLL)) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "abort(): error code must be between 0 and 4294967295", 0);
+        return;
+    }
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (response->aborted) {
+        return;
+    }
+
+    if (response->closed) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Response has already been closed — the body was already finished cleanly", 0);
+        return;
+    }
+
+    (void)http_response_finish_stream(Z_OBJ_P(ZEND_THIS), true,
+                                      code_is_null ? -1 : (int64_t) error_code);
 }
 /* }}} */
 
@@ -1585,7 +1670,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, isWritable)
 /* {{{ proto HttpResponse::isEnded(): bool
  *
  * Reports the response, not the connection: a peer that has gone leaves this
- * false until the handler ends the response. isWritable() answers liveness. */
+ * false until the handler finishes the response, whichever way it finishes it —
+ * end() or abort(). isWritable() answers liveness. */
 ZEND_METHOD(TrueAsync_HttpResponse, isEnded)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -1605,6 +1691,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->protocol_version = NULL;
     response->headers_sent = false;
     response->closed = false;
+    response->aborted = false;
     response->committed = false;
     response->streaming = false;
     response->grpc_mode = 0;

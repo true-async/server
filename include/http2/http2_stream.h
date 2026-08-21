@@ -171,6 +171,12 @@ struct http2_stream_t {
      * provider picks EOF over DEFERRED when the queue empties. */
     bool                 streaming_ended      : 1;
 
+    /* The server reset this stream on purpose. nghttp2 reports a locally sent
+     * RST_STREAM through the same close callback as a peer's, so without this
+     * the abort would cancel the handler that asked for it, with the message
+     * "stream reset by peer", and count itself in the peer-reset metric. */
+    bool                 local_aborted        : 1;
+
     /* nghttp2 tore its stream state down on a peer RST / graceful close: any
      * resume_stream_data / submit_* for this id is now unsafe — dispose checks
      * this before draining. */

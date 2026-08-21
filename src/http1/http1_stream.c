@@ -396,6 +396,35 @@ static void h1_stream_mark_ended(void *opaque)
     (void)http_connection_send(conn, "0\r\n\r\n", 5);
 }
 
+/* Chunked framing has no way to say "this body failed" other than to stop
+ * short of the terminator and let the connection end, so abort is mark_ended
+ * with everything that speaks of a finished body left out. The response zval
+ * is not consulted: the connection has to leave keep-alive whether or not the
+ * response outlived the handler. */
+static bool h1_stream_abort(void *opaque, const int64_t error_code)
+{
+    /* Chunked framing carries no error code — the absent terminator is the
+     * whole message. */
+    (void) error_code;
+
+    http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
+
+    if (ctx == NULL || ctx->conn == NULL) {
+        return false;
+    }
+
+    /* No status line has gone out, so there is no half body to disown and no
+     * framing to lose. mark_ended commits an empty response instead, which
+     * tells the peer more than a closed socket does. */
+    if (!ctx->h1_stream_headers_sent) {
+        return false;
+    }
+
+    ctx->stream_dead = true;
+    ctx->conn->keep_alive = false;
+    return true;
+}
+
 /* HTTP/1 push streaming has no internal queue — kernel backpressure
  * suspends directly inside http_connection_send — so there's nothing
  * for the handler to await on. Returning NULL signals to the write()
@@ -419,6 +448,7 @@ const http_response_stream_ops_t h1_stream_ops = {
     .append_chunk         = h1_stream_append_chunk,
     .is_alive             = h1_stream_is_alive,
     .mark_ended           = h1_stream_mark_ended,
+    .abort                = h1_stream_abort,
     .get_wait_event       = h1_stream_get_wait_event,
     .send_static_response = h1_stream_send_static_response,
 };

@@ -34,6 +34,14 @@
 #include "compression/http_compression_response.h"
 #endif
 
+/* Which call finished the response. The two are refused alike, and a handler
+ * told only that the response is closed has to guess which of its own calls
+ * did it. */
+static const char *sse_finished_by(const http_response_object *response)
+{
+	return response->aborted ? "abort()" : "end()";
+}
+
 /* Events are delimited by a blank line, fields by a single LF. WHATWG
  * accepts CR / CRLF on input but we always emit LF. CR / LF inside a
  * single-line field (event / id) is a framing-injection bug — reject it. */
@@ -124,8 +132,8 @@ static bool sse_ensure_started(http_response_object *response)
 	}
 
 	if (response->closed) {
-		zend_throw_exception(http_server_runtime_exception_ce,
-							 "Cannot start SSE on a closed response", 0);
+		zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+								"Cannot start SSE after %s", sse_finished_by(response));
 		return false;
 	}
 
@@ -347,8 +355,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseEvent)
 	http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
 	if (response->closed) {
-		zend_throw_exception(http_server_runtime_exception_ce,
-							 "Cannot sseEvent() on a closed response", 0);
+		zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+								"Cannot sseEvent() after %s", sse_finished_by(response));
 		return;
 	}
 
@@ -395,8 +403,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, trySseEvent)
 	http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
 	if (response->closed) {
-		zend_throw_exception(http_server_runtime_exception_ce,
-							 "Cannot trySseEvent() on a closed response", 0);
+		zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+								"Cannot trySseEvent() after %s", sse_finished_by(response));
 		return;
 	}
 
@@ -445,8 +453,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseComment)
 	http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
 	if (response->closed) {
-		zend_throw_exception(http_server_runtime_exception_ce,
-							 "Cannot sseComment() on a closed response", 0);
+		zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+								"Cannot sseComment() after %s", sse_finished_by(response));
 		return;
 	}
 
@@ -490,8 +498,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseRetry)
 	http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
 	if (response->closed) {
-		zend_throw_exception(http_server_runtime_exception_ce,
-							 "Cannot sseRetry() on a closed response", 0);
+		zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+								"Cannot sseRetry() after %s", sse_finished_by(response));
 		return;
 	}
 

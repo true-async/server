@@ -583,6 +583,9 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
     }
 
+    const bool handler_failed =
+        http_handler_failed(coroutine, stream->handler_bailout);
+
     /* If the handler threw and never committed, derive a response
      * from the exception (code → status, message → body). Same
      * policy as the HTTP/1 dispose path in
@@ -637,7 +640,9 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         return;
     }
 
-    /* Streaming: skip buffered commit (would RST); just mark ended for EOF. */
+    /* Streaming: skip the buffered commit, which would RST, and finish the
+     * stream the handler already started — cleanly, or as failed when the
+     * handler did not reach its end. */
     const bool is_streaming = !Z_ISUNDEF(stream->response_zv)
                               && http_response_is_streaming(Z_OBJ(stream->response_zv));
 
@@ -646,9 +651,8 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         grpc_call_finish(Z_OBJ(stream->response_zv),
                          &h2_grpc_finish_ops, stream);
     } else if (is_streaming) {
-        if (!stream->streaming_ended) {
-            h2_stream_mark_ended(stream);
-        }
+        (void)http_response_finish_stream(Z_OBJ(stream->response_zv),
+                                          handler_failed, -1);
     } else if (conn != NULL && !Z_ISUNDEF(stream->response_zv)) {
         (void)http2_commit_stream_response(conn, stream);
     }
@@ -1637,17 +1641,23 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
 #define H2_CHUNK_RING_SLOTS 8
 
 /* First-send lazy: allocate ring + commit HEADERS. */
+/* A non-NULL ring is what the rest of the stream reads as "the headers are on
+ * the wire", so it is published only once they are: a ring left behind by a
+ * failed commit would make abort reset a stream the peer never heard of. */
 static bool h2_stream_init_ring(http_connection_t *conn, http2_stream_t *stream)
 {
+    zend_string **const ring = ecalloc(H2_CHUNK_RING_SLOTS, sizeof(zend_string *));
+
     stream->chunk_queue_cap   = H2_CHUNK_RING_SLOTS;
-    stream->chunk_queue       = ecalloc(stream->chunk_queue_cap,
-                                        sizeof(zend_string *));
     stream->chunk_queue_head  = 0;
     stream->chunk_queue_tail  = 0;
     stream->chunk_queue_bytes = 0;
     stream->chunk_read_offset = 0;
+    stream->chunk_queue       = ring;
 
     if (!h2_commit_streaming_headers(conn, stream)) {
+        stream->chunk_queue = NULL;
+        efree(ring);
         return false;
     }
 
@@ -1663,6 +1673,15 @@ static bool h2_stream_wait_for_room(http2_stream_t *stream,
                                     const uint32_t timeout_ms)
 {
     for (;;) {
+        /* A peer that has gone will never drain the ring, so waiting for room
+         * is waiting for nothing. The dispose path reaches this loop through
+         * the compressing wrapper's trailer, and a coroutine parked there is
+         * past the point where a cancellation can reach it. */
+        if (stream->local_aborted || stream->peer_closed
+            || conn->write_timed_out) {
+            return false;
+        }
+
         http2_stream_compact_chunk_queue(stream);
 
         if (stream->chunk_queue_tail < stream->chunk_queue_cap
@@ -1686,7 +1705,7 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk,
     http2_stream_t *stream = (http2_stream_t *)ctx;
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
-    if (conn->write_timed_out) {
+    if (conn->write_timed_out || stream->local_aborted) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -1785,6 +1804,76 @@ static void h2_stream_mark_ended(void *ctx)
     http2_session_emit(stream->session);
 }
 
+/* RST_STREAM(INTERNAL_ERROR) instead of END_STREAM. The reset is per-stream,
+ * so the rest of the connection is untouched — which is the whole reason
+ * HTTP/2 can report a failed body without losing anything else.
+ *
+ * What makes the clean end unreachable is nghttp2, not the flag: submitting a
+ * reset moves its stream to the closing state, and the send predicate refuses
+ * DATA from there before the data provider is ever consulted. streaming_ended
+ * is raised as well so that the two early returns below — where the stream is
+ * already gone and no reset can be sent — cannot be followed by an EOF either.
+ *
+ * The ring is emptied between the submit and the send. Before the submit the
+ * provider could still read from it; after the send nghttp2 may already have
+ * closed the stream and dropped the table's reference to it. */
+static bool h2_stream_abort(void *ctx, const int64_t error_code)
+{
+    http2_stream_t *stream = (http2_stream_t *)ctx;
+
+    if (stream->local_aborted) {
+        return true;
+    }
+
+    /* The ring is created by the first committed chunk, so no ring means no
+     * HEADERS on the wire: nothing to fail, and mark_ended's lazy commit
+     * answers the peer better than a reset with no response before it. */
+    if (stream->chunk_queue == NULL) {
+        return false;
+    }
+
+    stream->local_aborted   = true;
+    stream->streaming_ended = true;
+
+    /* A producer parked for ring room has to learn the stream is gone from
+     * somewhere; the reset itself never reaches it. */
+    async_plain_event_fire((zend_async_event_t *)stream->write_event);
+
+    /* Peer RST already took nghttp2's stream state down; submitting against
+     * that id walks a stale data provider (phpt 092). */
+    if (stream->peer_closed) {
+        return true;
+    }
+
+    if (http2_session_get_conn(stream->session) == NULL) {
+        return true;
+    }
+
+    (void)http2_session_submit_rst_stream(
+        stream->session, stream->stream_id,
+        error_code < 0 ? NGHTTP2_INTERNAL_ERROR : (uint32_t) error_code);
+
+    /* Released through the accounting wrapper: a static-delivery ring owes
+     * its budget the debit. Slices already emitted are not here — they left
+     * the ring holding their own reference. */
+    while (stream->chunk_queue_head < stream->chunk_queue_tail) {
+        zend_string *chunk = stream->chunk_queue[stream->chunk_queue_head];
+        stream->chunk_queue[stream->chunk_queue_head++] = NULL;
+
+        if (chunk != NULL) {
+            h2_static_account_release_chunk(stream, chunk);
+        }
+    }
+
+    stream->chunk_queue_head  = 0;
+    stream->chunk_queue_tail  = 0;
+    stream->chunk_queue_bytes = 0;
+    stream->chunk_read_offset = 0;
+
+    http2_session_emit(stream->session);
+    return true;
+}
+
 static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
@@ -1800,6 +1889,10 @@ static zend_async_event_t *h2_stream_get_wait_event(void *ctx)
 static bool h2_stream_sendable(void *ctx)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
+
+    if (stream->local_aborted) {
+        return false;
+    }
 
     if (stream->chunk_queue == NULL) {
         return true;   /* not started — first write() always proceeds */
@@ -1824,7 +1917,7 @@ static bool h2_stream_is_alive(void *ctx)
 {
     const http2_stream_t *stream = (const http2_stream_t *)ctx;
 
-    if (stream == NULL || stream->peer_closed) {
+    if (stream == NULL || stream->peer_closed || stream->local_aborted) {
         return false;
     }
 
@@ -1858,6 +1951,7 @@ const http_response_stream_ops_t h2_stream_ops = {
     .is_alive            = h2_stream_is_alive,
     .wait_writable       = h2_stream_wait_writable,
     .mark_ended          = h2_stream_mark_ended,
+    .abort               = h2_stream_abort,
     .get_wait_event      = h2_stream_get_wait_event,
     .send_static_response = h2_stream_send_static_response,
 };

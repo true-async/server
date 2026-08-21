@@ -187,6 +187,11 @@ struct _http3_stream_s {
      * queue empties instead of NGHTTP3_ERR_WOULDBLOCK. */
     bool              streaming_ended     : 1;
 
+    /* The server reset this stream's write side on purpose. Distinct from
+     * streaming_ended, which a real end() sets and which the data_reader reads
+     * as "EOF is legitimate here". */
+    bool              local_aborted       : 1;
+
     bool              is_grpc             : 1;
     bool              has_trailers        : 1;
     bool              trailers_submitted  : 1;

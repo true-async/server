@@ -1208,7 +1208,7 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking
 {
     http3_stream_t *const s = (http3_stream_t *)ctx;
 
-    if (s == NULL || s->conn == NULL || s->peer_closed) {
+    if (s == NULL || s->conn == NULL || s->peer_closed || s->local_aborted) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -1299,7 +1299,8 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking
      * the inner loop doesn't re-derive it per suspension. */
     const uint32_t write_timeout_ms =
         (uint32_t)c->view->write_timeout_s * 1000u;
-    while (s->chunk_pending_bytes > 0 && !s->peer_closed && !nonblocking_producer) {
+    while (s->chunk_pending_bytes > 0 && !s->peer_closed && !s->local_aborted
+           && !nonblocking_producer) {
         zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
 
         if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
@@ -1350,8 +1351,9 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking
         http3_connection_arm_timer(c);
     }
 
-    return s->peer_closed ? HTTP_STREAM_APPEND_STREAM_DEAD
-                          : HTTP_STREAM_APPEND_OK;
+    return (s->peer_closed || s->local_aborted)
+               ? HTTP_STREAM_APPEND_STREAM_DEAD
+               : HTTP_STREAM_APPEND_OK;
 }
 
 void h3_stream_mark_ended(void *ctx)
@@ -1386,6 +1388,66 @@ void h3_stream_mark_ended(void *ctx)
     http3_connection_arm_timer(s->conn);
 }
 
+/* RESET_STREAM(H3_INTERNAL_ERROR) on the write side — the same answer
+ * h3_static_fail gives a truncated file, and the only one HTTP/3 has for a
+ * body that stopped after its status went out.
+ *
+ * The queued chunks are left where they are. ngtcp2 discards unacknowledged
+ * data on reset, so nothing more will be read from them, but nghttp3 may still
+ * hold an iovec into the chunk it was mid-way through; http3_stream_release
+ * frees the queue once the stream closes. */
+static bool h3_stream_abort(void *ctx, const int64_t error_code)
+{
+    http3_stream_t *const s = (http3_stream_t *)ctx;
+
+    if (s == NULL) {
+        return false;
+    }
+
+    if (s->local_aborted) {
+        return true;
+    }
+
+    /* The queue is created by the first committed chunk, so no queue means the
+     * response was never submitted: nothing to reset, and mark_ended's lazy
+     * commit tells the peer more than a bare RESET_STREAM would. */
+    if (s->chunk_queue == NULL) {
+        return false;
+    }
+
+    s->local_aborted   = true;
+    s->streaming_ended = true;
+
+    /* A producer parked on the stream window learns of the reset from here or
+     * not at all — the peer will never extend a window on a dead stream. */
+    if (s->write_event != NULL && s->write_event->trigger != NULL) {
+        s->write_event->trigger(s->write_event);
+    }
+
+    http3_connection_t *const c = s->conn;
+
+    if (c == NULL || c->closed || s->peer_closed || c->nghttp3_conn == NULL) {
+        return true;
+    }
+
+    /* Stops nghttp3 from asking the data reader for more of a body that is
+     * not coming; the RESET_STREAM below is what the peer actually sees. */
+    (void)nghttp3_conn_shutdown_stream_write((nghttp3_conn *)c->nghttp3_conn,
+                                             s->stream_id);
+
+    if (c->ngtcp2_conn != NULL) {
+        (void)ngtcp2_conn_shutdown_stream_write(
+            (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
+            error_code < 0 ? NGHTTP3_H3_INTERNAL_ERROR : (uint64_t) error_code);
+    }
+
+    /* Queued rather than drained: abort is also called from inside a drain,
+     * and h3_static_fail takes the same route for the same reason. */
+    http3_listener_mark_flush(c->listener, c);
+    http3_listener_queue_epilogue_flush(c->listener);
+    return true;
+}
+
 static zend_async_event_t *h3_stream_get_wait_event(void *ctx)
 {
     http3_stream_t *const s = (http3_stream_t *)ctx;
@@ -1408,15 +1470,15 @@ static bool h3_stream_sendable(void *ctx)
 {
     const http3_stream_t *const s = (const http3_stream_t *)ctx;
 
-    return s != NULL && s->chunk_pending_bytes == 0;
+    return s != NULL && !s->local_aborted && s->chunk_pending_bytes == 0;
 }
 
-/* The four terminal conditions h3_stream_append_chunk refuses on. */
+/* The terminal conditions h3_stream_append_chunk refuses on. */
 static bool h3_stream_is_alive(void *ctx)
 {
     const http3_stream_t *const s = (const http3_stream_t *)ctx;
 
-    return s != NULL && s->conn != NULL && !s->peer_closed
+    return s != NULL && !s->local_aborted && s->conn != NULL && !s->peer_closed
            && !s->conn->closed && s->conn->nghttp3_conn != NULL;
 }
 
@@ -1425,6 +1487,7 @@ const http_response_stream_ops_t h3_stream_ops = {
     .sendable            = h3_stream_sendable,
     .is_alive            = h3_stream_is_alive,
     .mark_ended          = h3_stream_mark_ended,
+    .abort               = h3_stream_abort,
     .get_wait_event      = h3_stream_get_wait_event,
     .send_static_response = h3_stream_send_static_response,
 };
