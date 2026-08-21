@@ -664,19 +664,30 @@ designs were worked out and both fail on something mechanical.
   BIO ring already batches. The three submits the case rested on are one, so what a queue
   could still remove is the single park — and only by making the write fire-and-forget,
   which leaves `isWritable()` and `tryWrite()` with nothing honest to answer.
-- [ ] **Answer from the queues the connection already has.** Plaintext:
-  `out_pending_buf` carries a byte count, a high-water predicate on the same knob,
-  low-water hysteresis, a drain hook and a destroy defer gate — all implemented and
-  all exercised by WebSocket. TLS: `BIO_ctrl_get_write_guarantee` on the plaintext
-  BIO is the exact predicate `tls_wait_space` loops on, so a refusal built from it
-  is exact by construction. Neither needs a new structure. What it does need is the
-  out-of-band writers brought under one order first — `send_strv_owned` ignores the
-  pending tail, and `emit_parse_error` writes with a direct `send(2)` syscall.
-  Measure before deciding: the case for it is three submits and up to three
-  suspensions per chunk, and that number has never been taken.
-- [ ] **#179 — one serialized outbound path per HTTP/1 connection.** The larger
-  version of the same idea. Filed, and to be judged against the measurement rather
-  than against the argument.
+- [~] **Answer from the queues the connection already has.** Reread against the
+  code on 2026-08-21, and the premise is gone. The step said the number behind it
+  had never been taken; it was taken on 2026-08-20 and is in `dev/BENCHMARKS.md`
+  — three writes per HTTP/1 chunk cost about 10 µs, and sending the frame as one
+  write is worth up to +85% rps. The change that measurement supported has landed:
+  `h1_stream_append_chunk` sends the plaintext frame as owned slots through
+  `http_connection_send_strv_awaited`, and the three-write path survives only for
+  a TLS chunk past `H1_CHUNK_COALESCE_MAX`. What the measurement explicitly does
+  not support is the queue: "the win is reachable without a queue, without an
+  ordering hazard between two writers and without a per-response structure".
+
+  What is left of the step is one thing it listed as a prerequisite and which
+  stands on its own: two writers reach the socket without consulting the pending
+  tail. `http_connection_send_strv_owned` submits `ZEND_ASYNC_IO_WRITEV` straight
+  at `conn->io` (`http_connection.c:1946`), and `http_connection_emit_parse_error`
+  falls back to a direct synchronous write in the plaintext read callback
+  (`:2110`). Whether either can overtake a real pending tail is unproven —
+  `out_pending_buf` is exercised by WebSocket, and an upgraded connection no
+  longer runs the HTTP/1 dispose that uses the first. Establish the path before
+  filing it as a defect.
+- [ ] **#179 — one serialized outbound path per HTTP/1 connection.** What the
+  measurement leaves it: a non-blocking `tryWrite()` on HTTP/1, which
+  `dev/BENCHMARKS.md` says "has to be argued on its own; this measurement does
+  not support it". No code until that argument exists.
 
 ## Landed elsewhere
 
