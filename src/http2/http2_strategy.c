@@ -119,9 +119,11 @@ static const grpc_finish_ops_t h2_grpc_finish_ops = {
  *  - write_timeout elapses (peer stuck — connection tear-down
  *    follows).
  * Returns true on woken-by-event, false on timeout / cancellation
- * (PHP exception is set in the latter case). */
+ * (PHP exception is set in the latter case). @p timeout_ms is the caller's
+ * own deadline; 0 leaves the connection's write timeout as the only bound. */
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
-                                    http_connection_t *conn);
+                                    http_connection_t *conn,
+                                    uint32_t timeout_ms);
 
 /* Ownership ctx for send_batched_writev — free_cb releases body refs +
  * iov + emit_buf + ctx. */
@@ -1582,7 +1584,8 @@ static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
 /* Park on stream->write_event (woken by WINDOW_UPDATE / ring-slot drain)
  * with write_timeout fallback. false on timeout/cancel (exception set). */
 static bool h2_wait_for_drain_event(http2_stream_t *stream,
-                                    http_connection_t *conn)
+                                    http_connection_t *conn,
+                                    const uint32_t timeout_ms)
 {
     zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
 
@@ -1603,10 +1606,18 @@ static bool h2_wait_for_drain_event(http2_stream_t *stream,
     zend_async_resume_when(co, wake_ev, false,
                            zend_async_waker_callback_resolve, NULL);
 
-    if (conn != NULL && conn->write_timeout_ms > 0) {
+    /* The shorter of the two bounds wins: a caller that named its own deadline
+     * gets it, and the connection's write timeout still caps a caller that did
+     * not. */
+    uint32_t deadline_ms = conn != NULL ? conn->write_timeout_ms : 0;
+
+    if (timeout_ms > 0 && (deadline_ms == 0 || timeout_ms < deadline_ms)) {
+        deadline_ms = timeout_ms;
+    }
+
+    if (deadline_ms > 0) {
         zend_async_event_t *timer =
-            &ZEND_ASYNC_NEW_TIMER_EVENT(
-                (zend_ulong)conn->write_timeout_ms, false)->base;
+            &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong) deadline_ms, false)->base;
         zend_async_resume_when(co, timer, true,
                                zend_async_waker_callback_timeout, NULL);
     }
@@ -1648,7 +1659,8 @@ static bool h2_stream_init_ring(http_connection_t *conn, http2_stream_t *stream)
  * Returns false on timeout/cancel (caller releases chunk + bails). */
 static bool h2_stream_wait_for_room(http2_stream_t *stream,
                                     http_connection_t *conn,
-                                    const uint32_t max_bytes)
+                                    const uint32_t max_bytes,
+                                    const uint32_t timeout_ms)
 {
     for (;;) {
         http2_stream_compact_chunk_queue(stream);
@@ -1660,7 +1672,7 @@ static bool h2_stream_wait_for_room(http2_stream_t *stream,
 
         http_server_on_stream_backpressure(conn->counters);
 
-        if (!h2_wait_for_drain_event(stream, conn)) {
+        if (!h2_wait_for_drain_event(stream, conn, timeout_ms)) {
             return false;
         }
 
@@ -1696,7 +1708,7 @@ static int h2_stream_append_chunk(void *ctx, zend_string *chunk,
         return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
-    if (!h2_stream_wait_for_room(stream, conn, max_bytes)) {
+    if (!h2_stream_wait_for_room(stream, conn, max_bytes, 0)) {
         zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -1827,8 +1839,6 @@ static bool h2_stream_wait_writable(void *ctx, const uint32_t timeout_ms)
 {
     http2_stream_t *stream = (http2_stream_t *)ctx;
 
-    (void)timeout_ms;   /* the drain wait uses conn->write_timeout_ms */
-
     http_connection_t *conn = http2_session_get_conn(stream->session);
 
     if (conn == NULL) {
@@ -1839,7 +1849,7 @@ static bool h2_stream_wait_writable(void *ctx, const uint32_t timeout_ms)
                              ? http_server_get_stream_write_buffer_bytes(conn->server)
                              : 0;
 
-    return h2_stream_wait_for_room(stream, conn, max_bytes);
+    return h2_stream_wait_for_room(stream, conn, max_bytes, timeout_ms);
 }
 
 const http_response_stream_ops_t h2_stream_ops = {

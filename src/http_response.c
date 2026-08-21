@@ -915,7 +915,7 @@ static bool response_has_buffered_body(const http_response_object *response)
  * cannot drift apart. Returns true after throwing; `method` names the caller
  * in the message. */
 static bool response_check_stream_usable(const http_response_object *response,
-                                         const char *method)
+                                         const char *method, const bool emits)
 {
     if (response->closed) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
@@ -923,7 +923,10 @@ static bool response_check_stream_usable(const http_response_object *response,
         return true;
     }
 
-    if (response->sse_mode) {
+    /* SSE owns the framing, so a call that would put its own bytes on the wire
+     * is refused. One that only waits is not: an SSE handler refused by
+     * trySseEvent() has nowhere else to wait for room. */
+    if (response->sse_mode && emits) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Response is in SSE mode — use sseEvent()/sseComment() instead of %s()", method);
         return true;
@@ -945,8 +948,9 @@ static bool response_check_stream_usable(const http_response_object *response,
 
     /* A buffered body leaves at end() and the streaming path never reads it,
      * so the two modes are exclusive. response_check_closed() refuses the
-     * other direction; this is the same refusal from this side. */
-    if (response_has_buffered_body(response)) {
+     * other direction; this is the same refusal from this side. A call that
+     * only waits discards nothing, so it is not refused here either. */
+    if (emits && response_has_buffered_body(response)) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Response already has a buffered body — %s() would discard it. "
             "Choose one mode: setBody()/appendBody() or %s()", method, method);
@@ -998,7 +1002,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_stream_usable(response, "write")) {
+    if (response_check_stream_usable(response, "write", true)) {
         return;
     }
 
@@ -1047,9 +1051,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
  *
  * HTTP/1 neither refuses nor returns promptly: it keeps no queue of its own,
  * so the kernel socket buffer is the queue, and an accepted chunk waits on the
- * socket for as long as a blocking write() would. Issue #179 gives the
- * connection its own outbound queue, after which both halves hold under this
- * same signature. */
+ * socket for as long as a blocking write() would. Its depth is not readable
+ * portably, so the exception is documented rather than closed — the cost of a
+ * chunk was measured instead, in dev/BENCHMARKS.md. */
 ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
 {
     zend_string *chunk;
@@ -1060,7 +1064,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_stream_usable(response, "tryWrite")) {
+    if (response_check_stream_usable(response, "tryWrite", true)) {
         return;
     }
 
@@ -1081,9 +1085,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
      * what encodes the chunk, and the transport emits headers from inside.
      * No transport can refuse a first offer — each opens its queue on that
      * call and answers "room" while the queue is absent — so a refusal never
-     * arrives with the response still uncommitted. #179 is where that stops
-     * being true, and where a refusal will have to unwind the commit and the
-     * wrapper together. */
+     * arrives with the response still uncommitted. A transport that ever
+     * refuses a first offer would have to unwind the commit and the wrapper
+     * together. */
     http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
 
     zend_string_addref(chunk);
@@ -1139,7 +1143,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable)
 
     http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
 
-    if (response_check_stream_usable(response, "awaitWritable")) {
+    if (response_check_stream_usable(response, "awaitWritable", false)) {
         return;
     }
 
@@ -1237,37 +1241,20 @@ ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding)
 }
 /* }}} */
 
-/* {{{ proto HttpResponse::writeMessage(string $message): static
- * Stream one gRPC length-prefixed message; first call commits, like write().
- * Compressed automatically when setGrpcEncoding('gzip') was declared. */
-ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
+/* A gRPC message is bytes of this response's own framing, so it answers to the
+ * same guards as write(): closed, sealed by sendFile(), detached, already
+ * framed as SSE, or holding a buffered body it would discard. @p method names
+ * the caller in the exception text. Throws and answers false. */
+static bool grpc_message_streamable(const http_response_object *response, const char *method)
 {
-    zend_string *message;
+    return !response_check_stream_usable(response, method, true);
+}
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_STR(message)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
-
-    if (response->closed) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response already closed — cannot writeMessage() after end()", 0);
-        return;
-    }
-
-    if (response->send_file_req != NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response is sealed by sendFile() — no further mutation allowed", 0);
-        return;
-    }
-
-    if (response->stream_ops == NULL) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Response streaming is not available on this response", 0);
-        return;
-    }
-
+/* Frame one message for the gRPC wire: compress it when an encoding was
+ * declared, prepend the five-byte length prefix, and base64 the frame under
+ * grpc-web-text. Returns a fresh reference, which append_chunk consumes. */
+static zend_string *grpc_message_frame(http_response_object *response, zend_string *message)
+{
     zend_string *payload = message;
     bool         gzipped = false;
 
@@ -1285,13 +1272,6 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
     }
 #endif
 
-    if (!response->streaming) {
-        response->streaming = true;
-        response->committed = true;
-        response->headers_sent = true;
-    }
-
-    /* append_chunk consumes the ref */
     zend_string *framed = grpc_frame_message(
         ZSTR_VAL(payload), ZSTR_LEN(payload), gzipped);
 
@@ -1308,8 +1288,41 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         framed = b64;
     }
 
+    return framed;
+}
+
+/* The first message switches the response into streaming mode at the PHP
+ * boundary; the protocol header commit happens inside append_chunk. */
+static void grpc_message_begin_stream(http_response_object *response)
+{
+    if (!response->streaming) {
+        response->streaming = true;
+        response->committed = true;
+        response->headers_sent = true;
+    }
+}
+
+/* {{{ proto HttpResponse::writeMessage(string $message): static
+ * Stream one gRPC length-prefixed message; first call commits, like write().
+ * Compressed automatically when setGrpcEncoding('gzip') was declared. */
+ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
+{
+    zend_string *message;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (!grpc_message_streamable(response, "writeMessage")) {
+        return;
+    }
+
+    grpc_message_begin_stream(response);
+
     const int rc = response->stream_ops->append_chunk(
-        response->stream_ctx, framed, false);
+        response->stream_ctx, grpc_message_frame(response, message), false);
 
     if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
         zend_throw_exception_ex(http_exception_ce, 499,
@@ -1317,9 +1330,46 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
-    (void)rc;
-
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::tryWriteMessage(string $message): bool */
+ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
+{
+    zend_string *message;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_response_object *response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+    if (!grpc_message_streamable(response, "tryWriteMessage")) {
+        return;
+    }
+
+    /* Dead peer first, so false carries one meaning only — the queue is full. */
+    if (response->stream_ops->is_alive != NULL
+        && !response->stream_ops->is_alive(response->stream_ctx)) {
+        zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+        return;
+    }
+
+    grpc_message_begin_stream(response);
+
+    const int rc = response->stream_ops->append_chunk(
+        response->stream_ctx, grpc_message_frame(response, message), true);
+
+    if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
+        if (EXPECTED(EG(exception) == NULL)) {
+            zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+        }
+
+        return;
+    }
+
+    RETURN_BOOL(rc != HTTP_STREAM_APPEND_BACKPRESSURE);
 }
 /* }}} */
 

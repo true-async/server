@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpResponse.php.stub.php instead.
- * Stub hash: a589c1d891e3c758c66b880fa5f28accb295a2dc */
+ * Stub hash: e1d2d752d815f089981eb99ad6776d5e97d06fa5 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpResponse___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -80,6 +80,10 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_wri
 	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_tryWriteMessage, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sendable, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
@@ -128,6 +132,13 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sse
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, retry, IS_LONG, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_trySseEvent, 0, 0, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, data, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, event, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, id, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, retry, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpResponse_sseComment, 0, 0, IS_STATIC, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, text, IS_STRING, 0, "\"\"")
 ZEND_END_ARG_INFO()
@@ -165,6 +176,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite);
 ZEND_METHOD(TrueAsync_HttpResponse, awaitWritable);
 ZEND_METHOD(TrueAsync_HttpResponse, setGrpcEncoding);
 ZEND_METHOD(TrueAsync_HttpResponse, writeMessage);
+ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage);
 ZEND_METHOD(TrueAsync_HttpResponse, sendable);
 ZEND_METHOD(TrueAsync_HttpResponse, setNoCompression);
 ZEND_METHOD(TrueAsync_HttpResponse, getBody);
@@ -177,6 +189,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, end);
 ZEND_METHOD(TrueAsync_HttpResponse, sendFile);
 ZEND_METHOD(TrueAsync_HttpResponse, sseStart);
 ZEND_METHOD(TrueAsync_HttpResponse, sseEvent);
+ZEND_METHOD(TrueAsync_HttpResponse, trySseEvent);
 ZEND_METHOD(TrueAsync_HttpResponse, sseComment);
 ZEND_METHOD(TrueAsync_HttpResponse, sseRetry);
 ZEND_METHOD(TrueAsync_HttpResponse, isHeadersSent);
@@ -207,6 +220,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, awaitWritable, arginfo_class_TrueAsync_HttpResponse_awaitWritable, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setGrpcEncoding, arginfo_class_TrueAsync_HttpResponse_setGrpcEncoding, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, writeMessage, arginfo_class_TrueAsync_HttpResponse_writeMessage, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, tryWriteMessage, arginfo_class_TrueAsync_HttpResponse_tryWriteMessage, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sendable, arginfo_class_TrueAsync_HttpResponse_sendable, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, setNoCompression, arginfo_class_TrueAsync_HttpResponse_setNoCompression, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, getBody, arginfo_class_TrueAsync_HttpResponse_getBody, ZEND_ACC_PUBLIC)
@@ -219,6 +233,7 @@ static const zend_function_entry class_TrueAsync_HttpResponse_methods[] = {
 	ZEND_ME(TrueAsync_HttpResponse, sendFile, arginfo_class_TrueAsync_HttpResponse_sendFile, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseStart, arginfo_class_TrueAsync_HttpResponse_sseStart, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseEvent, arginfo_class_TrueAsync_HttpResponse_sseEvent, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpResponse, trySseEvent, arginfo_class_TrueAsync_HttpResponse_trySseEvent, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseComment, arginfo_class_TrueAsync_HttpResponse_sseComment, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, sseRetry, arginfo_class_TrueAsync_HttpResponse_sseRetry, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpResponse, isHeadersSent, arginfo_class_TrueAsync_HttpResponse_isHeadersSent, ZEND_ACC_PUBLIC)

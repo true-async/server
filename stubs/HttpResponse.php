@@ -183,8 +183,7 @@ final class HttpResponse
      * the socket for as long as a blocking write() would — up to the write
      * timeout. A handler
      * that must not be parked has to check getProtocolVersion(). Over HTTP/2,
-     * HTTP/3 and the worker pool neither happens. Issue #179 removes the
-     * exception.
+     * HTTP/3 and the worker pool neither happens.
      */
     public function tryWrite(string $chunk): bool {}
 
@@ -201,9 +200,10 @@ final class HttpResponse
      * A timeout or a cancellation arrives as an exception; false after a wait
      * means the queue is still full.
      *
-     * @param int|null $timeoutMs Milliseconds to wait; null leaves the deadline
-     *                            to the transport, which uses the connection's
-     *                            write timeout.
+     * @param int|null $timeoutMs Milliseconds to wait. The shorter of this and
+     *                            the connection's write timeout bounds the
+     *                            wait; null leaves that timeout as the only
+     *                            bound.
      */
     public function awaitWritable(?int $timeoutMs = null): bool {}
 
@@ -237,6 +237,22 @@ final class HttpResponse
      * @return static
      */
     public function writeMessage(string $message): static {}
+
+    /**
+     * Frame and stream one gRPC message without waiting for room.
+     *
+     * The non-blocking twin of writeMessage(): the same framing, the same
+     * declared grpc-encoding, the same switch into streaming mode on the first
+     * call. False means the outbound queue is full — nothing was queued and no
+     * header was committed, so the same message may be offered again. A peer
+     * that is gone throws the 499 exception instead, as tryWrite() does.
+     *
+     * HTTP/1 never refuses: it keeps no queue of its own, so an accepted
+     * message waits for the socket as a blocking one would.
+     *
+     * @param string $message Protobuf-encoded message bytes.
+     */
+    public function tryWriteMessage(string $message): bool {}
 
     /**
      * Removed. One bool answered four questions, and a loop that read it as
@@ -429,6 +445,31 @@ final class HttpResponse
         ?string $id = null,
         ?int $retry = null
     ): static {}
+
+    /**
+     * Dispatch one SSE event without waiting for room.
+     *
+     * The non-blocking twin of sseEvent(): the same record, the same field
+     * validation, the same start of the stream on the first call. False means
+     * the outbound queue is full — the record was not queued and no header was
+     * committed, so the same event may be offered again. A peer that is gone
+     * throws the 499 exception instead, as tryWrite() does. All four arguments
+     * null is a no-op and answers true.
+     *
+     * HTTP/1 never refuses: it keeps no queue of its own, so an accepted record
+     * waits for the socket as a blocking one would.
+     *
+     * @param string|null $data  Message payload. Multiline strings are split.
+     * @param string|null $event Event name (matched by addEventListener()).
+     * @param string|null $id    Event id — echoed as Last-Event-ID on reconnect.
+     * @param int|null    $retry Reconnect delay hint in milliseconds.
+     */
+    public function trySseEvent(
+        ?string $data = null,
+        ?string $event = null,
+        ?string $id = null,
+        ?int $retry = null
+    ): bool {}
 
     /**
      * Send an SSE comment line (a record beginning with `:`).
