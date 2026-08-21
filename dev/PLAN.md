@@ -517,18 +517,26 @@ it and expects a tag within days.
   next shape to try is handing the count to the flatten loop as an extra entry
   instead of through the table.
 
-- [ ] **An aborted request is logged and counted as the status it committed.**
-  `http_request_telemetry` reads `http_response_get_status()`, which is the 200 the
-  handler put on the wire before it failed, so a truncated body reads as complete
-  in `requests_2xx_total` and in the access log — the same defect #171 fixed one
-  layer down. Deliberately left out of #171: the access-log record is a
-  user-visible format and deserves its own decision rather than a silent column.
-  `core/027`, `h2/051` and `h3/051` pin the shapes it would change. The same
-  record has a second wrong column, found by the state critic on the #197 diff:
-  `rec->response_size` reads the buffered body, so a 204 or a `HEAD` whose body
-  was dropped is logged with the count of bytes that never left, and every
-  streamed response is logged with zero while `written_length` holds the real
-  number.
+- [x] **#204 — an aborted request is logged and counted as the status it
+  committed.** Answered by looking at what other servers do rather than by
+  taste: nginx keeps `$status` and reports completion in `$request_completion`,
+  Apache in `%X`, Envoy in `%RESPONSE_FLAGS%`, HAProxy in `termination_state`.
+  None substitutes the status, so ours stays what the peer was told. The record
+  is OTel Logs with semconv names, so the marker needed no invented key —
+  `error.type` is conditionally required exactly when a request ends in an error
+  and forbidden when it does not. `responses_aborted_total` joins the counter
+  table, overlapping the four status buckets rather than joining them.
+
+  The second column went with it. `written_length` turned out to count only a
+  declared stream's bytes — the reserve was below the `declared < 0` return — so
+  the plan's claim that it "holds the real number" was true for one case in two.
+  It now counts every chunk, the audit still reads it only against a
+  declaration, and `http.response.body.size` reports it. Evidence: `core/066`
+  fails against `main` on all four of its lines, including a 204 logged with the
+  four bytes the wire dropped. Not addressed: a `sendFile()` body never passes
+  the response object, so its size stays 0, and a compressed stream reports what
+  the handler wrote rather than the octets on the wire.
+
 - [~] **Migration.** The CHANGELOG entries are written (#180, five bullets covering
   the seven renames, plus #181 under Fixed). What is left is laravel-spawn, and it
   is five call sites rather than the two this plan assumed: `send()` → `write()`

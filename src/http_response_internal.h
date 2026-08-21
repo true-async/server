@@ -53,9 +53,11 @@ typedef struct {
      * (identity, not chunked) and the audit below. */
     int64_t          declared_length;
 
-    /* Body bytes promised to the transport. Reserved before the chunk is
-     * handed over, because every transport suspends inside append_chunk and a
-     * second writer would otherwise read a count that is about to change. */
+    /* Body bytes promised to the transport, declaration or not: the audit
+     * above reads it against a declaration, the access log reports it.
+     * Reserved before the chunk is handed over, because every transport
+     * suspends inside append_chunk and a second writer would otherwise read a
+     * count that is about to change; given back when nothing was queued. */
     uint64_t         written_length;
 
     /* Connection info (for sending). SOCK_ERR if not connected. */

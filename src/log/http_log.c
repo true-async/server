@@ -2207,7 +2207,7 @@ void http_log_emit_access(http_log_state_t *state, const http_access_rec_t *ar)
 
     /* Stable OTel HTTP semconv names (v1.23+). The envelope is OTel Logs, so
      * the attributes have to be too — a collector keys off these exact names. */
-    http_log_attr_t attrs[9];
+    http_log_attr_t attrs[10];
     size_t n = 0;
 
     attrs[n++] = (http_log_attr_t){ .key = "http.request.method",
@@ -2224,6 +2224,12 @@ void http_log_emit_access(http_log_state_t *state, const http_access_rec_t *ar)
     attrs[n++] = (http_log_attr_t){ .key = "http.response.status_code",
                                     .type = HTTP_LOG_ATTR_I64,
                                     .v.i64 = ar->status };
+
+    if (ar->error_type != NULL) {
+        attrs[n++] = (http_log_attr_t){ .key = "error.type",
+                                        .type = HTTP_LOG_ATTR_STR,
+                                        .v.s = ar->error_type };
+    }
 
     if (ar->protocol_version != NULL) {
         attrs[n++] = (http_log_attr_t){ .key = "network.protocol.version",

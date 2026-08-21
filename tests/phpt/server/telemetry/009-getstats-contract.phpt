@@ -30,6 +30,7 @@ $expected = [
     'tls_bytes_ciphertext_in_total', 'tls_bytes_ciphertext_out_total',
     'total_requests',
     'responses_2xx_total', 'responses_3xx_total', 'responses_4xx_total', 'responses_5xx_total',
+    'responses_aborted_total',
     'conns_active_h1', 'conns_active_h2', 'conns_active_h3',
     'log_records_dropped_total',
     'static_zero_coroutine_total', 'static_cache_hits_total', 'static_cache_misses_total',

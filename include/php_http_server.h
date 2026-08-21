@@ -903,6 +903,11 @@ typedef struct {
     uint64_t responses_4xx_total;
     uint64_t responses_5xx_total;
 
+    /* Responses disowned mid-body by abort() or by an uncaught exception.
+     * Overlaps the four buckets rather than joining them: the status counted
+     * above is the one the peer was told. */
+    uint64_t responses_aborted_total;
+
     /* Active-connection gauge split by negotiated protocol (++ once the
      * protocol is detected / on H3 conn open, -- at conn close). Sum of
      * the three tracks the protocol-agnostic active_connections. */
@@ -983,6 +988,7 @@ typedef struct {
     X(responses_3xx_total,                   SUM)           \
     X(responses_4xx_total,                   SUM)           \
     X(responses_5xx_total,                   SUM)           \
+    X(responses_aborted_total,               SUM)           \
     X(conns_active_h1,                       GAUGE)         \
     X(conns_active_h2,                       GAUGE)         \
     X(conns_active_h3,                       GAUGE)         \
@@ -1406,6 +1412,16 @@ void http_response_set_protocol_version(zend_object *obj, const char *version);
  * known. */
 void http_response_set_head(zend_object *obj, bool is_head);
 bool http_response_is_closed(zend_object *obj);
+
+/* Whether the body was disowned mid-flight — abort(), or the dispose path
+ * answering an uncaught exception. The status it had already committed stands:
+ * that is what the peer was told. */
+bool http_response_is_aborted(zend_object *obj);
+
+/* Body bytes handed to the transport: what a stream wrote, or a buffered body
+ * where the message carries one. A `sendFile()` body passes the object
+ * altogether and counts 0. */
+uint64_t http_response_get_sent_body_size(zend_object *obj);
 
 /* HTTP/2 strategy uses these to build frames without going through
  * the HTTP/1 text formatter. Headers HashTable is name → array(zval

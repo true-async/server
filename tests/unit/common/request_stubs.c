@@ -22,6 +22,18 @@ int http_response_get_status(zend_object *obj)
 	abort();
 }
 
+bool http_response_is_aborted(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}
+
+uint64_t http_response_get_sent_body_size(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}
+
 size_t http_response_get_body_len(zend_object *obj)
 {
 	(void) obj;
