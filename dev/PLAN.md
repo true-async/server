@@ -92,8 +92,19 @@ it and expects a tag within days.
 
   **HTTP/1 is the open exception**: it keeps no queue of its own, so it never
   refuses and an accepted chunk waits for the socket. Two ways to close it were
-  tried and rejected — see below. The twins (`trySseEvent`, `tryWriteMessage`)
-  wait for that to settle.
+  tried and rejected — see below, and the measurement that closed the argument is
+  in `dev/BENCHMARKS.md`.
+- [ ] **The dialect twins: `trySseEvent()` and `tryWriteMessage()`.** The idiom is
+  half-applied while `tryWrite()` has a non-blocking form and the two dialects do
+  not. Shape: one static helper per dialect carries the formatting and the guards,
+  and the blocking and non-blocking entry points differ only in the flag they pass
+  to `append_chunk` — `sseEvent()` and `writeMessage()` move onto it rather than
+  keeping a second copy. Both new methods answer `bool` on the `tryWrite()`
+  contract: false means nothing was queued and no header was committed, a dead peer
+  is still the 499 exception, and HTTP/1 never refuses because it has no queue to
+  refuse from. Evidence to produce: phpt on H1 and H2 that a refusal leaves the wire
+  untouched, that the bytes match the blocking twin, and that the peer's death still
+  throws; `docs/USAGE.md` §3.5 and a CHANGELOG entry.
 - [ ] **Framing by declared length.** A `Content-Length` set before the first
   `write()` reaches the client verbatim on every protocol, and the server becomes
   the auditor: excess throws at the offending write, a shortfall aborts the stream
