@@ -1418,10 +1418,16 @@ bool http_response_is_closed(zend_object *obj);
  * that is what the peer was told. */
 bool http_response_is_aborted(zend_object *obj);
 
-/* Body bytes handed to the transport: what a stream wrote, or a buffered body
- * where the message carries one. A `sendFile()` body passes the object
- * altogether and counts 0. */
+/* Octets of the body that reached the peer: what a transport reported through
+ * http_response_add_sent_bytes, else what a stream wrote, else a buffered body
+ * where the message carries one. */
 uint64_t http_response_get_sent_body_size(zend_object *obj);
+
+/* Report octets this response put on the wire, for a transport whose count the
+ * response cannot derive: a codec re-sizes every chunk, a file pump never
+ * passes its bytes through the object. Additive, and the first call is what
+ * switches the access log onto the reported number. */
+void http_response_add_sent_bytes(zend_object *obj, uint64_t bytes);
 
 /* HTTP/2 strategy uses these to build frames without going through
  * the HTTP/1 text formatter. Headers HashTable is name → array(zval

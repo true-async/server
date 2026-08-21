@@ -2187,6 +2187,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->stream_ctx = NULL;
     response->declared_length = -1;
     response->written_length = 0;
+    response->transport_body_size = -1;
     response->compression_state = NULL;
     response->default_json_flags = 0;
     response->send_file_req = NULL;

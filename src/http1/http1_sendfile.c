@@ -79,6 +79,10 @@ typedef enum {
 typedef struct {
     http_connection_t       *conn;
 
+    /* Borrowed: the response outlives this chain, which finishes inside the
+     * dispose that reads it. Held so the bytes sent can be reported back. */
+    zend_object             *response_obj;
+
     /* Body source. NULL when caller passed file_io == NULL (head-only
      * inline-body responses). Disposed by this module — never by the
      * caller — once the chain finalizes. */
@@ -220,6 +224,10 @@ static void h1_send_finalize(h1_send_state_t *state)
 
     state->phase = H1_SEND_PHASE_DONE;
 
+    if (state->response_obj != NULL && state->bytes_sent > 0) {
+        http_response_add_sent_bytes(state->response_obj, state->bytes_sent);
+    }
+
     /* Uncork before tearing down so the kernel flushes whatever's left
      * (typically the trailing chunk of the sendfile body). Issued
      * unconditionally — TCP_CORK off is a no-op on a non-corked socket
@@ -282,6 +290,13 @@ static void h1_send_dispatch(zend_async_event_t *event,
         }
 
         state->pending_req = NULL;
+
+        /* The kernel path moves the whole slice in one op and had no reason to
+         * count until the access log needed the number; the TLS path below
+         * keeps its own count chunk by chunk. */
+        if (req->transferred > 0) {
+            state->bytes_sent += (uint64_t)req->transferred;
+        }
 
         if (req->dispose != NULL) {
             req->dispose(req);
@@ -512,6 +527,7 @@ int h1_stream_send_static_response(void *ctx_void,
 
     h1_send_state_t *state = ecalloc(1, sizeof(*state));
     state->conn = conn;
+    state->response_obj = response_obj;
     state->file_io = file_io;
     state->body_offset = body_offset;
     state->body_length = body_length;

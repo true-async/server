@@ -148,6 +148,10 @@ struct h2_static_state_s {
     http2_session_t             *session;
     http_connection_t           *conn;
 
+    /* Borrowed: the response outlives this chain, which finishes inside the
+     * dispose that reads it. Held so the bytes sent can be reported back. */
+    zend_object                 *response_obj;
+
     zend_async_io_t             *file_io;     /* owned; disposed on finalize */
     uint64_t                     body_offset;
     uint64_t                     body_length;
@@ -424,6 +428,10 @@ static void h2_static_finalize(h2_static_state_t *state, const int status)
     /* Unlink from the throttled list FIRST — kick_all may be walking
      * it via account_free triggered by a concurrent stream release. */
     h2_static_throttle_unlink(state);
+
+    if (state->response_obj != NULL && state->bytes_read > 0) {
+        http_response_add_sent_bytes(state->response_obj, state->bytes_read);
+    }
 
     if (state->cb != NULL && state->file_io != NULL) {
         (void)state->file_io->event.del_callback(&state->file_io->event,
@@ -891,8 +899,9 @@ int h2_stream_send_static_response(void *ctx,
         state = ecalloc(1, sizeof(*state));
         active_static_streams++;
             state->stream      = stream;
-        state->session     = stream->session;
-        state->conn        = conn;
+        state->session      = stream->session;
+        state->conn         = conn;
+        state->response_obj = response_obj;
         state->file_io     = file_io;
         state->body_offset = body_offset;
         state->body_length = body_length;

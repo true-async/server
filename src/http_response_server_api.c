@@ -164,9 +164,24 @@ static bool response_body_reaches_peer(const http_response_object *response)
         && response_status_carries_body(response->status_code);
 }
 
+void http_response_add_sent_bytes(zend_object *obj, const uint64_t bytes)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    if (response->transport_body_size < 0) {
+        response->transport_body_size = 0;
+    }
+
+    response->transport_body_size += (int64_t)bytes;
+}
+
 uint64_t http_response_get_sent_body_size(zend_object *obj)
 {
     const http_response_object *response = http_response_from_obj(obj);
+
+    if (response->transport_body_size >= 0) {
+        return (uint64_t)response->transport_body_size;
+    }
 
     if (response->streaming) {
         return response->written_length;
