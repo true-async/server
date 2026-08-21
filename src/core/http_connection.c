@@ -1491,25 +1491,12 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
 
 /* {{{ http_connection_send_str_owned
  *
- * Fire-and-forget plaintext send: transfer ownership of @p body to the
- * reactor. Returns immediately after submit; the buffer is released
- * when libuv reports completion (success or error), without parking
- * the calling coroutine. Hot path for the HTTP/1 dispose flow — avoids
- * the suspend/resume cycle around uv_try_write that absorbs the whole
- * payload inline in the steady state.
- *
- * On submit failure the body is released here. On any kernel-level
- * write error, the io is closed by libuv and the next read attempt on
- * this conn surfaces the failure to the read FSM, which tears the
- * connection down — the just-finished handler does not need to know.
+ * One-slot http_connection_send_strv_owned: transfer ownership of @p body and
+ * return without parking the calling coroutine. On a kernel-level write error
+ * libuv closes the io and the next read surfaces the failure to the read FSM,
+ * which tears the connection down — the just-finished handler does not need to
+ * know.
  */
-static void http1_send_release_zstr_cb(void *data, zend_async_io_t *io)
-{
-    (void)io;
-    zend_string *str = (zend_string *)((char *)data - offsetof(zend_string, val));
-    zend_string_release(str);
-}
-
 /* Batched fire-and-forget: amortises N back-to-back writes to one
  * socket into a single in-flight uv_write + a growing pending buffer.
  *
@@ -1901,33 +1888,46 @@ bool http_connection_send_str_owned(http_connection_t *conn, zend_string *body)
         return false;
     }
 
-    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(conn->io,
-                                                     ZSTR_VAL(body),
-                                                     ZSTR_LEN(body),
-                                                     http1_send_release_zstr_cb);
-
-    if (UNEXPECTED(req == NULL)) {
-        /* libuv_io_req_dispose ran free_cb on the partially-built req
-         * and the body was released there. Caller must not touch body. */
-        http_absorb_io_submission_exception(conn, __func__);
-        return false;
-    }
-    /* Caller does not await, does not dispose. The completion callback
-     * (io_pipe_write_cb) frees the body and disposes the req. */
-    return true;
+    return http_connection_send_strv_owned(conn, &body, 1);
 }
 /* }}} */
 
 /* {{{ http_connection_send_strv_owned
  *
- * Vectored fire-and-forget plaintext send. Each slot of @p bufs is an
- * OWNED zend_string reference; ZEND_ASYNC_IO_WRITEV consumes one ref per
- * slot on completion. Used for the HTTP/1 dispose hot path where
- * headers and body live in two separate zend_strings — saves one
- * emalloc + memcpy that http_response_format would otherwise spend
+ * Vectored fire-and-forget plaintext send. Each slot of @p bufs is an OWNED
+ * zend_string reference, released once the write ends. Used for the HTTP/1
+ * dispose hot path where headers and body live in two separate zend_strings —
+ * saves one emalloc + memcpy that http_response_format would otherwise spend
  * concatenating them. TLS path stays on the single-buffer
  * http_connection_send (encryption ring needs a contiguous payload).
+ *
+ * Submitted through http_connection_send_batched_writev rather than at the io,
+ * so it queues behind a write already in flight instead of overtaking it and
+ * the tail waiting on it. A pipelined client reads responses in the order they
+ * arrive (RFC 9112 §9.3.1), so an overtaking write hands it another request's
+ * body.
  */
+/* The slots an owned-buffer send holds until its write completes. Carried as
+ * the writev user data so the release happens once, wherever the send ends:
+ * the reactor's completion, a submit failure, or the coalesce path that copied
+ * the bytes and no longer needs them. */
+typedef struct {
+    unsigned      count;
+    zend_string  *slots[1];   /* over-allocated to count */
+} h1_owned_slots_t;
+
+static void h1_owned_slots_release(void *user_data, zend_async_io_t *io)
+{
+    (void)io;
+    h1_owned_slots_t *const held = (h1_owned_slots_t *)user_data;
+
+    for (unsigned i = 0; i < held->count; i++) {
+        zend_string_release(held->slots[i]);
+    }
+
+    efree(held);
+}
+
 bool http_connection_send_strv_owned(http_connection_t *conn,
                                      zend_string * const *bufs, unsigned nbufs)
 {
@@ -1943,15 +1943,23 @@ bool http_connection_send_strv_owned(http_connection_t *conn,
         return false;
     }
 
-    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV(conn->io, bufs, nbufs);
+    zend_async_buf_t *const iov = emalloc(nbufs * sizeof(*iov));
+    h1_owned_slots_t *const held =
+        emalloc(offsetof(h1_owned_slots_t, slots) + nbufs * sizeof(zend_string *));
 
-    if (UNEXPECTED(req == NULL)) {
-        /* Reactor already released every slot on submit failure. */
-        http_absorb_io_submission_exception(conn, __func__);
-        return false;
+    held->count = nbufs;
+
+    for (unsigned i = 0; i < nbufs; i++) {
+        held->slots[i] = bufs[i];
+        iov[i].base    = ZSTR_VAL(bufs[i]);
+        iov[i].len     = ZSTR_LEN(bufs[i]);
     }
 
-    return true;
+    const bool sent = http_connection_send_batched_writev(
+        conn, iov, nbufs, h1_owned_slots_release, held);
+
+    efree(iov);
+    return sent;
 }
 /* }}} */
 

@@ -675,15 +675,14 @@ designs were worked out and both fail on something mechanical.
   not support is the queue: "the win is reachable without a queue, without an
   ordering hazard between two writers and without a per-response structure".
 
-  What is left of the step is one thing it listed as a prerequisite and which
-  stands on its own: two writers reach the socket without consulting the pending
-  tail. `http_connection_send_strv_owned` submits `ZEND_ASYNC_IO_WRITEV` straight
-  at `conn->io` (`http_connection.c:1946`), and `http_connection_emit_parse_error`
-  falls back to a direct synchronous write in the plaintext read callback
-  (`:2110`). Whether either can overtake a real pending tail is unproven —
-  `out_pending_buf` is exercised by WebSocket, and an upgraded connection no
-  longer runs the HTTP/1 dispose that uses the first. Establish the path before
-  filing it as a defect.
+  What was left of the step was one thing it listed as a prerequisite: two
+  writers reach the socket without consulting the pending tail. The path was
+  established the same day and turned out to need no WebSocket at all — the
+  HTTP/1 dispose itself uses both senders, picking by body size, so three
+  pipelined requests answered small, small, large came back 1, 3, 2. Filed and
+  fixed as #209. `http_connection_emit_parse_error` still bypasses the tail with
+  a direct `send(2)`, and stays that way: it retires the connection in the same
+  breath, and its bypass is documented against a race with the close.
 - [ ] **#179 — one serialized outbound path per HTTP/1 connection.** What the
   measurement leaves it: a non-blocking `tryWrite()` on HTTP/1, which
   `dev/BENCHMARKS.md` says "has to be argued on its own; this measurement does
