@@ -22,7 +22,7 @@ a test that fails without it, a measurement, or both. Issue numbers point at
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
   (YanGusik/laravel-spawn#57). Remove it once a build with the flush is in use, and
   re-measure the CSV timeline from the issue.
-- [x] **#171 — a streaming response cannot be aborted.** A body truncated by an
+- [x] **#171 — a streaming response cannot be aborted.** Merged as PR 193 (`cf1c708`). A body truncated by an
   exception read as complete on the wire. `abort` is an op on
   `http_response_stream_ops_t` answering `bool`, and the answer carries the
   distinction the design first missed: false means the transport has not put a
@@ -174,7 +174,8 @@ it and expects a tag within days.
   the stream before probing the peer, so a 499 left the response committed and the handler
   could not answer with a status. And `awaitWritable($timeoutMs)` documented a deadline no
   transport read: HTTP/2 now waits the shorter of it and the connection's write timeout.
-- [x] **Framing by declared length.** A `Content-Length` set before the first
+- [x] **Framing by declared length.** Merged as PR 195 (`d44e749`), two commits:
+  the step, and the answer to its review. A `Content-Length` set before the first
   `write()` reaches the client verbatim on every protocol, and the server becomes
   the auditor: excess throws at the offending write, a shortfall aborts the stream
   at `end()` instead of finishing cleanly under a header that lies. Compression is
