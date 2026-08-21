@@ -2822,12 +2822,12 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         (ctx->request != NULL && ctx->request->end_ns != 0)
             ? ctx->request->end_ns : zend_hrtime();
 
-    /* A streaming response settled all of this when it committed its header
-     * block — that was its only chance to tell the peer — and asked the drain
-     * evaluator its one question there. Asking again would advance the
-     * evaluator's per-connection state a second time for one request, and set
-     * a header on bytes that have already left. */
-    if (!ctx->h1_stream_headers_sent) {
+    /* A streaming response settles all of this where it builds its header
+     * block, which is its only chance to tell the peer — at the first write(),
+     * or in the finisher below when the handler wrote nothing. Asking here as
+     * well would advance the drain evaluator's per-connection state twice for
+     * one request, and set a header on bytes that may already have left. */
+    if (!http_response_is_streaming(Z_OBJ(ctx->response_zv))) {
         if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
             http_response_force_connection_close(Z_OBJ(ctx->response_zv));
             conn->keep_alive = false;
