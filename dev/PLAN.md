@@ -266,7 +266,9 @@ it and expects a tag within days.
   from. Each finding is fixed above or an open step below.
 
 - [x] **#197 — an HTTP/1 message carries the body its status and method allow,
-  framed the way the request can read.** The step opened as one defect and the
+  framed the way the request can read.** Merged as PR 199 (`6892b97`), eleven
+  commits: three for the step, six answering two rounds of critic review, one
+  for a pass over every comment it adds. The step opened as one defect and the
   critics turned it into six, all of the same shape: the response frames itself
   from the declaration alone and reads neither the request version, nor the
   method, nor its own status.
@@ -455,7 +457,8 @@ it and expects a tag within days.
   connection today, so close-delimited framing changes no byte of that path.
 
 - [x] **#198 — an exception message reached the HTTP/1 status line unfiltered.**
-  Found while reading `emit_status_line` for the step above. A CRLF in the
+  Merged in the same PR 199. Found while reading `emit_status_line` for the step
+  above. A CRLF in the
   message ended the status line, so the bytes behind it were read as header
   fields and, past a blank line, as a second response (CWE-113) — reachable from
   any handler that puts request data into an exception message, and from
@@ -472,8 +475,21 @@ it and expects a tag within days.
   policies; the CHANGELOG claim that no path sent the echo before #197 was
   wrong because of this one.
 
-- [ ] **HTTP/2 and HTTP/3 strip `Content-Length` from every response, `HEAD`
-  and static files included.** `http_response_header_allowed_h2h3` drops the name
+- [ ] **#200 — HTTP/2 and HTTP/3 strip `Content-Length` from every response,
+  `HEAD` and static files included.** Filed with the reading behind it. What the
+  reading changed: the step is not four `false` arguments to flip. Nothing on
+  the response side of HTTP/2 or HTTP/3 computes a length at all — every
+  `content-length` in `http2_session.c` and `http3_callbacks.c` is the
+  request's — so the only route to the wire is the handler's own value, and
+  forwarding one nobody checked is a malformed message under RFC 9113 §8.1.1
+  that nghttp2 answers with a stream error. Each path has to state a count it
+  knows, the way HTTP/1 has since #195 and #197: `body_len` on the buffered
+  paths, the file size or range length on `sendFile()`, none on an undeclared
+  stream. **Open question for Edmond**, and the reason no code is written: does
+  every buffered HTTP/2 response gain the field, or only the two that answer a
+  question the framing cannot — `HEAD` and `sendFile()`? The first is even and
+  matches HTTP/1; the second leaves the shape of every other response alone,
+  and `h3/019`'s `header_count=71` is what moves either way. `http_response_header_allowed_h2h3` drops the name
   for the reason DATA frames make it implicit, but RFC 9110 §9.3.2 wants a `HEAD`
   response to carry the headers its `GET` would, and a `sendFile()` of a 4 KiB
   asset over HTTP/2 reaches the client with no length to size a download by. The
