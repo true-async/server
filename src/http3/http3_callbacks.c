@@ -899,10 +899,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
 
     HashTable *headers = http_response_get_headers(resp_obj);
 
-    /* A declared length reaches the peer so it can hold the DATA to it. Only a
-     * stream declares one — a buffered response answers -1 — so this is right
-     * for both modes without asking which one submitted. */
-    const bool keep_content_length = http_response_has_declared_length(resp_obj);
+    const bool keep_content_length = http_response_commit_content_length(resp_obj);
 
     /* Single-pass header emit. Scratch covers the common case (≤32
      * nv entries — :status + ~30 headers fits every REST/SSE workload

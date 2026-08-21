@@ -475,30 +475,30 @@ it and expects a tag within days.
   policies; the CHANGELOG claim that no path sent the echo before #197 was
   wrong because of this one.
 
-- [ ] **#200 — HTTP/2 and HTTP/3 strip `Content-Length` from every response,
-  `HEAD` and static files included.** Filed with the reading behind it. What the
-  reading changed: the step is not four `false` arguments to flip. Nothing on
-  the response side of HTTP/2 or HTTP/3 computes a length at all — every
-  `content-length` in `http2_session.c` and `http3_callbacks.c` is the
-  request's — so the only route to the wire is the handler's own value, and
-  forwarding one nobody checked is a malformed message under RFC 9113 §8.1.1
-  that nghttp2 answers with a stream error. Each path has to state a count it
-  knows, the way HTTP/1 has since #195 and #197: `body_len` on the buffered
-  paths, the file size or range length on `sendFile()`, none on an undeclared
-  stream. **Open question for Edmond**, and the reason no code is written: does
-  every buffered HTTP/2 response gain the field, or only the two that answer a
-  question the framing cannot — `HEAD` and `sendFile()`? The first is even and
-  matches HTTP/1; the second leaves the shape of every other response alone,
-  and `h3/019`'s `header_count=71` is what moves either way. `http_response_header_allowed_h2h3` drops the name
-  for the reason DATA frames make it implicit, but RFC 9110 §9.3.2 wants a `HEAD`
-  response to carry the headers its `GET` would, and a `sendFile()` of a 4 KiB
-  asset over HTTP/2 reaches the client with no length to size a download by. The
-  `keep_content_length` argument added for declared streams is the lever; the
-  step is deciding which of the four `false` call sites flip. Two comments in the
-  tree already assert the length goes out (`src/http3/http3_callbacks.c:952`,
-  `src/http3/http3_static_response.c:305`) and are wrong today.
-  `static/012` (`cl=-` on GET and HEAD) and `h3/019` (`header_count=71`) pin the
-  current shape, so both change with it.
+- [x] **#200 — HTTP/2 and HTTP/3 strip `Content-Length` from every response,
+  `HEAD` and static files included.** Answered A of the two readings: every
+  buffered response states a count, rather than only the `HEAD` and the
+  `sendFile()` whose framing cannot answer for itself. `sendFile()` is framed by
+  DATA and END_STREAM as completely as any buffered GET and sat in the narrow
+  answer for a download-sizing reason that holds for every body, so the narrow
+  answer had no principle to stand on. The step was not four `false` arguments:
+  the rules lived inside `http1_format.c`, and `head_streamed` inside
+  `http_response_internal.h`, where no HTTP/2 or HTTP/3 site could read them.
+  They are now `http_response_length_action` with four outcomes — state the
+  buffer's count, state zero, keep the field the table holds, send none — and
+  HTTP/1 reads it instead of its own copy. The one fact no call site had is a
+  bit, `length_stated`: the static engine writes a count into the table while
+  the buffer stays empty, so `http3_stream_submit_response` could not tell that
+  count from a handler's. Two rules the reading missed: a response carrying
+  trailers states nothing, because nghttp2 ends the stream at the byte
+  completing the count and the trailing HEADERS then reaches it closed
+  (`h2/003` caught it); gRPC needs no carve-out, since `writeMessage()` puts the
+  response in streaming mode and the streaming rule already covers it.
+  Evidence: `h2/056` and `h3/062` are new and fail against `main`; `static/012`
+  now reads `cl=4096` on GET and HEAD, `h3/019` counts 72 headers. 455 phpt,
+  429 passed, 0 failed, 24 skipped on absent tool gates, 1 warn (`core/047`,
+  the pre-existing XFAIL that passes); `ctest` 16 of 16.
+
 - [ ] **An aborted request is logged and counted as the status it committed.**
   `http_request_telemetry` reads `http_response_get_status()`, which is the 200 the
   handler put on the wire before it failed, so a truncated body reads as complete

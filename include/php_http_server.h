@@ -1464,8 +1464,10 @@ void http_response_static_set_body_view (zend_object *obj, zend_string *body);
  * for patterns that recurred in static handler / send_file / compression
  * with subtle drift between copies. */
 
-/* Set Content-Length from a uint64. Hand-rolled decimal format to avoid
- * snprintf overhead — Content-Length is on the hot path of every response. */
+/* Set Content-Length from a uint64 and mark the count as the server's own:
+ * http_response_length_action keeps it where it replaces a handler's.
+ * Hand-rolled decimal format to avoid snprintf overhead — Content-Length is on
+ * the hot path of every response. */
 void http_response_set_content_length(zend_object *obj, uint64_t length);
 
 /* Push a HashTable of operator-supplied headers (name → string) onto the
@@ -1490,16 +1492,34 @@ bool http_response_handler_wants_close(zend_object *obj);
 
 /* H2/H3 forbidden response-header filter (RFC 9113 §8.2.2 / RFC 9114
  * §4.2). Returns false for hop-by-hop names (connection, keep-alive,
- * transfer-encoding, upgrade) and content-length (implicit from DATA
- * frames). H1 has its own framing rules and uses none of this.
+ * transfer-encoding, upgrade). H1 has its own framing rules and uses none of
+ * this.
  *
- * @p keep_content_length is for the one response that needs the length on the
- * wire: a stream whose handler declared one, which the server then holds it
- * to. Pass http_response_get_declared_length(obj) >= 0 at a streaming header
- * commit and false everywhere else — a length nobody audits is worse on the
- * wire than no length at all. */
+ * @p keep_content_length is what http_response_commit_content_length answered:
+ * a count the server computed goes out, an unaudited one is malformed under
+ * RFC 9113 §8.1.1. */
 bool http_response_header_allowed_h2h3(const char *name, size_t len,
                                        bool keep_content_length);
+
+/* What a response does about its Content-Length, shared by all three
+ * transports. A count that disagrees with the body desyncs an HTTP/1
+ * connection and is malformed under RFC 9113 §8.1.1. */
+typedef enum {
+    HTTP_RESPONSE_LENGTH_FROM_BODY, /* state http_response_get_body_len(), drop the table's */
+    HTTP_RESPONSE_LENGTH_ZERO,      /* state 0, drop the table's */
+    HTTP_RESPONSE_LENGTH_KEEP,      /* the field already in the table goes out unchanged */
+    HTTP_RESPONSE_LENGTH_OMIT,      /* no field goes out, whoever set one */
+} http_response_length_action_t;
+
+/* Which of the four @p obj falls under, from its status, its mode and who set
+ * the field. */
+http_response_length_action_t http_response_length_action(zend_object *obj);
+
+/* Put the count @p obj must state into its header table and answer whether the
+ * field goes out; refuses one on a response carrying trailers. For HTTP/2 and
+ * HTTP/3, which emit the table as it stands. HTTP/1 orders its own block and
+ * reads the action. */
+bool http_response_commit_content_length(zend_object *obj);
 
 /* Resolve effective keep-alive for a request. Reads req->keep_alive,
  * which the parser populated according to HTTP/1.x semantics. */

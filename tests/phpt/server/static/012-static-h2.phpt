@@ -127,9 +127,9 @@ $server->start();
 await($client);
 echo "done\n";
 --EXPECT--
-get200 rc=0 status=HTTP/2 200 cl=- bodylen=4096 match=1
+get200 rc=0 status=HTTP/2 200 cl=4096 bodylen=4096 match=1
 cond rc=0 status=HTTP/2 304 bodylen=0
-head rc=0 status=HTTP/2 200 cl=- bodylen=0
+head rc=0 status=HTTP/2 200 cl=4096 bodylen=0
 range206 rc=0 status=HTTP/2 206 cr=bytes 10-19/4096 match=1
 range416 rc=0 status=HTTP/2 416 cr=bytes */4096
 miss rc=0 status=HTTP/2 404

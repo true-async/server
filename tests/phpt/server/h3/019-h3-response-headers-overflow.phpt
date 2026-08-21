@@ -16,17 +16,18 @@ h3_skipif(['openssl_cli' => true, 'h3client' => true]);
  * existed, no phpt sent more than a handful of response headers, so
  * the heap-promotion + first realloc-doubling branches were untested.
  *
- * Handler emits 70 distinct custom headers — :status + 70 = 71 nv
- * entries. Order of operations in src/http3/http3_connection.c:
+ * Handler emits 70 distinct custom headers — :status + 70 + content-type +
+ * the server's content-length = 73 nv entries. Order of operations in
+ * src/http3/http3_connection.c:
  *
  *   nvi = 1   (just :status)
  *   nvi = 32  (scratch full)            → next entry triggers promotion
  *   nvi = 64  (heap full at first cap)  → next entry triggers double to 128
- *   nvi = 71  (final)                   → submit
+ *   nvi = 73  (final)                   → submit
  *
  * Both new branches are exercised. We ask h3client to emit HEADERS=N
- * via H3CLIENT_VERBOSE_HEADERS=1 and assert that exactly 70 non-status
- * response headers come back over the wire. */
+ * via H3CLIENT_VERBOSE_HEADERS=1 and assert how many non-status response
+ * headers come back over the wire. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -55,8 +56,8 @@ $server->addHttpHandler(function ($req, $res) {
         ->setHeader('content-type', 'text/plain');
     /* 70 distinct, lowercase, RFC 9114-legal header names. Avoid the
      * forbidden set (connection / keep-alive / transfer-encoding /
-     * upgrade / content-length) that h3_response_header_allowed
-     * filters out — those would skew the count we assert. */
+     * upgrade) that h3_response_header_allowed filters out — those would
+     * skew the count we assert. */
     for ($i = 0; $i < 70; $i++) {
         $res->setHeader(sprintf('x-overflow-%02d', $i), 'v' . $i);
     }
@@ -83,11 +84,9 @@ $client = spawn(function () use ($server, $port, $client_bin) {
 
     echo "status=",       $status  ?? -1, "\n";
     echo "header_count=", $headers ?? -1, "\n";
-    /* content-type is set above plus 70 x-overflow-* — peer should see
-     * exactly 71 non-status headers. content-type counts; the forbidden
-     * content-length is filtered out by h3_response_header_allowed and
-     * never reaches the wire. */
-    echo "expected=71\n";
+    /* content-type is set above plus 70 x-overflow-*, and the server states
+     * the length of the buffered body itself — 72 non-status headers. */
+    echo "expected=72\n";
     echo "body=", trim($body), "\n";
 
     $server->stop();
@@ -101,7 +100,7 @@ echo "done\n";
 ?>
 --EXPECT--
 status=200
-header_count=71
-expected=71
+header_count=72
+expected=72
 body=ok
 done
