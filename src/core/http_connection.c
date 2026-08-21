@@ -2110,46 +2110,40 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
         return false;  /* truncation guard — unreachable for current reasons */
     }
 
-    /* Coroutine context — full async send is safe. The scheduler-
-     * context check is the load-bearing one: in a libuv callback
-     * ZEND_ASYNC_CURRENT_COROUTINE is the *scheduler* coroutine
-     * (non-NULL) but suspending from there throws "cannot be stopped
-     * from the Scheduler context". */
-    if (!ZEND_ASYNC_IS_SCHEDULER_CONTEXT && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
-        return http_connection_send(conn, response, (size_t)n);
-    }
-
 #ifdef HAVE_OPENSSL
-    /* TLS read FSM (no coroutine): SSL_write the response into the
-     * cipher BIO and kick the FSM async-send path. Single SSL_write
-     * always succeeds for a sub-256-byte response; the connection
-     * transitions to CLOSING and destroy waits on the in-flight FSM
-     * send so close_notify lands too. */
     if (conn->tls != NULL) {
+        /* Coroutine context — the awaited send encrypts through the BIO pair.
+         * The scheduler-context check is the load-bearing one: in a libuv
+         * callback ZEND_ASYNC_CURRENT_COROUTINE is the *scheduler* coroutine
+         * (non-NULL) but suspending from there throws "cannot be stopped from
+         * the Scheduler context". Outside one, the read FSM SSL_writes into the
+         * cipher BIO and kicks the async-send path; a single SSL_write always
+         * succeeds for a sub-256-byte response, the connection transitions to
+         * CLOSING, and destroy waits on the in-flight FSM send so close_notify
+         * lands too. */
+        if (!ZEND_ASYNC_IS_SCHEDULER_CONTEXT && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
+            return http_connection_send(conn, response, (size_t)n);
+        }
+
         return http_connection_tls_fsm_send_plaintext_atomic(
             conn, response, (size_t)n);
     }
 #endif
 
-    /* Plaintext read-callback context — write directly to the
-     * underlying socket in non-blocking mode. We bypass libuv's queue
-     * here on purpose: ZEND_ASYNC_IO_WRITE wants a coroutine to await
-     * the completion, and even disposing an unawaited req can race
-     * with the close that immediately follows. The response is small
-     * (~80 B), the socket is fresh, and the kernel send buffer is
-     * effectively always able to absorb a single small write. */
+    /* Plaintext read-callback context — no coroutine to await a write, so the
+     * batched sender carries it: it submits without suspending and queues
+     * behind whatever is already in flight. Writing at the socket instead put
+     * this response ahead of the pipelined ones still in the tail, and a peer
+     * reads them in order (RFC 9112 §9.3.1). The destroy that follows defers on
+     * out_in_flight, so the bytes still leave before the connection goes. */
     if (conn->io == NULL) {
         return false;
     }
 
-    const php_socket_t fd = (php_socket_t)conn->io->descriptor.socket;
+    char *const owned = emalloc((size_t)n);
+    memcpy(owned, response, (size_t)n);
 
-    if (fd == (php_socket_t)-1) {
-        return false;
-    }
-
-    const ssize_t sent = send(fd, response, (size_t)n, MSG_NOSIGNAL);
-    return sent == (ssize_t)n;
+    return http_connection_send_batched(conn, owned, (size_t)n);
 }
 /* }}} */
 

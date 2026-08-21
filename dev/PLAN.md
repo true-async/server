@@ -680,9 +680,14 @@ designs were worked out and both fail on something mechanical.
   established the same day and turned out to need no WebSocket at all — the
   HTTP/1 dispose itself uses both senders, picking by body size, so three
   pipelined requests answered small, small, large came back 1, 3, 2. Filed and
-  fixed as #209. `http_connection_emit_parse_error` still bypasses the tail with
-  a direct `send(2)`, and stays that way: it retires the connection in the same
-  breath, and its bypass is documented against a race with the close.
+  fixed as #209, and the parse-error responder went with it: the same three
+  requests with the last one malformed answered `200, 400, 200`, because that
+  4xx is built in the read path and was written at the socket from there. Its
+  plaintext side now queues; TLS keeps the BIO ring. The awaited sender
+  (`http_connection_send_raw`) reads neither flag either, and no reproduction
+  puts it out of order — an HTTP/1 connection dispatches one request at a time,
+  and the await drains the tail before the next handler starts. Left unproven
+  rather than filed.
 - [ ] **#179 — one serialized outbound path per HTTP/1 connection.** What the
   measurement leaves it: a non-blocking `tryWrite()` on HTTP/1, which
   `dev/BENCHMARKS.md` says "has to be argued on its own; this measurement does
