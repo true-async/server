@@ -72,6 +72,11 @@ typedef struct {
     bool             streaming;         /* write() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — write() now throws, sse* re-entry is allowed */
     bool             is_head;            /* HEAD: write() drops chunks (RFC 9110 §9.3.2) */
+    bool             head_streamed;      /* a HEAD whose handler offered a chunk: the bytes
+                                          * were dropped, and the buffered formatter must not
+                                          * state a length measured from the buffer they never
+                                          * reached. The response stays uncommitted, so the
+                                          * handler's own exception can still become a status. */
     bool             handler_wants_close; /* setHeader('Connection', 'close'): the field is
                                            * the server's to emit, so the handler's is taken
                                            * as the request it is and answered by closing the

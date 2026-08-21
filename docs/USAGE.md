@@ -272,11 +272,12 @@ representation and then finds the `ETag` matches — and by the time the respons
 is serialised there is nothing left to tell. `sseStart()` refuses on such a
 status for the same reason `write()` does.
 
-A `HEAD` is the one case where the drop is silent: the chunk is accepted, the
-bytes go nowhere, and the response commits as a streaming one, so it carries the
-framing the same handler's `GET` would carry. Declare a `Content-Length` if the
-client should learn the size of the body a `GET` would return — the server
-cannot measure bytes it dropped, and states no length of its own.
+A `HEAD` is the one case where the drop is silent: the chunk is accepted and the
+bytes go nowhere, while the response stays uncommitted, so `setHeader()` and
+`setStatusCode()` go on working and an uncaught exception still becomes the
+status. What changes is the length — the server states none, because a count
+taken from a buffer nobody filled claims the `GET` body is empty. Set a
+`Content-Length` if the client should learn the size a `GET` would report.
 
 A `HEAD` is the one case that drops on both paths: there the handler is meant to
 produce the body a `GET` would return, since that is where its `Content-Length`

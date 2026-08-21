@@ -69,18 +69,27 @@ final class HttpResponse
      * first write() it declares the length of a streamed body (see write()),
      * and on a buffered body the server states the count it is sending.
      *
-     * Three fields answer differently, because the server states them itself.
-     * Connection accepts only "close", which retires the connection after this
-     * response — the field is not copied onto the wire, the socket is actually
-     * closed. Transfer-Encoding accepts only "chunked", the framing an
-     * undeclared HTTP/1.1 stream gets anyway, and is dropped; naming any other
-     * coding throws, because the server cannot apply it and would otherwise
-     * send encoded bytes with nothing declaring them.
+     * Two fields answer differently, because the server states them itself.
+     * Connection is read rather than copied: "close" retires the connection
+     * after this response on HTTP/1 — the field is not copied onto the wire,
+     * the socket is closed — while HTTP/2 and HTTP/3 multiplex, so one response
+     * never retires their connection and the request is recorded and unused
+     * there. "keep-alive" is dropped, being what the server was going to say
+     * anyway; any other value throws. Transfer-Encoding accepts only "chunked",
+     * the framing an undeclared HTTP/1.1 stream gets anyway, and is dropped;
+     * naming any other coding throws, because the server cannot apply it and
+     * would otherwise send encoded bytes with nothing declaring them.
+     *
+     * getHeader() reports neither afterwards: what the server states is not
+     * part of the handler's header set. resetHeaders() takes back a close.
      *
      * Throws {@see HttpServerInvalidArgumentException} when the name is not an
-     * RFC 9110 §5.6.2 token or the value carries a byte that cannot stand in a
+     * RFC 9110 §5.6.2 token, or the value carries a byte that cannot stand in a
      * field value — a CR or an LF would end the header block and let the rest
-     * be read as a second response. Nothing is stored when it throws.
+     * be read as a second response — or the value has leading or trailing
+     * whitespace, which §5.5 forbids a sender to generate. The bytes checked
+     * are the bytes stored, so a value given as an object is checked after its
+     * __toString(). Nothing is stored when it throws.
      *
      * @param string $name Header name
      * @param string|array $value Header value(s)
@@ -203,11 +212,12 @@ final class HttpResponse
      * A status that carries no body — 204, 304, 205 — throws
      * HttpServerRuntimeException here, while the response is still uncommitted
      * and can still be given a status that does carry one. A HEAD request is
-     * the exception: the chunk is accepted and dropped, and the response
-     * commits as a streaming one all the same, so it is framed as the same
-     * handler's GET would be. Declare a Content-Length to state the length that
-     * GET would have reported; the server has no way to compute it from bytes
-     * it dropped, and states none.
+     * the exception: the chunk is accepted and dropped, and the response stays
+     * uncommitted, so setHeader() and setStatusCode() go on working and an
+     * uncaught exception still becomes the status. What the dropped chunk does
+     * change is the length: the server states none, because a count taken from
+     * the buffer nobody filled would claim the GET body is empty. Set a
+     * Content-Length to state the length a GET would report.
      *
      * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
      * park while every ring slot is live or the queued bytes stand at

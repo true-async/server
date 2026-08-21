@@ -16,8 +16,9 @@ true_async
  * A handler's `Connection: close` is obeyed as the request it is: the field is
  * not copied, the connection is closed, and the peer is told by the same branch
  * that tells it about a drain. Every other value is refused, because a handler
- * cannot make the server keep a socket. `Transfer-Encoding` is accepted only
- * where it names the chunked coding the server would apply anyway. */
+ * cannot make the server keep a socket — `keep-alive` excepted, which is dropped
+ * because it is what the server was going to say anyway. `Transfer-Encoding` is
+ * accepted only where it names the chunked coding the server would apply. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -46,10 +47,15 @@ $server->addHttpHandler(function ($req, $res) {
     switch ($req->getPath()) {
         case '/refused':
             echo "refused:\n";
+            /* keep-alive is dropped rather than refused: it is what the server
+             * was going to say, and the shape that sets it is a handler copying
+             * an upstream response's headers wholesale. */
             $report(static fn() => $res->setHeader('Connection', 'keep-alive'));
+            $report(static fn() => $res->setHeader('Connection', 'upgrade'));
             $report(static fn() => $res->setHeader('Transfer-Encoding', 'gzip'));
             $report(static fn() => $res->setHeader('Transfer-Encoding', 'chunked'));
             echo "  stored TE: ", json_encode($res->getHeader('transfer-encoding')), "\n";
+            echo "  stored connection: ", json_encode($res->getHeader('connection')), "\n";
             $res->setBody('answered')->end();
             return;
 
@@ -135,10 +141,12 @@ $server->start();
 ?>
 --EXPECT--
 refused:
+  accepted
   TrueAsync\HttpServerInvalidArgumentException
   TrueAsync\HttpServerInvalidArgumentException
   accepted
   stored TE: null
+  stored connection: null
 /refused status: HTTP/1.1 200 OK
 /refused transfer-encoding: <absent>
 /close connection headers: 1

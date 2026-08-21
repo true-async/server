@@ -51,6 +51,16 @@ $server->addHttpHandler(function ($req, $res) use ($split) {
             $report(static fn() => $res->setHeader('Location', $split));
             $report(static fn() => $res->setHeader('X-Nul', "a\x00b"));
             $report(static fn() => $res->addHeader('X-Multi', ['fine', "bad\r\nX-Also: yes"]));
+            /* The bytes stored are the bytes checked. An object is converted at
+             * storage time, and a URI object built from request data is the
+             * commonest way handler data reaches Location — checking the zval's
+             * type instead of its bytes would let exactly that through. */
+            $report(static fn() => $res->setHeader('Location', new class ($split) {
+                public function __construct(private string $s) {}
+                public function __toString(): string { return $this->s; }
+            }));
+            /* RFC 9110 §5.5: a sender does not generate surrounding whitespace. */
+            $report(static fn() => $res->setHeader('X-Pad', ' padded'));
             echo "  stored: ", json_encode($res->getHeader('x-multi')), "\n";
             $res->setBody('answered')->end();
             return;
@@ -110,6 +120,8 @@ $server->start();
 ?>
 --EXPECT--
 value:
+  TrueAsync\HttpServerInvalidArgumentException
+  TrueAsync\HttpServerInvalidArgumentException
   TrueAsync\HttpServerInvalidArgumentException
   TrueAsync\HttpServerInvalidArgumentException
   TrueAsync\HttpServerInvalidArgumentException

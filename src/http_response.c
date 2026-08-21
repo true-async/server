@@ -105,6 +105,32 @@ static zend_string *normalize_header_name(zend_string *name)
     return lower;
 }
 
+/* The statuses a handler may give a final response, and why the range starts
+ * at 200. A 1xx is interim (RFC 9110 §15.2): the client reads it and goes on
+ * waiting for the answer, which nothing will send — the request is over when
+ * the handler returns. Every writer of status_code asks this, so the rule
+ * cannot be walked around through json() or sendFile(). @p what names the call
+ * in the message. */
+static bool response_status_is_final(const zend_long status, const char *what)
+{
+    if (status >= 200 && status <= 599) {
+        return true;
+    }
+
+    if (status >= 100 && status < 200) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "%s: status %d is interim (RFC 9110 §15.2) and cannot be a final "
+            "response: the client would wait for one that never comes",
+            what, (int) status);
+        return false;
+    }
+
+    zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+        "%s: HTTP status code must be between 200 and 599, got %d",
+        what, (int) status);
+    return false;
+}
+
 /* Whether a byte may stand in a header field value: everything visible, plus
  * the horizontal tab (RFC 9110 §5.5 — field-vchar is VCHAR / obs-text, and
  * SP / HTAB may separate them). What this excludes is the point of it: a CR or
@@ -148,11 +174,16 @@ static bool header_field_check(zend_string *name, const zval *value)
         }
     }
 
-    if (Z_TYPE_P(value) != IS_STRING) {
-        return true;
-    }
+    /* The bytes checked are the bytes stored, which is why the value is
+     * resolved first: storage converts, and an object's __toString() is the
+     * shape that carries request data into a header — a PSR-7 URI built from a
+     * query parameter reaches setHeader('Location', $uri) as an object, and
+     * checking the zval's type instead of its bytes would let it past. */
+    zend_string *str = zval_try_get_string((zval *) value);
 
-    const zend_string *str = Z_STR_P(value);
+    if (str == NULL) {
+        return false;   /* conversion threw; the message names the type */
+    }
 
     for (size_t i = 0; i < ZSTR_LEN(str); i++) {
         if (!header_value_byte_allowed((unsigned char) ZSTR_VAL(str)[i])) {
@@ -160,27 +191,47 @@ static bool header_field_check(zend_string *name, const zval *value)
                 "Header \"%s\" carries byte 0x%02X at offset %zu, which cannot "
                 "stand in a field value",
                 ZSTR_VAL(name), (unsigned char) ZSTR_VAL(str)[i], i);
+            zend_string_release(str);
             return false;
         }
     }
 
+    /* RFC 9110 §5.5: a field value has no leading or trailing whitespace, and
+     * a sender must not generate one that does. Recipients strip it, so this
+     * refuses a value that would travel as something other than what was set. */
+    if (ZSTR_LEN(str) > 0) {
+        const char first = ZSTR_VAL(str)[0];
+        const char last  = ZSTR_VAL(str)[ZSTR_LEN(str) - 1];
+
+        if (first == ' ' || first == '\t' || last == ' ' || last == '\t') {
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "Header \"%s\" has leading or trailing whitespace, which RFC 9110 "
+                "§5.5 forbids a sender to generate", ZSTR_VAL(name));
+            zend_string_release(str);
+            return false;
+        }
+    }
+
+    zend_string_release(str);
     return true;
 }
 
-/* The three fields the server states for itself, and what a handler setting one
- * is answered with. `connection` is taken as a request rather than as bytes:
- * `close` records the intent, which the dispose path turns into a closed
- * connection, and every other value is refused, because a handler cannot make
- * the server keep a socket. `transfer-encoding` is refused unless it names the
- * chunked coding the server would apply anyway — a handler that named `gzip`
- * used to have the field dropped and the encoded bytes sent with no coding
- * declared anywhere, which is a corrupt download rather than a header the
- * server can second-guess. `content-length` is left alone here: a declared
- * length is a contract the streaming path audits, and the buffered path
- * replaces it with the count it is sending.
+/* The two fields the server states for itself, and what a handler setting one
+ * is answered with. `connection` is read as a request rather than copied as
+ * bytes: `close` records an intent the HTTP/1 dispose path turns into a closed
+ * socket, `keep-alive` is dropped because it is what the server was going to
+ * say anyway, and anything else names a connection option the server does not
+ * implement. `transfer-encoding` is refused unless it names the chunked coding
+ * the server would apply anyway. Dropping a `gzip` instead would put encoded
+ * bytes on the wire with no coding declared anywhere, which is a corrupt
+ * download rather than a header worth second-guessing.
  *
- * Returns false when the field was handled here and must not be stored, with an
- * exception thrown when it was refused. */
+ * `content-length` is deliberately not here: a declared length is a contract
+ * the streaming path audits, and the buffered path replaces it with the count
+ * it is sending.
+ *
+ * Returns true when the field was handled here and must not be stored, whether
+ * it was taken or refused; an exception is pending in the second case. */
 static bool response_take_server_field(http_response_object *response,
                                        zend_string *lower_name, const zval *value)
 {
@@ -190,39 +241,43 @@ static bool response_take_server_field(http_response_object *response,
         return false;
     }
 
-    if (Z_TYPE_P(value) != IS_STRING) {
-        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
-            "Header \"%s\" takes a single token, not a list", ZSTR_VAL(lower_name));
-        return true;
+    zend_string *str = zval_try_get_string((zval *) value);
+
+    if (str == NULL) {
+        return true;    /* conversion threw */
     }
 
-    const char *val = Z_STRVAL_P(value);
-    const size_t len = Z_STRLEN_P(value);
+    const char *val = ZSTR_VAL(str);
+    const size_t len = ZSTR_LEN(str);
 
     if (is_connection) {
         if (len == 5 && zend_binary_strcasecmp(val, len, "close", 5) == 0) {
             response->handler_wants_close = true;
-            return true;
+        } else if (len != 10 || zend_binary_strcasecmp(val, len, "keep-alive", 10) != 0) {
+            /* keep-alive is dropped rather than refused: it is what the server
+             * was about to say anyway, and the shape that sets it is a handler
+             * copying an upstream response's headers wholesale. Refusing that
+             * would turn a correct response into a 500 over a field the server
+             * ignores. Anything else names a connection option the server does
+             * not implement, and silence would be a promise it cannot keep. */
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "Connection: %s is the server's to decide. Only \"close\" can be "
+                "asked for, which retires the connection after this response on "
+                "HTTP/1; HTTP/2 and HTTP/3 multiplex, so one response never "
+                "retires their connection", val);
         }
-
+    } else if (len != 7 || zend_binary_strcasecmp(val, len, "chunked", 7) != 0) {
         zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
-            "Connection: %s is the server's to decide. Only \"close\" can be asked "
-            "for, which retires the connection after this response", val);
-        return true;
+            "Transfer-Encoding: %s cannot be applied by the server, and the framing "
+            "is not the handler's to state; the server negotiates a content coding "
+            "of its own",
+            val);
     }
+    /* `chunked` falls through: it is the framing an undeclared HTTP/1.1 stream
+     * gets anyway, so a handler stating the obvious is not made to care which
+     * path its response takes. */
 
-    if (len == 7 && zend_binary_strcasecmp(val, len, "chunked", 7) == 0) {
-        /* The framing the server picks for an undeclared HTTP/1.1 stream anyway.
-         * Accepted and dropped so a handler that states the obvious is not made
-         * to care which path its response takes. */
-        return true;
-    }
-
-    zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
-        "Transfer-Encoding: %s cannot be applied by the server, and the framing "
-        "is not the handler's to state; the server negotiates a content coding "
-        "of its own",
-        val);
+    zend_string_release(str);
     return true;
 }
 
@@ -233,8 +288,7 @@ static bool response_take_header_for_server(http_response_object *response,
                                             zend_string *name, zval *value)
 {
     zend_string *lower = zend_string_tolower(name);
-    const bool taken = response_take_server_field(response, lower,
-        Z_TYPE_P(value) == IS_ARRAY ? value : value);
+    const bool taken = response_take_server_field(response, lower, value);
     zend_string_release(lower);
     return taken;
 }
@@ -365,21 +419,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, setStatusCode)
         return;
     }
 
-    /* A final response starts at 200. A 1xx is an interim one (RFC 9110
-     * §15.2): it ends at its header block and the client goes on waiting for
-     * the answer, which nothing here will send — the request is finished the
-     * moment the handler returns. Sending one leaves both ends waiting for the
-     * other until a timeout, and to a 1.0 client, which §15.2 forbids it to
-     * entirely, it looks like the answer itself. The server has no
-     * interim-response API for a handler to reach for instead, so the shape
-     * has no correct use and is refused where it is asked for. */
-    if (code < 200 || code > 599) {
-        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
-            code >= 100 && code < 200
-                ? "Status %d is interim (RFC 9110 §15.2) and cannot be a final "
-                  "response: the client would wait for one that never comes"
-                : "HTTP status code must be between 200 and 599, got %d",
-            (int) code);
+    if (!response_status_is_final(code, "setStatusCode()")) {
         return;
     }
 
@@ -625,6 +665,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, resetHeaders)
     }
 
     zend_hash_clean(response->headers);
+    /* The close request is a header the table does not hold, so clearing the
+     * table has to clear it too — otherwise a middleware that rebuilds the
+     * header set cannot take it back. */
+    response->handler_wants_close = false;
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -718,6 +762,22 @@ ZEND_METHOD(TrueAsync_HttpResponse, setTrailer)
 
     if (response_check_trailer_sealed(response)) {
         return;
+    }
+
+    /* A trailer is a field on the wire, so it answers to the field grammar the
+     * header setters answer to. Today's transports validate it themselves —
+     * HTTP/1 emits no trailers at all, and nghttp2 and nghttp3 have their own
+     * checks — which is exactly why the guard belongs here rather than in the
+     * emitters: gRPC puts an exception message into `grpc-message`, and the day
+     * a chunked-trailer emitter lands on HTTP/1 that is CWE-113 with nothing
+     * in its way. */
+    {
+        zval value_zv;
+        ZVAL_STR(&value_zv, value);
+
+        if (!header_field_check(name, &value_zv)) {
+            return;
+        }
     }
 
     ensure_trailers_table(response);
@@ -956,9 +1016,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, json)
         return;
     }
 
-    if (UNEXPECTED(status < 100 || status > 599)) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "HTTP status code must be between 100 and 599", 0);
+    if (UNEXPECTED(!response_status_is_final(status, "json()"))) {
         return;
     }
 
@@ -1360,16 +1418,16 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
         return;
     }
 
-    /* HEAD carries no body (RFC 9110 §9.3.2), and the dropped bytes are the
-     * only difference: the response still becomes a streaming one, so it is
-     * framed as the same handler's GET would be and states no length it never
-     * measured. Without the commit it fell through to the buffered path, which
-     * computed Content-Length: 0 from a buffer nobody had filled — a claim that
-     * the GET body is empty, which is the opposite of what §9.3.2 wants the
-     * field to mean. A length the handler declared itself survives and
-     * describes the body a GET would have returned. */
+    /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is dropped, and the
+     * fact that one was offered is recorded. The response is deliberately not
+     * committed: nothing has reached the socket, so the handler's own exception
+     * can still become the status, and setHeader() still works. What the flag
+     * buys is the buffered formatter's silence: a count taken from the buffer
+     * those bytes never reached claims the GET body is empty. A length the
+     * handler declared itself survives and describes the body a GET would have
+     * returned. */
     if (response->is_head) {
-        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
+        response->head_streamed = true;
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
@@ -1446,9 +1504,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
     }
 
     /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is accepted and
-     * dropped, and the stream commits, as write() does. */
+     * dropped, as write() does, and the offer is recorded for the same reason. */
     if (response->is_head) {
-        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
+        response->head_streamed = true;
         RETURN_TRUE;
     }
 
@@ -1702,10 +1760,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
-    /* HEAD carries no body (RFC 9110 §9.3.2); the message is dropped and the
-     * stream commits, as write() does with its chunk. */
+    /* HEAD carries no body (RFC 9110 §9.3.2); the message is dropped, as
+     * write() drops its chunk, and the offer is recorded the same way. */
     if (response->is_head) {
-        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
+        response->head_streamed = true;
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
@@ -1760,9 +1818,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
     }
 
     /* HEAD carries no body (RFC 9110 §9.3.2); the message is accepted and
-     * dropped, and the stream commits, as tryWrite() does with its chunk. */
+     * dropped, as tryWrite() does with its chunk, and the offer is recorded. */
     if (response->is_head) {
-        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
+        response->head_streamed = true;
         RETURN_TRUE;
     }
 
@@ -1875,11 +1933,24 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
      * range matches the rest of the API. */
     const http_send_file_options_t *opts = &req->opts;
 
-    if (opts->status != 0 && (opts->status < 100 || opts->status > 599)) {
-        http_send_file_request_free(req);
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "sendFile(): status must be between 100 and 599", 0);
-        return;
+    if (opts->status != 0) {
+        if (!response_status_is_final(opts->status, "sendFile()")) {
+            http_send_file_request_free(req);
+            return;
+        }
+
+        /* A file body under a status defined to carry none is the desync the
+         * PHP path refuses: the client ends the message at the blank line and
+         * reads the file's first bytes as the next status line. The static
+         * head builder states Content-Length from the file size and knows
+         * nothing about the rule, so the refusal belongs here. */
+        if (!response_status_carries_body(opts->status)) {
+            const int bad = opts->status;
+            http_send_file_request_free(req);
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "sendFile(): status %d carries no body, and a file is one", bad);
+            return;
+        }
     }
 #define HAS_CRLF(zs) ((zs) != NULL && \
         (memchr(ZSTR_VAL(zs), '\r', ZSTR_LEN(zs)) != NULL \

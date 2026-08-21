@@ -370,6 +370,52 @@ it and expects a tag within days.
   dropped, which also makes the four streaming calls agree with the two SSE
   ones.
 
+  **A second review round, and eight more findings.** The six commits above
+  went back to four critics, and what they returned is recorded here because
+  one of it was a regression this step had just introduced.
+
+  **Committing a HEAD stream threw the handler's failure away.** The first
+  shape of the HEAD fix called `http_response_stream_commit_once`, which sets
+  `committed`, and the dispose path derives a 500 from an uncaught exception
+  only while the response is uncommitted. A `HEAD` handler that wrote a chunk
+  and then threw answered `200 OK` with a clean header block — and on a message
+  that ends at the header block a failed response is byte-identical to a
+  successful one, so the peer cannot tell. Health checks read it as green.
+  Confirmed on the wire before the fix. The commit is gone: a dropped chunk
+  records `head_streamed` and nothing else, so the response stays uncommitted,
+  `setHeader()` goes on working, and the buffered formatter reads the flag
+  instead of measuring an empty buffer. That also closed three findings the
+  same commit had opened — `end($data)` reaching `append_chunk` on a HEAD over
+  HTTP/2, a HEAD losing the ability to state a length it measured, and the pool
+  worker reverting such a response to a buffered wire.
+
+  **`sendFile()` and `json()` wrote `status_code` past `setStatusCode()`.**
+  `new SendFileOptions(status: 204)` framed a whole file under a status the
+  client ends at the blank line; `json($d, 100)` produced the interim response
+  that hangs the exchange. One predicate answers for all three now, and
+  `sendFile()` also refuses a status defined to carry no content.
+
+  **An object value walked past the header check.** It tested the zval's type
+  and skipped anything that was not a string, while storage converts — so a
+  PSR-7 URI built from a query parameter, which is the commonest way request
+  data reaches `Location`, went through unchecked. The bytes checked are the
+  bytes stored now. Leading and trailing whitespace is refused in the same
+  place (§5.5), and `setTrailer()` answers to the check as well: HTTP/1 emits
+  no trailers today, but gRPC puts an exception message into `grpc-message`,
+  and the day a chunked-trailer emitter lands there that is CWE-113 with
+  nothing in its way.
+
+  **`Connection: keep-alive` was refused where a drop was right.** The shape
+  that sets it is a handler copying an upstream response's headers wholesale,
+  and refusing it turns a correct response into a 500 over a field the server
+  ignores. It is dropped; `close` is still read; anything else still throws.
+  `resetHeaders()` clears the recorded close, which it did not, and the flag is
+  documented as HTTP/1-only, which the first shape of it was not.
+
+  **Compression did not know about 205**, so a 205 with a compressible body got
+  `Content-Encoding: gzip` beside `Content-Length: 0` and no bytes. It reads
+  `response_status_carries_body` now, so the list cannot drift again.
+
   **A drain that came due mid-stream was lost.** The first shape of this step
   gated dispose's whole `Connection` block on `http_response_is_streaming`, to
   keep the drain evaluator from being asked twice for one response. The
@@ -396,11 +442,12 @@ it and expects a tag within days.
   and holds the three rules that meet on a declared 1.0 stream, `tls/016`
   drives the identity write branch over TLS with a chunk above the coalescing
   bound, `h1/046` refuses a header that would split the message and `h1/047`
-  proves a handler `Connection: close` closes the socket. Nine of the twelve
-  fail against `main`'s sources and pass here; the
-  three exceptions are `h1/045`, which passes on `main` too because the defect
-  it guards was introduced and removed inside this branch, and `h1/046` and
-  `h1/047`, which fail there for their own reasons rather than #197's.
+  proves a handler `Connection: close` closes the socket, and `sendfile/004`
+  refuses a status a file body cannot go under. Fourteen of the fifteen tests
+  this step touches fail against `main`'s sources and pass here — the whole set,
+  including the three that existed before it (`core/027`, `core/036`,
+  `sendfile/004`). The exception is `h1/045`, which passes on `main` as well,
+  because the defect it guards was introduced and removed inside this branch.
 
   Reviewed by four critics against the design before any code: 32 findings, 12
   survived verification, every one of them fixed above. The RST findings were

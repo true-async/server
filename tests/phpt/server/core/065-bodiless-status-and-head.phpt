@@ -62,6 +62,15 @@ $server->addHttpHandler(function ($req, $res) {
             $res->end();
             return;
 
+        case '/headthrow':
+            /* The dropped chunk must not commit the response. Nothing has
+             * reached the socket on a HEAD, so the handler's own failure can
+             * still become the status — and on this method it has to, because
+             * a message that ends at the header block looks the same whether
+             * the body was produced or lost. */
+            $res->write('body a GET would return');
+            throw new \RuntimeException('db down');
+
         case '/message':
             /* The HEAD drop on the gRPC dialect. writeMessage() frames its own
              * bytes, so a message let through here would arrive under a status
@@ -272,6 +281,21 @@ spawn(function () use ($port, $server) {
             preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
     }
 
+    fwrite($fp, "HEAD /headthrow HTTP/1.1\r\nHost: x\r\n\r\n");
+    $head = '';
+
+    while (!str_contains($head, "\r\n\r\n")) {
+        $c = fread($fp, 1);
+
+        if ($c === false || $c === '') {
+            break;
+        }
+
+        $head .= $c;
+    }
+
+    echo "HEAD after throw: ", strtok($head, "\r\n"), "\n";
+
     /* Pipelined behind the HEAD so the next status line is read from wherever
      * the message really ended: a frame let through would put it inside one. */
     fwrite($fp, "HEAD /message HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
@@ -329,6 +353,7 @@ HEAD /streamhead content-length: 9
 HEAD /streamhead transfer-encoding: <absent>
 HEAD /streamheadbare content-length: <absent>
 HEAD /streamheadbare transfer-encoding: <absent>
+HEAD after throw: HTTP/1.1 500 db down
 HEAD message: HTTP/1.1 200 OK
 next after HEAD message: HTTP/1.1 200 OK "root"
 streamed: TrueAsync\HttpServerRuntimeException: write(): status 204 carries no body — the message ends at the header block

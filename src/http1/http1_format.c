@@ -338,6 +338,14 @@ static void emit_headers_block(smart_str *result, http_response_object *response
     } else if (handler_declared && body_follows) {
         emit_content_length(result, body_len);
         emit_headers_only(result, response->headers, true, true);
+    } else if (response->head_streamed && !handler_declared) {
+        /* A HEAD whose handler produced its body by streaming. The bytes were
+         * dropped, so the buffer holds nothing to measure, and stating its
+         * length says the GET body is empty — the opposite of what RFC 9110
+         * §9.3.2 wants the field to mean. §9.3.2 lets a server omit a field
+         * whose value is only known while generating the content; a handler
+         * that knows the count declares it before its first streaming call. */
+        emit_headers_only(result, response->headers, false, true);
     } else {
         if (!handler_declared) {
             emit_content_length(result, body_len);
@@ -478,6 +486,13 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
     const bool drop_content_length = framing == H1_FRAMING_NONE
         ? response_status_forbids_content_length(response->status_code)
         : framing != H1_FRAMING_LENGTH;
+    /* A 205 states a zero length wherever it is framed. No streaming call can
+     * reach this today — the shared guard refuses a status that carries no
+     * body before any of them commits — but the rule lives in
+     * http_response_internal.h and both formatters have to honour it, or the
+     * next path to reach here inherits the gap the 205 leg was built to close. */
+    const bool state_zero_length =
+        response_status_needs_zero_length(response->status_code);
     smart_str result = {0};
     smart_str_alloc(&result, 1024, 0);
 
@@ -489,7 +504,12 @@ zend_string *http_response_format_streaming_headers(zend_object *obj)
                           sizeof("Transfer-Encoding: chunked\r\n") - 1);
     }
 
-    emit_headers_only(&result, response->headers, drop_content_length, true);
+    if (state_zero_length) {
+        emit_content_length(&result, 0);
+    }
+
+    emit_headers_only(&result, response->headers,
+                      drop_content_length || state_zero_length, true);
 
     smart_str_appendl(&result, "\r\n", 2);
     smart_str_0(&result);
