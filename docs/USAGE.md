@@ -234,10 +234,12 @@ alphabeta
 
 The close is the framing, so the connection carries this one response and ends;
 a request the client pipelined behind it goes unanswered, because a reply would
-arrive as the body's last bytes. Declaring a `Content-Length` avoids all of
-this — the peer gets its boundary and the connection stays open, and the server
-confirms that with `Connection: keep-alive`, which a 1.0 client needs before it
-will reuse a socket.
+arrive as the body's last bytes. Declaring a `Content-Length` gives the peer
+its boundary, so the close is no longer needed to mark the end. Whether the
+connection then survives is the client's call, not the length's: a 1.0 request
+carrying `Connection: keep-alive` keeps it and gets that header echoed back,
+which such a client needs before it will reuse a socket, and a 1.0 request
+without it is closed as the version's default requires.
 
 HTTP/1.1 clients are unaffected: they keep chunked encoding.
 

@@ -38,9 +38,18 @@ $server = new HttpServer(
 
 $payload = "boom\r\nX-Injected: yes\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK";
 
-$server->addHttpHandler(function ($req, $res) use ($payload) {
+/* The setter's payload carries a NUL as well, and it is not decoration: the
+ * status line is built with a strlen-based append, so a NUL reaching it would
+ * end the phrase there and leave the rest of the header block off the wire.
+ * The sanitiser is what keeps that impossible, and narrowing it to CR and LF
+ * alone — the obvious way to make it smaller — would reopen it with nothing
+ * failing. The thrown message cannot carry one: it reaches the phrase and the
+ * body as a C string and is already cut at the first NUL. */
+$setter_payload = "boom\x00" . substr($payload, 4);
+
+$server->addHttpHandler(function ($req, $res) use ($payload, $setter_payload) {
     if ($req->getPath() === '/setter') {
-        $res->setReasonPhrase($payload)->setBody('set')->end();
+        $res->setReasonPhrase($setter_payload)->setBody('set')->end();
         return;
     }
 
@@ -97,6 +106,6 @@ header lines: 4
 injected header: <absent>
 second status line in body: yes
 body length: 59
-setter status line: "HTTP\/1.1 200 boom  X-Injected: yes  Content-Length: 0    HTTP\/1.1 200 OK"
+setter status line: "HTTP\/1.1 200 boom   X-Injected: yes  Content-Length: 0    HTTP\/1.1 200 OK"
 setter injected header: <absent>
 setter body: "set"

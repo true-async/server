@@ -127,13 +127,20 @@ bool h1_response_peer_speaks_http11(zend_object *response_obj)
 {
     const http_response_object *response = http_response_from_obj(response_obj);
 
+    /* Asked as the rule is written — "the request indicated 1.1 or later"
+     * (RFC 9112 §6.1) — rather than as "not 1.0". The parser admits only 1.0
+     * and 1.1 today, so the two agree; they stop agreeing the moment anything
+     * else gets through, and this answer decides how a body is framed. A
+     * response built outside a connection carries no version and counts as
+     * 1.1, which is what every modern peer reads. */
     return response->protocol_version == NULL
-        || ZSTR_LEN(response->protocol_version) != 3
-        || memcmp(ZSTR_VAL(response->protocol_version), "1.0", 3) != 0;
+        || (ZSTR_LEN(response->protocol_version) == 3
+            && memcmp(ZSTR_VAL(response->protocol_version), "1.1", 3) == 0);
 }
 
 /* RFC 9110 §8.6: a 1xx or a 204 carries no Content-Length, whoever set it. A
- * 304 is the exception in the other direction — §15.4.5 wants the field to
+ * 304 is the exception in the other direction — §8.6 permits the field there,
+ * and wants it to
  * describe the representation the 200 would have carried. */
 static inline bool response_status_forbids_content_length(const int status)
 {
@@ -315,7 +322,7 @@ static void emit_headers_block(smart_str *result, http_response_object *response
         /* RFC 9112 §6.3 rule 1: the message ends at the blank line, so the
          * server has no count to state. A 304 keeps the handler's, which
          * describes the representation a 200 would have carried (RFC 9110
-         * §15.4.5); a 1xx and a 204 lose it, which §8.6 requires. */
+         * §8.6); a 1xx and a 204 lose it, which the same section requires. */
         emit_headers_only(result, response->headers,
                           response_status_forbids_content_length(response->status_code), true);
     } else if (handler_declared && body_follows) {

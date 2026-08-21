@@ -273,8 +273,12 @@ it and expects a tag within days.
 
   One predicate now answers for all of it — `h1_response_framing` in
   `src/http1/http1_format.c`, four values from RFC 9112 §6.3's eight receiver
-  rules: none (rule 1), length (5), chunked (3), close-delimited (7). Both
-  formatters and the stream vtable read it; nothing else chooses.
+  rules: none (rule 1), length (5), chunked (3), close-delimited (7). The
+  streaming formatter and the stream vtable read it. The buffered formatter
+  states a length of its own, so it answers the same two questions — does this
+  status carry a body, does this method — from the same inputs rather than from
+  the enum; what is gone is the third place that used to decide, not the
+  second.
 
   **HTTP/1.0.** `Transfer-Encoding: chunked` went to every 1.0 client, which has
   no decoder for it (§6.1). Such a body is delimited by the close now, with
@@ -289,9 +293,9 @@ it and expects a tag within days.
   its header block at the first `write()` and the `Connection` decision was
   taken in dispose, after those bytes had left — so a request that asked for
   close and a graceful drain both went unmentioned to every streaming client.
-  The decision moved into `h1_streaming_headers_build`, which asks the drain
-  evaluator once; dispose skips its own call when the headers are away, because
-  that evaluator advances per-connection state. The 1.0 keep-alive echo
+  The decision moved into `h1_streaming_headers_build`, which is the only place
+  a streaming response can state it. Dispose still asks, because a stream
+  outlives the answer — see the correction below. The 1.0 keep-alive echo
   (RFC 2068 §19.7.1) lands in the same place and in dispose for the buffered
   path — without it "a 1.0 client that declares a length keeps keep-alive" was
   server-side fiction.
@@ -300,7 +304,7 @@ it and expects a tag within days.
   A streaming call throws while the response is uncommitted; a buffered body is
   dropped at format time, because the status may legitimately be chosen after
   the body was built and there is no one left to tell. `sseStart()` refuses;
-  a 304 keeps a handler `Content-Length` (RFC 9110 §15.4.5) and a 1xx and a 204
+  a 304 keeps a handler `Content-Length` (RFC 9110 §8.6) and a 1xx and a 204
   lose it (§8.6). The refusal is in the shared `write()`, so it reaches HTTP/2
   and HTTP/3 too.
 
@@ -311,19 +315,48 @@ it and expects a tag within days.
   `Transfer-Encoding`** — the pair §6.1 forbids and §6.3 names as the smuggling
   shape. The streaming path stopped in #195; the buffered one drops it now.
 
-  The evaluator is asked once per response: dispose skips its own call for a
-  streaming response, gated on `http_response_is_streaming` rather than on the
-  headers-sent flag — the flag is false for a stream whose handler wrote
-  nothing, and that shape asked twice.
+  **The buffered drop was HTTP/1's alone, while the docs and the test said it
+  was everyone's.** Found by three of the four critics on the finished diff and
+  confirmed on the wire with this repository's own HTTP/2 client: a 204 with a
+  buffered body put `DATA("oops")` on the wire, a 304 did the same, and a
+  `HEAD` shipped the whole body — the last one on `main` too, since HTTP/2 had
+  no `HEAD` suppression at all. The drop now sits where each transport reads
+  the body for the wire, in `http_response_get_body` and
+  `http_response_get_body_str`, so HTTP/2, HTTP/3 and the pool worker inherit
+  it from one place and HTTP/3's own `is_head` branch is gone. `h2/055` had
+  been reading the body with curl, which discards content on a 204 whatever the
+  server sent; it counts frames now and asserts no stream was reset, so an
+  empty body proves the server dropped it rather than the client hiding it.
+
+  **A drain that came due mid-stream was lost.** The first shape of this step
+  gated dispose's whole `Connection` block on `http_response_is_streaming`, to
+  keep the drain evaluator from being asked twice for one response. The
+  evaluator is idempotent once latched — both its arms are guarded, and the
+  second call returns the same verdict and increments nothing — so what the
+  gate bought was nothing, and what it cost was every drain that arrives after
+  the header block: a connection that reached its age limit while its body was
+  going out kept `keep_alive` and was handed on for reuse, which `main` did not
+  do. Dispose asks again now. What a streaming response does not do there is
+  touch the header block — those bytes may already have left — so the telling
+  and the counter stay with `h1_streaming_headers_build`, which asks again and
+  sees the same latched verdict. Evidence: `h1/045`, and `h1/044` reads the two
+  counters exactly rather than as floors, which is what would catch the double
+  count the gate was there to prevent.
 
   Evidence: `h1/040` reads the 1.0 body with no framing around it against a 1.1
   control, `h1/041` proves the pipelined request is neither answered nor run,
   `h1/042` reads the keep-alive echo back and completes a second request on the
   socket, `h1/044` reads the drain's `Connection: close` off a streamed answer,
   `core/065` walks the bodiless-status contract from PHP on both paths and the
-  `HEAD` dialect, `h2/055` shows the refusal reaching HTTP/2, `compression/075`
-  decodes a gzipped close-delimited body, `tls/016` drives the identity write
-  branch over TLS. All nine fail against `main`'s sources and pass here.
+  `HEAD` dialect, `h1/045` proves a drain that comes due mid-stream still
+  retires the connection, `h2/055` reads the frames HTTP/2 puts on the wire for
+  each bodiless shape, `compression/075` decodes a gzipped close-delimited body
+  and holds the three rules that meet on a declared 1.0 stream, `tls/016`
+  drives the identity write branch over TLS with a chunk above the coalescing
+  bound. Nine of the ten fail against `main`'s sources and pass here; the
+  tenth, `h1/045`, passes on `main` as well, because the defect it guards was
+  introduced and removed inside this branch — `main` never gated the dispose
+  call at all.
 
   Reviewed by four critics against the design before any code: 32 findings, 12
   survived verification, every one of them fixed above. The RST findings were
@@ -340,6 +373,64 @@ it and expects a tag within days.
   `reset_to_error` runs while an exception is already being handled. Evidence:
   `h1/043`. Not addressed: the phrase still carries the whole message, so a 500
   puts application text of any length on the status line.
+
+- [ ] **A header value reaches the HTTP/1 wire unfiltered, so a CRLF in one
+  splits the response.** The other half of #198, and the reachable half:
+  `add_header_value` (`src/http_response.c:118`) only lowercases the name, and
+  `append_header_line` (`src/http1/http1_format.c:197`) is three memcpys, so
+  `setHeader('Location', $userInput)` with a CRLF in it ends the header block
+  and puts a second response behind it (CWE-113). The status line was the rarer
+  door; this is the one production code opens, and the repository already knows
+  the rule — `sendFile()` refuses CR and LF in its option strings
+  (`src/http_response.c:1692`). Refuse rather than clean, unlike the phrase:
+  `setHeader()` runs with the handler still there to be told. HTTP/2 and
+  HTTP/3 are covered by nghttp2's and nghttp3's own validators.
+- [ ] **A 1xx status produces a final response, and the exchange never ends.**
+  `setStatusCode()` accepts 100–599, and a 1xx now frames correctly as a
+  message that ends at the header block — but a 1xx is not a final response
+  (RFC 9110 §15.2), and nothing follows it. The client waits for the answer,
+  the server waits for the next request, and both leave on a timeout. On a 1.0
+  request it is worse: §15.2 forbids sending a 1xx to such a client at all, and
+  the keep-alive echo makes the server offer to reuse the socket. There is no
+  interim-response API for a handler to reach for instead, so the shape has no
+  correct use — refusing `code < 200` in `setStatusCode()` is one branch, and
+  it would let `response_status_forbids_content_length` shrink to `204` and the
+  rule-1 test to `204 || 304`, which is what §6.3 rule 1 gives a *sender*.
+  `core/065`'s `/interim` arm pins today's shape and changes with it.
+- [ ] **205 Reset Content carries a body on every path.** RFC 9110 §15.3.6
+  forbids content in a 205, and `response_status_carries_body`
+  (`src/http_response_internal.h:109`) does not list it. It cannot simply join
+  204 and 304 there: §6.3 rule 1 does not name 205, so a receiver still looks
+  for framing and the message needs `Content-Length: 0` where 204 needs the
+  field absent. Its own leg: body dropped, zero length stated.
+- [ ] **The server states the framing and lets the handler lie about the
+  connection.** `emit_headers_only` drops a handler `Content-Length` and
+  `Transfer-Encoding` on the reasoning that framing is the server's to state,
+  and leaves `connection` alone: a handler `Connection: close` on a 1.1 request
+  reaches the peer while `conn->keep_alive` stays true, and the next request is
+  answered on a socket the peer has retired. The 1.0 keep-alive echo has the
+  mirror defect — it overwrites a handler's `Connection: close` with
+  `keep-alive`. And the `Transfer-Encoding` drop assumes the value is always
+  `chunked`: a handler that set `gzip` now sends gzip bytes with no coding
+  named anywhere, which is a corrupt download rather than a smuggling shape.
+  Refusing both names at `setHeader()` is the shape that fits — the handler is
+  still there to be told. Found by the protocol critic on the finished #197
+  diff; none of it is new in that change except the echo's overwrite.
+- [ ] **A `HEAD` whose handler streams reports `Content-Length: 0`.** `write()`
+  returns before `http_response_stream_commit_once`, so such a response is
+  never streaming and takes the buffered `HEAD` branch, where the length is
+  computed from an empty buffer. `docs/USAGE.md` and the `H1_FRAMING_NONE`
+  comment both say a `HEAD` carries the length its `GET` would have stated, and
+  on that route it states zero. Two shapes to choose between: commit the stream
+  and drop only the bytes, which puts every dialect in one framing, or keep the
+  early return and stop computing a length nobody measured. Pre-existing for
+  `write()`; #197 extended the same early return to `writeMessage()`.
+- [ ] **The static path advertises `Connection: keep-alive` on HTTP/1.1 too.**
+  `send_file.c:454` sets it unconditionally from `keep_alive`, while
+  `h1_streaming_headers_build` states the opposite rule — on 1.1 the header is
+  noise, since keep-alive is the version's default. Three response paths, two
+  policies; the CHANGELOG claim that no path sent the echo before #197 was
+  wrong because of this one.
 
 - [ ] **HTTP/2 and HTTP/3 strip `Content-Length` from every response, `HEAD`
   and static files included.** `http_response_header_allowed_h2h3` drops the name
@@ -358,7 +449,12 @@ it and expects a tag within days.
   in `requests_2xx_total` and in the access log — the same defect #171 fixed one
   layer down. Deliberately left out of #171: the access-log record is a
   user-visible format and deserves its own decision rather than a silent column.
-  `core/027`, `h2/051` and `h3/051` pin the shapes it would change.
+  `core/027`, `h2/051` and `h3/051` pin the shapes it would change. The same
+  record has a second wrong column, found by the state critic on the #197 diff:
+  `rec->response_size` reads the buffered body, so a 204 or a `HEAD` whose body
+  was dropped is logged with the count of bytes that never left, and every
+  streamed response is logged with zero while `written_length` holds the real
+  number.
 - [~] **Migration.** The CHANGELOG entries are written (#180, five bullets covering
   the seven renames, plus #181 under Fixed). What is left is laravel-spawn, and it
   is five call sites rather than the two this plan assumed: `send()` → `write()`

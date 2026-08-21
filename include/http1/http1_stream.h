@@ -33,8 +33,12 @@ extern const http_response_stream_ops_t h1_stream_ops;
 typedef enum {
     /* Rule 1: a 1xx, 204 or 304, and any response to HEAD. The message ends at
      * the blank line whatever the header fields say, so nothing is framed and
-     * no body goes out. A HEAD still carries the length its GET would have
-     * stated, which the buffered formatter computes. */
+     * no body goes out. A handler's own Content-Length survives where the
+     * number still describes something — a 304, a HEAD — and is dropped on a
+     * 1xx and a 204, which RFC 9110 §8.6 forbids it on. What this framing
+     * never carries is a length the server computed: on the buffered path a
+     * HEAD is not this framing at all, and the count of the body a GET would
+     * have returned is emitted there. */
     H1_FRAMING_NONE = 0,
     /* Rule 5: Content-Length, and the body is exactly that many bytes. */
     H1_FRAMING_LENGTH,

@@ -41,6 +41,16 @@ $payload = str_repeat("compressible payload\n", 200);
 
 $server->addHttpHandler(function ($req, $res) use ($payload) {
     $res->setHeader('Content-Type', 'text/html');
+
+    /* The route where all three rules meet: a 1.0 peer that would otherwise
+     * get a close-delimited body, an Accept-Encoding that would otherwise be
+     * honoured, and a declared length that overrules both — compression is
+     * refused because the count would describe the wrong bytes, the framing
+     * is the count rather than the close, and the connection survives. */
+    if ($req->getPath() === '/declared') {
+        $res->setHeader('Content-Length', (string) strlen($payload));
+    }
+
     $res->write($payload);
     $res->end();
 });
@@ -107,6 +117,17 @@ spawn(function () use ($port, $server, $payload) {
         preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
     echo "1.1 decodes to payload: ", gzdecode($dechunk($body)) === $payload ? 'yes' : 'no', "\n";
 
+    [$head, $body] = $fetch($port,
+        "GET /declared HTTP/1.0\r\nConnection: keep-alive\r\nAccept-Encoding: gzip\r\n\r\n");
+
+    echo "declared content-encoding: ",
+        preg_match('/^content-encoding:\s*(\S+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
+    echo "declared content-length: ",
+        preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? (int) $m[1] : -1, "\n";
+    echo "declared connection: ",
+        preg_match('/^connection:\s*(\S+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
+    echo "declared body is payload: ", $body === $payload ? 'yes' : 'no', "\n";
+
     $server->stop();
 });
 
@@ -120,3 +141,7 @@ $server->start();
 1.0 decodes to payload: yes
 1.1 transfer-encoding: present
 1.1 decodes to payload: yes
+declared content-encoding: <absent>
+declared content-length: 4200
+declared connection: keep-alive
+declared body is payload: yes

@@ -54,7 +54,11 @@ $server = new HttpServer(
 
 $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setHeader('Content-Type', 'text/plain');
-    $res->write('alpha');
+    /* Over the frame-coalescing bound, so the chunk is written on its own
+     * rather than copied into one frame with the header block. That standalone
+     * write is the identity branch this test exists for, and a small chunk
+     * never reaches it. */
+    $res->write(str_repeat('a', 64 * 1024));
     $res->write('beta');
     $res->end();
 });
@@ -72,7 +76,8 @@ spawn(function () use ($port, $server) {
     echo "status: ", rtrim(strtok($head, "\r\n")), "\n";
     echo "transfer-encoding: ", preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
     echo "connection: ", preg_match('/^connection:\s*(\S+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
-    echo "body: ", json_encode($body), "\n";
+    echo "body length: ", strlen($body), "\n";
+    echo "body tail: ", json_encode(substr($body, -4)), "\n";
 
     $server->stop();
 });
@@ -83,4 +88,5 @@ $server->start();
 status: HTTP/1.0 200 OK
 transfer-encoding: <absent>
 connection: close
-body: "alphabeta"
+body length: 65540
+body tail: "beta"
