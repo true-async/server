@@ -209,7 +209,8 @@ designs were worked out and both fail on something mechanical.
 
 - [x] **Measure what a chunk costs before deciding.** Taken 2026-08-20, in
   `dev/BENCHMARKS.md`: one `writev` and one park per streamed chunk on plaintext HTTP/1,
-  flat from 4 KiB to 64 KiB. The three submits the case rested on are one, so what a queue
+  flat from 4 KiB to 64 KiB, and half a write with a seventh of a park on TLS, where the
+  BIO ring already batches. The three submits the case rested on are one, so what a queue
   could still remove is the single park — and only by making the write fire-and-forget,
   which leaves `isWritable()` and `tryWrite()` with nothing honest to answer.
 - [ ] **Answer from the queues the connection already has.** Plaintext:

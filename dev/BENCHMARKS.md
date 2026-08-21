@@ -140,6 +140,16 @@ One vectored submit and one park per chunk, flat in the chunk size — the 64 Ki
 takes the copy-free path and still leaves as a single `writev`, because its three pieces
 are three slots rather than three calls.
 
+The same pair of runs over TLS, HTTP/1.1 on a TLS listener (`curl --http1.1`, bodies
+verified at 262144 and 65536 bytes):
+
+| chunk | chunks measured | write | epoll_pwait | per chunk |
+|---|---|---|---|---|
+| 4 KiB | 480 (640 − 160) | 249 | 69 | 0.52 writes, 0.14 waits |
+
+Fewer, not more: `tls_push` copies the chunk into the plaintext BIO ring and the drain
+writes what has accumulated, so two chunks share one socket write and most never park.
+
 What it decides: the premise under #179 is gone. What a per-connection outbound queue
 could still remove is the one park per chunk, and only by making the write
 fire-and-forget — which is what `isWritable()` and `tryWrite()` would then be unable to
