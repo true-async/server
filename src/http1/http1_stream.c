@@ -129,19 +129,15 @@ static zend_string *h1_streaming_headers_build(http1_request_ctx_t *ctx)
     }
 
     if (framing == H1_FRAMING_CLOSE || drain || !conn->keep_alive) {
-        http_response_set_connection(response_obj, false);
+        h1_response_state_connection(response_obj, false);
         conn->keep_alive = false;
         ctx->close_delimited = framing == H1_FRAMING_CLOSE;
 
         if (drain) {
             http_server_on_h1_connection_close_sent(conn->counters);
         }
-    } else if (!h1_response_peer_speaks_http11(response_obj)) {
-        /* An HTTP/1.0 peer treats every response as the last unless the server
-         * confirms otherwise (RFC 2068 §19.7.1), so a connection this server
-         * intends to keep has to say so. On 1.1 the default is the opposite and
-         * the header would be noise. */
-        http_response_set_connection(response_obj, true);
+    } else {
+        h1_response_state_connection(response_obj, true);
     }
 
     zend_string *headers =

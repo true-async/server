@@ -22,6 +22,7 @@
 #include "Zend/zend_async_API.h"
 #include "php_http_server.h"
 #include "http1/http_parser.h" /* http_request_t */
+#include "http1/http1_stream.h" /* h1_response_state_connection */
 #include "http_response_internal.h"
 #include "send_file.h"
 #include "http_mime.h"
@@ -232,7 +233,7 @@ static bool engine_emit_error_via_op(engine_state_t *state, int status, const ch
 	}
 
 	http_response_set_content_length(response_obj, (uint64_t)body_len);
-	http_response_set_connection(response_obj, engine_keep_alive(state));
+	h1_response_state_connection(response_obj, engine_keep_alive(state));
 
 	return engine_delegate_to_protocol(state, NULL, 0, 0, true);
 }
@@ -368,7 +369,7 @@ static void engine_handle_stat(engine_state_t *state)
 				}
 
 				http_response_static_set_header(response_obj, "content-length", 14, "0", 1);
-				http_response_set_connection(response_obj, engine_keep_alive(state));
+				h1_response_state_connection(response_obj, engine_keep_alive(state));
 
 				if (!engine_delegate_to_protocol(state, NULL, 0, 0, true)) {
 					engine_finalize(state, -1);
@@ -451,7 +452,7 @@ static void engine_handle_stat(engine_state_t *state)
 	}
 
 	http_response_apply_extra_headers(response_obj, cfg->extra_headers, include_content_headers);
-	http_response_set_connection(response_obj, keep_alive);
+	h1_response_state_connection(response_obj, keep_alive);
 
 	/* === Hand off to the protocol op ================================= */
 
