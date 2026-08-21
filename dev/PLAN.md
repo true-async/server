@@ -499,6 +499,20 @@ it and expects a tag within days.
   429 passed, 0 failed, 24 skipped on absent tool gates, 1 warn (`core/047`,
   the pre-existing XFAIL that passes); `ctest` 16 of 16.
 
+- [ ] **Measure what the framing work costs per response.** Not today; recorded so
+  the number is taken before the next release rather than assumed. #195, #197 and
+  #200 each added per-response work to a path that runs for every request. The one
+  to measure first is #200 on HTTP/2 and HTTP/3: `http_response_commit_content_length`
+  writes the count into the header table, so every buffered response now pays a
+  `zend_hash_update` plus two `zend_string` allocations — the lowercased name and
+  the formatted value — where the field used to be dropped and cost nothing. HTTP/1
+  is untouched by that: it reads the action and formats into the smart_str as
+  before. The `HEAD` branch adds one `zend_hash_str_exists`. Compare against the
+  commit before #200 with `h2load` on a buffered response, same machine and same
+  build, three runs, median, into `dev/BENCHMARKS.md`. If the insert shows, the
+  next shape to try is handing the count to the flatten loop as an extra entry
+  instead of through the table.
+
 - [ ] **An aborted request is logged and counted as the status it committed.**
   `http_request_telemetry` reads `http_response_get_status()`, which is the 200 the
   handler put on the wire before it failed, so a truncated body reads as complete
