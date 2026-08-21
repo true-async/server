@@ -144,6 +144,9 @@ Skip rules — when **any** of these holds, the response stays identity:
 - response `Content-Type` is outside the whitelist
 - response body is smaller than `compression_min_size` (buffered path
   only — streaming bodies have unknown size)
+- the handler declared a `Content-Length` before the first `write()`: the
+  server holds the body to that count, and a codec would put a different one
+  on the wire
 - `setNoCompression()` was called on the response
 - `compression_enabled` is false in the config
 

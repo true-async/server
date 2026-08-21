@@ -724,7 +724,8 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
 
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
+                                                   false)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
@@ -766,7 +767,8 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
 
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
+                                                   false)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv[i].name     = (uint8_t *)ZSTR_VAL(name);

@@ -87,9 +87,10 @@ http_send_file_request_t *http_response_take_send_file(zend_object *obj)
 	abort();
 }
 
-bool http_response_header_allowed_h2h3(const char *name, size_t len)
+bool http_response_header_allowed_h2h3(const char *name, size_t len,
+                                       bool keep_content_length)
 {
-	(void) name; (void) len;
+	(void) name; (void) len; (void) keep_content_length;
 	abort();
 }
 
@@ -148,5 +149,17 @@ http_static_result_t http_static_try_serve(http_server_object *server, struct ht
 		const http_static_dispatch_cbs_t *cbs, void *user)
 {
 	(void) server; (void) request; (void) response_obj; (void) counters; (void) cbs; (void) user;
+	abort();
+}
+
+int64_t http_response_get_declared_length(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}
+
+bool http_response_has_declared_length(zend_object *obj)
+{
+	(void) obj;
 	abort();
 }

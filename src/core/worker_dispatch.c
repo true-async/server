@@ -151,8 +151,13 @@ static void worker_dispatch_entry(void)
     zval_ptr_dtor(&retval);
 }
 
-/* Flatten status + H2/H3-allowed headers of the response onto a wire. */
-static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp)
+/* Flatten status + H2/H3-allowed headers of the response onto a wire.
+ *
+ * @p keep_content_length is the caller's framing decision: a streaming wire
+ * whose response declared a length carries it, so the peer can hold the frames
+ * to it; every other wire leaves the length to the frames themselves. */
+static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
+                                  const bool keep_content_length)
 {
     int status = http_response_get_status(resp);
 
@@ -175,7 +180,8 @@ static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp)
             continue;
         }
 
-        if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) {
+        if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
+                                               keep_content_length)) {
             continue;
         }
 
@@ -350,7 +356,8 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
 
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
         response_wire_set_credit(hw, ctx->credit);
-        worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv));
+        worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv),
+                              http_response_has_declared_length(Z_OBJ(ctx->response_zv)));
 
         /* headers undeliverable → the stream never opened; don't copy and
          * post a chunk wire the reactor would only throw away */
@@ -556,7 +563,7 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         return NULL;
     }
 
-    worker_wire_copy_head(rw, resp);
+    worker_wire_copy_head(rw, resp, false);
     worker_wire_copy_trailers(rw, resp);
 
     /* http_response_get_body_str returns a borrowed reference; the bytes are

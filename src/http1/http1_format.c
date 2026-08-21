@@ -172,32 +172,46 @@ static inline void append_header_line(smart_str *out,
     *p++ = '\r'; *p   = '\n';
 }
 
-/* True for the framing headers a chunked streaming response must drop:
- * Content-Length and any handler-set Transfer-Encoding. Case-insensitive
- * — handlers may set either casing. */
-static bool header_is_framing(const zend_string *name)
+/* Case-insensitive — handlers may set either casing. */
+static bool header_is_content_length(const zend_string *name)
 {
-    return (ZSTR_LEN(name) == 14
-            && zend_binary_strcasecmp(ZSTR_VAL(name), 14, "content-length", 14) == 0)
-        || (ZSTR_LEN(name) == 17
-            && zend_binary_strcasecmp(ZSTR_VAL(name), 17, "transfer-encoding", 17) == 0);
+    return ZSTR_LEN(name) == 14
+        && zend_binary_strcasecmp(ZSTR_VAL(name), 14, "content-length", 14) == 0;
+}
+
+static bool header_is_transfer_encoding(const zend_string *name)
+{
+    return ZSTR_LEN(name) == 17
+        && zend_binary_strcasecmp(ZSTR_VAL(name), 17, "transfer-encoding", 17) == 0;
+}
+
+static inline void emit_content_length(smart_str *out, const size_t body_len)
+{
+    smart_str_appendl(out, "Content-Length: ", sizeof("Content-Length: ") - 1);
+    smart_str_append_unsigned(out, body_len);
+    smart_str_appendl(out, "\r\n", 2);
 }
 
 /* Iterate the headers table emitting "name: value\r\n" for each entry.
- * When skip_framing is set, Content-Length / Transfer-Encoding are dropped
- * (a chunked streaming response supplies its own framing). Flat IS_STRING
- * fast path (single-value, common case) + IS_ARRAY multi-value fallback.
- * Does NOT emit the trailing CRLF that ends the header block — caller
- * appends that. */
+ * The two framing headers are dropped separately, because a declared-length
+ * stream keeps its Content-Length while still refusing a handler's
+ * Transfer-Encoding: one body cannot be framed twice (RFC 9112 §6.1), and a
+ * response carrying both is what an intermediary resolves one way and its peer
+ * the other. Flat IS_STRING fast path (single-value, common case) + IS_ARRAY
+ * multi-value fallback. Does NOT emit the trailing CRLF that ends the header
+ * block — caller appends that. */
 static void emit_headers_only(smart_str *out, HashTable *headers,
-                              const bool skip_framing)
+                              const bool drop_content_length,
+                              const bool drop_transfer_encoding)
 {
     zend_string *name;
     zval *values;
     ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
         if (UNEXPECTED(name == NULL)) continue;
 
-        if (skip_framing && header_is_framing(name)) continue;
+        if (drop_content_length && header_is_content_length(name)) continue;
+
+        if (drop_transfer_encoding && header_is_transfer_encoding(name)) continue;
 
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
             const zend_string *v = Z_STR_P(values);
@@ -243,17 +257,34 @@ static void emit_headers_block(smart_str *result, http_response_object *response
 
     emit_date_header(result, response->headers);
 
-    /* Add Content-Length if body exists and not already set. Use
-     * zend_hash_str_exists to skip the zend_string alloc/release
-     * round-trip on the literal name lookup. */
-    if (!zend_hash_str_exists(response->headers, "content-length",
-                              sizeof("content-length") - 1)) {
-        smart_str_appendl(result, "Content-Length: ", sizeof("Content-Length: ") - 1);
-        smart_str_append_unsigned(result, body_len);
-        smart_str_appendl(result, "\r\n", 2);
-    }
+    /* Content-Length on a buffered body is the server's to state: it is holding
+     * the bytes it is about to send, so a handler value that disagrees would
+     * put the peer's read cursor at the wrong byte and desync a reused
+     * connection. Use zend_hash_str_exists to skip the zend_string
+     * alloc/release round-trip on the literal name lookup. */
+    const bool handler_declared =
+        zend_hash_str_exists(response->headers, "content-length",
+                             sizeof("content-length") - 1);
 
-    emit_headers_only(result, response->headers, false);
+    /* The handler's number is kept where the message carries no body to
+     * measure it against: a HEAD, and a status that ends at the blank line.
+     *
+     * Two branches rather than one computed flag: the common response declares
+     * no length, and passing the literal lets the emit loop drop the name check
+     * for it. */
+    const bool body_follows = !response->is_head
+        && response_status_carries_body(response->status_code);
+
+    if (handler_declared && body_follows) {
+        emit_content_length(result, body_len);
+        emit_headers_only(result, response->headers, true, false);
+    } else {
+        if (!handler_declared) {
+            emit_content_length(result, body_len);
+        }
+
+        emit_headers_only(result, response->headers, false, false);
+    }
 
     /* End of headers */
     smart_str_appendl(result, "\r\n", 2);
@@ -355,27 +386,35 @@ zend_string *http_response_format(zend_object *obj)
     return result.s ? result.s : zend_empty_string;
 }
 
-/* Serialize status line + headers for an HTTP/1.1 streaming response
- * (Transfer-Encoding: chunked). Strips any handler-set Content-Length
- * — incompatible with chunked per RFC 9112 §6.3 — and emits
- * `Transfer-Encoding: chunked` in its place. Headers end with the
- * empty line; the caller writes the body as a sequence of chunks.
+/* Serialize status line + headers for an HTTP/1 streaming response. Headers
+ * end with the empty line; the caller writes the body after them.
+ *
+ * Which of the two framings the block announces is the response's own answer.
+ * A stream that declared a Content-Length keeps it and is framed by it, byte
+ * for byte, with no chunk headers around the body. One that declared none is
+ * framed by chunked encoding, and any handler Content-Length is dropped as
+ * incompatible with it (RFC 9112 §6.3). A handler Transfer-Encoding is dropped
+ * either way: the framing is the server's to state.
  *
  * Used by h1_stream_ops at first write(). Separate from http_response_format
  * because the latter builds status + Content-Length + headers + body
- * as a single atomic payload, which is exactly what chunked avoids. */
+ * as a single atomic payload, which is exactly what streaming avoids. */
 zend_string *http_response_format_streaming_headers(zend_object *obj)
 {
     http_response_object *response = http_response_from_obj(obj);
+    const bool declared = response->declared_length >= 0;
     smart_str result = {0};
     smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
     emit_date_header(&result, response->headers);
-    smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
-                      sizeof("Transfer-Encoding: chunked\r\n") - 1);
 
-    emit_headers_only(&result, response->headers, true);
+    if (!declared) {
+        smart_str_appendl(&result, "Transfer-Encoding: chunked\r\n",
+                          sizeof("Transfer-Encoding: chunked\r\n") - 1);
+    }
+
+    emit_headers_only(&result, response->headers, !declared, true);
 
     smart_str_appendl(&result, "\r\n", 2);
     smart_str_0(&result);
@@ -399,7 +438,7 @@ zend_string *http_response_format_static_head(zend_object *obj,
     smart_str_alloc(&result, 1024, 0);
 
     emit_status_line(&result, response);
-    emit_headers_only(&result, response->headers, false);
+    emit_headers_only(&result, response->headers, false, false);
     smart_str_appendl(&result, "\r\n", 2);
 
     if (include_inline_body) {

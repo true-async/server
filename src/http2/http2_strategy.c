@@ -958,12 +958,17 @@ static int http2_feed(http_protocol_strategy_t *strategy,
  * Two-pass: count admissible (name, value) pairs, then fill — multi-value
  * array headers contribute one entry per string value. Uses caller-provided
  * scratch when it fits, else emallocs into *out_heap (caller efrees).
- * Returns the number of entries written to *out_view. */
+ * Returns the number of entries written to *out_view.
+ *
+ * @p keep_content_length carries the caller's framing decision into both
+ * passes; they must agree, or the count and the fill describe different
+ * header sets. */
 static size_t h2_flatten_response_headers(HashTable *headers,
                                           http2_header_view_t *scratch,
                                           const size_t scratch_cap,
                                           http2_header_view_t **out_view,
-                                          http2_header_view_t **out_heap)
+                                          http2_header_view_t **out_heap,
+                                          const bool keep_content_length)
 {
     size_t total_values = 0;
 
@@ -973,7 +978,8 @@ static size_t h2_flatten_response_headers(HashTable *headers,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
 
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
+                                                   keep_content_length)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 total_values++;
@@ -1002,7 +1008,8 @@ static size_t h2_flatten_response_headers(HashTable *headers,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL)                                              continue;
 
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
+                                                   keep_content_length)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 nv_view[nv_count].name      = ZSTR_VAL(name);
@@ -1084,7 +1091,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
     http2_header_view_t *nv_view;
     http2_header_view_t *nv_heap;
     const size_t nv_count = h2_flatten_response_headers(
-        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap);
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap, false);
 
     const int status = http_response_get_status(response_obj);
     size_t body_len = 0;
@@ -1151,8 +1158,11 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     http2_header_view_t scratch[HTTP2_NV_SCRATCH];
     http2_header_view_t *nv_view;
     http2_header_view_t *nv_heap;
+    /* A declared length is carried so the peer can hold the DATA frames to it;
+     * without one the frames are the only framing there is. */
     const size_t nv_count = h2_flatten_response_headers(
-        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap);
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap,
+        http_response_has_declared_length(response_obj));
 
     const int status = http_response_get_status(response_obj);
     const int rc = http2_session_submit_response_streaming(

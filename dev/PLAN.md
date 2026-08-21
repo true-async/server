@@ -174,13 +174,116 @@ it and expects a tag within days.
   the stream before probing the peer, so a 499 left the response committed and the handler
   could not answer with a status. And `awaitWritable($timeoutMs)` documented a deadline no
   transport read: HTTP/2 now waits the shorter of it and the connection's write timeout.
-- [ ] **Framing by declared length.** A `Content-Length` set before the first
+- [x] **Framing by declared length.** A `Content-Length` set before the first
   `write()` reaches the client verbatim on every protocol, and the server becomes
   the auditor: excess throws at the offending write, a shortfall aborts the stream
   at `end()` instead of finishing cleanly under a header that lies. Compression is
   disabled for such a response. `src/http1/http1_format.c:249` is the only path
   that passes a handler value today; H2, H3 and the worker strip it in
   `http_response_header_allowed_h2h3`. The abort op it waited on landed with #171.
+
+  The declaration is taken at the first `write()`, into `declared_length` on the
+  response, and the count is **reserved** before each chunk reaches the transport
+  rather than added after it returns: every `append_chunk` suspends, so a second
+  coroutine writing to the same response would otherwise be admitted against a
+  total already spoken for. The shortfall verdict sits in
+  `http_response_finish_stream`, the one finisher `end()`, `abort()` and all four
+  dispose paths pass through, and it compares for equality — an overshoot the
+  reservation cannot produce today would be failed too rather than trusted.
+
+  Four carve-outs decide what declares. **gRPC** closes its body with a trailer
+  frame the handler never sees, and `grpc_call_finish` is a fifth finisher that
+  bypasses `finish_stream` — a declared length there would be carried and never
+  audited, so `grpc_mode != 0` declares nothing. **SSE** starts its stream
+  through `sse_ensure_started` and keeps its framing. **HEAD** returns before
+  the guard, so on HTTP/1 the length stays on the buffered path where it
+  describes the body a `GET` would return; on HTTP/2 and HTTP/3 it is stripped
+  there as it always was, which is the open step below. And a status defined to
+  carry no content (`1xx`, `204`, `304`) declares nothing, so such a response
+  keeps the framing it had — chunked, which RFC 9112 §6.1 forbids on it just as
+  it forbids the identity body: the carve-out declines to widen that defect
+  rather than closing it, and it belongs to the HTTP/1.0 step below.
+
+  A declaration is not always what reaches the client. When the body ends short
+  and `abort()` answers false — nothing on the wire — the finisher rewrites the
+  header to the count actually written, because the empty response committed
+  behind it would otherwise leave the peer counting down to bytes that are not
+  coming.
+
+  What a declared stream must not do is let bytes past the guard. `write()`,
+  `tryWrite()`, `end($data)` and both message calls go through it;
+  `writeMessage()` needs no gRPC mode of its own, so on a plain request it would
+  otherwise have put an uncounted frame onto an identity-framed body — found by
+  the intent reviewer on the finished diff, fixed here, pinned by `core/064`
+  route `/frame`. A declaration is therefore taken by whichever streaming call
+  comes first, and the byte counted is the one that call puts on the wire, not
+  the payload it was handed.
+
+  The reservation is given back whenever the transport queued nothing — a
+  non-blocking refusal, and every `HTTP_STREAM_APPEND_STREAM_DEAD`. Keeping it
+  on a dead stream let a body that never reached the peer satisfy the count, so
+  HTTP/2 ended cleanly under a `content-length` that overstated it. And the
+  declaration is adopted only once a chunk is accepted: a first offer refused
+  for over-run leaves the response uncommitted and free to answer buffered, and
+  a length recorded before that check reached the HTTP/3 field section beside a
+  body of another size. Both found by the adversarial reviewer on the finished
+  diff.
+
+  Two limits are known and carried without a test. The header correction on the
+  abort-answers-false branch needs a transport that refuses its first chunk
+  before opening the stream, which no shape reachable from PHP produces today.
+  And on the pool path the worker counts a chunk once the wire is posted, while
+  the reactor may drop it for a stream that has moved on (`http3_dispatch.c`
+  `RESPONSE_WIRE_STREAM_CHUNK`) — the count is a floor there, so a declared
+  length can be reported kept when the reactor discarded part of it.
+
+  Evidence: `h1/037` reads nine body bytes with no framing around them and
+  completes a second request on the same connection, `h1/038` refuses the
+  offending chunk and still finishes the promised body, `h1/039` fails a short
+  one, `core/064` walks the declaration's edges from PHP — malformed, twice,
+  late, exact — and proves the malformed case leaves the response uncommitted
+  and answerable with a 500, `h2/054` and `h3/060` read the field off the wire
+  against an undeclared control and get a reset on a short body, `h3/061`
+  carries it across the pool wire, `compression/074` shows the same payload
+  gzipped without a declaration and identity with one.
+
+  Two defects the work uncovered. **A handler `Content-Length` that disagreed
+  with a buffered body desynced the connection**: the value was emitted verbatim
+  next to whatever body the response held, so eleven bytes under a header naming
+  five left the client reading the last six as the next status line. The server
+  now states the count it is sending, except on `HEAD`, and `core/064` route
+  `/buffered` pins it. And **one predicate dropped both framing headers**, so keeping `Content-Length` on the streaming
+  path would have kept a handler's `Transfer-Encoding` with it — the pair RFC
+  9112 §6.1 forbids and §6.3 names as the smuggling shape; the two names are
+  dropped separately now.
+
+  Reviewed by four critics against the design before any code: they found the
+  gRPC finisher bypass, the commit-then-throw ordering, the
+  two-headers-one-predicate lever, the HEAD claim that held for `write()` only,
+  and the check-then-count race. Reviewed again on the finished diff, which is
+  where the `writeMessage()` hole and the missing test for the buffered fix came
+  from. Each finding is fixed above or an open step below.
+
+- [ ] **HTTP/1.0 responses are framed by chunked encoding, which they may not
+  be.** `http_response_format_streaming_headers` emits `Transfer-Encoding:
+  chunked` without reading the request version, while `emit_status_line` answers
+  `HTTP/1.0` when the request was 1.0 — RFC 9112 §6.1 forbids sending
+  `Transfer-Encoding` unless the request indicated 1.1 or later, so a 1.0 client
+  reads the hex size lines as body. The answer is the framing the declared-length
+  work just built: identity, `Connection: close`, body delimited by the close.
+  Found by the protocol critic on that design; pre-existing, and untouched by it.
+
+- [ ] **HTTP/2 and HTTP/3 strip `Content-Length` from every response, `HEAD`
+  and static files included.** `http_response_header_allowed_h2h3` drops the name
+  for the reason DATA frames make it implicit, but RFC 9110 §9.3.2 wants a `HEAD`
+  response to carry the headers its `GET` would, and a `sendFile()` of a 4 KiB
+  asset over HTTP/2 reaches the client with no length to size a download by. The
+  `keep_content_length` argument added for declared streams is the lever; the
+  step is deciding which of the four `false` call sites flip. Two comments in the
+  tree already assert the length goes out (`src/http3/http3_callbacks.c:952`,
+  `src/http3/http3_static_response.c:305`) and are wrong today.
+  `static/012` (`cl=-` on GET and HEAD) and `h3/019` (`header_count=71`) pin the
+  current shape, so both change with it.
 - [ ] **An aborted request is logged and counted as the status it committed.**
   `http_request_telemetry` reads `http_response_get_status()`, which is the 200 the
   handler put on the wire before it failed, so a truncated body reads as complete

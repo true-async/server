@@ -1478,8 +1478,15 @@ void http_response_set_connection(zend_object *obj, bool keep_alive);
 /* H2/H3 forbidden response-header filter (RFC 9113 §8.2.2 / RFC 9114
  * §4.2). Returns false for hop-by-hop names (connection, keep-alive,
  * transfer-encoding, upgrade) and content-length (implicit from DATA
- * frames). H1 has its own framing rules and uses none of this. */
-bool http_response_header_allowed_h2h3(const char *name, size_t len);
+ * frames). H1 has its own framing rules and uses none of this.
+ *
+ * @p keep_content_length is for the one response that needs the length on the
+ * wire: a stream whose handler declared one, which the server then holds it
+ * to. Pass http_response_get_declared_length(obj) >= 0 at a streaming header
+ * commit and false everywhere else — a length nobody audits is worse on the
+ * wire than no length at all. */
+bool http_response_header_allowed_h2h3(const char *name, size_t len,
+                                       bool keep_content_length);
 
 /* Resolve effective keep-alive for a request. Reads req->keep_alive,
  * which the parser populated according to HTTP/1.x semantics. */
@@ -1523,6 +1530,18 @@ bool  http_response_is_streaming   (zend_object *obj);  /* write() activated str
  * passes. */
 bool  http_response_finish_stream  (zend_object *obj, bool failed,
                                     int64_t error_code);
+
+/* The Content-Length the handler set before this response started streaming,
+ * or -1 when it set none. A transport reads it to choose its framing: the
+ * declared length goes to the peer and the body is framed by it rather than by
+ * chunks or by the end of the stream. The server holds the body to that number
+ * — a stream that does not reach it is finished as failed — so a transport may
+ * treat it as the length it will actually carry. */
+int64_t http_response_get_declared_length(zend_object *obj);
+
+/* True when this response declared a length — the question a transport asks to
+ * pick its framing, spelled once so the -1 convention lives in one place. */
+bool http_response_has_declared_length(zend_object *obj);
 
 /* The handler did not reach its end, and a committed streaming response cannot
  * be given the status that says so — it has to be failed on the wire.

@@ -73,20 +73,48 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
         return false;
     }
 
+    /* A body of a length other than the one its headers named is a failure
+     * however the handler arrived here: ending cleanly over it would tell the
+     * peer it has the whole body, which is the sentence this audit exists to
+     * stop. It outranks the cancellation carve-out too — what a graceful
+     * shutdown interrupts is a promise of a byte count, not a feed that is
+     * allowed to end wherever it reached. */
+    const bool length_kept = response->declared_length < 0
+        || response->written_length == (uint64_t)response->declared_length;
+
     /* A false answer from abort means the transport has not put a byte of this
      * response on the wire — sseStart() with no event is the usual way there.
      * There is no half body to disown then, and the empty response every
      * transport commits lazily says more to the peer than a stream that merely
      * stops, so the clean finish below is taken instead. */
-    if (failed && response->stream_ops->abort != NULL
+    if ((failed || !length_kept) && response->stream_ops->abort != NULL
         && response->stream_ops->abort(response->stream_ctx, error_code)) {
         response->aborted = true;
     } else {
+        /* Nothing has left, so a declaration that will not be kept can still
+         * be corrected instead of carried: the empty response committed below
+         * then describes itself, rather than leaving the peer counting down to
+         * bytes that are not coming. */
+        if (!length_kept) {
+            http_response_set_content_length(obj, response->written_length);
+            response->declared_length = (int64_t)response->written_length;
+        }
+
         response->stream_ops->mark_ended(response->stream_ctx);
     }
 
     response->closed = true;
     return true;
+}
+
+int64_t http_response_get_declared_length(zend_object *obj)
+{
+    return http_response_from_obj(obj)->declared_length;
+}
+
+bool http_response_has_declared_length(zend_object *obj)
+{
+    return http_response_from_obj(obj)->declared_length >= 0;
 }
 
 /* True once HttpResponse::write() has been called. Dispose paths use
@@ -405,7 +433,8 @@ void http_response_set_connection(zend_object *obj, bool keep_alive)
     }
 }
 
-bool http_response_header_allowed_h2h3(const char *name, const size_t len)
+bool http_response_header_allowed_h2h3(const char *name, const size_t len,
+                                       const bool keep_content_length)
 {
     switch (len) {
     case 7:
@@ -414,8 +443,11 @@ bool http_response_header_allowed_h2h3(const char *name, const size_t len)
         return zend_binary_strcasecmp(name, 10, "connection", 10) != 0 &&
                zend_binary_strcasecmp(name, 10, "keep-alive", 10) != 0;
     case 14:
-        /* implicit from DATA frames */
-        return zend_binary_strcasecmp(name, 14, "content-length", 14) != 0;
+        /* Implicit from DATA frames, and dropped for that reason — unless the
+         * response declared a length, which is the peer's own means of telling
+         * a body that stopped from one that finished. */
+        return keep_content_length
+            || zend_binary_strcasecmp(name, 14, "content-length", 14) != 0;
     case 17:
         return zend_binary_strcasecmp(name, 17, "transfer-encoding", 17) != 0;
     default:
