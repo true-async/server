@@ -36,6 +36,12 @@ final class HttpResponse
     /**
      * Set response reason phrase
      *
+     * The phrase sits on the HTTP/1 status line, where RFC 9112 §4 allows
+     * HTAB, SP, VCHAR and obs-text and nothing else. Every other byte is
+     * replaced with a space: a CR or an LF would end the status line early and
+     * let the rest be read as header fields. HTTP/2 and HTTP/3 carry no reason
+     * phrase and ignore this.
+     *
      * @param string $phrase Reason phrase (e.g., "OK", "Not Found")
      * @return static
      */
@@ -160,7 +166,7 @@ final class HttpResponse
      *
      * The first call commits status and headers; afterwards setStatusCode(),
      * setHeader() and setBody() throw. Later calls append chunked-transfer
-     * segments (HTTP/1) or DATA frames (HTTP/2, HTTP/3). To append to a
+     * segments (HTTP/1.1) or DATA frames (HTTP/2, HTTP/3). To append to a
      * buffered body instead, call appendBody().
      *
      * A Content-Length set before this first call frames the body instead of
@@ -168,6 +174,16 @@ final class HttpResponse
      * pass the declared count throws HttpServerRuntimeException and is not
      * queued, and a body that ends short of it is failed rather than finished.
      * Such a response is never compressed.
+     *
+     * An HTTP/1.0 client gets neither: it has no chunked decoder, so an
+     * undeclared body reaches it as its own bytes with Connection: close, and
+     * the close is the boundary. The connection carries that one response.
+     *
+     * A status that carries no body — 1xx, 204, 304 — throws
+     * HttpServerRuntimeException here, while the response is still uncommitted
+     * and can still be given a status that does carry one. A HEAD request is
+     * the exception: the chunk is accepted and dropped, because the handler is
+     * producing the body a GET would return.
      *
      * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
      * park while every ring slot is live or the queued bytes stand at
@@ -449,7 +465,9 @@ final class HttpResponse
      * Throws {@see HttpServerInvalidArgumentException} if the handler has
      * already set a Content-Type other than `text/event-stream`, and
      * {@see HttpServerRuntimeException} if the response is already
-     * streaming, closed, or has no connection to stream over.
+     * streaming, closed, has no connection to stream over, or carries a status
+     * that ends at the header block (1xx, 204, 304), where an event stream has
+     * no body to put its records in.
      *
      * @return static
      */

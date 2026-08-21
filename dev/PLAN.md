@@ -311,13 +311,19 @@ it and expects a tag within days.
   `Transfer-Encoding`** — the pair §6.1 forbids and §6.3 names as the smuggling
   shape. The streaming path stopped in #195; the buffered one drops it now.
 
+  The evaluator is asked once per response: dispose skips its own call for a
+  streaming response, gated on `http_response_is_streaming` rather than on the
+  headers-sent flag — the flag is false for a stream whose handler wrote
+  nothing, and that shape asked twice.
+
   Evidence: `h1/040` reads the 1.0 body with no framing around it against a 1.1
   control, `h1/041` proves the pipelined request is neither answered nor run,
   `h1/042` reads the keep-alive echo back and completes a second request on the
-  socket, `core/065` walks the bodiless-status contract from PHP on both paths
-  and the `HEAD` dialect, `h2/055` shows the refusal reaching HTTP/2,
-  `compression/075` decodes a gzipped close-delimited body, `tls/016` drives the
-  identity write branch over TLS. 449 phpt, 424 passed, 0 failed on 2026-08-21.
+  socket, `h1/044` reads the drain's `Connection: close` off a streamed answer,
+  `core/065` walks the bodiless-status contract from PHP on both paths and the
+  `HEAD` dialect, `h2/055` shows the refusal reaching HTTP/2, `compression/075`
+  decodes a gzipped close-delimited body, `tls/016` drives the identity write
+  branch over TLS. All nine fail against `main`'s sources and pass here.
 
   Reviewed by four critics against the design before any code: 32 findings, 12
   survived verification, every one of them fixed above. The RST findings were

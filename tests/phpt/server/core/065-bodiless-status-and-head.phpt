@@ -73,6 +73,17 @@ $server->addHttpHandler(function ($req, $res) {
             $res->setStatusCode(304)->setHeader('Content-Length', '1234')->setBody('x')->end();
             return;
 
+        case '/interim':
+            $res->setStatusCode(100)->setHeader('Content-Length', '7')->setBody('ignored')->end();
+            return;
+
+        case '/handlerte':
+            /* One body cannot be framed twice. The server states the count it
+             * is sending, so a handler Transfer-Encoding beside it is the pair
+             * RFC 9112 §6.1 forbids and §6.3 names as the smuggling shape. */
+            $res->setHeader('Transfer-Encoding', 'chunked')->setBody('hello')->end();
+            return;
+
         case '/events':
             $res->sseEvent('hi');
             $res->end();
@@ -139,6 +150,31 @@ spawn(function () use ($port, $server) {
     echo "304 content-length: ",
         preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
 
+    fwrite($fp, "GET /interim HTTP/1.1\r\nHost: x\r\n\r\n");
+    $head = '';
+
+    while (!str_contains($head, "\r\n\r\n")) {
+        $c = fread($fp, 1);
+
+        if ($c === false || $c === '') {
+            break;
+        }
+
+        $head .= $c;
+    }
+
+    echo "100: ", strtok($head, "\r\n"), "\n";
+    echo "100 content-length: ",
+        preg_match('/^content-length:/mi', $head) ? 'present' : '<absent>', "\n";
+
+    fwrite($fp, "GET /handlerte HTTP/1.1\r\nHost: x\r\n\r\n");
+    [$head, $body] = $read_message($fp);
+
+    echo "handler TE: ", preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
+    echo "handler TE content-length: ",
+        preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
+    echo "handler TE body: ", json_encode($body), "\n";
+
     fwrite($fp, "HEAD /events HTTP/1.1\r\nHost: x\r\n\r\n");
     $head = '';
 
@@ -179,6 +215,11 @@ buffered body: ""
 next on the connection: HTTP/1.1 200 OK "root"
 304: HTTP/1.1 304 Not Modified
 304 content-length: 1234
+100: HTTP/1.1 100 Continue
+100 content-length: <absent>
+handler TE: <absent>
+handler TE content-length: 5
+handler TE body: "hello"
 HEAD sse: HTTP/1.1 200 OK
 HEAD sse content-type: text/event-stream
 HEAD sse transfer-encoding: <absent>
