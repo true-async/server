@@ -1331,6 +1331,7 @@ static bool response_check_declared_length(http_response_object *response,
     }
 
     if (declared < 0) {
+        response->written_length += chunk_len;
         return false;
     }
 
@@ -1358,9 +1359,7 @@ static bool response_check_declared_length(http_response_object *response,
 static void response_release_declared_length(http_response_object *response,
                                              const size_t chunk_len)
 {
-    if (response->declared_length >= 0) {
-        response->written_length -= chunk_len;
-    }
+    response->written_length -= chunk_len;
 }
 
 /* First chunk locks headers and switches to streaming mode. After this,

@@ -810,7 +810,14 @@ void http_request_fill_access_rec(const http_request_t *req,
     }
 
     rec->status        = http_response_get_status(response_obj);
-    rec->response_size = http_response_get_body_len(response_obj);
+    rec->response_size = http_response_get_sent_body_size(response_obj);
+
+    /* OTel forbids error.type on a request that completed, so it is where the
+     * record says the body stopped short while the status stays what the peer
+     * was told. */
+    if (UNEXPECTED(http_response_is_aborted(response_obj))) {
+        rec->error_type = "response_aborted";
+    }
 
     /* network.protocol.version per OTel: the bare version, not a scheme alias
      * ("2", never "h2"). Note "2"/"3" have no minor — OTel spells them so. */
@@ -855,6 +862,10 @@ void http_request_telemetry(http_request_t *request, zend_object *response_obj,
     }
 
     http_server_count_request(counters, http_response_get_status(response_obj));
+
+    if (UNEXPECTED(http_response_is_aborted(response_obj))) {
+        counters->responses_aborted_total++;
+    }
 
     if (log_state == NULL || !log_state->has_access) {
         return;

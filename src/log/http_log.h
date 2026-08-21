@@ -164,7 +164,8 @@ typedef struct {
     const char *url_query;        /* url.query */
     const char *protocol_version; /* network.protocol.version: "1.1"|"2"|"3" */
     int         status;           /* http.response.status_code */
-    uint64_t    response_size;    /* http.response.body.size */
+    const char *error_type;       /* error.type; NULL on a request that completed */
+    uint64_t    response_size;    /* http.response.body.size — bytes that left */
     uint64_t    duration_ns;      /* http.server.request.duration (emitted in s) */
     const char *client_address;   /* client.address — bare IP */
     uint16_t    client_port;      /* client.port */

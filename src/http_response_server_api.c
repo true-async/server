@@ -60,6 +60,11 @@ bool http_response_is_committed(zend_object *obj)
     return http_response_from_obj(obj)->committed;
 }
 
+bool http_response_is_aborted(zend_object *obj)
+{
+    return http_response_from_obj(obj)->aborted;
+}
+
 bool http_response_finish_stream(zend_object *obj, const bool failed,
                                  const int64_t error_code)
 {
@@ -157,6 +162,18 @@ static bool response_body_reaches_peer(const http_response_object *response)
 {
     return !response->is_head
         && response_status_carries_body(response->status_code);
+}
+
+uint64_t http_response_get_sent_body_size(zend_object *obj)
+{
+    const http_response_object *response = http_response_from_obj(obj);
+
+    if (response->streaming) {
+        return response->written_length;
+    }
+
+    return response_body_reaches_peer(response)
+        ? (uint64_t)http_response_get_body_len(obj) : 0;
 }
 
 const char *http_response_get_body(zend_object *obj, size_t *len_out)
