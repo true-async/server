@@ -1464,6 +1464,9 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
             req->exception = NULL;
         }
 
+        /* All-or-nothing is libuv's contract, not this comparison's: on success
+         * the completion reports the sum the reactor was handed. The check is
+         * an assertion against a reactor that ever reports less. */
         const ssize_t transferred = req->transferred;
         req->dispose(req);
         ok_total = ok && !had_exc && transferred == (ssize_t)total;
