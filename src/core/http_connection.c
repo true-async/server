@@ -2831,6 +2831,15 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * asks again and sees the same latched verdict. */
     const bool streaming = http_response_is_streaming(Z_OBJ(ctx->response_zv));
 
+    /* A handler that asked for the connection to be retired is obeyed here,
+     * before anything else reads keep_alive. The field it set was never stored,
+     * so the peer is told by the same branches that tell it about a drain — and
+     * the socket is actually closed, which a copied header would not have
+     * done. */
+    if (http_response_handler_wants_close(Z_OBJ(ctx->response_zv))) {
+        conn->keep_alive = false;
+    }
+
     if (http_server_should_drain_now(conn->server, conn, drain_now_ns)) {
         conn->keep_alive = false;
 

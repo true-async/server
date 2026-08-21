@@ -167,6 +167,78 @@ static bool header_field_check(zend_string *name, const zval *value)
     return true;
 }
 
+/* The three fields the server states for itself, and what a handler setting one
+ * is answered with. `connection` is taken as a request rather than as bytes:
+ * `close` records the intent, which the dispose path turns into a closed
+ * connection, and every other value is refused, because a handler cannot make
+ * the server keep a socket. `transfer-encoding` is refused unless it names the
+ * chunked coding the server would apply anyway — a handler that named `gzip`
+ * used to have the field dropped and the encoded bytes sent with no coding
+ * declared anywhere, which is a corrupt download rather than a header the
+ * server can second-guess. `content-length` is left alone here: a declared
+ * length is a contract the streaming path audits, and the buffered path
+ * replaces it with the count it is sending.
+ *
+ * Returns false when the field was handled here and must not be stored, with an
+ * exception thrown when it was refused. */
+static bool response_take_server_field(http_response_object *response,
+                                       zend_string *lower_name, const zval *value)
+{
+    const bool is_connection = zend_string_equals_literal(lower_name, "connection");
+
+    if (!is_connection && !zend_string_equals_literal(lower_name, "transfer-encoding")) {
+        return false;
+    }
+
+    if (Z_TYPE_P(value) != IS_STRING) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "Header \"%s\" takes a single token, not a list", ZSTR_VAL(lower_name));
+        return true;
+    }
+
+    const char *val = Z_STRVAL_P(value);
+    const size_t len = Z_STRLEN_P(value);
+
+    if (is_connection) {
+        if (len == 5 && zend_binary_strcasecmp(val, len, "close", 5) == 0) {
+            response->handler_wants_close = true;
+            return true;
+        }
+
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "Connection: %s is the server's to decide. Only \"close\" can be asked "
+            "for, which retires the connection after this response", val);
+        return true;
+    }
+
+    if (len == 7 && zend_binary_strcasecmp(val, len, "chunked", 7) == 0) {
+        /* The framing the server picks for an undeclared HTTP/1.1 stream anyway.
+         * Accepted and dropped so a handler that states the obvious is not made
+         * to care which path its response takes. */
+        return true;
+    }
+
+    zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+        "Transfer-Encoding: %s cannot be applied by the server, and the framing "
+        "is not the handler's to state; the server negotiates a content coding "
+        "of its own",
+        val);
+    return true;
+}
+
+/* Lowercases the name once and hands it to response_take_server_field. True
+ * means the caller must not store the field — either it was taken or it was
+ * refused, and an exception is pending in the second case. */
+static bool response_take_header_for_server(http_response_object *response,
+                                            zend_string *name, zval *value)
+{
+    zend_string *lower = zend_string_tolower(name);
+    const bool taken = response_take_server_field(response, lower,
+        Z_TYPE_P(value) == IS_ARRAY ? value : value);
+    zend_string_release(lower);
+    return taken;
+}
+
 /* Every value a handler offers, checked before any of them is stored: a field
  * set as an array must not land half-written when its third element is the bad
  * one. Non-string scalars are converted at storage time and cannot carry a
@@ -370,6 +442,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, setHeader)
         return;
     }
 
+    if (response_take_header_for_server(response, name, value)) {
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    }
+
     add_header_value(response->headers, name, value, true);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
@@ -395,6 +471,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, addHeader)
 
     if (!header_values_check(name, value)) {
         return;
+    }
+
+    if (response_take_header_for_server(response, name, value)) {
+        RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
     add_header_value(response->headers, name, value, false);

@@ -212,6 +212,11 @@ void http_response_install_stream_ops(zend_object *obj,
     response->stream_ctx = ctx;
 }
 
+bool http_response_handler_wants_close(zend_object *obj)
+{
+    return http_response_from_obj(obj)->handler_wants_close;
+}
+
 /* Force `Connection: close` into the response headers, overwriting any
  * value the handler set. Used by the graceful-drain path in
  * http_connection.c to signal "no more keep-alive on this TCP" — RFC

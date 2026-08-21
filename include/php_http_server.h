@@ -1480,6 +1480,12 @@ void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,
  * Connection at submit time, so it is harmless to call on any response. */
 void http_response_set_connection(zend_object *obj, bool keep_alive);
 
+/* Whether the handler asked for the connection to be retired after this
+ * response, through setHeader('Connection', 'close'). The field itself is
+ * never stored — the server states the connection — so this is the request it
+ * left behind, and the two HTTP/1 paths answer it by closing. */
+bool http_response_handler_wants_close(zend_object *obj);
+
 /* H2/H3 forbidden response-header filter (RFC 9113 §8.2.2 / RFC 9114
  * §4.2). Returns false for hop-by-hop names (connection, keep-alive,
  * transfer-encoding, upgrade) and content-length (implicit from DATA

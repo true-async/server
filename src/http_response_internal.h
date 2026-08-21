@@ -72,6 +72,10 @@ typedef struct {
     bool             streaming;         /* write() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — write() now throws, sse* re-entry is allowed */
     bool             is_head;            /* HEAD: write() drops chunks (RFC 9110 §9.3.2) */
+    bool             handler_wants_close; /* setHeader('Connection', 'close'): the field is
+                                           * the server's to emit, so the handler's is taken
+                                           * as the request it is and answered by closing the
+                                           * connection, not by copying the bytes. */
 
     /* grpc_mode_t stamped at dispatch; picks the per-frame transform.
      * 0 = not a gRPC call. */

@@ -61,6 +61,19 @@ final class HttpResponse
      * first write() it declares the length of a streamed body (see write()),
      * and on a buffered body the server states the count it is sending.
      *
+     * Three fields answer differently, because the server states them itself.
+     * Connection accepts only "close", which retires the connection after this
+     * response — the field is not copied onto the wire, the socket is actually
+     * closed. Transfer-Encoding accepts only "chunked", the framing an
+     * undeclared HTTP/1.1 stream gets anyway, and is dropped; naming any other
+     * coding throws, because the server cannot apply it and would otherwise
+     * send encoded bytes with nothing declaring them.
+     *
+     * Throws {@see HttpServerInvalidArgumentException} when the name is not an
+     * RFC 9110 §5.6.2 token or the value carries a byte that cannot stand in a
+     * field value — a CR or an LF would end the header block and let the rest
+     * be read as a second response. Nothing is stored when it throws.
+     *
      * @param string $name Header name
      * @param string|array $value Header value(s)
      * @return static

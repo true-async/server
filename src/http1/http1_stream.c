@@ -126,6 +126,10 @@ static zend_string *h1_streaming_headers_build(http1_request_ctx_t *ctx)
     const h1_framing_t framing = h1_response_framing(response_obj);
     const bool drain = http_server_should_drain_now(conn->server, conn, zend_hrtime());
 
+    if (http_response_handler_wants_close(response_obj)) {
+        conn->keep_alive = false;
+    }
+
     if (framing == H1_FRAMING_CLOSE || drain || !conn->keep_alive) {
         http_response_set_connection(response_obj, false);
         conn->keep_alive = false;
