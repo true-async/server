@@ -193,6 +193,15 @@ the wrong answer:
   called, no `sendFile()` seal, peer still there. A false answer is final,
   which is what makes it the right condition for leaving a streaming loop.
 
+The two dialects have the same pair. `trySseEvent()` and `tryWriteMessage()`
+answer false on a full queue with nothing queued and no header committed, so
+the same event or message can be offered again after `awaitWritable()` — which
+an SSE handler may call, because waiting puts no bytes of its own on the wire.
+Where `awaitWritable()` answers false it did not wait, so the retry belongs
+after a fall back to the blocking twin rather than inside a loop around it;
+HTTP/3 is where that matters, since it refuses once per chunk on a congested
+path and offers no wait to park on.
+
 A peer that departs mid-stream arrives as `HttpException` with code 499 out of
 the next call, so a `try`/`catch` around the loop is how a handler winds down.
 `isEnded()` reports the response, not the connection: it stays false until the

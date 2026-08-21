@@ -221,15 +221,88 @@ static void sse_append_field(smart_str *out, const char *field, size_t field_len
 
 /* Push a finalised event payload through the installed stream ops.
  * append_chunk takes ownership of the payload ref (so we never release it)
- * and suspends the handler under backpressure on H2/H3. Mirrors write():
- * a dead stream surfaces as a 499 the handler may catch. */
-static void sse_dispatch(http_response_object *response, zend_string *payload)
+ * and, unless @p nonblocking, suspends the handler under backpressure on
+ * H2/H3. Mirrors write(): a dead stream surfaces as a 499 the handler may
+ * catch. Returns the append result, which a non-blocking caller reads to tell
+ * a refusal from a delivery. */
+static int sse_dispatch(http_response_object *response, zend_string *payload, const bool nonblocking)
 {
-	const int rc = response->stream_ops->append_chunk(response->stream_ctx, payload, false);
+	const int rc = response->stream_ops->append_chunk(response->stream_ctx, payload, nonblocking);
 
 	if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
 		zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
 	}
+
+	return rc;
+}
+
+/* Reject what a record cannot carry: CR or LF in a single-line field would
+ * inject further fields or end the record early, a NUL in `id` makes the
+ * parser ignore the field (WHATWG §9.2), and a negative retry is not a delay.
+ * @p method names the caller in the exception message. Throws and returns
+ * false. */
+static bool sse_event_fields_valid(zend_string *event, zend_string *id, const zend_long retry,
+								   const bool retry_is_null, const char *method)
+{
+	if (sse_has_newline(event)) {
+		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+								"%s(): $event must not contain CR or LF", method);
+		return false;
+	}
+
+	if (sse_has_newline(id)) {
+		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+								"%s(): $id must not contain CR or LF", method);
+		return false;
+	}
+
+	if (id != NULL && memchr(ZSTR_VAL(id), '\0', ZSTR_LEN(id)) != NULL) {
+		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+								"%s(): $id must not contain NUL bytes", method);
+		return false;
+	}
+
+	if (!retry_is_null && retry < 0) {
+		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+								"%s(): $retry must be a non-negative integer", method);
+		return false;
+	}
+
+	return true;
+}
+
+/* Build one event record from the four fields. Field order is id, event,
+ * retry, data — a spec parser is order-agnostic, and this is what every
+ * implementation emits. Returns a fresh reference for append_chunk. */
+static zend_string *sse_event_record(zend_string *data, zend_string *event, zend_string *id,
+									 const zend_long retry, const bool retry_is_null)
+{
+	smart_str payload = {0};
+
+	if (id != NULL) {
+		sse_append_field(&payload, "id", 2, ZSTR_VAL(id), ZSTR_LEN(id));
+	}
+
+	if (event != NULL) {
+		sse_append_field(&payload, "event", 5, ZSTR_VAL(event), ZSTR_LEN(event));
+	}
+
+	if (!retry_is_null) {
+		char buf[32];
+		const int n = snprintf(buf, sizeof(buf), ZEND_LONG_FMT, retry);
+		if (n > 0) {
+			sse_append_field(&payload, "retry", 5, buf, (size_t) n);
+		}
+	}
+
+	if (data != NULL) {
+		sse_append_data(&payload, ZSTR_VAL(data), ZSTR_LEN(data));
+	}
+
+	smart_str_appendc(&payload, '\n');
+	smart_str_0(&payload);
+
+	return payload.s;
 }
 
 /* {{{ proto HttpResponse::sseStart(): static */
@@ -279,30 +352,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseEvent)
 		return;
 	}
 
-	/* CR / LF in a single-line field would let the value inject extra
-	 * fields or terminate the record early — reject so the bug surfaces. */
-	if (sse_has_newline(event)) {
-		zend_throw_exception(http_server_invalid_argument_exception_ce,
-							 "sseEvent(): $event must not contain CR or LF", 0);
-		return;
-	}
-
-	if (sse_has_newline(id)) {
-		zend_throw_exception(http_server_invalid_argument_exception_ce,
-							 "sseEvent(): $id must not contain CR or LF", 0);
-		return;
-	}
-
-	/* WHATWG §9.2: a U+0000 in `id` makes the parser ignore the field. */
-	if (id != NULL && memchr(ZSTR_VAL(id), '\0', ZSTR_LEN(id)) != NULL) {
-		zend_throw_exception(http_server_invalid_argument_exception_ce,
-							 "sseEvent(): $id must not contain NUL bytes", 0);
-		return;
-	}
-
-	if (!retry_is_null && retry < 0) {
-		zend_throw_exception(http_server_invalid_argument_exception_ce,
-							 "sseEvent(): $retry must be a non-negative integer", 0);
+	if (!sse_event_fields_valid(event, id, retry, retry_is_null, "sseEvent")) {
 		return;
 	}
 
@@ -315,38 +365,70 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseEvent)
 		return;
 	}
 
-	/* Conventional field order: id, event, retry, then data. A spec parser
-	 * is order-agnostic; this is what every implementation emits. */
-	smart_str payload = {0};
-	if (id != NULL) {
-		sse_append_field(&payload, "id", 2, ZSTR_VAL(id), ZSTR_LEN(id));
-	}
-
-	if (event != NULL) {
-		sse_append_field(&payload, "event", 5, ZSTR_VAL(event), ZSTR_LEN(event));
-	}
-
-	if (!retry_is_null) {
-		char buf[32];
-		const int n = snprintf(buf, sizeof(buf), ZEND_LONG_FMT, retry);
-		if (n > 0) {
-			sse_append_field(&payload, "retry", 5, buf, (size_t)n);
-		}
-	}
-
-	if (data != NULL) {
-		sse_append_data(&payload, ZSTR_VAL(data), ZSTR_LEN(data));
-	}
-
-	smart_str_appendc(&payload, '\n');
-	smart_str_0(&payload);
-
-	sse_dispatch(response, payload.s);
+	sse_dispatch(response, sse_event_record(data, event, id, retry, retry_is_null), false);
 	if (EG(exception)) {
 		return;
 	}
 
 	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpResponse::trySseEvent(?string $data = null, ?string $event = null,
+ *                                     ?string $id = null, ?int $retry = null): bool */
+ZEND_METHOD(TrueAsync_HttpResponse, trySseEvent)
+{
+	zend_string *data = NULL;
+	zend_string *event = NULL;
+	zend_string *id = NULL;
+	zend_long retry = 0;
+	bool retry_is_null = true;
+
+	ZEND_PARSE_PARAMETERS_START(0, 4)
+	Z_PARAM_OPTIONAL
+	Z_PARAM_STR_OR_NULL(data)
+	Z_PARAM_STR_OR_NULL(event)
+	Z_PARAM_STR_OR_NULL(id)
+	Z_PARAM_LONG_OR_NULL(retry, retry_is_null)
+	ZEND_PARSE_PARAMETERS_END();
+
+	http_response_object *const response = Z_HTTP_RESPONSE_P(ZEND_THIS);
+
+	if (response->closed) {
+		zend_throw_exception(http_server_runtime_exception_ce,
+							 "Cannot trySseEvent() on a closed response", 0);
+		return;
+	}
+
+	if (!sse_event_fields_valid(event, id, retry, retry_is_null, "trySseEvent")) {
+		return;
+	}
+
+	/* Nothing to dispatch is not a refusal: the queue was never asked. */
+	if (data == NULL && event == NULL && id == NULL && retry_is_null) {
+		RETURN_TRUE;
+	}
+
+	/* Dead peer before the stream starts, for two reasons: false then carries
+	 * one meaning only — the queue is full — and the 499 leaves the response
+	 * uncommitted, so a handler catching it can still answer with a status. */
+	if (response->stream_ops != NULL && response->stream_ops->is_alive != NULL
+		&& !response->stream_ops->is_alive(response->stream_ctx)) {
+		zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");
+		return;
+	}
+
+	if (!sse_ensure_started(response)) {
+		return;
+	}
+
+	const int rc = sse_dispatch(response, sse_event_record(data, event, id, retry, retry_is_null), true);
+
+	if (EG(exception)) {
+		return;
+	}
+
+	RETURN_BOOL(rc != HTTP_STREAM_APPEND_BACKPRESSURE);
 }
 /* }}} */
 
@@ -387,7 +469,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseComment)
 	smart_str_appendl(&payload, "\n\n", 2);
 	smart_str_0(&payload);
 
-	sse_dispatch(response, payload.s);
+	sse_dispatch(response, payload.s, false);
 	if (EG(exception)) {
 		return;
 	}
@@ -431,7 +513,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sseRetry)
 	smart_str_appendc(&payload, '\n');
 	smart_str_0(&payload);
 
-	sse_dispatch(response, payload.s);
+	sse_dispatch(response, payload.s, false);
 	if (EG(exception)) {
 		return;
 	}

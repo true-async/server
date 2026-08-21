@@ -140,9 +140,9 @@ static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 
 /* `nonblocking` is accepted and ignored: HTTP/1 keeps no queue of its own, so
  * there is no depth to refuse from. Backpressure here belongs to the kernel
- * socket buffer, and the only way to learn of it is to write and wait. Issue
- * #179 gives the connection one outbound queue; a refusal becomes possible
- * then, and this signature is already the one it will use. */
+ * socket buffer, whose depth no portable call reports, so the only way to
+ * learn of it is to write and wait. The signature carries the argument for the
+ * transports that do refuse. */
 static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
                                   const bool nonblocking)
 {

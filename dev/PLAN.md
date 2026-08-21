@@ -94,7 +94,7 @@ it and expects a tag within days.
   refuses and an accepted chunk waits for the socket. Two ways to close it were
   tried and rejected — see below, and the measurement that closed the argument is
   in `dev/BENCHMARKS.md`.
-- [ ] **The dialect twins: `trySseEvent()` and `tryWriteMessage()`.** The idiom is
+- [x] **The dialect twins: `trySseEvent()` and `tryWriteMessage()`.** The idiom is
   half-applied while `tryWrite()` has a non-blocking form and the two dialects do
   not. Shape: one static helper per dialect carries the formatting and the guards,
   and the blocking and non-blocking entry points differ only in the flag they pass
@@ -105,6 +105,22 @@ it and expects a tag within days.
   refuse from. Evidence to produce: phpt on H1 and H2 that a refusal leaves the wire
   untouched, that the bytes match the blocking twin, and that the peer's death still
   throws; `docs/USAGE.md` §3.5 and a CHANGELOG entry.
+
+  Done. Evidence: `h1/031` shows HTTP/1 accepting every offer and the record matching
+  `sseEvent()` byte for byte; `h2/026` and `h2/027` fill the ring, take a refusal, wait it
+  out and end with a body identical to the blocking twin's — `027` alternates the two
+  twins, so the same body also proves they frame alike; `h1/032` aborts the peer and gets
+  499 out of both, on a response that is still uncommitted.
+
+  Four defects surfaced and are fixed here. `awaitWritable()` was refused in SSE mode by
+  the guard that keeps `write()` out of it, so the handler the twins were written for had
+  nowhere to wait — waiting emits nothing, so that guard and the buffered-body one now
+  apply only to the calls that emit. `writeMessage()` never answered to those guards at
+  all: a gRPC frame could be pushed into an SSE body or discard a buffered one, and the
+  refactor would have copied the hole onto a second public method. `trySseEvent()` started
+  the stream before probing the peer, so a 499 left the response committed and the handler
+  could not answer with a status. And `awaitWritable($timeoutMs)` documented a deadline no
+  transport read: HTTP/2 now waits the shorter of it and the connection's write timeout.
 - [ ] **Framing by declared length.** A `Content-Length` set before the first
   `write()` reaches the client verbatim on every protocol, and the server becomes
   the auditor: excess throws at the offending write, a shortfall aborts the stream
