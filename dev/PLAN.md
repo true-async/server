@@ -468,12 +468,16 @@ it and expects a tag within days.
   `h1/043`. Not addressed: the phrase still carries the whole message, so a 500
   puts application text of any length on the status line.
 
-- [ ] **The static path advertises `Connection: keep-alive` on HTTP/1.1 too.**
-  `send_file.c:454` sets it unconditionally from `keep_alive`, while
-  `h1_streaming_headers_build` states the opposite rule — on 1.1 the header is
-  noise, since keep-alive is the version's default. Three response paths, two
-  policies; the CHANGELOG claim that no path sent the echo before #197 was
-  wrong because of this one.
+- [x] **#202 — the static path advertises `Connection: keep-alive` on HTTP/1.1
+  too.** Three sites, not one: the served file (`send_file.c:455`), the inline
+  error (`:236`) and the 416 (`:372`) all stated the field from the connection's
+  verdict alone. The rule now lives in `h1_response_state_connection` beside
+  `h1_response_peer_speaks_http11`, and all five callers read it — the three
+  static ones with the real verdict, the two handler ones with `true`. The
+  version check was written twice before and statics would have been the third
+  copy. The wrong CHANGELOG claim went with the pass that shortened the whole
+  `[Unreleased]` block. Evidence: `h1/048` reads the raw wire on four requests
+  and fails against `main` on two of them.
 
 - [x] **#200 — HTTP/2 and HTTP/3 strip `Content-Length` from every response,
   `HEAD` and static files included.** Answered A of the two readings: every

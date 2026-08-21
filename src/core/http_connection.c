@@ -2853,11 +2853,8 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
              * or HTTP/1.0 default). RFC 9112 §9.6 — the response MUST advertise
              * `Connection: close` so the client knows not to reuse this TCP. */
             http_response_force_connection_close(Z_OBJ(ctx->response_zv));
-        } else if (!h1_response_peer_speaks_http11(Z_OBJ(ctx->response_zv))) {
-            /* An HTTP/1.0 peer treats every response as the last unless the
-             * server confirms otherwise (RFC 2068 §19.7.1), and a connection
-             * this server is keeping has to say so or the peer closes it. */
-            http_response_set_connection(Z_OBJ(ctx->response_zv), true);
+        } else {
+            h1_response_state_connection(Z_OBJ(ctx->response_zv), true);
         }
     }
 

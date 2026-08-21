@@ -61,4 +61,11 @@ h1_framing_t h1_response_framing(zend_object *response_obj);
  * version and counts as 1.1, which is what every modern peer reads. */
 bool h1_response_peer_speaks_http11(zend_object *response_obj);
 
+/* State how the connection ends, for a response whose verdict is @p keep_alive.
+ * A closing connection always says so (RFC 9112 §9.6). A kept one says so only
+ * to an HTTP/1.0 peer: on HTTP/1.1 persistence is the default (RFC 9112 §9.3)
+ * and the field states what the peer already assumes. Sets no field on an
+ * HTTP/2 or HTTP/3 response, where `connection` is forbidden outright. */
+void h1_response_state_connection(zend_object *response_obj, bool keep_alive);
+
 #endif /* HTTP1_STREAM_H */

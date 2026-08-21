@@ -140,6 +140,20 @@ bool h1_response_peer_speaks_http11(zend_object *response_obj)
             && memcmp(ZSTR_VAL(response->protocol_version), "1.1", 3) == 0);
 }
 
+void h1_response_state_connection(zend_object *response_obj, const bool keep_alive)
+{
+    if (!keep_alive) {
+        http_response_set_connection(response_obj, false);
+        return;
+    }
+
+    /* An HTTP/1.0 peer treats every response as the last unless the server
+     * confirms otherwise (RFC 2068 §19.7.1). */
+    if (!h1_response_peer_speaks_http11(response_obj)) {
+        http_response_set_connection(response_obj, true);
+    }
+}
+
 /* RFC 9110 §8.6: a 1xx or a 204 carries no Content-Length, whoever set it. A
  * 304 is the exception in the other direction — §8.6 permits the field there,
  * and wants it to
