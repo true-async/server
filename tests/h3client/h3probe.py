@@ -6,7 +6,7 @@ the whole point of running some tests through it.
 
 It prints one line the test can assert on:
 
-    status=<code> bytes=<n> outcome=CLEAN_END|RESET(err=<code>)|TIMEOUT
+    status=<code> bytes=<n> cl=<content-length|-> outcome=CLEAN_END|RESET(err=<code>)|TIMEOUT
 
 `outcome` is what h3client could not tell apart until it learned to report
 RESET_STREAM: a transfer the server aborts mid-body is NOT a short success.
@@ -40,6 +40,7 @@ class Probe(QuicConnectionProtocol):
         self.done = asyncio.get_event_loop().create_future()
         self.bytes = 0
         self.status = None
+        self.content_length = "-"
         self.outcome = None
 
     def get(self, host, path):
@@ -55,7 +56,9 @@ class Probe(QuicConnectionProtocol):
             return
         for e in self.h3.handle_event(event):
             if isinstance(e, HeadersReceived):
-                self.status = dict(e.headers).get(b":status", b"?").decode()
+                fields = dict(e.headers)
+                self.status = fields.get(b":status", b"?").decode()
+                self.content_length = fields.get(b"content-length", b"-").decode()
             elif isinstance(e, DataReceived):
                 self.bytes += len(e.data)
                 _note_progress(self.bytes)
@@ -87,7 +90,7 @@ async def main(host, port, path, max_stream_data):
             await asyncio.wait_for(p.done, 20)
         except asyncio.TimeoutError:
             p.outcome = "TIMEOUT"
-        print(f"status={p.status} bytes={p.bytes} outcome={p.outcome}")
+        print(f"status={p.status} bytes={p.bytes} cl={p.content_length} outcome={p.outcome}")
 
 _max_stream_data = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 PROGRESS_FILE = sys.argv[5] if len(sys.argv) > 5 else None

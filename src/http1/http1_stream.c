@@ -7,10 +7,10 @@
 */
 
 /*
- * HTTP/1.1 chunked-streaming vtable.
+ * HTTP/1.1 streaming vtable.
  *
  * Unlike the HTTP/2 side where stream_ops queue bytes for an nghttp2
- * data provider driven by flow-control windows, HTTP/1 chunked is a
+ * data provider driven by flow-control windows, HTTP/1 is a
  * straight push: format `<hex-len>\r\n<chunk>\r\n` and send. No queue,
  * no per-stream state — the kernel send buffer is the only buffering
  * we need, and http_connection_send already suspends the handler
@@ -25,6 +25,12 @@
  *     <hex>\r\n<chunk>\r\n
  *     ...
  *     0\r\n\r\n
+ *
+ * A response whose handler declared a Content-Length is framed by that number
+ * instead (RFC 9112 §6.3 rule 5): the header block carries the length, every
+ * chunk goes out as its own bytes, and the body ends at the last of them with
+ * no terminator. The response object decides which framing applies and answers
+ * through http_response_get_declared_length; nothing here chooses.
  *
  * Context pointer is the http_connection_t* itself — no per-stream
  * heap allocation, no cleanup needed. There is at most one in-flight
@@ -212,18 +218,27 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_OK;
     }
 
+    /* A declared length frames the body by itself, so the chunk travels as its
+     * own bytes: no size line ahead of it, no CRLF behind it. */
+    const bool identity =
+        http_response_get_declared_length(Z_OBJ(ctx->response_zv)) >= 0;
+    const size_t trailer_len = identity ? 0 : 2;
+
     char header[H1_CHUNK_HEADER_MAX];
-    const int header_len = snprintf(header, sizeof(header),
-                                    "%zx\r\n", chunk_len);
+    int  header_len = 0;
 
-    if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
-        zend_string_release(chunk);
+    if (!identity) {
+        header_len = snprintf(header, sizeof(header), "%zx\r\n", chunk_len);
 
-        if (headers != NULL) {
-            zend_string_release(headers);
+        if (header_len < 0 || (size_t)header_len >= sizeof(header)) {
+            zend_string_release(chunk);
+
+            if (headers != NULL) {
+                zend_string_release(headers);
+            }
+
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
-
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
     /* One write per frame while the copy is cheaper than the two syscalls it
@@ -237,7 +252,7 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
      * Closing that needs a write which reports its status AND takes the buffer
      * over — today's ABI offers one or the other, never both. */
     const size_t head_len  = headers != NULL ? ZSTR_LEN(headers) : 0;
-    const size_t frame_len = head_len + (size_t)header_len + chunk_len + 2;
+    const size_t frame_len = head_len + (size_t)header_len + chunk_len + trailer_len;
 
 #if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
     /* Plaintext: the pieces go over as slots the reactor owns — one submit, no
@@ -259,12 +274,18 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
             headers    = NULL;
         }
 
-        slots[n++] = zend_string_init(header, (size_t)header_len, 0);
+        if (!identity) {
+            slots[n++] = zend_string_init(header, (size_t)header_len, 0);
+        }
+
         slots[n++] = chunk;                  /* the caller's ref, handed over */
-        /* Two bytes per frame rather than one shared literal: the send releases
-         * every slot, and interning at runtime would write the process-wide
-         * permanent table from a worker thread. */
-        slots[n++] = zend_string_init("\r\n", 2, 0);
+
+        if (!identity) {
+            /* Two bytes per frame rather than one shared literal: the send
+             * releases every slot, and interning at runtime would write the
+             * process-wide permanent table from a worker thread. */
+            slots[n++] = zend_string_init("\r\n", 2, 0);
+        }
 
         const bool sent = http_connection_send_strv_awaited(conn, slots, n);
 
@@ -306,11 +327,17 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
             at += head_len;
         }
 
-        memcpy(at, header, (size_t)header_len);
-        at += header_len;
+        if (!identity) {
+            memcpy(at, header, (size_t)header_len);
+            at += header_len;
+        }
+
         memcpy(at, ZSTR_VAL(chunk), chunk_len);
         at += chunk_len;
-        memcpy(at, "\r\n", 2);
+
+        if (!identity) {
+            memcpy(at, "\r\n", 2);
+        }
 
         frame_ok = http_connection_send(conn, frame, frame_len);
         efree(frame);
@@ -318,6 +345,8 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         if (frame_ok && headers != NULL) {
             h1_stream_headers_committed(ctx);
         }
+    } else if (frame_ok && identity) {
+        frame_ok = http_connection_send(conn, ZSTR_VAL(chunk), chunk_len);
     } else if (frame_ok) {
         frame_ok = http_connection_send(conn, header, (size_t)header_len)
                    && http_connection_send(conn, ZSTR_VAL(chunk), chunk_len)
@@ -388,6 +417,12 @@ static void h1_stream_mark_ended(void *opaque)
         }
 
         h1_stream_headers_committed(ctx);
+    }
+
+    /* A body framed by a declared length ends at its last byte: the peer has
+     * been counting them down and there is nothing left to say. */
+    if (http_response_get_declared_length(Z_OBJ(ctx->response_zv)) >= 0) {
+        return;
     }
 
     /* Terminal zero-chunk. Trailers not emitted — RFC requires the

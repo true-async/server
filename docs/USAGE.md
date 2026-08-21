@@ -143,7 +143,7 @@ for that response, and a call belonging to another one throws
 | Mode | Calls | Reaches the client | Framing |
 |---|---|---|---|
 | Buffered | `setBody()`, `appendBody()`, `json()`, `html()` | at `end()` | `Content-Length`, computed from the buffer |
-| Streamed | `write()`, `sseEvent()`, `writeMessage()` | at each call | chunked encoding (HTTP/1) or DATA frames closed by END_STREAM (HTTP/2, HTTP/3) |
+| Streamed | `write()`, `sseEvent()`, `writeMessage()` | at each call | chunked encoding (HTTP/1) or DATA frames closed by END_STREAM (HTTP/2, HTTP/3); a `Content-Length` set before the first `write()` frames the body instead — see below |
 | File | `sendFile()` | after the handler returns | `Content-Length` from the file; a satisfiable `Range` yields `206` with `Content-Range` |
 
 ### Buffered
@@ -172,10 +172,44 @@ $res->end();
 
 The first `write()` commits the status line and the headers; from then on
 `setStatusCode()`, `setHeader()` and `setBody()` throw, and `isHeadersSent()`
-answers true. A `Content-Length` the handler set beforehand is dropped and the
-response is framed by chunked encoding — honouring a declared length is issue
-[#171](https://github.com/true-async/server/issues/171)'s successor, not
-today's behaviour.
+answers true.
+
+#### Framing by declared length
+
+A `Content-Length` set before the first `write()` reaches the client on every
+protocol, and the body is framed by it: HTTP/1 sends no `Transfer-Encoding`, no
+chunk size lines and no terminator, and HTTP/2 and HTTP/3 carry the field
+alongside the DATA frames so the peer can check one against the other.
+
+The server then holds the body to that number.
+
+```php
+$res->setHeader('Content-Length', (string) $size);
+$res->write($first);        // counted against $size
+$res->write($rest);         // throws if the two together pass it
+$res->end();                // short of $size: the stream is failed, not finished
+```
+
+A write that would pass the declared length throws `HttpServerRuntimeException`
+and queues nothing, so the handler can catch it and still finish the body it
+promised. A body that ends short is failed the way `abort()` fails one —
+HTTP/1 withholds the last bytes and drops keep-alive, HTTP/2 and HTTP/3 reset
+the stream — because ending it cleanly would tell the client it has a whole
+body when it has part of one.
+
+Two consequences follow from holding the body to a number. The response is not
+compressed: a codec would put a different count on the wire, which is why it
+deletes the header when it engages. And a graceful shutdown that interrupts
+such a stream fails it rather than ending it cleanly, unlike an undeclared
+stream, whose bytes were never promised in advance.
+
+A `Content-Length` that is not a decimal byte count, or one set twice through
+`addHeader()`, throws from that first `write()` — while the response is still
+uncommitted, so the handler can still answer with a status. Only `write()` and
+`tryWrite()` declare: `sseEvent()` and `writeMessage()` frame their own
+records, a `HEAD` response keeps the length on the buffered path where it
+describes the body a `GET` would return, and a status that carries no content
+(`1xx`, `204`, `304`) declares nothing.
 
 `write()` parks the handler coroutine while the outbound queue is full: HTTP/2
 and HTTP/3 park once every ring slot is live or the queued bytes reach
@@ -242,7 +276,9 @@ so a handler that names a code should know its protocol from
 A handler that throws without catching gets this anyway: the server aborts a
 committed stream on its own rather than finishing it. A cancellation is not a
 failure and still ends cleanly, so a graceful shutdown does not truncate the
-feeds it interrupts.
+feeds it interrupts. A stream that declared a `Content-Length` is the exception:
+there the promise is a byte count, so a body short of it is failed whatever
+stopped the handler.
 
 How much of the partial body the client keeps is the transport's business, not
 a promise: HTTP/1 has already written everything the handler handed over,
@@ -262,6 +298,11 @@ fourth is an error:
 
 A second `abort()` is a no-op, because its place is a catch block where a throw
 would bury the handler's own error.
+
+In the second state a declared `Content-Length` is corrected rather than
+carried: nothing has left, so the empty response the transport commits states
+the count actually written instead of leaving the client waiting for bytes that
+are not coming.
 
 Under compression the codec stream is left unclosed too. A gzip trailer is a
 second claim that the body is whole, and a decoder checks it.

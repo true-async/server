@@ -51,6 +51,10 @@ final class HttpResponse
     /**
      * Set header (replaces existing)
      *
+     * Content-Length is the one header the server reads back: set before the
+     * first write() it declares the length of a streamed body (see write()),
+     * and on a buffered body the server states the count it is sending.
+     *
      * @param string $name Header name
      * @param string|array $value Header value(s)
      * @return static
@@ -158,6 +162,12 @@ final class HttpResponse
      * setHeader() and setBody() throw. Later calls append chunked-transfer
      * segments (HTTP/1) or DATA frames (HTTP/2, HTTP/3). To append to a
      * buffered body instead, call appendBody().
+     *
+     * A Content-Length set before this first call frames the body instead of
+     * chunks, and the server then holds the body to it: a chunk that would
+     * pass the declared count throws HttpServerRuntimeException and is not
+     * queued, and a body that ends short of it is failed rather than finished.
+     * Such a response is never compressed.
      *
      * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
      * park while every ring slot is live or the queued bytes stand at

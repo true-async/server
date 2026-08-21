@@ -899,6 +899,12 @@ bool http3_stream_submit_response(http3_connection_t *c,
 
     HashTable *headers = http_response_get_headers(resp_obj);
 
+    /* A declared length reaches the peer so it can hold the DATA to it. Only a
+     * stream declares one — a buffered response answers -1 — so this is right
+     * for both modes without asking which one submitted. */
+    const bool keep_content_length =
+        http_response_get_declared_length(resp_obj) >= 0;
+
     /* Single-pass header emit. Scratch covers the common case (≤32
      * nv entries — :status + ~30 headers fits every REST/SSE workload
      * we've seen). h3_nv_push handles overflow promotion and the hard
@@ -926,7 +932,8 @@ bool http3_stream_submit_response(http3_connection_t *c,
         ZEND_HASH_FOREACH_STR_KEY_VAL(headers, name, values) {
             if (name == NULL) continue;
 
-            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name))) continue;
+            if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
+                                                   keep_content_length)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 if (!h3_nv_push(&buf, name, values)) goto headers_done;

@@ -46,6 +46,17 @@ typedef struct {
     const http_response_stream_ops_t *stream_ops;
     void                             *stream_ctx;
 
+    /* The Content-Length this response committed to, or -1 when it declared
+     * none. Snapshotted from the header table by the first write(), which is
+     * also the last moment the handler can still change it. A value here binds
+     * the framing (identity, not chunked) and the audit below. */
+    int64_t          declared_length;
+
+    /* Body bytes promised to the transport. Reserved before the chunk is
+     * handed over, because every transport suspends inside append_chunk and a
+     * second writer would otherwise read a count that is about to change. */
+    uint64_t         written_length;
+
     /* Connection info (for sending). SOCK_ERR if not connected. */
     php_socket_t     socket_fd;
 
