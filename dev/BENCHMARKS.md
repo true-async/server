@@ -122,3 +122,35 @@ Script: `tests/perf` has no case for this; the measurement was driven by an ad-h
 client that reads the chunked body and reports its length, run once per extension
 build. Reproduce by streaming a compressible body in N `send()` calls and comparing
 the de-chunked body length across builds.
+
+## Syscalls per streamed chunk on HTTP/1, plaintext (2026-08-20)
+
+Taken to decide #179, which was argued from "three submits and up to three suspensions
+per chunk" — a number nobody had measured. Release PHP at `/home/edmond/php-release-24`
+(ABI 0.25), the extension built from `e246dcf`, `tests/perf/servers/server_stream.php` in
+`h1` mode under `strace -f -c`. Two runs per chunk size differing only in how many chunks
+each response carries, so the difference divides out the startup and the request itself.
+
+| chunk | chunks measured | writev | epoll_pwait | per chunk |
+|---|---|---|---|---|
+| 4 KiB | 960 (1280 − 320) | 960 | 1009 | 1.00 writev, 1.05 waits |
+| 64 KiB | 480 (640 − 160) | 480 | 510 | 1.00 writev, 1.06 waits |
+
+One vectored submit and one park per chunk, flat in the chunk size — the 64 KiB frame
+takes the copy-free path and still leaves as a single `writev`, because its three pieces
+are three slots rather than three calls.
+
+The same pair of runs over TLS, HTTP/1.1 on a TLS listener (`curl --http1.1`, bodies
+verified at 262144 and 65536 bytes):
+
+| chunk | chunks measured | write | epoll_pwait | per chunk |
+|---|---|---|---|---|
+| 4 KiB | 480 (640 − 160) | 249 | 69 | 0.52 writes, 0.14 waits |
+
+Fewer, not more: `tls_push` copies the chunk into the plaintext BIO ring and the drain
+writes what has accumulated, so two chunks share one socket write and most never park.
+
+What it decides: the premise under #179 is gone. What a per-connection outbound queue
+could still remove is the one park per chunk, and only by making the write
+fire-and-forget — which is what `isWritable()` and `tryWrite()` would then be unable to
+answer honestly.

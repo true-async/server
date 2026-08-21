@@ -92,8 +92,19 @@ it and expects a tag within days.
 
   **HTTP/1 is the open exception**: it keeps no queue of its own, so it never
   refuses and an accepted chunk waits for the socket. Two ways to close it were
-  tried and rejected — see below. The twins (`trySseEvent`, `tryWriteMessage`)
-  wait for that to settle.
+  tried and rejected — see below, and the measurement that closed the argument is
+  in `dev/BENCHMARKS.md`.
+- [ ] **The dialect twins: `trySseEvent()` and `tryWriteMessage()`.** The idiom is
+  half-applied while `tryWrite()` has a non-blocking form and the two dialects do
+  not. Shape: one static helper per dialect carries the formatting and the guards,
+  and the blocking and non-blocking entry points differ only in the flag they pass
+  to `append_chunk` — `sseEvent()` and `writeMessage()` move onto it rather than
+  keeping a second copy. Both new methods answer `bool` on the `tryWrite()`
+  contract: false means nothing was queued and no header was committed, a dead peer
+  is still the 499 exception, and HTTP/1 never refuses because it has no queue to
+  refuse from. Evidence to produce: phpt on H1 and H2 that a refusal leaves the wire
+  untouched, that the bytes match the blocking twin, and that the peer's death still
+  throws; `docs/USAGE.md` §3.5 and a CHANGELOG entry.
 - [ ] **Framing by declared length.** A `Content-Length` set before the first
   `write()` reaches the client verbatim on every protocol, and the server becomes
   the auditor: excess throws at the offending write, a shortfall aborts the stream
@@ -207,6 +218,12 @@ designs were worked out and both fail on something mechanical.
   more shapes in `h1/029` close it: compression 75.68 → 78.38, worker_dispatch
   76.63 → 79.62, http1_stream 66.23 → 71.43.
 
+- [x] **Measure what a chunk costs before deciding.** Taken 2026-08-20, in
+  `dev/BENCHMARKS.md`: one `writev` and one park per streamed chunk on plaintext HTTP/1,
+  flat from 4 KiB to 64 KiB, and half a write with a seventh of a park on TLS, where the
+  BIO ring already batches. The three submits the case rested on are one, so what a queue
+  could still remove is the single park — and only by making the write fire-and-forget,
+  which leaves `isWritable()` and `tryWrite()` with nothing honest to answer.
 - [ ] **Answer from the queues the connection already has.** Plaintext:
   `out_pending_buf` carries a byte count, a high-water predicate on the same knob,
   low-water hysteresis, a drain hook and a destroy defer gate — all implemented and
