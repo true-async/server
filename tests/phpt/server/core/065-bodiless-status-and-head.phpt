@@ -47,6 +47,21 @@ $server->addHttpHandler(function ($req, $res) {
             $res->setStatusCode(204)->setBody(str_repeat('a', 2048))->end();
             return;
 
+        case '/streamhead':
+            /* The length a GET would have reported is not something the server
+             * can know from an empty buffer, and stating zero says the GET has
+             * no body at all. Declared here so the value is the handler's and
+             * means what §9.3.2 wants it to. */
+            $res->setHeader('Content-Length', '9');
+            $res->write('123456789');
+            $res->end();
+            return;
+
+        case '/streamheadbare':
+            $res->write('123456789');
+            $res->end();
+            return;
+
         case '/message':
             /* The HEAD drop on the gRPC dialect. writeMessage() frames its own
              * bytes, so a message let through here would arrive under a status
@@ -81,12 +96,29 @@ $server->addHttpHandler(function ($req, $res) {
             $res->setStatusCode(500)->setBody("refused\n")->end();
             return;
 
+        case '/reset':
+            /* 205 forbids content (RFC 9110 §15.3.6) and is not in §6.3
+             * rule 1, so the peer still looks for framing: the emptiness is
+             * stated with a zero length rather than left to be inferred. */
+            $res->setStatusCode(205)->setBody('discarded')->end();
+            return;
+
         case '/notmodified':
             $res->setStatusCode(304)->setHeader('Content-Length', '1234')->setBody('x')->end();
             return;
 
         case '/interim':
-            $res->setStatusCode(100)->setHeader('Content-Length', '7')->setBody('ignored')->end();
+            /* A 1xx frames as a message that ends at the header block, and
+             * that is where its correctness stops: it is an interim response,
+             * so a client that got one would go on waiting for the final one
+             * this server has no way to send. Refused at the status instead. */
+            try {
+                $res->setStatusCode(100);
+            } catch (\Throwable $e) {
+                echo "interim: ", get_class($e), "\n";
+            }
+
+            $res->setHeader('Content-Length', '7')->setBody('ignored')->end();
             return;
 
         case '/handlerte':
@@ -144,6 +176,20 @@ spawn(function () use ($port, $server) {
 
     [$head, $body] = $read_message($fp);
     echo "next on the connection: ", strtok($head, "\r\n"), " ", json_encode($body), "\n";
+
+    /* Pipelined: a 205 that leaked its body would put the next status line
+     * inside it, and a 205 with no framing at all would leave the client
+     * reading the next response as this one's content. */
+    fwrite($fp, "GET /reset HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    [$head, $body] = $read_message($fp);
+
+    echo "205: ", strtok($head, "\r\n"), "\n";
+    echo "205 content-length: ",
+        preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
+    echo "205 body: ", json_encode($body), "\n";
+
+    [$head, $body] = $read_message($fp);
+    echo "next after 205: ", strtok($head, "\r\n"), " ", json_encode($body), "\n";
 
     fwrite($fp, "GET /notmodified HTTP/1.1\r\nHost: x\r\n\r\n");
     $head = '';
@@ -206,6 +252,26 @@ spawn(function () use ($port, $server) {
     echo "HEAD sse transfer-encoding: ",
         preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
 
+    foreach (['/streamhead' => '9', '/streamheadbare' => '<absent>'] as $path => $expect) {
+        fwrite($fp, "HEAD $path HTTP/1.1\r\nHost: x\r\n\r\n");
+        $head = '';
+
+        while (!str_contains($head, "\r\n\r\n")) {
+            $c = fread($fp, 1);
+
+            if ($c === false || $c === '') {
+                break;
+            }
+
+            $head .= $c;
+        }
+
+        echo "HEAD $path content-length: ",
+            preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : '<absent>', "\n";
+        echo "HEAD $path transfer-encoding: ",
+            preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
+    }
+
     /* Pipelined behind the HEAD so the next status line is read from wherever
      * the message really ended: a frame let through would put it inside one. */
     fwrite($fp, "HEAD /message HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
@@ -244,16 +310,25 @@ buffered: HTTP/1.1 204 No Content
 buffered content-length: <absent>
 buffered body: ""
 next on the connection: HTTP/1.1 200 OK "root"
+205: HTTP/1.1 205 Reset Content
+205 content-length: 0
+205 body: ""
+next after 205: HTTP/1.1 200 OK "root"
 304: HTTP/1.1 304 Not Modified
 304 content-length: 1234
-100: HTTP/1.1 100 Continue
-100 content-length: <absent>
+interim: TrueAsync\HttpServerInvalidArgumentException
+100: HTTP/1.1 200 OK
+100 content-length: present
 handler TE: <absent>
 handler TE content-length: 5
 handler TE body: "hello"
 HEAD sse: HTTP/1.1 200 OK
 HEAD sse content-type: text/event-stream
 HEAD sse transfer-encoding: <absent>
+HEAD /streamhead content-length: 9
+HEAD /streamhead transfer-encoding: <absent>
+HEAD /streamheadbare content-length: <absent>
+HEAD /streamheadbare transfer-encoding: <absent>
 HEAD message: HTTP/1.1 200 OK
 next after HEAD message: HTTP/1.1 200 OK "root"
 streamed: TrueAsync\HttpServerRuntimeException: write(): status 204 carries no body — the message ends at the header block

@@ -365,9 +365,21 @@ ZEND_METHOD(TrueAsync_HttpResponse, setStatusCode)
         return;
     }
 
-    if (code < 100 || code > 599) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "HTTP status code must be between 100 and 599", 0);
+    /* A final response starts at 200. A 1xx is an interim one (RFC 9110
+     * §15.2): it ends at its header block and the client goes on waiting for
+     * the answer, which nothing here will send — the request is finished the
+     * moment the handler returns. Sending one leaves both ends waiting for the
+     * other until a timeout, and to a 1.0 client, which §15.2 forbids it to
+     * entirely, it looks like the answer itself. The server has no
+     * interim-response API for a handler to reach for instead, so the shape
+     * has no correct use and is refused where it is asked for. */
+    if (code < 200 || code > 599) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            code >= 100 && code < 200
+                ? "Status %d is interim (RFC 9110 §15.2) and cannot be a final "
+                  "response: the client would wait for one that never comes"
+                : "HTTP status code must be between 200 and 599, got %d",
+            (int) code);
         return;
     }
 
@@ -1348,10 +1360,16 @@ ZEND_METHOD(TrueAsync_HttpResponse, write)
         return;
     }
 
-    /* HEAD must carry no body (RFC 9110 §9.3.2); drop the chunk. A length the
-     * handler declared stays on the buffered path, where it describes the body
-     * a GET would have returned. */
+    /* HEAD carries no body (RFC 9110 §9.3.2), and the dropped bytes are the
+     * only difference: the response still becomes a streaming one, so it is
+     * framed as the same handler's GET would be and states no length it never
+     * measured. Without the commit it fell through to the buffered path, which
+     * computed Content-Length: 0 from a buffer nobody had filled — a claim that
+     * the GET body is empty, which is the opposite of what §9.3.2 wants the
+     * field to mean. A length the handler declared itself survives and
+     * describes the body a GET would have returned. */
     if (response->is_head) {
+        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
@@ -1428,8 +1446,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
     }
 
     /* HEAD carries no body (RFC 9110 §9.3.2); the chunk is accepted and
-     * dropped, as write() does. */
+     * dropped, and the stream commits, as write() does. */
     if (response->is_head) {
+        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
         RETURN_TRUE;
     }
 
@@ -1683,9 +1702,10 @@ ZEND_METHOD(TrueAsync_HttpResponse, writeMessage)
         return;
     }
 
-    /* HEAD carries no body (RFC 9110 §9.3.2); the message is dropped, as
-     * write() drops its chunk. */
+    /* HEAD carries no body (RFC 9110 §9.3.2); the message is dropped and the
+     * stream commits, as write() does with its chunk. */
     if (response->is_head) {
+        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
         RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
     }
 
@@ -1740,8 +1760,9 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
     }
 
     /* HEAD carries no body (RFC 9110 §9.3.2); the message is accepted and
-     * dropped, as tryWrite() does with its chunk. */
+     * dropped, and the stream commits, as tryWrite() does with its chunk. */
     if (response->is_head) {
+        http_response_stream_commit_once(Z_OBJ_P(ZEND_THIS), response);
         RETURN_TRUE;
     }
 

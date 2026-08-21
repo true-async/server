@@ -245,10 +245,17 @@ HTTP/1.1 clients are unaffected: they keep chunked encoding.
 
 #### A status that carries no body
 
-`1xx`, `204` and `304` end at the header block, and so does every response to a
-`HEAD` (RFC 9112 §6.3). Bytes written past that point are read by the client as
-the start of the next response, so the server does not send them, and the two
-body modes say so differently:
+`204` and `304` end at the header block, and so does every response to a `HEAD`
+(RFC 9112 §6.3 rule 1). `205` carries no content either (RFC 9110 §15.3.6), and
+differs in one way that matters: rule 1 does not name it, so the client still
+looks for framing and the server states `Content-Length: 0` rather than leaving
+the field out. A `1xx` never reaches this at all — `setStatusCode()` refuses an
+interim status, because the client would read it and go on waiting for a final
+response the handler has no way to send.
+
+Bytes written past the header block are read by the client as the start of the
+next response, so the server does not send them, and the two body modes say so
+differently:
 
 ```php
 $res->setStatusCode(204);
@@ -264,6 +271,12 @@ been decided after the body was built — a conditional `GET` renders a
 representation and then finds the `ETag` matches — and by the time the response
 is serialised there is nothing left to tell. `sseStart()` refuses on such a
 status for the same reason `write()` does.
+
+A `HEAD` is the one case where the drop is silent: the chunk is accepted, the
+bytes go nowhere, and the response commits as a streaming one, so it carries the
+framing the same handler's `GET` would carry. Declare a `Content-Length` if the
+client should learn the size of the body a `GET` would return — the server
+cannot measure bytes it dropped, and states no length of its own.
 
 A `HEAD` is the one case that drops on both paths: there the handler is meant to
 produce the body a `GET` would return, since that is where its `Content-Length`

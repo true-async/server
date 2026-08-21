@@ -37,6 +37,7 @@ const char *http_status_reason(int code)
         case 201: return "Created";
         case 202: return "Accepted";
         case 204: return "No Content";
+        case 205: return "Reset Content";
         case 206: return "Partial Content";
         case 301: return "Moved Permanently";
         case 302: return "Found";
@@ -81,6 +82,7 @@ static const http_status_line_t http11_status_lines[] = {
     [201] = MK_LINE("HTTP/1.1 201 Created\r\n"),
     [202] = MK_LINE("HTTP/1.1 202 Accepted\r\n"),
     [204] = MK_LINE("HTTP/1.1 204 No Content\r\n"),
+    [205] = MK_LINE("HTTP/1.1 205 Reset Content\r\n"),
     [206] = MK_LINE("HTTP/1.1 206 Partial Content\r\n"),
     [301] = MK_LINE("HTTP/1.1 301 Moved Permanently\r\n"),
     [302] = MK_LINE("HTTP/1.1 302 Found\r\n"),
@@ -322,9 +324,17 @@ static void emit_headers_block(smart_str *result, http_response_object *response
         /* RFC 9112 §6.3 rule 1: the message ends at the blank line, so the
          * server has no count to state. A 304 keeps the handler's, which
          * describes the representation a 200 would have carried (RFC 9110
-         * §8.6); a 1xx and a 204 lose it, which the same section requires. */
-        emit_headers_only(result, response->headers,
-                          response_status_forbids_content_length(response->status_code), true);
+         * §8.6); a 1xx and a 204 lose it, which the same section requires.
+         *
+         * A 205 is the exception rule 1 does not cover: the peer will look for
+         * framing, so the emptiness is stated rather than implied. */
+        if (response_status_needs_zero_length(response->status_code)) {
+            emit_content_length(result, 0);
+            emit_headers_only(result, response->headers, true, true);
+        } else {
+            emit_headers_only(result, response->headers,
+                              response_status_forbids_content_length(response->status_code), true);
+        }
     } else if (handler_declared && body_follows) {
         emit_content_length(result, body_len);
         emit_headers_only(result, response->headers, true, true);

@@ -328,6 +328,48 @@ it and expects a tag within days.
   server sent; it counts frames now and asserts no stream was reset, so an
   empty body proves the server dropped it rather than the client hiding it.
 
+  **Five defects the review found and this step fixes.** Recorded together
+  because they are one family — the server states a message's framing, and each
+  of these was a place where it did not.
+
+  **A header value reached the wire unfiltered**, which is #198's other half
+  and the reachable one: `setHeader('Location', $userInput)` with a CRLF ended
+  the header block and put a second response behind it (CWE-113). `setHeader()`,
+  `addHeader()` and `redirect()` refuse a name that is not an RFC 9110 §5.6.2
+  token and a value carrying a byte §5.5 does not allow. Refused rather than
+  cleaned, because these run while the handler can still answer; `redirect()`
+  checks before assigning the status, so a refused call changes nothing.
+  Evidence: `h1/046`.
+
+  **A handler `Connection: close` was copied and ignored**: the field reached
+  the peer while `conn->keep_alive` stayed true, so the next request was
+  answered on a socket the client had retired, and on 1.0 the keep-alive echo
+  overwrote the handler's value instead. The field is taken as the request it
+  is now — the connection closes, and the peer is told by the branch that
+  already tells it about a drain. **`Transfer-Encoding` was dropped whatever it
+  named**, so a handler that set `gzip` sent encoded bytes with no coding
+  declared; only `chunked` is accepted and dropped now. Evidence: `h1/047`,
+  which writes a second request onto the same socket — the header alone never
+  proved anything.
+
+  **A 1xx framed correctly and left the exchange unfinished.** It is an interim
+  response (RFC 9110 §15.2) and nothing follows it, so both ends waited for the
+  other; to a 1.0 client, which §15.2 forbids it to entirely, it read as the
+  answer. `setStatusCode()` takes 200 to 599 now. `core/027` pinned the old
+  boundary and changes with it — the one contract in this step that was already
+  written down, and worth naming for that reason.
+
+  **205 carried a body**, which RFC 9110 §15.3.6 forbids, and could not have
+  framed one: §6.3 rule 1 does not name 205, so a client still looks for
+  framing. Its own leg — body dropped, `Content-Length: 0` stated — rather than
+  joining 204 and 304, which state no length at all.
+
+  **A `HEAD` whose handler streamed reported `Content-Length: 0`**, because
+  `write()` returned before the stream committed and the buffered path computed
+  a length from an empty buffer. The stream commits now and only the bytes are
+  dropped, which also makes the four streaming calls agree with the two SSE
+  ones.
+
   **A drain that came due mid-stream was lost.** The first shape of this step
   gated dispose's whole `Connection` block on `http_response_is_streaming`, to
   keep the drain evaluator from being asked twice for one response. The
@@ -353,10 +395,12 @@ it and expects a tag within days.
   each bodiless shape, `compression/075` decodes a gzipped close-delimited body
   and holds the three rules that meet on a declared 1.0 stream, `tls/016`
   drives the identity write branch over TLS with a chunk above the coalescing
-  bound. Nine of the ten fail against `main`'s sources and pass here; the
-  tenth, `h1/045`, passes on `main` as well, because the defect it guards was
-  introduced and removed inside this branch — `main` never gated the dispose
-  call at all.
+  bound, `h1/046` refuses a header that would split the message and `h1/047`
+  proves a handler `Connection: close` closes the socket. Nine of the twelve
+  fail against `main`'s sources and pass here; the
+  three exceptions are `h1/045`, which passes on `main` too because the defect
+  it guards was introduced and removed inside this branch, and `h1/046` and
+  `h1/047`, which fail there for their own reasons rather than #197's.
 
   Reviewed by four critics against the design before any code: 32 findings, 12
   survived verification, every one of them fixed above. The RST findings were
@@ -374,57 +418,6 @@ it and expects a tag within days.
   `h1/043`. Not addressed: the phrase still carries the whole message, so a 500
   puts application text of any length on the status line.
 
-- [ ] **A header value reaches the HTTP/1 wire unfiltered, so a CRLF in one
-  splits the response.** The other half of #198, and the reachable half:
-  `add_header_value` (`src/http_response.c:118`) only lowercases the name, and
-  `append_header_line` (`src/http1/http1_format.c:197`) is three memcpys, so
-  `setHeader('Location', $userInput)` with a CRLF in it ends the header block
-  and puts a second response behind it (CWE-113). The status line was the rarer
-  door; this is the one production code opens, and the repository already knows
-  the rule — `sendFile()` refuses CR and LF in its option strings
-  (`src/http_response.c:1692`). Refuse rather than clean, unlike the phrase:
-  `setHeader()` runs with the handler still there to be told. HTTP/2 and
-  HTTP/3 are covered by nghttp2's and nghttp3's own validators.
-- [ ] **A 1xx status produces a final response, and the exchange never ends.**
-  `setStatusCode()` accepts 100–599, and a 1xx now frames correctly as a
-  message that ends at the header block — but a 1xx is not a final response
-  (RFC 9110 §15.2), and nothing follows it. The client waits for the answer,
-  the server waits for the next request, and both leave on a timeout. On a 1.0
-  request it is worse: §15.2 forbids sending a 1xx to such a client at all, and
-  the keep-alive echo makes the server offer to reuse the socket. There is no
-  interim-response API for a handler to reach for instead, so the shape has no
-  correct use — refusing `code < 200` in `setStatusCode()` is one branch, and
-  it would let `response_status_forbids_content_length` shrink to `204` and the
-  rule-1 test to `204 || 304`, which is what §6.3 rule 1 gives a *sender*.
-  `core/065`'s `/interim` arm pins today's shape and changes with it.
-- [ ] **205 Reset Content carries a body on every path.** RFC 9110 §15.3.6
-  forbids content in a 205, and `response_status_carries_body`
-  (`src/http_response_internal.h:109`) does not list it. It cannot simply join
-  204 and 304 there: §6.3 rule 1 does not name 205, so a receiver still looks
-  for framing and the message needs `Content-Length: 0` where 204 needs the
-  field absent. Its own leg: body dropped, zero length stated.
-- [ ] **The server states the framing and lets the handler lie about the
-  connection.** `emit_headers_only` drops a handler `Content-Length` and
-  `Transfer-Encoding` on the reasoning that framing is the server's to state,
-  and leaves `connection` alone: a handler `Connection: close` on a 1.1 request
-  reaches the peer while `conn->keep_alive` stays true, and the next request is
-  answered on a socket the peer has retired. The 1.0 keep-alive echo has the
-  mirror defect — it overwrites a handler's `Connection: close` with
-  `keep-alive`. And the `Transfer-Encoding` drop assumes the value is always
-  `chunked`: a handler that set `gzip` now sends gzip bytes with no coding
-  named anywhere, which is a corrupt download rather than a smuggling shape.
-  Refusing both names at `setHeader()` is the shape that fits — the handler is
-  still there to be told. Found by the protocol critic on the finished #197
-  diff; none of it is new in that change except the echo's overwrite.
-- [ ] **A `HEAD` whose handler streams reports `Content-Length: 0`.** `write()`
-  returns before `http_response_stream_commit_once`, so such a response is
-  never streaming and takes the buffered `HEAD` branch, where the length is
-  computed from an empty buffer. `docs/USAGE.md` and the `H1_FRAMING_NONE`
-  comment both say a `HEAD` carries the length its `GET` would have stated, and
-  on that route it states zero. Two shapes to choose between: commit the stream
-  and drop only the bytes, which puts every dialect in one framing, or keep the
-  early return and stop computing a length nobody measured. Pre-existing for
-  `write()`; #197 extended the same early return to `writeMessage()`.
 - [ ] **The static path advertises `Connection: keep-alive` on HTTP/1.1 too.**
   `send_file.c:454` sets it unconditionally from `keep_alive`, while
   `h1_streaming_headers_build` states the opposite rule — on 1.1 the header is

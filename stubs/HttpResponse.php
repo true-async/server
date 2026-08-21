@@ -23,7 +23,15 @@ final class HttpResponse
     /**
      * Set response status code
      *
-     * @param int $code HTTP status code (100-599)
+     * Takes 200 to 599. An interim status (1xx) throws: RFC 9110 §15.2 makes
+     * it a response the client reads and then goes on waiting for the final
+     * one, which a handler has no way to send afterwards.
+     *
+     * A status that carries no content changes what the body calls do. 204,
+     * 304 and 205 refuse a streaming call and drop a buffered body; 205 states
+     * Content-Length: 0, the other two state no length at all.
+     *
+     * @param int $code HTTP status code (200-599)
      * @return static
      */
     public function setStatusCode(int $code): static {}
@@ -192,11 +200,14 @@ final class HttpResponse
      * undeclared body reaches it as its own bytes with Connection: close, and
      * the close is the boundary. The connection carries that one response.
      *
-     * A status that carries no body — 1xx, 204, 304 — throws
+     * A status that carries no body — 204, 304, 205 — throws
      * HttpServerRuntimeException here, while the response is still uncommitted
      * and can still be given a status that does carry one. A HEAD request is
-     * the exception: the chunk is accepted and dropped, because the handler is
-     * producing the body a GET would return.
+     * the exception: the chunk is accepted and dropped, and the response
+     * commits as a streaming one all the same, so it is framed as the same
+     * handler's GET would be. Declare a Content-Length to state the length that
+     * GET would have reported; the server has no way to compute it from bytes
+     * it dropped, and states none.
      *
      * Parks the handler coroutine only under backpressure: HTTP/2 and HTTP/3
      * park while every ring slot is live or the queued bytes stand at
