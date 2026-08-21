@@ -87,6 +87,12 @@ http_send_file_request_t *http_response_take_send_file(zend_object *obj)
 	abort();
 }
 
+bool http_response_commit_content_length(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}
+
 bool http_response_header_allowed_h2h3(const char *name, size_t len,
                                        bool keep_content_length)
 {

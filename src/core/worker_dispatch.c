@@ -153,9 +153,9 @@ static void worker_dispatch_entry(void)
 
 /* Flatten status + H2/H3-allowed headers of the response onto a wire.
  *
- * @p keep_content_length is the caller's framing decision: a streaming wire
- * whose response declared a length carries it, so the peer can hold the frames
- * to it; every other wire leaves the length to the frames themselves. */
+ * @p keep_content_length is what http_response_commit_content_length answered.
+ * The reactor submits the wire as it stands, so a name dropped here cannot be
+ * put back downstream. */
 static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
                                   const bool keep_content_length)
 {
@@ -563,7 +563,9 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         return NULL;
     }
 
-    worker_wire_copy_head(rw, resp, false);
+    const bool keep_content_length = http_response_commit_content_length(resp);
+
+    worker_wire_copy_head(rw, resp, keep_content_length);
     worker_wire_copy_trailers(rw, resp);
 
     /* http_response_get_body_str returns a borrowed reference; the bytes are

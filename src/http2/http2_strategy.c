@@ -1082,6 +1082,8 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         }
     }
 
+    const bool keep_content_length = http_response_commit_content_length(response_obj);
+
     /* Flatten response headers — nghttp2 copies name/value into its HPACK
      * dynamic table, so the backing zend_string memory only needs to live
      * through the submit call below. */
@@ -1091,7 +1093,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
     http2_header_view_t *nv_view;
     http2_header_view_t *nv_heap;
     const size_t nv_count = h2_flatten_response_headers(
-        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap, false);
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap, keep_content_length);
 
     const int status = http_response_get_status(response_obj);
     size_t body_len = 0;

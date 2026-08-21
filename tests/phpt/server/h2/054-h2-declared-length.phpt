@@ -10,12 +10,11 @@ h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
-/* HTTP/2 frames the body itself, which is why content-length is stripped from
- * every response: a length nobody checks adds nothing to DATA frames that
- * already carry their own boundaries. A declared length is different — the
- * server holds the body to it, so the peer can hold it to the same number, and
- * RFC 9113 §8.1.1 makes the mismatch a malformed message the client detects.
- * The header therefore travels on exactly the responses that were audited.
+/* A stream has no body to measure when its headers go out, so the only count
+ * it can state is the one its handler declared — and the server then holds the
+ * body to it, which is what makes the number safe to send. RFC 9113 §8.1.1
+ * makes a mismatch a malformed message the client detects. An undeclared
+ * stream states nothing: the DATA frames carry their own boundaries.
  *
  * curl reads the header off the wire; the raw client reads the reset code,
  * because a stream that stopped short and a stream that was reset are the same

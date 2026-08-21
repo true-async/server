@@ -443,6 +443,88 @@ void http_response_set_content_length(zend_object *obj, uint64_t length)
     char buf[24];
     const size_t n = format_u64(buf, length);
     http_response_static_set_header(obj, "content-length", 14, buf, n);
+    http_response_from_obj(obj)->length_stated = true;
+}
+
+static bool response_header_table_has_length(const http_response_object *response)
+{
+    return zend_hash_str_exists(response->headers, "content-length",
+                                sizeof("content-length") - 1);
+}
+
+http_response_length_action_t http_response_length_action(zend_object *obj)
+{
+    const http_response_object *response = http_response_from_obj(obj);
+    const int status = response->status_code;
+
+    if (UNEXPECTED(!response_status_carries_body(status))) {
+        if (response_status_needs_zero_length(status)) {
+            return HTTP_RESPONSE_LENGTH_ZERO;
+        }
+
+        /* RFC 9110 §8.6 forbids the field on a 1xx and a 204 and permits it on
+         * a 304, where it describes the representation a 200 would carry. */
+        return status < 200 || status == 204
+            ? HTTP_RESPONSE_LENGTH_OMIT
+            : HTTP_RESPONSE_LENGTH_KEEP;
+    }
+
+    /* A stream has no buffer to measure; its own declaration is the only count
+     * it can state, and finish_stream audits the bytes against it. */
+    if (response->streaming) {
+        return response->declared_length >= 0
+            ? HTTP_RESPONSE_LENGTH_KEEP
+            : HTTP_RESPONSE_LENGTH_OMIT;
+    }
+
+    if (response->length_stated) {
+        return HTTP_RESPONSE_LENGTH_KEEP;
+    }
+
+    if (!response->is_head) {
+        return HTTP_RESPONSE_LENGTH_FROM_BODY;
+    }
+
+    /* A HEAD carries the length its GET would have (RFC 9110 §9.3.2): the
+     * buffer holds that body. A handler that streamed instead had its bytes
+     * dropped, so the empty buffer measures nothing and only its own
+     * declaration can answer. */
+    if (response_header_table_has_length(response)) {
+        return HTTP_RESPONSE_LENGTH_KEEP;
+    }
+
+    return response->head_streamed
+        ? HTTP_RESPONSE_LENGTH_OMIT
+        : HTTP_RESPONSE_LENGTH_FROM_BODY;
+}
+
+bool http_response_commit_content_length(zend_object *obj)
+{
+    /* nghttp2 puts END_STREAM on the DATA frame that completes a stated count,
+     * so trailers would reach a closed stream and read as a protocol error. */
+    const HashTable *const trailers = http_response_get_trailers(obj);
+
+    if (trailers != NULL && zend_hash_num_elements(trailers) > 0) {
+        return false;
+    }
+
+    switch (http_response_length_action(obj)) {
+    case HTTP_RESPONSE_LENGTH_FROM_BODY:
+        http_response_set_content_length(obj, http_response_get_body_len(obj));
+        return true;
+
+    case HTTP_RESPONSE_LENGTH_ZERO:
+        http_response_set_content_length(obj, 0);
+        return true;
+
+    case HTTP_RESPONSE_LENGTH_KEEP:
+        return true;
+
+    case HTTP_RESPONSE_LENGTH_OMIT:
+        break;
+    }
+
+    return false;
 }
 
 void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,

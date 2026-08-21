@@ -77,6 +77,9 @@ typedef struct {
                                           * state a length measured from the buffer they never
                                           * reached. The response stays uncommitted, so the
                                           * handler's own exception can still become a status. */
+    bool             length_stated;      /* the Content-Length in the table is the server's own,
+                                          * not the handler's: the static engine states a file
+                                          * size the empty buffer cannot be measured for. */
     bool             handler_wants_close; /* setHeader('Connection', 'close'): the field is
                                            * the server's to emit, so the handler's is taken
                                            * as the request it is and answered by closing the

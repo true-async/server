@@ -266,7 +266,9 @@ it and expects a tag within days.
   from. Each finding is fixed above or an open step below.
 
 - [x] **#197 — an HTTP/1 message carries the body its status and method allow,
-  framed the way the request can read.** The step opened as one defect and the
+  framed the way the request can read.** Merged as PR 199 (`6892b97`), eleven
+  commits: three for the step, six answering two rounds of critic review, one
+  for a pass over every comment it adds. The step opened as one defect and the
   critics turned it into six, all of the same shape: the response frames itself
   from the declaration alone and reads neither the request version, nor the
   method, nor its own status.
@@ -455,7 +457,8 @@ it and expects a tag within days.
   connection today, so close-delimited framing changes no byte of that path.
 
 - [x] **#198 — an exception message reached the HTTP/1 status line unfiltered.**
-  Found while reading `emit_status_line` for the step above. A CRLF in the
+  Merged in the same PR 199. Found while reading `emit_status_line` for the step
+  above. A CRLF in the
   message ended the status line, so the bytes behind it were read as header
   fields and, past a blank line, as a second response (CWE-113) — reachable from
   any handler that puts request data into an exception message, and from
@@ -472,17 +475,44 @@ it and expects a tag within days.
   policies; the CHANGELOG claim that no path sent the echo before #197 was
   wrong because of this one.
 
-- [ ] **HTTP/2 and HTTP/3 strip `Content-Length` from every response, `HEAD`
-  and static files included.** `http_response_header_allowed_h2h3` drops the name
-  for the reason DATA frames make it implicit, but RFC 9110 §9.3.2 wants a `HEAD`
-  response to carry the headers its `GET` would, and a `sendFile()` of a 4 KiB
-  asset over HTTP/2 reaches the client with no length to size a download by. The
-  `keep_content_length` argument added for declared streams is the lever; the
-  step is deciding which of the four `false` call sites flip. Two comments in the
-  tree already assert the length goes out (`src/http3/http3_callbacks.c:952`,
-  `src/http3/http3_static_response.c:305`) and are wrong today.
-  `static/012` (`cl=-` on GET and HEAD) and `h3/019` (`header_count=71`) pin the
-  current shape, so both change with it.
+- [x] **#200 — HTTP/2 and HTTP/3 strip `Content-Length` from every response,
+  `HEAD` and static files included.** Answered A of the two readings: every
+  buffered response states a count, rather than only the `HEAD` and the
+  `sendFile()` whose framing cannot answer for itself. `sendFile()` is framed by
+  DATA and END_STREAM as completely as any buffered GET and sat in the narrow
+  answer for a download-sizing reason that holds for every body, so the narrow
+  answer had no principle to stand on. The step was not four `false` arguments:
+  the rules lived inside `http1_format.c`, and `head_streamed` inside
+  `http_response_internal.h`, where no HTTP/2 or HTTP/3 site could read them.
+  They are now `http_response_length_action` with four outcomes — state the
+  buffer's count, state zero, keep the field the table holds, send none — and
+  HTTP/1 reads it instead of its own copy. The one fact no call site had is a
+  bit, `length_stated`: the static engine writes a count into the table while
+  the buffer stays empty, so `http3_stream_submit_response` could not tell that
+  count from a handler's. Two rules the reading missed: a response carrying
+  trailers states nothing, because nghttp2 ends the stream at the byte
+  completing the count and the trailing HEADERS then reaches it closed
+  (`h2/003` caught it); gRPC needs no carve-out, since `writeMessage()` puts the
+  response in streaming mode and the streaming rule already covers it.
+  Evidence: `h2/056` and `h3/062` are new and fail against `main`; `static/012`
+  now reads `cl=4096` on GET and HEAD, `h3/019` counts 72 headers. 455 phpt,
+  429 passed, 0 failed, 24 skipped on absent tool gates, 1 warn (`core/047`,
+  the pre-existing XFAIL that passes); `ctest` 16 of 16.
+
+- [ ] **Measure what the framing work costs per response.** Not today; recorded so
+  the number is taken before the next release rather than assumed. #195, #197 and
+  #200 each added per-response work to a path that runs for every request. The one
+  to measure first is #200 on HTTP/2 and HTTP/3: `http_response_commit_content_length`
+  writes the count into the header table, so every buffered response now pays a
+  `zend_hash_update` plus two `zend_string` allocations — the lowercased name and
+  the formatted value — where the field used to be dropped and cost nothing. HTTP/1
+  is untouched by that: it reads the action and formats into the smart_str as
+  before. The `HEAD` branch adds one `zend_hash_str_exists`. Compare against the
+  commit before #200 with `h2load` on a buffered response, same machine and same
+  build, three runs, median, into `dev/BENCHMARKS.md`. If the insert shows, the
+  next shape to try is handing the count to the flatten loop as an extra entry
+  instead of through the table.
+
 - [ ] **An aborted request is logged and counted as the status it committed.**
   `http_request_telemetry` reads `http_response_get_status()`, which is the 200 the
   handler put on the wire before it failed, so a truncated body reads as complete

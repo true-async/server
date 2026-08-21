@@ -300,59 +300,28 @@ static void emit_headers_block(smart_str *result, http_response_object *response
 
     emit_date_header(result, response->headers);
 
-    /* Content-Length on a buffered body is the server's to state: it is holding
-     * the bytes it is about to send, so a handler value that disagrees would
-     * put the peer's read cursor at the wrong byte and desync a reused
-     * connection. Use zend_hash_str_exists to skip the zend_string
-     * alloc/release round-trip on the literal name lookup. */
-    const bool handler_declared =
-        zend_hash_str_exists(response->headers, "content-length",
-                             sizeof("content-length") - 1);
+    /* Local to HTTP/1 is only the order: the count goes out after Date, ahead
+     * of the table, so the table's own field is dropped as it is copied. */
+    bool drop_content_length = true;
 
-    /* The handler's number is kept on a HEAD, where the message carries no body
-     * to measure it against and the value describes the one a GET would have
-     * returned. A status that ends at the blank line keeps it only where the
-     * number still means something — see the branch below.
-     *
-     * Three branches rather than one computed flag: the common response
-     * declares no length, and passing the literal lets the emit loop drop the
-     * name check for it. */
-    const bool carries_body = response_status_carries_body(response->status_code);
-    const bool body_follows = !response->is_head && carries_body;
-
-    if (UNEXPECTED(!carries_body)) {
-        /* RFC 9112 §6.3 rule 1: the message ends at the blank line, so the
-         * server has no count to state. A 304 keeps the handler's, which
-         * describes the representation a 200 would have carried (RFC 9110
-         * §8.6); a 1xx and a 204 lose it, which the same section requires.
-         *
-         * A 205 is the exception rule 1 does not cover: the peer will look for
-         * framing, so the emptiness is stated rather than implied. */
-        if (response_status_needs_zero_length(response->status_code)) {
-            emit_content_length(result, 0);
-            emit_headers_only(result, response->headers, true, true);
-        } else {
-            emit_headers_only(result, response->headers,
-                              response_status_forbids_content_length(response->status_code), true);
-        }
-    } else if (handler_declared && body_follows) {
+    switch (http_response_length_action(&response->std)) {
+    case HTTP_RESPONSE_LENGTH_FROM_BODY:
         emit_content_length(result, body_len);
-        emit_headers_only(result, response->headers, true, true);
-    } else if (response->head_streamed && !handler_declared) {
-        /* A HEAD whose handler produced its body by streaming. The bytes were
-         * dropped, so the buffer holds nothing to measure, and stating its
-         * length says the GET body is empty — the opposite of what RFC 9110
-         * §9.3.2 wants the field to mean. §9.3.2 lets a server omit a field
-         * whose value is only known while generating the content; a handler
-         * that knows the count declares it before its first streaming call. */
-        emit_headers_only(result, response->headers, false, true);
-    } else {
-        if (!handler_declared) {
-            emit_content_length(result, body_len);
-        }
+        break;
 
-        emit_headers_only(result, response->headers, false, true);
+    case HTTP_RESPONSE_LENGTH_ZERO:
+        emit_content_length(result, 0);
+        break;
+
+    case HTTP_RESPONSE_LENGTH_KEEP:
+        drop_content_length = false;
+        break;
+
+    case HTTP_RESPONSE_LENGTH_OMIT:
+        break;
     }
+
+    emit_headers_only(result, response->headers, drop_content_length, true);
 
     /* End of headers */
     smart_str_appendl(result, "\r\n", 2);
