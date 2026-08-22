@@ -43,15 +43,6 @@
 
 #include <string.h>
 
-/* MSG_NOSIGNAL is a POSIX flag that suppresses SIGPIPE on send() to a
- * half-closed socket. Windows has no SIGPIPE — Winsock signals errors
- * via the return value (WSAECONNRESET / WSAECONNABORTED) — so the flag
- * is unnecessary there and absent from <winsock2.h>. Define it to 0 on
- * Windows so call-sites stay portable. */
-#ifndef MSG_NOSIGNAL
-# define MSG_NOSIGNAL 0
-#endif
-
 /* Defined in src/http_request.c — builds a PHP HttpRequest zval from
  * a parsed http_request_t. Declared extern here (not in the public
  * header) to mirror the HTTP/1 dispatch path in http_connection.c. */
@@ -766,6 +757,23 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
     }
 }
 
+/* Hand @p len bytes of session output to the connection's outbound queue.
+ * The bytes are copied: every caller drains into a stack scratch that the
+ * next turn of the loop overwrites. Plaintext only — a TLS session orders
+ * through the BIO ring instead, and each call site is already gated on that.
+ * False means the submit failed and the connection can no longer write. */
+static bool h2c_queue_bytes(http_connection_t *conn, const void *src, const size_t len)
+{
+    if (len == 0) {
+        return true;
+    }
+
+    void *const owned = emalloc(len);
+    memcpy(owned, src, len);
+
+    return http_connection_send_batched(conn, owned, len);
+}
+
 static int http2_feed(http_protocol_strategy_t *strategy,
                       http_connection_t *conn,
                       const char *data,
@@ -832,10 +840,11 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     if (rc < 0) {
         /* Error-path drain. When feed() flagged a bad connection preface
          * or a hard protocol violation, the session may have queued a
-         * GOAWAY(PROTOCOL_ERROR) before giving up. Flush it synchronously
-         * so the peer sees the diagnostic frame before we drop TCP —
-         * otherwise it observes an unexplained EOF, which is non-compliant
-         * per RFC 9113 §3.4 and fails strict conformance tools.
+         * GOAWAY(PROTOCOL_ERROR) before giving up. Queue it so the peer
+         * sees the diagnostic frame before we drop TCP — otherwise it
+         * observes an unexplained EOF, which is non-compliant per RFC 9113
+         * §3.4 and fails strict conformance tools. The destroy that follows
+         * defers while the write is in flight, so the bytes still leave.
          *
          * TLS path is unaffected here: terminate_session + drain happens
          * inside the TLS coroutine's own write pipeline, not ours. */
@@ -850,26 +859,20 @@ static int http2_feed(http_protocol_strategy_t *strategy,
         should_drain = should_drain && conn->tls == NULL;
 #endif
         if (should_drain) {
-            const php_socket_t fd = (php_socket_t)conn->io->descriptor.socket;
+            /* Bad-preface path: nghttp2 can't queue a GOAWAY itself
+             * once BAD_CLIENT_MAGIC has fired. Send the static
+             * template instead. */
+            if (http2_session_should_emit_bad_preface_goaway(self->session)) {
+                (void)h2c_queue_bytes(conn, http2_session_bad_preface_goaway_bytes(),
+                                      HTTP2_BAD_PREFACE_GOAWAY_LEN);
+            } else {
+                char drain_buf[256];
+                const ssize_t n = http2_session_drain(self->session,
+                                                       drain_buf,
+                                                       sizeof(drain_buf));
 
-            if (fd != (php_socket_t)-1) {
-                /* Bad-preface path: nghttp2 can't queue a GOAWAY itself
-                 * once BAD_CLIENT_MAGIC has fired. Write the static
-                 * template directly. */
-                if (http2_session_should_emit_bad_preface_goaway(self->session)) {
-                    (void)send(fd,
-                               http2_session_bad_preface_goaway_bytes(),
-                               HTTP2_BAD_PREFACE_GOAWAY_LEN,
-                               MSG_NOSIGNAL);
-                } else {
-                    char drain_buf[256];
-                    const ssize_t n = http2_session_drain(self->session,
-                                                           drain_buf,
-                                                           sizeof(drain_buf));
-
-                    if (n > 0) {
-                        (void)send(fd, drain_buf, (size_t)n, MSG_NOSIGNAL);
-                    }
+                if (n > 0) {
+                    (void)h2c_queue_bytes(conn, drain_buf, (size_t)n);
                 }
             }
         }
@@ -891,10 +894,13 @@ static int http2_feed(http_protocol_strategy_t *strategy,
      *
      * Context discipline:
      *  - Plaintext h2c: http2_feed runs from the read-callback
-     *    (scheduler context — cannot suspend). Use raw non-blocking
-     *    send() for control frames. These are small (SETTINGS 30 B,
-     *    ACK 9 B, WINDOW_UPDATE 13 B, PING 17 B) and fit in the
-     *    kernel send buffer virtually always.
+     *    (scheduler context — cannot suspend), so the same emit the
+     *    response path uses carries them: it queues on the connection
+     *    without suspending, and skips while a writev is in flight
+     *    because the completion re-drives it. Draining at the socket
+     *    instead put these frames ahead of a response already queued,
+     *    and lost whatever the socket refused — the bytes are gone from
+     *    the session by then, so the body ended mid-frame.
      *  - TLS h2: http2_feed runs from the TLS coroutine, which has
      *    its own drain pipeline that flushes plaintext → BIO →
      *    ciphertext → socket after decrypt-and-process loops. We
@@ -905,7 +911,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
      *    before the next read (plenty fast for h2spec-style timing).
      *  - Peer-RST-mid-stream paths (phpt 077) likewise rely on the
      *    nghttp2 callback + ZEND_ASYNC_CANCEL path that happens
-     *    WITHIN session_feed; we must not pre-empt with a raw send
+     *    WITHIN session_feed; we must not pre-empt with a drain
      *    before the cancel has propagated.
      *
      * So: only drain eagerly when the connection is plaintext AND
@@ -924,21 +930,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
         return rc;
     }
 
-    char drain_buf[16384];
-    while (http2_session_want_write(self->session)) {
-        const ssize_t n = http2_session_drain(self->session,
-                                              drain_buf, sizeof(drain_buf));
-
-        if (n <= 0) { break; }
-
-        if (conn->io == NULL) { break; }
-        const php_socket_t fd = (php_socket_t)conn->io->descriptor.socket;
-
-        if (fd == (php_socket_t)-1) { break; }
-        const ssize_t sent = send(fd, drain_buf, (size_t)n, MSG_NOSIGNAL);
-
-        if (sent != (ssize_t)n) { break; }
-    }
+    http2_session_emit(self->session);
 
     /* Session fully winding down (e.g. nghttp2 auto-submitted a
      * GOAWAY(PROTOCOL_ERROR) on an invalid inbound frame). After the
