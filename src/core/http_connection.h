@@ -216,6 +216,12 @@ struct _http_connection_t {
      * low-water mark so the producer can resume. NULL = nobody waiting. */
     void                       (*on_outbound_drain)(http_connection_t *conn);
 
+    /* Fired once no batched write is outstanding and the pending tail is
+     * empty. The awaited senders park on it so their submit cannot overtake
+     * bytes queued ahead of them. Created on the first wait, disposed in
+     * http_connection_destroy; NULL while nobody has had to wait. */
+    zend_async_event_t          *out_idle_event;
+
     /* 4-byte fields */
     http_connection_state_t  state;
     http_protocol_type_t     protocol_type;
@@ -477,10 +483,10 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
 /* Outbound backpressure (transport-level, plaintext batched path).
  * pending_bytes = coalesced tail waiting behind the single in-flight
  * batched write — the part that grows under a slow consumer. The
- * high-water predicate is gated on stream_write_buffer_bytes: 0 (the
- * default) disables it so behaviour is byte-for-byte as before. A future
- * blocking producer suspends while over_highwater; a non-blocking one
- * (WebSocket::trySend) reports BUSY. */
+ * high-water predicate is gated on stream_write_buffer_bytes, which is
+ * 262144 by default (src/http_server_config.c) and disables the predicate
+ * when set to 0. A blocking producer suspends while over_highwater; a
+ * non-blocking one (WebSocket::trySend) reports BUSY. */
 size_t http_connection_outbound_pending_bytes(const http_connection_t *conn);
 bool   http_connection_outbound_over_highwater(const http_connection_t *conn);
 

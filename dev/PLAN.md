@@ -683,11 +683,19 @@ designs were worked out and both fail on something mechanical.
   fixed as #209, and the parse-error responder went with it: the same three
   requests with the last one malformed answered `200, 400, 200`, because that
   4xx is built in the read path and was written at the socket from there. Its
-  plaintext side now queues; TLS keeps the BIO ring. The awaited sender
-  (`http_connection_send_raw`) reads neither flag either, and no reproduction
-  puts it out of order — an HTTP/1 connection dispatches one request at a time,
-  and the await drains the tail before the next handler starts. Left unproven
-  rather than filed.
+  plaintext side now queues; TLS keeps the BIO ring. The awaited senders
+  (`http_connection_send_raw`, `http_connection_send_strv_awaited`) read
+  neither flag either, and the reproduction that shows it needs two buffered
+  responses ahead of the stream rather than one: filed as #211 and fixed by
+  parking the sender until the tail is empty, on a connection-lifetime event
+  fired from every site that clears `out_in_flight`. Evidence: `h1/052`.
+
+  A third writer stays open. The plaintext `sendFile()` body is submitted as
+  `ZEND_ASYNC_IO_SENDFILE` straight at the io (`http1_sendfile.c:661`) while
+  its own head goes through the queue, so nothing but `TCP_CORK` orders the
+  two. Fifteen runs across nine shapes — first body 2 B to 4 MiB, reader delay
+  0 to 400 ms — all came back in order, the file hop through the thread pool
+  being slower than the drain in each. Unproven rather than filed.
 - [ ] **#179 — one serialized outbound path per HTTP/1 connection.** What the
   measurement leaves it: a non-blocking `tryWrite()` on HTTP/1, which
   `dev/BENCHMARKS.md` says "has to be argued on its own; this measurement does
