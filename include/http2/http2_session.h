@@ -200,8 +200,17 @@ static inline http_connection_t *http2_session_get_conn(http2_session_t *session
     return session->conn;
 }
 
-/* h2 emit pump (issue #23): h2c → one writev; TLS → SSL_write + tls_drain. */
+/* h2 emit pump (issue #23): h2c → one writev; TLS → SSL_write + tls_drain.
+ * Skips while a plaintext writev is in flight — the write completion re-drives
+ * it, which is what lets a whole nghttp2_session_send pass gather into one
+ * writev instead of copying into the connection's tail. */
 void http2_session_emit(http2_session_t *session);
+
+/* The same pump for a caller that will not be there when the completion
+ * re-drives: it queues behind the write in flight rather than skipping. For a
+ * teardown, where the frames it leaves in the session nothing comes back for.
+ * Costs a copy into the tail; the response path uses http2_session_emit. */
+void http2_session_emit_now(http2_session_t *session);
 
 /* -------------------------------------------------------------------------
  * Response submission.

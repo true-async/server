@@ -1597,29 +1597,16 @@ static void out_signal_drain(http_connection_t *conn);
 static void out_signal_idle(http_connection_t *conn);
 
 /* Shared tail for batched-send completion callbacks: clears the in-flight
- * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. */
+ * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. The
+ * re-drive is last because it can destroy the connection under us — a submit
+ * that fails synchronously completes from inside it. */
 static void http_send_batched_finish(http_connection_t *conn)
 {
     conn->out_in_flight = false;
     conn->out_in_flight_bytes = 0;
     http_write_timer_stop(conn);
 
-    /* Ask the session for what it still holds before the destroy below can take
-     * the connection. An emit skipped while this write was in flight left the
-     * response's last frames inside nghttp2, and this is the only call that
-     * comes back for them. A connection whose write failed is the exception:
-     * there the re-drive would build frames for an io the peer has left. */
-    if (EXPECTED(!conn->write_failed)) {
-        http2_conn_notify_emit(conn);
-    }
-
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
-        /* The emit may have started the next write; its completion runs the
-         * destroy instead. */
-        if (conn->out_in_flight || conn->out_pending_len > 0) {
-            return;
-        }
-
         conn->destroy_pending = false;
         http_connection_destroy(conn);
         return;
@@ -1627,6 +1614,13 @@ static void http_send_batched_finish(http_connection_t *conn)
 
     out_signal_idle(conn);
     out_signal_drain(conn);
+
+    /* A connection whose write failed has nothing to emit onto: the re-drive
+     * would build frames for an io the peer has already left, and its own
+     * submit failure would come straight back here. */
+    if (EXPECTED(!conn->write_failed)) {
+        http2_conn_notify_emit(conn);
+    }
 }
 
 /* A chained submit that never reached the reactor. The in-flight state ends

@@ -868,7 +868,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
                 (void)h2c_queue_bytes(conn, http2_session_bad_preface_goaway_bytes(),
                                       HTTP2_BAD_PREFACE_GOAWAY_LEN);
             } else {
-                http2_session_emit(self->session);
+                http2_session_emit_now(self->session);
             }
         }
 
@@ -904,7 +904,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
      *    Skip the eager drain for TLS; control frames go out on the
      *    TLS coroutine's next natural write tick, which happens
      *    before the next read (plenty fast for h2spec-style timing).
-     *  - Peer-RST-mid-stream paths (phpt 077) likewise rely on the
+     *  - Peer-RST-mid-stream paths (h2/007, h2/008) likewise rely on the
      *    nghttp2 callback + ZEND_ASYNC_CANCEL path that happens
      *    WITHIN session_feed; we must not pre-empt with a drain
      *    before the cancel has propagated.
@@ -928,23 +928,21 @@ static int http2_feed(http_protocol_strategy_t *strategy,
     http2_session_emit(self->session);
 
     /* Session fully winding down (e.g. nghttp2 auto-submitted a
-     * GOAWAY(PROTOCOL_ERROR) on an invalid inbound frame). After the
-     * drain above we've flushed everything nghttp2 had; keeping the
+     * GOAWAY(PROTOCOL_ERROR) on an invalid inbound frame). Keeping the
      * TCP channel open would leave the peer hanging until its own
      * timeout. Signal the connection layer to tear down by returning
      * a non-zero rc — the error path already closes the socket. */
     if (!http2_session_want_read(self->session)) {
+        /* The emit above skips a write in flight, and this verdict is read only
+         * from here — a peer that has been told GOAWAY sends nothing more to
+         * bring us back. Queue the last frames behind that write instead. */
+        if (http2_session_want_write(self->session)) {
+            http2_session_emit_now(self->session);
+        }
+
         if (!http2_session_want_write(self->session)) {
             return -1;
         }
-
-        /* The session is finished and its last frames are still queued, because
-         * the emit above skipped a write in flight. This verdict is read only
-         * from here, and a peer that has been told GOAWAY sends nothing more to
-         * read — so ask for the teardown now and let the write completion
-         * finalise it. */
-        conn->keep_alive = false;
-        conn->destroy_pending = true;
     }
 
     return rc;
@@ -1515,7 +1513,7 @@ static void http2_emit_log_bailout(const http_connection_t *conn)
     fflush(stderr);
 }
 
-void http2_session_emit(http2_session_t *session)
+static void h2_session_emit_ex(http2_session_t *session, const bool queue_behind_inflight)
 {
     http_connection_t *conn = http2_session_get_conn(session);
 
@@ -1550,8 +1548,10 @@ void http2_session_emit(http2_session_t *session)
             }
         } else
 #endif
-        /* Skip if writev in flight; completion re-drives via notify_emit. */
-        if (!conn->out_in_flight) {
+        /* Skip if writev in flight; completion re-drives via notify_emit.
+         * A caller that will not be there for that re-drive asks to queue
+         * behind it instead — the tail copies where the writev would gather. */
+        if (queue_behind_inflight || !conn->out_in_flight) {
             session->emit_state = &st;
             h2_emit_flush_h2c(conn, session, &st);
         }
@@ -1582,6 +1582,16 @@ void http2_session_emit(http2_session_t *session)
          * the way out and the worker thread exits cleanly. */
         ZEND_ASYNC_SHUTDOWN();
     }
+}
+
+void http2_session_emit(http2_session_t *session)
+{
+    h2_session_emit_ex(session, false);
+}
+
+void http2_session_emit_now(http2_session_t *session)
+{
+    h2_session_emit_ex(session, true);
 }
 
 static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io)
