@@ -534,19 +534,25 @@ it and expects a tag within days.
   against `main` on all three. HTTP/3 takes the same reporting call and has no
   test of its own.
 
-- [ ] **Measure what the framing work costs per response.** Not today; recorded so
-  the number is taken before the next release rather than assumed. #195, #197 and
-  #200 each added per-response work to a path that runs for every request. The one
-  to measure first is #200 on HTTP/2 and HTTP/3: `http_response_commit_content_length`
-  writes the count into the header table, so every buffered response now pays a
+- [x] **Measure what the framing work costs per response.** Taken on 2026-08-22,
+  `b0ca84c` against `ebbe410` on a release build: **126 ns per response**, 3.3% of a
+  3-byte HTTP/2 one, and #200 is the slower of the pair in 14 rounds of 16. The
+  comparison had to be paired — one build's own spread is 6%, so two independent
+  medians put the effect inside the noise. `http_response_commit_content_length`
+  writes the count into the header table, so every buffered response pays a
   `zend_hash_update` plus two `zend_string` allocations — the lowercased name and
   the formatted value — where the field used to be dropped and cost nothing. HTTP/1
-  is untouched by that: it reads the action and formats into the smart_str as
-  before. The `HEAD` branch adds one `zend_hash_str_exists`. Compare against the
-  commit before #200 with `h2load` on a buffered response, same machine and same
-  build, three runs, median, into `dev/BENCHMARKS.md`. If the insert shows, the
-  next shape to try is handing the count to the flatten loop as an extra entry
-  instead of through the table.
+  is untouched: it reads the action and formats into the smart_str as before. Two
+  things the measurement does not cover: HTTP/3, which calls the same function and
+  therefore spends the same 126 ns against an unmeasured baseline, and a large body,
+  where a 66% run-to-run spread at 64 KiB drowns a 3% effect. #195 and #197 are not
+  measured at all. Evidence: `dev/BENCHMARKS.md`, 2026-08-22.
+- [ ] **Hand the Content-Length to the flatten loop instead of the header table.**
+  The shape the measurement above calls for: the count reaches the wire as an extra
+  entry of the flatten loop, so a buffered response stops paying a `zend_hash_update`
+  and two `zend_string` allocations for a field no PHP code reads back. Re-measure
+  the same way — paired rounds on `/b3`, release build — and keep the entry beside
+  the one it answers.
 
 - [x] **#204 — an aborted request is logged and counted as the status it
   committed.** Answered by looking at what other servers do rather than by
