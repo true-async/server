@@ -22,6 +22,19 @@ transfer that is demonstrably still running when they act on it:
   progress_file    the running received-byte count is written here as it grows,
                    so a test can truncate the file the instant the transfer is
                    underway rather than guess a sleep.
+
+Environment:
+
+  H3PROBE_ABANDON_MS  wait this many milliseconds after sending the request and
+                      then drop the QUIC connection without reading the
+                      response, printing outcome=ABANDONED. For the tests that
+                      ask what the server does with a request whose peer left
+                      while the handler was still working.
+
+  H3PROBE_STOP_MS     the same wait, then STOP_SENDING on the request stream
+                      with the connection left open, printing
+                      outcome=STOP_SENDING. The pair discriminates a stream the
+                      peer cancelled from a connection the peer took away.
 """
 import asyncio, os, sys
 from aioquic.asyncio.client import connect
@@ -49,6 +62,7 @@ class Probe(QuicConnectionProtocol):
             (b":method", b"GET"), (b":scheme", b"https"),
             (b":authority", host.encode()), (b":path", path.encode())], end_stream=True)
         self.transmit()
+        return sid
 
     def quic_event_received(self, event):
         if isinstance(event, StreamReset):
@@ -84,8 +98,21 @@ async def main(host, port, path, max_stream_data):
     if max_stream_data:
         cfg.max_stream_data = max_stream_data
         cfg.max_data = max_stream_data
+    abandon_ms = int(os.environ.get("H3PROBE_ABANDON_MS", "0"))
+    stop_ms = int(os.environ.get("H3PROBE_STOP_MS", "0"))
     async with connect(host, port, configuration=cfg, create_protocol=Probe) as p:
-        p.get(host, path)
+        sid = p.get(host, path)
+        if abandon_ms:
+            await asyncio.sleep(abandon_ms / 1000.0)
+            print("status=- bytes=- cl=- outcome=ABANDONED")
+            return
+        if stop_ms:
+            await asyncio.sleep(stop_ms / 1000.0)
+            p._quic.stop_stream(sid, 0x010c)   # H3_REQUEST_CANCELLED
+            p.transmit()
+            await asyncio.sleep(0.5)
+            print("status=- bytes=- cl=- outcome=STOP_SENDING")
+            return
         try:
             await asyncio.wait_for(p.done, 20)
         except asyncio.TimeoutError:

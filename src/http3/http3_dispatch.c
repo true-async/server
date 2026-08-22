@@ -733,8 +733,9 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
 
     /* Bracket on the server's in-flight counter — admission / CoDel
      * see H3 load at the right granularity. Paired with on_request_dispose
-     * in h3_handler_coroutine_dispose. */
-    http_server_on_request_dispatch(s->conn->counters);
+     * in h3_handler_coroutine_dispose, which reads the same copy because by
+     * then s->conn is gone on an abandoned connection. */
+    http_server_on_request_dispatch(s->req_counters);
 
     s->request->coroutine   = co;
 
@@ -871,9 +872,13 @@ static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
      * the engine stamped its status), static — with both zvals still live. On
      * the reactor thread c->log_state is the OFF default, so a static hard-zero
      * served there counts but never reaches a worker's sink. */
-    if (EXPECTED(!s->handler_bailout) && c != NULL && !Z_ISUNDEF(s->response_zv)) {
+    if (EXPECTED(!s->handler_bailout) && s->req_counters != NULL
+        && !Z_ISUNDEF(s->response_zv)) {
+        /* Counted through the stream's copy, not through @p c: a request the
+         * peer abandoned mid-flight still happened, and reading the sink off
+         * the connection dropped it from the record entirely. */
         http_request_telemetry(s->request, Z_OBJ(s->response_zv),
-                             c->counters, c->log_state);
+                             s->req_counters, s->req_log_state);
     }
 
     if (!Z_ISUNDEF(s->request_zv)) {
@@ -1028,7 +1033,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     http3_connection_t *c = s->conn;
 
     /* In-flight bracket (paired with on_request_dispatch). */
-    if (c != NULL) http_server_on_request_dispose(c->counters);
+    if (s->req_counters != NULL) http_server_on_request_dispose(s->req_counters);
 
     /* A thrown handler exception becomes a response (derived 500 below, or
      * a grpc-status / aborted stream) — mark it consumed on both escalation
