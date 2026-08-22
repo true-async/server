@@ -60,29 +60,11 @@ typedef struct {
 static void ws_handler_coroutine_entry(void);
 static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 
-static void ws_pending_write_complete_cb(zend_async_event_t *event,
-                                         zend_async_event_callback_t *callback,
-                                         void *result,
-                                         zend_object *exception);
-static void ws_pending_write_dispose(zend_async_event_callback_t *callback,
-                                     zend_async_event_t *event);
-
 static bool ws_submit_reject_write(http_connection_t *conn,
                                    char *buf, size_t len);
 
 static zend_string *build_error_response(int status, const char *extra_header);
 /* }}} */
-
-/* Reject-path async write context. The reject flow lives entirely
- * in event-loop context: ws_dispatch_try_upgrade builds a 4xx,
- * submits an async write, and this callback frees the buffer when
- * the write completes. No coroutine ever runs on the reject path. */
-typedef struct {
-    zend_async_event_callback_t base;
-    http_connection_t          *conn;
-    zend_async_io_req_t        *active_req;
-    char                       *buf;
-} ws_pending_write_t;
 
 /* Destroy a reject-path request, severing the parser's borrow first
  * (a later read tick must not see it freed). */
@@ -92,6 +74,36 @@ static void ws_reject_destroy_request(http_connection_t *conn, http_request_t *r
         http_parser_clear_request(conn->parser);
     }
     http_request_destroy(req);
+}
+
+/* Answer a refused upgrade and retire the connection. Owns @p req — on this
+ * path nothing else does, no HttpRequest object wraps it. Always answers true:
+ * the caller's question is whether the upgrade was handled, not whether the
+ * peer got its 4xx. */
+static bool ws_reject_upgrade(http_connection_t *conn, http_request_t *req,
+                              const int status, const char *extra_header)
+{
+    zend_string *resp = build_error_response(status, extra_header);
+
+    if (EXPECTED(resp != NULL)) {
+        const size_t len = ZSTR_LEN(resp);
+        char *const buf = emalloc(len);
+
+        memcpy(buf, ZSTR_VAL(resp), len);
+        zend_string_release(resp);
+        (void)ws_submit_reject_write(conn, buf, len);
+    }
+
+    conn->keep_alive = false;
+    ws_reject_destroy_request(conn, req);
+
+    /* Nothing else asks this connection to go: the 4xx is queued and its
+     * completion only writes it. The destroy defers on the parser feed we are
+     * inside, then on the write in flight, so it lands once the bytes have
+     * left. Without it the socket is held to the read deadline — 30 s by
+     * default — for one unauthenticated request. */
+    http_connection_destroy(conn);
+    return true;
 }
 
 bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
@@ -110,45 +122,22 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
 
     /* No WS handler registered → 426. */
     if (handler == NULL) {
-        zend_string *resp = build_error_response(426,
-            "Sec-WebSocket-Version: 13\r\n");
-        if (resp == NULL) { conn->keep_alive = false; ws_reject_destroy_request(conn, req); return true; }
-        char *buf = emalloc(ZSTR_LEN(resp));
-        memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
-        size_t len = ZSTR_LEN(resp);
-        zend_string_release(resp);
-        if (!ws_submit_reject_write(conn, buf, len)) {
-            conn->keep_alive = false;
-        }
-
-        /* Reject path owns req (no HttpRequest object wraps it here). */
-        ws_reject_destroy_request(conn, req);
-        return true;
+        return ws_reject_upgrade(conn, req, 426, "Sec-WebSocket-Version: 13\r\n");
     }
 
     /* Validation failure → matching error code. */
     if (v < 0) {
         int status = 400;
         const char *extra = NULL;
+
         switch (v) {
             case WS_HANDSHAKE_FORBIDDEN_METHOD:   status = 405; extra = "Allow: GET\r\n"; break;
             case WS_HANDSHAKE_UPGRADE_REQUIRED:   status = 426; extra = "Sec-WebSocket-Version: 13\r\n"; break;
             case WS_HANDSHAKE_BAD_REQUEST:
             default:                              status = 400; extra = NULL; break;
         }
-        zend_string *resp = build_error_response(status, extra);
-        if (resp == NULL) { conn->keep_alive = false; ws_reject_destroy_request(conn, req); return true; }
-        char *buf = emalloc(ZSTR_LEN(resp));
-        memcpy(buf, ZSTR_VAL(resp), ZSTR_LEN(resp));
-        size_t len = ZSTR_LEN(resp);
-        zend_string_release(resp);
-        if (!ws_submit_reject_write(conn, buf, len)) {
-            conn->keep_alive = false;
-        }
 
-        /* Reject path owns req (no HttpRequest object wraps it here). */
-        ws_reject_destroy_request(conn, req);
-        return true;
+        return ws_reject_upgrade(conn, req, status, extra);
     }
 
     /* Accept path — pre-compute Sec-WebSocket-Accept now (pure CPU,
@@ -268,18 +257,20 @@ static zend_string *build_error_response(int status, const char *extra_header)
 
 /* {{{ ws_submit_reject_write
  *
- * Queue a 4xx write from event-loop context (no coroutine). Used by
- * try_upgrade for the immediate-reject paths and by handler dispose
- * for the upgrade-was-rejected path. Takes ownership of `buf`.
+ * Queue a 4xx from event-loop context (no coroutine), behind whatever the
+ * connection already owes. Used by try_upgrade for the immediate-reject paths
+ * and by handler dispose for the upgrade-was-rejected path. Takes ownership of
+ * `buf` in every outcome. Marks the connection for close; asking for the
+ * teardown is the caller's, since only it knows the request is finished.
  */
 static bool ws_submit_reject_write(http_connection_t *conn,
                                    char *buf, size_t len)
 {
 #ifdef HAVE_OPENSSL
-    /* Over TLS the raw IO_WRITE below would ship plaintext. Encrypt the
-     * 4xx via the FSM's non-suspending atomic send (we are in event-loop
-     * context — no coroutine to drive the suspending tls_push), then mark
-     * the connection for close. */
+    /* The batched sender below is plaintext-only and would ship the 4xx in the
+     * clear. Encrypt it through the FSM's non-suspending atomic send instead —
+     * we are in event-loop context, with no coroutine to drive the suspending
+     * tls_push — then mark the connection for close. */
     if (conn->tls != NULL) {
         const bool ok = http_connection_tls_fsm_send_plaintext_atomic(conn, buf, len);
         efree(buf);
@@ -288,65 +279,25 @@ static bool ws_submit_reject_write(http_connection_t *conn,
     }
 #endif
 
-    ws_pending_write_t *pw = (ws_pending_write_t *)
-        ZEND_ASYNC_EVENT_CALLBACK_EX(ws_pending_write_complete_cb,
-                                     sizeof(ws_pending_write_t));
-    if (pw == NULL) {
+    if (UNEXPECTED(conn->io == NULL)) {
         efree(buf);
         return false;
     }
-    pw->base.dispose = ws_pending_write_dispose;
-    pw->conn         = conn;
-    pw->buf          = buf;
-    pw->active_req   = ZEND_ASYNC_IO_WRITE(conn->io, buf, len);
-    if (pw->active_req == NULL) {
-        efree(pw); efree(buf); return false;
-    }
-    if (!conn->io->event.add_callback(&conn->io->event, &pw->base)) {
-        pw->active_req->dispose(pw->active_req);
-        efree(pw); efree(buf);
-        return false;
-    }
-    return true;
-}
-/* }}} */
 
-static void ws_pending_write_complete_cb(
-    zend_async_event_t *event,
-    zend_async_event_callback_t *callback,
-    void *result,
-    zend_object *exception)
-{
-    (void)event;
-    ws_pending_write_t *pw = (ws_pending_write_t *)callback;
-    if (pw->active_req == NULL || result != pw->active_req) {
-        return;
-    }
-    http_connection_t *conn = pw->conn;
-    zend_async_io_req_t *req_io = pw->active_req;
-    pw->active_req = NULL;
-
-    (void)conn->io->event.del_callback(&conn->io->event, &pw->base);
-
-    if (req_io->exception != NULL) {
-        OBJ_RELEASE(req_io->exception);
-        req_io->exception = NULL;
-    }
-    req_io->dispose(req_io);
-    if (pw->buf) { efree(pw->buf); pw->buf = NULL; }
-
-    /* Reject path always closes. */
+    /* A reject always closes; say so before the bytes leave, as the TLS branch
+     * above does. */
     conn->keep_alive = false;
 
-    efree(pw);
-    (void)exception;
-}
+    /* Queued rather than awaited, so nothing else would time it out (#179). */
+    http_connection_arm_write_deadline(conn);
 
-static void ws_pending_write_dispose(
-    zend_async_event_callback_t *callback, zend_async_event_t *event)
-{
-    (void)callback; (void)event;
+    /* Behind whatever the connection already owes: this 4xx used to be written
+     * at the io, past the write in flight and past the tail waiting on it, and
+     * a pipelined peer matches responses to requests by arrival order
+     * (RFC 9112 §9.3.1). Same escape as #209 and #211. */
+    return http_connection_send_batched(conn, buf, len);
 }
+/* }}} */
 
 /* {{{ ws_handler_coroutine_entry
  *
@@ -515,7 +466,11 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     /* Case 2: reject was called (or the handler failed) pre-commit — answer
      * with a status; no 101 goes out, so the peer never sees a WS session. */
+    bool rejected = false;
+
     if (w != NULL && !w->committed && reject_status != 0) {
+        rejected = true;
+
         zend_string *resp = build_error_response(reject_status, NULL);
         if (resp != NULL) {
             char *buf = emalloc(ZSTR_LEN(resp));
@@ -570,17 +525,16 @@ static void ws_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     ZEND_ASSERT(conn->handler_refcount > 0);
     conn->handler_refcount--;
 
-    /* Last reference on a COMMITTED WS connection: tear it down so its
-     * read poll, wslay session, and keepalive ping timer are released —
-     * a committed WS connection has no other teardown trigger once the
-     * handler exits, and leaving those reactor handles armed trips the
+    /* Last reference on a WS connection that answered: tear it down so its read
+     * poll, wslay session and keepalive ping timer are released — neither a
+     * committed session nor a refused upgrade has another teardown trigger once
+     * the handler exits, and leaving those reactor handles armed trips the
      * loop-alive assertion at server stop. Mirrors http_request_finalize's
-     * !keep_alive destroy.
-     *
-     * NOT for the reject / never-committed path: there an async 4xx write
-     * is in flight and its completion callback (ws_pending_write_complete_cb)
-     * owns teardown — destroying here would free conn under that write. */
-    if (w_committed) {
+     * !keep_alive destroy. The 4xx a reject queued is not lost to it: the
+     * destroy defers while that write is in flight and runs from its
+     * completion. A handler that neither committed nor rejected auto-committed
+     * a 101 above and is covered by w_committed. */
+    if (w_committed || rejected) {
         if (conn->handler_refcount == 0) {
             http_connection_destroy(conn);
         } else {
