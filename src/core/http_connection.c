@@ -386,6 +386,11 @@ void http_connection_destroy(http_connection_t *conn)
         conn->out_idle_event = NULL;
     }
 
+    if (conn->out_drain_event != NULL) {
+        conn->out_drain_event->dispose(conn->out_drain_event);
+        conn->out_drain_event = NULL;
+    }
+
 
     /* Notify server of close so it can decrement active_connections and
      * maybe resume listeners. Per-request timing is already reported by
@@ -1171,6 +1176,12 @@ static void http_connection_read_callback_fn(
             ws_session_mark_peer_closed(ws_strategy_get_session(conn->strategy));
         }
 #endif
+        /* Where a queued write's failure becomes visible: libuv reports it at
+         * completion, and a fire-and-forget completion carries no status. */
+        conn->write_failed = true;
+        async_plain_event_fire(conn->out_idle_event);
+        async_plain_event_fire(conn->out_drain_event);
+
         /* Defer destroy if a handler is in flight or the read_buffer holds
          * a pipelined tail — flagging keep_alive=false makes handler dispose
          * tear the conn down once it (and any pipelined chain) has finished
@@ -1360,7 +1371,7 @@ bool http_connection_send_raw(http_connection_t *conn,
         return true;
     }
 
-    if (UNEXPECTED(conn->write_timed_out)) {
+    if (UNEXPECTED(conn->write_timed_out || conn->write_failed)) {
         return false;
     }
 
@@ -1597,6 +1608,8 @@ static void out_signal_idle(http_connection_t *conn);
 static void http_send_batched_finish(http_connection_t *conn)
 {
     conn->out_in_flight = false;
+    conn->out_in_flight_bytes = 0;
+    http_write_timer_stop(conn);
 
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
         conn->destroy_pending = false;
@@ -1636,6 +1649,13 @@ size_t http_connection_outbound_pending_bytes(const http_connection_t *conn)
     return conn->out_pending_len;
 }
 
+size_t http_connection_outbound_depth_bytes(const http_connection_t *conn)
+{
+    return conn->out_pending_len + conn->out_in_flight_bytes;
+}
+
+/* The chunk being offered is not counted: a first chunk larger than the whole
+ * mark would otherwise be refused forever. Overshoot is one chunk, as on H2. */
 bool http_connection_outbound_over_highwater(const http_connection_t *conn)
 {
     if (conn->server == NULL) {
@@ -1643,7 +1663,9 @@ bool http_connection_outbound_over_highwater(const http_connection_t *conn)
     }
 
     const uint32_t high = http_server_get_stream_write_buffer_bytes(conn->server);
-    return high != 0 && conn->out_pending_len >= (size_t)high;
+
+    return high != 0
+        && http_connection_outbound_depth_bytes(conn) >= (size_t)high;
 }
 
 /* Low-water mark = half the high-water (gated knob). Producers suspended
@@ -1655,16 +1677,79 @@ static bool out_below_lowwater(const http_connection_t *conn)
     }
 
     const uint32_t high = http_server_get_stream_write_buffer_bytes(conn->server);
-    return high == 0 || conn->out_pending_len <= (size_t)(high / 2);
+    return high == 0
+        || http_connection_outbound_depth_bytes(conn) <= (size_t)(high / 2);
 }
 
 /* Wake a producer that suspended over the high-water mark, once the tail
  * has drained back below the low-water mark. No-op unless one is waiting. */
 static void out_signal_drain(http_connection_t *conn)
 {
-    if (conn->on_outbound_drain != NULL && out_below_lowwater(conn)) {
+    if (!out_below_lowwater(conn)) {
+        return;
+    }
+
+    if (conn->on_outbound_drain != NULL) {
         conn->on_outbound_drain(conn);
     }
+
+    async_plain_event_fire(conn->out_drain_event);
+}
+
+void http_connection_arm_write_deadline(http_connection_t *conn)
+{
+    if (conn->write_timeout_ms > 0) {
+        (void)http_write_timer_arm(conn, conn->write_timeout_ms);
+    }
+}
+
+bool http_connection_outbound_wait_drain(http_connection_t *conn,
+                                         const uint32_t timeout_ms)
+{
+    while (http_connection_outbound_over_highwater(conn)) {
+        if (UNEXPECTED(conn->write_failed || conn->write_timed_out || conn->io == NULL)) {
+            return false;
+        }
+
+        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+            return false;
+        }
+
+        ZEND_ASSERT(conn->handler_refcount > 0);
+
+        if (conn->out_drain_event == NULL) {
+            conn->out_drain_event = async_plain_event_new();
+
+            if (UNEXPECTED(conn->out_drain_event == NULL)) {
+                return false;
+            }
+        }
+
+        /* A peer that never reads would park this coroutine for good. */
+        const uint32_t deadline = timeout_ms != 0 ? timeout_ms : conn->write_timeout_ms;
+
+        if (UNEXPECTED(zend_async_waker_new_with_timeout(co, deadline, NULL) == NULL)) {
+            return false;
+        }
+
+        zend_async_resume_when(co, conn->out_drain_event, false,
+                               zend_async_waker_callback_resolve, NULL);
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
+
+        if (EG(exception) != NULL) {
+            return false;
+        }
+
+        /* Still over the mark on a clean wake means the deadline fired. */
+        if (http_connection_outbound_over_highwater(conn)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool out_tail_idle(const http_connection_t *conn)
@@ -1749,6 +1834,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
         conn->out_pending_buf = NULL;
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
+        conn->out_in_flight_bytes = next_len;
         /* out_in_flight stays true — chain continues. */
         zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
@@ -1756,6 +1842,8 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
         if (UNEXPECTED(req == NULL)) {
             http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
+            conn->out_in_flight_bytes = 0;
+            conn->write_failed = true;
             out_signal_idle(conn);
         } else {
             out_signal_drain(conn);
@@ -1781,6 +1869,7 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
     conn->out_pending_buf = NULL;
     conn->out_pending_len = 0;
     conn->out_pending_cap = 0;
+    conn->out_in_flight_bytes = next_len;
 
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, next_buf, next_len, http_send_batched_completion_cb);
@@ -1788,6 +1877,8 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
     if (UNEXPECTED(req == NULL)) {
         http_absorb_io_submission_exception(conn, __func__);
         conn->out_in_flight = false;
+        conn->out_in_flight_bytes = 0;
+        conn->write_failed = true;
         out_signal_idle(conn);
         return false;
     }
@@ -1836,6 +1927,7 @@ bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *bod
     }
 
     conn->out_in_flight = true;
+    conn->out_in_flight_bytes = ZSTR_LEN(body);
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, ZSTR_VAL(body), ZSTR_LEN(body),
         http_send_batched_zstr_completion_cb);
@@ -1868,6 +1960,7 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
 
     /* Mark in-flight BEFORE submit so sync-complete sees consistent state. */
     conn->out_in_flight = true;
+    conn->out_in_flight_bytes = len;
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, buf, len, http_send_batched_completion_cb);
 
@@ -1904,12 +1997,15 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         conn->out_pending_buf = NULL;
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
+        conn->out_in_flight_bytes = next_len;
         zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
             http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
+            conn->out_in_flight_bytes = 0;
+            conn->write_failed = true;
             out_signal_idle(conn);
         } else {
             out_signal_drain(conn);
@@ -1956,6 +2052,11 @@ bool http_connection_send_batched_writev(http_connection_t *conn,
     conn->out_writev_user_cb   = free_cb;
     conn->out_writev_user_data = user_data;
     conn->out_in_flight = true;
+    conn->out_in_flight_bytes = 0;
+
+    for (unsigned i = 0; i < niov; i++) {
+        conn->out_in_flight_bytes += iov[i].len;
+    }
 
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV_EX(
         conn->io, iov, niov, http_send_batched_writev_completion_cb, conn);

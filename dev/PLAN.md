@@ -696,10 +696,26 @@ designs were worked out and both fail on something mechanical.
   two. Fifteen runs across nine shapes — first body 2 B to 4 MiB, reader delay
   0 to 400 ms — all came back in order, the file hop through the thread pool
   being slower than the drain in each. Unproven rather than filed.
-- [ ] **#179 — one serialized outbound path per HTTP/1 connection.** What the
-  measurement leaves it: a non-blocking `tryWrite()` on HTTP/1, which
-  `dev/BENCHMARKS.md` says "has to be argued on its own; this measurement does
-  not support it". No code until that argument exists.
+- [x] **#179 — one serialized outbound path per HTTP/1 connection.** Closed by
+  splitting the two callers rather than by moving the whole path off the await,
+  which is what `dev/BENCHMARKS.md` refused to support. `write()` keeps the
+  awaited sender and with it the return value that sets `stream_dead`, the
+  bracketed deadline and the copy-free frame; `tryWrite()` queues on the
+  connection's tail and refuses once the depth reaches the high-water mark.
+
+  The depth counts the write in flight as well as the tail: without it the
+  first write reads as zero and the refusal arrives one write late. Two holes
+  the awaited path had been covering came with it — a queued write learns
+  nothing from libuv, whose completion carries no status, so the read side now
+  latches `write_failed` and the terminator refuses to seal a body that failed;
+  and queued bytes carry no await to time out, so the connection's write
+  deadline is armed at submit and stopped when the tail goes idle.
+
+  Evidence: `h1/053`, restored from the commit that deleted it in #177 — 42
+  chunks accepted, the 43rd refused, the handler still running. `h1/032` now
+  answers a refusal with `awaitWritable()`: the twins never suspend, and a loop
+  that only offers never gives the reactor the turn in which the peer's RST
+  arrives, so its 499 used to rest on the very park this step removes.
 
 ## Landed elsewhere
 

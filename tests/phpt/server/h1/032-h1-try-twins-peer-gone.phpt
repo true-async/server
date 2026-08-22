@@ -9,8 +9,12 @@ sockets
 /* False from either twin means one thing: the queue is full. A client that has
  * gone is the other answer, and it arrives as a catchable HttpException 499 —
  * the same signal write() and sseEvent() give. The peer here aborts with a RST
- * (SO_LINGER {1,0}) so the next write fails at submit rather than draining a
- * graceful FIN.
+ * (SO_LINGER {1,0}).
+ *
+ * The refusal is answered with awaitWritable(), which is both what a handler
+ * does with one and what lets the departure be seen: the twins never suspend,
+ * and a loop that only offers never gives the reactor the turn in which the
+ * RST arrives.
  *
  * The response stays uncommitted on that throw, which is what lets the handler
  * answer with a status afterwards on a response that never started. */
@@ -38,10 +42,12 @@ $server->addHttpHandler(function ($req, $res) use ($server) {
 
     try {
         for ($i = 0; $i < 100000; $i++) {
-            if ($grpc) {
-                $res->tryWriteMessage($payload);
-            } else {
-                $res->trySseEvent($payload, id: (string) $i);
+            $offered = $grpc
+                ? $res->tryWriteMessage($payload)
+                : $res->trySseEvent($payload, id: (string) $i);
+
+            if (!$offered) {
+                $res->awaitWritable();
             }
         }
     } catch (HttpException $e) {

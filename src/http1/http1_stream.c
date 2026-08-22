@@ -11,10 +11,11 @@
  *
  * Unlike the HTTP/2 side where stream_ops queue bytes for an nghttp2
  * data provider driven by flow-control windows, HTTP/1 is a
- * straight push: format `<hex-len>\r\n<chunk>\r\n` and send. No queue,
- * no per-stream state — the kernel send buffer is the only buffering
- * we need, and http_connection_send already suspends the handler
- * coroutine when that buffer is full. Backpressure is transparent.
+ * straight push: format `<hex-len>\r\n<chunk>\r\n` and send.
+ *
+ * A non-blocking frame is queued on the connection's batched output, so the
+ * refusal has a depth to read. write() stays awaited, on plaintext and on TLS
+ * alike.
  *
  * Wire format per RFC 9112 §7.1:
  *     HTTP/1.1 200 OK\r\n
@@ -180,8 +181,6 @@ static bool h1_emit_headers_once(http1_request_ctx_t *ctx)
 static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
                                   const bool nonblocking)
 {
-    (void)nonblocking;
-
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
 
     if (ctx == NULL || ctx->conn == NULL) {
@@ -289,7 +288,6 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     const size_t head_len  = headers != NULL ? ZSTR_LEN(headers) : 0;
     const size_t frame_len = head_len + (size_t)header_len + chunk_len + trailer_len;
 
-#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
     /* Plaintext: the pieces go over as slots the reactor owns — one submit, no
      * copy of the body, and nothing a cancelled frame could leave dangling.
      * TLS keeps the copy below: tls_push copies into the BIO ring anyway, and a
@@ -300,6 +298,56 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     const bool plaintext = true;
 #endif
 
+    /* Decided here rather than from a predicate the caller read first: between
+     * that call and this one the depth can go either way. */
+    if (plaintext && nonblocking) {
+        if (http_connection_outbound_over_highwater(conn)
+            || conn->write_failed || conn->write_timed_out) {
+            zend_string_release(chunk);
+
+            if (headers != NULL) {
+                zend_string_release(headers);
+            }
+
+            return conn->write_failed || conn->write_timed_out
+                 ? HTTP_STREAM_APPEND_STREAM_DEAD
+                 : HTTP_STREAM_APPEND_BACKPRESSURE;
+        }
+
+        zend_string *slots[4];
+        unsigned     n = 0;
+
+        if (headers != NULL) {
+            slots[n++] = headers;
+            headers    = NULL;
+        }
+
+        if (!identity) {
+            slots[n++] = zend_string_init(header, (size_t)header_len, 0);
+        }
+
+        slots[n++] = chunk;
+
+        if (!identity) {
+            slots[n++] = zend_string_init("\r\n", 2, 0);
+        }
+
+        http_connection_arm_write_deadline(conn);
+
+        if (UNEXPECTED(!http_connection_send_strv_owned(conn, slots, n))) {
+            ctx->stream_dead = true;
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
+
+        if (head_len != 0) {
+            h1_stream_headers_committed(ctx);
+        }
+
+        http_server_on_stream_send(conn->counters, chunk_len);
+        return HTTP_STREAM_APPEND_OK;
+    }
+
+#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
     if (plaintext) {
         zend_string *slots[4];
         unsigned     n = 0;
@@ -437,7 +485,7 @@ static void h1_stream_mark_ended(void *opaque)
      * promised. Refuse everything from here: no headers, no terminator, no
      * keep-alive. Checked before the header commit below, so a stream that
      * died after its headers landed does not send them twice. */
-    if (UNEXPECTED(ctx->stream_dead)) {
+    if (UNEXPECTED(ctx->stream_dead || conn->write_failed)) {
         conn->keep_alive = false;
         return;
     }
@@ -507,18 +555,43 @@ static zend_async_event_t *h1_stream_get_wait_event(void *ctx)
     return NULL;
 }
 
+static bool h1_stream_sendable(void *opaque)
+{
+    const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)opaque;
+
+    if (ctx == NULL || ctx->conn == NULL) {
+        return false;
+    }
+
+    return !http_connection_outbound_over_highwater(ctx->conn);
+}
+
+static bool h1_stream_wait_writable(void *opaque, const uint32_t timeout_ms)
+{
+    http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
+
+    if (ctx == NULL || ctx->conn == NULL || ctx->stream_dead) {
+        return false;
+    }
+
+    return http_connection_outbound_wait_drain(ctx->conn, timeout_ms);
+}
+
 /* Same three conditions append_chunk refuses on, asked without a chunk. */
 static bool h1_stream_is_alive(void *opaque)
 {
     const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)opaque;
 
     return ctx != NULL && ctx->conn != NULL && !ctx->stream_dead
-           && !ctx->conn->write_timed_out && !Z_ISUNDEF(ctx->response_zv);
+           && !ctx->conn->write_timed_out && !ctx->conn->write_failed
+           && !Z_ISUNDEF(ctx->response_zv);
 }
 
 const http_response_stream_ops_t h1_stream_ops = {
     .append_chunk         = h1_stream_append_chunk,
+    .sendable             = h1_stream_sendable,
     .is_alive             = h1_stream_is_alive,
+    .wait_writable        = h1_stream_wait_writable,
     .mark_ended           = h1_stream_mark_ended,
     .abort                = h1_stream_abort,
     .get_wait_event       = h1_stream_get_wait_event,
