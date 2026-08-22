@@ -60,13 +60,6 @@ extern void http_response_set_default_json_flags(zend_object *, uint32_t);
 #endif
 #include <stdio.h>
 
-/* MSG_NOSIGNAL is a Linux extension. On BSD/macOS SO_NOSIGPIPE is the
- * equivalent; on Windows SIGPIPE does not exist. Providing a no-op macro
- * keeps the call sites portable. */
-#ifndef MSG_NOSIGNAL
-# define MSG_NOSIGNAL 0
-#endif
-
 #define DEFAULT_READ_BUFFER_SIZE 8192
 
 extern zval* http_request_create_from_parsed(http_request_t *req);
@@ -1604,7 +1597,9 @@ static void out_signal_drain(http_connection_t *conn);
 static void out_signal_idle(http_connection_t *conn);
 
 /* Shared tail for batched-send completion callbacks: clears the in-flight
- * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. */
+ * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. The
+ * re-drive is last because it can destroy the connection under us — a submit
+ * that fails synchronously completes from inside it. */
 static void http_send_batched_finish(http_connection_t *conn)
 {
     conn->out_in_flight = false;
@@ -1619,7 +1614,24 @@ static void http_send_batched_finish(http_connection_t *conn)
 
     out_signal_idle(conn);
     out_signal_drain(conn);
-    http2_conn_notify_emit(conn);
+
+    /* A connection whose write failed has nothing to emit onto: the re-drive
+     * would build frames for an io the peer has already left, and its own
+     * submit failure would come straight back here. */
+    if (EXPECTED(!conn->write_failed)) {
+        http2_conn_notify_emit(conn);
+    }
+}
+
+/* A chained submit that never reached the reactor. The in-flight state ends
+ * here or nothing ends it: a destroy deferred on out_in_flight is finalised by
+ * the completion that will now never fire, and the connection then lives to its
+ * read deadline. */
+static void http_send_batched_submit_failed(http_connection_t *conn, const char *op)
+{
+    http_absorb_io_submission_exception(conn, op);
+    conn->write_failed = true;
+    http_send_batched_finish(conn);
 }
 
 /* Coalesce path: append `len` bytes into the pending buffer behind the
@@ -1840,11 +1852,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
-            http_absorb_io_submission_exception(conn, __func__);
-            conn->out_in_flight = false;
-            conn->out_in_flight_bytes = 0;
-            conn->write_failed = true;
-            out_signal_idle(conn);
+            http_send_batched_submit_failed(conn, __func__);
         } else {
             out_signal_drain(conn);
         }
@@ -1875,11 +1883,7 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
         conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
     if (UNEXPECTED(req == NULL)) {
-        http_absorb_io_submission_exception(conn, __func__);
-        conn->out_in_flight = false;
-        conn->out_in_flight_bytes = 0;
-        conn->write_failed = true;
-        out_signal_idle(conn);
+        http_send_batched_submit_failed(conn, __func__);
         return false;
     }
 
@@ -2002,11 +2006,7 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
-            http_absorb_io_submission_exception(conn, __func__);
-            conn->out_in_flight = false;
-            conn->out_in_flight_bytes = 0;
-            conn->write_failed = true;
-            out_signal_idle(conn);
+            http_send_batched_submit_failed(conn, __func__);
         } else {
             out_signal_drain(conn);
         }

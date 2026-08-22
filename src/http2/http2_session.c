@@ -687,15 +687,14 @@ static int cb_on_frame_recv(nghttp2_session *ng,
      * ACK flag set → our own PING came back, measure RTT from the
      * zend_hrtime() stamp embedded in the opaque payload.
      *
-     * ACK flag clear → peer wants us to reply. nghttp2's auto-ACK in
-     * nghttp2_session_on_ping_received is guarded by session_is_closing,
-     * which returns true once want_read == want_write == 0 — the exact
-     * state we end up in after the peer sends a GOAWAY to us on an
-     * otherwise idle connection. Without help, the ACK never fires and
-     * h2spec (and real gRPC shutdown sequences — see nghttp2 #1103) hang
-     * until their own timeout. Submit the ACK ourselves: nghttp2's
-     * session_prep_frame for PING only blocks on the TERM_ON_SEND flag
-     * (PR #1104, 2018), which we do not set on peer-initiated GOAWAY. */
+     * ACK flag clear → peer wants us to reply, and this is the only place
+     * that replies: apply_hardened_options turns nghttp2's automatic ACK off.
+     * The automatic one is withheld from a closing session — session_is_closing
+     * is true once want_read == want_write == 0 — which left h2spec and real
+     * gRPC shutdown sequences (nghttp2 #1103) waiting out their own timeout.
+     * This submit has no such guard: nghttp2's session_prep_frame for PING
+     * blocks only on the TERM_ON_SEND flag (PR #1104, 2018), which we do not
+     * set on a peer-initiated GOAWAY. */
     /* Peer-sent GOAWAY visibility — real gRPC/Envoy deployments send
      * GOAWAY during rolling restart; operators want the counter to
      * correlate restarts with backend churn. */
@@ -1183,6 +1182,9 @@ static void apply_hardened_options(nghttp2_option *opt)
      * the body chunk is drained by the handler — see http_body_stream_pop
      * and the buffered branch in cb_on_data_chunk_recv. */
     nghttp2_option_set_no_auto_window_update(opt, 1);
+    /* The PING ACK is ours as well, submitted in cb_on_frame_recv. With
+     * nghttp2's automatic one also on, a single PING was answered twice. */
+    nghttp2_option_set_no_auto_ping_ack(opt, 1);
 }
 
 static int submit_initial_settings(http2_session_t *session)
