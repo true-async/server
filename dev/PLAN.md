@@ -772,3 +772,17 @@ CT-out one). `ctest` ran 10 of 16 on 2026-08-20 and runs 16 of 16 now.
   is gone; the contract stays where it was written.
 - [x] **Build the unit suite in CI.** In the embedded-fuzz job, the only one that builds
   a libphp for the suite to link against.
+
+## A phpt client reads a framed body with one fread (#233)
+
+- [x] **Read until the declared count is in hand.** `fread($fp, $len)` on a network
+  stream returns as soon as one segment is available, so a body the server sent as
+  two writes read back short: `h1/037` compared five bytes against nine on
+  MACOS_ARM64_RELEASE_ZTS in run 32590836568, and `h1/038`, `h1/042` and `h1/048`
+  carried the same race unfired. `tests/phpt/server/_read_exact.inc` reads until the
+  count is met or the peer closes, and all four clients call it. The server's framing
+  was right throughout — `content-length: 9` and nine bytes on the wire — which is
+  why no server code changed. Evidence: a probe that puts 30 ms between the two
+  writes reads 5 bytes of 9 through one `fread` and 9 through the helper, three runs
+  each; 473 phpt, 448 passed, 0 failed, 24 skipped, 1 warn (`h2/060`, the retry-pass
+  that predates this).
