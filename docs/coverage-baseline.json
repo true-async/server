@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 24382,
-      "hit": 20184
+      "total": 24389,
+      "hit": 20180
     },
     "functions": {
-      "total": 1706,
-      "hit": 1550
+      "total": 1708,
+      "hit": 1547
     }
   },
   "files": {
@@ -143,7 +143,7 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1202,
-        "hit": 949
+        "hit": 947
       },
       "functions": {
         "total": 73,
@@ -252,12 +252,12 @@
     },
     "src/core/stats_registry.c": {
       "lines": {
-        "total": 109,
-        "hit": 100
+        "total": 118,
+        "hit": 104
       },
       "functions": {
-        "total": 14,
-        "hit": 13
+        "total": 15,
+        "hit": 12
       }
     },
     "src/core/thread_mailbox.c": {
@@ -383,7 +383,7 @@
     "src/http1/http_parser.c": {
       "lines": {
         "total": 533,
-        "hit": 450
+        "hit": 448
       },
       "functions": {
         "total": 27,
@@ -433,11 +433,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 933,
-        "hit": 778
+        "hit": 769
       },
       "functions": {
         "total": 51,
-        "hit": 44
+        "hit": 41
       }
     },
     "src/http3/http3_connection.c": {
@@ -473,7 +473,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 666,
-        "hit": 511
+        "hit": 512
       },
       "functions": {
         "total": 46,
@@ -493,7 +493,7 @@
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 240,
-        "hit": 181
+        "hit": 184
       },
       "functions": {
         "total": 17,
@@ -682,12 +682,12 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 2484,
-        "hit": 1865
+        "total": 2482,
+        "hit": 1863
       },
       "functions": {
-        "total": 133,
-        "hit": 118
+        "total": 134,
+        "hit": 119
       }
     },
     "src/http_server_config.c": {
@@ -833,7 +833,7 @@
     "src/websocket/php_websocket.c": {
       "lines": {
         "total": 603,
-        "hit": 474
+        "hit": 473
       },
       "functions": {
         "total": 48,
@@ -873,7 +873,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 542,
-        "hit": 485
+        "hit": 489
       },
       "functions": {
         "total": 37,
