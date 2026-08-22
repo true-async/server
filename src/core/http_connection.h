@@ -202,6 +202,10 @@ struct _http_connection_t {
     size_t   out_pending_len;
     size_t   out_pending_cap;
 
+    /* Handed to the reactor, not yet complete. Counted with the tail: the peer
+     * has taken neither. */
+    size_t   out_in_flight_bytes;
+
     /* send_batched_writev passthrough: stash user free_cb + user_data
      * here while one writev is in flight (out_in_flight guarantees
      * single-writer serialisation, so it's safe to keep these on the
@@ -221,6 +225,9 @@ struct _http_connection_t {
      * bytes queued ahead of them. Created on the first wait, disposed in
      * http_connection_destroy; NULL while nobody has had to wait. */
     zend_async_event_t          *out_idle_event;
+
+    /* Fired when the depth falls to the low-water mark. */
+    zend_async_event_t          *out_drain_event;
 
     /* 4-byte fields */
     http_connection_state_t  state;
@@ -270,6 +277,7 @@ struct _http_connection_t {
     unsigned                 body_complete : 1;
     unsigned                 request_ready : 1;     /* set by strategy->on_request_ready */
     unsigned                 out_in_flight : 1;     /* batched send: one uv_write outstanding, pending buffer accumulates */
+    unsigned                 write_failed : 1;      /* output can no longer reach the peer */
     unsigned                 drain_pending : 1;     /* decision: this conn should drain */
     unsigned                 drain_submitted : 1;   /* HTTP/2: GOAWAY already queued on this session */
     unsigned                 destroy_pending : 1;   /* destroy deferred — a handler coroutine is mid-dispose */
@@ -489,6 +497,20 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
  * non-blocking one (WebSocket::trySend) reports BUSY. */
 size_t http_connection_outbound_pending_bytes(const http_connection_t *conn);
 bool   http_connection_outbound_over_highwater(const http_connection_t *conn);
+
+/* Park until the depth falls to the low-water mark. @p timeout_ms 0 takes the
+ * connection's write deadline. False means stop: a cancellation (exception in
+ * EG), the deadline, or a connection that can no longer write. */
+bool http_connection_outbound_wait_drain(http_connection_t *conn, uint32_t timeout_ms);
+
+/* The depth a refusal reads: the coalesce tail plus the write in flight. */
+size_t http_connection_outbound_depth_bytes(const http_connection_t *conn);
+
+
+/* Arm the write deadline for bytes queued rather than awaited: without it a
+ * write to a peer that stopped reading never completes, and the destroy that
+ * defers on out_in_flight never runs. */
+void http_connection_arm_write_deadline(http_connection_t *conn);
 
 /* Build and emit the RFC-compliant 4xx response for a parser failure.
  * Reads parser->parse_error, maps to status + reason, writes through
