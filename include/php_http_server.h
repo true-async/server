@@ -849,7 +849,8 @@ void  http_response_install_stream_ops(zend_object *response_obj,
  * (rebuild required) — the tradeoff for inline access on hot paths.
  *
  * NOT for stateful counters with side-effects (CoDel sample aggregator,
- * parse-error switch, request_sample) — those stay behind opaque fns. */
+ * parse-error switch) — those stay behind opaque fns. The request-timing group
+ * is here because a pool has to sum it (#169). */
 typedef struct {
     /* Streaming response */
     uint64_t streaming_responses_total;
@@ -934,6 +935,16 @@ typedef struct {
      * paths and TTL-evicted re-lookups count as misses. */
     uint64_t static_cache_hits_total;
     uint64_t static_cache_misses_total;
+
+    /* Request timings — keep these four adjacent so the hot sample aggregator
+     * writes within a few cache lines. One group: every sample updates
+     * sojourn_sum + service_sum + sojourn_samples, and may raise sojourn_max.
+     * service_samples is collapsed into sojourn_samples — each sample carries
+     * both sojourn and service, so the counts are identical. */
+    uint64_t sojourn_sum_ns;
+    uint64_t service_sum_ns;
+    uint64_t sojourn_samples;
+    uint64_t sojourn_max_ns;
 } http_server_counters_t;
 
 /* Counter field table. One row per field of http_server_counters_t; it drives
@@ -950,15 +961,21 @@ typedef struct {
  *   GAUGE — a currently-active count. Sums across LIVE workers only; a dead
  *           worker holds no open connections and no in-flight requests, so
  *           carrying its last value forward would strand a phantom.
- *   MAX    — a latest sample. Summing it is meaningless (an RTT is not
- *           additive), and a dead worker's sample is stale, so it is the max
- *           across live workers.
+ *   MAX    — a peak that happened. Summing it is meaningless, so it is the
+ *           maximum across workers, and a retiring worker's peak is folded
+ *           into the retired accumulator the way a total is: the event did
+ *           occur, and a peak that drops on a reload never happened.
+ *   LATEST — the most recent sample of something that varies, an RTT. Also
+ *           taken as a maximum across live workers, because summing is
+ *           meaningless, but a dead worker's sample is stale and is dropped
+ *           with it.
  *
  * A _Static_assert in stats_registry.c fails the build if the struct grows a
  * field this table misses, or if a field stops being a 64-bit word. */
-#define HTTP_COUNTER_SUM   0
-#define HTTP_COUNTER_GAUGE 1
-#define HTTP_COUNTER_MAX   2
+#define HTTP_COUNTER_SUM    0
+#define HTTP_COUNTER_GAUGE  1
+#define HTTP_COUNTER_MAX    2
+#define HTTP_COUNTER_LATEST 3
 
 #define HTTP_SERVER_COUNTER_TABLE(X)                        \
     X(streaming_responses_total,             SUM)           \
@@ -974,7 +991,7 @@ typedef struct {
     X(h2_goaway_sent_total,                  SUM)           \
     X(h2_data_recv_bytes_total,              SUM)           \
     X(h2_data_sent_bytes_total,              SUM)           \
-    X(h2_ping_rtt_ns,                        MAX)           \
+    X(h2_ping_rtt_ns,                        LATEST)        \
     X(h1_connection_close_sent_total,        SUM)           \
     X(h3_goaway_sent_total,                  SUM)           \
     X(requests_shed_total,                   SUM)           \
@@ -995,7 +1012,11 @@ typedef struct {
     X(log_records_dropped_total,             SUM)           \
     X(static_zero_coroutine_total,           SUM)           \
     X(static_cache_hits_total,               SUM)           \
-    X(static_cache_misses_total,             SUM)
+    X(static_cache_misses_total,             SUM)           \
+    X(sojourn_sum_ns,                        SUM)           \
+    X(service_sum_ns,                        SUM)           \
+    X(sojourn_samples,                       SUM)           \
+    X(sojourn_max_ns,                        MAX)
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
  * caches &server->view (or &http_server_view_default) at create time.

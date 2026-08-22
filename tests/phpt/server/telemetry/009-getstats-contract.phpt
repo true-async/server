@@ -34,6 +34,7 @@ $expected = [
     'conns_active_h1', 'conns_active_h2', 'conns_active_h3',
     'log_records_dropped_total',
     'static_zero_coroutine_total', 'static_cache_hits_total', 'static_cache_misses_total',
+    'sojourn_sum_ns', 'service_sum_ns', 'sojourn_samples', 'sojourn_max_ns',
 ];
 
 $port = tas_free_port();

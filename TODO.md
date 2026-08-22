@@ -135,3 +135,81 @@ Tracked as **issue #29**. When the response body exceeds the CT-out BIO ring (`T
 ### Explicitly NOT a problem (do not re-flag)
 
 - **Single in-flight cipher write per connection** (`tls_cipher_inflight` gate, `http_connection_tls.c:141`). A TCP socket is a single ordered byte stream — concurrent writes are impossible regardless, and encryption is synchronous inside drain. Depth-1 socket write with completion-driven re-drain is the correct design; freshly produced bytes accumulate in the 64 KiB ring and ship on the next drain. Not a bottleneck.
+
+## Audit 2026-08-22 — the three days of framing and ordering work
+
+Read of `d85b090..ad2c0ec`, 97 non-merge commits: #197, #198, #200, #202, #204,
+#206, #209, #211, #179. Duplication, SOLID with a named cost, and work added to
+a per-request path. Nothing here is measured unless it says so.
+
+### Duplicated logic
+
+- **High. `keep_content_length` is re-derived at five submit sites, and the
+  copies disagree.** Buffered paths ask `http_response_commit_content_length`
+  (`src/http2/http2_strategy.c:1085`, `src/http2/http2_static_response.c:725`,
+  `src/http3/http3_callbacks.c:902`, `src/core/worker_dispatch.c:568`);
+  streaming paths ask `http_response_has_declared_length`
+  (`src/http2/http2_strategy.c:1167`, `src/core/worker_dispatch.c:360`). Only
+  the first refuses the field on a response carrying trailers, so a
+  declared-length stream with trailers keeps `content-length` on HTTP/2 — where
+  nghttp2 then closes the stream before the trailers land — and drops it on
+  HTTP/3. Fix: the streaming commits call `commit_content_length` too.
+- **High. The HTTP/1 retirement verdict is computed twice** —
+  `src/core/http_connection.c:3040` and `src/http1/http1_stream.c:118` — kept
+  coherent by the `streaming` flag and a latch, with three comments to explain
+  it. The counter conditions already differ. Fix: one
+  `h1_decide_connection_close(conn, response_obj)` called from both.
+- **Medium. The HTTP/3 reset sequence is written twice** and has drifted:
+  `src/http3/http3_callbacks.c:1428` and `src/http3/http3_dispatch.c:475`. The
+  reactor copy learned to drain before latching; the other did not.
+- **Medium. Two park loops with opposite failure policy in one file.**
+  `http_connection_outbound_wait_drain` (`src/core/http_connection.c:1706`)
+  returns false when the waker cannot be allocated; `out_wait_for_tail` (`:1773`)
+  returns true and submits — which under OOM is the overtake #211 exists to
+  prevent.
+- **Medium. The four-slot frame is assembled twice** in
+  `h1_stream_append_chunk` (`src/http1/http1_stream.c:317` and `:352`).
+- **Medium. The non-blocking entry points spell the same refusal protocol three
+  times** (`src/http_response.c:1498`, `:1810`, `src/http_sse.c:442`, with the
+  tail at `:1536` and `:1834`).
+- **Low.** `grpc_message_begin_stream` (`src/http_response.c:1734`) repeats the
+  three-flag commit of `http_response_stream_commit_once` without saying why it
+  may not share it. RFC 9110 §8.6's forbid-list is spelled at
+  `src/http1/http1_format.c:161` and again inline at
+  `src/http_response_server_api.c:499`. The HEAD drop-and-record block is copied
+  four times (`src/http_response.c:1428, 1506, 1762, 1818`) and a fifth site
+  drops without recording (`src/http_sse.c:250`).
+
+### SOLID, where the cost is named
+
+- **Medium, and a defect rather than debt.** `h1_response_state_connection`
+  promises to set no field on HTTP/2 or HTTP/3 (`include/http1/http1_stream.h:64`)
+  and tests `protocol_version == "1.1"` instead (`src/http1/http1_format.c:143`),
+  so "2.0" and "3.0" read as an HTTP/1.0 peer and `Connection: keep-alive` is
+  written into the table of every H2/H3 static-file response
+  (`src/send_file.c:236, 372, 455`). Only the submit-time filter keeps it off
+  the wire.
+- **Medium, and a defect rather than debt.** `worker_stream_wait_writable`
+  discards the caller's deadline (`src/core/worker_dispatch.c:499`), which the
+  vtable slot defines as the caller's own bound: `awaitWritable(50)` on a pool
+  worker parks for the configured write deadline.
+- **Medium.** `h1_stream_append_chunk` chooses between four transport
+  dispositions behind two `#if` fences (`src/http1/http1_stream.c:181-465`) — a
+  decision http_connection already owns.
+- **Low.** The compressing wrapper enforces the refusal precondition in prose
+  (`src/compression/http_compression_response.c:571`); a transport that refuses
+  without publishing `sendable` loses a flushed block per refusal, silently.
+
+### Per-request cost
+
+- **Medium.** `http_connection_send_strv_owned` emallocs an iov and an
+  over-allocated slot block per fire-and-forget response
+  (`src/core/http_connection.c:2145`), where before #209 it was one direct
+  submit. A fixed per-connection slot block would carry both, since
+  `out_in_flight` already serialises the writer. Not measured: h2load on a small
+  keep-alive response against the commit before `5d5b40b` settles it.
+- **Low/medium.** Every `setHeader`/`addHeader` lowercases the name twice
+  (`src/http_response.c:289` then `:325`), and the server-field test runs for
+  every header though only lengths 10 and 17 can match. Not measured.
+- **Low.** Two fresh `zend_string`s per streamed chunk on the awaited plaintext
+  path (`src/http1/http1_stream.c:352`). Not measured.

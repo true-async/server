@@ -84,8 +84,8 @@ bool http_stats_slot_active(const http_stats_slot_t *slot);
 void http_stats_registry_free(http_stats_registry_t *reg);
 
 /* Aggregate every live slot plus the totals inherited from workers that have
- * already exited. Monotonic totals survive a pool reload; gauges and samples
- * come from live workers only. Any thread. */
+ * already exited. Monotonic totals and peaks survive a pool reload; gauges and
+ * latest samples come from live workers only. Any thread. */
 void http_stats_registry_totals(const http_stats_registry_t *reg,
                                 http_server_counters_t *out);
 

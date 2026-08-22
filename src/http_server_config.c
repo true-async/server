@@ -131,6 +131,7 @@ struct _http_server_shared_config_t {
     bool                    http3_pacing;
     bool                    request_scope;
     bool                    stats_enabled;   /* issue #5: opt-in getStats() */
+    bool                    telemetry_enabled; /* issue #169: request timings and W3C trace context */
 
     /* Logging (issue #5): sink specs flattened to persistent strings so each
      * worker LOAD rebuilds its own sinks (file/stdout/stderr/syslog reopen
@@ -3393,6 +3394,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_pacing                 = src->http3_pacing;
     shared->request_scope                = src->request_scope;
     shared->stats_enabled                = src->stats_enabled;
+    shared->telemetry_enabled            = src->telemetry_enabled;
     shared->write_buffer_size  = src->write_buffer_size;
 
     shared->http2_enabled              = src->http2_enabled;
@@ -3633,6 +3635,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_pacing                 = src->http3_pacing;
     dst->request_scope                = src->request_scope;
     dst->stats_enabled                = src->stats_enabled;
+    dst->telemetry_enabled            = src->telemetry_enabled;
     dst->write_buffer_size  = src->write_buffer_size;
 
     dst->http2_enabled              = src->http2_enabled;
