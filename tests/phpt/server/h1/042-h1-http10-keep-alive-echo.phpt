@@ -25,6 +25,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../_read_exact.inc';
 
 $port = tas_free_port();
 $server = new HttpServer(
@@ -66,7 +67,7 @@ spawn(function () use ($port, $server) {
 
         $len = (int) (preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : 0);
 
-        return [$head, $len > 0 ? fread($fp, $len) : ''];
+        return [$head, $len > 0 ? tas_read_exact($fp, $len) : ''];
     };
 
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 5);

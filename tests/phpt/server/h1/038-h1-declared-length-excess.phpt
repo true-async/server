@@ -23,6 +23,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../_read_exact.inc';
 
 $port = tas_free_port();
 $server = new HttpServer(
@@ -79,7 +80,7 @@ spawn(function () use ($port, $server) {
     }
 
     $len  = preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? (int) $m[1] : 0;
-    $body = $len > 0 ? fread($fp, $len) : '';
+    $body = $len > 0 ? tas_read_exact($fp, $len) : '';
 
     echo "content-length: ", $len, "\n";
     echo "body: ", json_encode($body), "\n";
