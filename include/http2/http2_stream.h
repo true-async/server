@@ -198,6 +198,13 @@ struct http2_stream_t {
 
     bool                 is_websocket         : 1;   /* Extended-CONNECT WebSocket (RFC 8441) */
 
+    /* The transport refused this stream on the server's own account — the body
+     * outgrew setMaxBodySize, or buffering it ran the process out of memory.
+     * The reset is ours, so it is not a peer reset to count; the handler is
+     * parked in awaitBody() and still has to be woken, which is what separates
+     * this from local_aborted. Holds the status that names the reason. */
+    uint16_t             refused_status;
+
     /* Owned by the stream — freed in http2_stream_release. */
     struct ws_session_t *ws_session;
 };

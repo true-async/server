@@ -16,6 +16,7 @@
 #include "zend_closures.h"
 #include "main/php_network.h"           /* php_socket_t, SOCK_ERR, closesocket, php_socket_errno */
 #include "Zend/zend_async_API.h"
+#include "core/bailout_guard.h"
 #include "Zend/zend_hrtime.h"
 #include "Zend/zend_enum.h"
 #include "php_http_server.h"
@@ -4401,6 +4402,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * otherwise longjmp skips it and the periodic timer keeps libuv
      * loop alive past worker shutdown (scheduler.c:1964 asserts). */
     volatile bool bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try {
         ZEND_ASYNC_SUSPEND();
         /* The waker owns the wait_event (resume_when took ownership) and
@@ -4414,6 +4418,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             zend_clear_exception();
         }
     } zend_catch {
+        http_bailout_state_restore(&bailout_state);
         bailout = true;
     } zend_end_try();
 

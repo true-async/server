@@ -18,6 +18,7 @@
                                             * http3_connection.h + php_http_server.h */
 #include "Zend/zend_hrtime.h"              /* enqueue_ns / start_ns / end_ns */
 #include "core/http_protocol_handlers.h"   /* http_protocol_get_handler */
+#include "core/bailout_guard.h"
 #include "http3_listener.h"                /* http3_listener_server_obj */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 #include "log/trace_context.h"
@@ -813,6 +814,9 @@ static void h3_handler_coroutine_entry(void)
     /* Bailout firewall — see http_handler_log_bailout in
      * src/core/http_connection.c. */
     volatile bool bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try
     {
         zend_call_function(&fci, &fcall->fci_cache);
@@ -820,6 +824,7 @@ static void h3_handler_coroutine_entry(void)
 
     zend_catch
     {
+        http_bailout_state_restore(&bailout_state);
         bailout = true;
     }
 

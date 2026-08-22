@@ -15,6 +15,7 @@
 #include "room/room_hub.h"
 #include "room/room_tree.h"
 #include "core/thread_mailbox.h"
+#include "core/bailout_guard.h"
 #include "core/async_plain_event.h"
 
 #include <TSRM.h>
@@ -1596,12 +1597,15 @@ uint32_t room_hub_count(room_hub_t *hub, const char *topic, const size_t topic_l
          * query is the handshake that lets the reply's drain release it instead
          * of firing an event whose owner is gone. */
         volatile bool bailout = false;
+        http_bailout_state_t bailout_state;
+        http_bailout_state_save(&bailout_state);
 
         zend_try {
             zend_async_resume_when(coroutine, done, false, zend_async_waker_callback_resolve, NULL);
             ZEND_ASYNC_SUSPEND();
             zend_async_waker_clean(coroutine);
         } zend_catch {
+            http_bailout_state_restore(&bailout_state);
             bailout = true;
         } zend_end_try();
 

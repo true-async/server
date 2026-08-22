@@ -18,6 +18,7 @@
 #include "http_known_strings.h"
 #include "core/http_connection.h"   /* for http_connection_t::server layout */
 #include "core/body_pool.h"
+#include "core/bailout_guard.h"
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/http_protocol_handlers.h"   /* http_request_classify_protocols */
@@ -701,6 +702,9 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         const bool can_pool = (parser->conn == NULL || parser->conn->view == NULL
                                || !parser->conn->view->body_streaming_enabled);
         volatile bool oom = false;
+        http_bailout_state_t bailout_state;
+        http_bailout_state_save(&bailout_state);
+
         zend_try {
             req->body = can_pool ? body_pool_acquire(req->content_length) : NULL;
             if (req->body == NULL) {
@@ -708,6 +712,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
             }
             parser->body_offset = 0;
         } zend_catch {
+            http_bailout_state_restore(&bailout_state);
             oom = true;
         } zend_end_try();
 
@@ -826,6 +831,9 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
          * Both the first-chunk alloc and the append are OOM-guarded —
          * see on_headers_complete for the rationale. */
         volatile bool oom = false;
+        http_bailout_state_t bailout_state;
+        http_bailout_state_save(&bailout_state);
+
         zend_try {
             if (!parser->body_builder.s) {
                 smart_str_alloc(&parser->body_builder, HTTP_DEFAULT_BODY_BUFFER, 0);
@@ -837,6 +845,7 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
              * cap mremap syscalls at O(log N). See smart_str_scalable.h. */
             http_smart_str_append_scalable(&parser->body_builder, at, length);
         } zend_catch {
+            http_bailout_state_restore(&bailout_state);
             oom = true;
         } zend_end_try();
 

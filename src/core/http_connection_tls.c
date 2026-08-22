@@ -32,6 +32,7 @@
 #include "Zend/zend_hrtime.h"
 #include "Zend/zend_exceptions.h"        /* zend_clear_exception */
 #include "php_http_server.h"             /* http_server_on_tls_*, http_server_object */
+#include "bailout_guard.h"
 #include "http_protocol_strategy.h"      /* ALPN fast-path strategy creation */
 #include "tls_layer.h"                   /* tls_session_t + tls_io_result_t */
 #include "log/http_log.h"
@@ -329,6 +330,9 @@ static void tls_fsm_io_callback_fn(
      * Per-stream rollback is structurally impossible because nghttp2 /
      * HPACK / TLS state is shared. */
     volatile bool bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try {
 
     /* Read completion. */
@@ -371,6 +375,7 @@ static void tls_fsm_io_callback_fn(
     }
 
     } zend_catch {
+        http_bailout_state_restore(&bailout_state);
         bailout = true;
     } zend_end_try();
 

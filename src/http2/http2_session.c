@@ -16,6 +16,7 @@
 #include "Zend/zend_hrtime.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
+#include "core/bailout_guard.h"
 #include "core/http_protocol_handlers.h"  /* http_protocol_has_handler (RFC 8441 gate) */
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 # include "websocket/ws_session.h"  /* ws_session_feed (RFC 8441 inbound DATA) */
@@ -405,9 +406,36 @@ static void http2_request_body_upgrade(http_request_t *req)
     req->body_streaming = true;
 }
 
+/* Refuses one stream on the server's own account and lets the connection carry
+ * on. nghttp2 gives on_data_chunk_recv no way to say "reset this stream": its
+ * contract knows NGHTTP2_ERR_PAUSE and nothing else, and every other non-zero
+ * answer is a fatal connection error the library used to swallow here, leaving
+ * the peer waiting on a stream nobody would ever answer. So the RST_STREAM is
+ * submitted by hand, the way the admission reject in cb_on_begin_headers does
+ * it, and 0 keeps the sibling streams alive.
+ *
+ * `status` is the HTTP status the refusal would have carried on HTTP/1, and it
+ * reaches the handler parked in awaitBody() through cb_on_stream_close. */
+static int h2_refuse_stream(http2_session_t *session,
+                            nghttp2_session *ng,
+                            http2_stream_t *stream,
+                            const int32_t stream_id,
+                            const uint32_t error_code,
+                            const uint16_t status)
+{
+    if (stream != NULL) {
+        stream->refused_status = status;
+    }
+
+    (void)nghttp2_submit_rst_stream(ng, NGHTTP2_FLAG_NONE, stream_id, error_code);
+    h2_session_schedule_emit(session);
+
+    return 0;
+}
+
 /* top of the per-stream flow-control window — if the peer ignores
  * the window and somehow keeps shipping bytes, we refuse at this
- * layer too. Returns NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE for a
+ * layer too. A refusal goes out through h2_refuse_stream as a
  * stream-level reset; connection stays up for other streams. */
 static int cb_on_data_chunk_recv(nghttp2_session *ng,
                                  const uint8_t flags,
@@ -451,7 +479,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
          * CLOSE queued by ws_session_feed flushes with the emit above, and
          * on_stream_close wakes any recv()-suspended handler. */
         if (UNEXPECTED(ws_rc != 0)) {
-            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+            return h2_refuse_stream(session, ng, stream, stream_id,
+                                    NGHTTP2_INTERNAL_ERROR, 500);
         }
         return 0;
     }
@@ -475,7 +504,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
             || (!http_request_body_size_uncapped(req)
                 && req->body_bytes_consumed + req->body_bytes_queued + len
                        > body_cap)) {
-            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+            return h2_refuse_stream(session, ng, stream, stream_id,
+                                    NGHTTP2_ENHANCE_YOUR_CALM, 413);
         }
 
         zend_string *chunk = zend_string_init((const char *)data, len, 0);
@@ -483,7 +513,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
         zend_string_release(chunk);
 
         if (UNEXPECTED(!ok)) {
-            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+            return h2_refuse_stream(session, ng, stream, stream_id,
+                                    NGHTTP2_INTERNAL_ERROR, 500);
         }
 
         return 0;
@@ -503,7 +534,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 
     if (SIZE_MAX - current < len ||
         current + len > body_cap) {
-        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        return h2_refuse_stream(session, ng, stream, stream_id,
+                                NGHTTP2_ENHANCE_YOUR_CALM, 413);
     }
 
     /* First chunk + known Content-Length: pre-size the smart_str in one
@@ -514,13 +546,15 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
      * one-shot reserve the hot path is pure memcpy.
      *
      * Both the pre-size and the append can bailout if memory_limit is
-     * tighter than setMaxBodySize. Catch the bailout and return
-     * TEMPORAL_CALLBACK_FAILURE — nghttp2 converts that to RST_STREAM
-     * (INTERNAL_ERROR) for this stream only; other streams on the
-     * same connection survive. Without the guard the longjmp escapes
-     * into nghttp2's C frames and the scheduler crashes at
+     * tighter than setMaxBodySize. Catch the bailout and refuse this
+     * stream alone with RST_STREAM(INTERNAL_ERROR); other streams on
+     * the same connection survive. Without the guard the longjmp
+     * escapes into nghttp2's C frames and the scheduler crashes at
      * shutdown. */
     volatile bool oom = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try {
         if (current == 0 && stream->request != NULL
             && stream->request->content_length > 0
@@ -531,11 +565,13 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 
         smart_str_appendl(&stream->request_body_buf, (const char *)data, len);
     } zend_catch {
+        http_bailout_state_restore(&bailout_state);
         oom = true;
     } zend_end_try();
 
     if (UNEXPECTED(oom)) {
-        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        return h2_refuse_stream(session, ng, stream, stream_id,
+                                NGHTTP2_INTERNAL_ERROR, 500);
     }
 
     /* Buffered branch: handler will read the full body via $request->body
@@ -802,10 +838,17 @@ static int cb_on_stream_close(nghttp2_session *ng,
      * reason to cancel the handler that asked for it. */
     const bool locally_aborted = stream != NULL && stream->local_aborted;
 
+    /* A refusal the transport issued — body over the cap, or no memory to hold
+     * it — is our reset and not the peer's, so it is not counted as one. The
+     * cancel below still has to run: the handler is parked in awaitBody() with
+     * nothing else coming. */
+    const uint16_t refused_status = (stream != NULL) ? stream->refused_status : 0;
+
     /* Peer-initiated reset visibility (RST_STREAM with a non-NO_ERROR
      * code). NO_ERROR is a clean END_STREAM on both sides, not a reset. */
     if (error_code != NGHTTP2_NO_ERROR
         && !locally_aborted
+        && refused_status == 0
         && session->conn != NULL) {
         http_server_on_h2_stream_reset_by_peer(session->conn->counters);
     }
@@ -860,15 +903,22 @@ static int cb_on_stream_close(nghttp2_session *ng,
         object_init_ex(&exc_zv, http_exception_ce);
         zend_object *exc = Z_OBJ(exc_zv);
 
-        ZVAL_STRING(&message_zv, "stream reset by peer");
+        ZVAL_STRING(&message_zv,
+                    refused_status == 413
+                        ? "request body exceeds the configured limit"
+                        : (refused_status != 0
+                               ? "request body could not be buffered"
+                               : "stream reset by peer"));
         zend_update_property_ex(http_exception_ce, exc,
                                 ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
         zval_ptr_dtor(&message_zv);
 
         /* 499 — nginx convention for "client closed request". Gives
          * user handlers a distinguishable status if they catch the
-         * HttpException and want to branch on peer-reset specifically. */
-        ZVAL_LONG(&code_zv, 499);
+         * HttpException and want to branch on peer-reset specifically. A
+         * refusal of ours carries the status it would have had on HTTP/1
+         * instead, so the handler can tell whose decision ended the stream. */
+        ZVAL_LONG(&code_zv, refused_status != 0 ? (zend_long)refused_status : 499);
         zend_update_property_ex(http_exception_ce, exc,
                                 ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
 
