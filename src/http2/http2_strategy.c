@@ -872,6 +872,7 @@ static int http2_feed(http_protocol_strategy_t *strategy,
             }
         }
 
+        self->session->emit_stopped = true;
         return rc;
     }
 
@@ -1517,7 +1518,7 @@ static void h2_session_emit_ex(http2_session_t *session, const bool queue_behind
 {
     http_connection_t *conn = http2_session_get_conn(session);
 
-    if (conn->write_timed_out) {
+    if (conn->write_timed_out || session->emit_stopped) {
         return;
     }
 
@@ -1533,7 +1534,11 @@ static void h2_session_emit_ex(http2_session_t *session, const bool queue_behind
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
             const enum h2_tls_emit_mode mode = h2_tls_emit_mode();
+            /* A parked slice pins the mode: DRAIN resumes from send_pending and
+             * GATHER's nghttp2_session_send would step past it, so the peer
+             * would read a truncated frame followed by a well-formed header. */
             const bool use_drain =
+                http2_session_has_pending_send(session) ||
                 (mode == H2_EMIT_DRAIN) ||
                 (mode == H2_EMIT_HYBRID && session->large_streams_pending == 0);
 
@@ -2262,6 +2267,9 @@ static void ws_h2_handler_dispose(zend_coroutine_t *coroutine)
 
     if (conn != NULL && conn->handler_refcount > 0) {
         conn->handler_refcount--;
+        /* This pin may be the last thing a teardown asked for mid-stream is
+         * waiting on. */
+        http_connection_destroy_if_idle_deferred(conn);
     }
 }
 
