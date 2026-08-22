@@ -28,6 +28,7 @@
 #include "static/static_handler.h"  /* issue #13 — dispatch hook */
 #include "http_send_file.h"          /* issue #13 — Response::sendFile() */
 #include "http_response_internal.h"  /* http_response_take_send_file */
+#include "core/async_plain_event.h"
 
 static bool h1_sendfile_arm(http_connection_t *conn,
                             http1_request_ctx_t *ctx,
@@ -378,6 +379,11 @@ void http_connection_destroy(http_connection_t *conn)
         conn->out_pending_buf = NULL;
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
+    }
+
+    if (conn->out_idle_event != NULL) {
+        conn->out_idle_event->dispose(conn->out_idle_event);
+        conn->out_idle_event = NULL;
     }
 
 
@@ -1333,11 +1339,13 @@ bool http_connection_read(http_connection_t *conn)
  * here because the awaiting send path needs it on its submit-failure branch too. */
 static void http_absorb_io_submission_exception(const http_connection_t *conn, const char *op);
 
+static bool out_wait_for_tail(http_connection_t *conn);
+
 /* {{{ http_connection_send_raw
  *
  * Synchronous socket-level send (from a coroutine — uses async_io_req_await).
- * Splits the buffer into multiple IO_WRITE calls as the reactor accepts
- * whatever size it can; loops until @p len bytes are on the wire.
+ * One IO_WRITE for the whole buffer: libuv absorbs a partial write itself, so
+ * the completion reports either @p len bytes or an error.
  *
  * Factored out of the public http_connection_send() so the TLS path can
  * produce ciphertext via tls_write_plaintext + tls_drain_ciphertext and
@@ -1362,6 +1370,14 @@ bool http_connection_send_raw(http_connection_t *conn,
      * timer fires only if the entire send (across multiple await
      * iterations) takes longer than write_timeout_ms. */
     if (write_timeout_ms > 0 && !http_write_timer_arm(conn, write_timeout_ms)) {
+        return false;
+    }
+
+    if (UNEXPECTED(!out_wait_for_tail(conn))) {
+        if (write_timeout_ms > 0) {
+            http_write_timer_stop(conn);
+        }
+
         return false;
     }
 
@@ -1421,6 +1437,13 @@ bool http_connection_send_raw(http_connection_t *conn,
  * every reference is consumed whatever happens, including a cancellation while
  * parked — the reactor holds them until libuv is done, which is exactly what
  * the awaited single-buffer write cannot promise. */
+static void strv_release(zend_string *const *bufs, const unsigned nbufs)
+{
+    for (unsigned i = 0; i < nbufs; i++) {
+        zend_string_release(bufs[i]);
+    }
+}
+
 bool http_connection_send_strv_awaited(http_connection_t *conn,
                                        zend_string *const *bufs,
                                        const unsigned nbufs)
@@ -1429,18 +1452,22 @@ bool http_connection_send_strv_awaited(http_connection_t *conn,
     ZEND_ASSERT(nbufs > 0);
 
     if (UNEXPECTED(conn->write_timed_out)) {
-        for (unsigned i = 0; i < nbufs; i++) {
-            zend_string_release(bufs[i]);
-        }
-
+        strv_release(bufs, nbufs);
         return false;
     }
 
     const uint32_t write_timeout_ms = conn->write_timeout_ms;
 
     if (write_timeout_ms > 0 && !http_write_timer_arm(conn, write_timeout_ms)) {
-        for (unsigned i = 0; i < nbufs; i++) {
-            zend_string_release(bufs[i]);
+        strv_release(bufs, nbufs);
+        return false;
+    }
+
+    if (UNEXPECTED(!out_wait_for_tail(conn))) {
+        strv_release(bufs, nbufs);
+
+        if (write_timeout_ms > 0) {
+            http_write_timer_stop(conn);
         }
 
         return false;
@@ -1563,6 +1590,7 @@ static void http_absorb_io_submission_exception(const http_connection_t *conn,
 
 /* Defined below, after the high/low-water helpers. */
 static void out_signal_drain(http_connection_t *conn);
+static void out_signal_idle(http_connection_t *conn);
 
 /* Shared tail for batched-send completion callbacks: clears the in-flight
  * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. */
@@ -1576,6 +1604,7 @@ static void http_send_batched_finish(http_connection_t *conn)
         return;
     }
 
+    out_signal_idle(conn);
     out_signal_drain(conn);
     http2_conn_notify_emit(conn);
 }
@@ -1638,6 +1667,72 @@ static void out_signal_drain(http_connection_t *conn)
     }
 }
 
+static bool out_tail_idle(const http_connection_t *conn)
+{
+    return !conn->out_in_flight && conn->out_pending_len == 0;
+}
+
+/* Called from every site that clears out_in_flight, a failed submit included.
+ * Not out_signal_drain: that one fires at the low-water mark and mid-chain,
+ * while the flag is still set. */
+static void out_signal_idle(http_connection_t *conn)
+{
+    if (conn->out_idle_event != NULL && out_tail_idle(conn)) {
+        async_plain_event_fire(conn->out_idle_event);
+    }
+}
+
+/* Park until the tail is idle, so an awaited write cannot overtake it (#211).
+ * False means a cancellation cut the wait short, its exception left in EG for
+ * the caller to propagate once it has released what it owns; true means submit. */
+static bool out_wait_for_tail(http_connection_t *conn)
+{
+#ifdef HAVE_OPENSSL
+    /* TLS orders through the BIO ring: tls_push takes its bytes before
+     * send_raw, and the batched senders are plaintext-only. */
+    ZEND_ASSERT(conn->tls == NULL || out_tail_idle(conn));
+#endif
+
+    while (!out_tail_idle(conn)) {
+        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+            return true;
+        }
+
+        /* The pin is what defers the destroy that disposes out_idle_event. */
+        ZEND_ASSERT(conn->handler_refcount > 0);
+
+        if (conn->out_idle_event == NULL) {
+            conn->out_idle_event = async_plain_event_new();
+
+            if (UNEXPECTED(conn->out_idle_event == NULL)) {
+                return true;
+            }
+        }
+
+        if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(co) == NULL)) {
+            return true;
+        }
+
+        zend_async_resume_when(co, conn->out_idle_event, false,
+                               zend_async_waker_callback_resolve, NULL);
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
+
+        if (EG(exception) != NULL) {
+            return false;
+        }
+
+        /* The write timer closes the io instead of resuming this wait. */
+        if (UNEXPECTED(conn->write_timed_out)) {
+            return true;
+        }
+    }
+
+    return true;
+}
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1661,6 +1756,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
         if (UNEXPECTED(req == NULL)) {
             http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
+            out_signal_idle(conn);
         } else {
             out_signal_drain(conn);
         }
@@ -1692,6 +1788,7 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
     if (UNEXPECTED(req == NULL)) {
         http_absorb_io_submission_exception(conn, __func__);
         conn->out_in_flight = false;
+        out_signal_idle(conn);
         return false;
     }
 
@@ -1813,6 +1910,7 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         if (UNEXPECTED(req == NULL)) {
             http_absorb_io_submission_exception(conn, __func__);
             conn->out_in_flight = false;
+            out_signal_idle(conn);
         } else {
             out_signal_drain(conn);
         }
