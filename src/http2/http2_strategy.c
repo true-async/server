@@ -757,11 +757,12 @@ static void h2_sendfile_arm(http_connection_t *conn, http2_stream_t *stream)
     }
 }
 
-/* Hand @p len bytes of session output to the connection's outbound queue.
- * The bytes are copied: every caller drains into a stack scratch that the
- * next turn of the loop overwrites. Plaintext only — a TLS session orders
- * through the BIO ring instead, and each call site is already gated on that.
- * False means the submit failed and the connection can no longer write. */
+/* Hand @p len bytes to the connection's outbound queue, copied: the caller's
+ * buffer is a static template. Only for bytes nghttp2 does not know it owes —
+ * everything the session has queued goes out through http2_session_emit, so one
+ * cursor walks the session. Plaintext only: a TLS session orders through the
+ * BIO ring, and the call site is gated on that. False means the submit was
+ * refused; the buffer is released either way. */
 static bool h2c_queue_bytes(http_connection_t *conn, const void *src, const size_t len)
 {
     if (len == 0) {
@@ -861,19 +862,13 @@ static int http2_feed(http_protocol_strategy_t *strategy,
         if (should_drain) {
             /* Bad-preface path: nghttp2 can't queue a GOAWAY itself
              * once BAD_CLIENT_MAGIC has fired. Send the static
-             * template instead. */
+             * template instead — the session holds nothing to drain,
+             * so these bytes are the whole message. */
             if (http2_session_should_emit_bad_preface_goaway(self->session)) {
                 (void)h2c_queue_bytes(conn, http2_session_bad_preface_goaway_bytes(),
                                       HTTP2_BAD_PREFACE_GOAWAY_LEN);
             } else {
-                char drain_buf[256];
-                const ssize_t n = http2_session_drain(self->session,
-                                                       drain_buf,
-                                                       sizeof(drain_buf));
-
-                if (n > 0) {
-                    (void)h2c_queue_bytes(conn, drain_buf, (size_t)n);
-                }
+                http2_session_emit(self->session);
             }
         }
 
@@ -938,9 +933,18 @@ static int http2_feed(http_protocol_strategy_t *strategy,
      * TCP channel open would leave the peer hanging until its own
      * timeout. Signal the connection layer to tear down by returning
      * a non-zero rc — the error path already closes the socket. */
-    if (!http2_session_want_read(self->session) &&
-        !http2_session_want_write(self->session)) {
-        return -1;
+    if (!http2_session_want_read(self->session)) {
+        if (!http2_session_want_write(self->session)) {
+            return -1;
+        }
+
+        /* The session is finished and its last frames are still queued, because
+         * the emit above skipped a write in flight. This verdict is read only
+         * from here, and a peer that has been told GOAWAY sends nothing more to
+         * read — so ask for the teardown now and let the write completion
+         * finalise it. */
+        conn->keep_alive = false;
+        conn->destroy_pending = true;
     }
 
     return rc;
@@ -1484,6 +1488,15 @@ static void h2_emit_flush_h2c(http_connection_t *conn,
     ctx->body_refs_cnt = st->body_refs_count;
 
     if (st->records != NULL) { efree(st->records); }
+
+    /* The buffer and the body references belong to ctx now, and the records
+     * are gone. Detached from the state so a bailout below — the submit
+     * allocates — does not free all three a second time through the caller's
+     * h2_emit_state_cleanup. */
+    st->records          = NULL;
+    st->body_refs        = NULL;
+    st->body_refs_count  = 0;
+    st->emit_buf_on_heap = false;
 
     (void)http_connection_send_batched_writev(conn, iov, niov,
                                               h2c_writev_free_cb, ctx);

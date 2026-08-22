@@ -1604,7 +1604,22 @@ static void http_send_batched_finish(http_connection_t *conn)
     conn->out_in_flight_bytes = 0;
     http_write_timer_stop(conn);
 
+    /* Ask the session for what it still holds before the destroy below can take
+     * the connection. An emit skipped while this write was in flight left the
+     * response's last frames inside nghttp2, and this is the only call that
+     * comes back for them. A connection whose write failed is the exception:
+     * there the re-drive would build frames for an io the peer has left. */
+    if (EXPECTED(!conn->write_failed)) {
+        http2_conn_notify_emit(conn);
+    }
+
     if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+        /* The emit may have started the next write; its completion runs the
+         * destroy instead. */
+        if (conn->out_in_flight || conn->out_pending_len > 0) {
+            return;
+        }
+
         conn->destroy_pending = false;
         http_connection_destroy(conn);
         return;
@@ -1612,7 +1627,17 @@ static void http_send_batched_finish(http_connection_t *conn)
 
     out_signal_idle(conn);
     out_signal_drain(conn);
-    http2_conn_notify_emit(conn);
+}
+
+/* A chained submit that never reached the reactor. The in-flight state ends
+ * here or nothing ends it: a destroy deferred on out_in_flight is finalised by
+ * the completion that will now never fire, and the connection then lives to its
+ * read deadline. */
+static void http_send_batched_submit_failed(http_connection_t *conn, const char *op)
+{
+    http_absorb_io_submission_exception(conn, op);
+    conn->write_failed = true;
+    http_send_batched_finish(conn);
 }
 
 /* Coalesce path: append `len` bytes into the pending buffer behind the
@@ -1833,11 +1858,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
-            http_absorb_io_submission_exception(conn, __func__);
-            conn->out_in_flight = false;
-            conn->out_in_flight_bytes = 0;
-            conn->write_failed = true;
-            out_signal_idle(conn);
+            http_send_batched_submit_failed(conn, __func__);
         } else {
             out_signal_drain(conn);
         }
@@ -1868,11 +1889,7 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
         conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
     if (UNEXPECTED(req == NULL)) {
-        http_absorb_io_submission_exception(conn, __func__);
-        conn->out_in_flight = false;
-        conn->out_in_flight_bytes = 0;
-        conn->write_failed = true;
-        out_signal_idle(conn);
+        http_send_batched_submit_failed(conn, __func__);
         return false;
     }
 
@@ -1995,11 +2012,7 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
         if (UNEXPECTED(req == NULL)) {
-            http_absorb_io_submission_exception(conn, __func__);
-            conn->out_in_flight = false;
-            conn->out_in_flight_bytes = 0;
-            conn->write_failed = true;
-            out_signal_idle(conn);
+            http_send_batched_submit_failed(conn, __func__);
         } else {
             out_signal_drain(conn);
         }
