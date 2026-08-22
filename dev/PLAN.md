@@ -125,7 +125,7 @@ it and expects a tag within days.
   with no argument against an arginfo requiring one, so the profile answered 500
   with `expects exactly 1 argument, 0 given` before measuring anything, and its
   chunk loop buffered through the old `write()`.
-- [~] **`tryWrite(): bool` and the dialect twins.** In #178, without the twins. The non-blocking half of the
+- [x] **`tryWrite(): bool` and the dialect twins.** In #178, without the twins. The non-blocking half of the
   pair, matching `WebSocket::trySend()`; `trySseEvent()` and `tryWriteMessage()`
   follow, so the idiom is not half-applied. Invariant: false means nothing was
   queued and no header was committed, and a dead peer is still the 499 exception.
@@ -143,10 +143,25 @@ it and expects a tag within days.
   under compression threw away a block the encoder had already emitted, and the
   retry the caller was told to make corrupted the deflate stream.
 
-  **HTTP/1 is the open exception**: it keeps no queue of its own, so it never
-  refuses and an accepted chunk waits for the socket. Two ways to close it were
-  tried and rejected — see below, and the measurement that closed the argument is
-  in `dev/BENCHMARKS.md`.
+  **The HTTP/1 exception is closed** (#179, PR 214). Not by moving the path off
+  the await, which the measurement refused to support, but by splitting the two
+  callers: `write()` keeps the awaited sender and with it the return value that
+  sets `stream_dead`, the bracketed deadline and the copy-free frame, while
+  `tryWrite()` queues on the connection's tail and is refused once the outbound
+  depth — the tail plus the write in flight — reaches the high-water mark.
+
+  Counting the write in flight is what makes the refusal honest: the tail alone
+  reads zero for the whole first write, so the answer arrives one write late and
+  the memory a slow peer pins is twice the knob. Two things the await had been
+  providing came with the queued path — the read side latches `write_failed`,
+  because libuv reports a failed write at completion and a fire-and-forget
+  completion carries no status, and the connection's write deadline is armed at
+  submit, because queued bytes have no await to time out.
+
+  Evidence: `h1/053`, restored from the commit that deleted it in #177 — 42
+  chunks accepted against a peer that never reads, the 43rd refused, the handler
+  still running. `h1/032` now answers a refusal with `awaitWritable()`: its 499
+  rested on the hidden park this step removes.
 - [x] **The dialect twins: `trySseEvent()` and `tryWriteMessage()`.** The idiom is
   half-applied while `tryWrite()` has a non-blocking form and the two dialects do
   not. Shape: one static helper per dialect carries the formatting and the guards,
