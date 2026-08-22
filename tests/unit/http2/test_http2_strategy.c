@@ -88,6 +88,11 @@ bool http_connection_send_batched(http_connection_t *c, void *buf, size_t len) {
 
 void http_connection_destroy(http_connection_t *c) { (void)c; }
 
+/* Detection calls this to narrow conn->handler to the protocol it settled on.
+ * These cases attach no server, so the real one returns before it reads
+ * anything — a no-op stub is what it does here, not an invented answer. */
+void http_connection_bind_protocol_handler(http_connection_t *c) { (void)c; }
+
 void http_connection_on_request_ready(http_connection_t *c, http_request_t *r) {
     (void)c; (void)r;
 }

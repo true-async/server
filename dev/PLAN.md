@@ -786,3 +786,61 @@ CT-out one). `ctest` ran 10 of 16 on 2026-08-20 and runs 16 of 16 now.
   writes reads 5 bytes of 9 through one `fread` and 9 through the helper, three runs
   each; 473 phpt, 448 passed, 0 failed, 24 skipped, 1 warn (`h2/060`, the retry-pass
   that predates this).
+
+## What the request path was losing (#236, #237, #238, #239, #240)
+
+Five defects found in one pass, four of them shapes where the framing called the
+response whole and the peer had less than the handler wrote. They are one section
+because they were found and land together, not because they share a cause.
+
+- [x] **#236 — an HTTP/2 request ran the HTTP/1 handler.** `conn->handler` was
+  picked in the accept callback, before a byte had been read and so before the
+  protocol was known: HTTP1 first, HTTP2 only where no HTTP1 handler was
+  registered. `addHttp2Handler` therefore answered nothing on any server that
+  also called `addHttpHandler` — which `docs/USAGE.md:116` names as its main use.
+  The pick happens at both detection sites now, through
+  `http_connection_bind_protocol_handler`, and `http_protocol_pick_handler` takes
+  the protocol for the worker pool and HTTP/3. The general registration stays the
+  fallback for every protocol. Evidence: `core/068` fails against `main` on the
+  h2c line alone.
+- [x] **#237 — a buffered HTTP/2 response carrying trailers lost its body.**
+  nghttp2 takes trailers only from inside the data provider, at true EOF, with
+  `NO_END_STREAM` on the last DATA slice; the buffered path queued them straight
+  after `submit_response`, and the DATA that had not left yet was displaced.
+  Three shapes were wrong: a 7-byte body delivered 0, a gzipped 4096-byte body
+  delivered 0 decoded, and an empty body lost the trailers instead, because with
+  no DATA frame the HEADERS carries END_STREAM. Such a response takes a
+  zero-length DATA frame to hang them off now. Evidence: `h2/063` fails against
+  `main` on all three lines; `h2/003` gained the body assertion whose absence let
+  this pass for as long as it existed.
+- [x] **#238 — three exits from `h1_stream_mark_ended` left the framing lost and
+  unmarked.** The terminator's write answer was discarded — the only
+  `(void)http_connection_send` in the tree — and the awaited write path latches
+  nothing on the connection, so the next reader saw a healthy one and the request
+  pipelined behind the unfinished chunk was answered into it. The guard at the top
+  and the header-commit failure had the same hole: both returned without a
+  terminator and without setting `stream_dead`, which is what
+  `http_request_finalize` reads as "write nothing more". All three make the two
+  marks `h1_stream_abort` makes now. Evidence: `h1/055` cancels the handler while
+  `end()` is parked inside the terminator write, `h1/056` resets the connection
+  with `SO_LINGER 0`; both fail against `main`. The header-commit branch is
+  carried without a test — no seam makes a header write fail.
+- [x] **#239 — `awaitBody()` answered none under a non-nullable return type.**
+  Unreachable on today's engine, where `async_waker_new` raises `E_CORE_ERROR`
+  before it can return NULL, but the macro dispatches through a function pointer,
+  so the call site answers the contract rather than the implementation. It throws
+  now: without a waker the body was never waited for, and `$this` would say it
+  was.
+- [~] **#240 — shared-fd accept has no arbitration.** Not answered here. Where the
+  kernel has no load-balanced `SO_REUSEPORT` the workers share one descriptor and
+  nothing arbitrates between their reactors, so a machine short of CPU lets one
+  drain the accept queue: measured on Linux under
+  `TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1` pinned to one core, `[1,0,8]` samples
+  across three workers once in six runs, against a spread every time with
+  SO_REUSEPORT. Whether the server should promise better is a design question with
+  a cost on the accept path of every connection, and it stays in the issue. What
+  is fixed is the test that had been silenced for it: `telemetry/011` asserted
+  `PHP_OS_FAMILY === 'Darwin' || $reporting > 1`, which is nothing on the one
+  platform where it went red. The assertion is gone rather than carved out — the
+  same non-promise is already recorded in `websocket/042:116` — and the test went
+  from 1 failure in 20 under those conditions to 0.

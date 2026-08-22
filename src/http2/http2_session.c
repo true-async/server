@@ -1605,15 +1605,29 @@ void http2_session_submit_response_trailers(http2_session_t *session,
     if (heap != NULL) { efree(heap); }
 }
 
-/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending). Streaming
- * trailers submit HERE, at true EOF — submitting while DATA is still queued
- * makes nghttp2 drop the pending DATA. */
+/* Whether the response on @p stream still owes a trailer block. */
+static bool h2_stream_owes_trailers(const http2_stream_t *stream)
+{
+    if (stream == NULL || Z_ISUNDEF(stream->response_zv)) {
+        return false;
+    }
+
+    const HashTable *const trailers =
+        http_response_get_trailers(Z_OBJ(stream->response_zv));
+
+    return trailers != NULL && zend_hash_num_elements(trailers) > 0;
+}
+
+/* Stamp DATA_FLAG_EOF (+ NO_END_STREAM if trailers pending). Trailers submit
+ * HERE, at true EOF, whichever source fed the body — nghttp2 documents this as
+ * the order that works (`nghttp2_submit_trailer`, nghttp2.h), and submitting
+ * while DATA is still queued makes it drop the pending DATA. */
 static inline void h2_dp_mark_eof(http2_stream_t *stream,
                                   uint32_t *data_flags)
 {
     *data_flags |= NGHTTP2_DATA_FLAG_EOF;
 
-    if (stream->chunk_queue != NULL && !stream->trailers_submitted) {
+    if (!stream->trailers_submitted) {
         stream->trailers_submitted = true;
 
         if (!Z_ISUNDEF(stream->response_zv)) {
@@ -1886,7 +1900,11 @@ int http2_session_submit_response(http2_session_t *session,
 
     int rc;
 
-    if (body_len == 0) {
+    /* A response owing trailers takes the data provider even with nothing to
+     * put in it: a NULL provider ends the stream on the HEADERS, and no trailer
+     * block can follow that. An empty body then goes out as a zero-length DATA
+     * frame with NO_END_STREAM, which the trailer HEADERS closes. */
+    if (body_len == 0 && !h2_stream_owes_trailers(stream)) {
         /* No DATA frame — HEADERS with END_STREAM does the whole
          * response (204, 304, HEAD-style). */
         rc = nghttp2_submit_response(session->ng, (int32_t)stream_id,

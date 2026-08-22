@@ -1712,7 +1712,13 @@ final class HttpServer
     public function addWebSocketHandler(callable $handler): static {}
 
     /**
-     * Add HTTP/2 handler.
+     * Add a handler for connections that speak HTTP/2.
+     *
+     * Takes precedence over {@see HttpServer::addHttpHandler()} on such a
+     * connection; a gRPC call registered through
+     * {@see HttpServer::addGrpcHandler()} still wins over both. Registered
+     * alone it also narrows the server-wide protocol mask to HTTP/2, so
+     * HTTP/1 traffic is refused.
      *
      * @param callable $handler HTTP/2 handler callback
      * @return static

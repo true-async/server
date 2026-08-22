@@ -32,8 +32,16 @@ zend_fcall_t* http_protocol_get_handler(HashTable *handlers,
 bool http_protocol_has_handler(HashTable *handlers, http_protocol_type_t protocol);
 
 /* The one shared handler precedence for every dispatch site: gRPC (when
- * classified) → HTTP1 → HTTP2. NULL when nothing matches. */
-zend_fcall_t *http_protocol_pick_handler(HashTable *handlers, bool is_grpc);
+ * classified) → @p protocol → HTTP1 → HTTP2. NULL when nothing matches.
+ *
+ * @p protocol is the transport the request actually arrived on, so a
+ * registration made for it wins over the general one — otherwise
+ * addHttp2Handler is unreachable on any server that also calls
+ * addHttpHandler. The HTTP1 step behind it is the general registration: most
+ * servers make only that one, and it has always answered every protocol. */
+zend_fcall_t *http_protocol_pick_handler(HashTable *handlers,
+                                         http_protocol_type_t protocol,
+                                         bool is_grpc);
 
 /* Stamp the request's grpc_mode once at headers-complete, before any
  * body-streaming decision; transports never classify themselves and read

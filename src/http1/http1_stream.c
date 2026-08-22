@@ -465,6 +465,16 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
     return HTTP_STREAM_APPEND_OK;
 }
 
+/* Every exit that writes no terminator leaves a chunked body without an end
+ * (RFC 9112 §7.1). `stream_dead` is what http_request_finalize reads as "write
+ * nothing more", so without it the request pipelined behind the body is
+ * answered into the unfinished chunk; keep-alive off retires the connection. */
+static void h1_stream_framing_lost(http1_request_ctx_t *ctx)
+{
+    ctx->stream_dead      = true;
+    ctx->conn->keep_alive = false;
+}
+
 static void h1_stream_mark_ended(void *opaque)
 {
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)opaque;
@@ -484,7 +494,7 @@ static void h1_stream_mark_ended(void *opaque)
      * keep-alive. Checked before the header commit below, so a stream that
      * died after its headers landed does not send them twice. */
     if (UNEXPECTED(ctx->stream_dead || conn->write_failed)) {
-        conn->keep_alive = false;
+        h1_stream_framing_lost(ctx);
         return;
     }
 
@@ -494,6 +504,10 @@ static void h1_stream_mark_ended(void *opaque)
      * waiting for a response that never starts. */
     if (!ctx->h1_stream_headers_sent) {
         if (!h1_emit_headers_once(ctx)) {
+            /* No framing to lose here — nothing reached the wire — but the
+             * request is unanswered, and a client pairs responses to requests
+             * by order (RFC 9112 §9.3.1). */
+            h1_stream_framing_lost(ctx);
             return;
         }
 
@@ -510,8 +524,13 @@ static void h1_stream_mark_ended(void *opaque)
 
     /* Terminal zero-chunk. Trailers not emitted — RFC requires the
      * client to opt in via TE: trailers, and the chunked-push path
-     * doesn't surface a trailer API yet. */
-    (void)http_connection_send(conn, "0\r\n\r\n", 5);
+     * doesn't surface a trailer API yet.
+     *
+     * The write's answer is the only report of a terminator that did not
+     * leave: the awaited path latches nothing on the connection. */
+    if (UNEXPECTED(!http_connection_send(conn, "0\r\n\r\n", 5))) {
+        h1_stream_framing_lost(ctx);
+    }
 }
 
 /* Chunked framing has no way to say "this body failed" other than to stop
@@ -538,8 +557,7 @@ static bool h1_stream_abort(void *opaque, const int64_t error_code)
         return false;
     }
 
-    ctx->stream_dead = true;
-    ctx->conn->keep_alive = false;
+    h1_stream_framing_lost(ctx);
     return true;
 }
 

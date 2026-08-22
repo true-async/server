@@ -55,6 +55,10 @@ $client = spawn(function() use ($port, $server) {
      * response-header lines because they arrive in a HEADERS frame. */
     echo "saw_grpc_status=",  (int)(strpos($blob, 'grpc-status: 0') !== false), "\n";
     echo "saw_grpc_message=", (int)(strpos($blob, 'grpc-message: ok') !== false), "\n";
+    /* The body is the half of that sequence the trailer lines cannot show:
+     * a trailer block queued ahead of the DATA displaces it, and the four
+     * assertions above all hold on the empty response that leaves. */
+    echo "saw_body=",         (int)(strpos($blob, 'payload') !== false), "\n";
 
     $server->stop();
 });
@@ -68,4 +72,5 @@ saw_status_200=1
 saw_ctype=1
 saw_grpc_status=1
 saw_grpc_message=1
+saw_body=1
 Done

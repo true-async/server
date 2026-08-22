@@ -3,13 +3,27 @@
 How work is organised in this repository. Code conventions live in
 [docs/CODING_STANDARDS.md](../docs/CODING_STANDARDS.md) and are not repeated here.
 
-## Issue first
+## Issue first, and one issue per concern
 
 A change starts as a GitHub issue in `true-async/server` that states the defect or
 the feature, what the code does today with file and line, and the measurement or
 reproduction behind the claim. The commit and the CHANGELOG entry cite the number.
 Design questions that have more than one defensible answer are settled in the issue
 before the code is written.
+
+**One issue covers one concern, not one commit.** Defects that share a cause, a
+subsystem or a fix go into one issue and land in one PR, with the reproduction of
+each spelled out inside it. Four issues for four commits of one pass turn the
+tracker into a second changelog and bury the only thing it is read for: what still
+needs doing.
+
+They are split when a reader would look for them separately — a different
+subsystem, a fix that can land without the other, or a question still open while
+the rest is settled.
+
+Held by discipline; there is no gate. The tell is in the tracker itself: an issue
+opened and closed by one PR, sitting next to a sibling opened and closed by the
+same PR, should have been one issue.
 
 ## Branch and commit
 
