@@ -204,6 +204,14 @@ bool http_stats_registry_retire(http_stats_registry_t *reg, const int idx)
 void http_stats_registry_totals(const http_stats_registry_t *reg,
                                 http_server_counters_t *out)
 {
+    http_stats_registry_totals_ex(reg, out, NULL, NULL);
+}
+
+void http_stats_registry_totals_ex(const http_stats_registry_t *reg,
+                                   http_server_counters_t *out,
+                                   const http_stats_slot_visit_t visit,
+                                   void *ctx)
+{
     memset(out, 0, sizeof *out);
 
     if (UNEXPECTED(reg == NULL)) {
@@ -231,10 +239,20 @@ void http_stats_registry_totals(const http_stats_registry_t *reg,
             continue;
         }
 
+        /* Read once into a private copy: the caller's breakdown and the total
+         * below are then the same numbers, whatever the worker does next. */
+        http_server_counters_t snapshot;
+
+        for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
+            const size_t off = stats_fields[i].offset;
+            *(uint64_t *)((char *)&snapshot + off) =
+                stats_field_load(&slot->counters, off);
+        }
+
         for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
             const size_t   off = stats_fields[i].offset;
             uint64_t      *dst = (uint64_t *)((char *)out + off);
-            const uint64_t v   = stats_field_load(&slot->counters, off);
+            const uint64_t v   = *(const uint64_t *)((const char *)&snapshot + off);
 
             if (stats_fields[i].kind == HTTP_COUNTER_MAX
                 || stats_fields[i].kind == HTTP_COUNTER_LATEST) {
@@ -244,6 +262,10 @@ void http_stats_registry_totals(const http_stats_registry_t *reg,
             } else {
                 *dst += v;   /* SUM and GAUGE both add across live workers */
             }
+        }
+
+        if (visit != NULL) {
+            visit(slot->worker_id, &snapshot, ctx);
         }
     }
 }

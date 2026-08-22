@@ -2280,7 +2280,7 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
     /* Bump telemetry up front. The dispose-side response may or may
      * not actually go on the wire (socket may be dead by then), but
      * the parser-error event itself is what we want counted. */
-    http_server_on_parse_error(conn->server, status);
+    http_server_on_parse_error(conn->counters, status);
     conn->parse_error_handled = 1;
     conn->keep_alive = false;
 
@@ -2355,7 +2355,7 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
         status, reason, reason_len + 2, extra_hdr, reason);
 
     conn->keep_alive = false;
-    http_server_on_parse_error(conn->server, status);
+    http_server_on_parse_error(conn->counters, status);
     conn->parse_error_handled = 1;
 
     if (n <= 0 || (size_t)n >= sizeof(response)) {

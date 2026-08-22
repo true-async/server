@@ -278,9 +278,6 @@ struct http_server_object {
                                                  * the dtor phase before our http_server_free. */
     zend_async_event_t      *wait_event;        /* Event to block start() */
 
-    /* Statistics — active_requests + total_requests moved into counters slice. */
-    size_t                   active_connections;
-
     /* Slab allocator for live http_connection_t instances. Owns both
      * the chunk memory AND the intrusive doubly-linked alive list
      * (arena.alive_head). Lifetime is tied to the refcounted C-state:
@@ -382,40 +379,9 @@ struct http_server_object {
     uint64_t                 codel_min_sojourn_ns;
     uint64_t                 codel_first_above_target_ns;
 
-    uint64_t                 pause_count_total;
-    uint64_t                 codel_trips_total;
     uint64_t                 paused_since_ns;     /* 0 while accepting */
-    uint64_t                 paused_total_ns;
 
-    /* TLS telemetry. Kept in a separate bucket from the sojourn/service
-     * aggregates: handshake cost is once-per-connection, not per
-     * request, so mixing it in would contaminate CoDel's signal
-     * — kept separate by design. All counters are plain
-     * uint64_t because every TLS coroutine is single-threaded on a
-     * single worker's event loop — no atomics needed. */
-    uint64_t                 tls_handshakes_total;
-    uint64_t                 tls_handshake_failures_total;
-    uint64_t                 tls_handshake_ns_sum;
-    uint64_t                 tls_handshake_ns_count;
-    uint64_t                 tls_resumed_total;
-    /* tls_bytes_* moved into counters slice for inline access. */
-    uint64_t                 tls_ktls_tx_total;   /* handshakes where kTLS TX engaged */
-    uint64_t                 tls_ktls_rx_total;   /* handshakes where kTLS RX engaged */
-
-    /* Parser-error telemetry. One bump per
-     * RFC-compliant 4xx parse-error response emitted before tearing
-     * down the connection. parse_errors_4xx_total == sum of the four
-     * per-status counters. Independent from CoDel sojourn samples. */
-    uint64_t                 parse_errors_4xx_total;
-    uint64_t                 parse_errors_400_total;
-    uint64_t                 parse_errors_413_total;
-    uint64_t                 parse_errors_414_total;
-    uint64_t                 parse_errors_431_total;
-    uint64_t                 parse_errors_503_total;
-
-    /* Admission-reject + drain telemetry: requests_shed_total moved to
-     * counters slice; drain_epoch_current moved to view (read by every
-     * conn create + every commit; readers cache view pointer). */
+    /* Read by the cooldown that refuses a second sweep too soon after the last. */
     uint64_t                 drain_last_fired_ns;
 
     /* Config cache — nanoseconds, 0 = feature disabled per knob. */
@@ -423,14 +389,6 @@ struct http_server_object {
     uint64_t                 max_connection_age_grace_ns;
     uint64_t                 drain_spread_ns;
     uint64_t                 drain_cooldown_ns;
-
-    /* Drain/connection counters that aren't on the per-request hot path
-     * — kept here, not in the inline counters slice. */
-    uint64_t                 connections_drained_reactive_total;
-    uint64_t                 connections_drained_proactive_total;
-    uint64_t                 connections_force_closed_total;
-    uint64_t                 drain_events_reactive_total;
-    uint64_t                 drain_events_cooldown_blocked_total;
 
     /* Hot-path counters slice. Layout-public via php_http_server.h so
      * other TUs can bump fields directly via the inline helpers — one
@@ -1016,7 +974,7 @@ static void http_server_pause_listeners(http_server_object *server,
     }
 
     server->listeners_paused = true;
-    server->pause_count_total++;
+    server->counters_live->pause_count_total++;
     server->paused_since_ns = zend_hrtime();
 
     if (drain_connections) {
@@ -1039,7 +997,7 @@ static void http_server_resume_listeners(http_server_object *server)
     }
 
     if (server->paused_since_ns) {
-        server->paused_total_ns += zend_hrtime() - server->paused_since_ns;
+        server->counters_live->paused_total_ns += zend_hrtime() - server->paused_since_ns;
         server->paused_since_ns = 0;
     }
 
@@ -1102,7 +1060,7 @@ void http_server_on_request_sample(http_server_object *server,
         server->codel_first_above_target_ns = now + CODEL_INTERVAL_NS;
     } else if (now >= server->codel_first_above_target_ns
                && !server->listeners_paused) {
-        server->codel_trips_total++;
+        server->counters_live->codel_trips_total++;
         /* Overload trigger — also drains existing connections. */
         http_server_pause_listeners(server, /*drain_connections=*/true);
     }
@@ -1119,45 +1077,45 @@ void http_server_on_request_sample(http_server_object *server,
  *
  * All three are safe with server == NULL (tests, unsupervised connections).
  */
-void http_server_on_tls_handshake_done(http_server_object *server,
+void http_server_on_tls_handshake_done(http_server_counters_t *counters,
                                        const uint64_t duration_ns,
                                        const bool resumed)
 {
-    if (server == NULL) {
+    if (counters == NULL) {
         return;
     }
 
-    server->tls_handshakes_total++;
-    server->tls_handshake_ns_sum   += duration_ns;
-    server->tls_handshake_ns_count += 1;
+    counters->tls_handshakes_total++;
+    counters->tls_handshake_ns_sum   += duration_ns;
+    counters->tls_handshake_ns_count += 1;
 
     if (resumed) {
-        server->tls_resumed_total++;
+        counters->tls_resumed_total++;
     }
 }
 
-void http_server_on_tls_handshake_failed(http_server_object *server)
+void http_server_on_tls_handshake_failed(http_server_counters_t *counters)
 {
-    if (server == NULL) {
+    if (counters == NULL) {
         return;
     }
 
-    server->tls_handshake_failures_total++;
+    counters->tls_handshake_failures_total++;
 }
 
 /* http_server_on_tls_io migrated to inline in php_http_server.h —
  * callers pass conn->counters directly. */
 
-void http_server_on_tls_ktls(http_server_object *server,
+void http_server_on_tls_ktls(http_server_counters_t *counters,
                              const bool tx_active, const bool rx_active)
 {
-    if (server == NULL) {
+    if (counters == NULL) {
         return;
     }
 
-    if (tx_active) server->tls_ktls_tx_total++;
+    if (tx_active) counters->tls_ktls_tx_total++;
 
-    if (rx_active) server->tls_ktls_rx_total++;
+    if (rx_active) counters->tls_ktls_rx_total++;
 }
 /* }}} */
 
@@ -1169,19 +1127,19 @@ void http_server_on_tls_ktls(http_server_object *server,
  * dashboards and access logs. Unknown status codes still bump the
  * aggregate so we don't silently miss anything.
  */
-void http_server_on_parse_error(http_server_object *server, const int status_code)
+void http_server_on_parse_error(http_server_counters_t *counters, const int status_code)
 {
-    if (server == NULL) {
+    if (counters == NULL) {
         return;
     }
 
-    server->parse_errors_4xx_total++;
+    counters->parse_errors_4xx_total++;
     switch (status_code) {
-        case 400: server->parse_errors_400_total++; break;
-        case 413: server->parse_errors_413_total++; break;
-        case 414: server->parse_errors_414_total++; break;
-        case 431: server->parse_errors_431_total++; break;
-        case 503: server->parse_errors_503_total++; break;
+        case 400: counters->parse_errors_400_total++; break;
+        case 413: counters->parse_errors_413_total++; break;
+        case 414: counters->parse_errors_414_total++; break;
+        case 431: counters->parse_errors_431_total++; break;
+        case 503: counters->parse_errors_503_total++; break;
         default:  /* aggregate-only */ break;
     }
 }
@@ -1570,13 +1528,13 @@ void http_server_trigger_drain(http_server_object *server)
     if (server->drain_cooldown_ns > 0
         && server->drain_last_fired_ns != 0
         && now - server->drain_last_fired_ns < server->drain_cooldown_ns) {
-        server->drain_events_cooldown_blocked_total++;
+        server->counters_live->drain_events_cooldown_blocked_total++;
         return;
     }
 
     server->view.drain_epoch_current++;
     server->drain_last_fired_ns = now;
-    server->drain_events_reactive_total++;
+    server->counters_live->drain_events_reactive_total++;
 }
 
 /* Generic pull-model drain decision. Takes state by value, returns
@@ -1609,7 +1567,7 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
         && r.drain_not_before_ns != UINT64_MAX
         && now >= r.drain_not_before_ns) {
         r.drain_pending = true;
-        server->connections_drained_proactive_total++;
+        server->counters_live->connections_drained_proactive_total++;
     }
 
     if (r.drain_epoch_seen < server->view.drain_epoch_current) {
@@ -1618,7 +1576,7 @@ http_server_drain_eval_t http_server_drain_evaluate(http_server_object *server,
         if (!r.drain_pending) {
             r.drain_pending       = true;
             r.drain_not_before_ns = now;   /* immediate */
-            server->connections_drained_reactive_total++;
+            server->counters_live->connections_drained_reactive_total++;
         }
     }
 
@@ -1693,12 +1651,12 @@ void http_server_on_connection_close(http_server_object *server)
         return;
     }
 
-    if (server->active_connections > 0) {
-        server->active_connections--;
+    if (server->counters_live->active_connections > 0) {
+        server->counters_live->active_connections--;
     }
 
     if (server->listeners_paused
-        && server->active_connections <= server->pause_low) {
+        && server->counters_live->active_connections <= server->pause_low) {
         http_server_resume_listeners(server);
     }
 }
@@ -2130,7 +2088,7 @@ static void http_server_accept_callback(
      * an accept already in flight — reject such strays cheaply with
      * 503 rather than spawning a connection we can't serve. */
     if (server->max_connections > 0 &&
-        server->active_connections >= (size_t)server->max_connections) {
+        server->counters_live->active_connections >= (uint64_t)server->max_connections) {
         const char *response = "HTTP/1.1 503 Service Unavailable\r\n"
                                "Content-Length: 19\r\n"
                                "Connection: close\r\n\r\n"
@@ -2200,7 +2158,7 @@ static void http_server_accept_callback(
         return;
     }
 
-    server->active_connections++;
+    server->counters_live->active_connections++;
     /* total_requests is NOT bumped here — accept counts connections, not
      * requests. It lives in http_server_on_request_sample, fired once per
      * completed request (including each keep-alive request). */
@@ -2210,7 +2168,7 @@ static void http_server_accept_callback(
      * Overload → drain existing connections too. */
     if (!server->listeners_paused
         && server->pause_high > 0
-        && server->active_connections >= server->pause_high) {
+        && server->counters_live->active_connections >= server->pause_high) {
         http_server_pause_listeners(server, /*drain_connections=*/true);
     }
 }
@@ -5240,7 +5198,8 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
 
     array_init(return_value);
     add_assoc_long(return_value, "total_requests", (zend_long)server->counters_live->total_requests);
-    add_assoc_long(return_value, "active_connections", server->active_connections);
+    add_assoc_long(return_value, "active_connections",
+                   (zend_long)server->counters_live->active_connections);
     add_assoc_long(return_value, "active_requests", (zend_long)server->counters_live->active_requests);
     add_assoc_long(return_value, "max_inflight_requests", (zend_long)server->max_inflight_requests);
     add_assoc_long(return_value, "requests_shed_total", (zend_long)server->counters_live->requests_shed_total);
@@ -5254,10 +5213,10 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_bool (return_value, "listeners_paused",     server->listeners_paused);
     add_assoc_long (return_value, "pause_high",           (zend_long)server->pause_high);
     add_assoc_long (return_value, "pause_low",            (zend_long)server->pause_low);
-    add_assoc_long (return_value, "pause_count_total",    (zend_long)server->pause_count_total);
-    add_assoc_long (return_value, "codel_trips_total",    (zend_long)server->codel_trips_total);
+    add_assoc_long (return_value, "pause_count_total",    (zend_long)server->counters_live->pause_count_total);
+    add_assoc_long (return_value, "codel_trips_total",    (zend_long)server->counters_live->codel_trips_total);
     add_assoc_double(return_value, "paused_total_ms",
-                     (double)server->paused_total_ns * ns_to_ms);
+                     (double)server->counters_live->paused_total_ns * ns_to_ms);
     /* This worker's slot — getStats() is what sums them across the pool. */
     const http_server_counters_t *const tc = server->counters_live;
 
@@ -5275,40 +5234,40 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
 
     /* TLS telemetry. Zero-valued on builds without OpenSSL (fields are
      * always present for a stable ABI to PHP callers / dashboards). */
-    add_assoc_long  (return_value, "tls_handshakes_total",           (zend_long)server->tls_handshakes_total);
-    add_assoc_long  (return_value, "tls_handshake_failures_total",   (zend_long)server->tls_handshake_failures_total);
+    add_assoc_long  (return_value, "tls_handshakes_total",           (zend_long)server->counters_live->tls_handshakes_total);
+    add_assoc_long  (return_value, "tls_handshake_failures_total",   (zend_long)server->counters_live->tls_handshake_failures_total);
     add_assoc_double(return_value, "tls_handshake_avg_ms",
-                     server->tls_handshake_ns_count
-                       ? (double)server->tls_handshake_ns_sum / (double)server->tls_handshake_ns_count * ns_to_ms
+                     server->counters_live->tls_handshake_ns_count
+                       ? (double)server->counters_live->tls_handshake_ns_sum / (double)server->counters_live->tls_handshake_ns_count * ns_to_ms
                        : 0.0);
-    add_assoc_long  (return_value, "tls_resumed_total",              (zend_long)server->tls_resumed_total);
+    add_assoc_long  (return_value, "tls_resumed_total",              (zend_long)server->counters_live->tls_resumed_total);
     add_assoc_long  (return_value, "tls_bytes_plaintext_in_total",   (zend_long)server->counters_live->tls_bytes_plaintext_in_total);
     add_assoc_long  (return_value, "tls_bytes_plaintext_out_total",  (zend_long)server->counters_live->tls_bytes_plaintext_out_total);
     add_assoc_long  (return_value, "tls_bytes_ciphertext_in_total",  (zend_long)server->counters_live->tls_bytes_ciphertext_in_total);
     add_assoc_long  (return_value, "tls_bytes_ciphertext_out_total", (zend_long)server->counters_live->tls_bytes_ciphertext_out_total);
-    add_assoc_long  (return_value, "tls_ktls_tx_total",              (zend_long)server->tls_ktls_tx_total);
-    add_assoc_long  (return_value, "tls_ktls_rx_total",              (zend_long)server->tls_ktls_rx_total);
+    add_assoc_long  (return_value, "tls_ktls_tx_total",              (zend_long)server->counters_live->tls_ktls_tx_total);
+    add_assoc_long  (return_value, "tls_ktls_rx_total",              (zend_long)server->counters_live->tls_ktls_rx_total);
 
     /* Parser-error counters. Always present
      * even if zero so dashboards have a stable schema. */
-    add_assoc_long  (return_value, "parse_errors_4xx_total", (zend_long)server->parse_errors_4xx_total);
-    add_assoc_long  (return_value, "parse_errors_400_total", (zend_long)server->parse_errors_400_total);
-    add_assoc_long  (return_value, "parse_errors_413_total", (zend_long)server->parse_errors_413_total);
-    add_assoc_long  (return_value, "parse_errors_414_total", (zend_long)server->parse_errors_414_total);
-    add_assoc_long  (return_value, "parse_errors_431_total", (zend_long)server->parse_errors_431_total);
-    add_assoc_long  (return_value, "parse_errors_503_total", (zend_long)server->parse_errors_503_total);
+    add_assoc_long  (return_value, "parse_errors_4xx_total", (zend_long)server->counters_live->parse_errors_4xx_total);
+    add_assoc_long  (return_value, "parse_errors_400_total", (zend_long)server->counters_live->parse_errors_400_total);
+    add_assoc_long  (return_value, "parse_errors_413_total", (zend_long)server->counters_live->parse_errors_413_total);
+    add_assoc_long  (return_value, "parse_errors_414_total", (zend_long)server->counters_live->parse_errors_414_total);
+    add_assoc_long  (return_value, "parse_errors_431_total", (zend_long)server->counters_live->parse_errors_431_total);
+    add_assoc_long  (return_value, "parse_errors_503_total", (zend_long)server->counters_live->parse_errors_503_total);
 
     /* Connection-drain telemetry. */
     add_assoc_long(return_value, "drain_epoch_current",
                    (zend_long)server->view.drain_epoch_current);
     add_assoc_long(return_value, "drain_events_reactive_total",
-                   (zend_long)server->drain_events_reactive_total);
+                   (zend_long)server->counters_live->drain_events_reactive_total);
     add_assoc_long(return_value, "drain_events_cooldown_blocked_total",
-                   (zend_long)server->drain_events_cooldown_blocked_total);
+                   (zend_long)server->counters_live->drain_events_cooldown_blocked_total);
     add_assoc_long(return_value, "connections_drained_reactive_total",
-                   (zend_long)server->connections_drained_reactive_total);
+                   (zend_long)server->counters_live->connections_drained_reactive_total);
     add_assoc_long(return_value, "connections_drained_proactive_total",
-                   (zend_long)server->connections_drained_proactive_total);
+                   (zend_long)server->counters_live->connections_drained_proactive_total);
     add_assoc_long(return_value, "h2_goaway_sent_total",
                    (zend_long)server->counters_live->h2_goaway_sent_total);
     add_assoc_long(return_value, "h3_goaway_sent_total",
@@ -5316,7 +5275,7 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long(return_value, "h1_connection_close_sent_total",
                    (zend_long)server->counters_live->h1_connection_close_sent_total);
     add_assoc_long(return_value, "connections_force_closed_total",
-                   (zend_long)server->connections_force_closed_total);
+                   (zend_long)server->counters_live->connections_force_closed_total);
 
     /* Streaming-response telemetry. */
     add_assoc_long(return_value, "streaming_responses_total",
@@ -5371,39 +5330,39 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->counters_live->service_sum_ns  = 0;
     server->counters_live->sojourn_max_ns  = 0;
     server->counters_live->sojourn_samples = 0;
-    server->pause_count_total    = 0;
-    server->codel_trips_total    = 0;
-    server->paused_total_ns      = 0;
-    server->tls_handshakes_total           = 0;
-    server->tls_handshake_failures_total   = 0;
-    server->tls_handshake_ns_sum           = 0;
-    server->tls_handshake_ns_count         = 0;
-    server->tls_resumed_total              = 0;
+    server->counters_live->pause_count_total    = 0;
+    server->counters_live->codel_trips_total    = 0;
+    server->counters_live->paused_total_ns      = 0;
+    server->counters_live->tls_handshakes_total           = 0;
+    server->counters_live->tls_handshake_failures_total   = 0;
+    server->counters_live->tls_handshake_ns_sum           = 0;
+    server->counters_live->tls_handshake_ns_count         = 0;
+    server->counters_live->tls_resumed_total              = 0;
     server->counters_live->tls_bytes_plaintext_in_total   = 0;
     server->counters_live->tls_bytes_plaintext_out_total  = 0;
     server->counters_live->tls_bytes_ciphertext_in_total  = 0;
     server->counters_live->tls_bytes_ciphertext_out_total = 0;
-    server->tls_ktls_tx_total              = 0;
-    server->tls_ktls_rx_total              = 0;
-    server->parse_errors_4xx_total         = 0;
-    server->parse_errors_400_total         = 0;
-    server->parse_errors_413_total         = 0;
-    server->parse_errors_414_total         = 0;
-    server->parse_errors_431_total         = 0;
-    server->parse_errors_503_total         = 0;
+    server->counters_live->tls_ktls_tx_total              = 0;
+    server->counters_live->tls_ktls_rx_total              = 0;
+    server->counters_live->parse_errors_4xx_total         = 0;
+    server->counters_live->parse_errors_400_total         = 0;
+    server->counters_live->parse_errors_413_total         = 0;
+    server->counters_live->parse_errors_414_total         = 0;
+    server->counters_live->parse_errors_431_total         = 0;
+    server->counters_live->parse_errors_503_total         = 0;
     server->counters_live->requests_shed_total            = 0;
     server->counters_live->h2_streams_refused_total       = 0;
 
     /* Drain counters. drain_epoch_current / drain_last_fired_ns are
      * runtime state, NOT cleared (same rationale as paused_since_ns). */
-    server->connections_drained_reactive_total   = 0;
-    server->connections_drained_proactive_total  = 0;
+    server->counters_live->connections_drained_reactive_total   = 0;
+    server->counters_live->connections_drained_proactive_total  = 0;
     server->counters_live->h2_goaway_sent_total                 = 0;
     server->counters_live->h3_goaway_sent_total                 = 0;
     server->counters_live->h1_connection_close_sent_total       = 0;
-    server->connections_force_closed_total       = 0;
-    server->drain_events_reactive_total          = 0;
-    server->drain_events_cooldown_blocked_total  = 0;
+    server->counters_live->connections_force_closed_total       = 0;
+    server->counters_live->drain_events_reactive_total          = 0;
+    server->counters_live->drain_events_cooldown_blocked_total  = 0;
     /* Blanket-reset the counters, but carry the live occupancy gauges across:
      * active_requests, conns_active_* and h2_streams_active are current state,
      * and zeroing them mid-flight would make the next close decrement underflow
@@ -5449,6 +5408,16 @@ static void stats_counters_to_zval(zval *arr, const http_server_counters_t *c)
  * (no CAS); a slot mid-retire is skipped, so the aggregate can be stale by one
  * worker — acceptable for statistics. A single-worker server reports its own
  * counters as the sole worker. */
+static void stats_worker_slot_to_zval(const int worker_id,
+                                      const http_server_counters_t *counters,
+                                      void *ctx)
+{
+    zval w;
+    array_init(&w);
+    stats_counters_to_zval(&w, counters);
+    add_index_zval((zval *)ctx, (zend_long)worker_id, &w);
+}
+
 ZEND_METHOD(TrueAsync_HttpServer, getStats)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -5469,25 +5438,11 @@ ZEND_METHOD(TrueAsync_HttpServer, getStats)
     array_init(&workers);
 
     if (g_stats_registry != NULL) {
-        const int cap = http_stats_registry_capacity(g_stats_registry);
-
         /* 'workers' lists the live slots; 'totals' also inherits the monotonic
          * counts of workers that have already exited, so a pool reload does not
          * make a total run backwards. */
-        for (int i = 0; i < cap; i++) {
-            const http_stats_slot_t *const slot = http_stats_registry_at(g_stats_registry, i);
-
-            if (!http_stats_slot_active(slot)) {
-                continue;
-            }
-
-            zval w;
-            array_init(&w);
-            stats_counters_to_zval(&w, &slot->counters);
-            add_index_zval(&workers, (zend_long)slot->worker_id, &w);
-        }
-
-        http_stats_registry_totals(g_stats_registry, &totals);
+        http_stats_registry_totals_ex(g_stats_registry, &totals,
+                                      stats_worker_slot_to_zval, &workers);
     } else {
         /* Single-worker / non-pool: the server's own counters are the one slot. */
         zval w;
