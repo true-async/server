@@ -16,6 +16,7 @@
 #include "core/worker_dispatch.h"
 #include "php_http_server.h"                 /* http_server_object accessors, response API */
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
+#include "core/bailout_guard.h"
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
 #include "zend_exceptions.h"                 /* zend_clear_exception */
@@ -118,9 +119,13 @@ static void worker_dispatch_entry(void)
     };
 
     volatile bool bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try {
         zend_call_function(&fci, &fcall->fci_cache);
     } zend_catch {
+        http_bailout_state_restore(&bailout_state);
         bailout = true;
     } zend_end_try();
 

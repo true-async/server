@@ -29,6 +29,7 @@
 #include "http_send_file.h"          /* issue #13 — Response::sendFile() */
 #include "http_response_internal.h"  /* http_response_take_send_file */
 #include "core/async_plain_event.h"
+#include "core/bailout_guard.h"
 
 static bool h1_sendfile_arm(http_connection_t *conn,
                             http1_request_ctx_t *ctx,
@@ -2891,6 +2892,9 @@ void http_handler_coroutine_entry(void)
      *      exit; OBJ_RELEASE on the coroutine and the rest of cleanup
      *      run in async_coroutine_finalize → extended_dispose, which has
      *      its own zend_try and treats this case via ctx->handler_bailout. */
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try
     {
         zend_call_function(&fci, &conn->handler->fci_cache);
@@ -2898,6 +2902,7 @@ void http_handler_coroutine_entry(void)
 
     zend_catch
     {
+        http_bailout_state_restore(&bailout_state);
         ctx->handler_bailout = true;
     }
 

@@ -21,6 +21,7 @@
 #include "websocket/php_websocket.h"
 
 #include "core/http_connection.h"
+#include "core/bailout_guard.h"
 #include "core/http_connection_internal.h"  /* http_connection_tls_fsm_send_plaintext_atomic */
 #include "core/http_protocol_strategy.h"
 #include "core/http_protocol_handlers.h"
@@ -321,6 +322,9 @@ static void ws_handler_coroutine_entry(void)
     ZVAL_UNDEF(&retval);
 
     /* Bailout firewall — see http_handler_log_bailout in http_connection.c. */
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try
     {
         call_user_function(NULL, NULL, &conn->handler->fci.function_name,
@@ -329,6 +333,7 @@ static void ws_handler_coroutine_entry(void)
 
     zend_catch
     {
+        http_bailout_state_restore(&bailout_state);
         ctx->handler_bailout = 1;
     }
 

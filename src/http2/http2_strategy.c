@@ -37,6 +37,7 @@
 #include "grpc/grpc.h"           /* grpc_classify */
 #include "grpc/grpc_call.h"      /* gRPC call lifecycle policy */
 #include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
+#include "core/bailout_guard.h"
 #include "static/static_handler.h"
 #include "http_send_file.h"
 #include "http_response_internal.h"
@@ -483,6 +484,9 @@ static void http2_handler_coroutine_entry(void)
      * async_coroutine_execute's outer zend_catch and quietly retires the
      * worker via should_start_graceful_shutdown. */
     volatile bool bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try
     {
         zend_call_function(&fci, &handler->fci_cache);
@@ -490,6 +494,7 @@ static void http2_handler_coroutine_entry(void)
 
     zend_catch
     {
+        http_bailout_state_restore(&bailout_state);
         bailout = true;
     }
 
@@ -815,9 +820,13 @@ static int http2_feed(http_protocol_strategy_t *strategy,
      * finer-grained log site and lets feed return a proper error code. */
     int rc;
     volatile bool feed_bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try {
         rc = http2_session_feed(self->session, data, len, consumed_out);
     } zend_catch {
+        http_bailout_state_restore(&bailout_state);
         feed_bailout = true;
         rc = -1;
     } zend_end_try();
@@ -1529,6 +1538,9 @@ static void h2_session_emit_ex(http2_session_t *session, const bool queue_behind
     };
 
     volatile bool bailout = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try
     {
 #ifdef HAVE_OPENSSL
@@ -1564,6 +1576,7 @@ static void h2_session_emit_ex(http2_session_t *session, const bool queue_behind
 
     zend_catch
     {
+        http_bailout_state_restore(&bailout_state);
         bailout = true;
     }
 
@@ -2170,6 +2183,9 @@ static void ws_h2_handler_entry(void)
     ZVAL_UNDEF(&retval);
 
     /* Bailout firewall — see http_handler_log_bailout in http_connection.c. */
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
     zend_try
     {
         call_user_function(NULL, NULL, &ctx->handler->fci.function_name,
@@ -2178,6 +2194,7 @@ static void ws_h2_handler_entry(void)
 
     zend_catch
     {
+        http_bailout_state_restore(&bailout_state);
         ctx->handler_bailout = 1;
     }
 
