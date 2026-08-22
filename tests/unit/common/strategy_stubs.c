@@ -169,3 +169,9 @@ bool http_response_has_declared_length(zend_object *obj)
 	(void) obj;
 	abort();
 }
+
+bool http_response_keeps_declared_length(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}

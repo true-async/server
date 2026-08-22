@@ -1619,6 +1619,10 @@ int64_t http_response_get_declared_length(zend_object *obj);
  * pick its framing, spelled once so the -1 convention lives in one place. */
 bool http_response_has_declared_length(zend_object *obj);
 
+/* Whether a streamed response keeps its declared length on the wire. False
+ * once trailers are set — the rule the buffered commit applies. */
+bool http_response_keeps_declared_length(zend_object *obj);
+
 /* The handler did not reach its end, and a committed streaming response cannot
  * be given the status that says so — it has to be failed on the wire.
  *
