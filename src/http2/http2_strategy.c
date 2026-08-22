@@ -2267,8 +2267,8 @@ static void ws_h2_handler_dispose(zend_coroutine_t *coroutine)
 
     if (conn != NULL && conn->handler_refcount > 0) {
         conn->handler_refcount--;
-        /* The pin this stream held may have been the last thing deferring a
-         * teardown asked for while it ran. */
+        /* This pin may be the last thing a teardown asked for mid-stream is
+         * waiting on. */
         http_connection_destroy_if_idle_deferred(conn);
     }
 }

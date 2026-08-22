@@ -874,11 +874,11 @@ static void http_write_timer_cb_fn(zend_async_event_t *event,
     async_plain_event_fire(conn->out_idle_event);
     async_plain_event_fire(conn->out_drain_event);
 
-    /* The destroy owns the close. It force-fails the write in flight — closing
-     * the io marks any pending request with an error, which is what wakes a
-     * writer suspended in async_io_req_await — and it is the only path that
-     * pairs that close with the dispose the reactor needs to free the handle.
-     * Closing here as well left the io closed but never freed. */
+    /* The close belongs to the destroy, and only there: it is the one path that
+     * pairs the close with the dispose the reactor needs to free the handle. It
+     * force-fails the write in flight too — closing the io marks any pending
+     * request with an error, which is what wakes a writer suspended in
+     * async_io_req_await. */
     http_connection_destroy(conn);
 }
 
