@@ -3,6 +3,47 @@
 One entry per measurement, newest first. An entry names the machine, the build and
 the scenario, because a number without them cannot be compared with the next one.
 
+## 2026-08-22 — what #200's Content-Length insert costs per HTTP/2 response
+
+Builds: `b0ca84c`, the commit before #200, against `ebbe410`, which is #200.
+Machine: WSL2, Linux 6.6.114.1, 16 cores. PHP 8.6.0-dev ZTS **release**
+(`/home/edmond/php-release-24`), the same binary the #179 entry above used.
+Server: `tests/perf/servers/server_setbody.php` in `h2c` mode, one worker, route
+`/b3` — a 3-byte buffered body, so the response is nearly all framing. Load:
+`h2load -n 100000 -c 16 -m 16` after a 20000-request warm-up against the same
+process. The two builds alternate inside each round, so a drift in the machine
+hits both; 18 rounds, the first of each of the two batches dropped because a
+cold page cache cost the first process 15%.
+
+#200 makes every buffered HTTP/2 and HTTP/3 response write its byte count into
+the header table through `http_response_commit_content_length` — a
+`zend_hash_update` plus two `zend_string` allocations, for a field that used to
+be dropped and cost nothing.
+
+| | req/s |
+|---|---|
+| before, median of 16 | 270693 |
+| paired ratio after/before, median | 0.9671 |
+| paired ratio, min and max | 0.9224 … 1.0030 |
+| rounds where #200 is slower | 14 of 16 |
+
+**126 ns per response**, or 3.3% of a 3-byte one. The single-build spread is 6%,
+which is why the comparison is paired: taken as two independent medians the same
+data reads −2.9%, and that is inside one build's own range.
+
+The number is the whole per-response cost and does not scale with the body, so
+its share falls as the body grows. `/b64k` was measured to show that and cannot:
+seven rounds spread 27401 to 45520 req/s, 66% either way, and a 3% effect does
+not survive it.
+
+HTTP/3 is not measured. It calls the same function
+(`src/http3/http3_callbacks.c:902`), so the 126 ns is spent there too, but what
+share of an HTTP/3 response that is has not been taken.
+
+The insert shows, so the shape the plan named next is worth trying: hand the
+count to the flatten loop as an extra entry instead of putting it through the
+table.
+
 ## 2026-08-20 — what the three writes per HTTP/1 chunk cost (#179)
 
 Branch `180-body-rename` at 2e72f41. Machine: WSL2, Linux 6.6.114.1, 16 cores.
