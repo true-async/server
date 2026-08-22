@@ -22,6 +22,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../_read_exact.inc';
 
 $dir = __DIR__ . '/tmp-048';
 @mkdir($dir, 0700, true);
@@ -67,7 +68,7 @@ spawn(function () use ($port, $server) {
 
         $len = (int) (preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? $m[1] : 0);
 
-        return [$head, $len > 0 ? fread($fp, $len) : ''];
+        return [$head, $len > 0 ? tas_read_exact($fp, $len) : ''];
     };
 
     $ask = static function (string $request) use ($port, $read_message) {
