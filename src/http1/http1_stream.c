@@ -332,8 +332,6 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
             slots[n++] = zend_string_init("\r\n", 2, 0);
         }
 
-        http_connection_arm_write_deadline(conn);
-
         if (UNEXPECTED(!http_connection_send_strv_owned(conn, slots, n))) {
             ctx->stream_dead = true;
             return HTTP_STREAM_APPEND_STREAM_DEAD;

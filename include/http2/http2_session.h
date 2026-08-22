@@ -133,6 +133,13 @@ struct http2_session_t {
     uint32_t       last_peer_stream_id;
     bool           bad_preface_emit_goaway;
 
+    /* The session has said its last word: feed answered with a teardown, and
+     * what nghttp2 still holds is what it had queued before the failure. Set
+     * once, never cleared — the connection goes with it. Without it the write
+     * completion's re-drive would put the initial SETTINGS on the wire behind
+     * the GOAWAY that just told the peer the connection is dead. */
+    bool           emit_stopped;
+
     /* Set by http2_session_emit for the duration of nghttp2_session_send;
      * NULL otherwise. */
     struct http2_emit_state *emit_state;
@@ -341,6 +348,16 @@ ssize_t http2_session_drain(http2_session_t *session,
 
 /* Introspection for tests + eventual read/write pump. Both are safe
  * to call after session_new, before any feed. */
+/* True while http2_session_drain holds part of a slice nghttp2 considers sent.
+ * nghttp2_session_send does not know about it, so the two must not alternate
+ * over one session (nghttp2.h: the caller sends all of a chunk before the next). */
+static inline bool http2_session_has_pending_send(const http2_session_t *session)
+{
+    return session != NULL
+        && session->send_pending != NULL
+        && session->send_pending_offset < session->send_pending_len;
+}
+
 bool http2_session_want_read(const http2_session_t *session);
 bool http2_session_want_write(const http2_session_t *session);
 

@@ -349,8 +349,11 @@ void http_connection_destroy(http_connection_t *conn)
         return;
     }
 #endif
-    /* Same deferral for the batched plaintext send (libuv owns our buf). */
-    if (conn->out_in_flight) {
+    /* Same deferral for the batched plaintext send (libuv owns our buf) —
+     * except when the write deadline has fired, because then the completion
+     * that would lift the deferral is what timed out. There the close below
+     * cancels the write, and the completion finds user_data cleared. */
+    if (conn->out_in_flight && !conn->write_timed_out) {
         conn->destroy_pending = true;
         return;
     }
@@ -453,7 +456,23 @@ void http_connection_destroy(http_connection_t *conn)
      * async_io_t (plus its callbacks vector) leaks on server teardown. */
     if (conn->io) {
         zend_async_io_t *io = conn->io;
+
+        /* A writev may still be in flight — the write deadline lets the destroy
+         * run without waiting for it. Release what its completion would have
+         * released, before the strategy that owns those references goes. */
+        if (conn->out_writev_user_cb != NULL) {
+            zend_async_io_write_free_cb_t user_cb = conn->out_writev_user_cb;
+            void *user_data = conn->out_writev_user_data;
+
+            conn->out_writev_user_cb   = NULL;
+            conn->out_writev_user_data = NULL;
+            user_cb(user_data, io);
+        }
+
         conn->io = NULL;
+        /* Both completions read the connection back through this pointer, and
+         * it is about to stop existing. */
+        io->user_data = NULL;
         ZEND_ASYNC_IO_CLOSE(io);
         io->event.dispose(&io->event);
     }
@@ -845,13 +864,22 @@ static void http_write_timer_cb_fn(zend_async_event_t *event,
         return;
     }
 
-    cb->conn->write_timed_out = true;
-    /* Force-fail in-flight write — closing io marks any pending req
-     * with an error which wakes the suspended writer in
-     * async_io_req_await. */
-    if (cb->conn->io != NULL) {
-        ZEND_ASYNC_IO_CLOSE(cb->conn->io);
-    }
+    http_connection_t *conn = cb->conn;
+
+    conn->write_timed_out = true;
+    conn->keep_alive = false;
+
+    /* Wake whoever is parked on the outbound path: the write they are waiting
+     * on is not coming, and every one of them re-reads write_timed_out. */
+    async_plain_event_fire(conn->out_idle_event);
+    async_plain_event_fire(conn->out_drain_event);
+
+    /* The destroy owns the close. It force-fails the write in flight — closing
+     * the io marks any pending request with an error, which is what wakes a
+     * writer suspended in async_io_req_await — and it is the only path that
+     * pairs that close with the dispose the reactor needs to free the handle.
+     * Closing here as well left the io closed but never freed. */
+    http_connection_destroy(conn);
 }
 
 static bool http_write_timer_arm(http_connection_t *conn, const uint32_t ms)
@@ -1596,30 +1624,44 @@ static void http_absorb_io_submission_exception(const http_connection_t *conn,
 static void out_signal_drain(http_connection_t *conn);
 static void out_signal_idle(http_connection_t *conn);
 
-/* Shared tail for batched-send completion callbacks: clears the in-flight
- * flag, finalises a deferred destroy, otherwise re-drives the h2 emit. The
- * re-drive is last because it can destroy the connection under us — a submit
- * that fails synchronously completes from inside it. */
+/* Shared tail for batched-send completion callbacks: clears the in-flight flag,
+ * re-drives the h2 emit, and finalises a deferred destroy once the emit has
+ * nothing left to add. A connection whose write failed is not asked: the
+ * re-drive would build frames for an io the peer has already left, and its own
+ * submit failure would come straight back here. */
 static void http_send_batched_finish(http_connection_t *conn)
 {
     conn->out_in_flight = false;
     conn->out_in_flight_bytes = 0;
     http_write_timer_stop(conn);
 
-    if (UNEXPECTED(conn->destroy_pending) && conn->handler_refcount == 0) {
+    const bool destroying =
+        conn->destroy_pending && conn->handler_refcount == 0;
+
+    if (UNEXPECTED(destroying)) {
+        /* Cleared before the emit: a submit that fails synchronously completes
+         * from inside it and re-enters here, and that nested call must not run
+         * the destroy under this frame. */
         conn->destroy_pending = false;
-        http_connection_destroy(conn);
-        return;
+    } else {
+        out_signal_idle(conn);
+        out_signal_drain(conn);
     }
 
-    out_signal_idle(conn);
-    out_signal_drain(conn);
-
-    /* A connection whose write failed has nothing to emit onto: the re-drive
-     * would build frames for an io the peer has already left, and its own
-     * submit failure would come straight back here. */
     if (EXPECTED(!conn->write_failed)) {
         http2_conn_notify_emit(conn);
+    }
+
+    if (UNEXPECTED(destroying)) {
+        /* The emit may have queued this response's last frames — the one that
+         * would have sent them skipped the write that just completed, and once
+         * the connection is gone nothing comes back for them. */
+        if (conn->out_in_flight || conn->out_pending_len > 0) {
+            conn->destroy_pending = true;
+            return;
+        }
+
+        http_connection_destroy(conn);
     }
 }
 
@@ -1848,6 +1890,7 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
         conn->out_pending_cap = 0;
         conn->out_in_flight_bytes = next_len;
         /* out_in_flight stays true — chain continues. */
+        http_connection_arm_write_deadline(conn);
         zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
@@ -1879,6 +1922,7 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
     conn->out_pending_cap = 0;
     conn->out_in_flight_bytes = next_len;
 
+    http_connection_arm_write_deadline(conn);
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
@@ -1932,6 +1976,7 @@ bool http_connection_send_zstr_batched(http_connection_t *conn, zend_string *bod
 
     conn->out_in_flight = true;
     conn->out_in_flight_bytes = ZSTR_LEN(body);
+    http_connection_arm_write_deadline(conn);
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, ZSTR_VAL(body), ZSTR_LEN(body),
         http_send_batched_zstr_completion_cb);
@@ -1965,6 +2010,7 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
     /* Mark in-flight BEFORE submit so sync-complete sees consistent state. */
     conn->out_in_flight = true;
     conn->out_in_flight_bytes = len;
+    http_connection_arm_write_deadline(conn);
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
         conn->io, buf, len, http_send_batched_completion_cb);
 
@@ -1979,6 +2025,13 @@ bool http_connection_send_batched(http_connection_t *conn, void *buf, size_t len
 /* Vectored variant of send_batched. Drains pending via the single-buf path. */
 static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *io)
 {
+    /* Validated before the connection is read at all: a write deadline lets the
+     * destroy run with this write still in flight, and it clears user_data and
+     * releases the user callback itself so there is nothing here to do. */
+    if (UNEXPECTED(io == NULL || io->user_data != data)) {
+        return;
+    }
+
     http_connection_t *conn = (http_connection_t *)data;
 
     /* User release first; pulled to a local so a re-entrant emit sees cleared slot. */
@@ -1991,10 +2044,6 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         user_cb(user_data, io);
     }
 
-    if (UNEXPECTED(io == NULL || conn != (http_connection_t *)io->user_data)) {
-        return;
-    }
-
     if (conn->out_pending_len > 0) {
         char  *next_buf = conn->out_pending_buf;
         size_t next_len = conn->out_pending_len;
@@ -2002,6 +2051,7 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
         conn->out_in_flight_bytes = next_len;
+        http_connection_arm_write_deadline(conn);
         zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
             conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
@@ -2057,6 +2107,8 @@ bool http_connection_send_batched_writev(http_connection_t *conn,
     for (unsigned i = 0; i < niov; i++) {
         conn->out_in_flight_bytes += iov[i].len;
     }
+
+    http_connection_arm_write_deadline(conn);
 
     zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITEV_EX(
         conn->io, iov, niov, http_send_batched_writev_completion_cb, conn);

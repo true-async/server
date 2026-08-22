@@ -509,7 +509,10 @@ size_t http_connection_outbound_depth_bytes(const http_connection_t *conn);
 
 /* Arm the write deadline for bytes queued rather than awaited: without it a
  * write to a peer that stopped reading never completes, and the destroy that
- * defers on out_in_flight never runs. */
+ * defers on out_in_flight never runs. Every batched submit arms it, so the
+ * deadline measures a write that stopped making progress rather than the
+ * lifetime of a whole response; a caller outside this file needs it only for a
+ * queued write of its own. No-op when setWriteTimeout is 0. */
 void http_connection_arm_write_deadline(http_connection_t *conn);
 
 /* Build and emit the RFC-compliant 4xx response for a parser failure.
