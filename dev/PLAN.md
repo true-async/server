@@ -664,7 +664,7 @@ designs were worked out and both fail on something mechanical.
   BIO ring already batches. The three submits the case rested on are one, so what a queue
   could still remove is the single park — and only by making the write fire-and-forget,
   which leaves `isWritable()` and `tryWrite()` with nothing honest to answer.
-- [~] **Answer from the queues the connection already has.** Reread against the
+- [x] **Answer from the queues the connection already has.** Reread against the
   code on 2026-08-21, and the premise is gone. The step said the number behind it
   had never been taken; it was taken on 2026-08-20 and is in `dev/BENCHMARKS.md`
   — three writes per HTTP/1 chunk cost about 10 µs, and sending the frame as one

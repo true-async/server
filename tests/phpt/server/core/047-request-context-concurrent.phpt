@@ -1,12 +1,5 @@
 --TEST--
 HttpServer: per-request context survives concurrent in-flight requests (no cross-request clobbering)
---XFAIL--
-Known bug true-async/server#74: when the server is destroyed with a per-request
-handler coroutine still in-flight (here parked in Async\delay), the server scope
-is disposed while a child per-request scope still holds that coroutine, tripping
-the runtime assertion "Scope should be empty before disposal" (ext/async/scope.c).
-Remove this XFAIL once graceful shutdown (drain/cancel-and-await before scope
-disposal) lands.
 --EXTENSIONS--
 true_async_server
 true_async
