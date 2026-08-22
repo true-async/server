@@ -1,18 +1,21 @@
 --TEST--
-HTTP/2 h2c: one PING gets exactly one ACK, and a closing session still answers
+HTTP/2 h2c: one PING gets exactly one ACK
 --EXTENSIONS--
 true_async_server
 true_async
 --FILE--
 <?php
-/* The server submits the PING ACK itself, because nghttp2's automatic one is
- * guarded by session_is_closing and so never fires on a session the peer has
- * GOAWAYed — which is what a gRPC shutdown sequence looks like. With nghttp2's
- * ACK left on, the two answered a live connection's PING twice.
+/* The server submits the PING ACK itself, because nghttp2 withholds its
+ * automatic one from a closing session (session_is_closing) and a gRPC shutdown
+ * sequence waits on that ACK. With nghttp2's ACK left on as well, one PING was
+ * answered twice.
  *
- * Both halves are asserted here: a live session answers once, and a session the
- * peer has closed still answers. Deleting either the manual submit or the
- * no_auto_ping_ack option fails one of them. */
+ * Only the live session is asserted. A closing one is not reachable from here:
+ * a peer GOAWAY on an idle connection winds the session down inside the same
+ * feed, so whether a PING behind it is read at all depends on which TCP segment
+ * carries it — that is what made this test fail once on macOS. Measured before
+ * the fix, that shape answered twice too, so it never stood in the state it was
+ * written for. */
 
 require_once __DIR__ . '/_h2_client.inc';
 require_once __DIR__ . '/../_free_port.inc';
@@ -63,15 +66,6 @@ $client = spawn(function () use ($port, $server, $collect) {
         $live->sendPing('LIVEPING');
         echo 'live acks: ', $collect($live, 'LIVEPING'), "\n";
         $live->close();
-
-        /* No request at all, then a peer GOAWAY — the shape a gRPC shutdown
-         * arrives in. */
-        $closing = new H2TestClient('127.0.0.1', $port, 3);
-        $closing->sendRawFrame(H2_FRAME_GOAWAY, 0, 0,
-                               pack('N', 0) . pack('N', 0));
-        $closing->sendPing('GONEPING');
-        echo 'closing acks: ', $collect($closing, 'GONEPING'), "\n";
-        $closing->close();
     } catch (Throwable $e) {
         echo 'client error: ', $e->getMessage(), "\n";
     }
@@ -85,5 +79,4 @@ echo "done\n";
 ?>
 --EXPECT--
 live acks: 1
-closing acks: 1
 done

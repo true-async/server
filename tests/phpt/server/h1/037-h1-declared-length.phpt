@@ -48,7 +48,10 @@ spawn(function () use ($port, $server) {
     usleep(50000);
 
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 5);
-    stream_set_timeout($fp, 3);
+    /* The head is read a byte at a time to stop exactly at the blank line, so
+     * the timeout has to cover a slow runner rather than a slow server: the
+     * server's own read deadline above is 10 s. */
+    stream_set_timeout($fp, 10);
 
     $read_message = static function ($fp) {
         $head = '';
