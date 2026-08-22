@@ -17,7 +17,11 @@ if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
  * Retiring a worker now folds its monotonic totals into the registry, so the
  * aggregate only ever grows. Gauges (active_requests, conns_active_*) must NOT
  * be inherited: a dead worker holds no open connections, and carrying its last
- * value forward would strand a phantom that never drains. */
+ * value forward would strand a phantom that never drains.
+ *
+ * A peak is carried like a total rather than dropped like a gauge: the slow
+ * request did happen, and a worst-case latency that falls back to zero because
+ * the pool rotated reports a health the server never had. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -32,6 +36,7 @@ $config = (new HttpServerConfig())
     ->setReadTimeout(5)
     ->setWriteTimeout(5)
     ->setStatsEnabled(true)
+    ->setTelemetryEnabled(true)
     ->setWorkers(2);
 
 $server = new HttpServer($config);
@@ -73,6 +78,11 @@ spawn(function () use ($server, $hit, $settle) {
     $mid = $server->getStats();
     echo 'survives_reload=', (($mid['totals']['total_requests'] ?? -1) >= $t1 ? 1 : 0), "\n";
 
+    /* A peak the retired cohort measured is still the pool's worst case. */
+    $peak1 = $s1['totals']['sojourn_max_ns'] ?? 0;
+    echo 'peak_measured=',  ($peak1 > 0 ? 1 : 0), "\n";
+    echo 'peak_survives=',  (($mid['totals']['sojourn_max_ns'] ?? -1) >= $peak1 ? 1 : 0), "\n";
+
     /* A retired worker's connection gauge must not be inherited. */
     echo 'no_phantom_conns=', (($mid['totals']['conns_active_h1'] ?? -1) === 0 ? 1 : 0), "\n";
     echo 'no_phantom_reqs=', (($mid['totals']['active_requests'] ?? -1) === 0 ? 1 : 0), "\n";
@@ -97,6 +107,8 @@ $server->start();
 before_reload_ok=1
 %A
 survives_reload=1
+peak_measured=1
+peak_survives=1
 no_phantom_conns=1
 no_phantom_reqs=1
 accumulates=1

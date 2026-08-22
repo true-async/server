@@ -178,8 +178,9 @@ bool http_stats_registry_retire(http_stats_registry_t *reg, const int idx)
 
     /* Inherit the departing worker's monotonic totals before the slot is freed
      * for recycling. A gauge dies with it — it described a state that ended —
-     * while a peak did happen and is carried the way the live fold carries it.
-     * The worker is gone by now, so a plain read of its slot races nobody. */
+     * and so does a LATEST sample, stale the moment its worker is gone. A MAX
+     * peak did happen and is carried, the way a total is. The worker is gone
+     * by now, so a plain read of its slot races nobody. */
     const http_server_counters_t *c = &reg->slots[idx].counters;
 
     for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
@@ -214,6 +215,15 @@ void http_stats_registry_totals(const http_stats_registry_t *reg,
     memcpy(out, &reg->retired, sizeof *out);
     tsrm_mutex_unlock(reg->admin);
 
+    /* retire() writes no LATEST field, and the memcpy above copies the whole
+     * block: zero them so a rename or a reordering cannot let a stale sample
+     * outlive the worker that took it. */
+    for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
+        if (stats_fields[i].kind == HTTP_COUNTER_LATEST) {
+            *(uint64_t *)((char *)out + stats_fields[i].offset) = 0;
+        }
+    }
+
     for (int s = 0; s < reg->capacity; s++) {
         const http_stats_slot_t *slot = &reg->slots[s];
 
@@ -226,7 +236,8 @@ void http_stats_registry_totals(const http_stats_registry_t *reg,
             uint64_t      *dst = (uint64_t *)((char *)out + off);
             const uint64_t v   = stats_field_load(&slot->counters, off);
 
-            if (stats_fields[i].kind == HTTP_COUNTER_MAX) {
+            if (stats_fields[i].kind == HTTP_COUNTER_MAX
+                || stats_fields[i].kind == HTTP_COUNTER_LATEST) {
                 if (v > *dst) {
                     *dst = v;
                 }
@@ -245,7 +256,8 @@ void http_stats_counters_add(http_server_counters_t *acc,
         uint64_t      *dst = (uint64_t *)((char *)acc + off);
         const uint64_t v   = stats_field_load(c, off);
 
-        if (stats_fields[i].kind == HTTP_COUNTER_MAX) {
+        if (stats_fields[i].kind == HTTP_COUNTER_MAX
+            || stats_fields[i].kind == HTTP_COUNTER_LATEST) {
             if (v > *dst) {
                 *dst = v;
             }

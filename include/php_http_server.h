@@ -961,15 +961,21 @@ typedef struct {
  *   GAUGE — a currently-active count. Sums across LIVE workers only; a dead
  *           worker holds no open connections and no in-flight requests, so
  *           carrying its last value forward would strand a phantom.
- *   MAX    — a latest sample. Summing it is meaningless (an RTT is not
- *           additive), and a dead worker's sample is stale, so it is the max
- *           across live workers.
+ *   MAX    — a peak that happened. Summing it is meaningless, so it is the
+ *           maximum across workers, and a retiring worker's peak is folded
+ *           into the retired accumulator the way a total is: the event did
+ *           occur, and a peak that drops on a reload never happened.
+ *   LATEST — the most recent sample of something that varies, an RTT. Also
+ *           taken as a maximum across live workers, because summing is
+ *           meaningless, but a dead worker's sample is stale and is dropped
+ *           with it.
  *
  * A _Static_assert in stats_registry.c fails the build if the struct grows a
  * field this table misses, or if a field stops being a 64-bit word. */
-#define HTTP_COUNTER_SUM   0
-#define HTTP_COUNTER_GAUGE 1
-#define HTTP_COUNTER_MAX   2
+#define HTTP_COUNTER_SUM    0
+#define HTTP_COUNTER_GAUGE  1
+#define HTTP_COUNTER_MAX    2
+#define HTTP_COUNTER_LATEST 3
 
 #define HTTP_SERVER_COUNTER_TABLE(X)                        \
     X(streaming_responses_total,             SUM)           \
@@ -985,7 +991,7 @@ typedef struct {
     X(h2_goaway_sent_total,                  SUM)           \
     X(h2_data_recv_bytes_total,              SUM)           \
     X(h2_data_sent_bytes_total,              SUM)           \
-    X(h2_ping_rtt_ns,                        MAX)           \
+    X(h2_ping_rtt_ns,                        LATEST)        \
     X(h1_connection_close_sent_total,        SUM)           \
     X(h3_goaway_sent_total,                  SUM)           \
     X(requests_shed_total,                   SUM)           \
