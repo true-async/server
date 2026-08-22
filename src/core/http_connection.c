@@ -19,6 +19,7 @@
 #include "http1/http1_stream.h"
 #include "http_connection.h"
 #include "http_connection_internal.h"
+#include "http_protocol_handlers.h"  /* handler pick, once the protocol is known */
 #include "conn_arena.h"
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
 #include "http_protocol_strategy.h"
@@ -3444,6 +3445,8 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
     (void)tls_ctx;
 #endif
 
+    /* Provisional: the accept path only needs to tell "a handler exists" from
+     * "none at all". http_connection_bind_protocol_handler narrows it. */
     conn->handler = handler;
     conn->read_timeout_ms = read_timeout_ms;
     conn->write_timeout_ms = write_timeout_ms;
@@ -3533,3 +3536,20 @@ bool http_connection_spawn(const php_socket_t client_fd, zend_async_scope_t *ser
     return true;
 }
 /* }}} */
+
+void http_connection_bind_protocol_handler(http_connection_t *conn)
+{
+    if (conn == NULL || conn->server == NULL) {
+        return;
+    }
+
+    HashTable *const handlers = http_server_get_protocol_handlers(conn->server);
+
+    if (handlers == NULL) {
+        return;
+    }
+
+    /* is_grpc is false here: a gRPC call is classified per request, and the
+     * transports that carry one override this handler at dispatch. */
+    conn->handler = http_protocol_pick_handler(handlers, conn->protocol_type, false);
+}

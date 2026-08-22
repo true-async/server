@@ -69,6 +69,9 @@ typedef struct {
 
     bool                    is_grpc;
 
+    /* The transport the request arrived on; the handler pick reads it. */
+    http_protocol_type_t    protocol;
+
     bool                    stream_started;
     bool                    stream_ended;
     bool                    stream_failed;  /* terminal wire becomes STREAM_ABORT */
@@ -93,7 +96,7 @@ static void worker_dispatch_entry(void)
 
     HashTable *const handlers = http_server_get_protocol_handlers(ctx->server);
     zend_fcall_t *const fcall =
-        http_protocol_pick_handler(handlers, ctx->is_grpc);
+        http_protocol_pick_handler(handlers, ctx->protocol, ctx->is_grpc);
 
     if (fcall == NULL) {
         return;
@@ -833,6 +836,9 @@ bool worker_dispatch_request(http_server_object *server,
     ctx->sink_arg   = sink_arg;
     ctx->is_head    = is_head;
     ctx->is_grpc    = is_grpc;
+    ctx->protocol   = req->http_major >= 3 ? HTTP_PROTOCOL_HTTP3
+                    : req->http_major == 2 ? HTTP_PROTOCOL_HTTP2
+                                           : HTTP_PROTOCOL_HTTP1;
     ctx->abort_code = -1;   /* until abort($code) names one */
 
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
@@ -851,7 +857,8 @@ bool worker_dispatch_request(http_server_object *server,
 
     /* No handler registered: synthesise a 404 so the sink still fires with a
      * response instead of leaving the stream hanging. */
-    zend_fcall_t *const fcall = http_protocol_pick_handler(handlers, is_grpc);
+    zend_fcall_t *const fcall =
+        http_protocol_pick_handler(handlers, ctx->protocol, is_grpc);
 
     if (fcall == NULL) {
         http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);

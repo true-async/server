@@ -985,6 +985,11 @@ ZEND_METHOD(TrueAsync_HttpRequest, awaitBody)
     zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
 
     if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
+        /* Nothing to suspend on, and `static` leaves no value to say so with:
+         * a bare return here answers the declared return type with none, and
+         * $this would report a body this call never waited for. */
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "awaitBody(): the current coroutine cannot be suspended", 0);
         return;
     }
 

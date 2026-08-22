@@ -152,4 +152,10 @@ bool http_connection_tls_fsm_send_plaintext_atomic(http_connection_t *conn,
 void tls_release_waiters(http_connection_t *conn);
 #endif /* HAVE_OPENSSL */
 
+/* Re-pick conn->handler now that conn->protocol_type is settled — the accept
+ * pick runs before a byte is read and can only take the general registration.
+ * Called from both detection sites, the plaintext preface and the TLS ALPN
+ * fast path; http_protocol_pick_handler holds the precedence. */
+void http_connection_bind_protocol_handler(http_connection_t *conn);
+
 #endif /* HTTP_CONNECTION_INTERNAL_H */

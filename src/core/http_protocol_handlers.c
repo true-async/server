@@ -147,11 +147,17 @@ bool http_request_body_size_uncapped(const http_request_t *req)
 }
 
 /* {{{ http_protocol_pick_handler */
-zend_fcall_t *http_protocol_pick_handler(HashTable *handlers, const bool is_grpc)
+zend_fcall_t *http_protocol_pick_handler(HashTable *handlers,
+                                         const http_protocol_type_t protocol,
+                                         const bool is_grpc)
 {
     zend_fcall_t *fcall = is_grpc
         ? http_protocol_get_handler(handlers, HTTP_PROTOCOL_GRPC)
         : NULL;
+
+    if (fcall == NULL) {
+        fcall = http_protocol_get_handler(handlers, protocol);
+    }
 
     if (fcall == NULL) {
         fcall = http_protocol_get_handler(handlers, HTTP_PROTOCOL_HTTP1);

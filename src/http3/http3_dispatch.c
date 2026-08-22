@@ -597,7 +597,8 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
 
     s->is_grpc = grpc_mode != GRPC_MODE_NONE;
 
-    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, s->is_grpc);
+    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, HTTP_PROTOCOL_HTTP3,
+                                                     s->is_grpc);
 
     /* Static-only deployments register a mount but no PHP handler — the
      * static gate below claims the request before any handler is needed.
@@ -771,7 +772,8 @@ static void h3_handler_coroutine_entry(void)
     }
 
     HashTable *handlers = http_server_get_protocol_handlers(server);
-    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, s->is_grpc);
+    zend_fcall_t *fcall = http_protocol_pick_handler(handlers, HTTP_PROTOCOL_HTTP3,
+                                                     s->is_grpc);
 
     if (fcall == NULL) return;
 

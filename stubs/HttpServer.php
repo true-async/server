@@ -37,7 +37,12 @@ final class HttpServer
     public static function isHttp3(): bool {}
 
     /**
-     * Add HTTP/1.1 request handler
+     * Add the request handler every protocol falls back to.
+     *
+     * HTTP/1.1, HTTP/2 and HTTP/3 all reach this handler unless a
+     * protocol-specific one is registered beside it — see
+     * {@see HttpServer::addHttp2Handler()} and
+     * {@see HttpServer::addGrpcHandler()}.
      *
      * Handler signature: function(HttpRequest $request, HttpResponse $response): void
      *
@@ -149,7 +154,13 @@ final class HttpServer
     public function room(string $topic): Room {}
 
     /**
-     * Add HTTP/2 handler (TODO)
+     * Add a handler for connections that speak HTTP/2.
+     *
+     * Takes precedence over {@see HttpServer::addHttpHandler()} on such a
+     * connection; a gRPC call registered through
+     * {@see HttpServer::addGrpcHandler()} still wins over both. Registered
+     * alone it also narrows the server-wide protocol mask to HTTP/2, so
+     * HTTP/1 traffic is refused.
      *
      * @param callable $handler HTTP/2 handler callback
      * @return static

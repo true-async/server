@@ -74,23 +74,22 @@ spawn(function () use ($server, $port) {
     $samples_sum = array_sum(array_column($w, 'sojourn_samples'));
     $service_sum = array_sum(array_column($w, 'service_sum_ns'));
     $max_of_max  = max(array_column($w, 'sojourn_max_ns') ?: [-1]);
-    $reporting   = count(array_filter(array_column($w, 'sojourn_samples')));
 
     echo 'samples_total=',   (($t['sojourn_samples'] ?? 0) === N ? 1 : 0), "\n";
     echo 'samples_summed=',  (($t['sojourn_samples'] ?? -1) === $samples_sum ? 1 : 0), "\n";
     echo 'service_summed=',  (($t['service_sum_ns'] ?? -1) === $service_sum ? 1 : 0), "\n";
     echo 'max_is_peak=',     (($t['sojourn_max_ns'] ?? -2) === $max_of_max ? 1 : 0), "\n";
     echo 'slow_seen=',       (($t['service_sum_ns'] ?? 0) >= 150 * 1000 * 1000 ? 1 : 0), "\n";
-    /* Whether the nine land on one worker or three is the kernel's call, and the
-     * macOS runner does not spread them reliably: this line reported a single
-     * worker there both when the requests were offered in turn and when they
-     * were offered together, while the same code spreads them on Linux and in
-     * the same runner's other passes. What the test is actually about — the
-     * totals being the pool's sum rather than one worker's — holds either way,
-     * so the spread is required where it is reproducible and reported where it
-     * is not. */
-    echo 'spread_or_darwin=',
-         (PHP_OS_FAMILY === 'Darwin' || $reporting > 1 ? 1 : 0), "\n";
+    /* How many workers the nine requests reach is not asserted, because the
+     * server does not promise it. Where the kernel has load-balanced
+     * SO_REUSEPORT each worker binds its own socket and the connections spread;
+     * everywhere else the workers share one descriptor and nothing arbitrates
+     * between their reactors, so a busy machine lets one drain the accept queue
+     * — measured on Linux under TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1 pinned to
+     * one core: [1,0,8] samples across three workers. The same non-promise is
+     * recorded in tests/phpt/websocket/042-topics-interest-filter.phpt. What
+     * this test is about holds either way: the totals are the pool's sum rather
+     * than one worker's, which the two lines above check. */
 
     $server->stop();
 });
@@ -104,5 +103,4 @@ samples_summed=1
 service_summed=1
 max_is_peak=1
 slow_seen=1
-spread_or_darwin=1
 %ADone

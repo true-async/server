@@ -1113,14 +1113,13 @@ static bool http2_commit_stream_response(http_connection_t *conn,
 
     if (submit_rc != 0)  { return false; }
 
-    /* Trailers. Must be queued BEFORE the drain loop so
-     * the data_provider sees has_trailers=true on the final DATA
-     * slice and emits NO_END_STREAM instead of END_STREAM. */
-    http2_session_submit_response_trailers(self->session, stream->stream_id,
-                                           response_obj);
-
-    /* GOAWAY after response+trailers so it bundles with the final DATA
-     * in one writev. drain_submitted guards multi-stream double-GOAWAY. */
+    /* Trailers belong to the data provider, which submits them at true EOF —
+     * the only order nghttp2 accepts. A trailer HEADERS queued here, beside
+     * DATA that has not been sent yet, displaces the DATA, and the peer reads
+     * a complete response with an empty body. See h2_dp_mark_eof.
+     *
+     * GOAWAY after the response so it bundles with the final DATA in one
+     * writev. drain_submitted guards multi-stream double-GOAWAY. */
     if (!conn->drain_submitted
         && http_server_should_drain_now(conn->server, conn, zend_hrtime())) {
         (void)http2_session_terminate(self->session, 0 /* NGHTTP2_NO_ERROR */);
