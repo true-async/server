@@ -260,16 +260,18 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
 }
 
 /* Park until in-flight < cap; false = stream dead. Suspends on a trigger the
- * reactor signals per ack; a write-timeout timer bounds a peer that stops
- * ACKing. */
-static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx)
+ * reactor signals per ack. @p bound_ms 0 takes the configured write deadline,
+ * which is what bounds a peer that stops ACKing. */
+static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx,
+                                      const uint32_t bound_ms)
 {
     if (ctx->credit == NULL) {
         return true;
     }
 
-    const uint32_t timeout_ms =
-        http_server_get_write_timeout_s(ctx->server) * 1000u;
+    const uint32_t timeout_ms = bound_ms != 0
+        ? bound_ms
+        : http_server_get_write_timeout_s(ctx->server) * 1000u;
 
     while (ctx->posted_bytes - stream_credit_acked(ctx->credit)
                >= WORKER_STREAM_INFLIGHT_CAP) {
@@ -407,7 +409,7 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         return HTTP_STREAM_APPEND_OK;   /* room was checked above; never parks */
     }
 
-    if (!worker_stream_wait_credit(ctx)) {
+    if (!worker_stream_wait_credit(ctx, 0)) {
         ctx->stream_failed = true;   /* credit timeout / cancelled while parked */
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -500,9 +502,7 @@ static bool worker_stream_wait_writable(void *vctx, const uint32_t timeout_ms)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
-    (void)timeout_ms;   /* the credit wait uses the configured write deadline */
-
-    return worker_stream_wait_credit(ctx);
+    return worker_stream_wait_credit(ctx, timeout_ms);
 }
 
 static const http_response_stream_ops_t worker_stream_ops = {
