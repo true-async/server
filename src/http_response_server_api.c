@@ -122,6 +122,19 @@ bool http_response_has_declared_length(zend_object *obj)
     return http_response_from_obj(obj)->declared_length >= 0;
 }
 
+bool http_response_keeps_declared_length(zend_object *obj)
+{
+    if (!http_response_has_declared_length(obj)) {
+        return false;
+    }
+
+    /* nghttp2 puts END_STREAM on the DATA frame that completes a stated count,
+     * and the trailers would then reach a closed stream. */
+    const HashTable *const trailers = http_response_get_trailers(obj);
+
+    return trailers == NULL || zend_hash_num_elements(trailers) == 0;
+}
+
 /* True once HttpResponse::write() has been called. Dispose paths use
  * this to skip the buffered-mode commit (headers are already on the
  * wire, the data provider drives the body via chunk_queue). */
