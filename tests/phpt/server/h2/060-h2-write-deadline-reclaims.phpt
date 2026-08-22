@@ -68,7 +68,10 @@ $client = spawn(function () use ($port, $server) {
 
         $active = -1;
 
-        for ($i = 0; $i < 60; $i++) {
+        /* Fifteen seconds against a one-second write deadline: the margin is
+         * for a loaded runner, not for the deadline, and the read deadline at
+         * 30 s still cannot explain a reclaim inside it. */
+        for ($i = 0; $i < 150; $i++) {
             delay(100);
             $active = $server->getStats()['totals']['conns_active_h2'] ?? -1;
 

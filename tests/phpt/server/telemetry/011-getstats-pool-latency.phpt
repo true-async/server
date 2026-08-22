@@ -17,7 +17,7 @@ if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
  * count is the pool's and the maximum is the worst any worker saw.
  *
  * The three slow requests are what makes the sum a pool-wide number rather
- * than one worker's: they are spread across workers by the accept hash, so no
+ * than one worker's: offered together they land on different workers, so no
  * single slot holds them all. sojourn is the wait before the handler starts,
  * service is the handler itself — the delay shows in the second. */
 
@@ -47,10 +47,19 @@ $server->addHttpHandler(function ($req, $res) {
 spawn(function () use ($server, $port) {
     usleep(400000);
 
+    /* Concurrent, not one after another: a worker accepts as fast as it can, so
+     * nine requests offered in turn can all be taken by whichever one is free —
+     * measured on a macOS runner, where this test then reported a single worker
+     * and failed. Nine at once cannot all be accepted by one. */
+    $cmds = [];
+
     for ($i = 0; $i < N; $i++) {
         $path = ($i % 3 === 0) ? '/slow' : '/fast';
-        shell_exec(sprintf('curl -s -o /dev/null --http1.1 --max-time 3 http://127.0.0.1:%d%s', $port, $path));
+        $cmds[] = sprintf('curl -s -o /dev/null --http1.1 --max-time 5 http://127.0.0.1:%d%s &',
+                          $port, $path);
     }
+
+    shell_exec(implode(' ', $cmds) . ' wait');
 
     $stats = [];
     for ($p = 0; $p < 60; $p++) {
