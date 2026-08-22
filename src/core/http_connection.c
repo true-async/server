@@ -60,13 +60,6 @@ extern void http_response_set_default_json_flags(zend_object *, uint32_t);
 #endif
 #include <stdio.h>
 
-/* MSG_NOSIGNAL is a Linux extension. On BSD/macOS SO_NOSIGPIPE is the
- * equivalent; on Windows SIGPIPE does not exist. Providing a no-op macro
- * keeps the call sites portable. */
-#ifndef MSG_NOSIGNAL
-# define MSG_NOSIGNAL 0
-#endif
-
 #define DEFAULT_READ_BUFFER_SIZE 8192
 
 extern zval* http_request_create_from_parsed(http_request_t *req);
