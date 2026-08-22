@@ -149,9 +149,19 @@ struct _http3_stream_s {
 
     /* Back-pointer to the owning connection. Needed by the dispose
      * path so it can submit the response to the correct nghttp3_conn
-     * and trigger drain. Non-owning — the connection outlives any
-     * stream it carries. */
+     * and trigger drain. Non-owning, and NULL once the connection has
+     * torn down — a handler coroutine outlives that, so anything the
+     * dispose owes whatever happens is reached through the two fields
+     * below instead. */
     http3_connection_t *conn;
+
+    /* The server's counters and log sink, taken when the stream is created.
+     * What the dispose owes — closing the in-flight bracket, recording the
+     * request — is owed whether or not the peer is still there, and reached
+     * through conn it is skipped: the gauge never comes back down, and
+     * admission control on HTTP/1 and HTTP/2 reads that gauge. */
+    struct http_server_counters_s *req_counters;
+    struct http_log_state         *req_log_state;
 
     /* Slab pool the slot came from. Stable across the stream's lifetime
      * even when conn is NULLed during teardown — release() needs this

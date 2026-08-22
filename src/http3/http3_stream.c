@@ -56,6 +56,11 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
     s->request->peer     = conn->peer;
     s->request->peer_len = conn->peer_len;
 
+    /* Taken here, not at dispose: teardown NULLs conn while the stream is
+     * still finishing. */
+    s->req_counters  = conn->counters;
+    s->req_log_state = conn->log_state;
+
     /* Reactor mode: the listener routes parsed requests to PHP
      * workers, so the parser builds the request in the persistent (malloc)
      * domain — it crosses the reactor->worker thread boundary. NULL reactor ctx
@@ -263,7 +268,9 @@ void http3_stream_release(http3_stream_t *s)
      * somewhere; in the latter case the callback fires later when
      * the wrapper is finally collected. dtor is a no-op when UNDEF. */
     zval_ptr_dtor(&s->request_zv);
+    ZVAL_UNDEF(&s->request_zv);
     zval_ptr_dtor(&s->response_zv);
+    ZVAL_UNDEF(&s->response_zv);
 
     /* Drop our own request refcount. If the wrapper's free_object
      * already ran above, this is the last ref and triggers the
