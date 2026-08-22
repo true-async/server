@@ -815,12 +815,12 @@ static void tls_on_handshake_done(http_connection_t *conn,
                                   uint64_t handshake_start_ns)
 {
     http_server_on_tls_handshake_done(
-        conn->server,
+        conn->counters,
         zend_hrtime() - handshake_start_ns,
         tls_session_was_resumed(conn->tls));
 
     http_server_on_tls_ktls(
-        conn->server,
+        conn->counters,
         tls_session_ktls_tx_active(conn->tls),
         tls_session_ktls_rx_active(conn->tls));
 
@@ -905,7 +905,7 @@ static void tls_advance_state(http_connection_t *conn)
             }
             /* TLS_IO_ERROR / TLS_IO_CLOSED. */
             tls_log_error(conn, "handshake");
-            http_server_on_tls_handshake_failed(conn->server);
+            http_server_on_tls_handshake_failed(conn->counters);
             conn->state = CONN_STATE_CLOSING;
             return;
         }

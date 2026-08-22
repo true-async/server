@@ -543,23 +543,25 @@ void http_server_bind_connection(http_server_object *server,
 void http_server_addref(http_server_object *server);
 void http_server_release(http_server_object *server);
 
-/* TLS handshake telemetry hooks. on_tls_io is now inline (see counters
- * slice below); these stay out-of-line because they touch state outside
- * the public counters slice (handshake count + ns sum). All safe with
- * server == NULL. */
-void http_server_on_tls_handshake_done(http_server_object *server,
+typedef struct http_server_counters_s http_server_counters_t;
+
+/* TLS handshake telemetry hooks. Out-of-line because a handshake happens
+ * once per connection and none of this is on the per-request path;
+ * on_tls_io is inline for the opposite reason. All three are safe with
+ * counters == NULL. */
+void http_server_on_tls_handshake_done(http_server_counters_t *counters,
                                        uint64_t duration_ns,
                                        bool resumed);
-void http_server_on_tls_handshake_failed(http_server_object *server);
+void http_server_on_tls_handshake_failed(http_server_counters_t *counters);
 
 /* Post-handshake kTLS probe. tx / rx are independent — the kernel may
  * offload one direction but not the other. */
-void http_server_on_tls_ktls(http_server_object *server,
+void http_server_on_tls_ktls(http_server_counters_t *counters,
                              bool tx_active, bool rx_active);
 
 /* Parser-error hook. Called once per RFC-compliant 4xx parse-error
  * response built in http_connection_emit_parse_error. */
-void http_server_on_parse_error(http_server_object *server, int status_code);
+void http_server_on_parse_error(http_server_counters_t *counters, int status_code);
 
 /* H3 dispatch needs the handler fcall + the server scope but lives in
  * src/http3/ where http_server_object's layout is opaque. Two pinpoint
@@ -851,7 +853,7 @@ void  http_response_install_stream_ops(zend_object *response_obj,
  * NOT for stateful counters with side-effects (CoDel sample aggregator,
  * parse-error switch) — those stay behind opaque fns. The request-timing group
  * is here because a pool has to sum it (#169). */
-typedef struct {
+typedef struct http_server_counters_s {
     /* Streaming response */
     uint64_t streaming_responses_total;
     uint64_t stream_send_calls_total;
@@ -945,6 +947,47 @@ typedef struct {
     uint64_t service_sum_ns;
     uint64_t sojourn_samples;
     uint64_t sojourn_max_ns;
+
+    /* Connection gauge (++ at accept, -- at close). The protocol split above
+     * starts only once ALPN or the preface has answered, so this is the count
+     * the hard cap and the pause hysteresis read. */
+    uint64_t active_connections;
+
+    /* Backpressure. pause_count_total counts every pause, whatever raised it;
+     * codel_trips_total counts the subset CoDel raised. paused_total_ns is the
+     * time already spent paused — the current pause is added at resume, so a
+     * reader sees it only once the listeners are back. */
+    uint64_t pause_count_total;
+    uint64_t codel_trips_total;
+    uint64_t paused_total_ns;
+
+    /* The sum and the count are separate fields because the mean is taken after
+     * the pool is summed: averaging per-worker averages weights a quiet worker
+     * like a busy one. */
+    uint64_t tls_handshakes_total;
+    uint64_t tls_handshake_failures_total;
+    uint64_t tls_handshake_ns_sum;
+    uint64_t tls_handshake_ns_count;
+    uint64_t tls_resumed_total;
+    uint64_t tls_ktls_tx_total;   /* handshakes where kTLS TX engaged */
+    uint64_t tls_ktls_rx_total;   /* handshakes where kTLS RX engaged */
+
+    /* parse_errors_4xx_total is the sum of the per-status fields beside it. */
+    uint64_t parse_errors_4xx_total;
+    uint64_t parse_errors_400_total;
+    uint64_t parse_errors_413_total;
+    uint64_t parse_errors_414_total;
+    uint64_t parse_errors_431_total;
+    uint64_t parse_errors_503_total;
+
+    /* Connection drain. The two events count sweeps, the two connections count
+     * what the sweeps closed, and force_closed counts a deadline that ran out
+     * with the connection still open. */
+    uint64_t drain_events_reactive_total;
+    uint64_t drain_events_cooldown_blocked_total;
+    uint64_t connections_drained_reactive_total;
+    uint64_t connections_drained_proactive_total;
+    uint64_t connections_force_closed_total;
 } http_server_counters_t;
 
 /* Counter field table. One row per field of http_server_counters_t; it drives
@@ -1016,7 +1059,29 @@ typedef struct {
     X(sojourn_sum_ns,                        SUM)           \
     X(service_sum_ns,                        SUM)           \
     X(sojourn_samples,                       SUM)           \
-    X(sojourn_max_ns,                        MAX)
+    X(sojourn_max_ns,                        MAX)            \
+    X(active_connections,                    GAUGE)          \
+    X(pause_count_total,                     SUM)            \
+    X(codel_trips_total,                     SUM)            \
+    X(paused_total_ns,                       SUM)            \
+    X(tls_handshakes_total,                  SUM)            \
+    X(tls_handshake_failures_total,          SUM)            \
+    X(tls_handshake_ns_sum,                  SUM)            \
+    X(tls_handshake_ns_count,                SUM)            \
+    X(tls_resumed_total,                     SUM)            \
+    X(tls_ktls_tx_total,                     SUM)            \
+    X(tls_ktls_rx_total,                     SUM)            \
+    X(parse_errors_4xx_total,                SUM)            \
+    X(parse_errors_400_total,                SUM)            \
+    X(parse_errors_413_total,                SUM)            \
+    X(parse_errors_414_total,                SUM)            \
+    X(parse_errors_431_total,                SUM)            \
+    X(parse_errors_503_total,                SUM)            \
+    X(drain_events_reactive_total,           SUM)            \
+    X(drain_events_cooldown_blocked_total,   SUM)            \
+    X(connections_drained_reactive_total,    SUM)            \
+    X(connections_drained_proactive_total,   SUM)            \
+    X(connections_force_closed_total,        SUM)
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
  * caches &server->view (or &http_server_view_default) at create time.

@@ -35,6 +35,16 @@ $expected = [
     'log_records_dropped_total',
     'static_zero_coroutine_total', 'static_cache_hits_total', 'static_cache_misses_total',
     'sojourn_sum_ns', 'service_sum_ns', 'sojourn_samples', 'sojourn_max_ns',
+    'active_connections',
+    'pause_count_total', 'codel_trips_total', 'paused_total_ns',
+    'tls_handshakes_total', 'tls_handshake_failures_total',
+    'tls_handshake_ns_sum', 'tls_handshake_ns_count', 'tls_resumed_total',
+    'tls_ktls_tx_total', 'tls_ktls_rx_total',
+    'parse_errors_4xx_total', 'parse_errors_400_total', 'parse_errors_413_total',
+    'parse_errors_414_total', 'parse_errors_431_total', 'parse_errors_503_total',
+    'drain_events_reactive_total', 'drain_events_cooldown_blocked_total',
+    'connections_drained_reactive_total', 'connections_drained_proactive_total',
+    'connections_force_closed_total',
 ];
 
 $port = tas_free_port();

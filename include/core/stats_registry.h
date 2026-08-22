@@ -89,6 +89,19 @@ void http_stats_registry_free(http_stats_registry_t *reg);
 void http_stats_registry_totals(const http_stats_registry_t *reg,
                                 http_server_counters_t *out);
 
+/* The pool's totals, and what each live worker contributed to them, from one
+ * traversal. `visit` receives a private copy of the slot taken in the same read
+ * pass the totals accumulate, so the breakdown and the total describe the same
+ * instant and always add up. NULL asks for the totals alone. */
+typedef void (*http_stats_slot_visit_t)(int worker_id,
+                                        const http_server_counters_t *counters,
+                                        void *ctx);
+
+void http_stats_registry_totals_ex(const http_stats_registry_t *reg,
+                                   http_server_counters_t *out,
+                                   http_stats_slot_visit_t visit,
+                                   void *ctx);
+
 /* Accumulate one counter block into another, honouring each field's kind. */
 void http_stats_counters_add(http_server_counters_t *acc,
                              const http_server_counters_t *c);
