@@ -66,9 +66,9 @@ spawn(function () use ($server, $port) {
 
     $mismatch = [];
     foreach ($t as $k => $v) {
-        /* h2_ping_rtt_ns is a latest-sample gauge: it reports the max across
-         * workers, not their sum — summing round-trip times means nothing. */
-        if ($k === 'h2_ping_rtt_ns') continue;
+        /* A MAX field reports the peak across workers, not their sum: summing
+         * a round-trip time or a worst-case latency means nothing. */
+        if ($k === 'h2_ping_rtt_ns' || $k === 'sojourn_max_ns') continue;
         if (($sum[$k] ?? 0) !== $v) $mismatch[] = $k;
     }
 

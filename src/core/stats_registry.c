@@ -177,18 +177,21 @@ bool http_stats_registry_retire(http_stats_registry_t *reg, const int idx)
     tsrm_mutex_lock(reg->admin);
 
     /* Inherit the departing worker's monotonic totals before the slot is freed
-     * for recycling; its gauges and samples die with it. The worker is gone by
-     * now, so a plain read of its slot races nobody. */
+     * for recycling. A gauge dies with it — it described a state that ended —
+     * while a peak did happen and is carried the way the live fold carries it.
+     * The worker is gone by now, so a plain read of its slot races nobody. */
     const http_server_counters_t *c = &reg->slots[idx].counters;
 
     for (size_t i = 0; i < STATS_FIELD_COUNT; i++) {
-        if (stats_fields[i].kind != HTTP_COUNTER_SUM) {
-            continue;
-        }
-
         const size_t off = stats_fields[i].offset;
-        *(uint64_t *)((char *)&reg->retired + off) +=
-            *(const uint64_t *)((const char *)c + off);
+        uint64_t *const dst = (uint64_t *)((char *)&reg->retired + off);
+        const uint64_t v = *(const uint64_t *)((const char *)c + off);
+
+        if (stats_fields[i].kind == HTTP_COUNTER_SUM) {
+            *dst += v;
+        } else if (stats_fields[i].kind == HTTP_COUNTER_MAX && v > *dst) {
+            *dst = v;
+        }
     }
 
     zend_atomic_int_store_ex(&reg->slots[idx].active, 0);

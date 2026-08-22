@@ -849,7 +849,8 @@ void  http_response_install_stream_ops(zend_object *response_obj,
  * (rebuild required) — the tradeoff for inline access on hot paths.
  *
  * NOT for stateful counters with side-effects (CoDel sample aggregator,
- * parse-error switch, request_sample) — those stay behind opaque fns. */
+ * parse-error switch) — those stay behind opaque fns. The request-timing group
+ * is here because a pool has to sum it (#169). */
 typedef struct {
     /* Streaming response */
     uint64_t streaming_responses_total;
@@ -934,6 +935,16 @@ typedef struct {
      * paths and TTL-evicted re-lookups count as misses. */
     uint64_t static_cache_hits_total;
     uint64_t static_cache_misses_total;
+
+    /* Request timings — keep these four adjacent so the hot sample aggregator
+     * writes within a few cache lines. One group: every sample updates
+     * sojourn_sum + service_sum + sojourn_samples, and may raise sojourn_max.
+     * service_samples is collapsed into sojourn_samples — each sample carries
+     * both sojourn and service, so the counts are identical. */
+    uint64_t sojourn_sum_ns;
+    uint64_t service_sum_ns;
+    uint64_t sojourn_samples;
+    uint64_t sojourn_max_ns;
 } http_server_counters_t;
 
 /* Counter field table. One row per field of http_server_counters_t; it drives
@@ -995,7 +1006,11 @@ typedef struct {
     X(log_records_dropped_total,             SUM)           \
     X(static_zero_coroutine_total,           SUM)           \
     X(static_cache_hits_total,               SUM)           \
-    X(static_cache_misses_total,             SUM)
+    X(static_cache_misses_total,             SUM)           \
+    X(sojourn_sum_ns,                        SUM)           \
+    X(service_sum_ns,                        SUM)           \
+    X(sojourn_samples,                       SUM)           \
+    X(sojourn_max_ns,                        MAX)
 
 /* Read-mostly config snapshot. Same embedded-pointer pattern: each conn
  * caches &server->view (or &http_server_view_default) at create time.

@@ -381,15 +381,6 @@ struct http_server_object {
     uint64_t                 codel_min_sojourn_ns;
     uint64_t                 codel_first_above_target_ns;
 
-    /* Telemetry — cluster these so the hot sample aggregator writes
-     * within a few cache lines. Counter set is one atomic group: every
-     * sample updates sojourn_sum + service_sum + sojourn_samples
-     * (possibly sojourn_max). service_samples collapsed — each sample
-     * carries both sojourn and service, counts are identical. */
-    uint64_t                 sojourn_sum_ns;
-    uint64_t                 service_sum_ns;
-    uint64_t                 sojourn_max_ns;
-    uint64_t                 sojourn_samples;
     uint64_t                 pause_count_total;
     uint64_t                 codel_trips_total;
     uint64_t                 paused_since_ns;     /* 0 while accepting */
@@ -985,20 +976,21 @@ static void http_server_resume_listeners(http_server_object *server);
 
 /* Hot-path counter aggregation. Always-inlined so the sample callback
  * emits the three writes + one branch directly at the call site — no
- * function call, no stack frame. Struct layout above clusters these
- * fields (sojourn_sum/max/samples + service_sum) on a small number of
- * cache lines so this whole block writes within L1. */
+ * function call, no stack frame. The four fields it writes are adjacent in the
+ * counter slab, which is what keeps the block inside a cache line or two. */
 static zend_always_inline void
 http_server_aggregate_sample(http_server_object *s,
                              const uint64_t sojourn_ns,
                              const uint64_t service_ns)
 {
-    s->sojourn_sum_ns += sojourn_ns;
-    s->service_sum_ns += service_ns;
-    s->sojourn_samples++;
+    http_server_counters_t *const c = s->counters_live;
 
-    if (sojourn_ns > s->sojourn_max_ns) {
-        s->sojourn_max_ns = sojourn_ns;
+    c->sojourn_sum_ns += sojourn_ns;
+    c->service_sum_ns += service_ns;
+    c->sojourn_samples++;
+
+    if (sojourn_ns > c->sojourn_max_ns) {
+        c->sojourn_max_ns = sojourn_ns;
     }
 }
 
@@ -5261,16 +5253,19 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long (return_value, "codel_trips_total",    (zend_long)server->codel_trips_total);
     add_assoc_double(return_value, "paused_total_ms",
                      (double)server->paused_total_ns * ns_to_ms);
-    add_assoc_long (return_value, "sojourn_samples",      (zend_long)server->sojourn_samples);
+    /* This worker's slot — getStats() is what sums them across the pool. */
+    const http_server_counters_t *const tc = server->counters_live;
+
+    add_assoc_long (return_value, "sojourn_samples",      (zend_long)tc->sojourn_samples);
     add_assoc_double(return_value, "sojourn_avg_ms",
-                     server->sojourn_samples
-                       ? (double)server->sojourn_sum_ns / (double)server->sojourn_samples * ns_to_ms
+                     tc->sojourn_samples
+                       ? (double)tc->sojourn_sum_ns / (double)tc->sojourn_samples * ns_to_ms
                        : 0.0);
     add_assoc_double(return_value, "sojourn_max_ms",
-                     (double)server->sojourn_max_ns * ns_to_ms);
+                     (double)tc->sojourn_max_ns * ns_to_ms);
     add_assoc_double(return_value, "service_avg_ms",
-                     server->sojourn_samples
-                       ? (double)server->service_sum_ns / (double)server->sojourn_samples * ns_to_ms
+                     tc->sojourn_samples
+                       ? (double)tc->service_sum_ns / (double)tc->sojourn_samples * ns_to_ms
                        : 0.0);
 
     /* TLS telemetry. Zero-valued on builds without OpenSSL (fields are
@@ -5367,10 +5362,10 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->counters_live->static_zero_coroutine_total = 0;
     server->counters_live->static_cache_hits_total     = 0;
     server->counters_live->static_cache_misses_total   = 0;
-    server->sojourn_sum_ns       = 0;
-    server->service_sum_ns       = 0;
-    server->sojourn_max_ns       = 0;
-    server->sojourn_samples      = 0;
+    server->counters_live->sojourn_sum_ns  = 0;
+    server->counters_live->service_sum_ns  = 0;
+    server->counters_live->sojourn_max_ns  = 0;
+    server->counters_live->sojourn_samples = 0;
     server->pause_count_total    = 0;
     server->codel_trips_total    = 0;
     server->paused_total_ns      = 0;
