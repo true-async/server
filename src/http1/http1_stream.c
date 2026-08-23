@@ -72,7 +72,6 @@ ZEND_STATIC_ASSERT(H1_CHUNK_COALESCE_MAX <= HTTP_TLS_PLAINTEXT_RING_BYTES,
  * write pointing at a released string; elsewhere the copy is unavoidable. */
 static bool h1_send_headers_owned(http_connection_t *conn, zend_string *headers)
 {
-#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
 #ifdef HAVE_OPENSSL
     const bool plaintext = conn->tls == NULL;
 #else
@@ -82,7 +81,6 @@ static bool h1_send_headers_owned(http_connection_t *conn, zend_string *headers)
     if (plaintext) {
         return http_connection_send_strv_awaited(conn, &headers, 1);
     }
-#endif
 
     const bool ok = http_connection_send(conn, ZSTR_VAL(headers), ZSTR_LEN(headers));
     zend_string_release(headers);
@@ -345,7 +343,6 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         return HTTP_STREAM_APPEND_OK;
     }
 
-#if defined(ZEND_ASYNC_API_VERSION_NUMBER) && ZEND_ASYNC_API_VERSION_NUMBER >= 0x001900
     if (plaintext) {
         zend_string *slots[4];
         unsigned     n = 0;
@@ -382,7 +379,6 @@ static int h1_stream_append_chunk(void *opaque, zend_string *chunk,
         http_server_on_stream_send(conn->counters, chunk_len);
         return HTTP_STREAM_APPEND_OK;
     }
-#endif
 
     const bool coalesce = frame_len <= H1_CHUNK_COALESCE_MAX;
     bool frame_ok = true;
