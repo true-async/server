@@ -24,6 +24,10 @@
  *
  * Protocol detection (preface + "GET" prefix) is exercised by the
  * connection-layer tests; it already passed before HTTP/2 existed.
+ *
+ * The TLS emit selector (h2_tls_emit_use_drain) is tested here too, because
+ * the wire shape behind issue #224 needs a frame-level TLS client the suite
+ * does not have.
  */
 
 #include <stdarg.h>
@@ -38,6 +42,7 @@
 #include "http_protocol_strategy.h"
 #include "http_connection.h"
 #include "http1/http_parser.h"
+#include "http2/http2_session.h"
 
 /* Linker stubs for symbols defined in PHP-SAPI-heavy translation units
  * that aren't part of the unit-test link graph. None of these are
@@ -133,6 +138,10 @@ static void test_strategy_create_vtable_complete(void **state)
     assert_non_null(s->reset);
     assert_non_null(s->cleanup);
 
+    /* HTTP/2 allocates a session of its own, so destroy has to be able to
+     * release it without a connection. */
+    assert_non_null(s->dispose);
+
     /* on_request_ready is wired by the connection layer after create,
      * so it's legitimately NULL here. */
     assert_null(s->on_request_ready);
@@ -168,6 +177,69 @@ static void test_strategy_destroy_null_safe(void **state)
     http_protocol_strategy_destroy(NULL);
 }
 
+/* A session carrying only the three fields the emit selector reads; the rest
+ * stays zeroed, because the selector touches neither nghttp2 nor the
+ * connection. @p pending_len 0 means no slice was ever handed over. */
+static http2_session_t emit_selector_session(const size_t pending_len,
+                                             const size_t pending_offset,
+                                             const unsigned large_streams)
+{
+    static const uint8_t slice[1] = { 0 };
+
+    http2_session_t session;
+    memset(&session, 0, sizeof(session));
+
+    session.send_pending          = pending_len > 0 ? slice : NULL;
+    session.send_pending_len      = pending_len;
+    session.send_pending_offset   = pending_offset;
+    session.large_streams_pending = large_streams;
+
+    return session;
+}
+
+static void test_emit_selector_hybrid_reads_the_large_stream_count(void **state)
+{
+    (void)state;
+
+    http2_session_t idle = emit_selector_session(0, 0, 0);
+    assert_true(h2_tls_emit_use_drain(&idle, H2_EMIT_HYBRID));
+
+    http2_session_t large = emit_selector_session(0, 0, 1);
+    assert_false(h2_tls_emit_use_drain(&large, H2_EMIT_HYBRID));
+}
+
+static void test_emit_selector_parked_slice_outranks_the_mode(void **state)
+{
+    (void)state;
+
+    /* Issue #224. The large stream alone picks GATHER and the two cursors
+     * alternate; the parked remainder outranks even a mode asking for GATHER
+     * outright. */
+    http2_session_t parked = emit_selector_session(64, 16, 1);
+
+    assert_true(h2_tls_emit_use_drain(&parked, H2_EMIT_HYBRID));
+    assert_true(h2_tls_emit_use_drain(&parked, H2_EMIT_GATHER));
+}
+
+static void test_emit_selector_consumed_slice_is_not_parked(void **state)
+{
+    (void)state;
+
+    /* offset == len is a slice fully handed over, so nothing pins the mode. */
+    http2_session_t consumed = emit_selector_session(64, 64, 1);
+
+    assert_false(h2_tls_emit_use_drain(&consumed, H2_EMIT_HYBRID));
+}
+
+static void test_emit_selector_drain_mode_ignores_the_count(void **state)
+{
+    (void)state;
+
+    http2_session_t large = emit_selector_session(0, 0, 3);
+
+    assert_true(h2_tls_emit_use_drain(&large, H2_EMIT_DRAIN));
+}
+
 static int group_setup(void **state)
 {
     (void)state;
@@ -187,6 +259,10 @@ int main(void)
         cmocka_unit_test(test_strategy_create_vtable_complete),
         cmocka_unit_test(test_strategy_feed_returns_not_implemented),
         cmocka_unit_test(test_strategy_destroy_null_safe),
+        cmocka_unit_test(test_emit_selector_hybrid_reads_the_large_stream_count),
+        cmocka_unit_test(test_emit_selector_parked_slice_outranks_the_mode),
+        cmocka_unit_test(test_emit_selector_consumed_slice_is_not_parked),
+        cmocka_unit_test(test_emit_selector_drain_mode_ignores_the_count),
     };
     return cmocka_run_group_tests(tests, group_setup, group_teardown);
 }

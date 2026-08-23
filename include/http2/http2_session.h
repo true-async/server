@@ -162,6 +162,39 @@ struct http2_session_t {
  * amortises cipher setup over one SSL_write_ex. */
 #define H2_TLS_HYBRID_LARGE_THRESHOLD      (2u * 1024u)
 
+/* Phase 1 hybrid TLS emit mode (issue #30). Two emit strategies coexist:
+ *
+ *   DRAIN  — drain nghttp2's outbound queue via mem_send into a 16 KiB stack
+ *            buffer, BIO_write straight into the plaintext BIO, let tls_drain
+ *            encrypt + ship. No records[] / body_refs[] gather machinery.
+ *            Wins on short responses (no per-pass alloc / addref churn).
+ *
+ *   GATHER — drive nghttp2 via session_send + NO_COPY callbacks, accumulate
+ *            frames in records[] (with body_refs[] keeping body memory alive),
+ *            then memcpy everything into one stage[] buffer and ship with one
+ *            SSL_write_ex. Wins on bodies >= one TLS record (amortises cipher
+ *            setup over a larger plaintext).
+ *
+ *   HYBRID — default. Pick DRAIN when no large stream is in flight, otherwise
+ *            GATHER (session->large_streams_pending tracks the threshold). */
+enum h2_tls_emit_mode {
+    H2_EMIT_HYBRID = 0,
+    H2_EMIT_DRAIN  = 1,
+    H2_EMIT_GATHER = 2,
+};
+
+/* Answers which path the next TLS emit pass takes: true for DRAIN, false for
+ * GATHER. @p mode is the configured preference; @p session must be non-NULL.
+ *
+ * A parked slice — http2_session_drain holding part of a slice nghttp2 already
+ * considers sent — forces DRAIN whatever the mode says. nghttp2_session_send
+ * resumes at the frame after it and would step past the remainder, so the peer
+ * would read a truncated frame followed by a well-formed one. The two cursors
+ * must not alternate over one session: nghttp2.h requires the caller to send
+ * all of a chunk before asking for the next. */
+bool h2_tls_emit_use_drain(const http2_session_t *session,
+                           enum h2_tls_emit_mode mode);
+
 void h2_session_schedule_emit(http2_session_t *session);
 
 /* Per-emit accumulator: copied control bytes (emit_buf) + ordered body iov

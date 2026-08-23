@@ -90,9 +90,21 @@ struct _http_protocol_strategy_t {
     void (*reset)(http_connection_t *conn);
 
     /*
-     * Cleanup strategy resources.
+     * Release what the connection lent the strategy, at the point the
+     * connection stops using it. Reached through conn->strategy, so it runs
+     * only for a strategy a connection installed.
      */
     void (*cleanup)(http_connection_t *conn);
+
+    /*
+     * Release what the strategy itself allocated. http_protocol_strategy_destroy
+     * calls it before freeing the strategy, so a strategy that never reached a
+     * connection releases the same memory as one that did. Must tolerate having
+     * already run: cleanup() routes here and clears the same fields.
+     *
+     * NULL when the strategy allocates nothing of its own.
+     */
+    void (*dispose)(http_protocol_strategy_t *strategy);
 };
 
 /*

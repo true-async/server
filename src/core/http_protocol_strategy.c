@@ -158,6 +158,10 @@ bool detect_and_assign_protocol(http_connection_t *conn)
 void http_protocol_strategy_destroy(http_protocol_strategy_t *strategy)
 {
     if (strategy) {
+        if (strategy->dispose != NULL) {
+            strategy->dispose(strategy);
+        }
+
         efree(strategy);
     }
 }
