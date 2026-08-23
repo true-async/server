@@ -138,6 +138,10 @@ static void test_strategy_create_vtable_complete(void **state)
     assert_non_null(s->reset);
     assert_non_null(s->cleanup);
 
+    /* HTTP/2 allocates a session of its own, so destroy has to be able to
+     * release it without a connection. */
+    assert_non_null(s->dispose);
+
     /* on_request_ready is wired by the connection layer after create,
      * so it's legitimately NULL here. */
     assert_null(s->on_request_ready);

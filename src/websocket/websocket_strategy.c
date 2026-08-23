@@ -90,17 +90,25 @@ static void ws_reset(http_connection_t *conn)
     (void)conn;
 }
 
+static void ws_dispose(http_protocol_strategy_t *strategy)
+{
+    /* ws_session_destroy is NULL-safe, so a strategy that never fed runs
+     * through here unharmed. */
+    ws_strategy_t *const self = (ws_strategy_t *)strategy;
+
+    ws_session_destroy(self->session);
+    self->session = NULL;
+    self->conn    = NULL;
+}
+
 static void ws_cleanup(http_connection_t *conn)
 {
     /* The connection layer calls cleanup() on conn->strategy. We
      * cannot reach the wrapper through `conn` directly (we only have
      * the strategy via conn->strategy), so route through the same
-     * pointer. ws_session_destroy is NULL-safe. */
-    ws_strategy_t *const self = (ws_strategy_t *)conn->strategy;
-    if (self != NULL) {
-        ws_session_destroy(self->session);
-        self->session = NULL;
-        self->conn    = NULL;
+     * pointer. */
+    if (conn->strategy != NULL) {
+        ws_dispose(conn->strategy);
     }
 }
 
@@ -115,6 +123,7 @@ http_protocol_strategy_t* http_protocol_strategy_websocket_create(void)
     self->base.send_response    = ws_send_response;
     self->base.reset            = ws_reset;
     self->base.cleanup          = ws_cleanup;
+    self->base.dispose          = ws_dispose;
 
     return &self->base;
 }

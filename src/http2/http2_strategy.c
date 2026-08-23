@@ -2381,18 +2381,23 @@ static void http2_strategy_reset(http_connection_t *conn)
      * the nghttp2 callback table. */
 }
 
+static void http2_strategy_dispose(http_protocol_strategy_t *strategy)
+{
+    http2_strategy_t *self = (http2_strategy_t *)strategy;
+
+    if (self->session != NULL) {
+        http2_session_free(self->session);
+        self->session = NULL;
+    }
+}
+
 static void http2_strategy_cleanup(http_connection_t *conn)
 {
     if (conn == NULL || conn->strategy == NULL) {
         return;
     }
 
-    http2_strategy_t *self = (http2_strategy_t *)conn->strategy;
-
-    if (self->session != NULL) {
-        http2_session_free(self->session);
-        self->session = NULL;
-    }
+    http2_strategy_dispose(conn->strategy);
 }
 
 http_protocol_strategy_t *http_protocol_strategy_http2_create(void)
@@ -2406,6 +2411,7 @@ http_protocol_strategy_t *http_protocol_strategy_http2_create(void)
     self->base.send_response    = http2_strategy_send_response;
     self->base.reset            = http2_strategy_reset;
     self->base.cleanup          = http2_strategy_cleanup;
+    self->base.dispose          = http2_strategy_dispose;
     self->session               = NULL;
 
     return &self->base;
