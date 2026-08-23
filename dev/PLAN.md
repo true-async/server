@@ -946,3 +946,49 @@ the suite had, since every H3 test reads its response to the end.
 
   Evidence: `h3/067`, `h3/068`, both failing against `main`. 485 phpt, 461 passed,
   0 failed, 0 warned; `ctest` 16 of 16.
+
+- [x] **`h2/060` flakes because php-async builds a PHP object after the object
+  store is gone.** The test's own assertions pass every time; the process
+  segfaults afterwards, which `run-tests` prints as `Termsig=0` under correct
+  output. Two failures in 17 full `-j4` sweeps, four in 30 standalone runs.
+
+  Cause, from a backtrace of mine rather than a reading: `zend_deactivate` runs
+  `shutdown_executor()` and only then `ZEND_ASYNC_ENGINE_SHUTDOWN()` — php-src
+  states the contract at that line, "All objects are destroyed — safe to shut
+  down the reactor", and `zend_shutdown_executor_values` has already set
+  `EG(active) = 0`, "No PHP callback functions should be called after this
+  point". `libuv_reactor_shutdown` then turns the loop to finish cancelling
+  work, a connection this server closed earlier finishes closing there, and
+  libuv flushes its queued write with `UV_ECANCELED`. `io_pipe_writev_cb`
+  branches on `status == 0` alone and sends everything else to
+  `async_new_exception` → `object_init_ex` → `zend_objects_store_put`, writing
+  into an `object_buckets` that is NULL.
+
+  The handle is ours (`stream->type == UV_TCP`,
+  `free_cb == http_send_batched_writev_completion_cb`, `uv_flags == 0`, so no
+  awaiter), but no frame of this repository is on the stack and the contract
+  broken is php-async's. The fix belongs there and Edmond agreed to it: a check
+  in `async_new_exception`, plus four sites that use its result without a NULL
+  check — `libuv_reactor.c:2204`, `:2870`, `:3126`, `:6286`. The audit of all 27
+  call sites is done; the other 23 carry NULL.
+
+  No `.phpt` in php-async can reproduce it: the queue of writes on a stream
+  handle exists only through `ZEND_ASYNC_IO_WRITEV_EX`, whose one consumer is
+  this server, out of that tree. Measured, not reasoned — a temporary hook in
+  `plain_wrapper.c` that leaves a write unawaited fires and leaks the request but
+  exits 0, because a file write is waited out by the drain rather than cancelled;
+  and `plain_wrapper.c:553` is the only caller of the write API in all of php-src,
+  sockets not using it at all. So php-async gets a test-only entry point behind a
+  build flag, agreed with Edmond, and the deterministic test rides on that.
+
+  Done in php-async (issue #264, PR 265): `async_new_exception` answers NULL
+  while `EG(active)` is 0, and the four call sites take that NULL. The entry
+  point is a write queued at reactor shutdown when `ASYNC_FUZZ_CANCELLED_WRITE=1`
+  is set, compiled in only with `--enable-async-fuzz`, and
+  `tests/cleanup/005-write_cancelled_at_reactor_shutdown.phpt` rides on it:
+  without the guard it prints its expected output and segfaults, with it 5 of 5
+  runs pass. Against a PHP carrying the change, `h2/060` failed 0 of 30
+  standalone runs where it had failed 4, and this suite ran 369 tests to 349
+  passed, 20 skipped, 0 failed on that binary. The change reaches this
+  repository only through a php-src build that carries it; `/usr/local/bin/php`,
+  which the suite runs against by default, is older.
