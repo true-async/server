@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 24420,
-      "hit": 20214
+      "total": 24428,
+      "hit": 20271
     },
     "functions": {
-      "total": 1710,
-      "hit": 1549
+      "total": 1711,
+      "hit": 1553
     }
   },
   "files": {
@@ -142,12 +142,12 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 1207,
-        "hit": 955
+        "total": 1206,
+        "hit": 980
       },
       "functions": {
         "total": 74,
-        "hit": 66
+        "hit": 67
       }
     },
     "src/core/http_connection.h": {
@@ -282,8 +282,8 @@
     },
     "src/core/worker_dispatch.c": {
       "lines": {
-        "total": 386,
-        "hit": 314
+        "total": 388,
+        "hit": 321
       },
       "functions": {
         "total": 20,
@@ -383,7 +383,7 @@
     "src/http1/http_parser.c": {
       "lines": {
         "total": 533,
-        "hit": 450
+        "hit": 444
       },
       "functions": {
         "total": 27,
@@ -412,8 +412,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 935,
-        "hit": 791
+        "total": 939,
+        "hit": 804
       },
       "functions": {
         "total": 54,
@@ -433,11 +433,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 933,
-        "hit": 769
+        "hit": 775
       },
       "functions": {
         "total": 51,
-        "hit": 41
+        "hit": 43
       }
     },
     "src/http3/http3_connection.c": {
@@ -452,8 +452,8 @@
     },
     "src/http3/http3_dispatch.c": {
       "lines": {
-        "total": 454,
-        "hit": 389
+        "total": 457,
+        "hit": 402
       },
       "functions": {
         "total": 21,
@@ -472,8 +472,8 @@
     },
     "src/http3/http3_listener.c": {
       "lines": {
-        "total": 666,
-        "hit": 512
+        "total": 667,
+        "hit": 513
       },
       "functions": {
         "total": 46,
@@ -522,12 +522,12 @@
     },
     "src/http3/http3_stream_pool.c": {
       "lines": {
-        "total": 42,
-        "hit": 42
+        "total": 41,
+        "hit": 41
       },
       "functions": {
-        "total": 5,
-        "hit": 5
+        "total": 6,
+        "hit": 6
       }
     },
     "src/http_body_stream.c": {
@@ -873,7 +873,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 542,
-        "hit": 488
+        "hit": 487
       },
       "functions": {
         "total": 37,
