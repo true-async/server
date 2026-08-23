@@ -1199,9 +1199,13 @@ static void http_connection_read_callback_fn(
             ws_session_mark_peer_closed(ws_strategy_get_session(conn->strategy));
         }
 #endif
-        /* Where a queued write's failure becomes visible: libuv reports it at
-         * completion, and a fire-and-forget completion carries no status. */
-        conn->write_failed = true;
+        /* A read error stands for a write failure the completion could not
+         * report; a clean EOF does not — the peer that shut its write half down
+         * goes on reading, and this flag means "output can no longer reach the
+         * peer". The write side reports for itself, so this only latches. */
+        if (err) {
+            conn->write_failed = true;
+        }
         async_plain_event_fire(conn->out_idle_event);
         async_plain_event_fire(conn->out_drain_event);
 
@@ -1874,6 +1878,25 @@ static bool out_wait_for_tail(http_connection_t *conn)
     return true;
 }
 
+/* Read before the tail is queued: the peer that refused these bytes will refuse
+ * the next ones, and the tail is released here so nothing chains another
+ * refused write. Contract at the declaration. */
+void http_connection_absorb_write_verdict(http_connection_t *conn, const zend_async_io_t *io)
+{
+    if (EXPECTED((io->state & ZEND_ASYNC_IO_WRITE_FAILED) == 0)) {
+        return;
+    }
+
+    conn->write_failed = true;
+
+    if (conn->out_pending_len > 0) {
+        efree(conn->out_pending_buf);
+        conn->out_pending_buf = NULL;
+        conn->out_pending_len = 0;
+        conn->out_pending_cap = 0;
+    }
+}
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -1883,6 +1906,8 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
     }
 
     http_connection_t *conn = (http_connection_t *)io->user_data;
+
+    http_connection_absorb_write_verdict(conn, io);
 
     if (conn->out_pending_len > 0) {
         char  *next_buf = conn->out_pending_buf;
@@ -1946,6 +1971,8 @@ static void http_send_batched_zstr_completion_cb(void *data, zend_async_io_t *io
     }
 
     http_connection_t *conn = (http_connection_t *)io->user_data;
+
+    http_connection_absorb_write_verdict(conn, io);
 
     if (h1_batched_drain_pending(conn)) {
         return;
@@ -2035,6 +2062,8 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
     }
 
     http_connection_t *conn = (http_connection_t *)data;
+
+    http_connection_absorb_write_verdict(conn, io);
 
     /* User release first; pulled to a local so a re-entrant emit sees cleared slot. */
     zend_async_io_write_free_cb_t user_cb = conn->out_writev_user_cb;

@@ -447,6 +447,8 @@ static void tls_cipher_completion(void *data, zend_async_io_t *io)
 
     http_connection_t *conn = (http_connection_t *)io->user_data;
 
+    http_connection_absorb_write_verdict(conn, io);
+
     if (UNEXPECTED(conn->tls == NULL)) {
         return;
     }
