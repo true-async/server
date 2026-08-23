@@ -46,7 +46,11 @@ $server->enableRooms();
 
 /* The handler captures the server (as 057 does) — a transferred Room handle is
  * not valid on the worker, but the server is; send() reaches the hub through it. */
-$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($server) {
+/* SUBS travels bound to the closure: a worker runs with its own set of
+ * constants, and the parent's are not among them. */
+$subs_total = SUBS;
+
+$server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($server, $subs_total) {
     if ($req->getPath() === '/ctl') {
         foreach ($ws as $msg) {
             if ($msg->data !== 'go') { continue; }
@@ -57,7 +61,12 @@ $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($se
 
             try {
                 $r = $server->send('rt', 'hi', 2000);
-                $ws->send("ret=$r");
+                /* delivered counts every subscriber this worker served plus one
+                 * post per remote worker, and SUBS connections land on the two
+                 * workers in whatever split the accepts gave — so the count is
+                 * bounded rather than exact. At least the retried post landed;
+                 * at most every subscriber is local bar the one behind it. */
+                $ws->send('ret in range: ' . ($r >= 1 && $r <= $subs_total ? 'yes' : "no ($r)"));
             } catch (\Throwable $e) {
                 $ws->send('exc=' . $e::class);
             }
@@ -112,7 +121,7 @@ spawn(function () use ($port, $server) {
 $server->start();
 ?>
 --EXPECTF--
-reply: ret=1
+reply: ret in range: yes
 retry_queued advanced: yes
 retry_delivered advanced: yes
 all subscribers received: yes%A
