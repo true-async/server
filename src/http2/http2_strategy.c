@@ -1210,31 +1210,26 @@ static void h2_emit_state_cleanup(struct http2_emit_state *st)
     if (st->emit_buf_on_heap) { efree(st->emit_buf); }
 }
 
-#ifdef HAVE_OPENSSL
-/* Phase 1 hybrid TLS emit mode (issue #30). Two emit strategies coexist:
- *
- *   DRAIN  — drain nghttp2's outbound queue via mem_send into a 16 KiB stack
- *            buffer, BIO_write straight into the plaintext BIO, let tls_drain
- *            encrypt + ship. No records[] / body_refs[] gather machinery.
- *            Wins on short responses (no per-pass alloc / addref churn).
- *
- *   GATHER — drive nghttp2 via session_send + NO_COPY callbacks, accumulate
- *            frames in records[] (with body_refs[] keeping body memory alive),
- *            then memcpy everything into one stage[] buffer and ship with one
- *            SSL_write_ex. Wins on bodies >= one TLS record (amortises cipher
- *            setup over a larger plaintext).
- *
- *   HYBRID — default. Pick DRAIN when no large stream is in flight, otherwise
- *            GATHER (session->large_streams_pending tracks the threshold).
- *
- * Override with env var TRUE_ASYNC_H2_TLS_EMIT_MODE = drain | gather | hybrid.
- * Read once, cached for process lifetime. */
-enum h2_tls_emit_mode {
-    H2_EMIT_HYBRID = 0,
-    H2_EMIT_DRAIN  = 1,
-    H2_EMIT_GATHER = 2,
-};
+/* Contract, and the reason a parked slice outranks the mode: http2_session.h.
+ * Compiled with or without OpenSSL so the unit suite reaches it. */
+bool h2_tls_emit_use_drain(const http2_session_t *session,
+                           const enum h2_tls_emit_mode mode)
+{
+    if (http2_session_has_pending_send(session)) {
+        return true;
+    }
 
+    if (mode == H2_EMIT_DRAIN) {
+        return true;
+    }
+
+    return mode == H2_EMIT_HYBRID && session->large_streams_pending == 0;
+}
+
+#ifdef HAVE_OPENSSL
+/* The configured preference, from env var TRUE_ASYNC_H2_TLS_EMIT_MODE =
+ * drain | gather | hybrid. Read once, cached for process lifetime; an
+ * unrecognised value reads as hybrid. */
 static enum h2_tls_emit_mode h2_tls_emit_mode(void)
 {
     static int cached = -1;
@@ -1550,14 +1545,8 @@ static void h2_session_emit_ex(http2_session_t *session, const bool queue_behind
     {
 #ifdef HAVE_OPENSSL
         if (conn->tls != NULL) {
-            const enum h2_tls_emit_mode mode = h2_tls_emit_mode();
-            /* A parked slice pins the mode: DRAIN resumes from send_pending and
-             * GATHER's nghttp2_session_send would step past it, so the peer
-             * would read a truncated frame followed by a well-formed header. */
             const bool use_drain =
-                http2_session_has_pending_send(session) ||
-                (mode == H2_EMIT_DRAIN) ||
-                (mode == H2_EMIT_HYBRID && session->large_streams_pending == 0);
+                h2_tls_emit_use_drain(session, h2_tls_emit_mode());
 
             if (use_drain) {
                 /* DRAIN: mem_send + BIO_write, no records[]/body_refs[] gather,

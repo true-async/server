@@ -1020,5 +1020,39 @@ the suite had, since every H3 test reads its response to the end.
   Evidence: `h1/057` and `h2/064`, both failing against `main`; `h1/032` holds
   the other half. 351 of 371 phpt (20 skipped, 0 failed), `ctest` 16 of 16.
 
-  Two fixes recorded in the CHANGELOG were carried without a test and still are:
-  #224 and #225. The reproduction for #225 is what turned into this step.
+  Two fixes recorded in the CHANGELOG were carried without a test. The
+  reproduction for #225 is what turned into this step, and the step closed the
+  debt on its way past — see below.
+
+## The two CHANGELOG debts, #224 and #225
+
+- [x] **#225 was already covered, and #224 now is.** Both entries said "carried
+  without a test", and neither claim survived being checked. `h2/064` builds the
+  peer #225 asked for: a half-close with a writev in flight defers the destroy,
+  and the re-drive in `http_send_batched_finish` is what gets the last frames
+  out. Put that completion tail back the way it was before #223 and the test
+  fails 10 runs of 10 — all 1048576 body bytes arrive and END_STREAM does not,
+  which is the entry's own description of the defect. It passes 10 of 10 with
+  the tail in place, so the entry now cites `h2/064` instead of an excuse.
+
+  #224 had no test and could not get one in the shape the entry imagined. The
+  parked slice it needs appears only in DRAIN, and DRAIN is picked when
+  `large_streams_pending == 0` — but a body over `H2_TLS_HYBRID_LARGE_THRESHOLD`
+  (2048, strict `>`) raises that counter itself, so no single large response
+  reaches the window. It takes a dozen streams of exactly 2048 bytes behind a
+  zero initial window, then one TCP write carrying the WINDOW_UPDATE batch plus
+  a request for a large body — at frame level over TLS, which the suite cannot
+  speak: `_h2_client.inc:60` opens `tcp://` and nothing else here talks h2 over
+  TLS frame by frame. Even then a reactor tick between the microtask and the
+  handler coroutine can flush the parked tail and close the window, so the phpt
+  would be probabilistic.
+
+  So the invariant is tested instead of the wire. The mode choice moved out of
+  `h2_session_emit_ex` into `h2_tls_emit_use_drain`, declared in
+  `include/http2/http2_session.h` and compiled with or without OpenSSL so the
+  unit suite links it. Four cases in `HTTP2Strategy` cover the selector, and
+  removing the pin turns exactly one of them red:
+  `test_emit_selector_parked_slice_outranks_the_mode`. What this does not cover
+  is the truncated frame on the wire, and the CHANGELOG says so.
+
+  Evidence: `ctest` 16 of 16, 351 of 371 phpt (20 skipped, 0 failed).
