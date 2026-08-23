@@ -38,10 +38,10 @@ void grpc_call_init_response(zend_object *response_obj, const int grpc_mode)
     http_response_set_grpc_mode(response_obj, (uint8_t)grpc_mode);
 }
 
-void grpc_call_ensure_status(zend_object *response_obj, bool had_exception)
+void grpc_call_ensure_status(zend_object *response_obj, bool failed)
 {
     http_response_ensure_grpc_status(response_obj,
-        had_exception ? GRPC_STATUS_INTERNAL : GRPC_STATUS_OK);
+        failed ? GRPC_STATUS_INTERNAL : GRPC_STATUS_OK);
 }
 
 void grpc_call_finish(zend_object *response_obj,

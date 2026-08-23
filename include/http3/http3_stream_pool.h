@@ -36,8 +36,16 @@ extern "C" {
  * live-stream list link (http3_connection_t::streams_head). The two
  * memberships are mutually exclusive in time.
  *
- * Lifetime: pool is embedded in http3_listener_t. Cleanup at listener
- * teardown asserts no slot is still alive.
+ * Lifetime: the pool outlives the listener that created it. A slot can stay
+ * alive past listener teardown, because a handler may keep the PHP HttpRequest
+ * wrapper — in `$GLOBALS`, in a queue, in a VM frame a bailout abandoned — and
+ * the slot only returns when that wrapper is collected. The listener therefore
+ * closes the pool rather than freeing it, and the last slot to come back frees
+ * the chunks and the pool struct together.
+ *
+ * The slab is persistent memory for that reason. Under the reactor pool the
+ * return lands on a thread whose request heap may already be gone, which is
+ * longer than ZMM can hold a block.
  *
  * Thread-safety: H3 listener is single-thread per worker. No locking. */
 
@@ -55,19 +63,24 @@ typedef struct http3_stream_pool_s {
     http3_stream_t       *free_head;   /* via slot->list_next */
     size_t                slot_count;
     size_t                live_count;
+    bool                  closed;      /* creator gone; the last slot back frees the pool */
 } http3_stream_pool_t;
 
-void http3_stream_pool_init(http3_stream_pool_t *pool);
+/* An empty pool, owned by the caller until it closes it. Never NULL: the
+ * allocator bails out rather than fail. */
+http3_stream_pool_t *http3_stream_pool_create(void);
 
-/* Frees all chunks. Caller must have released every alive slot first
- * (assert live_count == 0 in debug). */
-void http3_stream_pool_cleanup(http3_stream_pool_t *pool);
+/* Give up the creator's ownership. The pool and its chunks are freed here when
+ * no slot is out, and by the last http3_stream_pool_free otherwise. No slot may
+ * be allocated afterwards, and the caller must drop its pointer either way. */
+void http3_stream_pool_close(http3_stream_pool_t *pool);
 
 http3_stream_t *http3_stream_pool_alloc(http3_stream_pool_t *pool);
 
 /* Push a slot back onto the freelist. Caller must have torn down all
  * dependent state (request, body buffers, zvals, etc.) — pool only
- * does the link/unlink. */
+ * does the link/unlink. Frees @p pool when it is the last slot out of a closed
+ * pool, so neither pointer may be read after the call. */
 void http3_stream_pool_free(http3_stream_pool_t *pool, http3_stream_t *slot);
 
 #ifdef __cplusplus

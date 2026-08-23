@@ -2988,14 +2988,9 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
     }
 
-    /* Bailout firewall path: handler longjmp'd out via zend_bailout
-     * (see http_handler_coroutine_entry). PHP-VM state is tainted but
-     * the response object itself is just a C struct — safe to reset. */
-    if (ctx->handler_bailout
-        && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {
-        http_response_reset_to_error(Z_OBJ(ctx->response_zv), 500,
-                                     "Internal Server Error");
-    }
+    /* The flag is raised by the firewall in http_handler_coroutine_entry. */
+    http_response_reset_after_bailout(Z_OBJ(ctx->response_zv),
+                                      ctx->handler_bailout);
 
     /* If the handler threw / was cancelled and the response isn't
      * already committed, derive the response from the exception:
