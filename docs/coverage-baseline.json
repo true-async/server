@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 24428,
-      "hit": 20271
+      "total": 24427,
+      "hit": 20288
     },
     "functions": {
       "total": 1711,
-      "hit": 1553
+      "hit": 1555
     }
   },
   "files": {
@@ -383,7 +383,7 @@
     "src/http1/http_parser.c": {
       "lines": {
         "total": 533,
-        "hit": 444
+        "hit": 450
       },
       "functions": {
         "total": 27,
@@ -432,12 +432,12 @@
     },
     "src/http3/http3_callbacks.c": {
       "lines": {
-        "total": 933,
-        "hit": 775
+        "total": 932,
+        "hit": 777
       },
       "functions": {
         "total": 51,
-        "hit": 43
+        "hit": 44
       }
     },
     "src/http3/http3_connection.c": {
@@ -473,7 +473,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 513
+        "hit": 516
       },
       "functions": {
         "total": 46,
@@ -483,11 +483,11 @@
     "src/http3/http3_packet.c": {
       "lines": {
         "total": 115,
-        "hit": 98
+        "hit": 104
       },
       "functions": {
         "total": 13,
-        "hit": 11
+        "hit": 12
       }
     },
     "src/http3/http3_static_response.c": {
@@ -833,7 +833,7 @@
     "src/websocket/php_websocket.c": {
       "lines": {
         "total": 603,
-        "hit": 474
+        "hit": 473
       },
       "functions": {
         "total": 48,
@@ -873,7 +873,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 542,
-        "hit": 487
+        "hit": 488
       },
       "functions": {
         "total": 37,
