@@ -476,6 +476,13 @@ jobs:
         working-directory: http-server
         env:
           ENABLE_COVERAGE: ${{ matrix.debug == false && '--enable-coverage' || '' }}
+          # Four tests skip unless the fault-injection hook is compiled in, and a
+          # skipped test reads like coverage it never had — websocket/064, 065
+          # and 066 on the reliable-room retry path, 067 on a shutdown
+          # double-free, all four running nowhere until this flag appeared here.
+          # Debug leg only: configure calls the build unshippable, and the
+          # release leg is what the release resembles.
+          ENABLE_TEST_HOOKS: ${{ matrix.debug && '--enable-tas-test-hooks' || '' }}
         run: |
           set -eux
           PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
@@ -488,7 +495,8 @@ jobs:
             --with-nghttp2=/usr/local \
             --with-nghttp3=/usr/local \
             --with-ngtcp2=/usr/local \
-            $ENABLE_COVERAGE
+            $ENABLE_COVERAGE \
+            $ENABLE_TEST_HOOKS
 
       - name: Build http_server
         working-directory: http-server
