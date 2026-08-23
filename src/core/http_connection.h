@@ -432,6 +432,12 @@ uint16_t     http_connection_remote_port(const http_connection_t *conn);
  * the connection is not idle or a teardown microtask is already queued. */
 void http_connection_destroy_if_idle_deferred(http_connection_t *conn);
 
+/* Take the reactor's verdict on a write that has just completed, and release
+ * the outbound tail if it failed. Every write completion calls this: a write
+ * submitted without an awaiter gets no status of its own, so the failure is
+ * reported on the handle instead. */
+void http_connection_absorb_write_verdict(http_connection_t *conn, const zend_async_io_t *io);
+
 /* Connection processing */
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len);
 bool http_connection_send_error(http_connection_t *conn, int status_code, const char *message);
