@@ -906,10 +906,10 @@ the suite had, since every H3 test reads its response to the end.
   Evidence: `core/069`, `grpc/019`, `h3/064`, `h3/065`, `h3/066`, all five failing
   against `main`. 483 phpt, 459 passed, 0 failed, 0 warned; `ctest` 16 of 16.
 
-- [ ] **The direct HTTP/3 submit path disagrees with every other path about what
-  reaches the wire.** Both remaining leads are measured now, and both land on the
-  same path — the one `http3_stream_submit_response` and `h3_stream_mark_ended`
-  own. No issue filed and no code written: PR 246 is open, and one PR at a time.
+- [x] **#247 — the direct HTTP/3 submit path disagreed with every other path about
+  what reaches the wire.** The last two leads of the hunt, both measured with a
+  probe of my own before a line of code, and both on the path
+  `http3_stream_submit_response` and `h3_stream_mark_ended` own.
 
   **Trailers are dropped when the handler calls `end()` itself.** `end()` reaches
   `h3_stream_mark_ended`, which sets `streaming_ended` and drains, and the data
@@ -927,6 +927,22 @@ the suite had, since every H3 test reads its response to the end.
   and no `content-length`, while the body arrives in full — the framing the server
   computed is dropped without a word. The reactor pool delivers all 300 and the
   `content-length`; HTTP/2 delivers all 300 and the `content-length`. The cap is a
-  `goto headers_done` out of the flatten loop with nothing told to the caller
-  (`src/http3/http3_callbacks.c:739`), and the header order decides which fields
-  survive.
+  `goto headers_done` out of the flatten loop with nothing told to the caller,
+  and the header order decides which fields survive.
+
+  The cap is removed rather than mirrored onto the other paths, and Edmond
+  settled that: it arrived with the initial import behind no issue, its comment
+  named the threat as "a server-side accident" rather than a peer — unlike the
+  inbound caps in `http3_internal.h`, which name a malformed one — and it bounded
+  10 KB of `nghttp3_nv` (40 bytes an entry, measured) copied out of a `HashTable`
+  already holding the same strings at several times the cost. HTTP/3's real limit
+  is the peer's `SETTINGS_MAX_FIELD_SECTION_SIZE`, a negotiated byte count the
+  server does not read. A byte-denominated limit driven by that setting is a
+  separate question, not opened.
+
+  The trailer mechanism was proved rather than inferred: capturing in
+  `h3_stream_mark_ended` before the latch turned all four shapes to `trailer=1`,
+  and the experiment was reverted before the fix was written properly.
+
+  Evidence: `h3/067`, `h3/068`, both failing against `main`. 485 phpt, 461 passed,
+  0 failed, 0 warned; `ctest` 16 of 16.
