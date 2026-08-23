@@ -715,11 +715,6 @@ static nghttp3_ssize h3_read_data_cb(nghttp3_conn *conn, int64_t stream_id,
     return 1;
 }
 
-/* Hard cap on outbound response headers — backstop against a
- * server-side accident that fills HttpResponse with an unbounded
- * header set. 256 covers any sane response and bounds RAM. */
-enum { H3_RESPONSE_HEADER_MAX = 256 };
-
 /* Growable nghttp3_nv buffer. Starts on a stack scratch[32]; on first
  * overflow promotes to heap (64), then doubles. Geometric growth keeps
  * realloc cost amortised O(1) per entry. */
@@ -731,15 +726,9 @@ typedef struct {
     size_t       nvcap;     /* current capacity of *nv */
 } h3_nv_buf_t;
 
-/* Append one (name, value) pair. Returns false on hard-cap hit;
- * caller treats false as "stop emitting headers". */
-static inline bool h3_nv_push(h3_nv_buf_t *b,
+static inline void h3_nv_push(h3_nv_buf_t *b,
                               zend_string *name, zval *val)
 {
-    if (UNEXPECTED(b->nvi >= H3_RESPONSE_HEADER_MAX)) {
-        return false;
-    }
-
     if (UNEXPECTED(b->nvi == b->nvcap)) {
         const size_t new_cap = (b->heap == NULL) ? 64 : b->nvcap * 2;
         nghttp3_nv *new_buf  = (b->heap == NULL)
@@ -761,7 +750,6 @@ static inline bool h3_nv_push(h3_nv_buf_t *b,
     slot->value    = (uint8_t *)Z_STRVAL_P(val);
     slot->valuelen = Z_STRLEN_P(val);
     slot->flags    = NGHTTP3_NV_FLAG_NONE;
-    return true;
 }
 
 /* Build the nghttp3_nv array from the PHP response and submit it on
@@ -903,8 +891,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
 
     /* Single-pass header emit. Scratch covers the common case (≤32
      * nv entries — :status + ~30 headers fits every REST/SSE workload
-     * we've seen). h3_nv_push handles overflow promotion and the hard
-     * cap; we treat its `false` return as "stop emitting more". */
+     * we've seen). h3_nv_push promotes to the heap past that. */
     nghttp3_nv scratch[32];
     h3_nv_buf_t buf = {
         .nv      = scratch,
@@ -932,19 +919,17 @@ bool http3_stream_submit_response(http3_connection_t *c,
                                                    keep_content_length)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-                if (!h3_nv_push(&buf, name, values)) goto headers_done;
+                h3_nv_push(&buf, name, values);
             } else if (Z_TYPE_P(values) == IS_ARRAY) {
                 zval *v;
                 ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
                     if (Z_TYPE_P(v) != IS_STRING) continue;
 
-                    if (!h3_nv_push(&buf, name, v)) goto headers_done;
+                    h3_nv_push(&buf, name, v);
                 } ZEND_HASH_FOREACH_END();
             }
         } ZEND_HASH_FOREACH_END();
     }
-
-headers_done:
 
     /* Body source. Buffered: copy onto the stream so the data_reader
      * outlives the response zval (released in dispose right after this
@@ -1364,6 +1349,13 @@ void h3_stream_mark_ended(void *ctx)
     if (s == NULL || s->conn == NULL || s->streaming_ended) {
         return;
     }
+
+    /* Before the latch, because the drain below can carry the data reader all
+     * the way to EOF inside this call, and the reader submits the trailers it
+     * finds on the stream. The dispose captures them too, for the stream a
+     * handler leaves unended; whichever runs first wins and the other is a
+     * no-op. */
+    http3_stream_capture_trailers(s);
 
     s->streaming_ended = true;
 
