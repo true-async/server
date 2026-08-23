@@ -34,8 +34,10 @@ typedef struct grpc_finish_ops {
 /* Dispatch-time response defaults: content-type + mode stamp. */
 void grpc_call_init_response(zend_object *response_obj, int grpc_mode);
 
-/* Outcome → grpc-status; exception maps to INTERNAL unless already set. */
-void grpc_call_ensure_status(zend_object *response_obj, bool had_exception);
+/* Outcome → grpc-status; a handler that did not reach its end maps to INTERNAL
+ * unless the status is already set. @p failed covers both ways a handler can
+ * fail to reach it: a thrown exception and a zend_bailout. */
+void grpc_call_ensure_status(zend_object *response_obj, bool failed);
 
 /* Dispose-time delivery: grpc-web → in-body trailer frame + end; streaming
  * → end_stream; zero-message → Trailers-Only commit. */

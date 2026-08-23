@@ -582,6 +582,11 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     const bool handler_failed =
         http_handler_failed(coroutine, stream->handler_bailout);
 
+    if (!stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
+        http_response_reset_after_bailout(Z_OBJ(stream->response_zv),
+                                          stream->handler_bailout);
+    }
+
     /* If the handler threw and never committed, derive a response
      * from the exception (code → status, message → body). Same
      * policy as the HTTP/1 dispose path in
@@ -622,7 +627,8 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
     if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
         grpc_call_ensure_status(Z_OBJ(stream->response_zv),
-                                coroutine->exception != NULL);
+                                coroutine->exception != NULL
+                                    || stream->handler_bailout);
     }
 
     /* sendFile() handoff (issue #13). Take the descriptor before

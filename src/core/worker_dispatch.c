@@ -703,7 +703,10 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
         }
 
         if (ctx->is_grpc) {
-            grpc_call_ensure_status(resp, coroutine->exception != NULL);
+            grpc_call_ensure_status(resp,
+                coroutine->exception != NULL || ctx->handler_bailout);
+        } else {
+            http_response_reset_after_bailout(resp, ctx->handler_bailout);
         }
 
         if (!http_response_is_committed(resp)) {

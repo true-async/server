@@ -20,38 +20,44 @@
 
 #include "http3/http3_stream_pool.h"
 
-void http3_stream_pool_init(http3_stream_pool_t *pool)
+http3_stream_pool_t *http3_stream_pool_create(void)
 {
-    pool->chunks     = NULL;
-    pool->free_head  = NULL;
-    pool->slot_count = 0;
-    pool->live_count = 0;
+    /* Zeroed: the chunk chain, the freelist head, both counters and the closed
+     * flag are each read before anything writes them. */
+    return pecalloc(1, sizeof(http3_stream_pool_t), 1);
 }
 
-void http3_stream_pool_cleanup(http3_stream_pool_t *pool)
+/* Release the slab and the pool struct. Called only by whoever holds the last
+ * claim on the pool. */
+static void http3_stream_pool_destroy(http3_stream_pool_t *pool)
 {
-    /* Caller contract: every slot returned to the freelist before
-     * cleanup. Per-slot teardown happens in http3_stream_release which
-     * calls back into http3_stream_pool_free. */
-    assert(pool->live_count == 0
-           && "http3_stream_pool_cleanup with live slots");
-
     http3_stream_chunk_t *c = pool->chunks;
+
     while (c != NULL) {
         http3_stream_chunk_t *next = c->next_chunk;
-        efree(c);
+        pefree(c, 1);
         c = next;
     }
 
-    pool->chunks     = NULL;
-    pool->free_head  = NULL;
-    pool->slot_count = 0;
-    pool->live_count = 0;
+    pefree(pool, 1);
+}
+
+void http3_stream_pool_close(http3_stream_pool_t *pool)
+{
+    if (pool == NULL) {
+        return;
+    }
+
+    pool->closed = true;
+
+    if (pool->live_count == 0) {
+        http3_stream_pool_destroy(pool);
+    }
 }
 
 static bool http3_stream_pool_grow(http3_stream_pool_t *pool)
 {
-    http3_stream_chunk_t *chunk = emalloc(sizeof(*chunk));
+    http3_stream_chunk_t *chunk = pemalloc(sizeof(*chunk), 1);
 
     if (UNEXPECTED(chunk == NULL)) {
         return false;
@@ -76,6 +82,8 @@ static bool http3_stream_pool_grow(http3_stream_pool_t *pool)
 
 http3_stream_t *http3_stream_pool_alloc(http3_stream_pool_t *pool)
 {
+    assert(!pool->closed && "http3_stream_pool_alloc after close");
+
     if (UNEXPECTED(pool->free_head == NULL)) {
         if (!http3_stream_pool_grow(pool)) {
             return NULL;
@@ -99,5 +107,10 @@ void http3_stream_pool_free(http3_stream_pool_t *pool, http3_stream_t *slot)
      * down per-stream state via http3_stream_release. */
     slot->list_next = pool->free_head;
     pool->free_head = slot;
-    pool->live_count--;
+
+    /* A closed pool is kept alive only by the slots still out; this is the last
+     * one, so the slab goes with it. */
+    if (--pool->live_count == 0 && pool->closed) {
+        http3_stream_pool_destroy(pool);
+    }
 }

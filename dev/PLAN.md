@@ -844,3 +844,89 @@ because they were found and land together, not because they share a cause.
   platform where it went red. The assertion is gone rather than carved out — the
   same non-promise is already recorded in `websocket/042:116` — and the test went
   from 1 failure in 20 under those conditions to 0.
+
+## A request the HTTP/3 peer abandons (#242)
+
+Found by driving an HTTP/3 client that stops reading — the one shape no test in
+the suite had, since every H3 test reads its response to the end.
+
+- [x] **#242 — the in-flight bracket is closed and the stream released once.**
+  Both halves came from the dispose reaching the server through `s->conn`, which
+  connection teardown NULLs while the handler coroutine is still running. The
+  dispatch raised `active_requests` unconditionally and the dispose lowered it
+  under `if (c != NULL)`, so an abandoned request left the gauge up for good —
+  and that gauge is what `http_server_should_shed_request` reads, a predicate
+  only the HTTP/1 parser and the HTTP/2 session consult, so N abandoned HTTP/3
+  requests subtracted N from the admission budget and the server eventually
+  answered 503 to protocols that had done nothing. The same reach dropped the
+  request from telemetry. Counters and log sink are taken when the stream is
+  created now — at creation rather than at dispatch, because the static path
+  never dispatches a handler, which the first version of the change broke and
+  `h3/054` caught.
+
+  The second half: `http3_stream_release` dropped `request_zv` and
+  `response_zv` without `ZVAL_UNDEF` while `h3_dispose_tail` guards its own
+  release with `Z_ISUNDEF` — a guard testing a sentinel the other site never
+  set. A stream the peer cancelled with STOP_SENDING was therefore released
+  twice: on a debug build the process aborts in `zend_objects_store_del`, on a
+  release build it writes into a freed object bucket. Reproduced on `62c33da`
+  with no local change.
+
+  Evidence: `h3/063` fails against `main` twice over — `active=1 total=0` where
+  it expects `active=0 total=1`, then the crash backtrace in place of the rest —
+  and passes here, 10 runs of 10. `tests/h3client/h3probe.py` gained two modes
+  behind env vars, `H3PROBE_ABANDON_MS` (drop the connection) and
+  `H3PROBE_STOP_MS` (STOP_SENDING, connection kept), which is the pair that
+  tells the two states apart. 478 phpt, 454 passed, 0 failed, 0 warned;
+  `ctest` 16 of 16.
+
+- [x] **#244, #245 — a handler killed by a bailout, and the slab slot it strands.**
+  The first lead of the three, re-measured with a probe of my own and wider than
+  it was written: HTTP/2 answers the half-built body too, not only HTTP/3 and the
+  pool, and a bailed-out gRPC call reports `grpc-status: 0`. Every transport now
+  goes through one predicate, `http_response_reset_after_bailout` — the block
+  HTTP/1 already carried.
+
+  The lead's "neither counted nor freed" split in two. Not counted is policy, not
+  a defect: `http_request_finalize` skips a bailed-out request on HTTP/1 as well,
+  because post-bailout EG cannot sustain the telemetry call. Not freed is #245
+  and is not about bailouts at all — any handler that keeps the `HttpRequest`
+  wrapper past `stop()` strands its slab slot, and the listener freed the slab
+  under it. The pool is allocated on its own now and the last slot out frees it.
+
+  Two things the first round of this work got wrong, both caught by running the
+  reactor pool rather than reading it. The pool test carried `setWorkers(2)` and
+  no `--ENV--`, which is not the reactor pool at all — every other `h3/*-pool-*`
+  test sets `TRUE_ASYNC_SERVER_REACTOR_POOL=1`, and without it the test measured
+  the direct path twice and timed out in CI. With the env on, the deferred slab
+  free landed after the allocating thread's request heap was gone, so ZMM
+  reported the pool as a leak and the heap as corrupt; the slab is persistent
+  memory now.
+
+  Evidence: `core/069`, `grpc/019`, `h3/064`, `h3/065`, `h3/066`, all five failing
+  against `main`. 483 phpt, 459 passed, 0 failed, 0 warned; `ctest` 16 of 16.
+
+- [ ] **The direct HTTP/3 submit path disagrees with every other path about what
+  reaches the wire.** Both remaining leads are measured now, and both land on the
+  same path — the one `http3_stream_submit_response` and `h3_stream_mark_ended`
+  own. No issue filed and no code written: PR 246 is open, and one PR at a time.
+
+  **Trailers are dropped when the handler calls `end()` itself.** `end()` reaches
+  `h3_stream_mark_ended`, which sets `streaming_ended` and drains, and the data
+  reader can hit EOF inside that call — before the dispose runs
+  `http3_stream_capture_trailers`. The gRPC ops already have the right shape:
+  `h3_stream_finish_streaming` captures first, then ends. Measured with the
+  aioquic client of `grpc/_h3grpc_client.py`, one trailer set, four handler
+  shapes: `end()` after the write loses it in both orderings (trailer before the
+  write and after it), while a stream the dispose finishes, a buffered response
+  and every shape under the reactor pool keep it. HTTP/2 keeps all four. HTTP/1
+  emits no trailers at all by design (`src/http_response.c:768`).
+
+  **`H3_RESPONSE_HEADER_MAX` truncates and takes the Content-Length with it.**
+  300 response headers plus a 512-byte body: the direct path delivers 254 of them
+  and no `content-length`, while the body arrives in full — the framing the server
+  computed is dropped without a word. The reactor pool delivers all 300 and the
+  `content-length`; HTTP/2 delivers all 300 and the `content-length`. The cap is a
+  `goto headers_done` out of the flatten loop with nothing told to the caller
+  (`src/http3/http3_callbacks.c:739`), and the header order decides which fields
+  survive.

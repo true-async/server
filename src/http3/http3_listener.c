@@ -213,10 +213,10 @@ struct _http3_listener_s {
      * internal throttle state, not a counter. */
     uint64_t                   wd_last_warn_ns;
 
-    /* Slab pool for http3_stream_t. Shared across all conns on this
-     * listener. Initialised in http3_listener_spawn, cleaned up in
-     * http3_listener_destroy after all conns are gone. */
-    http3_stream_pool_t        stream_pool;
+    /* Slab pool for http3_stream_t. Shared across all conns on this listener
+     * and closed rather than freed at teardown — http3_stream_pool.h has why a
+     * slot can outlive the listener. */
+    http3_stream_pool_t       *stream_pool;
 };
 
 /* Callback subclass — carries a back-pointer to the listener. */
@@ -1458,7 +1458,7 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     listener->ssl_ctx     = ssl_ctx;
     listener->server_obj  = server_obj;
     listener->reactor_ctx = reactor_ctx;
-    http3_stream_pool_init(&listener->stream_pool);
+    listener->stream_pool = http3_stream_pool_create();
 
 #ifdef __linux__
     /* Raw-fd path: socket() + setsockopt + bind() + uv_poll_t. We need
@@ -1945,16 +1945,17 @@ void http3_listener_destroy(http3_listener_t *listener)
     OPENSSL_cleanse(listener->sr_key, sizeof(listener->sr_key));
     OPENSSL_cleanse(listener->retry_token_key, sizeof(listener->retry_token_key));
 
-    /* Stream pool: every conn freed above released its streams back into
-     * the pool, so live_count is 0 here. cleanup() walks the chunk chain
-     * and pefrees the slab memory. */
-    http3_stream_pool_cleanup(&listener->stream_pool);
+    /* Stream pool: the conns freed above gave back their slots, so this usually
+     * frees the slab outright. A slot still out keeps it, and the pool struct
+     * with it, until whoever holds that slot returns it. */
+    http3_stream_pool_close(listener->stream_pool);
+    listener->stream_pool = NULL;
 
     efree(listener);
 }
 
 http3_stream_pool_t *http3_listener_stream_pool(http3_listener_t *listener)
 {
-    return listener != NULL ? &listener->stream_pool : NULL;
+    return listener != NULL ? listener->stream_pool : NULL;
 }
 

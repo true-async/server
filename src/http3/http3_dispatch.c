@@ -1044,6 +1044,11 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
         ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
     }
 
+    if (!s->is_grpc && !Z_ISUNDEF(s->response_zv)) {
+        http_response_reset_after_bailout(Z_OBJ(s->response_zv),
+                                          s->handler_bailout);
+    }
+
     /* If the handler threw and never committed a response, derive a
      * 500 from the exception so the peer gets *something*. Mirrors
      * the H2 dispose path's exception → status policy in spirit, but
@@ -1063,7 +1068,7 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
     if (s->is_grpc && !Z_ISUNDEF(s->response_zv)) {
         grpc_call_ensure_status(Z_OBJ(s->response_zv),
-                                coroutine->exception != NULL);
+                                coroutine->exception != NULL || s->handler_bailout);
     }
 
     /* Streaming-vs-buffered decision (mirror of H2 dispose).

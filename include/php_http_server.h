@@ -1719,8 +1719,33 @@ static zend_always_inline bool http_handler_failed(const zend_coroutine_t *corou
     return cancellation_ce == NULL
            || !instanceof_function(coroutine->exception->ce, cancellation_ce);
 }
+
 void  http_response_reset_to_error (zend_object *obj, int status_code,
                                     const char *message);
+
+/* Replace what a bailed-out handler left behind with a 500. Called from the
+ * dispose path of every transport.
+ *
+ * A zend_bailout longjmps out of the handler without unwinding it, so the
+ * response object keeps the status and the part-written body it held at that
+ * instant. Committing those tells the peer that a truncated answer is complete.
+ *
+ * @p bailout is the transport's own firewall flag: a bailout leaves
+ * `coroutine->exception` NULL, so the exception-derived status cannot see it.
+ * Does nothing to a response already committed — its headers have left, and the
+ * streaming abort is what disowns that body. A gRPC response is excluded by its
+ * caller, because a gRPC outcome is a grpc-status over a 200 and
+ * grpc_call_ensure_status is what sets it.
+ *
+ * The response struct is the only state touched here. Nothing else is safe:
+ * post-bailout EG cannot sustain a PHP call. */
+static zend_always_inline void http_response_reset_after_bailout(zend_object *obj,
+                                                                 const bool bailout)
+{
+    if (UNEXPECTED(bailout) && !http_response_is_committed(obj)) {
+        http_response_reset_to_error(obj, 500, "Internal Server Error");
+    }
+}
 
 /* HttpResponse class entry — the HTTP/2 strategy object-inits a
  * fresh response per stream. HTTP/1 does the same from
