@@ -992,3 +992,33 @@ the suite had, since every H3 test reads its response to the end.
   passed, 20 skipped, 0 failed on that binary. The change reaches this
   repository only through a php-src build that carries it; `/usr/local/bin/php`,
   which the suite runs against by default, is older.
+
+## A half-closed peer lost the rest of its response (#249)
+
+- [x] **The read side stopped standing in for the write side.** Found while
+  building the reproduction #225 still owed: a peer that calls
+  `shutdown(SHUT_WR)` and goes on reading was answered with 110 bytes and no
+  chunked terminator where 4 MiB were owed, and over HTTP/2 with 65536 to 393216
+  DATA bytes of 4194304 and no END_STREAM. Every terminating read latched
+  `conn->write_failed`, and a clean EOF is what a half-close produces.
+
+  The one-line experiment named the cause: `conn->write_failed = err` and the
+  whole body arrived. It is not the whole fix, and `h1/032` said so — with that
+  alone the handler ran all 100000 iterations of 4 KiB against a peer that had
+  sent an RST and never saw the 499 its contract promises. The kernel hands
+  `so_error` to whichever syscall asks first, and with a saturated queue that is
+  the write: on bare sockets after an RST, `write -> ECONNRESET`,
+  `write -> EPIPE`, `read -> b''`.
+
+  So the write reports for itself. `ZEND_ASYNC_IO_WRITE_FAILED` is set by the
+  reactor on a failed write (true-async/php-src#27, ABI 0.26.0;
+  true-async/php-async#266) and read by every write completion here, which also
+  releases the outbound tail rather than chaining another refused write. The
+  read side latches on a read error alone, under the version guard the file
+  already uses.
+
+  Evidence: `h1/057` and `h2/064`, both failing against `main`; `h1/032` holds
+  the other half. 351 of 371 phpt (20 skipped, 0 failed), `ctest` 16 of 16.
+
+  Two fixes recorded in the CHANGELOG were carried without a test and still are:
+  #224 and #225. The reproduction for #225 is what turned into this step.
