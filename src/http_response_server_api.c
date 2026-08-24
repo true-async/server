@@ -500,47 +500,23 @@ static bool response_header_table_has_length(const http_response_object *respons
 http_response_length_action_t http_response_length_action(zend_object *obj)
 {
     const http_response_object *response = http_response_from_obj(obj);
-    const int status = response->status_code;
 
-    if (UNEXPECTED(!response_status_carries_body(status))) {
-        if (response_status_needs_zero_length(status)) {
-            return HTTP_RESPONSE_LENGTH_ZERO;
-        }
+    /* The table is read only where the rule can ask for it — a HEAD carrying no
+     * count of the server's own — so an ordinary response pays no lookup. */
+    const bool table_has_length = response->is_head && !response->length_stated
+        && response_header_table_has_length(response);
 
-        /* RFC 9110 §8.6 forbids the field on a 1xx and a 204 and permits it on
-         * a 304, where it describes the representation a 200 would carry. */
-        return status < 200 || status == 204
-            ? HTTP_RESPONSE_LENGTH_OMIT
-            : HTTP_RESPONSE_LENGTH_KEEP;
-    }
+    const http_response_length_inputs_t in = {
+        .status           = response->status_code,
+        .streaming        = response->streaming,
+        .is_head          = response->is_head,
+        .head_streamed    = response->head_streamed,
+        .length_stated    = response->length_stated,
+        .table_has_length = table_has_length,
+        .declared_length  = response->declared_length,
+    };
 
-    /* A stream has no buffer to measure; its own declaration is the only count
-     * it can state, and finish_stream audits the bytes against it. */
-    if (response->streaming) {
-        return response->declared_length >= 0
-            ? HTTP_RESPONSE_LENGTH_KEEP
-            : HTTP_RESPONSE_LENGTH_OMIT;
-    }
-
-    if (response->length_stated) {
-        return HTTP_RESPONSE_LENGTH_KEEP;
-    }
-
-    if (!response->is_head) {
-        return HTTP_RESPONSE_LENGTH_FROM_BODY;
-    }
-
-    /* A HEAD carries the length its GET would have (RFC 9110 §9.3.2): the
-     * buffer holds that body. A handler that streamed instead had its bytes
-     * dropped, so the empty buffer measures nothing and only its own
-     * declaration can answer. */
-    if (response_header_table_has_length(response)) {
-        return HTTP_RESPONSE_LENGTH_KEEP;
-    }
-
-    return response->head_streamed
-        ? HTTP_RESPONSE_LENGTH_OMIT
-        : HTTP_RESPONSE_LENGTH_FROM_BODY;
+    return http_response_length_action_for(&in);
 }
 
 size_t http_response_wire_content_length(zend_object *obj, char *digits,
@@ -607,28 +583,6 @@ void http_response_set_connection(zend_object *obj, bool keep_alive)
         http_response_static_set_header(obj, "connection", 10, "keep-alive", 10);
     } else {
         http_response_static_set_header(obj, "connection", 10, "close", 5);
-    }
-}
-
-bool http_response_header_allowed_h2h3(const char *name, const size_t len,
-                                       const bool keep_content_length)
-{
-    switch (len) {
-    case 7:
-        return zend_binary_strcasecmp(name, 7, "upgrade", 7) != 0;
-    case 10:
-        return zend_binary_strcasecmp(name, 10, "connection", 10) != 0 &&
-               zend_binary_strcasecmp(name, 10, "keep-alive", 10) != 0;
-    case 14:
-        /* Implicit from DATA frames, and dropped for that reason — unless the
-         * response declared a length, which is the peer's own means of telling
-         * a body that stopped from one that finished. */
-        return keep_content_length
-            || zend_binary_strcasecmp(name, 14, "content-length", 14) != 0;
-    case 17:
-        return zend_binary_strcasecmp(name, 17, "transfer-encoding", 17) != 0;
-    default:
-        return true;
     }
 }
 

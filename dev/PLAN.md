@@ -1041,6 +1041,36 @@ the suite had, since every H3 test reads its response to the end.
   fault, and on the shapes a phpt can build the skipped cleanup has nothing to
   release.
 
+## Coverage through the seams the rules already have
+
+- [x] **The framing rule is tested as a rule.** Asked for by Edmond on
+  2026-08-24, and the pattern is #224's: a decision buried in a function that
+  needs a live object is moved to a named function over its inputs, and the unit
+  suite holds it to a table. `http_response_length_action_for` takes the six
+  answers the rule reads — status, streaming, HEAD, `head_streamed`,
+  `length_stated`, whether the table holds a count, and the declared length —
+  and `http_response_length_action` fills them from the response. Both it and
+  the H2/H3 header filter moved to `src/http_response_framing.c`, which holds
+  nothing else, so the unit target links it without the response object behind
+  it.
+
+  `ResponseFraming` covers eleven cases: the four statuses that answer before
+  the mode is read, a 205 outranking a stream, a measured buffer, a count the
+  server stated, a declared and an undeclared stream, the two HEAD shapes, and
+  the filter — hop-by-hop names, the content-length gate, and case folding.
+  Ignoring `head_streamed` in the rule turns exactly
+  `test_head_that_streamed_states_only_what_it_holds` red.
+
+  Evidence: `ctest` 18 of 18, 353 of 373 phpt (20 skipped, 0 failed).
+
+- [ ] **What a seam cannot reach, and why.** Three debts named in the CHANGELOG
+  stay uncovered, and none of them is a rule: the execute frame a firewall
+  restores after a bailout is engine state a unit target cannot bring up; the
+  credit wait's bound is `caller ?: deadline`, while the defect was a call site
+  ignoring its argument, which such a test would not have caught; and the
+  header-commit branch of `h1_stream_abort` needs a seam that makes a header
+  write fail, which no shape reachable from PHP produces.
+
 ## Release (asked for by Edmond, 2026-08-24)
 
 To run once the defects above are closed. The algorithm is `~/releases/RELEASING.md`;

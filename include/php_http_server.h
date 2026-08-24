@@ -1619,6 +1619,23 @@ typedef enum {
     HTTP_RESPONSE_LENGTH_OMIT,      /* no field goes out, whoever set one */
 } http_response_length_action_t;
 
+/* What a response knows about its own length. The fields below are the whole
+ * input to the rule that follows; it asks the object for nothing else. */
+typedef struct {
+    int      status;
+    bool     streaming;        /* write() has been called */
+    bool     is_head;          /* the request was a HEAD */
+    bool     head_streamed;    /* a HEAD whose handler offered chunks, dropped unmeasured */
+    bool     length_stated;    /* the count in the table is the server's own, not the handler's */
+    bool     table_has_length; /* the header table holds a Content-Length, whoever set it */
+    int64_t  declared_length;  /* what the handler promised before streaming, or -1 */
+} http_response_length_inputs_t;
+
+/* The rule over nothing but @p in. Separate from the accessor below so the unit
+ * suite can put a table of responses through it without building one. */
+http_response_length_action_t
+http_response_length_action_for(const http_response_length_inputs_t *in);
+
 /* Which of the four @p obj falls under, from its status, its mode and who set
  * the field. */
 http_response_length_action_t http_response_length_action(zend_object *obj);

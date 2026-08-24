@@ -439,6 +439,36 @@ endif()
 # defaults) require HAVE_HTTP_COMPRESSION at compile time; we set it
 # directly here rather than re-running the pkg-config probe so the test
 # build stays decoupled from the main feature flag.
+# Response framing (#235 and the entries it follows) — the Content-Length rule
+# and the H2/H3 header filter, both read from src/http_response_framing.c, which
+# holds nothing else and so links without the response object behind it.
+add_executable(test_response_framing
+    http/test_response_framing.c
+    ${CMAKE_SOURCE_DIR}/../src/http_response_framing.c
+)
+
+target_include_directories(test_response_framing PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+)
+
+target_link_libraries(test_response_framing
+    test_common
+    ${CMOCKA_LIBRARIES}
+)
+
+if(UNIX)
+    target_link_libraries(test_response_framing m pthread)
+endif()
+
+add_test(NAME ResponseFraming COMMAND test_response_framing)
+
+if(UNIX AND NOT APPLE)
+    set_tests_properties(ResponseFraming PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
 add_executable(test_compression_negotiate
     compression/test_negotiate.c
     ${CMAKE_SOURCE_DIR}/../src/compression/http_compression_negotiate.c
