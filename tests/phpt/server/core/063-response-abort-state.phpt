@@ -14,7 +14,13 @@ true_async
  *
  * Everything that would put bytes on a failed stream throws instead, and the
  * two predicates agree with each other: the response is ended, and it is not
- * writable. */
+ * writable.
+ *
+ * The three shapes a started stream can be in when abort() reaches it are all
+ * here, because they differ only in what the transport can still do: bytes on
+ * the wire (/aborted), nothing on the wire (/sse-no-event), and a body already
+ * finished (/ended). Which call finished the response is the same answer in
+ * all three, and it is the answer every refusal below quotes. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -72,6 +78,20 @@ $server->addHttpHandler(function ($req, $res) use (&$log) {
             $log[] = 'abort after end: ' . why(fn () => $res->abort());
             break;
 
+        case '/sse-no-event':
+            /* Streaming, and nothing on the wire: sseStart() commits its
+             * headers lazily, so the transport has no half body to fail and
+             * the peer gets a whole empty response. abort() still finished
+             * the response, so the refusals name it. */
+            $res->sseStart();
+            $res->abort();
+
+            $log[] = 'sse ended='    . (int) $res->isEnded();
+            $log[] = 'sse second abort: ' . why(fn () => $res->abort());
+            $log[] = 'sse write: '        . why(fn () => $res->write('more'));
+            $log[] = 'sse end: '          . why(fn () => $res->end());
+            break;
+
         case '/never-started':
             /* Nothing was streamed, so there is nothing to disown: abort()
              * leaves the response alone and end() still answers normally. */
@@ -85,7 +105,7 @@ $server->addHttpHandler(function ($req, $res) use (&$log) {
 spawn(function () use ($port, $server) {
     usleep(50000);
 
-    foreach (['/aborted', '/ended', '/never-started', '/bad-code'] as $path) {
+    foreach (['/aborted', '/ended', '/sse-no-event', '/never-started', '/bad-code'] as $path) {
         $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 5);
         stream_set_timeout($fp, 3);
         fwrite($fp, "GET $path HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
@@ -117,6 +137,10 @@ end: Response has already been aborted
 setTrailer: Cannot set trailers after abort() has been called
 setHeader: Cannot modify response after abort() has been called
 abort after end: Response has already been closed — the body was already finished cleanly
+sse ended=1
+sse second abort: no throw
+sse write: Response already closed — cannot write() after abort()
+sse end: Response has already been aborted
 abort unstarted: no throw
 ended=0
 negative: abort(): error code must be between 0 and 4294967295

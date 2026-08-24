@@ -62,7 +62,7 @@ bool http_response_is_committed(zend_object *obj)
 
 bool http_response_is_aborted(zend_object *obj)
 {
-    return http_response_from_obj(obj)->aborted;
+    return http_response_from_obj(obj)->wire_failed;
 }
 
 bool http_response_finish_stream(zend_object *obj, const bool failed,
@@ -94,7 +94,7 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
      * stops, so the clean finish below is taken instead. */
     if ((failed || !length_kept) && response->stream_ops->abort != NULL
         && response->stream_ops->abort(response->stream_ctx, error_code)) {
-        response->aborted = true;
+        response->wire_failed = true;
     } else {
         /* Nothing has left, so a declaration that will not be kept can still
          * be corrected instead of carried: the empty response committed below
@@ -108,7 +108,12 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
         response->stream_ops->mark_ended(response->stream_ctx);
     }
 
-    response->closed = true;
+    /* Which call finished the response, and that it is finished. `failed`
+     * distinguishes abort() from end() whatever the transport above could do
+     * about the body, and the refusals a later call gets quote this rather
+     * than what the peer saw. */
+    response->aborted = failed;
+    response->closed  = true;
     return true;
 }
 

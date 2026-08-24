@@ -38,12 +38,18 @@ zend_class_entry *http_response_ce;
 static zend_object_handlers http_response_handlers;
 
 /* Helper: gate every status/header/body mutation. A response is
- * no-longer-mutable in two states:
- *  1. closed   — end() has been called; nothing further is possible.
- *  2. streaming — write() has been called; status + headers are
+ * no-longer-mutable in four states, tested in the order that decides which one
+ * the handler is told about:
+ *  1. aborted   — abort() finished the response, whatever the transport could
+ *                 do about the body; named ahead of closed so the handler
+ *                 hears about its own call rather than about end().
+ *  2. closed    — end() has been called; nothing further is possible.
+ *  3. streaming — write() has been called; status + headers are
  *                 committed on the wire. Trailers are still allowed
  *                 (they're post-DATA) and go through separate
- *                 non-guarded setters — see setTrailer/setTrailers. */
+ *                 non-guarded setters — see setTrailer/setTrailers.
+ *  4. sealed    — sendFile() owns the body, so the header block is spoken for
+ *                 too. */
 static inline bool response_check_closed(const http_response_object *response)
 {
     if (response->aborted) {
@@ -2180,6 +2186,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->headers_sent = false;
     response->closed = false;
     response->aborted = false;
+    response->wire_failed = false;
     response->committed = false;
     response->streaming = false;
     response->grpc_mode = 0;

@@ -1264,3 +1264,30 @@ these are the steps before and around it.
   Not covered: that the caller's bound is honoured when the window never opens.
   It needs a peer that stalls forever, which the aioquic probe does not offer;
   the bound itself is the same expression H2 is tested on.
+
+## The label an aborted response carries (#267)
+
+- [x] **Two questions, two fields.** `http_response_finish_stream` set `aborted`
+  inside the branch the transport's `abort` op answered true to, and set
+  `closed` outside it. A transport answers false when nothing of the response
+  has reached the wire, so `sseStart()` followed by `abort()` left the pair
+  `aborted = false, closed = true` — the state a clean `end()` leaves. Six
+  refusals read `aborted` and all six then named the wrong call; the second
+  `abort()`, documented as a no-op, threw instead, in the `catch` block where it
+  replaces the handler's own diagnosis.
+
+  `aborted` is now which call finished the response, set from `failed` outside
+  the branch, and `wire_failed` is what the peer saw. `http_response_is_aborted`
+  reads the second, so the header's stated contract — the body was disowned
+  mid-flight — holds without a word changed.
+
+  The alternative was to keep one field and set it in both branches. It was
+  rejected because `responses_aborted_total` and `error.type` would then count a
+  request the peer received whole; `core/066` was extended so that choice cannot
+  be taken silently — with the two questions merged back it reads
+  `responses_aborted_total=2` and `error=response_aborted` for a completed
+  request.
+
+  Evidence: `core/063` covers the third state a started stream can be in
+  (nothing on the wire) and fails against `main` on all three of its new lines.
+  354 of 374 phpt (20 skipped, 0 failed), `ctest` 18 of 18.

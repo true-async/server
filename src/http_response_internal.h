@@ -75,7 +75,15 @@ typedef struct {
     /* State flags (clustered) */
     bool             headers_sent;
     bool             closed;
-    bool             aborted;           /* abort(): finished as failed; implies `closed` */
+    bool             aborted;           /* abort() finished this response; implies `closed`.
+                                         * Which call finished it, not what the peer saw: a
+                                         * stream with nothing on the wire is committed empty,
+                                         * and the flag holds there too, so every refusal
+                                         * names abort() rather than end(). */
+    bool             wire_failed;       /* the transport had put a byte of this response out
+                                         * and then failed it — a reset, or a terminator
+                                         * withheld. What the access record and the aborted
+                                         * counter report. */
     bool             committed;
     bool             streaming;         /* write() has been called — setBody/setHeader now throw */
     bool             sse_mode;           /* SSE helpers committed the stream — write() now throws, sse* re-entry is allowed */
