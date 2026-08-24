@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-24
+
 ### Added
 
 - **A streamed body can be framed by a length the handler declares.** A `Content-Length` set before the first `write()` now reaches the client on every protocol and frames the body; it used to be dropped on all four paths, so nothing could size a download or check it against a promise. The server holds the body to the number: a write past it throws, a body that ends short is failed rather than ended cleanly, and such a response is not compressed. Evidence: `h1/037`, `h1/038`, `h1/039`, `h2/054`, `h3/060`, `h3/061`, `compression/074`.
@@ -1409,7 +1411,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/true-async/server/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/true-async/server/compare/v0.11.3...v0.12.0
 [0.11.3]: https://github.com/true-async/server/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/true-async/server/compare/v0.11.1...v0.11.2

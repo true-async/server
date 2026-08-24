@@ -1076,9 +1076,21 @@ the suite had, since every H3 test reads its response to the end.
 To run once the defects above are closed. The algorithm is `~/releases/RELEASING.md`;
 these are the steps before and around it.
 
-- [ ] **php-src: bring the fork forward.** Update `master` from upstream, merge
-  it into `true-async`, then into `true-async-stable`. The tag comes off
-  `true-async-stable`.
+- [x] **php-src: bring the fork forward.** `master` already matched upstream;
+  `true-async` was 204 commits behind it. The merge is `cf960704dfb`, pushed to
+  both `true-async` and `true-async-stable`. Two files conflicted, both fiber
+  tests, where upstream broadened the catch to `Throwable` and printed the
+  exception class while the fork keeps its own expectation — the force-closed
+  suspend escapes as a fatal here, and the unfinished-fiber test prints `done`
+  ahead of the finally block. Both take upstream's body with the fork's SKIPIF
+  and order.
+
+  It needed php-async beside it: upstream passes `$this` as a `zend_object*`
+  now, and `ext/async` carried a copy of the closure layout that still said
+  zval, so 37 thread tests segfaulted in the worker (true-async/php-async#268).
+  Evidence: `Zend/tests/fibers` + `ext/async/tests` read 1286 of 1289 on the
+  merged tree, the same three failures it had before the merge, against 1249 of
+  1289 with the merge alone.
 - [ ] **Tag php-src** as `php-8.6.0-trueasync-A.B.C`, where `A.B.C` is the
   product version. The last one is `php-8.6.0-trueasync-0.9.6`.
 - [ ] **php-async: bump the version inside the extension, then tag** `vX.Y.Z`
@@ -1089,6 +1101,9 @@ these are the steps before and around it.
 - [ ] **`~/releases`: point `build-config.json` at the new tags, commit, tag**
   `vX.Y.Z` — that tag is what starts the build and publishes the images. The
   last one is `v0.9.6`.
+- [ ] **Every tag carries release notes of its own.** Asked for by Edmond on
+  2026-08-24: each repository gets a written description of what changed, not a
+  bare tag. `~/releases/.release-notes-*.md` are the earlier ones.
 
   Open: the product version for this round is Edmond's to name.
 
