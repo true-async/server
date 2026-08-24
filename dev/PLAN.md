@@ -1462,15 +1462,23 @@ a release yet except the first two, which are fixed.
   the WebSocket setting is. Both are added. WebSocket stays out, as it was: it
   needs wslay, and its call sites are behind `HAVE_HTTP_SERVER_WEBSOCKET`.
 
-- [ ] **`WINDOWS_X64_ZTS_RELEASE` is green on an absent extension.** It is why
+- [~] **`WINDOWS_X64_ZTS_RELEASE` is green on an absent extension.** It is why
   the drift was invisible. The job checks out php-src, copies the extension in,
   runs `configure.bat --enable-true-async-server` and `nmake` — and the build
   log contains not one compile line for an extension source. The phpt step then
   reports `Number of tests : 491` with `0` executed and `Tests failed : 0`,
   because every test skips on a missing extension, so the job passes.
 
-  Two things have to hold for it to be worth anything: the configure output has
-  to show the extension enabled, and the phpt run has to refuse a run where
-  nothing executed. The second is the cheaper guard and catches the first.
-  Until then `config.w32` is verified only by a release, which is the worst
-  place to find out.
+  Two guards are in: the test step asks `php.exe -n -m` for the module before it
+  trusts anything the run says, and `assert_executed.php` refuses a run where
+  nothing executed — checked against the failing job's own summary line, a real
+  one-test run, an unparseable log and a missing file, which answer 1, 0, 2, 2.
+
+  **The job will be red until the build is fixed, and that half is still open.**
+  Neither `async` nor `true_async_server` appears in the configure summary's
+  enabled-extension table, so both are skipped and the cause is not the
+  directory name. Ruled out from the log: an unknown flag (configure would have
+  errored), the ZTS refusal in `config.w32` (`THREAD_SAFE=1` is set), and a
+  failed `CHECK_LIB` (each calls `ERROR()`, which fails configure). The
+  configure invocation itself is not in the log — `build_task.bat` runs under
+  `@echo off` — so the next step is to echo the command and its output.
