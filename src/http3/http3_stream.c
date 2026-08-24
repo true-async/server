@@ -66,8 +66,12 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
      * workers, so the parser builds the request in the persistent (malloc)
      * domain — it crosses the reactor->worker thread boundary. NULL reactor ctx
      * (the default) keeps the ZMM fast path. */
-    s->reactor_owned = (http3_listener_reactor_ctx(conn->listener) != NULL);
+    const http3_reactor_ctx_t *const rctx = http3_listener_reactor_ctx(conn->listener);
+
+    s->reactor_owned = (rctx != NULL);
     s->request->persistent = s->reactor_owned;
+    s->req_reactor_id = rctx != NULL ? rctx->reactor_id : -1;
+    s->req_reactor_pool = rctx != NULL ? rctx->pool : NULL;
     /* PHP zvals start UNDEF; dispatch fills them right before spawning
      * the handler coroutine. */
     ZVAL_UNDEF(&s->request_zv);
@@ -102,17 +106,21 @@ static void http3_stream_release_via_request(http_request_t *req)
      * reactor's — freeing it here would be a cross-thread pool free. Instead
      * signal the owning reactor to reclaim the slot on its own thread;
      * the actual http3_stream_pool_free happens in http3_reactor_consumed_apply
-     * -> http3_stream_release. */
-    const http3_reactor_ctx_t *const rctx =
-        s->conn != NULL ? http3_listener_reactor_ctx(s->conn->listener) : NULL;
-
-    if (rctx != NULL) {
+     * -> http3_stream_release. The route is the one stamped at creation:
+     * teardown NULLs conn while a worker still holds the request, and reading
+     * the listener through conn would send exactly those streams down the
+     * single-thread path below.
+     *
+     * A closed pool is the exception. Its listener is gone, so no reactor will
+     * take work for it again and nothing can be racing for the slot — and the
+     * posts below refuse there, which is what would hang a shutdown. */
+    if (http3_stream_slot_goes_to_reactor(s)) {
         /* Hand the release back via the worker's ordered FIFO — no busy-spin,
          * stays behind any parked wire of this stream. The fallback only fires
          * when no timer can be armed (stopping loop), where the FIFO is empty. */
-        if (!http_worker_reactor_post_release(rctx->reactor_id,
+        if (!http_worker_reactor_post_release(s->req_reactor_id,
                                               http3_reactor_consumed_apply, s)) {
-            while (!reactor_pool_post_exec(rctx->pool, rctx->reactor_id,
+            while (!reactor_pool_post_exec(s->req_reactor_pool, s->req_reactor_id,
                                            http3_reactor_consumed_apply, s)) {
             }
         }

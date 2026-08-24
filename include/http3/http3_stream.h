@@ -168,6 +168,14 @@ struct _http3_stream_s {
      * to return the slot. */
     struct http3_stream_pool_s *pool;
 
+    /* Reactor mode: where the slot goes home. The slab belongs to the reactor
+     * thread, so a worker that outlives the connection posts the release to
+     * this id instead of freeing across threads. Taken at creation for the
+     * same reason as req_counters: teardown NULLs conn first. -1 outside
+     * reactor mode. */
+    int               req_reactor_id;
+    struct reactor_pool_s *req_reactor_pool;
+
     /* Lifecycle refcount. Starts at 1 (held by nghttp3 stream_user_data).
      * Once dispatch fires, the handler coroutine bumps to 2. */
     unsigned          refcount;
