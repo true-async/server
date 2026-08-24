@@ -553,6 +553,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/grpc/grpc.c
     src/grpc/grpc_call.c
     src/http_sse.c
+    src/http_response_framing.c
     src/http_response_server_api.c
     src/http_body_stream.c
     src/http_mime.c

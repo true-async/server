@@ -56,6 +56,7 @@ set(CORE_SOURCES
     src/http_send_file.c
     src/http_send_file_options.c
     src/http_body_stream.c
+    src/http_response_framing.c
     src/http_response_server_api.c
     src/compression/http_compression_negotiate.c
 )
