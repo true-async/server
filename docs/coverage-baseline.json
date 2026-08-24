@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 24492,
-      "hit": 20333
+      "total": 24503,
+      "hit": 20369
     },
     "functions": {
-      "total": 1716,
-      "hit": 1556
+      "total": 1717,
+      "hit": 1561
     }
   },
   "files": {
@@ -383,7 +383,7 @@
     "src/http1/http_parser.c": {
       "lines": {
         "total": 533,
-        "hit": 446
+        "hit": 448
       },
       "functions": {
         "total": 27,
@@ -433,11 +433,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 940,
-        "hit": 776
+        "hit": 786
       },
       "functions": {
         "total": 52,
-        "hit": 42
+        "hit": 45
       }
     },
     "src/http3/http3_connection.c": {
@@ -473,7 +473,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 513
+        "hit": 516
       },
       "functions": {
         "total": 46,
@@ -483,11 +483,11 @@
     "src/http3/http3_packet.c": {
       "lines": {
         "total": 115,
-        "hit": 98
+        "hit": 104
       },
       "functions": {
         "total": 13,
-        "hit": 11
+        "hit": 12
       }
     },
     "src/http3/http3_static_response.c": {
@@ -620,6 +620,16 @@
         "hit": 71
       }
     },
+    "src/http_response_framing.c": {
+      "lines": {
+        "total": 26,
+        "hit": 23
+      },
+      "functions": {
+        "total": 2,
+        "hit": 2
+      }
+    },
     "src/http_response_internal.h": {
       "lines": {
         "total": 11,
@@ -632,12 +642,12 @@
     },
     "src/http_response_server_api.c": {
       "lines": {
-        "total": 281,
-        "hit": 254
+        "total": 266,
+        "hit": 242
       },
       "functions": {
-        "total": 44,
-        "hit": 39
+        "total": 43,
+        "hit": 38
       }
     },
     "src/http_rfc5987.c": {
@@ -873,7 +883,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 542,
-        "hit": 486
+        "hit": 490
       },
       "functions": {
         "total": 37,
