@@ -42,7 +42,7 @@ check('ctor:prefix-no-lead',     fn() => new StaticHandler('static/',  $root));
 check('ctor:prefix-no-trail',    fn() => new StaticHandler('/static',  $root));
 check('ctor:prefix-nul',         fn() => new StaticHandler("/a\0/",    $root));
 check('ctor:prefix-double-slash', fn() => new StaticHandler('/a//b/',  $root));
-check('ctor:prefix-too-short',   fn() => new StaticHandler('/',        $root)); // len < 2
+check('ctor:prefix-root',        fn() => new StaticHandler('/',        $root));
 
 /* ---- Constructor: root-directory validation -------------------- */
 check('ctor:root-empty',         fn() => new StaticHandler('/x/', ''));
@@ -131,7 +131,7 @@ ctor:prefix-no-lead: TrueAsync\HttpServerInvalidArgumentException: StaticHandler
 ctor:prefix-no-trail: TrueAsync\HttpServerInvalidArgumentException: StaticHandler url prefix must start and end with '/'
 ctor:prefix-nul: TrueAsync\HttpServerInvalidArgumentException: StaticHandler url prefix must not contain NUL
 ctor:prefix-double-slash: TrueAsync\HttpServerInvalidArgumentException: StaticHandler url prefix must not contain '//'
-ctor:prefix-too-short: TrueAsync\HttpServerInvalidArgumentException: StaticHandler url prefix must start and end with '/'
+ctor:prefix-root: OK
 ctor:root-empty: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must not be empty
 ctor:root-relative: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must be an absolute path
 ctor:root-missing: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory not found: %s

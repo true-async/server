@@ -1011,6 +1011,25 @@ the suite had, since every H3 test reads its response to the end.
   repository only through a php-src build that carries it; `/usr/local/bin/php`,
   which the suite runs against by default, is older.
 
+## The document-root mount (#259)
+
+- [x] **A `StaticHandler` mounts at `/`.** Found while answering
+  YanGusik/laravel-spawn#52, where a user's files under Laravel's `public/`
+  reach the catch-all route instead of the disk. That report is the adapter's —
+  it ships `'static_handlers' => []` and mounts nothing — but the mount it needs
+  is the document root, and the constructor refused it: `len < 2` in
+  `validate_url_prefix` threw the message about brackets at an argument that
+  brackets. The bound is gone; an empty string is still refused, and
+  `http_static_path_resolve` needed nothing, because a one-character prefix
+  leaves the whole path as the relative one.
+
+  Evidence: `static/022` reads a file off the disk at `/assets/app.svg`, gets
+  `handler:/api/users` for a path the mount does not hold, and `handler:/index.php`
+  for one `hide('*.php')` covers — so a document root does not answer with PHP
+  source. It fails against `c748c4b` at the constructor. `static/016` recorded
+  the old bound as `ctor:prefix-too-short` and now records the new answer.
+  353 of 373 phpt (20 skipped, 0 failed), `ctest` 16 of 16.
+
 ## Which worker accepts a connection (#240)
 
 - [x] **The server promises nothing, and the shared-fd path is now tested.**
