@@ -672,6 +672,44 @@ else()
     message(STATUS "Skipping test_static_decoders: http_static_mime.c / http_static_etag.c not yet present")
 endif()
 
+# StaticHandler::hide() as a rule over its inputs. Registered without an
+# existence guard: the decoder target next to it has been skipped silently
+# since its sources were renamed, and a test that can switch itself off is
+# worth less than no test (dev/PLAN.md, "The cmocka suite rots unnoticed").
+add_executable(test_static_hide
+    static/test_static_hide.c
+    ${CMAKE_SOURCE_DIR}/../src/static/http_static_path.c
+)
+
+target_include_directories(test_static_hide PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../include/static
+    ${CMAKE_SOURCE_DIR}/../src
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(test_static_hide
+    test_common
+    ${CMOCKA_LIBRARIES}
+    ${CMAKE_DL_LIBS}
+)
+
+if(UNIX)
+    target_link_libraries(test_static_hide m pthread rt)
+endif()
+
+add_test(NAME StaticHide COMMAND test_static_hide)
+
+if(WIN32)
+    set_tests_properties(StaticHide PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
+    set_tests_properties(StaticHide PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
 # Windows/MSVC portability tests (issue #15).
 # Exercises win32_compat.h macro values, path-separator handling in
 # http_static_resolved_under_root / verify_path_owner_chain, and

@@ -1102,9 +1102,8 @@ these are the steps before and around it.
   renames. Verified against the candidate PHP (php-src `true-async` merged with
   `master`, php-async #268, installed as `/home/edmond/php-release-26`): 353 of
   373 phpt, 0 failed, built against it.
-- [ ] **`~/releases`: point `build-config.json` at the new tags, commit, tag**
-  `vX.Y.Z` — that tag is what starts the build and publishes the images. The
-  last one is `v0.9.6`.
+- [x] **`~/releases`: point `build-config.json` at the new tags, commit, tag**
+  `v0.9.7` — done for the 0.9.7 round.
 - [ ] **Every tag carries release notes of its own.** Asked for by Edmond on
   2026-08-24: each repository gets a written description of what changed, not a
   bare tag. `~/releases/.release-notes-*.md` are the earlier ones.
@@ -1291,3 +1290,162 @@ these are the steps before and around it.
   Evidence: `core/063` covers the third state a started stream can be in
   (nothing on the wire) and fails against `main` on all three of its new lines.
   354 of 374 phpt (20 skipped, 0 failed), `ctest` 18 of 18.
+
+## Four defects found by review on 2026-08-24, three of them open
+
+Verified this day, each by a run or by a reading that names the code. None is in
+a release yet except the first two, which are fixed.
+
+- [x] **`awaitWritable()` refused instead of waiting on HTTP/3 (#265).** Fixed;
+  the section above carries the evidence.
+- [x] **An aborted response with nothing on the wire was labelled cleanly ended
+  (#267).** Fixed; the section above carries the evidence.
+- [ ] **Compression is not wired into the worker path.** Settled by Edmond on
+  2026-08-24: a defect, not a feature awaiting a port. With the reactor pool on,
+  a response is not compressed and a `Content-Encoding` request body reaches the
+  handler as it came. `http_compression_attach` runs in all three transports —
+  `src/core/http_connection.c:2654`, `src/http2/http2_strategy.c:289`,
+  `src/http3/http3_dispatch.c:668` — always beside the response object it
+  belongs to, and `http_compression_decode_request_body` runs beside each
+  handler call. `src/core/worker_dispatch.c:860-869` builds its own request and
+  response on the worker thread and calls neither, so the H3 dispatch path that
+  would have attached is never reached: the request is marshalled and the
+  response is a different object. `json_encode_flags` is missing there for the
+  same reason, and the protocol version is hard-coded `"3.0"` two lines above a
+  `ctx->protocol` that already distinguishes HTTP/1 and HTTP/2 — harmless while
+  the pool is H3-only, which #106 is about ending.
+
+  **The trap the fix has to clear first.** `http_server_get_config(server)`
+  reaches a `HashTable` — `compression_mime_types`, read by `decide()` at
+  `src/compression/http_compression_response.c:265` — allocated in the thread
+  that built the config. A worker thread must take the frozen snapshot instead:
+  `http_server_shared_config_t` (`src/http_server_config.c:50`) deep-copies that
+  whitelist into persistent `zend_string`s for exactly this crossing, and each
+  PHP thread LOADs its own `http_server_config_t` from it. Which of the two the
+  worker actually holds is the first thing to establish; the attach call is
+  correct only over the second.
+
+- [ ] **A full reactor mailbox drops a buffered response and the record says it
+  was delivered.** `reactor_pool_post_exec` answers false when the mailbox is at
+  capacity (default 1024, floor 64), and `src/http_server_class.c:3053-3073`
+  defers a STREAM_* wire to the retry FIFO while discarding a `RESPONSE_WIRE_FULL`
+  on the spot. The discard itself is a decision the code states. What is not
+  stated is the silence: `src/core/worker_dispatch.c:269` guards two unrelated
+  decisions with one condition, so a FULL wire is exempted from
+  `worker_wire_dropped_total` along with `stream_failed`, and
+  `http_request_telemetry` twenty lines later counts the status and emits the
+  access line regardless. The client waits out its own deadline while the server
+  records a 200 that never left the process.
+
+  Observed under gdb by forcing `thread_cmd_mailbox_post` to answer false for
+  `http3_reactor_apply_response`: `CLIENT_OUT=[h3client: timeout]`,
+  `responses_2xx_total=1`, `worker_wire_dropped_total=0`. Natural overflow was
+  not reachable — 200 concurrent buffered requests and 50 streams × 3000 chunks
+  against a 64-deep mailbox all served cleanly, because the per-stream credit cap
+  throttles the producer first. So the consequence is established and the
+  frequency is not.
+
+  The fix is at `worker_dispatch.c:269`: split the condition, keep FULL exempt
+  from `stream_failed` and count every undelivered wire. Beside it the invariant
+  worth stating: a request whose wire was not delivered is not a delivered
+  response, which means the telemetry call at `:768` has to see the flag.
+
+- [ ] **SSE never counts the bytes it sends.** `sse_dispatch`
+  (`src/http_sse.c:257`) hands its record to `append_chunk` without going through
+  `response_check_declared_length`, the only function that advances
+  `written_length` — and `written_length` is what
+  `http_response_get_sent_body_size` reports for a streaming response, so
+  `http.response.body.size` reads 0. The other five `append_chunk` call sites all
+  pass through it. Observed on HTTP/1 and HTTP/2: three `sseEvent()` put 105
+  octets on the wire and logged 0; the same handler finishing with
+  `end("data: bye\n\n")` logged 11, which is exactly the part that went through
+  the ledger. HTTP/3 not observed.
+
+  The counting fix goes at that call site, with the release-on-refusal symmetry
+  `tryWrite()` uses, since `trySseEvent()` passes `nonblocking = true`. The wider
+  answer is that `append_chunk` is callable directly at all: one funnel that both
+  records and dispatches would make the table above collapse to one row.
+
+- [ ] **A failed HTTP/3 submit leaves `chunk_queue` primed.**
+  `h3_stream_append_chunk` initialises the queue before
+  `http3_stream_submit_response` is known to have succeeded, and its failure tail
+  releases the elements while leaving the array allocated. `chunk_queue != NULL`
+  is what `h3_stream_abort` and `h3_stream_mark_ended` read as "the response is
+  on the wire", so such a stream is either reset without the peer having seen a
+  HEADERS frame or left with nothing sent at all. H2 corrected the same primer in
+  #171 — `h2_stream_init_ring` publishes the ring only after the commit — and H3
+  was not touched.
+
+  Not reproduced: the failure needs `Z_ISUNDEF(s->response_zv)` or an nghttp3
+  NOMEM, and no live path reaches either today. A debt against a refactor, not a
+  fault in the field.
+
+## Release 0.14.0 (2026-08-24)
+
+- [x] **Server: bump the version and cut `v0.14.0`.** A minor rather than a
+  patch: `awaitWritable()` answers where it used to refuse on HTTP/3, and the
+  refusals a finished response gives name a different call. Both are visible to
+  a handler.
+- [ ] **`~/releases`: point the server at `v0.14.0`, commit, tag `v0.9.8`.** A
+  patch on the product version — php-src and php-async are unchanged since
+  `v0.9.7`, and only the server extension moves. Notes for both tags are written
+  by hand; the release workflow does not read them, so `gh release edit
+  --notes-file` follows the build.
+
+## `hide()` was anchored, and a document root leaked sources (#270)
+
+- [x] **A pattern naming no directory names a file, at any depth.** Found while
+  answering YanGusik/laravel-spawn#52, where the adapter has to mount Laravel's
+  `public/` at `/` and `hide('*.php')` is the whole of what keeps the front
+  controller off the wire. `fnmatch(..., FNM_PATHNAME)` stops `*` at each
+  separator, so the pattern covered `index.php` and served `admin/tools.php` as
+  its own text. Probed before reading further: `/index.php` answered
+  `handler:/index.php` and `/sub/deep.php` answered `<?php echo "NESTED
+  SECRET";`.
+
+  gitignore's rule is the one an operator already knows and the one that fails
+  safe, so it is what the code follows: no separator in the pattern means it
+  names a file, and the file is hidden wherever it sits; a separator means the
+  pattern is anchored at the mount root and `*` stops at each separator, which
+  is the only way to say `cache/*` and mean that one directory.
+
+  The rule moved out of the mount into `http_static_hide_glob_matches`, over the
+  two strings it actually reads, and `StaticHide` holds it to a table: putting
+  the anchored rule back turns it red. `static/023` shows the same end to end.
+
+  Evidence: 355 of 375 phpt (20 skipped, 0 failed), `ctest` 19 of 19.
+
+- [ ] **`test_static_decoders` has been switched off, and nothing said so.** Its
+  CMake guard tests for `src/static/http_static_mime.c` and
+  `http_static_etag.c`; both were renamed to `src/http_mime.c` and
+  `src/http_etag.c` with their headers, so the guard has been false ever since
+  and the target is skipped with a `message(STATUS ...)` nobody reads. The file
+  also calls `http_static_mime_lookup`, which no longer exists — the current
+  calls are `http_mime_lookup_by_ext`, `http_etag_format_strong` and
+  `http_etag_match_inm` — so reviving it is a rewrite of about thirty cases, not
+  a path fix. Belongs to #189, and the new `StaticHide` target is registered
+  without a guard for the same reason.
+
+## Two room tests rested on an accept split the server does not promise
+
+- [x] **The spread is proved now, not assumed.** `064-room-retry-delivered` and
+  `066-room-retry-rejected` opened twelve subscribers across two workers and
+  went on as though a remote worker certainly held one — 064 said so in a
+  comment. The outbound queue they exercise is reached only through a
+  cross-worker post, so a run where one worker took every accept sends locally,
+  parks nothing, and the counters never move: `066` read `a=1 b=1` and
+  `retry_rejected advanced: no` on `LINUX_X64_DEBUG_ZTS` in PR 269. Which worker
+  accepts is exactly what #240 settled the server promises nothing about, so the
+  premise was never a fact.
+
+  `ws_open_spread_subscribers` opens connections in rounds and probes with a
+  publish from the parent, which posts once per worker holding a subscriber:
+  `ws_topic_posted` moving by the worker count is the observable that turns the
+  hope into a fact. The probe's own messages are drained before it returns, and
+  a spread that never happens is reported rather than asserted past.
+
+  Evidence: asking for a spread across three workers on a two-worker server
+  prints `no subscriber on a remote worker` and fails, so the guard is load
+  bearing; both tests pass 10 runs of 10, and the whole phpt tree reads 471 of
+  491 (20 skipped, 0 failed) on a build configured with
+  `--enable-tas-test-hooks`.

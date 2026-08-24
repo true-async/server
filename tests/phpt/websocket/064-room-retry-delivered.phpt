@@ -31,8 +31,6 @@ use TrueAsync\HttpRequest;
 use function Async\spawn;
 use function Async\delay;
 
-const SUBS = 12;   // spread over 2 workers => a remote worker certainly has one
-
 $port = tas_free_port();
 $server = new HttpServer(
     (new HttpServerConfig())
@@ -46,9 +44,11 @@ $server->enableRooms();
 
 /* The handler captures the server (as 057 does) — a transferred Room handle is
  * not valid on the worker, but the server is; send() reaches the hub through it. */
-/* SUBS travels bound to the closure: a worker runs with its own set of
- * constants, and the parent's are not among them. */
-$subs_total = SUBS;
+/* The bound travels bound to the closure: a worker runs with its own set of
+ * constants, and the parent's are not among them. The count is decided by how
+ * many connections it took to reach both workers, so the handler is given a
+ * ceiling it cannot exceed rather than the exact number. */
+$subs_total = 64;
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($server, $subs_total) {
     if ($req->getPath() === '/ctl') {
@@ -62,7 +62,7 @@ $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use ($se
             try {
                 $r = $server->send('rt', 'hi', 2000);
                 /* delivered counts every subscriber this worker served plus one
-                 * post per remote worker, and SUBS connections land on the two
+                 * post per remote worker, and the connections land on the two
                  * workers in whatever split the accepts gave — so the count is
                  * bounded rather than exact. At least the retried post landed;
                  * at most every subscriber is local bar the one behind it. */
@@ -83,16 +83,14 @@ $server->addHttpHandler(function ($req, $res) { $res->setStatusCode(404)->end();
 spawn(function () use ($port, $server) {
     delay(4000);   // both workers bind
 
-    $subs = [];
-    for ($i = 0; $i < SUBS; $i++) {
-        $fp = ws_open($port, '/');
-        if ($fp === null) { echo "sub handshake failed\n"; $server->stop(); return; }
-        $subs[] = $fp;
-    }
+    /* The post this test fails is the cross-worker one, so both workers have to
+     * hold a subscriber first. Accepts decide where a connection lands and the
+     * server promises nothing about it, so the spread is proved, not assumed. */
+    $subs = ws_open_spread_subscribers($server, $port, 'rt', 2);
+    if ($subs === null) { echo "no subscriber on a remote worker\n"; $server->stop(); return; }
+
     $ctl = ws_open($port, '/ctl');
     if ($ctl === null) { echo "ctl handshake failed\n"; $server->stop(); return; }
-
-    delay(1200);   // subscribes land in each worker's tree
 
     $before = $server->getRuntimeStats();
 
@@ -111,7 +109,7 @@ spawn(function () use ($port, $server) {
     foreach ($subs as $fp) {
         if (ws_await($fp, 3000) === 'hi') { $got++; }
     }
-    echo 'all subscribers received: ', $got === SUBS ? 'yes' : "no ($got)", "\n";
+    echo 'all subscribers received: ', $got === count($subs) ? 'yes' : "no ($got of " . count($subs) . ")", "\n";
 
     foreach ($subs as $fp) { @fclose($fp); }
     @fclose($ctl);

@@ -426,8 +426,16 @@ final class StaticHandler
 
     /**
      * Glob patterns whose matching paths return 404 regardless of
-     * existence. Patterns are matched against the path *relative to
-     * the root directory*, with `/` as the separator.
+     * existence — or fall through to the PHP handler on an
+     * `on_missing: NEXT` mount.
+     *
+     * Patterns are matched against the path *relative to the root
+     * directory*, with `/` as the separator, by gitignore's rule:
+     * a pattern naming no directory names a file, and covers a file
+     * of that name at any depth, so `*.php` hides `index.php` and
+     * `admin/tools.php` alike. A pattern naming a directory is
+     * anchored at the root and `*` stops at each separator, so
+     * `cache/*` hides the mount's own `cache/` and not `var/cache/`.
      *
      * @return static
      */
