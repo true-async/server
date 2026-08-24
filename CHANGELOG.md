@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`awaitWritable()` answered "still full" on HTTP/3 instead of waiting for the window (#265).** `h3_stream_ops` declared no `wait_writable`, and a transport that cannot wait is told to refuse — the answer that keeps a handler from spinning, and the wrong one for a stream whose peer extends the window a millisecond later. The handler was left with a sleep-and-retry loop or a blocking `write()`, and on a reactor-pool worker that loop holds the thread carrying the other requests. HTTP/3 now takes the park loop `write()` already ran, bounded by the shorter of the caller's timeout and the connection's write deadline, as HTTP/2 bounds its own. Evidence: `h3/069`, where `awaitWritable(5000)` reads `room=0` against `main` and `room=1` with the fix.
+
 ## [0.13.0] - 2026-08-24
 
 ### Added

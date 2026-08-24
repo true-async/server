@@ -1091,13 +1091,17 @@ these are the steps before and around it.
   Evidence: `Zend/tests/fibers` + `ext/async/tests` read 1286 of 1289 on the
   merged tree, the same three failures it had before the merge, against 1249 of
   1289 with the merge alone.
-- [ ] **Tag php-src** as `php-8.6.0-trueasync-A.B.C`, where `A.B.C` is the
-  product version. The last one is `php-8.6.0-trueasync-0.9.6`.
-- [ ] **php-async: bump the version inside the extension, then tag** `vX.Y.Z`
-  from `main`. The last one is `v0.9.4`.
-- [ ] **Server: build against the new PHP, run the suite, bump the version,
-  tag** `vX.Y.Z`. The last one is `v0.12.0`, and `## [Unreleased]` carries BC
-  breaks, so the next is a minor rather than a patch.
+- [x] **Tag php-src** — `php-8.6.0-trueasync-0.9.7` on `cf960704dfb`, with notes
+  naming the ABI addition and the two fiber-test resolutions.
+- [~] **php-async: bump the version inside the extension, then tag** `v0.9.5`
+  from `main`. The macro said `0.9.3` while the tags had reached `v0.9.4`, so
+  `phpinfo()` reported a release behind; PR 269 carries it and the tag follows
+  its CI.
+- [x] **Server: build against the new PHP, run the suite, bump the version,
+  tag** — `v0.13.0` on `8c80d42`. A minor: the release carries the body-API
+  renames. Verified against the candidate PHP (php-src `true-async` merged with
+  `master`, php-async #268, installed as `/home/edmond/php-release-26`): 353 of
+  373 phpt, 0 failed, built against it.
 - [ ] **`~/releases`: point `build-config.json` at the new tags, commit, tag**
   `vX.Y.Z` — that tag is what starts the build and publishes the images. The
   last one is `v0.9.6`.
@@ -1234,3 +1238,29 @@ these are the steps before and around it.
   is the truncated frame on the wire, and the CHANGELOG says so.
 
   Evidence: `ctest` 16 of 16, 351 of 371 phpt (20 skipped, 0 failed).
+
+## awaitWritable() on HTTP/3 (#265)
+
+- [x] **The wait HTTP/3 did not have.** `h3_stream_ops` declared no
+  `wait_writable`, so `awaitWritable()` took the branch meant for a transport
+  that cannot wait and answered false whenever the queue was full. The stream
+  already owned every part of the wait: `s->write_event`, fired by
+  `extend_max_stream_data_cb` and by the data reader, and the park loop inside
+  `h3_stream_append_chunk`. That loop is now `h3_stream_wait_for_room`, called
+  by both `append_chunk` and the new `h3_stream_wait_writable`, and its deadline
+  is the shorter of the caller's `timeout_ms` and the connection's write
+  timeout — the rule `h2_wait_for_drain_event` already states.
+
+  The one behaviour the extraction had to keep: outside a coroutine the flush is
+  best-effort, not a dead stream. `append_chunk` asks `h3_can_suspend()` before
+  entering the wait, so the refusal the wait gives there does not reach the
+  caller as `HTTP_STREAM_APPEND_STREAM_DEAD`.
+
+  Evidence: `h3/069` reads `room=0` against `main` and `room=1` with the fix —
+  the aioquic probe caps its window at 16384, so the second 256 KiB chunk sits
+  on the queue behind a blocked stream while the wait is asked for. 354 of 374
+  phpt (20 skipped, 0 failed), `ctest` 18 of 18.
+
+  Not covered: that the caller's bound is honoured when the window never opens.
+  It needs a peer that stalls forever, which the aioquic probe does not offer;
+  the bound itself is the same expression H2 is tested on.
