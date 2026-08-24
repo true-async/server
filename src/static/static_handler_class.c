@@ -83,7 +83,7 @@ static bool validate_url_prefix(const zend_string *prefix)
 	const size_t len = ZSTR_LEN(prefix);
 	const char *val = ZSTR_VAL(prefix);
 
-	if (len < 2 || val[0] != '/' || val[len - 1] != '/') {
+	if (len == 0 || val[0] != '/' || val[len - 1] != '/') {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler url prefix must start and end with '/'", 0);
 		return false;
