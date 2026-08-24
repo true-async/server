@@ -156,3 +156,56 @@ function ws_await($fp, int $timeout_ms = 5000): string
 
     return '';
 }
+
+/* Open subscriber connections until every worker holds one, and say so plainly
+ * when they never do.
+ *
+ * Which worker accepts a connection is not something the server promises
+ * (true-async/server#240 settled that no arbitration is added), so "twelve
+ * connections reach both workers" is a hope, and a test resting on it asserts
+ * the wrong thing on the run where one worker took them all — a cross-worker
+ * post never happens and the counter it watches never moves.
+ *
+ * The spread is made a fact instead: a publish from the parent posts once per
+ * worker that holds a subscriber, so `ws_topic_posted` moving by $workers is
+ * the observable. Probe messages are drained before returning, so the caller
+ * counts only its own.
+ *
+ * Returns the sockets, or null when the spread never happened — the caller
+ * reports that rather than asserting past it. */
+function ws_open_spread_subscribers($server, int $port, string $topic,
+                                    int $workers, int $per_round = 4,
+                                    int $rounds = 8): ?array
+{
+    $subs = [];
+
+    for ($round = 0; $round < $rounds; $round++) {
+        for ($i = 0; $i < $per_round; $i++) {
+            $fp = ws_open($port, '/');
+
+            if ($fp === null) {
+                foreach ($subs as $open) { @fclose($open); }
+
+                return null;
+            }
+
+            $subs[] = $fp;
+        }
+
+        /* The subscribe lands in the worker's tree after the handshake. */
+        \Async\delay(400);
+
+        $before = $server->getRuntimeStats()['ws_topic_posted'];
+        $server->publish($topic, 'probe');
+
+        foreach ($subs as $fp) { ws_await($fp, 3000); }
+
+        if ($server->getRuntimeStats()['ws_topic_posted'] - $before >= $workers) {
+            return $subs;
+        }
+    }
+
+    foreach ($subs as $fp) { @fclose($fp); }
+
+    return null;
+}

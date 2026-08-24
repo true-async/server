@@ -1425,3 +1425,27 @@ a release yet except the first two, which are fixed.
   `http_etag_match_inm` — so reviving it is a rewrite of about thirty cases, not
   a path fix. Belongs to #189, and the new `StaticHide` target is registered
   without a guard for the same reason.
+
+## Two room tests rested on an accept split the server does not promise
+
+- [x] **The spread is proved now, not assumed.** `064-room-retry-delivered` and
+  `066-room-retry-rejected` opened twelve subscribers across two workers and
+  went on as though a remote worker certainly held one — 064 said so in a
+  comment. The outbound queue they exercise is reached only through a
+  cross-worker post, so a run where one worker took every accept sends locally,
+  parks nothing, and the counters never move: `066` read `a=1 b=1` and
+  `retry_rejected advanced: no` on `LINUX_X64_DEBUG_ZTS` in PR 269. Which worker
+  accepts is exactly what #240 settled the server promises nothing about, so the
+  premise was never a fact.
+
+  `ws_open_spread_subscribers` opens connections in rounds and probes with a
+  publish from the parent, which posts once per worker holding a subscriber:
+  `ws_topic_posted` moving by the worker count is the observable that turns the
+  hope into a fact. The probe's own messages are drained before it returns, and
+  a spread that never happens is reported rather than asserted past.
+
+  Evidence: asking for a spread across three workers on a two-worker server
+  prints `no subscriber on a remote worker` and fails, so the guard is load
+  bearing; both tests pass 10 runs of 10, and the whole phpt tree reads 471 of
+  491 (20 skipped, 0 failed) on a build configured with
+  `--enable-tas-test-hooks`.
