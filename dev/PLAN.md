@@ -547,12 +547,30 @@ it and expects a tag within days.
   therefore spends the same 126 ns against an unmeasured baseline, and a large body,
   where a 66% run-to-run spread at 64 KiB drowns a 3% effect. #195 and #197 are not
   measured at all. Evidence: `dev/BENCHMARKS.md`, 2026-08-22.
-- [ ] **Hand the Content-Length to the flatten loop instead of the header table.**
-  The shape the measurement above calls for: the count reaches the wire as an extra
-  entry of the flatten loop, so a buffered response stops paying a `zend_hash_update`
-  and two `zend_string` allocations for a field no PHP code reads back. Re-measure
-  the same way — paired rounds on `/b3`, release build — and keep the entry beside
-  the one it answers.
+- [x] **#235 — hand the Content-Length to the flatten loop instead of the header
+  table.** The count reaches the wire as an entry of its own, the way `:status`
+  already did, so a buffered response stops paying a `zend_hash_update` and two
+  `zend_string` allocations for a field no PHP code reads back.
+  `http_response_wire_content_length` writes the digits into a buffer the caller
+  owns and answers how many, with a second output for whether the table's own
+  field is copied instead. The four submit sites read it: HTTP/2, HTTP/3, the
+  static HTTP/2 engine and the reactor pool wire. The two
+  streaming sites keep `http_response_keeps_declared_length`, because a stream's
+  count is the handler's own field in the table and the status rules that the
+  buffered path applies first would answer differently for a streamed 204 or 205.
+
+  Measured the same way, paired rounds on `/b3` against a release build:
+  **95 ns per response**, 3.6%, 15 rounds of 19, and the order of the two builds
+  flipped every round so the first-position penalty falls on both. The insert was
+  measured at 126 ns from the other side. Evidence: `dev/BENCHMARKS.md`,
+  2026-08-24; 351 of 371 phpt (20 skipped, 0 failed), `ctest` 16 of 16.
+
+  No test is new. The change moves where the field is written and not what goes
+  on the wire: `h2/056`, `h3/068` and `static/012` read the count back off the
+  wire and `h3/019` counts the fields that go out with it, all four passing here.
+  The reactor pool wire has no
+  end-to-end coverage of its own here — the suite exercises it through the
+  self-test hooks — so its copy is carried on the build alone.
 
 - [x] **#204 — an aborted request is logged and counted as the status it
   committed.** Answered by looking at what other servers do rather than by

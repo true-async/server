@@ -144,16 +144,13 @@ a per-request path. Nothing here is measured unless it says so.
 
 ### Duplicated logic
 
-- **High. `keep_content_length` is re-derived at five submit sites, and the
-  copies disagree.** Buffered paths ask `http_response_commit_content_length`
-  (`src/http2/http2_strategy.c:1085`, `src/http2/http2_static_response.c:725`,
-  `src/http3/http3_callbacks.c:902`, `src/core/worker_dispatch.c:568`);
-  streaming paths ask `http_response_has_declared_length`
-  (`src/http2/http2_strategy.c:1167`, `src/core/worker_dispatch.c:360`). Only
-  the first refuses the field on a response carrying trailers, so a
-  declared-length stream with trailers keeps `content-length` on HTTP/2 — where
-  nghttp2 then closes the stream before the trailers land — and drops it on
-  HTTP/3. Fix: the streaming commits call `commit_content_length` too.
+- ~~**High. `keep_content_length` is re-derived at five submit sites, and the
+  copies disagree.**~~ Closed. The streaming sites read
+  `http_response_keeps_declared_length`, which carries the same trailers rule the
+  buffered path applies, and the buffered ones read
+  `http_response_wire_content_length` (#235). The two answers still come from two
+  functions, because a stream's count is the handler's own field in the table
+  while the buffered path computes one and states it.
 - **High. The HTTP/1 retirement verdict is computed twice** —
   `src/core/http_connection.c:3040` and `src/http1/http1_stream.c:118` — kept
   coherent by the `streaming` flag and a latch, with three comments to explain
