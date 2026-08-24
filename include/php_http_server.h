@@ -1689,9 +1689,12 @@ bool  http_response_is_streaming   (zend_object *obj);  /* write() activated str
  *
  * A response already finished is left alone; a failed finish that the
  * transport cannot deliver falls back to the clean one, which is the closest
- * thing to the truth available on that wire. False means the response had no
- * started stream to finish at all, and the caller still owes the peer
- * whatever its protocol allows. Backs HttpResponse::end() and abort().
+ * thing to the truth available on that wire. The fallback changes what the
+ * peer receives and not what the response is labelled: @p failed decides that,
+ * so a later call is still refused as one after abort(). False means the
+ * response had no started stream to finish at all, and the caller still owes
+ * the peer whatever its protocol allows. Backs HttpResponse::end() and
+ * abort().
  *
  * @p error_code reaches the transport's abort op unchanged; negative asks for
  * that transport's default, and it is what every caller but abort($code)
