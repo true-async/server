@@ -37,6 +37,15 @@ The before build's own spread is 23% against the after build's 10%, both driven
 by two rounds near 211000 that the paired ratio absorbs. HTTP/3 and the reactor
 pool take the same change and are not measured.
 
+A second run, on the merged shape — the same change with the count handed over as
+a buffer and a flag rather than a struct — took 16 rounds the same way and read
+weaker: paired median ratio **1.0221**, faster in 10 rounds of 15. The two builds'
+medians came out within 0.1% of each other there, because that run carried
+outliers near 180000 on both sides where the first carried them on one, so the
+per-round pairing is the only statistic of the two that survives it. Both runs
+agree on the direction and bound the size at 2 to 4 percent; the 95 ns above is
+the top of that range, not a repeatable figure.
+
 ## 2026-08-22 — what #200's Content-Length insert costs per HTTP/2 response
 
 Builds: `b0ca84c`, the commit before #200, against `ebbe410`, which is #200.
