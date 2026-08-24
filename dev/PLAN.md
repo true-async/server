@@ -1492,3 +1492,15 @@ a release yet except the first two, which are fixed.
   invocation now and asks `configure.bat --help` what it knows of the two flags,
   so the next run says. Settling it likely needs a Windows host: the SDK, the
   toolchain and `cscript` are not reachable from here.
+
+  Asked of the people who own the recipe: true-async/php-async#270. The one
+  difference between their job, which builds `ext/async`, and this copy, which
+  builds neither extension, is `--enable-snapshot-build`. By
+  `confutils.js:461-510` that flag rewrites only arguments the command line did
+  not name, so an explicit `--enable-async` should stand without it — the
+  observation and the source disagree, and that disagreement is the question.
+
+  **A trap this cost an hour of CI:** a batch file edited from Linux must keep
+  its CRLF. `cmd.exe` parses a parenthesised block by line ending, so an
+  LF-only `build_task.bat` fails at its first `if … (` with
+  `'/i' is not recognized`, which reads like a bad flag and is not.
