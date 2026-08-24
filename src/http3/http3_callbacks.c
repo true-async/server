@@ -1205,6 +1205,82 @@ void h3_chunk_queue_push(http3_stream_t *s, zend_string *chunk)
     s->chunk_pending_bytes += ZSTR_LEN(chunk);
 }
 
+/* A suspend needs a coroutine of its own, and the scheduler's frame is not
+ * one. */
+static bool h3_can_suspend(void)
+{
+    return ZEND_ASYNC_CURRENT_COROUTINE != NULL && !ZEND_ASYNC_IS_SCHEDULER_CONTEXT;
+}
+
+/* Park until the queued bytes have reached nghttp3, re-draining the connection
+ * on every wake — a bare park on write_event would sleep with packets still
+ * unsent. `timeout_ms` is the caller's own bound; 0 leaves only the
+ * connection's write timeout, and that being 0 in turn means wait for as long
+ * as the peer takes. `s->conn` must be live. False means the wait ended
+ * without room — a dead stream, a caller that cannot suspend, or the
+ * deadline — and an exception may be pending. */
+static bool h3_stream_wait_for_room(http3_stream_t *const s, const uint32_t timeout_ms)
+{
+    if (!h3_can_suspend()) {
+        return false;
+    }
+
+    http3_connection_t *const c = s->conn;
+
+    /* Pulled once: config cannot change mid-handler. The shorter of the two
+     * bounds wins, so a caller that named its own deadline gets it and one
+     * that did not is still capped by the connection. */
+    uint32_t deadline_ms = (uint32_t)c->view->write_timeout_s * 1000u;
+
+    if (timeout_ms > 0 && (deadline_ms == 0 || timeout_ms < deadline_ms)) {
+        deadline_ms = timeout_ms;
+    }
+
+    while (s->chunk_pending_bytes > 0 && !s->peer_closed && !s->local_aborted) {
+        zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+        if (s->write_event == NULL) {
+            s->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+            if (s->write_event == NULL) {
+                return false;
+            }
+        }
+
+        if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+            return false;
+        }
+
+        zend_async_resume_when(co, &s->write_event->base, false,
+                               zend_async_waker_callback_resolve, NULL);
+
+        /* Two wake sources, whichever fires first wins: the peer extending the
+         * window, and the deadline that keeps a peer which stops acknowledging
+         * from pinning the handler. Mirrors H2's h2_wait_for_drain_event. */
+        if (deadline_ms > 0) {
+            zend_async_event_t *timer =
+                &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)deadline_ms, false)->base;
+            zend_async_resume_when(co, timer, true,
+                                   zend_async_waker_callback_timeout, NULL);
+        }
+
+        ZEND_ASYNC_SUSPEND();
+        zend_async_waker_clean(co);
+
+        if (EG(exception) != NULL) {
+            /* A timeout for a genuinely stalled peer, or the cancellation an
+             * RST turns into; write() surfaces it as HttpException. */
+            return false;
+        }
+
+        /* Window extended — the packets it makes room for still need sending. */
+        http3_connection_drain_out(c);
+        http3_connection_arm_timer(c);
+    }
+
+    return s->chunk_pending_bytes == 0;
+}
+
 int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking)
 {
     http3_stream_t *const s = (http3_stream_t *)ctx;
@@ -1289,67 +1365,18 @@ int h3_stream_append_chunk(void *ctx, zend_string *chunk, const bool nonblocking
     }
 
     /* The static/sendFile sender feeds us from an io callback on a transport
-     * thread, where a current coroutine exists — so the co != NULL guard below
-     * passes and the suspend never returns: it parks a libuv callback frame that
-     * the sender itself would have had to wake. It backpressures in
+     * thread, where a current coroutine exists — so the suspend guard inside
+     * the wait passes and the suspend never returns: it parks a libuv callback
+     * frame that the sender itself would have had to wake. It backpressures in
      * h3_static_try_read instead. */
     const bool nonblocking_producer = s->static_body_state != NULL || nonblocking;
 
-    /* Pull write_timeout_s once — config can't change mid-handler.
-     * 0 = wait forever (used in tests / bring-up). Pre-multiply to ms so
-     * the inner loop doesn't re-derive it per suspension. */
-    const uint32_t write_timeout_ms =
-        (uint32_t)c->view->write_timeout_s * 1000u;
-    while (s->chunk_pending_bytes > 0 && !s->peer_closed && !s->local_aborted
-           && !nonblocking_producer) {
-        zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
-
-        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
-            /* Not in a coroutine — can't suspend; flush is best-effort. */
-            break;
-        }
-
-        if (s->write_event == NULL) {
-            s->write_event = ZEND_ASYNC_NEW_TRIGGER_EVENT();
-
-            if (s->write_event == NULL) {
-                return HTTP_STREAM_APPEND_STREAM_DEAD;
-            }
-        }
-
-        zend_async_event_t *wake_ev =
-            &s->write_event->base;
-
-        if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
+    /* Outside a coroutine there is nothing to park, and the flush stays
+     * best-effort rather than reading as a dead stream. */
+    if (!nonblocking_producer && h3_can_suspend()) {
+        if (!h3_stream_wait_for_room(s, 0)) {
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
-
-        zend_async_resume_when(co, wake_ev, false,
-                               zend_async_waker_callback_resolve, NULL);
-        /* Defensive write_timeout_s — caps the wait so a peer that stops
-         * acknowledging can't pin the handler forever. Mirrors H2's
-         * h2_wait_for_drain_event. Two wake sources, whichever fires
-         * first wins. */
-        if (write_timeout_ms > 0) {
-            zend_async_event_t *timer =
-                &ZEND_ASYNC_NEW_TIMER_EVENT(
-                    (zend_ulong)write_timeout_ms, false)->base;
-            zend_async_resume_when(co, timer, true,
-                                   zend_async_waker_callback_timeout, NULL);
-        }
-
-        ZEND_ASYNC_SUSPEND();
-        zend_async_waker_clean(co);
-
-        if (EG(exception) != NULL) {
-            /* Timeout exception expected for genuinely stalled peers;
-             * cancel-from-RST also lands here. write() surfaces this as
-             * HttpException to the user handler. */
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
-        }
-        /* Window extended — try draining again. */
-        http3_connection_drain_out(c);
-        http3_connection_arm_timer(c);
     }
 
     return (s->peer_closed || s->local_aborted)
@@ -1490,10 +1517,22 @@ static bool h3_stream_is_alive(void *ctx)
            && !s->conn->closed && s->conn->nghttp3_conn != NULL;
 }
 
+/* The same park loop append_chunk takes, offered to a handler that wants the
+ * queue drained before it builds the next chunk. */
+static bool h3_stream_wait_writable(void *ctx, const uint32_t timeout_ms)
+{
+    if (!h3_stream_is_alive(ctx)) {
+        return false;
+    }
+
+    return h3_stream_wait_for_room((http3_stream_t *)ctx, timeout_ms);
+}
+
 const http_response_stream_ops_t h3_stream_ops = {
     .append_chunk        = h3_stream_append_chunk,
     .sendable            = h3_stream_sendable,
     .is_alive            = h3_stream_is_alive,
+    .wait_writable       = h3_stream_wait_writable,
     .mark_ended          = h3_stream_mark_ended,
     .abort               = h3_stream_abort,
     .get_wait_event      = h3_stream_get_wait_event,
