@@ -62,7 +62,7 @@ bool http_response_is_committed(zend_object *obj)
 
 bool http_response_is_aborted(zend_object *obj)
 {
-    return http_response_from_obj(obj)->aborted;
+    return http_response_from_obj(obj)->wire_failed;
 }
 
 bool http_response_finish_stream(zend_object *obj, const bool failed,
@@ -94,7 +94,7 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
      * stops, so the clean finish below is taken instead. */
     if ((failed || !length_kept) && response->stream_ops->abort != NULL
         && response->stream_ops->abort(response->stream_ctx, error_code)) {
-        response->aborted = true;
+        response->wire_failed = true;
     } else {
         /* Nothing has left, so a declaration that will not be kept can still
          * be corrected instead of carried: the empty response committed below
@@ -108,7 +108,14 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
         response->stream_ops->mark_ended(response->stream_ctx);
     }
 
-    response->closed = true;
+    /* Outside the branch, because the branch answers a different question. The
+     * transport says what the peer saw; `failed` says which call finished the
+     * response, and abort() finishes it whether or not there was a half body to
+     * disown. Kept inside, the empty response an unstarted stream commits would
+     * carry the label of a clean end(), and a second abort() would then be
+     * refused as a call after end(). */
+    response->aborted = failed;
+    response->closed  = true;
     return true;
 }
 

@@ -1501,7 +1501,10 @@ bool http_response_is_closed(zend_object *obj);
 
 /* Whether the body was disowned mid-flight — abort(), or the dispose path
  * answering an uncaught exception. The status it had already committed stands:
- * that is what the peer was told. */
+ * that is what the peer was told. False for an abort() the transport had
+ * nothing on the wire to fail: the peer gets a whole empty response, and a
+ * record saying the body stopped short would describe a request that did not
+ * happen. */
 bool http_response_is_aborted(zend_object *obj);
 
 /* Octets of the body that reached the peer: what a transport reported through

@@ -13,7 +13,13 @@ true_async
  * %X and Envoy's RESPONSE_FLAGS all separate the two the same way.
  *
  * `http.response.body.size` is the second column read here: it counted the
- * buffered body, which a stream never fills and a 204 never sends. */
+ * buffered body, which a stream never fills and a 204 never sends.
+ *
+ * The counted abort is the one the transport could act on. An abort() that
+ * reaches a stream with nothing on the wire is finished as an empty response
+ * the peer receives whole, so it is a completed request and the record says
+ * so — the flag the log reads is what the peer saw, not which call ended the
+ * handler. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -47,6 +53,14 @@ $server->addHttpHandler(function ($req, $res) {
             $res->abort();
             return;
 
+        case '/sse-no-event':
+            /* abort() on a stream the transport never put a byte of: the peer
+             * gets a whole empty response, so the record must not say the body
+             * stopped short. */
+            $res->sseStart();
+            $res->abort();
+            return;
+
         case '/streamed':
             $res->setStatusCode(200)->setHeader('Content-Type', 'text/plain');
             $res->write('alpha');
@@ -64,7 +78,7 @@ $server->addHttpHandler(function ($req, $res) {
 spawn(function () use ($server, $port) {
     usleep(50000);
 
-    foreach (['/aborted', '/streamed', '/nocontent'] as $target) {
+    foreach (['/aborted', '/sse-no-event', '/streamed', '/nocontent'] as $target) {
         $c = @stream_socket_client("tcp://127.0.0.1:$port", $e1, $e2, 2);
 
         if (!$c) {
@@ -87,7 +101,7 @@ spawn(function () use ($server, $port) {
     for ($p = 0; $p < 50; $p++) {
         $totals = $server->getStats()['totals'];
 
-        if (($totals['total_requests'] ?? 0) >= 3) {
+        if (($totals['total_requests'] ?? 0) >= 4) {
             $aborted = $totals['responses_aborted_total'] ?? -1;
             break;
         }
@@ -116,7 +130,7 @@ foreach (explode("\n", $lines) as $line) {
     $by_path[$attrs['url.path'] ?? '?'] = $attrs;
 }
 
-foreach (['/aborted', '/streamed', '/nocontent'] as $target) {
+foreach (['/aborted', '/sse-no-event', '/streamed', '/nocontent'] as $target) {
     $a = $by_path[$target] ?? null;
     echo $target, ': ', $a === null ? 'missing' : sprintf(
         'status=%d bytes=%d error=%s',
@@ -130,6 +144,7 @@ echo "Done\n";
 --EXPECT--
 responses_aborted_total=1
 /aborted: status=200 bytes=5 error=response_aborted
+/sse-no-event: status=200 bytes=0 error=-
 /streamed: status=200 bytes=9 error=-
 /nocontent: status=204 bytes=0 error=-
 Done

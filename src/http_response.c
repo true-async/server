@@ -2180,6 +2180,7 @@ static zend_object *http_response_create(zend_class_entry *ce)
     response->headers_sent = false;
     response->closed = false;
     response->aborted = false;
+    response->wire_failed = false;
     response->committed = false;
     response->streaming = false;
     response->grpc_mode = 0;
