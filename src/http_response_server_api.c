@@ -108,12 +108,10 @@ bool http_response_finish_stream(zend_object *obj, const bool failed,
         response->stream_ops->mark_ended(response->stream_ctx);
     }
 
-    /* Outside the branch, because the branch answers a different question. The
-     * transport says what the peer saw; `failed` says which call finished the
-     * response, and abort() finishes it whether or not there was a half body to
-     * disown. Kept inside, the empty response an unstarted stream commits would
-     * carry the label of a clean end(), and a second abort() would then be
-     * refused as a call after end(). */
+    /* Which call finished the response, and that it is finished. `failed`
+     * distinguishes abort() from end() whatever the transport above could do
+     * about the body, and the refusals a later call gets quote this rather
+     * than what the peer saw. */
     response->aborted = failed;
     response->closed  = true;
     return true;

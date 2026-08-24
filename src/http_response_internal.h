@@ -77,9 +77,9 @@ typedef struct {
     bool             closed;
     bool             aborted;           /* abort() finished this response; implies `closed`.
                                          * Which call finished it, not what the peer saw: a
-                                         * stream with nothing on the wire is committed empty
-                                         * and this still holds, so every refusal names
-                                         * abort() rather than end(). */
+                                         * stream with nothing on the wire is committed empty,
+                                         * and the flag holds there too, so every refusal
+                                         * names abort() rather than end(). */
     bool             wire_failed;       /* the transport had put a byte of this response out
                                          * and then failed it — a reset, or a terminator
                                          * withheld. What the access record and the aborted
