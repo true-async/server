@@ -26,6 +26,18 @@ if exist "%DEPS_DIR%\bin" (
     echo WARNING: %DEPS_DIR%\bin missing — DLLs may be unresolved
 )
 
+REM A build that produced no extension still runs the suite to the end: every
+REM test skips on the missing module, run-tests.php exits 0, and the job passes
+REM having compiled and checked nothing. Ask php.exe what it loaded before
+REM trusting anything the run says (#271).
+%PHP_BUILD_DIR%\php.exe -n -m | findstr /i /c:"true_async_server" >nul
+if errorlevel 1 (
+    echo ERROR: php.exe has no true_async_server module -- the build produced none
+    echo Modules php.exe does have:
+    %PHP_BUILD_DIR%\php.exe -n -m
+    exit /b 1
+)
+
 REM protect_memory is process-global page protection toggled outside the compile
 REM lock; the threaded worker pool shares one address space and races on it. Off.
 %PHP_BUILD_DIR%\php.exe run-tests.php ^
@@ -36,6 +48,15 @@ REM lock; the threaded worker pool shares one address space and races on it. Off
     --offline ^
     --show-diff ^
     --set-timeout 120 ^
-    ext\http_server\tests\phpt
+    ext\http_server\tests\phpt > phpt-run.log 2>&1
+set SUITE_RC=%errorlevel%
 
-exit /b %errorlevel%
+type phpt-run.log
+
+REM A suite that skipped everything is not a pass, and run-tests.php reports one
+REM the same way it reports a clean run. The second guard catches what the
+REM module check cannot: a suite gated off for some other reason.
+%PHP_BUILD_DIR%\php.exe -n %~dp0assert_executed.php phpt-run.log
+if errorlevel 1 exit /b 1
+
+exit /b %SUITE_RC%

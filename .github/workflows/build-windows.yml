@@ -81,6 +81,20 @@ jobs:
         run: |
           xcopy /E /I /H /Y http-server-src\.github .github
 
+      - name: Drop the staging checkouts from the php-src root
+        shell: cmd
+        run: |
+          rem buildconf's find_config_w32(".") scans every directory in the
+          rem php-src root for a config.w32, so each staging checkout registers
+          rem as a module of its own beside the copy under ext/. The names
+          rem differ, nothing is deduplicated, and every ARG_ENABLE lands twice;
+          rem the duplicate is never matched on the command line, so the loop
+          rem that applies defaults resets PHP_ASYNC and PHP_TRUE_ASYNC_SERVER
+          rem to 'no' after the flags had turned them on. Neither extension is
+          rem built and configure reports nothing. See true-async/php-async#270.
+          rmdir /s /q async-src
+          rmdir /s /q http-server-src
+
       - name: Setup libuv + nghttp2 (vcpkg)
         shell: powershell
         run: |

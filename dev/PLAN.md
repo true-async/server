@@ -1449,3 +1449,72 @@ a release yet except the first two, which are fixed.
   bearing; both tests pass 10 runs of 10, and the whole phpt tree reads 471 of
   491 (20 skipped, 0 failed) on a build configured with
   `--enable-tas-test-hooks`.
+
+## The Windows build linked nothing, and its own job could not tell (#271)
+
+- [x] **`config.w32` had fallen behind `config.m4`.** The release pipeline's
+  Windows job — the only place that compiles `config.w32` — stopped at 18
+  unresolved externals on the `v0.9.8` build: `http_response_framing.c` was
+  never in the list, so `http_response_length_action_for` and
+  `http_response_header_allowed_h2h3` had no definition, and `src/room/` was
+  absent entirely while `HttpServer::publish()`, `::send()`, `::trySend()`,
+  `::room()`, `::subscriberCount()` and `::enableRooms()` are declared whatever
+  the WebSocket setting is. Both are added. WebSocket stays out, as it was: it
+  needs wslay, and its call sites are behind `HAVE_HTTP_SERVER_WEBSOCKET`.
+
+- [~] **`WINDOWS_X64_ZTS_RELEASE` is green on an absent extension.** It is why
+  the drift was invisible. The job checks out php-src, copies the extension in,
+  runs `configure.bat --enable-true-async-server` and `nmake` — and the build
+  log contains not one compile line for an extension source. The phpt step then
+  reports `Number of tests : 491` with `0` executed and `Tests failed : 0`,
+  because every test skips on a missing extension, so the job passes.
+
+  Two guards are in: the test step asks `php.exe -n -m` for the module before it
+  trusts anything the run says, and `assert_executed.php` refuses a run where
+  nothing executed — checked against the failing job's own summary line, a real
+  one-test run, an unparseable log and a missing file, which answer 1, 0, 2, 2.
+
+  **The job will be red until the build is fixed, and that half is still open.**
+  The fact is settled: 735 sources compile in that job and not one belongs to
+  `ext/http_server` or `ext/async`, and neither name reaches the configure
+  summary's enabled-extension table. So the cause is common to both extensions,
+  which rules out anything specific to this one — the directory name among them.
+
+  Ruled out from the log: discovery (`buildconf.js:find_config_w32` enumerates
+  every `ext/*` holding a `config.w32`, and both were copied before
+  `buildconf.bat --force` runs); an unknown flag (`confutils.js:413` errors on
+  one, and configure did not); the ZTS refusal in `config.w32` (`THREAD_SAFE=1`);
+  a failed `CHECK_LIB` (each calls `ERROR()`, which fails configure). Both
+  `ARG_ENABLE` names match what is passed — `async` and `true-async-server`.
+
+  What the log cannot answer is what configure was actually given and what it
+  made of it, because `build_task.bat` runs under `@echo off`. It echoes the
+  invocation now and asks `configure.bat --help` what it knows of the two flags,
+  so the next run says. Settling it likely needs a Windows host: the SDK, the
+  toolchain and `cscript` are not reachable from here.
+
+  Asked of the people who own the recipe: true-async/php-async#270. The one
+  difference between their job, which builds `ext/async`, and this copy, which
+  builds neither extension, is `--enable-snapshot-build`. By
+  `confutils.js:461-510` that flag rewrites only arguments the command line did
+  not name, so an explicit `--enable-async` should stand without it — the
+  observation and the source disagree, and that disagreement is the question.
+
+  **A trap this cost an hour of CI:** a batch file edited from Linux must keep
+  its CRLF. `cmd.exe` parses a parenthesised block by line ending, so an
+  LF-only `build_task.bat` fails at its first `if … (` with
+  `'/i' is not recognized`, which reads like a bad flag and is not.
+
+  **Answered.** The flag was masking the fault, not carrying the build.
+  `buildconf.js:find_config_w32(".")` scans every directory in the php-src root
+  for a `config.w32`, so `async-src` and `http-server-src` register as modules
+  beside the copies under `ext/` and every `ARG_ENABLE` lands twice. The first
+  entry takes the command-line flag; the second is never named, so the loop that
+  applies defaults assigns `PHP_ASYNC = "no"` right after. The snapshot pass
+  rewrites exactly those unnamed `'no'` defaults to `yes,shared`, which is why
+  the ext/async job built its extension and this copy built neither. Their own
+  job hid a milder form of the same thing: the staging directory is named
+  `async`, collides with `ext/async` by name, and the log reads
+  `Skipping ext/async -- already have a module with that name` — it was building
+  the root copy. Both recipes now delete the staging checkout before
+  `buildconf.bat`; the flag stays out, and `PHP_HTTP3` keeps its `'no'` default.

@@ -38,15 +38,20 @@
 #endif
 
 /* moodycamel headers are vendored third-party; quiet their warnings under
- * our -Wall -Wextra without touching upstream. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wshadow"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
+ * our -Wall -Wextra without touching upstream. MSVC does not know the GCC
+ * pragma and answers C4068, which /WX turns into a build error. */
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wsign-compare"
+# pragma GCC diagnostic ignored "-Wsign-conversion"
+# pragma GCC diagnostic ignored "-Wshadow"
+# pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
 #include "concurrentqueue.h"
 #include "readerwriterqueue.h"
-#pragma GCC diagnostic pop
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic pop
+#endif
 
 namespace {
 
