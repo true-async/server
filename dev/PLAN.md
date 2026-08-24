@@ -1391,3 +1391,37 @@ a release yet except the first two, which are fixed.
   `v0.9.7`, and only the server extension moves. Notes for both tags are written
   by hand; the release workflow does not read them, so `gh release edit
   --notes-file` follows the build.
+
+## `hide()` was anchored, and a document root leaked sources (#270)
+
+- [x] **A pattern naming no directory names a file, at any depth.** Found while
+  answering YanGusik/laravel-spawn#52, where the adapter has to mount Laravel's
+  `public/` at `/` and `hide('*.php')` is the whole of what keeps the front
+  controller off the wire. `fnmatch(..., FNM_PATHNAME)` stops `*` at each
+  separator, so the pattern covered `index.php` and served `admin/tools.php` as
+  its own text. Probed before reading further: `/index.php` answered
+  `handler:/index.php` and `/sub/deep.php` answered `<?php echo "NESTED
+  SECRET";`.
+
+  gitignore's rule is the one an operator already knows and the one that fails
+  safe, so it is what the code follows: no separator in the pattern means it
+  names a file, and the file is hidden wherever it sits; a separator means the
+  pattern is anchored at the mount root and `*` stops at each separator, which
+  is the only way to say `cache/*` and mean that one directory.
+
+  The rule moved out of the mount into `http_static_hide_glob_matches`, over the
+  two strings it actually reads, and `StaticHide` holds it to a table: putting
+  the anchored rule back turns it red. `static/023` shows the same end to end.
+
+  Evidence: 355 of 375 phpt (20 skipped, 0 failed), `ctest` 19 of 19.
+
+- [ ] **`test_static_decoders` has been switched off, and nothing said so.** Its
+  CMake guard tests for `src/static/http_static_mime.c` and
+  `http_static_etag.c`; both were renamed to `src/http_mime.c` and
+  `src/http_etag.c` with their headers, so the guard has been false ever since
+  and the target is skipped with a `message(STATUS ...)` nobody reads. The file
+  also calls `http_static_mime_lookup`, which no longer exists — the current
+  calls are `http_mime_lookup_by_ext`, `http_etag_format_strong` and
+  `http_etag_match_inm` — so reviving it is a rewrite of about thirty cases, not
+  a path fix. Belongs to #189, and the new `StaticHide` target is registered
+  without a guard for the same reason.

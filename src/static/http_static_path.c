@@ -293,6 +293,32 @@ bool http_static_path_join(char *buf, const size_t cap, size_t *len,
 	return true;
 }
 
+bool http_static_hide_glob_matches(const char *glob, const char *relative)
+{
+	if (glob == NULL || relative == NULL) {
+		return false;
+	}
+
+	if (fnmatch(glob, relative, FNM_PATHNAME) == 0) {
+		return true;
+	}
+
+	/* A pattern that names no directory names a file, and that file is hidden
+	 * wherever it sits — gitignore's rule, and the one an operator writing
+	 * `*.php` means. FNM_PATHNAME stops `*` at the separator, so without this
+	 * the pattern covers `index.php` and serves `admin/tools.php` as source:
+	 * the surprise costs a disclosure rather than a 404. A pattern that does
+	 * name a directory stays anchored at the mount root, which is the only way
+	 * to say `cache/*` and mean that one directory. */
+	if (strchr(glob, '/') != NULL) {
+		return false;
+	}
+
+	const char *const basename = strrchr(relative, '/');
+
+	return basename != NULL && fnmatch(glob, basename + 1, FNM_PATHNAME) == 0;
+}
+
 bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *relative,
 								size_t relative_len)
 {
@@ -305,9 +331,7 @@ bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *
 	 * to fnmatch and skip the per-request memcpy + 4 KiB scratch. */
 	(void)relative_len;
 	for (size_t i = 0; i < mount->hide_count; i++) {
-		const zend_string *glob = mount->hide_globs[i];
-
-		if (fnmatch(ZSTR_VAL(glob), relative, FNM_PATHNAME) == 0) {
+		if (http_static_hide_glob_matches(ZSTR_VAL(mount->hide_globs[i]), relative)) {
 			return true;
 		}
 	}
