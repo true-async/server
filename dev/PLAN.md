@@ -1011,6 +1011,25 @@ the suite had, since every H3 test reads its response to the end.
   repository only through a php-src build that carries it; `/usr/local/bin/php`,
   which the suite runs against by default, is older.
 
+## Which worker accepts a connection (#240)
+
+- [x] **The server promises nothing, and the shared-fd path is now tested.**
+  Settled by Edmond on 2026-08-24: fairness between workers is not a promise the
+  server makes, so no arbitration is added. That closes the second question with
+  it — a mutex or a round-robin token sits on the accept path of every
+  connection, and nothing is paying for a guarantee nobody gives.
+
+  What the answer leaves is coverage. Where the kernel has no load-balanced
+  `SO_REUSEPORT` — macOS, the other BSDs, Solaris — the parent binds one socket
+  and every worker accepts off a dup of it, and no runner exercised that model:
+  `TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1` existed for it and nothing set it. The
+  Linux debug leg now runs the whole suite a second time with it. Measured
+  locally first: 352 of 372 (20 skipped, 0 failed) on the shared fd, 65 s against
+  68 s for the ordinary pass, so the model costs the leg about a minute.
+
+  `setWorkers()` says the non-promise where a reader meets it, next to the
+  sentence about the kernel balancing accept.
+
 ## A response kept past its request (#256)
 
 - [x] **The transport pair is cleared with the context it points at.** Found by

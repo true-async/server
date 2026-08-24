@@ -556,6 +556,29 @@ jobs:
             --set-timeout 120 \
             tests/phpt
 
+      # macOS, the other BSDs and Solaris have no load-balanced SO_REUSEPORT, so
+      # there the parent binds one listening socket and every worker accepts off
+      # a dup of it. That accept model has no runner of its own, and the switch
+      # that selects it on Linux exists for exactly this. Debug leg only: the
+      # suite takes about a minute and this is the second pass of it.
+      - name: Run the phpt suite on the shared listen fd (#240)
+        if: matrix.debug == true
+        working-directory: http-server
+        env:
+          TRUE_ASYNC_SERVER_SHARED_LISTEN_FD: "1"
+        run: |
+          ulimit -c unlimited
+          /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            -d opcache.protect_memory=0 \
+            -P -q -j"$(nproc)" \
+            -g FAIL,BORK,LEAK,XLEAK \
+            --no-progress \
+            --offline \
+            --show-diff \
+            --show-slow 4000 \
+            --set-timeout 120 \
+            tests/phpt
+
       # A room is not a WebSocket feature, and the only thing that proves it is
       # building the configuration that has no WebSocket. Two defects reached
       # main before this gate existed, both invisible to every other job: an
