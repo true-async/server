@@ -3,6 +3,40 @@
 One entry per measurement, newest first. An entry names the machine, the build and
 the scenario, because a number without them cannot be compared with the next one.
 
+## 2026-08-24 — what #235 gives back by stating the count as an nv entry
+
+Builds: `538f37e`, `main` before the change, against `8dc2913`, which is #235.
+The measured tree differs from that commit in comment text alone.
+Machine: WSL2, Linux 6.6.114.1, 16 cores. PHP 8.6.0-dev ZTS **release**
+(`/home/edmond/php-release-26`), built for this measurement because the extension
+now needs TrueAsync ABI 0.26.0 and the release binary the entries below used is
+0.25.0. Server, route and load are the ones the entry below used, so the two
+numbers can be compared: `tests/perf/servers/server_setbody.php` in `h2c` mode,
+one worker, `/b3`, `h2load -n 100000 -c 16 -m 16` after a 20000-request warm-up
+against the same process. The two builds alternate inside each round, and the
+order flips every round, so neither the machine's drift nor the penalty of
+running first falls on one build. 20 rounds, the first dropped for a cold page
+cache.
+
+| | req/s |
+|---|---|
+| before, median of 19 | 250865 |
+| after, median of 19 | 257025 |
+| paired ratio after/before, median | 1.0357 |
+| paired ratio, min and max | 0.9860 … 1.2268 |
+| rounds where #235 is faster | 15 of 19 |
+
+**95 ns per response**, or 3.6% of a 3-byte one. Split by which build ran first
+the ratio is 1.0357 over the nine rounds that started with `main` and 1.0268 over
+the ten that started with #235, so the gain survives the order rather than riding
+on it. The entry below measured the insert at 126 ns, and the two numbers are the
+same effect from either side: what a `zend_hash_update` and two `zend_string`
+allocations cost a buffered response.
+
+The before build's own spread is 23% against the after build's 10%, both driven
+by two rounds near 211000 that the paired ratio absorbs. HTTP/3 and the reactor
+pool take the same change and are not measured.
+
 ## 2026-08-22 — what #200's Content-Length insert costs per HTTP/2 response
 
 Builds: `b0ca84c`, the commit before #200, against `ebbe410`, which is #200.

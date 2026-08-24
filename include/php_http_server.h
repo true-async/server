@@ -1603,8 +1603,8 @@ bool http_response_handler_wants_close(zend_object *obj);
  * transfer-encoding, upgrade). H1 has its own framing rules and uses none of
  * this.
  *
- * @p keep_content_length is what http_response_commit_content_length answered:
- * a count the server computed goes out, an unaudited one is malformed under
+ * @p keep_content_length is the `keep_table_field` of http_response_wire_length_t:
+ * a count the server audited goes out, an unaudited one is malformed under
  * RFC 9113 §8.1.1. */
 bool http_response_header_allowed_h2h3(const char *name, size_t len,
                                        bool keep_content_length);
@@ -1623,11 +1623,18 @@ typedef enum {
  * the field. */
 http_response_length_action_t http_response_length_action(zend_object *obj);
 
-/* Put the count @p obj must state into its header table and answer whether the
- * field goes out; refuses one on a response carrying trailers. For HTTP/2 and
- * HTTP/3, which emit the table as it stands. HTTP/1 orders its own block and
- * reads the action. */
-bool http_response_commit_content_length(zend_object *obj);
+/* 20 digits hold UINT64_MAX, plus the terminator. */
+#define HTTP_CONTENT_LENGTH_DIGITS 21
+
+/* Write into @p digits the count @p obj states as a header entry of its own and
+ * answer how many digits it took, or 0 where the response states none; @p
+ * keep_table_field then says whether the table's own field is copied instead.
+ * The header table is left alone, so a buffered response pays no hash insert for
+ * a field no PHP code reads back. @p digits is the caller's and must outlive the
+ * submit call: nghttp2 and nghttp3 copy the value there, not when the slot is
+ * filled. HTTP/1 orders its own block and reads the action instead. */
+size_t http_response_wire_content_length(zend_object *obj, char *digits,
+                                         bool *keep_table_field);
 
 /* Resolve effective keep-alive for a request. Reads req->keep_alive,
  * which the parser populated according to HTTP/1.x semantics. */

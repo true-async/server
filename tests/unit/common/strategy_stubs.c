@@ -87,9 +87,10 @@ http_send_file_request_t *http_response_take_send_file(zend_object *obj)
 	abort();
 }
 
-bool http_response_commit_content_length(zend_object *obj)
+size_t http_response_wire_content_length(zend_object *obj, char *digits,
+                                         bool *keep_table_field)
 {
-	(void) obj;
+	(void) obj; (void) digits; (void) keep_table_field;
 	abort();
 }
 

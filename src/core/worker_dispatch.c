@@ -161,10 +161,12 @@ static void worker_dispatch_entry(void)
 
 /* Flatten status + H2/H3-allowed headers of the response onto a wire.
  *
- * @p keep_content_length is what http_response_commit_content_length answered.
- * The reactor submits the wire as it stands, so a name dropped here cannot be
- * put back downstream. */
+ * @p cl_len digits of @p cl are added as the response's own count, and @p
+ * keep_content_length says whether the table's field survives the copy. The
+ * reactor submits the wire as it stands, so a name dropped here cannot be put
+ * back downstream. */
 static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
+                                  const char *cl, const size_t cl_len,
                                   const bool keep_content_length)
 {
     int status = http_response_get_status(resp);
@@ -174,6 +176,11 @@ static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
     }
 
     response_wire_set_status(rw, status);
+
+    if (cl_len != 0) {
+        response_wire_add_header(rw, "content-length", sizeof("content-length") - 1,
+                                 cl, cl_len);
+    }
 
     HashTable *const headers = http_response_get_headers(resp);
 
@@ -366,8 +373,10 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
 
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
         response_wire_set_credit(hw, ctx->credit);
-        worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv),
-                              http_response_keeps_declared_length(Z_OBJ(ctx->response_zv)));
+
+        worker_wire_copy_head(
+            hw, Z_OBJ(ctx->response_zv), NULL, 0,
+            http_response_keeps_declared_length(Z_OBJ(ctx->response_zv)));
 
         /* headers undeliverable → the stream never opened; don't copy and
          * post a chunk wire the reactor would only throw away */
@@ -571,9 +580,11 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         return NULL;
     }
 
-    const bool keep_content_length = http_response_commit_content_length(resp);
+    char cl[HTTP_CONTENT_LENGTH_DIGITS];
+    bool keep_cl;
+    const size_t cl_len = http_response_wire_content_length(resp, cl, &keep_cl);
 
-    worker_wire_copy_head(rw, resp, keep_content_length);
+    worker_wire_copy_head(rw, resp, cl, cl_len, keep_cl);
     worker_wire_copy_trailers(rw, resp);
 
     /* http_response_get_body_str returns a borrowed reference; the bytes are
