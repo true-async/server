@@ -713,20 +713,26 @@ static bool h2_static_submit_read(h2_static_state_t *state)
 
 /* Build nghttp2_nv[] (with leading :status) from response_obj. Returns
  * the heap allocation pointer (NULL if scratch was sufficient); the
- * filled view is written through *out_nv / *out_count. */
+ * filled view is written through *out_nv / *out_count.
+ *
+ * @p status_buf3 and @p cl are the caller's, because the view points into both
+ * and nghttp2 reads it at submit rather than here. */
 static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
                                       const int status,
                                       char *status_buf3,
+                                      char *cl,
                                       nghttp2_nv *scratch,
                                       const size_t scratch_cap,
                                       size_t *out_count,
                                       nghttp2_nv **out_nv)
 {
-    const bool keep_content_length = http_response_commit_content_length(response_obj);
+    bool keep_content_length;
+    const size_t cl_len =
+        http_response_wire_content_length(response_obj, cl, &keep_content_length);
 
     HashTable *headers = http_response_get_headers(response_obj);
 
-    size_t total_values = 1;
+    size_t total_values = cl_len != 0 ? 2 : 1;
 
     if (headers != NULL) {
         zend_string *name;
@@ -770,6 +776,15 @@ static nghttp2_nv *h2_static_build_nv(zend_object *response_obj,
     nv[0].flags    = NGHTTP2_NV_FLAG_NONE;
 
     size_t i = 1;
+
+    if (cl_len != 0) {
+        nv[i].name     = (uint8_t *)"content-length";
+        nv[i].namelen  = sizeof("content-length") - 1;
+        nv[i].value    = (uint8_t *)cl;
+        nv[i].valuelen = cl_len;
+        nv[i].flags    = NGHTTP2_NV_FLAG_NONE;
+        i++;
+    }
 
     if (headers != NULL) {
         zend_string *name;
@@ -841,8 +856,9 @@ int h2_stream_send_static_response(void *ctx,
     nghttp2_nv *nv = NULL;
     size_t nv_count = 0;
     char status_buf[4];
+    char cl_buf[HTTP_CONTENT_LENGTH_DIGITS];
     nghttp2_nv *nv_heap = h2_static_build_nv(response_obj, status_code,
-                                                   status_buf, scratch, 64,
+                                                   status_buf, cl_buf, scratch, 64,
                                                    &nv_count, &nv);
 
     h2_static_state_t *state = NULL;

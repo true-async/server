@@ -970,17 +970,18 @@ static int http2_feed(http_protocol_strategy_t *strategy,
  * scratch when it fits, else emallocs into *out_heap (caller efrees).
  * Returns the number of entries written to *out_view.
  *
- * @p keep_content_length carries the caller's framing decision into both
- * passes; they must agree, or the count and the fill describe different
- * header sets. */
+ * The framing decision carries into both passes; they must agree, or the count
+ * and the fill describe different header sets. @p cl_len digits of @p cl go out
+ * as an entry of their own, ahead of the table. */
 static size_t h2_flatten_response_headers(HashTable *headers,
                                           http2_header_view_t *scratch,
                                           const size_t scratch_cap,
                                           http2_header_view_t **out_view,
                                           http2_header_view_t **out_heap,
+                                          const char *cl, const size_t cl_len,
                                           const bool keep_content_length)
 {
-    size_t total_values = 0;
+    size_t total_values = cl_len != 0 ? 1 : 0;
 
     if (headers != NULL) {
         zend_string *name;
@@ -1011,6 +1012,14 @@ static size_t h2_flatten_response_headers(HashTable *headers,
     }
 
     size_t nv_count = 0;
+
+    if (cl_len != 0) {
+        nv_view[0].name      = "content-length";
+        nv_view[0].name_len  = sizeof("content-length") - 1;
+        nv_view[0].value     = cl;
+        nv_view[0].value_len = cl_len;
+        nv_count = 1;
+    }
 
     if (headers != NULL) {
         zend_string *name;
@@ -1092,7 +1101,11 @@ static bool http2_commit_stream_response(http_connection_t *conn,
         }
     }
 
-    const bool keep_content_length = http_response_commit_content_length(response_obj);
+    /* The digits outlive the submit below, which is what the view points into. */
+    char cl[HTTP_CONTENT_LENGTH_DIGITS];
+    bool keep_cl;
+    const size_t cl_len =
+        http_response_wire_content_length(response_obj, cl, &keep_cl);
 
     /* Flatten response headers — nghttp2 copies name/value into its HPACK
      * dynamic table, so the backing zend_string memory only needs to live
@@ -1103,7 +1116,7 @@ static bool http2_commit_stream_response(http_connection_t *conn,
     http2_header_view_t *nv_view;
     http2_header_view_t *nv_heap;
     const size_t nv_count = h2_flatten_response_headers(
-        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap, keep_content_length);
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap, cl, cl_len, keep_cl);
 
     const int status = http_response_get_status(response_obj);
     size_t body_len = 0;
@@ -1170,9 +1183,10 @@ static bool h2_commit_streaming_headers(http_connection_t *conn,
     http2_header_view_t *nv_view;
     http2_header_view_t *nv_heap;
     /* A declared length is carried so the peer can hold the DATA frames to it;
-     * without one the frames are the only framing there is. */
+     * without one the frames are the only framing there is. It is the handler's
+     * own field in the table, so this path states no count of its own. */
     const size_t nv_count = h2_flatten_response_headers(
-        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap,
+        headers, scratch, HTTP2_NV_SCRATCH, &nv_view, &nv_heap, NULL, 0,
         http_response_keeps_declared_length(response_obj));
 
     const int status = http_response_get_status(response_obj);

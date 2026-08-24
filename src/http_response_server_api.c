@@ -543,33 +543,38 @@ http_response_length_action_t http_response_length_action(zend_object *obj)
         : HTTP_RESPONSE_LENGTH_FROM_BODY;
 }
 
-bool http_response_commit_content_length(zend_object *obj)
+size_t http_response_wire_content_length(zend_object *obj, char *digits,
+                                         bool *keep_table_field)
 {
-    /* nghttp2 puts END_STREAM on the DATA frame that completes a stated count,
-     * so trailers would reach a closed stream and read as a protocol error. */
+    *keep_table_field = false;
+
+    /* Trailers refuse a count, by the rule http_response_keeps_declared_length
+     * carries for the streaming side. */
     const HashTable *const trailers = http_response_get_trailers(obj);
 
     if (trailers != NULL && zend_hash_num_elements(trailers) > 0) {
-        return false;
+        return 0;
     }
+
+    uint64_t length = 0;
 
     switch (http_response_length_action(obj)) {
     case HTTP_RESPONSE_LENGTH_FROM_BODY:
-        http_response_set_content_length(obj, http_response_get_body_len(obj));
-        return true;
+        length = http_response_get_body_len(obj);
+        break;
 
     case HTTP_RESPONSE_LENGTH_ZERO:
-        http_response_set_content_length(obj, 0);
-        return true;
+        break;
 
     case HTTP_RESPONSE_LENGTH_KEEP:
-        return true;
+        *keep_table_field = true;
+        return 0;
 
     case HTTP_RESPONSE_LENGTH_OMIT:
-        break;
+        return 0;
     }
 
-    return false;
+    return format_u64(digits, length);
 }
 
 void http_response_apply_extra_headers(zend_object *obj, const HashTable *extra,

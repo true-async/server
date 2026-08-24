@@ -726,8 +726,9 @@ typedef struct {
     size_t       nvcap;     /* current capacity of *nv */
 } h3_nv_buf_t;
 
-static inline void h3_nv_push(h3_nv_buf_t *b,
-                              zend_string *name, zval *val)
+static inline void h3_nv_push_raw(h3_nv_buf_t *b,
+                                  const char *name, const size_t name_len,
+                                  const char *value, const size_t value_len)
 {
     if (UNEXPECTED(b->nvi == b->nvcap)) {
         const size_t new_cap = (b->heap == NULL) ? 64 : b->nvcap * 2;
@@ -745,11 +746,17 @@ static inline void h3_nv_push(h3_nv_buf_t *b,
     }
 
     nghttp3_nv *slot = &b->nv[b->nvi++];
-    slot->name     = (uint8_t *)ZSTR_VAL(name);
-    slot->namelen  = ZSTR_LEN(name);
-    slot->value    = (uint8_t *)Z_STRVAL_P(val);
-    slot->valuelen = Z_STRLEN_P(val);
+    slot->name     = (uint8_t *)name;
+    slot->namelen  = name_len;
+    slot->value    = (uint8_t *)value;
+    slot->valuelen = value_len;
     slot->flags    = NGHTTP3_NV_FLAG_NONE;
+}
+
+static inline void h3_nv_push(h3_nv_buf_t *b, zend_string *name, zval *val)
+{
+    h3_nv_push_raw(b, ZSTR_VAL(name), ZSTR_LEN(name),
+                   Z_STRVAL_P(val), Z_STRLEN_P(val));
 }
 
 /* Build the nghttp3_nv array from the PHP response and submit it on
@@ -887,7 +894,10 @@ bool http3_stream_submit_response(http3_connection_t *c,
 
     HashTable *headers = http_response_get_headers(resp_obj);
 
-    const bool keep_content_length = http_response_commit_content_length(resp_obj);
+    /* The digits outlive the submit below, where nghttp3 copies the value. */
+    char cl[HTTP_CONTENT_LENGTH_DIGITS];
+    bool keep_cl;
+    const size_t cl_len = http_response_wire_content_length(resp_obj, cl, &keep_cl);
 
     /* Single-pass header emit. Scratch covers the common case (≤32
      * nv entries — :status + ~30 headers fits every REST/SSE workload
@@ -909,6 +919,11 @@ bool http3_stream_submit_response(http3_connection_t *c,
     scratch[0].flags    = NGHTTP3_NV_FLAG_NONE;
     buf.nvi = 1;
 
+    if (cl_len != 0) {
+        h3_nv_push_raw(&buf, "content-length", sizeof("content-length") - 1,
+                       cl, cl_len);
+    }
+
     if (headers != NULL) {
         zend_string *name;
         zval        *values;
@@ -916,7 +931,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
             if (name == NULL) continue;
 
             if (!http_response_header_allowed_h2h3(ZSTR_VAL(name), ZSTR_LEN(name),
-                                                   keep_content_length)) continue;
+                                                   keep_cl)) continue;
 
             if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
                 h3_nv_push(&buf, name, values);
