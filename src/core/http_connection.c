@@ -3318,6 +3318,12 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
      * cleared its own back-pointer. */
     zval_ptr_dtor(&ctx->request_zv);
     ZVAL_UNDEF(&ctx->request_zv);
+
+    /* ctx dies below; a late call on a kept $response must answer, not UAF */
+    if (!Z_ISUNDEF(ctx->response_zv)) {
+        http_response_replace_stream_ops(Z_OBJ(ctx->response_zv), NULL, NULL);
+    }
+
     zval_ptr_dtor(&ctx->response_zv);
     ZVAL_UNDEF(&ctx->response_zv);
     efree(ctx);

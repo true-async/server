@@ -1011,6 +1011,32 @@ the suite had, since every H3 test reads its response to the end.
   repository only through a php-src build that carries it; `/usr/local/bin/php`,
   which the suite runs against by default, is older.
 
+## A response kept past its request (#256)
+
+- [x] **The transport pair is cleared with the context it points at.** Found by
+  auditing the response lifecycle after #235. `stream_ops` and `stream_ctx` are
+  installed at dispatch and outlive the per-request context whenever PHP code
+  keeps the `$response` — a global, a queue, a cache. The API guard does not
+  cover it: `isWritable` and `response_check_stream_usable` refuse on `closed`,
+  on a pending `sendFile()` and on a NULL `stream_ops`, and a buffered response
+  is none of the three when its request ends.
+
+  Measured on HTTP/1 with a debug build: a handler stashes one `$response`, 200
+  requests recycle the freed `http1_request_ctx_t`, and the next `isWritable()`
+  on the kept object segfaults in `h1_stream_is_alive`
+  (`src/http1/http1_stream.c:598`, reading `ctx->conn`). The reactor pool was
+  already clearing the pair one line before its own dtor
+  (`src/core/worker_dispatch.c:777`); the three transports do the same now.
+
+  What is not measured: the HTTP/2 and HTTP/3 halves. Both hand their slots back
+  to a pool, so there a stale pair points at a live foreign stream rather than at
+  free memory, which is worse than a crash — but the shape needs a slot to be
+  reused by another request while the kept response is touched, and no probe of
+  mine has produced it.
+
+  Evidence: `core/070` passes on the fix and dies with a signal against
+  `8bff3f3`; 352 of 372 phpt (20 skipped, 0 failed), `ctest` 16 of 16.
+
 ## A half-closed peer lost the rest of its response (#249)
 
 - [x] **The read side stopped standing in for the write side.** Found while

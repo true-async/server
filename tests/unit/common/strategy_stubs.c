@@ -87,6 +87,13 @@ http_send_file_request_t *http_response_take_send_file(zend_object *obj)
 	abort();
 }
 
+void http_response_replace_stream_ops(zend_object *obj,
+                                      const http_response_stream_ops_t *ops, void *ctx)
+{
+	(void) obj; (void) ops; (void) ctx;
+	abort();
+}
+
 size_t http_response_wire_content_length(zend_object *obj, char *digits,
                                          bool *keep_table_field)
 {

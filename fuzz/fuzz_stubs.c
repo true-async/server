@@ -186,3 +186,13 @@ __attribute__((weak)) void h2_static_account_debit(struct _http_connection_t *co
 {
     (void)conn; (void)n;
 }
+
+/* Real impl in http_response.c (not linked here). http2_stream_release calls
+ * it where it frees the stream, guarded by a live response zval — fuzz inputs
+ * dispatch no request, so there is never one to clear. Linker only. */
+struct http_response_stream_ops_t;
+__attribute__((weak)) void http_response_replace_stream_ops(
+    zend_object *obj, const struct http_response_stream_ops_t *ops, void *ctx)
+{
+    (void)obj; (void)ops; (void)ctx;
+}
