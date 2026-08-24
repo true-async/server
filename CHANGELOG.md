@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Windows build did not link: `config.w32` was missing the framing module and the whole of `src/room/`.** `http_response_framing.c` carries `http_response_length_action_for` and `http_response_header_allowed_h2h3`, which every transport calls, and rooms became unconditional when the pub/sub core stopped knowing what a connection is — `HttpServer::publish()`, `::send()`, `::trySend()`, `::room()`, `::subscriberCount()` and `::enableRooms()` are declared whatever the WebSocket setting is. 18 unresolved externals, and it reached a release because the extension's own Windows job builds none of it: `configure.bat --enable-true-async-server` leaves every source uncompiled there and the phpt run reports 491 tests with 0 executed, so the job is green on an absent extension. WebSocket is still absent from the Windows build, as before, and its call sites are guarded.
+
 ## [0.14.0] - 2026-08-24
 
 ### Security

@@ -1449,3 +1449,28 @@ a release yet except the first two, which are fixed.
   bearing; both tests pass 10 runs of 10, and the whole phpt tree reads 471 of
   491 (20 skipped, 0 failed) on a build configured with
   `--enable-tas-test-hooks`.
+
+## The Windows build linked nothing, and its own job could not tell (#271)
+
+- [x] **`config.w32` had fallen behind `config.m4`.** The release pipeline's
+  Windows job — the only place that compiles `config.w32` — stopped at 18
+  unresolved externals on the `v0.9.8` build: `http_response_framing.c` was
+  never in the list, so `http_response_length_action_for` and
+  `http_response_header_allowed_h2h3` had no definition, and `src/room/` was
+  absent entirely while `HttpServer::publish()`, `::send()`, `::trySend()`,
+  `::room()`, `::subscriberCount()` and `::enableRooms()` are declared whatever
+  the WebSocket setting is. Both are added. WebSocket stays out, as it was: it
+  needs wslay, and its call sites are behind `HAVE_HTTP_SERVER_WEBSOCKET`.
+
+- [ ] **`WINDOWS_X64_ZTS_RELEASE` is green on an absent extension.** It is why
+  the drift was invisible. The job checks out php-src, copies the extension in,
+  runs `configure.bat --enable-true-async-server` and `nmake` — and the build
+  log contains not one compile line for an extension source. The phpt step then
+  reports `Number of tests : 491` with `0` executed and `Tests failed : 0`,
+  because every test skips on a missing extension, so the job passes.
+
+  Two things have to hold for it to be worth anything: the configure output has
+  to show the extension enabled, and the phpt run has to refuse a run where
+  nothing executed. The second is the cheaper guard and catches the first.
+  Until then `config.w32` is verified only by a release, which is the worst
+  place to find out.
