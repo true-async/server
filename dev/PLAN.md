@@ -1504,3 +1504,17 @@ a release yet except the first two, which are fixed.
   its CRLF. `cmd.exe` parses a parenthesised block by line ending, so an
   LF-only `build_task.bat` fails at its first `if … (` with
   `'/i' is not recognized`, which reads like a bad flag and is not.
+
+  **Answered.** The flag was masking the fault, not carrying the build.
+  `buildconf.js:find_config_w32(".")` scans every directory in the php-src root
+  for a `config.w32`, so `async-src` and `http-server-src` register as modules
+  beside the copies under `ext/` and every `ARG_ENABLE` lands twice. The first
+  entry takes the command-line flag; the second is never named, so the loop that
+  applies defaults assigns `PHP_ASYNC = "no"` right after. The snapshot pass
+  rewrites exactly those unnamed `'no'` defaults to `yes,shared`, which is why
+  the ext/async job built its extension and this copy built neither. Their own
+  job hid a milder form of the same thing: the staging directory is named
+  `async`, collides with `ext/async` by name, and the log reads
+  `Skipping ext/async -- already have a module with that name` — it was building
+  the root copy. Both recipes now delete the staging checkout before
+  `buildconf.bat`; the flag stays out, and `PHP_HTTP3` keeps its `'no'` default.
