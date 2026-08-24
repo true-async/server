@@ -702,6 +702,7 @@ static void h2_stream_dispose_tail(http_connection_t *conn,
     }
 
     if (!Z_ISUNDEF(stream->response_zv)) {
+        http_response_replace_stream_ops(Z_OBJ(stream->response_zv), NULL, NULL);
         zval_ptr_dtor(&stream->response_zv);
         ZVAL_UNDEF(&stream->response_zv);
     }

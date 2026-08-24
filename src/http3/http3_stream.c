@@ -20,6 +20,7 @@
 #include "http3_connection.h"   /* http3_connection_t — list ownership at teardown */
 #include "core/stream_credit.h" /* reverse-path flow control — teardown release */
 #include "http_body_stream.h"   /* sever body_h3_conn + wake a parked consumer */
+#include "http_response_internal.h" /* http_response_replace_stream_ops */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
 
 /* Static-delivery memory accounting (http3_static_response.c). Declared here
@@ -269,6 +270,12 @@ void http3_stream_release(http3_stream_t *s)
      * the wrapper is finally collected. dtor is a no-op when UNDEF. */
     zval_ptr_dtor(&s->request_zv);
     ZVAL_UNDEF(&s->request_zv);
+
+    /* The slot is reused by a later request; a kept $response must not reach it. */
+    if (!Z_ISUNDEF(s->response_zv)) {
+        http_response_replace_stream_ops(Z_OBJ(s->response_zv), NULL, NULL);
+    }
+
     zval_ptr_dtor(&s->response_zv);
     ZVAL_UNDEF(&s->response_zv);
 

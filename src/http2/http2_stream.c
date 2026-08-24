@@ -16,6 +16,7 @@
 #include "http2/http2_stream.h"
 #include "http1/http_parser.h"     /* http_request_destroy */
 #include "http_body_stream.h"      /* sever body_h2_session at teardown */
+#include "http_response_internal.h" /* http_response_replace_stream_ops */
 
 /*
  * Stream lifecycle.
@@ -131,6 +132,12 @@ void http2_stream_release(http2_stream_t *stream)
      * the slot now; if not (wrapper outlived stream) the callback
      * fires later on the wrapper's final release. */
     zval_ptr_dtor(&stream->request_zv);
+
+    /* The slot is reused by a later request; a kept $response must not reach it. */
+    if (!Z_ISUNDEF(stream->response_zv)) {
+        http_response_replace_stream_ops(Z_OBJ(stream->response_zv), NULL, NULL);
+    }
+
     zval_ptr_dtor(&stream->response_zv);
 
     /* The request can outlive this stream (wrapper ref) — sever the raw

@@ -34,3 +34,10 @@ HashTable *http_response_get_trailers(zend_object *obj)
 	(void) obj;
 	abort();
 }
+
+void http_response_replace_stream_ops(zend_object *obj,
+                                      const http_response_stream_ops_t *ops, void *ctx)
+{
+	(void) obj; (void) ops; (void) ctx;
+	abort();
+}
