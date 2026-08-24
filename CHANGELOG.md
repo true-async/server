@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-24
+
 ### Fixed
 
 - **`abort()` on a stream with nothing on the wire labelled the response as cleanly ended (#267).** One field answered two questions. `http_response_finish_stream` set `aborted` only inside the branch the transport's `abort` op answered true to, and a transport answers false when it has put no byte of this response out — `sseStart()` with no event is the ordinary way there. The response was left `aborted = false, closed = true`, which is what a clean `end()` leaves, so the second `abort()` was refused with "the body was already finished cleanly" and a later `write()` said "after end()". The natural call site is a `catch` or a `finally`, where that refusal replaces the diagnosis the handler was carrying. `aborted` now records which call finished the response, and the new `wire_failed` records what the peer saw; `http_response_is_aborted` reads the second, so the access record and `responses_aborted_total` still count only a body that stopped short. Evidence: `core/063` fails against `main` on all three of its new lines; `core/066` reads `responses_aborted_total=2` and `error=response_aborted` for a completed request if the two questions are merged back into one field.
