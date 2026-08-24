@@ -1011,6 +1011,57 @@ the suite had, since every H3 test reads its response to the end.
   repository only through a php-src build that carries it; `/usr/local/bin/php`,
   which the suite runs against by default, is older.
 
+## HTTP/3 slot release under the reactor pool (#261)
+
+- [x] **The route is stamped on the stream, not read through the connection.**
+  `http3_stream_release_via_request` asked `s->conn` for the listener, and
+  teardown NULLs `s->conn` while a worker still holds the request — so exactly
+  the abandoned streams took the single-thread branch and called
+  `http3_stream_pool_free` on the worker thread. Measured with a print in that
+  branch, pool on and two workers, the abandon shape of `h3/063`:
+  `conn=(nil) rctx=(nil) owned=1 refcount=1`. `http3_stream_release` twenty lines
+  below already reads the stable `reactor_owned` flag and carries the comment
+  explaining why `s->conn` cannot be read there.
+
+  The stream now carries `req_reactor_id` and `req_reactor_pool`, taken at
+  creation next to `req_counters` for the same reason. A closed pool stays local:
+  its listener is gone, no reactor takes work for it, and both posts refuse
+  there — `h3/065` timed out until that carve-out went in, which is how the
+  shutdown path announced itself.
+
+  The rule is tested rather than the race, the way #224 was: the route is
+  `http3_stream_slot_goes_to_reactor` in `include/http3/http3_stream_pool.h`, and
+  `HTTP3SlotRelease` puts the four shapes through it — an abandoned request with
+  a NULL connection, a live one, a closed pool, and single-thread mode. Putting
+  the pre-#261 rule back turns exactly the first of them red.
+
+  Evidence: the print reads `owned=1 closed=0` and takes the reactor route after
+  the change; `ctest` 17 of 17, 353 of 373 phpt (20 skipped, 0 failed). What no
+  test covers is the free itself — it is a race rather than a deterministic
+  fault, and on the shapes a phpt can build the skipped cleanup has nothing to
+  release.
+
+## Release (asked for by Edmond, 2026-08-24)
+
+To run once the defects above are closed. The algorithm is `~/releases/RELEASING.md`;
+these are the steps before and around it.
+
+- [ ] **php-src: bring the fork forward.** Update `master` from upstream, merge
+  it into `true-async`, then into `true-async-stable`. The tag comes off
+  `true-async-stable`.
+- [ ] **Tag php-src** as `php-8.6.0-trueasync-A.B.C`, where `A.B.C` is the
+  product version. The last one is `php-8.6.0-trueasync-0.9.6`.
+- [ ] **php-async: bump the version inside the extension, then tag** `vX.Y.Z`
+  from `main`. The last one is `v0.9.4`.
+- [ ] **Server: build against the new PHP, run the suite, bump the version,
+  tag** `vX.Y.Z`. The last one is `v0.12.0`, and `## [Unreleased]` carries BC
+  breaks, so the next is a minor rather than a patch.
+- [ ] **`~/releases`: point `build-config.json` at the new tags, commit, tag**
+  `vX.Y.Z` — that tag is what starts the build and publishes the images. The
+  last one is `v0.9.6`.
+
+  Open: the product version for this round is Edmond's to name.
+
 ## The document-root mount (#259)
 
 - [x] **A `StaticHandler` mounts at `/`.** Found while answering

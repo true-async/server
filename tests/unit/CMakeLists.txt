@@ -739,6 +739,45 @@ if(NGTCP2_FOUND AND NGTCP2_OSSL_FOUND AND NGHTTP3_FOUND AND OpenSSL_FOUND)
     endif()
 endif()
 
+# HTTP/3 slot-release route (#261) — a predicate over the stream, no reactor and
+# no socket. Header-only: the rule lives in http3_stream_pool.h so both the
+# release path and this target read the same one.
+if(NGTCP2_FOUND AND NGHTTP3_FOUND)
+    add_executable(test_http3_slot_release
+        http3/test_http3_slot_release.c
+    )
+
+    target_compile_definitions(test_http3_slot_release PRIVATE HAVE_HTTP3=1)
+
+    target_include_directories(test_http3_slot_release PRIVATE
+        ${CMAKE_SOURCE_DIR}/../include
+        ${CMAKE_SOURCE_DIR}/../include/http3
+        ${CMAKE_SOURCE_DIR}/../src
+        ${CMAKE_SOURCE_DIR}/../src/http3
+        ${CMAKE_SOURCE_DIR}/../src/core
+        ${NGTCP2_INCLUDE_DIRS}
+        ${NGHTTP3_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(test_http3_slot_release
+        test_common
+        ${CMOCKA_LIBRARIES}
+        ${CMAKE_DL_LIBS}
+    )
+
+    if(UNIX)
+        target_link_libraries(test_http3_slot_release m pthread rt)
+    endif()
+
+    add_test(NAME HTTP3SlotRelease COMMAND test_http3_slot_release)
+
+    if(UNIX AND NOT APPLE)
+        set_tests_properties(HTTP3SlotRelease PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+        )
+    endif()
+endif()
+
 # HTTP/3 CID steering core (#80 D6 / #72) — pure crypto addressing layer
 # (AES-masked reactor id in the CID). No ngtcp2/server; only OpenSSL for the
 # EVP block + DRBG. http3_steer.c is decoupled from the heavy H3 headers so it

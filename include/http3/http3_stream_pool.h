@@ -66,6 +66,21 @@ typedef struct http3_stream_pool_s {
     bool                  closed;      /* creator gone; the last slot back frees the pool */
 } http3_stream_pool_t;
 
+/* Where a slot goes home when the request's last reference drops on a worker
+ * thread. True means the owning reactor must reclaim it, because the slab is
+ * the reactor's and a free from here would mutate its freelist and counters
+ * across threads.
+ *
+ * The answer comes from the flag stamped at creation, not from the stream's
+ * connection: teardown NULLs that pointer while a worker still holds the
+ * request, which is exactly the population this question is asked about. A
+ * closed pool answers false whatever the flag says — its listener is gone, so
+ * no reactor takes work for it and nothing can be racing for the slot. */
+static inline bool http3_stream_slot_goes_to_reactor(const http3_stream_t *s)
+{
+    return s->reactor_owned && s->pool != NULL && !s->pool->closed;
+}
+
 /* An empty pool, owned by the caller until it closes it. Never NULL: the
  * allocator bails out rather than fail. */
 http3_stream_pool_t *http3_stream_pool_create(void);
