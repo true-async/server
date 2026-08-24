@@ -114,6 +114,13 @@ final class HttpServerConfig
      * completion. Each worker re-binds the same listeners; the kernel
      * load-balances accept() across them via `SO_REUSEPORT` (Linux).
      *
+     * Which worker answers a given connection is not promised. Where the
+     * kernel has no load-balanced `SO_REUSEPORT` — macOS, the other BSDs,
+     * Solaris — the workers share one listening socket and nothing arbitrates
+     * between them, so a busy machine can leave a worker idle while another
+     * drains the queue. Work that must be spread evenly belongs behind a queue
+     * of its own, not behind the accept.
+     *
      * @return static
      */
     public function setWorkers(int $workers): static {}
