@@ -48,6 +48,10 @@ set CFLAGS=/W3 /WX /wd4018 /wd4146 /wd4244 /wd4267
 rem --enable-snapshot-build forces PHP_HTTP3=yes despite the ARG_ENABLE
 rem 'no' default, which then trips the ngtcp2/nghttp3 prereq check in
 rem our config.w32. Omit it — we are not producing a snapshot release.
+rem The configure line and its answer go into the log: a run where the
+rem extension is silently absent from the enabled table is otherwise
+rem indistinguishable from one where it built (#271).
+@echo on
 cmd /c configure.bat ^
     --disable-debug-pack ^
     --without-analyzer ^
@@ -59,6 +63,12 @@ cmd /c configure.bat ^
     %ADD_CONF% ^
     --disable-test-ini
 if %errorlevel% neq 0 exit /b 3
+@echo off
+
+rem configure answers "Unknown option" only for a name it has never seen, so a
+rem flag that is recognised and still leaves the extension out looks like
+rem success. Ask the generated configure what it knows about ours.
+cmd /c configure.bat --help | findstr /i "async true-async-server"
 
 nmake /NOLOGO
 if %errorlevel% neq 0 exit /b 3

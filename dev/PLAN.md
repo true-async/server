@@ -1475,10 +1475,20 @@ a release yet except the first two, which are fixed.
   one-test run, an unparseable log and a missing file, which answer 1, 0, 2, 2.
 
   **The job will be red until the build is fixed, and that half is still open.**
-  Neither `async` nor `true_async_server` appears in the configure summary's
-  enabled-extension table, so both are skipped and the cause is not the
-  directory name. Ruled out from the log: an unknown flag (configure would have
-  errored), the ZTS refusal in `config.w32` (`THREAD_SAFE=1` is set), and a
-  failed `CHECK_LIB` (each calls `ERROR()`, which fails configure). The
-  configure invocation itself is not in the log — `build_task.bat` runs under
-  `@echo off` — so the next step is to echo the command and its output.
+  The fact is settled: 735 sources compile in that job and not one belongs to
+  `ext/http_server` or `ext/async`, and neither name reaches the configure
+  summary's enabled-extension table. So the cause is common to both extensions,
+  which rules out anything specific to this one — the directory name among them.
+
+  Ruled out from the log: discovery (`buildconf.js:find_config_w32` enumerates
+  every `ext/*` holding a `config.w32`, and both were copied before
+  `buildconf.bat --force` runs); an unknown flag (`confutils.js:413` errors on
+  one, and configure did not); the ZTS refusal in `config.w32` (`THREAD_SAFE=1`);
+  a failed `CHECK_LIB` (each calls `ERROR()`, which fails configure). Both
+  `ARG_ENABLE` names match what is passed — `async` and `true-async-server`.
+
+  What the log cannot answer is what configure was actually given and what it
+  made of it, because `build_task.bat` runs under `@echo off`. It echoes the
+  invocation now and asks `configure.bat --help` what it knows of the two flags,
+  so the next run says. Settling it likely needs a Windows host: the SDK, the
+  toolchain and `cscript` are not reachable from here.
