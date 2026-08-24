@@ -148,7 +148,11 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     // promoted to an error and the entire ext fails to compile. The Z_PARAM
     // macros are correct (every slot is assigned before the END marker) so
     // this is a tooling limitation, not a real bug.
-    ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/W4 /GS /sdl /guard:cf /wd4701 /wd4703 /std:c11");
+    // /wd4068 — the vendored moodycamel headers guard their own warnings with
+    // #pragma GCC, which MSVC reports as an unknown pragma; under /WX that
+    // stops the build. Our own code guards those pragmas on __GNUC__, so this
+    // covers deps/ alone.
+    ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/W4 /GS /sdl /guard:cf /wd4068 /wd4701 /wd4703 /std:c11");
 
     // /EHsc enables C++ exception unwinding for the one C++ TU (thread_queue.cc,
     // issue #81); moodycamel and operator new can throw and the wrapper catches.
