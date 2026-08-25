@@ -53,10 +53,12 @@ check('ctor:root-slash',         fn() => new StaticHandler('/x/', '/'));
 
 /* ---- Happy path ------------------------------------------------ */
 $sh = new StaticHandler('/static/', $root);
-/* "Absolute" is not "starts with a slash" everywhere: a Windows root is
- * a drive letter. Compare against the directory handed in instead. */
+/* "Absolute" is not "starts with a slash" everywhere: a Windows root is a
+ * drive letter. Compare against the directory handed in — resolved, because
+ * the constructor stores the resolved form and a platform may differ from
+ * what was passed: macOS resolves /var to /private/var. */
 $root_ok = rtrim(strtr($sh->getRootDirectory(), DIRECTORY_SEPARATOR, '/'), '/')
-    === rtrim(strtr($root, DIRECTORY_SEPARATOR, '/'), '/');
+    === rtrim(strtr(realpath($root), DIRECTORY_SEPARATOR, '/'), '/');
 echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", $root_ok ? 'yes' : 'no', "\n";
 echo "isLocked: ", $sh->isLocked() ? 'yes' : 'no', "\n";
 
