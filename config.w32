@@ -174,6 +174,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         if (CHECK_HEADER_ADD_INCLUDE("nghttp2/nghttp2.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
             && CHECK_LIB("nghttp2.lib", "true_async_server")) {
             AC_DEFINE("HAVE_HTTP2", 1, "Whether HTTP/2 support is enabled");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HAVE_HTTP2=1");
             ADD_SOURCES(configure_module_dirname + "/src/http2",
                 "http2_strategy.c http2_session.c http2_stream.c http2_static_response.c",
                 "true_async_server");
@@ -222,6 +223,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
         if (_h3_ok) {
             AC_DEFINE("HAVE_HTTP_SERVER_HTTP3", 1, "Whether HTTP/3 support is enabled");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HAVE_HTTP_SERVER_HTTP3=1");
             AC_DEFINE("HAVE_NGTCP2", 1, "Whether ngtcp2 is available");
             AC_DEFINE("HAVE_NGHTTP3", 1, "Whether nghttp3 is available");
             ADD_SOURCES(configure_module_dirname + "/src/http3", http_server_http3, "true_async_server");
@@ -260,6 +262,13 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         if (CHECK_HEADER_ADD_INCLUDE("zlib.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
             && CHECK_LIB("zlib_a.lib;zlib.lib", "true_async_server")) {
             AC_DEFINE("HAVE_HTTP_COMPRESSION", 1, "Whether HTTP body compression is enabled");
+            // Every feature macro below is also passed on the command line.
+            // AC_DEFINE writes it into config.w32.h, which a source file sees
+            // only through php.h, and the files that read these macros are
+            // partly pure C: the negotiator and the codec registry include no
+            // PHP header at all, so the feature would compile out of the two
+            // places that decide whether a response is compressed.
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HAVE_HTTP_COMPRESSION=1");
             ADD_SOURCES(configure_module_dirname + "/src/compression",
                 http_server_compression, "true_async_server");
             ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/include/compression");
@@ -279,7 +288,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
             && CHECK_LIB("brotlidec.lib;brotlidec-static.lib", "true_async_server")
             && CHECK_LIB("brotlicommon.lib;brotlicommon-static.lib", "true_async_server")) {
             AC_DEFINE("HAVE_HTTP_BROTLI", 1, "Whether Brotli compression backend is available");
-            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D BROTLI_STATIC_DEFINE");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D BROTLI_STATIC_DEFINE /D HAVE_HTTP_BROTLI=1");
             ADD_SOURCES(configure_module_dirname + "/src/compression",
                 "http_compression_brotli.c", "true_async_server");
         } else {
@@ -293,7 +302,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         if (CHECK_HEADER_ADD_INCLUDE("zstd.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
             && CHECK_LIB("zstd_static.lib;zstd.lib;libzstd.lib", "true_async_server")) {
             AC_DEFINE("HAVE_HTTP_ZSTD", 1, "Whether zstd compression backend is available");
-            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D ZSTD_STATIC_LINKING_ONLY");
+            ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D ZSTD_STATIC_LINKING_ONLY /D HAVE_HTTP_ZSTD=1");
             ADD_SOURCES(configure_module_dirname + "/src/compression",
                 "http_compression_zstd.c", "true_async_server");
         } else {
