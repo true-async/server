@@ -298,6 +298,13 @@ struct _http_connection_t {
      * parse_errors_*_total. Cleared on connection reset only — once
      * a parse error is handled the connection is on its way down. */
     unsigned                 parse_error_handled : 1;
+    /* Set once the connection is on its way down but the peer may still be
+     * uploading. A socket closed with unread bytes in its receive buffer is
+     * reset rather than finished, and the reset discards the refusal this side
+     * has just written, so the close waits: the read stays armed, what arrives
+     * is thrown away, and the destroy defers until the peer stops sending or
+     * linger_until_ms passes. */
+    unsigned                 linger_close : 1;
     /* Set while http_parser_execute runs on conn->parser. A dispatch
      * callback fires from deep inside llhttp_execute; if it tears the
      * connection down synchronously (handler coroutine spawn failure)
@@ -327,6 +334,11 @@ struct _http_connection_t {
      * — a single load, no syscall, no vDSO. Tick granularity is
      * min(read,write,keepalive)/2 with a 250 ms floor. */
     uint64_t                 deadline_ms;
+
+    /* Absolute cap on the lingering close, in the same clock as deadline_ms.
+     * deadline_ms is pushed forward by every chunk the drain throws away, so a
+     * peer that keeps sending keeps the connection alive; this bound ends it. */
+    uint64_t                 linger_until_ms;
 
     /* Number of handler coroutines currently holding a reference to
      * this connection (H2 multiplex: N concurrent handler coroutines
@@ -415,6 +427,12 @@ struct http_server_object;
 http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
+
+/* Ends a lingering close, so the next destroy closes instead of waiting out the
+ * drain. For a caller tearing the connection down whatever the peer is doing —
+ * the drain is finished by the deadline tick, and a caller that outlives the
+ * tick has to finish it itself. */
+void http_connection_linger_end(http_connection_t *conn);
 
 /* Bare peer IP (REMOTE_ADDR form: no port, no brackets) as a fresh zend_string
  * the caller owns, or NULL when there is no IP peer (Unix-socket listener).
