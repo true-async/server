@@ -44,6 +44,10 @@ const H2_FLAG_END_HEADERS  = 0x04;
 
 class H2TestClient
 {
+    /* Upper bound on one drain read in close(): a peer that sends neither
+     * data nor FIN must not hold the close open. */
+    private const DRAIN_TIMEOUT_SEC = 1;
+
     /** @var resource */
     private $sock;
     private int $next_stream_id = 1;  /* client streams are odd */
@@ -83,11 +87,30 @@ class H2TestClient
         $this->writeFrame(H2_FRAME_SETTINGS, 0, 0, '');
     }
 
+    /* Closing a socket that still has unread bytes waiting makes the stack
+     * answer with RST, and an RST discards what this side has written but the
+     * peer has not yet read — a RST_STREAM or GOAWAY sent a moment earlier goes
+     * with it. Windows loses that race routinely where Linux usually wins it.
+     *
+     * Half-close for writing, drain whatever the peer has queued, then close:
+     * an orderly shutdown leaves the frames delivered. */
     public function close(): void
     {
-        if (is_resource($this->sock)) {
-            fclose($this->sock);
+        if (!is_resource($this->sock)) {
+            return;
         }
+
+        @stream_socket_shutdown($this->sock, STREAM_SHUT_WR);
+        stream_set_timeout($this->sock, self::DRAIN_TIMEOUT_SEC);
+
+        while (!feof($this->sock)) {
+            $chunk = @fread($this->sock, 8192);
+            if ($chunk === '' || $chunk === false) {
+                break;
+            }
+        }
+
+        fclose($this->sock);
     }
 
     /* ----- Frame primitives ----- */
