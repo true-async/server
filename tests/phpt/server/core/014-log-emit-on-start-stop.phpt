@@ -12,7 +12,11 @@ use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
 
-$port = tas_free_port_span(2);
+/* One port per server, taken when that server is about to bind it:
+ * a span reserves its ports by binding and closing them, and the
+ * second server here starts a whole lifecycle later, long enough
+ * for the port to be handed to someone else. */
+$port = tas_free_port();
 $logfile = sys_get_temp_dir() . "/php-http-server-091-" . getmypid() . ".log";
 @unlink($logfile);
 $logfh = fopen($logfile, "w+b");
@@ -49,8 +53,9 @@ echo "has stop: ",  (strpos($log, "INFO server.stop")  !== false ? "yes" : "no")
 $logfile2 = sys_get_temp_dir() . "/php-http-server-091b-" . getmypid() . ".log";
 @unlink($logfile2);
 $logfh2 = fopen($logfile2, "w+b");
+$port2 = tas_free_port();
 $config2 = (new HttpServerConfig())
-    ->addListener('127.0.0.1', $port + 1)
+    ->addListener('127.0.0.1', $port2)
     ->setLogSeverity(LogSeverity::OFF)
     ->setLogStream($logfh2);
 $server2 = new HttpServer($config2);
