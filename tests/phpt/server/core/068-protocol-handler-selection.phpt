@@ -6,8 +6,12 @@ true_async
 sockets
 --SKIPIF--
 <?php
+require __DIR__ . '/../h2/_h2_skipif.inc';
 if (!TrueAsync\HttpServer::isHttp2()) die('skip built without HTTP/2');
-if (trim((string) shell_exec('command -v curl')) === '') die('skip curl not found');
+/* The request below is prior-knowledge HTTP/2, so the probe has to ask for
+ * a curl built with nghttp2, and `command -v` is a shell builtin cmd.exe
+ * does not have. */
+h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
@@ -25,6 +29,7 @@ use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
+require_once __DIR__ . '/../h2/_h2_skipif.inc';
 require_once __DIR__ . '/../_free_port.inc';
 
 $port = tas_free_port();
@@ -47,9 +52,10 @@ spawn(function () use ($port, $server) {
         usleep(20000);
     }
 
-    $ask = static function (string $opt) use ($port) {
+    $devnull = h2_dev_null();
+    $ask = static function (string $opt) use ($port, $devnull) {
         return trim((string) shell_exec(
-            "curl -s $opt http://127.0.0.1:$port/x 2>/dev/null"));
+            "curl -s $opt http://127.0.0.1:$port/x 2>$devnull"));
     };
 
     echo 'h2c: ', $ask('--http2-prior-knowledge'), "\n";

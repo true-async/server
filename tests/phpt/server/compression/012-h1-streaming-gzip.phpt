@@ -6,7 +6,12 @@ true_async
 --SKIPIF--
 <?php
 if (!class_exists('TrueAsync\HttpServerConfig')) die('skip http_server not loaded');
-if (trim((string)shell_exec('command -v gunzip')) === '') die('skip gunzip(1) not in PATH');
+/* `command -v` is a shell builtin cmd.exe does not have, and Git for
+ * Windows ships gunzip as a shell script with only gzip.exe beside it,
+ * so the probe and the decode below both go through gzip. */
+$probe_rc = 0; $probe_out = [];
+@exec('gzip --version 2>&1', $probe_out, $probe_rc);
+if ($probe_rc !== 0) die('skip gzip(1) not in PATH');
 ?>
 --FILE--
 <?php
@@ -92,8 +97,8 @@ $client = spawn(function () use ($port, $server, $payload) {
     echo "content-length: ",    $h['content-length']    ?? '<absent>', "\n";
     echo "is-gzip-magic: ",     (substr($body, 0, 2) === "\x1f\x8b") ? 1 : 0, "\n";
 
-    /* Pipe through gunzip to recover the original payload. */
-    $proc = proc_open(['gunzip'], [
+    /* Pipe through gzip -d to recover the original payload. */
+    $proc = proc_open(['gzip', '-d'], [
         0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w'],
     ], $pipes);
     fwrite($pipes[0], $body);

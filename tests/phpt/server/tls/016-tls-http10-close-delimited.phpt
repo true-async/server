@@ -67,11 +67,13 @@ spawn(function () use ($port, $server) {
     usleep(50000);
 
     $cmd = 'curl -sS -k --http1.0 -D - --max-time 10 '
-         . escapeshellarg("https://127.0.0.1:$port/stream") . ' 2>/dev/null';
+         . escapeshellarg("https://127.0.0.1:$port/stream") . ' 2>' . tls_dev_null();
     $raw   = (string) shell_exec($cmd);
-    $split = strpos($raw, "\r\n\r\n");
-    $head  = substr($raw, 0, (int) $split);
-    $body  = substr($raw, (int) $split + 4);
+    /* Windows opens the pipe behind shell_exec in text mode and turns every
+     * CRLF into LF, header terminator included, so the split takes both. */
+    $parts = preg_split("/\r?\n\r?\n/", $raw, 2);
+    $head  = $parts[0] ?? '';
+    $body  = $parts[1] ?? '';
 
     echo "status: ", rtrim(strtok($head, "\r\n")), "\n";
     echo "transfer-encoding: ", preg_match('/^transfer-encoding:/mi', $head) ? 'present' : '<absent>', "\n";
