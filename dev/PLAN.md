@@ -1626,3 +1626,30 @@ a release yet except the first two, which are fixed.
   which test that is moves between runs. The rest of the literals stay: each
   bites only when its test starts running on Windows, and it is cheaper to fix
   one then than to rewrite 228 sites now.
+
+## The accept split, two tests further (#296, #297)
+
+- [x] **`telemetry/012` and `websocket/065` rested on the same unproved premise
+  as the two room tests.** The family was thought closed with 064 and 066; it was
+  not. `telemetry/012` asserted `PHP_OS_FAMILY === 'Darwin' || $holders > 1` and
+  failed twice running on `LINUX_X64_DEBUG_ZTS` with all six connections on one
+  worker. The line could not simply go: it is the witness that the test's
+  discriminating condition occurred at all, because with a single holder the sum
+  across workers, the maximum and that worker's own field are one number, and
+  the regression it exists to catch — the twenty-two counters back on the server
+  object — would read green. Connections are opened in rounds now, the earlier
+  ones held, until the per-worker column shows two holders; the gauge assertions
+  compare against what is held rather than a constant, a run that never spreads
+  prints `gauge_spread=none`, which no `--EXPECTF--` branch matches, and macOS,
+  where a SO_REUSEPORT set hands every accept to one socket, runs one round and
+  says `darwin-none`. `websocket/065` opened twelve subscribers in a plain loop
+  where 064 and 066 already called `ws_open_spread_subscribers`; it takes the
+  same call.
+
+  Evidence: `LINUX_X64_DEBUG_ZTS` on #296 and on #297, both suite runs of the
+  job green — 469 of 495 and 470 of 495, 0 failed — with `telemetry/012` and
+  `065` executing rather than skipping.
+
+  Left open: `errors_summed` in `telemetry/012` has never had a spread guard and
+  still has none, so its summation is proved only on a run where the six bad
+  requests did land on more than one worker. The file's header comment says so.
