@@ -15,6 +15,7 @@ use function Async\await;
 use function Async\delay;
 
 require_once __DIR__ . '/../server/_free_port.inc';
+require_once __DIR__ . '/_ws_client.inc';
 
 $port = tas_free_port();
 $config = (new HttpServerConfig())
@@ -85,18 +86,33 @@ $client = spawn(function () use ($port, $server) {
         fwrite($fp, $frame);
     }
 
-    /* Server must answer with CLOSE 1013 and drop the connection. */
+    /* Server must answer with CLOSE 1013 and drop the connection. The close
+     * is not promised to be the next thing on the wire — frames accepted
+     * before the cap are still being drained — so the stream is walked frame
+     * by frame rather than sampled at byte 0. */
     $close_code = null;
-    $buf = '';
-    while (!feof($fp)) {
-        $chunk = fread($fp, 4096);
-        if ($chunk === false || $chunk === '') break;
-        $buf .= $chunk;
-        if (strlen($buf) >= 4 && (ord($buf[0]) & 0x0f) === 0x8) {
-            $close_code = unpack('n', substr($buf, 2, 2))[1];
+    $deadline = microtime(true) + 5;
+
+    while (microtime(true) < $deadline) {
+        $frame = ws_read_frame($fp);
+
+        if ($frame === null) {
+            if (feof($fp)) {
+                break;
+            }
+
+            delay(20);
+            continue;
+        }
+
+        if ($frame['opcode'] === 0x8) {
+            $close_code = strlen($frame['data']) >= 2
+                ? unpack('n', substr($frame['data'], 0, 2))[1]
+                : 0;
             break;
         }
     }
+
     fclose($fp);
 
     echo "client saw close: ", $close_code === 1013 ? '1013' : var_export($close_code, true), "\n";

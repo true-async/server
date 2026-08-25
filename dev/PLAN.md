@@ -1653,3 +1653,24 @@ a release yet except the first two, which are fixed.
   Left open: `errors_summed` in `telemetry/012` has never had a spread guard and
   still has none, so its summation is proved only on a run where the six bad
   requests did land on more than one worker. The file's header comment says so.
+
+## A WebSocket close is lost when the peer is still sending (#303 fallout)
+
+- [ ] **The 1013 close never reaches a client that overflowed the inbound
+  cap.** `websocket/035-recv-queue-overflow` fails on Windows with
+  `client saw close: NULL` while the handler side reports 1013 correctly, so
+  the decision is right and the frame does not arrive. The shape is the one
+  #287 named for HTTP/1: the client writes 24 frames, about 16 KiB, the server
+  caps at 8 KiB and stops reading, queues the close and tears the transport
+  down at `ws_session.c:1345` — and a socket closed with unread bytes in its
+  receive buffer is reset rather than finished, which discards what this side
+  has written. #288 gave HTTP/1 a lingering close for exactly this; the
+  WebSocket overflow path has none.
+
+  Not proved yet, and the cheap proof is the same one that settled #287: cut
+  the client's write to just past the cap, leaving nothing unread, and see
+  whether the close arrives. Windows shows it because a reset there is
+  immediate; Linux may be hiding it behind timing rather than avoiding it.
+
+  Found while making the group build on Windows at all (#303), where it is the
+  single failure out of 61 executed WebSocket tests.
