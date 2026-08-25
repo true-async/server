@@ -16,6 +16,7 @@
 #include "Zend/zend_async_API.h"     /* zend_async_event_t * for stream ops */
 #include "ext/json/php_json.h"
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
+#include "Zend/zend_virtual_cwd.h" /* IS_ABSOLUTE_PATH */
 #include "php_http_server.h"
 #include "http_response_internal.h"
 #include "smart_str_scalable.h"
@@ -1918,7 +1919,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
         return;
     }
 
-    if (UNEXPECTED(ZSTR_VAL(path)[0] != '/')) {
+    if (UNEXPECTED(!http_path_is_cwd_independent(ZSTR_VAL(path), ZSTR_LEN(path)))) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "sendFile(): path must be absolute", 0);
         return;

@@ -53,7 +53,13 @@ check('ctor:root-slash',         fn() => new StaticHandler('/x/', '/'));
 
 /* ---- Happy path ------------------------------------------------ */
 $sh = new StaticHandler('/static/', $root);
-echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", str_starts_with($sh->getRootDirectory(), '/') ? 'yes' : 'no', "\n";
+/* "Absolute" is not "starts with a slash" everywhere: a Windows root is a
+ * drive letter. Compare against the directory handed in — resolved, because
+ * the constructor stores the resolved form and a platform may differ from
+ * what was passed: macOS resolves /var to /private/var. */
+$root_ok = rtrim(strtr($sh->getRootDirectory(), DIRECTORY_SEPARATOR, '/'), '/')
+    === rtrim(strtr(realpath($root), DIRECTORY_SEPARATOR, '/'), '/');
+echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", $root_ok ? 'yes' : 'no', "\n";
 echo "isLocked: ", $sh->isLocked() ? 'yes' : 'no', "\n";
 
 /* ---- setIndexFiles: validation arms --------------------------- */
@@ -136,7 +142,7 @@ ctor:root-empty: TrueAsync\HttpServerInvalidArgumentException: StaticHandler roo
 ctor:root-relative: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must be an absolute path
 ctor:root-missing: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory not found: %s
 ctor:root-not-a-dir: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory is not a directory: %s
-ctor:root-slash: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must not be '/'
+ctor:root-slash: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must not be a whole volume: %s
 happy-path: prefix=/static/ root-ok=yes
 isLocked: no
 idx:non-string: TrueAsync\HttpServerInvalidArgumentException: StaticHandler index files must be strings

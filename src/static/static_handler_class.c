@@ -117,10 +117,7 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 		return NULL;
 	}
 
-	/* Cross-platform absolute-path check: leading '/' on POSIX, drive-letter
-	 * (C:\) or UNC (\\) on Windows. The old `[0] != '/'` test rejected every
-	 * valid Windows path, making StaticHandler unusable there. */
-	if (!IS_ABSOLUTE_PATH(ZSTR_VAL(path), ZSTR_LEN(path))) {
+	if (!http_path_is_cwd_independent(ZSTR_VAL(path), ZSTR_LEN(path))) {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler root directory must be an absolute path", 0);
 		return NULL;
@@ -157,9 +154,45 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 	 * to fail loudly at attach time (#15 in TODO_STATIC_HANDLER_REVIEW). */
 	const size_t resolved_len = strlen(resolved);
 
-	if (UNEXPECTED(resolved_len == 1 && resolved[0] == '/')) {
-		zend_throw_exception(http_server_invalid_argument_exception_ce,
-							 "StaticHandler root directory must not be '/'", 0);
+	/* A root that names a whole volume is refused, and not for taste: the
+	 * containment check compares canonical[root_len] against a separator, and
+	 * for a volume root that position already holds the first character of the
+	 * subpath — so every request under such a mount would 404. Failing at
+	 * attach says so; failing per request looks like a missing file.
+	 *
+	 * Windows spells a whole volume more than one way: the plain "C:\\", the
+	 * device form "\\.\C:\\", and a UNC share root such as
+	 * "\\host\C$\\" — where nothing follows the share name. All three name
+	 * a drive, and the last two survive canonicalisation unchanged, so the
+	 * containment prefix does match and the drive really would be served. */
+	bool resolved_is_volume_root = (resolved_len == 1 && IS_SLASH(resolved[0]));
+
+#ifdef PHP_WIN32
+	if (!resolved_is_volume_root && resolved_len == 3
+		&& isalpha((unsigned char) resolved[0]) && resolved[1] == ':'
+		&& IS_SLASH(resolved[2])) {
+		resolved_is_volume_root = true;
+	}
+
+	if (!resolved_is_volume_root && IS_UNC_PATH(resolved, resolved_len)) {
+		/* Walk past "\\\\", then past the host (or "." / "?" for a device
+		 * path) and past the share. Whatever is left is the part that makes
+		 * the root narrower than the volume; nothing left means it does not. */
+		size_t i = 2;
+
+		while (i < resolved_len && IS_SLASH(resolved[i])) i++;
+		while (i < resolved_len && !IS_SLASH(resolved[i])) i++;   /* host */
+		while (i < resolved_len && IS_SLASH(resolved[i])) i++;
+		while (i < resolved_len && !IS_SLASH(resolved[i])) i++;   /* share */
+		while (i < resolved_len && IS_SLASH(resolved[i])) i++;
+
+		resolved_is_volume_root = (i >= resolved_len);
+	}
+#endif
+
+	if (UNEXPECTED(resolved_is_volume_root)) {
+		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+			"StaticHandler root directory must not be a whole volume: %s", resolved);
 		return NULL;
 	}
 

@@ -18,6 +18,7 @@
 
 #include "php.h"
 #include "Zend/zend_async_API.h"
+#include "Zend/zend_virtual_cwd.h" /* IS_ABSOLUTE_PATH, IS_SLASH */
 #include "php_http_server.h"
 #include "http1/http_parser.h"
 #include "http_response_internal.h"
@@ -140,8 +141,8 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 
 	const size_t path_len = ZSTR_LEN(req->path);
 
-	if (UNEXPECTED(path_len == 0 || path_len + 4 + 1 >= MAXPATHLEN ||
-				   ZSTR_VAL(req->path)[0] != '/')) {
+	if (UNEXPECTED(path_len == 0 || path_len + 4 + 1 >= MAXPATHLEN
+				   || !http_path_is_cwd_independent(ZSTR_VAL(req->path), path_len))) {
 		http_send_file_request_free(req);
 		http_response_synth_error(response_obj, 500, "sendFile: path must be absolute");
 		return false;
