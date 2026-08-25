@@ -242,6 +242,23 @@ final class HttpServer
     public function getConfig(): HttpServerConfig {}
 
     /**
+     * Addresses this server is bound to, one entry per configured listener,
+     * in configuration order.
+     *
+     * A listener configured with port 0 is bound to a port the kernel picks,
+     * and the entry carries that port: there is no gap between choosing an
+     * address and owning it, which a caller picking a free port beforehand
+     * cannot avoid. HTTP/3 listeners still require an explicit port and
+     * report the configured one.
+     *
+     * Empty while the server is not running: before start(), after stop().
+     *
+     * @return array<int, array{type: 'tcp'|'udp_h3', host: string, port: int, tls: bool}
+     *                  |array{type: 'unix', path: string}>
+     */
+    public function getBoundListeners(): array {}
+
+    /**
      * Get per-listener HTTP/3 observability counters.
      *
      * One entry per addHttp3Listener() in order. Each entry carries host,

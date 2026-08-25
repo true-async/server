@@ -31,9 +31,14 @@ function check(string $label, callable $fn, bool $expectThrow): void
     }
 }
 
-/* ---- Port range (every listener-add method has its own check) ---- */
+/* ---- Port range (every listener-add method has its own check) ----
+ * A TCP listener takes 0 as "the kernel picks at bind time" and reports the
+ * assignment through HttpServer::getBoundListeners(). HTTP/3 binds through the
+ * UDP path, which cannot report a local address, so 0 stays refused there. */
 foreach (['addListener', 'addHttp1Listener', 'addHttp2Listener', 'addHttp3Listener'] as $m) {
-    check("$m:port0",       fn(HttpServerConfig $c) => $c->$m('127.0.0.1',     0), true);
+    check("$m:port0",       fn(HttpServerConfig $c) => $c->$m('127.0.0.1',     0),
+          $m === 'addHttp3Listener');
+    check("$m:port-negative", fn(HttpServerConfig $c) => $c->$m('127.0.0.1',   -1), true);
     check("$m:port65536",   fn(HttpServerConfig $c) => $c->$m('127.0.0.1', 65536), true);
     check("$m:port-valid",  fn(HttpServerConfig $c) => $c->$m('127.0.0.1', 12345), false);
 }
@@ -131,15 +136,19 @@ echo "done\n";
 ?>
 --EXPECT--
 addListener:port0: OK
+addListener:port-negative: OK
 addListener:port65536: OK
 addListener:port-valid: OK
 addHttp1Listener:port0: OK
+addHttp1Listener:port-negative: OK
 addHttp1Listener:port65536: OK
 addHttp1Listener:port-valid: OK
 addHttp2Listener:port0: OK
+addHttp2Listener:port-negative: OK
 addHttp2Listener:port65536: OK
 addHttp2Listener:port-valid: OK
 addHttp3Listener:port0: OK
+addHttp3Listener:port-negative: OK
 addHttp3Listener:port65536: OK
 addHttp3Listener:port-valid: OK
 backlog:0: OK
