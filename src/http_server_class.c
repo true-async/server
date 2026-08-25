@@ -2437,17 +2437,89 @@ static void http_server_close_pool_unix_fds(http_server_object *server)
     http_listen_set_clear_unix(server->listen_set);
 }
 
-/* Bind every AF_UNIX listener once, before the worker pool is spawned, so all
- * workers can share a single listening socket (AF_UNIX has no SO_REUSEPORT —
- * N independent binds on one path is impossible). Each fd is recorded on the
- * server and copied to every worker by thread transfer; a worker adopts a
- * dup. Throws and returns FAILURE on the first bind error. */
+/* Bind an AF_UNIX path once for the whole set, then hand the caller a
+ * duplicate to adopt — the TCP story of http_listen_set_acquire_tcp, with
+ * the stale-socket probe AF_UNIX needs before it may bind. */
+static zend_socket_t http_listen_set_acquire_unix(http_listen_set_t *set,
+                                                  const char *path, size_t path_len,
+                                                  int backlog,
+                                                  const char **error_out)
+{
+    *error_out = NULL;
+
+    struct sockaddr_un addr;
+    if (path_len >= sizeof(addr.sun_path)) {
+        *error_out = "path too long";
+        return (zend_socket_t) -1;
+    }
+
+    tsrm_mutex_lock(set->lock);
+
+    zend_socket_t master = (zend_socket_t) -1;
+    bool found = false;
+
+    for (size_t i = 0; i < set->unix_count; i++) {
+        if (strcmp(set->unix_paths[i].path, path) == 0) {
+            master = set->unix_paths[i].fd;
+            found  = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        if (set->unix_count >= MAX_LISTENERS) {
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "too many listeners";
+            return (zend_socket_t) -1;
+        }
+
+        http_server_unix_unlink_if_stale(path);
+
+        const zend_socket_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (!http_socket_valid(fd)) {
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "socket";
+            return (zend_socket_t) -1;
+        }
+
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        memcpy(addr.sun_path, path, path_len + 1);
+
+        if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0
+            || listen(fd, backlog) != 0) {
+            closesocket(fd);
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "bind";
+            return (zend_socket_t) -1;
+        }
+
+        http_pool_unix_fd_t *slot = &set->unix_paths[set->unix_count++];
+        memcpy(slot->path, path, path_len + 1);
+        slot->fd = fd;
+        master   = fd;
+    }
+
+    const zend_socket_t copy = http_socket_dup(master);
+
+    tsrm_mutex_unlock(set->lock);
+
+    if (!http_socket_valid(copy)) {
+        *error_out = "duplicate";
+        return (zend_socket_t) -1;
+    }
+
+    return copy;
+}
+
+/* Bind every AF_UNIX listener of the configuration into the shared set, so a
+ * bind error surfaces on the thread that called start(). Idempotent — the
+ * same lazy path the workers take, reached early. */
 static int http_server_prebind_unix(http_server_object *server)
 {
     http_server_config_t *cfg = http_server_get_config(server);
-    server->listen_set->unix_count = 0;
 
-    if (cfg == NULL) {
+    if (cfg == NULL || server->listen_set == NULL) {
         return SUCCESS;
     }
 
@@ -2458,60 +2530,24 @@ static int http_server_prebind_unix(http_server_object *server)
             continue;
         }
 
-        if (server->listen_set->unix_count >= MAX_LISTENERS) {
-            break;
-        }
+        const char *error = NULL;
+        const zend_socket_t copy = http_listen_set_acquire_unix(
+            server->listen_set, ZSTR_VAL(lc->host), ZSTR_LEN(lc->host),
+            cfg->backlog, &error);
 
-        const char *path = ZSTR_VAL(lc->host);
-        size_t      path_len = ZSTR_LEN(lc->host);
-
-        struct sockaddr_un addr;
-        if (path_len >= sizeof(addr.sun_path)) {
-            http_server_close_pool_unix_fds(server);
-            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
-                "Unix socket path too long: %s", path);
-            return FAILURE;
-        }
-
-        http_server_unix_unlink_if_stale(path);
-
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) {
-            http_server_close_pool_unix_fds(server);
+        if (!http_socket_valid(copy)) {
+            http_listen_set_clear_unix(server->listen_set);
             zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                "Failed to create AF_UNIX socket for %s", path);
+                "Failed to bind AF_UNIX socket %s (%s)",
+                ZSTR_VAL(lc->host), error != NULL ? error : "unknown");
             return FAILURE;
         }
 
-        memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
-        memcpy(addr.sun_path, path, path_len + 1);
-
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0
-            || listen(fd, cfg->backlog) != 0) {
-            closesocket(fd);
-            http_server_close_pool_unix_fds(server);
-            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                "Failed to bind AF_UNIX socket %s", path);
-            return FAILURE;
-        }
-
-        http_pool_unix_fd_t *slot = &server->listen_set->unix_paths[server->listen_set->unix_count++];
-        memcpy(slot->path, path, path_len + 1);
-        slot->fd = fd;
+        closesocket(copy);
     }
 
     return SUCCESS;
 }
-
-/* Return the pre-bound listening fd for `path`, or -1 — i.e. this server is
- * not a pooled worker, or `path` is not one of the pre-bound unix sockets. */
-static int http_server_pool_unix_fd_lookup(const http_server_object *server, const char *path)
-{
-    for (size_t i = 0; i < server->listen_set->unix_count; i++) {
-        if (strcmp(server->listen_set->unix_paths[i].path, path) == 0) {
-            return server->listen_set->unix_paths[i].fd;
-        }
     }
     return -1;
 }
@@ -4393,21 +4429,22 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             bool unlink_on_close = false;
 
 #ifndef PHP_WIN32
-            /* Pooled worker: the parent already bound this path. Adopt a
-             * private dup of the shared fd — the parent owns the path and
-             * the original fd, and unlinks once the pool drains. */
-            const int prebound_fd =
-                http_server_pool_unix_fd_lookup(server, Z_STRVAL_P(path_zv));
+            /* AF_UNIX has no SO_REUSEPORT under any kernel, so the path is
+             * always bound once into the shared set and adopted per thread.
+             * The set owns the path and unlinks it with the last reference. */
+            if (server->listen_set != NULL) {
+                const char *error = NULL;
+                const zend_socket_t adopted = http_listen_set_acquire_unix(
+                    server->listen_set, Z_STRVAL_P(path_zv), Z_STRLEN_P(path_zv),
+                    server->backlog, &error);
 
-            if (prebound_fd >= 0) {
-                const int dup_fd = dup(prebound_fd);
-
-                if (dup_fd < 0) {
+                if (!http_socket_valid(adopted)) {
                     zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                        "Failed to dup AF_UNIX listen fd for %s", Z_STRVAL_P(path_zv));
+                        "Failed to acquire AF_UNIX listener for %s (%s)",
+                        Z_STRVAL_P(path_zv), error != NULL ? error : "unknown");
                 } else {
                     listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
-                        dup_fd, server->backlog, ZEND_ASYNC_LISTEN_F_UNIX, 0);
+                        adopted, server->backlog, ZEND_ASYNC_LISTEN_F_UNIX, 0);
                 }
             }
 #endif
