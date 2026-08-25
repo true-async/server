@@ -6,6 +6,14 @@ true_async
 --SKIPIF--
 <?php
 if (!PHP_ZTS) die('skip ZTS required');
+/* Where the kernel load-balances SO_REUSEPORT, two unrelated servers on one
+ * port is a supported arrangement rather than a conflict, and each binds its
+ * own socket without consulting any set. The property under test exists only
+ * in the sharing camp — which the second Linux run enters through the env. */
+if ((PHP_OS_FAMILY === 'Linux' || PHP_OS_FAMILY === 'BSD')
+    && getenv('TRUE_ASYNC_SERVER_SHARED_LISTEN_FD') !== '1') {
+    die('skip kernel load-balanced SO_REUSEPORT: independent binds are legal here');
+}
 ?>
 --FILE--
 <?php
@@ -15,8 +23,8 @@ if (!PHP_ZTS) die('skip ZTS required');
  * unrelated servers asking for the same address must still collide.
  *
  * A set shared process-wide would make the second start() succeed here and
- * silently steal half the traffic of the first, which is precisely the
- * failure mode SO_REUSEADDR carries on Windows.
+ * silently take half the traffic of the first, which is the failure mode
+ * SO_REUSEADDR carries on Windows.
  */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -43,14 +51,23 @@ $client = spawn(function () use ($port, $first, $second) {
         usleep(20000);
     }
 
+    /* start() blocks for as long as the server runs, so a bind that wrongly
+     * succeeds would hang the test rather than fail it. This watchdog turns
+     * that outcome back into a readable one. */
+    $watchdog = spawn(function () use ($second) {
+        usleep(1000000);
+        $second->stop();
+    });
+
     try {
         $second->start();
         echo "second: bound the same port\n";
-        $second->stop();
     } catch (\Throwable $t) {
         echo "second: refused\n";
+        $second->stop();
     }
 
+    await($watchdog);
     $first->stop();
 });
 
