@@ -6,6 +6,7 @@ ARG_ENABLE('http3', 'Enable HTTP/3 in true_async_server (requires ngtcp2, nghttp
 ARG_ENABLE('http-compression', 'Enable HTTP body compression (gzip via zlib)', 'yes');
 ARG_ENABLE('brotli',            'Enable Brotli backend (requires libbrotli)', 'yes');
 ARG_ENABLE('zstd',              'Enable zstd backend (requires libzstd)',     'yes');
+ARG_ENABLE('websocket',         'Enable WebSocket (RFC 6455) via bundled wslay', 'yes');
 
 if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
@@ -167,6 +168,42 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     } else {
         WARNING("OpenSSL not found at '" + PHP_PHP_BUILD + "' — TLS layer will fail to compile. " +
                 "Drop libssl.lib/libcrypto.lib into '" + PHP_PHP_BUILD + "\\lib' and headers into '\\include\\openssl'.");
+    }
+
+    // WebSocket (RFC 6455) — bundled wslay frame parser plus our strategy,
+    // session bridge, handshake, dispatch and PHP object layer. Mirrors the
+    // --enable-websocket block of config.m4.
+    //
+    // It sits below the include-path section because ADD_FLAG skips a flag
+    // that is a substring of one already added: the wslay include path added
+    // first would swallow the module root's own /I, and every file reached
+    // through php_true_async_server.h would stop resolving.
+    if (PHP_WEBSOCKET == "yes") {
+        AC_DEFINE("HAVE_WSLAY", 1, "Whether bundled wslay is available");
+        AC_DEFINE("HAVE_HTTP_SERVER_WEBSOCKET", 1, "Whether WebSocket support is enabled");
+
+        // The pure-C wslay translation units include no PHP header, so a macro
+        // reaching them through main/config.w32.h never arrives: pass the two
+        // this extension owns on the command line, as the compression block
+        // does. htons()/ntohs() come from winsock2.h, which wslay includes
+        // only under HAVE_WINSOCK2_H.
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HAVE_WSLAY=1");
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HAVE_HTTP_SERVER_WEBSOCKET=1");
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HAVE_WINSOCK2_H=1");
+        // wslay.h types its callbacks with ssize_t, which MSVC does not have.
+        // php-src answers this with `#define ssize_t SSIZE_T` in config.w32.h,
+        // a header these translation units never see; SSIZE_T itself comes from
+        // BaseTsd.h, force-included because wslay.h includes no Windows header.
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/FI BaseTsd.h");
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D ssize_t=SSIZE_T");
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/I " + configure_module_dirname + "/deps/wslay/includes");
+
+        ADD_SOURCES(configure_module_dirname + "/deps/wslay/lib",
+            "wslay_event.c wslay_frame.c wslay_net.c wslay_queue.c wslay_stack.c",
+            "true_async_server");
+        ADD_SOURCES(configure_module_dirname + "/src/websocket",
+            "websocket_strategy.c ws_session.c ws_handshake.c ws_dispatch.c php_websocket.c",
+            "true_async_server");
     }
 
     // HTTP/2 (optional)
