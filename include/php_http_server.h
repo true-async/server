@@ -27,6 +27,34 @@
 #include <main/php_network.h>   /* php_socket_t, SOCK_ERR */
 
 #include <stdbool.h>
+#include <Zend/zend_virtual_cwd.h>   /* IS_ABSOLUTE_PATH, IS_SLASH */
+
+/* Whether a path is independent of the current working directory.
+ *
+ * This is the property the file-serving entry points require, and the reason
+ * they require it: a server resolves paths on many threads, and the process
+ * cwd is one mutable value shared by all of them, so a cwd-relative path
+ * names different files depending on when it is read.
+ *
+ * A leading slash qualifies on every platform. Windows also accepts a drive
+ * letter and a UNC prefix — but NOT a bare `C:foo`, which IS_ABSOLUTE_PATH
+ * admits and which resolves against that drive's own current directory. */
+static zend_always_inline bool http_path_is_cwd_independent(const char *path, size_t len)
+{
+	if (len == 0) {
+		return false;
+	}
+
+	if (IS_SLASH(path[0])) {
+		return true;
+	}
+
+#ifdef PHP_WIN32
+	return len >= 3 && IS_ABSOLUTE_PATH(path, len) && IS_SLASH(path[2]);
+#else
+	return false;
+#endif
+}
 #include <stdint.h>
 #if defined(__linux__)
 # include <time.h>

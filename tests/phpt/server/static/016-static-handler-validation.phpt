@@ -140,7 +140,7 @@ ctor:root-empty: TrueAsync\HttpServerInvalidArgumentException: StaticHandler roo
 ctor:root-relative: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must be an absolute path
 ctor:root-missing: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory not found: %s
 ctor:root-not-a-dir: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory is not a directory: %s
-ctor:root-slash: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must not be '/'
+ctor:root-slash: TrueAsync\HttpServerInvalidArgumentException: StaticHandler root directory must not be a whole volume: %s
 happy-path: prefix=/static/ root-ok=yes
 isLocked: no
 idx:non-string: TrueAsync\HttpServerInvalidArgumentException: StaticHandler index files must be strings
