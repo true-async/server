@@ -16,11 +16,15 @@ true_async
  * normally: a connection-level GOAWAY would satisfy the first assertion and
  * fail every other stream in flight.
  *
- * `body=alpha` and not `alphabeta` is the second chunk's fate, not a lost
- * write. Submitting the reset moves nghttp2's stream to its closing state and
- * the send predicate refuses DATA from there, so whatever the handler queued
- * but the session had not yet framed cannot leave — dropping the ring only
- * releases what was already unsendable. */
+ * A third assertion is the body: `body=alphabeta` — what the session can frame
+ * within the peer's window of everything the handler wrote before the throw,
+ * with the reset saying the body stops there. The append path can leave frames
+ * queued inside the session, its emit skipped while a writev is in flight and
+ * left to the write completion's re-drive, so the abort flushes the session
+ * before it submits the reset. Without that flush the reset moves nghttp2's
+ * stream to its closing state, where the send predicate refuses DATA and the
+ * queued HEADERS go with it: the peer reads status=0 on a response the handler
+ * wrote in full. */
 
 require_once __DIR__ . '/_h2_client.inc';
 
@@ -97,7 +101,7 @@ echo "done\n";
 ?>
 --EXPECT--
 status=200
-body=alpha
+body=alphabeta
 ended=0
 reset=2
 named reset=11

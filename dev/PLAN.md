@@ -1518,3 +1518,35 @@ a release yet except the first two, which are fixed.
   `Skipping ext/async -- already have a module with that name` — it was building
   the root copy. Both recipes now delete the staging checkout before
   `buildconf.bat`; the flag stays out, and `PHP_HTTP3` keeps its `'no'` default.
+
+## An aborted HTTP/2 stream lost the response it had written (#285)
+
+- [x] **The reset dropped the frames the emit had not sent yet.** `h2/053` read
+  `status=0` and an empty body on Windows, 3 runs of 3, while RST_STREAM(2)
+  arrived and the next stream on the connection was served. `h2_stream_append_chunk`
+  ends with `http2_session_emit`, which skips the send while a writev is in
+  flight and leaves the frames to the write completion's re-drive; on Windows the
+  initial SETTINGS writev is still in flight when the handler's first `write()`
+  runs. `h2_stream_abort` then submitted RST_STREAM, and nghttp2 drops what it
+  has queued for a stream it moves to the closing state — the HEADERS commit
+  among it. The ring-exists check guarding the reset reads a non-NULL
+  `chunk_queue` as "the HEADERS are on the wire", which a skipped emit makes
+  false.
+
+  The abort flushes through `http2_session_emit_now` before raising
+  `streaming_ended` — with that flag the provider marks EOF on the last DATA,
+  and an END_STREAM would call the truncated body whole — and its closing emit
+  moves to `emit_now` as well, the pump documented for a caller that will not be
+  there when the write completion re-drives.
+
+  The feedback loop came before the reading: the test failed 3 of 3, and a copy
+  with a 100 ms delay before the first `write()` passed 3 of 3, which named the
+  race before any code was read. After the fix the test passes 5 of 5 and
+  `tests/phpt/server` gains no failure.
+
+  **The old expectation was one platform's timing.** `body=alpha` held because
+  the first chunk had been framed and the second had not; on Windows it produced
+  nothing at all. The contract is now the same everywhere: everything the handler
+  wrote before the throw reaches the peer, RST_STREAM says the body stops there,
+  no END_STREAM. The test asserts `body=alphabeta` and fails without the fix on
+  Linux too.
