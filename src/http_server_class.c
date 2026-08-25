@@ -4130,6 +4130,17 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * We own one ref on the scope_object; releasing it in http_server_free
      * triggers scope_destroy which cascades to proper scope cleanup
      * (cancels any leftover coroutines, then disposes the struct). */
+    /* A restart makes a fresh scope, so the one the previous run left behind
+     * has to go first — overwriting the field would strand it, and nothing
+     * else would ever release it. */
+    if (server->scope_object != NULL) {
+        zend_object *previous_scope_object = server->scope_object;
+
+        server->scope_object = NULL;
+        server->server_scope = NULL;
+        OBJ_RELEASE(previous_scope_object);
+    }
+
     server->server_scope = ZEND_ASYNC_NEW_SCOPE_WITH_OBJECT(ZEND_ASYNC_CURRENT_SCOPE);
 
     if (!server->server_scope) {
