@@ -44,6 +44,10 @@ const H2_FLAG_END_HEADERS  = 0x04;
 
 class H2TestClient
 {
+    /* Upper bound on one drain read in close(): a peer that sends neither
+     * data nor FIN must not hold the close open. */
+    private const DRAIN_TIMEOUT_SEC = 1;
+
     /** @var resource */
     private $sock;
     private int $next_stream_id = 1;  /* client streams are odd */
@@ -97,7 +101,7 @@ class H2TestClient
         }
 
         @stream_socket_shutdown($this->sock, STREAM_SHUT_WR);
-        stream_set_timeout($this->sock, 1);
+        stream_set_timeout($this->sock, self::DRAIN_TIMEOUT_SEC);
 
         while (!feof($this->sock)) {
             $chunk = @fread($this->sock, 8192);
