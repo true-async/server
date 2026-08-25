@@ -1498,14 +1498,6 @@ static uint32_t http_server_retry_interval_ms(http_server_object *server)
     return cfg != NULL ? cfg->ws_publish_retry_interval_ms : 0u;
 }
 
-/* The hub is the server's: it is created through this function, fanned out to
- * the worker clones through the transfer shells and released in free_obj. The
- * room layer (room/php_room.h) asks for it rather than reaching into the struct —
- * creating it on demand is what lets a room be minted before start().
- *
- * A worker clone never mints one: it inherits the parent's through its shell, and
- * a hub created on a clone would be attached by nobody, so every publish through
- * it would report served=0 with no error to show for it. */
 /* The shared listen set, created on first need. Called on the thread that
  * owns the server before any worker can reach it, so no lock is needed to
  * publish the pointer itself. Returns NULL only on allocation failure. */
@@ -1522,6 +1514,14 @@ static http_listen_set_t *http_server_listen_set_ensure(http_server_object *serv
     return server->listen_set;
 }
 
+/* The hub is the server's: it is created through this function, fanned out to
+ * the worker clones through the transfer shells and released in free_obj. The
+ * room layer (room/php_room.h) asks for it rather than reaching into the struct —
+ * creating it on demand is what lets a room be minted before start().
+ *
+ * A worker clone never mints one: it inherits the parent's through its shell, and
+ * a hub created on a clone would be attached by nobody, so every publish through
+ * it would report served=0 with no error to show for it. */
 void *http_server_topic_hub_ensure(http_server_object *server)
 {
     if (server == NULL || server->is_worker_clone) {
@@ -2547,9 +2547,6 @@ static int http_server_prebind_unix(http_server_object *server)
     }
 
     return SUCCESS;
-}
-    }
-    return -1;
 }
 #endif  /* !PHP_WIN32 */
 
@@ -3588,6 +3585,15 @@ static int http_server_start_pool(http_server_object *server,
         return FAILURE;
     }
 
+    /* The prebinds fill the set, so it has to exist first — otherwise they
+     * bind nothing and a bad address is only discovered inside a worker. */
+    if (UNEXPECTED(http_server_listen_set_ensure(server) == NULL)) {
+        ZEND_THREAD_POOL_DELREF(pool);
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Failed to allocate the shared listener set", 0);
+        return FAILURE;
+    }
+
 #ifndef PHP_WIN32
     if (http_server_prebind_unix(server) != SUCCESS) {
         ZEND_THREAD_POOL_DELREF(pool);
@@ -3595,15 +3601,16 @@ static int http_server_start_pool(http_server_object *server,
     }
 #endif
 
-#ifndef PHP_WIN32
-    /* Shared-fd path: bind each TCP listener once, workers dup it. */
+    /* Bind each TCP listener once here so an unusable address is reported on
+     * this thread; the workers then adopt duplicates of it. */
     if (http_server_use_shared_listen_fd()
         && http_server_prebind_tcp(server) != SUCCESS) {
+#ifndef PHP_WIN32
         http_server_close_pool_unix_fds(server);
+#endif
         ZEND_THREAD_POOL_DELREF(pool);
         return FAILURE;
     }
-#endif
 
     /* Control channel (issue #117): allocated BEFORE the transfer loop so every
      * worker shell fans the pointer out to its clone. */
@@ -3624,9 +3631,9 @@ static int http_server_start_pool(http_server_object *server,
 
     http_server_topic_hub_ensure(server);
 
-    if (!http_server_use_reuseport()) {
-        http_server_listen_set_ensure(server);
-    }
+    /* Needed on every platform: TCP shares it outside the REUSEPORT camp,
+     * and AF_UNIX always does — no kernel load-balances a unix path. */
+    http_server_listen_set_ensure(server);
 
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
@@ -3819,14 +3826,12 @@ cleanup:
     http_logf_info(&server->log_state, "server.stop mode=pool");
     http_log_server_stop(&server->log_state);
 
+    /* Every worker has drained and closed its own duplicate; this final
+     * close releases the shared sockets and removes their unix paths. */
 #ifndef PHP_WIN32
-    /* Every worker has drained and closed its own dup; this final close
-     * releases the shared sockets and removes their paths. */
     http_server_close_pool_unix_fds(server);
 #endif
-#ifndef PHP_WIN32
     http_server_close_pool_tcp_fds(server);
-#endif
 
     /* Last, because stop() promises the server is fully down when it returns. */
     if (server->pool_stopped_event != NULL) {
@@ -4083,6 +4088,15 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     server->drain_last_fired_ns  = 0;
 
     /* Get listeners */
+    /* Bound addresses live in the shared set even for a lone start(): a
+     * server transferred while running must hand its clones the socket it
+     * bound itself, not leave them to collide with it. */
+    if (UNEXPECTED(http_server_listen_set_ensure(server) == NULL)) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Failed to allocate the shared listener set", 0);
+        RETURN_THROWS();
+    }
+
     zval listeners_zval;
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "getListeners", &listeners_zval);
 
@@ -4576,10 +4590,6 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * have here — the mailbox handle is created on it. */
     http_server_topic_hub_ensure(server);
 
-    if (!http_server_use_reuseport()) {
-        http_server_listen_set_ensure(server);
-    }
-
     /* A worker that fails to attach gets no topic tree, and then every
      * subscribe() on it throws while every publish() quietly does nothing. That
      * is worse than not starting, so it is fatal rather than a degradation. */
@@ -4704,6 +4714,14 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
     for (size_t i = 0; i < server->listener_count; i++) {
         http_server_listener_release(&server->listeners[i]);
     }
+
+    /* Releasing the listeners closed this thread's duplicates only. The
+     * master sockets live in the shared set, and holding them past stop()
+     * would keep the ports occupied by a server nobody is running. */
+    http_listen_set_clear_tcp(server->listen_set);
+#ifndef PHP_WIN32
+    http_listen_set_clear_unix(server->listen_set);
+#endif
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     for (size_t i = 0; i < server->http3_listener_count; i++) {
@@ -6430,14 +6448,9 @@ static zend_object *http_server_transfer_obj(
             dst_shell->transit_static_mounts = st_transit;
         }
 
-        /* Pre-bound AF_UNIX listen fds (workers > 1). POD array copied by
-         * value — the fd integers stay valid in the worker thread because
-         * all worker threads share one process-wide fd table. */
         /* The set must exist before the shell can reference it: the worker
          * threads loaded from this shell have no other way to reach it. */
-        if (!http_server_use_reuseport()) {
-            http_server_listen_set_ensure(src);
-        }
+        http_server_listen_set_ensure(src);
 
         /* The listening sockets are shared, not copied: the shell takes a
          * reference so they outlive the parent, and the clone loaded from it
@@ -6576,8 +6589,8 @@ static zend_object *http_server_transfer_obj(
         dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
     }
 
-    /* Pre-bound AF_UNIX listen fds — see the TRANSFER side above. The worker
-     * looks these up in its start() to adopt the shared socket. */
+    /* The clone takes its own reference to the listening sockets — see the
+     * TRANSFER side above. Its start() acquires duplicates from the set. */
     dst_obj->listen_set = src_shell->listen_set;
     http_listen_set_addref(dst_obj->listen_set);
 
