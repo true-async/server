@@ -53,7 +53,11 @@ check('ctor:root-slash',         fn() => new StaticHandler('/x/', '/'));
 
 /* ---- Happy path ------------------------------------------------ */
 $sh = new StaticHandler('/static/', $root);
-echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", str_starts_with($sh->getRootDirectory(), '/') ? 'yes' : 'no', "\n";
+/* "Absolute" is not "starts with a slash" everywhere: a Windows root is
+ * a drive letter. Compare against the directory handed in instead. */
+$root_ok = rtrim(strtr($sh->getRootDirectory(), DIRECTORY_SEPARATOR, '/'), '/')
+    === rtrim(strtr($root, DIRECTORY_SEPARATOR, '/'), '/');
+echo "happy-path: prefix=", $sh->getUrlPrefix(), " root-ok=", $root_ok ? 'yes' : 'no', "\n";
 echo "isLocked: ", $sh->isLocked() ? 'yes' : 'no', "\n";
 
 /* ---- setIndexFiles: validation arms --------------------------- */

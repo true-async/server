@@ -120,7 +120,8 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 	/* Cross-platform absolute-path check: leading '/' on POSIX, drive-letter
 	 * (C:\) or UNC (\\) on Windows. The old `[0] != '/'` test rejected every
 	 * valid Windows path, making StaticHandler unusable there. */
-	if (!IS_ABSOLUTE_PATH(ZSTR_VAL(path), ZSTR_LEN(path))) {
+	if (!IS_ABSOLUTE_PATH(ZSTR_VAL(path), ZSTR_LEN(path))
+		&& !IS_SLASH(ZSTR_VAL(path)[0])) {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler root directory must be an absolute path", 0);
 		return NULL;
@@ -157,7 +158,17 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 	 * to fail loudly at attach time (#15 in TODO_STATIC_HANDLER_REVIEW). */
 	const size_t resolved_len = strlen(resolved);
 
-	if (UNEXPECTED(resolved_len == 1 && resolved[0] == '/')) {
+	const bool resolved_is_volume_root =
+		(resolved_len == 1 && IS_SLASH(resolved[0]))
+#ifdef PHP_WIN32
+		/* A Windows volume root resolves to "C:\\", not "/", and hands out
+		 * the whole drive just as readily. */
+		|| (resolved_len == 3 && isalpha((unsigned char) resolved[0])
+			&& resolved[1] == ':' && IS_SLASH(resolved[2]))
+#endif
+		;
+
+	if (UNEXPECTED(resolved_is_volume_root)) {
 		zend_throw_exception(http_server_invalid_argument_exception_ce,
 							 "StaticHandler root directory must not be '/'", 0);
 		return NULL;

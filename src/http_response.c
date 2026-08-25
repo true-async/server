@@ -16,6 +16,7 @@
 #include "Zend/zend_async_API.h"     /* zend_async_event_t * for stream ops */
 #include "ext/json/php_json.h"
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
+#include "Zend/zend_virtual_cwd.h" /* IS_ABSOLUTE_PATH */
 #include "php_http_server.h"
 #include "http_response_internal.h"
 #include "smart_str_scalable.h"
@@ -1918,7 +1919,12 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
         return;
     }
 
-    if (UNEXPECTED(ZSTR_VAL(path)[0] != '/')) {
+    /* What this rejects is a path relative to the current directory, which
+     * the handler cannot reason about. A leading slash qualifies everywhere;
+     * on Windows so do a drive letter and a UNC prefix, and refusing those
+     * left every sendFile() there answering 500. */
+    if (UNEXPECTED(!IS_ABSOLUTE_PATH(ZSTR_VAL(path), ZSTR_LEN(path))
+                   && !IS_SLASH(ZSTR_VAL(path)[0]))) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "sendFile(): path must be absolute", 0);
         return;
