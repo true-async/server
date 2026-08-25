@@ -60,7 +60,9 @@ $client = spawn(function () use ($port, $server) {
     );
     $raw = shell_exec($cmd) ?? '';
 
-    $split = preg_split("/\r\n\r\n/", $raw, 2);
+    /* Windows opens the pipe behind shell_exec in text mode and turns every
+     * CRLF into LF, header terminator included, so the split takes both. */
+    $split = preg_split("/\r?\n\r?\n/", $raw, 2);
     $head  = $split[0] ?? '';
     $body  = $split[1] ?? '';
 
