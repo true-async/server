@@ -6,7 +6,11 @@ true_async
 --SKIPIF--
 <?php
 if (!class_exists('TrueAsync\HttpServerConfig')) die('skip http_server not loaded');
-if (trim((string)shell_exec('command -v gzip')) === '') die('skip gzip(1) not in PATH');
+/* `command -v` is a shell builtin cmd.exe does not have; asking the
+ * tool itself answers on both. */
+$probe_rc = 0; $probe_out = [];
+@exec('gzip --version 2>&1', $probe_out, $probe_rc);
+if ($probe_rc !== 0) die('skip gzip(1) not in PATH');
 ?>
 --FILE--
 <?php
