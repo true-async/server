@@ -13,7 +13,11 @@ use function Async\await;
 
 require_once __DIR__ . '/../_free_port.inc';
 
-$port = tas_free_port_span(2);
+/* One port per server, taken when that server is about to bind it:
+ * a span reserves its ports by binding and closing them, and the
+ * second server here starts a whole lifecycle later, long enough
+ * for the port to be handed to someone else. */
+$port = tas_free_port();
 $logfile = sys_get_temp_dir() . "/php-http-server-092-" . getmypid() . ".log";
 @unlink($logfile);
 $logfh = fopen($logfile, "w+b");
@@ -82,15 +86,16 @@ echo "has server.stop: ", (strpos($log, "server.stop") !== false ? "yes" : "no")
 $logfile2 = sys_get_temp_dir() . "/php-http-server-092b-" . getmypid() . ".log";
 @unlink($logfile2);
 $logfh2 = fopen($logfile2, "w+b");
+$port2 = tas_free_port();
 $config2 = (new HttpServerConfig())
-    ->addListener('127.0.0.1', $port + 1)
+    ->addListener('127.0.0.1', $port2)
     ->setLogSeverity(LogSeverity::INFO)
     ->setLogStream($logfh2);
 $server2 = new HttpServer($config2);
 $server2->addHttpHandler(function ($req, $res) { $res->setStatusCode(200)->setBody('ok')->end(); });
-$c2 = spawn(function () use ($port, $server2) {
+$c2 = spawn(function () use ($port2, $server2) {
     usleep(30000);
-    $fp = @stream_socket_client("tcp://127.0.0.1:" . ($port + 1), $errno, $errstr, 2);
+    $fp = @stream_socket_client("tcp://127.0.0.1:$port2", $errno, $errstr, 2);
     if (!$fp) { $server2->stop(); return; }
     $boundary = "----X";
     $body = "--$boundary\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--$boundary--\r\n";
