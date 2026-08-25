@@ -412,6 +412,21 @@ static void config_add_listener(http_server_config_t *config, http_listener_type
     listener->protocol_mask = protocol_mask;
 }
 
+/* A TCP port the caller may name, or 0 to let the kernel pick one at bind
+ * time. Zero closes the window between choosing a port and owning it, which
+ * is why the server reports the assigned port through
+ * HttpServer::getBoundListeners() rather than the caller guessing it. */
+static bool config_check_tcp_port(zend_long port)
+{
+    if (port < 0 || port > 65535) {
+        zend_throw_exception(http_server_invalid_argument_exception_ce,
+            "Port must be 0 (assigned by the kernel) or between 1 and 65535", 0);
+        return false;
+    }
+
+    return true;
+}
+
 /* {{{ proto HttpServerConfig::__construct(?string $host = null, int $port = 8080) */
 ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
 {
@@ -476,9 +491,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
 
     /* Add default listener if host provided */
     if (host) {
-        if (port < 1 || port > 65535) {
-            zend_throw_exception(http_server_invalid_argument_exception_ce,
-                "Port must be between 1 and 65535", 0);
+        if (!config_check_tcp_port(port)) {
             return;
         }
 
@@ -512,9 +525,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addListener)
         return;
     }
 
-    if (port < 1 || port > 65535) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "Port must be between 1 and 65535", 0);
+    if (!config_check_tcp_port(port)) {
         return;
     }
 
@@ -549,9 +560,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp1Listener)
         return;
     }
 
-    if (port < 1 || port > 65535) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "Port must be between 1 and 65535", 0);
+    if (!config_check_tcp_port(port)) {
         return;
     }
 
@@ -588,9 +597,7 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, addHttp2Listener)
         return;
     }
 
-    if (port < 1 || port > 65535) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "Port must be between 1 and 65535", 0);
+    if (!config_check_tcp_port(port)) {
         return;
     }
 

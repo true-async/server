@@ -159,11 +159,15 @@ typedef struct {
 } http_pool_unix_fd_t;
 
 /* A TCP listener bound once and shared the same way, for every platform
- * whose kernel has no load-balanced SO_REUSEPORT. host/port identify the
- * entry so a thread can match its config against what is already bound. */
+ * whose kernel has no load-balanced SO_REUSEPORT. The entry is identified by
+ * the listener's position in the configuration, which every thread walks in
+ * the same order: host and port cannot identify it, because two listeners
+ * asking for port 0 look alike until the kernel has answered. */
 typedef struct {
     char          host[64];
-    int           port;
+    int           requested_port;   /* what the configuration asked for; 0 means "the kernel picks" */
+    int           bound_port;       /* what the socket is bound to — the answer for a requested 0 */
+    size_t        listener_index;
     zend_socket_t fd;
 } http_pool_tcp_fd_t;
 
@@ -2561,8 +2565,57 @@ static int http_server_prebind_unix(http_server_object *server)
  *
  * error_out receives a short reason for the caller to phrase; the lock is
  * never held across a throw. */
+/* The port under a bound socket. `fallback` is answered when the address
+ * cannot be read, which leaves the caller with what it asked for rather than
+ * with a zero that reads like a valid answer. */
+static int http_socket_local_port(zend_socket_t fd, int fallback)
+{
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+
+    if (getsockname(fd, (struct sockaddr *) &addr, &len) != 0) {
+        return fallback;
+    }
+
+    if (addr.ss_family == AF_INET) {
+        return ntohs(((struct sockaddr_in *) &addr)->sin_port);
+    }
+
+    if (addr.ss_family == AF_INET6) {
+        return ntohs(((struct sockaddr_in6 *) &addr)->sin6_port);
+    }
+
+    return fallback;
+}
+
+/* The port the shared set holds for one listener, or 0 when the set has no
+ * entry for it. A pool parent binds through the set and never builds a listen
+ * event of its own, so this is the only place its answer lives. */
+static int http_listen_set_bound_port(http_listen_set_t *set, size_t listener_index)
+{
+    if (set == NULL) {
+        return 0;
+    }
+
+    int port = 0;
+
+    tsrm_mutex_lock(set->lock);
+
+    for (size_t i = 0; i < set->tcp_count; i++) {
+        if (set->tcp[i].listener_index == listener_index) {
+            port = set->tcp[i].bound_port;
+            break;
+        }
+    }
+
+    tsrm_mutex_unlock(set->lock);
+
+    return port;
+}
+
 static zend_socket_t http_listen_set_acquire_tcp(http_listen_set_t *set,
                                                  const char *host, int port,
+                                                 size_t listener_index,
                                                  int backlog,
                                                  const char **error_out)
 {
@@ -2574,7 +2627,11 @@ static zend_socket_t http_listen_set_acquire_tcp(http_listen_set_t *set,
     bool found = false;
 
     for (size_t i = 0; i < set->tcp_count; i++) {
-        if (set->tcp[i].port == port && strcmp(set->tcp[i].host, host) == 0) {
+        const bool same_listener = set->tcp[i].listener_index == listener_index;
+        const bool same_address  = port != 0 && set->tcp[i].requested_port == port
+                                   && strcmp(set->tcp[i].host, host) == 0;
+
+        if (same_listener || same_address) {
             master = set->tcp[i].fd;
             found  = true;
             break;
@@ -2639,9 +2696,11 @@ static zend_socket_t http_listen_set_acquire_tcp(http_listen_set_t *set,
         if (host_len >= sizeof(slot->host)) host_len = sizeof(slot->host) - 1;
         memcpy(slot->host, host, host_len);
         slot->host[host_len] = '\0';
-        slot->port = port;
-        slot->fd   = fd;
-        master     = fd;
+        slot->requested_port = port;
+        slot->bound_port     = http_socket_local_port(fd, port);
+        slot->listener_index = listener_index;
+        slot->fd             = fd;
+        master               = fd;
     }
 
     const zend_socket_t copy = http_socket_dup(master);
@@ -2682,7 +2741,7 @@ static int http_server_prebind_tcp(http_server_object *server)
 
         const char *error = NULL;
         const zend_socket_t copy = http_listen_set_acquire_tcp(
-            server->listen_set, ZSTR_VAL(lc->host), lc->port, cfg->backlog, &error);
+            server->listen_set, ZSTR_VAL(lc->host), lc->port, i, cfg->backlog, &error);
 
         if (!http_socket_valid(copy)) {
             http_listen_set_clear_tcp(server->listen_set);
@@ -4248,9 +4307,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
 
     /* Create listen sockets for each listener */
     zval *listener;
+    zend_ulong listener_index;
     server->listener_count = 0;
 
-    ZEND_HASH_FOREACH_VAL(Z_ARRVAL(listeners_zval), listener) {
+    ZEND_HASH_FOREACH_NUM_KEY_VAL(Z_ARRVAL(listeners_zval), listener_index, listener) {
         if (server->listener_count >= MAX_LISTENERS) {
             break;
         }
@@ -4291,12 +4351,15 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
              * adopts a duplicate of that one socket. The duplicate is not
              * cosmetic: the reactor closes what it adopts, so a descriptor
              * handed out verbatim would die with the first thread to stop. */
-            if (http_server_use_reuseport()) {
+            if (http_server_use_reuseport() && port != 0) {
                 listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
             } else if (server->listen_set != NULL) {
+                /* Port 0 always comes here, REUSEPORT or not: the address is
+                 * bound once and every thread adopts a duplicate, so the whole
+                 * server answers on the one port the kernel gave. */
                 const char *error = NULL;
                 const zend_socket_t adopted = http_listen_set_acquire_tcp(
-                    server->listen_set, host, port, server->backlog, &error);
+                    server->listen_set, host, port, listener_index, server->backlog, &error);
 
                 if (!http_socket_valid(adopted)) {
                     zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
@@ -5812,6 +5875,91 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     RETURN_ZVAL(&server->config, 1, 0);
+}
+/* }}} */
+
+/* {{{ proto HttpServer::getBoundListeners(): array
+ *
+ * The addresses the server holds, one entry per configured listener and in
+ * configuration order. A TCP entry carries what the socket is bound to, which
+ * is the only place the answer exists when the listener asked for port 0. */
+ZEND_METHOD(TrueAsync_HttpServer, getBoundListeners)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const http_server_object *const server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    array_init(return_value);
+
+    if (!server->running) {
+        return;
+    }
+
+    const http_server_config_t *const cfg = http_server_get_config((http_server_object *)server);
+
+    if (UNEXPECTED(cfg == NULL)) {
+        return;
+    }
+
+    /* server->listeners holds the TCP and AF_UNIX listen events in config
+     * order; the HTTP/3 ones live in http3_listeners and are skipped here. */
+    size_t socket_index = 0;
+
+    for (size_t i = 0; i < cfg->listener_count; i++) {
+        const http_listener_config_t *const lc = &cfg->listeners[i];
+        zval entry;
+
+        array_init(&entry);
+
+        if (lc->type == LISTENER_TYPE_UNIX) {
+            add_assoc_string(&entry, "type", "unix");
+            add_assoc_str(&entry, "path", zend_string_copy(lc->host));
+            socket_index++;
+        } else if (lc->type == LISTENER_TYPE_UDP_H3) {
+            /* A UDP bind reports no local address through the async API, so an
+             * HTTP/3 listener answers with the port it was given —
+             * addHttp3Listener refuses 0 for that reason. */
+            add_assoc_string(&entry, "type", "udp_h3");
+            add_assoc_str(&entry, "host", zend_string_copy(lc->host));
+            add_assoc_long(&entry, "port", lc->port);
+            add_assoc_bool(&entry, "tls", lc->tls);
+        } else {
+            char host[64];
+            int port = lc->port;
+            bool from_socket = false;
+
+            if (socket_index < server->listener_count) {
+                zend_async_listen_event_t *const listen_event =
+                    server->listeners[socket_index].listen_event;
+
+                if (listen_event != NULL && listen_event->get_local_address != NULL
+                    && listen_event->get_local_address(listen_event, host, sizeof(host), &port)
+                       == SUCCESS) {
+                    from_socket = true;
+                }
+            }
+
+            if (!from_socket) {
+                /* A pool parent holds no listen event of its own: its threads
+                 * do, and what they adopted was bound through the shared set. */
+                const int shared_port = http_listen_set_bound_port(server->listen_set, i);
+
+                if (shared_port != 0) {
+                    port = shared_port;
+                }
+            }
+
+            add_assoc_string(&entry, "type", "tcp");
+            add_assoc_str(&entry, "host",
+                          from_socket ? zend_string_init(host, strlen(host), 0)
+                                      : zend_string_copy(lc->host));
+            add_assoc_long(&entry, "port", port);
+            add_assoc_bool(&entry, "tls", lc->tls);
+            socket_index++;
+        }
+
+        add_next_index_zval(return_value, &entry);
+    }
 }
 /* }}} */
 
