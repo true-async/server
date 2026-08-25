@@ -4096,7 +4096,28 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             listen_event->base.add_callback(&listen_event->base,
                 ZEND_ASYNC_EVENT_CALLBACK(http_server_accept_callback));
 
-            listen_event->base.start(&listen_event->base);
+            /* Windows defers an address conflict from bind() to listen(), so
+             * a listener that bound cleanly can still fail here. Dropping the
+             * answer left the server in its accept loop with nothing bound. */
+            if (UNEXPECTED(!listen_event->base.start(&listen_event->base))) {
+                for (size_t i = 0; i < server->listener_count; i++) {
+                    http_server_listener_release(&server->listeners[i]);
+                }
+
+                server->listener_count = 0;
+#ifdef HAVE_OPENSSL
+                if (server->tls_ctx != NULL) {
+                    tls_context_free(server->tls_ctx);
+                    server->tls_ctx = NULL;
+                }
+#endif
+                zval_ptr_dtor(&listeners_zval);
+                if (!EG(exception)) {
+                    zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                        "Failed to listen on %s:%d", host, port);
+                }
+                RETURN_THROWS();
+            }
         }
 #ifdef HAVE_HTTP_SERVER_HTTP3
         else if (strcmp(Z_STRVAL_P(type_zv), "udp_h3") == 0) {
@@ -4252,7 +4273,19 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             listen_event->base.add_callback(&listen_event->base,
                 ZEND_ASYNC_EVENT_CALLBACK(http_server_accept_callback));
 
-            listen_event->base.start(&listen_event->base);
+            if (UNEXPECTED(!listen_event->base.start(&listen_event->base))) {
+                for (size_t i = 0; i < server->listener_count; i++) {
+                    http_server_listener_release(&server->listeners[i]);
+                }
+
+                server->listener_count = 0;
+                zval_ptr_dtor(&listeners_zval);
+                if (!EG(exception)) {
+                    zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                        "Failed to listen on unix socket %s", Z_STRVAL_P(path_zv));
+                }
+                RETURN_FALSE;
+            }
         }
     } ZEND_HASH_FOREACH_END();
 
