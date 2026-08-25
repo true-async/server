@@ -1124,13 +1124,16 @@ static void *formatter_ud_pretty(HashTable *spec, zval *stream_zv)
         return NULL;
     }
 
-    int fd = -1;
+    /* Same carrier as in http_log_sink_start: the cast writes a php_socket_t. */
+    php_socket_t raw_fd = (php_socket_t)-1;
+
     if (php_stream_cast(s, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
-                        (void *)&fd, 0) != SUCCESS || fd < 0) {
+                        (void *)&raw_fd, 0) != SUCCESS
+        || raw_fd == (php_socket_t)-1) {
         return NULL;
     }
 
-    return http_log_color_for_fd(fd) ? (void *)1 : NULL;
+    return http_log_color_for_fd((int)raw_fd) ? (void *)1 : NULL;
 }
 
 /* syslog carries the facility code in ud (default user=1). */
@@ -1902,8 +1905,13 @@ static void writer_teardown(http_log_writer_cb_t *cb)
 typedef struct {
     http_log_sink_t      *sink;
     int                   fd;
+    zend_async_io_type    io_type;
     http_log_write_mode_t mode;
     bool                  ok;
+    /* Raised as soon as the io exists. From that moment the descriptor is the
+     * io's, whether the rest of the open succeeds or not — a failure disposes
+     * the io, and disposing it closes an adopted socket. */
+    bool                  io_created;
 } log_open_arg_t;
 
 /* A stream socket must be driven as a socket, not as a file. Wrapped as a file,
@@ -1918,6 +1926,19 @@ typedef struct {
  * reliable — a wedged collector fills its receive queue and the blocking sendto
  * then parks a pool thread until the stop deadline abandons it. Everything else
  * — regular files, stdout, a pipe — keeps its current behaviour. */
+#ifdef PHP_WIN32
+/* Whether the descriptor is a socket at all. Only Windows needs the question:
+ * there the file path cannot carry one, so a socket the io refuses is a dead
+ * sink rather than a slow one. */
+static bool log_fd_is_socket(const int fd)
+{
+    int type = 0;
+    int tlen = (int) sizeof type;
+
+    return getsockopt((SOCKET) fd, SOL_SOCKET, SO_TYPE, (char *) &type, &tlen) == 0;
+}
+#endif
+
 static zend_async_io_type log_io_type_for_fd(const int fd)
 {
 #ifndef PHP_WIN32
@@ -1946,7 +1967,33 @@ static zend_async_io_type log_io_type_for_fd(const int fd)
         return ZEND_ASYNC_IO_TYPE_TCP;
     }
 #else
-    (void)fd;
+    /* A Windows socket is not a CRT descriptor, so the file path does not
+     * merely park a pool thread here — uv_fs_write refuses the handle with
+     * EBADF and every record is dropped. The descriptor php_stream_cast hands
+     * over is the SOCKET itself, which is what the socket calls below take.
+     *
+     * Anything but a TCP stream — a datagram socket, or the AF_UNIX that
+     * Windows 10 has and libuv's pipe handle will not adopt — therefore has no
+     * transport here at all, and the sink refuses to start rather than drop
+     * every record. log_fd_is_socket tells that case from a real file. */
+    int type = 0;
+    int tlen = (int) sizeof type;
+
+    if (getsockopt((SOCKET) fd, SOL_SOCKET, SO_TYPE, (char *) &type, &tlen) != 0
+        || type != SOCK_STREAM) {
+        return ZEND_ASYNC_IO_TYPE_FILE;
+    }
+
+    struct sockaddr_storage sa;
+    int                     salen = (int) sizeof sa;
+
+    if (getsockname((SOCKET) fd, (struct sockaddr *) &sa, &salen) != 0) {
+        return ZEND_ASYNC_IO_TYPE_FILE;
+    }
+
+    if (sa.ss_family == AF_INET || sa.ss_family == AF_INET6) {
+        return ZEND_ASYNC_IO_TYPE_TCP;
+    }
 #endif
 
     return ZEND_ASYNC_IO_TYPE_FILE;
@@ -1956,14 +2003,20 @@ static void log_sink_open_op(void *arg)
 {
     log_open_arg_t *const a = (log_open_arg_t *)arg;
 
+    /* PRESERVE_FD only reaches a descriptor the reactor would otherwise close
+     * itself, which is the FILE path; a socket is adopted by a libuv stream
+     * handle that closes it on teardown whatever the flag says. */
     zend_async_io_t *const io =
-        ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)a->fd,
-                             log_io_type_for_fd(a->fd),
-                             ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD);
+        ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)a->fd, a->io_type,
+                             a->io_type == ZEND_ASYNC_IO_TYPE_FILE
+                                 ? ZEND_ASYNC_IO_WRITABLE | ZEND_ASYNC_IO_PRESERVE_FD
+                                 : ZEND_ASYNC_IO_WRITABLE);
 
     if (io == NULL) {
         return;
     }
+
+    a->io_created = true;
 
     http_log_writer_cb_t *const cb = (http_log_writer_cb_t *)
         ZEND_ASYNC_EVENT_CALLBACK_EX(writer_complete_cb, sizeof(http_log_writer_cb_t));
@@ -2397,16 +2450,41 @@ static bool http_log_sink_start(http_log_sink_t *sink,
 
     /* The stream's own async-IO handle is not usable: it belongs to this
      * thread's loop, and the writes run on the log thread's. Take the raw
-     * descriptor instead — PRESERVE_FD keeps it with the stream, which stays
-     * referenced by sink->stream_zv for as long as the sink lives. */
-    int fd = -1;
+     * descriptor instead.
+     *
+     * Who owns it afterwards follows the handle type. A file descriptor stays
+     * with the stream, which sink->stream_zv holds for as long as the sink
+     * lives, and the reactor leaves it alone. A socket cannot be shared: libuv
+     * adopts it into a stream handle and closes it on teardown, so the stream
+     * is released below once the transport is up, and a descriptor still owned
+     * by a live stream would be closed twice — the second close landing on
+     * whatever connection has since taken that number. */
+    php_socket_t raw_fd = (php_socket_t)-1;
 
     if (php_stream_cast(stream, PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL,
-                        (void *)&fd, 0) != SUCCESS || fd < 0) {
+                        (void *)&raw_fd, 0) != SUCCESS
+        || raw_fd == (php_socket_t)-1) {
         fprintf(stderr,
                 "http_server: log stream has no descriptor; sink disabled\n");
         return false;
     }
+
+    /* The cast writes a php_socket_t, which is a SOCKET on Windows and eight
+     * bytes wide there, so the carrier above cannot be an int. Narrowing to one
+     * afterwards is the documented move: Windows guarantees a SOCKET value fits
+     * in 32 bits, and the socket calls take it back. */
+    const int fd = (int)raw_fd;
+
+    const zend_async_io_type io_type = log_io_type_for_fd(fd);
+
+#ifdef PHP_WIN32
+    if (io_type == ZEND_ASYNC_IO_TYPE_FILE && log_fd_is_socket(fd)) {
+        fprintf(stderr,
+                "http_server: only a TCP log transport is supported on Windows; "
+                "sink disabled\n");
+        return false;
+    }
+#endif
 
     tsrm_mutex_lock(g_log_lock);
     const bool have_thread = log_thread_ref();
@@ -2417,15 +2495,33 @@ static bool http_log_sink_start(http_log_sink_t *sink,
         return false;
     }
 
-    log_open_arg_t arg = { .sink = sink, .fd = fd, .mode = spec->write_mode, .ok = false };
+    log_open_arg_t arg = { .sink = sink, .fd = fd, .io_type = io_type,
+                           .mode = spec->write_mode, .ok = false,
+                           .io_created = false };
 
     if (!reactor_pool_exec(g_log_pool, 0, log_sink_open_op, &arg) || !arg.ok) {
+        /* The io took the socket and its dispose has closed it, so the stream
+         * must not close that number a second time. */
+        if (arg.io_created && io_type != ZEND_ASYNC_IO_TYPE_FILE) {
+            stream->flags |= PHP_STREAM_FLAG_NO_CLOSE;
+        }
+
         tsrm_mutex_lock(g_log_lock);
         log_thread_unref();
         tsrm_mutex_unlock(g_log_lock);
 
         fprintf(stderr, "http_server: failed to open the log sink transport\n");
         return false;
+    }
+
+    /* A socket belongs to the io from here, and the stream must not close it
+     * when the caller drops the resource: libuv has adopted it, closes it on
+     * teardown, and a second close would land on whatever connection has taken
+     * that descriptor since. A file descriptor stays the stream's, and
+     * PRESERVE_FD keeps the reactor off it. The stream object itself is held
+     * either way — freeing it would leave the caller a dead resource. */
+    if (io_type != ZEND_ASYNC_IO_TYPE_FILE) {
+        stream->flags |= PHP_STREAM_FLAG_NO_CLOSE;
     }
 
     ZVAL_COPY(&sink->stream_zv, stream_zv);
