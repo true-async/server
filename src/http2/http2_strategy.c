@@ -1886,6 +1886,30 @@ static bool h2_stream_abort(void *ctx, const int64_t error_code)
         return false;
     }
 
+    http_connection_t *const conn = http2_session_get_conn(stream->session);
+
+    /* The ring still holds every chunk whose emit was skipped because a writev
+     * was in flight, and the HEADERS commit can be among them: the append path
+     * leaves those frames to the write completion's re-drive, while the submit
+     * below moves the stream to a closing state where nghttp2 refuses DATA and
+     * drops what it has queued for it. The flush puts the body the handler
+     * produced on the wire ahead of the reset, and the reset says it is
+     * incomplete. What the peer's window cannot take stays in the ring and is
+     * released with it.
+     *
+     * It runs before streaming_ended is raised: with that flag the provider
+     * marks EOF on the last DATA, and an END_STREAM would call the body whole.
+     *
+     * The flush cannot close this stream under us — cb_on_stream_close frees
+     * the stream, and the pointer is read on every line below. Nothing queued
+     * for this id ends it: END_STREAM waits on the flag still down, the reset
+     * is not submitted yet, and a peer that reset it first is turned away by
+     * the guard. */
+    if (!stream->peer_closed && stream->session->emit_state == NULL
+        && conn != NULL) {
+        http2_session_emit_now(stream->session);
+    }
+
     stream->local_aborted   = true;
     stream->streaming_ended = true;
 
@@ -1899,7 +1923,7 @@ static bool h2_stream_abort(void *ctx, const int64_t error_code)
         return true;
     }
 
-    if (http2_session_get_conn(stream->session) == NULL) {
+    if (conn == NULL) {
         return true;
     }
 
@@ -1924,7 +1948,7 @@ static bool h2_stream_abort(void *ctx, const int64_t error_code)
     stream->chunk_queue_bytes = 0;
     stream->chunk_read_offset = 0;
 
-    http2_session_emit(stream->session);
+    http2_session_emit_now(stream->session);
     return true;
 }
 
