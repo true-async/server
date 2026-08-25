@@ -1599,3 +1599,19 @@ a release yet except the first two, which are fixed.
   intent was backpressure. The drain above removes the parse-error case. Every
   other path that can fill `read_buffer` still ends this way, and none of them
   has a test.
+
+- [x] **The `/dev/null` sweep is not worth doing; five files were (#295).** The
+  literal appears 230 times in `tests/`, and the question was whether to replace
+  it wholesale for Windows. Measured instead: of the 214 tests the Windows suite
+  skipped, **none** skipped because of `/dev/null`. Every `exec('curl --version
+  2>/dev/null')` in a SKIPIF sits under a `die` for Windows that fires first,
+  and most of the remaining occurrences are in `.sh` files Windows never runs.
+  What the literal did cost was one red test, `tls/016`, whose curl never ran;
+  behind it hid a second Windows defect, the text-mode pipe that strips CR from
+  `shell_exec` output and defeats a `\r\n\r\n` search. The measurement also
+  named a POSIX-ism that does cost coverage: `command -v` in four
+  `compression/` SKIPIFs, plus `gunzip`, which Git for Windows ships as a shell
+  script. Evidence: the Windows suite goes from 163 passed / 2 failed to
+  167 passed / 1 failed. The rest of the literals stay: each bites only when its
+  test starts running on Windows, and it is cheaper to fix one then than to
+  rewrite 230 sites now.
