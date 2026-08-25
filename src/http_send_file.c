@@ -20,6 +20,7 @@
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_virtual_cwd.h" /* IS_ABSOLUTE_PATH, IS_SLASH */
 #include "php_http_server.h"
+#include "main/fopen_wrappers.h" /* php_check_open_basedir_ex */
 #include "http1/http_parser.h"
 #include "http_response_internal.h"
 #include "http_send_file.h"
@@ -145,6 +146,14 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 				   || !http_path_is_cwd_independent(ZSTR_VAL(req->path), path_len))) {
 		http_send_file_request_free(req);
 		http_response_synth_error(response_obj, 500, "sendFile: path must be absolute");
+		return false;
+	}
+
+	/* Reachable from more than the PHP method, so the operator's boundary is
+	 * checked here too rather than trusted to the caller. */
+	if (UNEXPECTED(php_check_open_basedir_ex(ZSTR_VAL(req->path), 0) != 0)) {
+		http_send_file_request_free(req);
+		http_response_synth_error(response_obj, 500, "sendFile: path is outside open_basedir");
 		return false;
 	}
 
