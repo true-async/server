@@ -118,18 +118,18 @@ static zend_string *canonicalise_root_directory(const zend_string *path)
 		return NULL;
 	}
 
+	if (!http_path_is_cwd_independent(ZSTR_VAL(path), ZSTR_LEN(path))) {
+		zend_throw_exception(http_server_invalid_argument_exception_ce,
+							 "StaticHandler root directory must be an absolute path", 0);
+		return NULL;
+	}
+
 	/* A mount rooted outside the operator's boundary would serve from there
 	 * on every request, so the root is checked once, here. */
 	if (php_check_open_basedir_ex(ZSTR_VAL(path), 0) != 0) {
 		zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
 								"StaticHandler root directory is outside open_basedir: %s",
 								ZSTR_VAL(path));
-		return NULL;
-	}
-
-	if (!http_path_is_cwd_independent(ZSTR_VAL(path), ZSTR_LEN(path))) {
-		zend_throw_exception(http_server_invalid_argument_exception_ce,
-							 "StaticHandler root directory must be an absolute path", 0);
 		return NULL;
 	}
 
