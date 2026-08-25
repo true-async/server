@@ -1550,3 +1550,52 @@ a release yet except the first two, which are fixed.
   wrote before the throw reaches the peer, RST_STREAM says the body stops there,
   no END_STREAM. The test asserts `body=alphabeta` and fails without the fix on
   Linux too.
+
+## A refused upload never heard the refusal (#287)
+
+- [x] **The read buffer filled after the parse error, and the read died of it.**
+  `h1/005` read an empty reply on Windows while `parse_errors_413_total` counted
+  the refusal. The failing read says what happened:
+  `Async\InputOutputException: Pipe read error: no buffer space available`,
+  `UV_ENOBUFS`, and that error latches `write_failed`
+  (`src/core/http_connection.c:1284`), which takes the connection down before
+  the 413 is delivered. `http_connection_handle_read_completion` returns early
+  on `parse_error_handled` and consumes nothing, so `read_buffer_len` stays put
+  and grows with every chunk the peer sends; `http_connection_alloc_cb` then
+  hands the reactor a zero-length buffer, which is how this transport spells
+  backpressure and how libuv spells a fatal read.
+
+  Behind it waits the second effect, which the same fix removes: a socket closed
+  with unread bytes in its receive buffer is reset rather than finished, and the
+  reset discards what this side has written.
+
+  A parse error now opens a lingering close — nginx's `lingering_close`,
+  Apache's `ap_lingering_close`. Arriving bytes are dropped instead of buffered
+  and the destroy defers: 500 ms of silence from the peer, refreshed by every
+  chunk, and 5 s in total. Both reach the connection through the deadline tick
+  already walking the connection list, so the change adds no timer and the tick
+  period is the resolution — the wait is at least this long, not exactly.
+
+  Three defects a review found before it landed, all fixed here. **A peer
+  trickling one byte per window held the connection for good:** the idle
+  refresh did not stop at the cap, and the cap was read only by a destroy that
+  such a peer never triggers. **The cancel path did not wait at all:**
+  `http_request_finalize` zeroes `deadline_ms` for a connection going to close,
+  which cancelled the drain the moment the refusal was written — the case the
+  test covers, passing on loopback timing rather than on the wait. **A drain
+  outlived its server:** the sweep in `http_server_free` runs after the deadline
+  tick is stopped, so a deferred destroy there was never finalised and the
+  connection, its io, parser and strategy leaked; the sweep ends the drain
+  itself.
+
+  The loop came first: the test failed 3 of 4 runs, and a copy cut to exactly
+  the bytes that trip the limit — nothing left inbound — passed, which named the
+  condition before any code was read. After the fix `h1/005` passes 5 of 5 and
+  `tests/phpt/server` loses two failures without gaining one.
+
+- [ ] **A full read buffer kills any connection, not only a refused one.**
+  `http_connection_alloc_cb` answers a full buffer with `base = NULL, len = 0`,
+  and libuv turns that into `UV_ENOBUFS` on the read — a fatal error where the
+  intent was backpressure. The drain above removes the parse-error case. Every
+  other path that can fill `read_buffer` still ends this way, and none of them
+  has a test.

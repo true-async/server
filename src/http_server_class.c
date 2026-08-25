@@ -6098,6 +6098,10 @@ static void http_server_free(zend_object *obj)
         http_connection_t *c = server->conn_arena.alive_head;
         while (c != NULL) {
             http_connection_t *next = c->next_conn;
+            /* A lingering close holds the destroy back for the deadline tick,
+             * and the tick is stopped by now: the drain has to end here or the
+             * connection outlives the server that owns it. */
+            http_connection_linger_end(c);
             http_connection_destroy(c);
             c = next;
         }

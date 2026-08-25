@@ -321,6 +321,74 @@ void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
 }
 /* }}} */
 
+/* {{{ Lingering close.
+ *
+ * The peer of a refused request is usually still uploading, and a socket closed
+ * with unread bytes in its receive buffer is reset rather than finished. The
+ * reset discards what this side has written but the peer has not read yet — the
+ * refusal itself — so the client of a 413 reads an empty reply and learns
+ * nothing about why its upload ended. nginx answers this with lingering_close,
+ * Apache with ap_lingering_close.
+ *
+ * The drain is the read that is already armed: what arrives is thrown away, and
+ * the destroy waits. HTTP_LINGER_IDLE_MS measures silence from the peer and
+ * every chunk buys another window of it; HTTP_LINGER_MAX_MS caps the sum, so a
+ * peer trickling one byte per window releases the connection all the same. Both
+ * bounds reach the connection through deadline_ms, which the server's deadline
+ * tick already sweeps, and the tick's own period is the resolution — the wait is
+ * at least this long, not exactly.
+ */
+#define HTTP_LINGER_IDLE_MS 500
+#define HTTP_LINGER_MAX_MS  5000
+
+/* The next moment the drain may end: one idle window from now, never past the
+ * cap the drain opened with. */
+static uint64_t http_connection_linger_next_deadline(const http_connection_t *conn)
+{
+    const uint64_t idle_until = ZEND_ASYNC_NOW() + HTTP_LINGER_IDLE_MS;
+
+    return idle_until < conn->linger_until_ms ? idle_until : conn->linger_until_ms;
+}
+
+static void http_connection_linger_begin(http_connection_t *conn)
+{
+    if (conn->linger_close || !conn->parse_error_handled
+        || conn->io == NULL || conn->write_failed || conn->write_timed_out) {
+        return;
+    }
+
+    conn->linger_close = 1;
+    conn->read_buffer_len = 0;
+    conn->keep_alive = false;
+    conn->linger_until_ms = ZEND_ASYNC_NOW() + HTTP_LINGER_MAX_MS;
+    conn->deadline_ms = http_connection_linger_next_deadline(conn);
+}
+
+static bool http_connection_linger_pending(const http_connection_t *conn)
+{
+    if (!conn->linger_close) {
+        return false;
+    }
+
+    return ZEND_ASYNC_NOW() < conn->deadline_ms;
+}
+
+/* A chunk from the peer buys the drain another window and is dropped. */
+static void http_connection_linger_note_inbound(http_connection_t *conn)
+{
+    conn->read_buffer_len = 0;
+    conn->deadline_ms = http_connection_linger_next_deadline(conn);
+}
+
+/* The peer has gone, the wait is spent, or the server is going down: the close
+ * can happen now. */
+void http_connection_linger_end(http_connection_t *conn)
+{
+    conn->linger_close = 0;
+    conn->linger_until_ms = 0;
+}
+/* }}} */
+
 /* {{{ http_connection_destroy */
 void http_connection_destroy(http_connection_t *conn)
 {
@@ -368,6 +436,16 @@ void http_connection_destroy(http_connection_t *conn)
         conn->destroy_pending = true;
         return;
     }
+
+    /* The refusal on the wire is discarded by the reset a close sends while
+     * the peer is still uploading, so the close waits out the drain the parse
+     * error opened. A wait that is spent falls through. */
+    if (http_connection_linger_pending(conn)) {
+        conn->destroy_pending = true;
+        return;
+    }
+
+    http_connection_linger_end(conn);
 
     /* Past defer gates — arm the re-entry guard before any callback removal. */
     conn->destroying = 1;
@@ -1043,9 +1121,10 @@ static bool http_connection_handle_read_completion(http_connection_t *conn,
          *   - No handler dispatched (URI / header limit hit before
          *     on_headers_complete, or Content-Length pre-checked in
          *     on_headers_complete): emit the 4xx ourselves and signal
-         *     destroy via should_destroy=true. Caller must disarm the
-         *     multishot read + dispose its req before destroy frees
-         *     rcb out from under it.
+         *     destroy via should_destroy=true. The drain the refusal
+         *     opened holds that destroy back and keeps reading, so the
+         *     read is disarmed and its req disposed when the drain
+         *     ends, not here.
          */
         /* Multishot read may keep delivering chunks after the parser
          * latched its error — the kernel's recv buffer was already full
@@ -1209,6 +1288,11 @@ static void http_connection_read_callback_fn(
         async_plain_event_fire(conn->out_idle_event);
         async_plain_event_fire(conn->out_drain_event);
 
+        /* What the wait was waiting for: the peer has stopped, so the receive
+         * buffer is empty and the close carries the response instead of a
+         * reset. */
+        http_connection_linger_end(conn);
+
         /* Defer destroy if a handler is in flight or the read_buffer holds
          * a pipelined tail — flagging keep_alive=false makes handler dispose
          * tear the conn down once it (and any pipelined chain) has finished
@@ -1233,6 +1317,18 @@ static void http_connection_read_callback_fn(
 
     conn->read_buffer_len += bytes_read;
     http_connection_note_inbound_h2(conn);
+
+    /* Multishot keeps the reader armed, so dropping the chunk is the whole
+     * drain; a terminal completion re-arms below. */
+    if (UNEXPECTED(conn->linger_close)) {
+        http_connection_linger_note_inbound(conn);
+
+        if (terminal) {
+            http_connection_read(conn);
+        }
+
+        return;
+    }
 
     /* Re-entrancy guard: a handler coroutine is currently in flight (possibly
      * suspended at an await), so the parser must not run — feeding new bytes
@@ -1285,54 +1381,70 @@ static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend
 /* {{{ http_connection_read */
 bool http_connection_read(http_connection_t *conn)
 {
-    if (conn->read_buffer_len >= conn->read_buffer_size) {
-        http_connection_destroy(conn);
-        return false;
-    }
+    zend_async_io_req_t *req = NULL;
 
-    zend_async_io_req_t *req = ZEND_ASYNC_IO_READ(
-        conn->io,
-        conn->read_buffer + conn->read_buffer_len,
-        conn->read_buffer_size - conn->read_buffer_len);
-
-    if (req == NULL) {
-        http_connection_destroy(conn);
-        return false;
-    }
-
-    /* Sync-complete fast path — no need to arm a callback. */
-    if (req->completed) {
-        const bool err = (req->exception != NULL);
-        const ssize_t bytes_read = req->transferred;
-
-        if (req->exception != NULL) {
-            OBJ_RELEASE(req->exception);
-            req->exception = NULL;
-        }
-
-        req->dispose(req);
-
-        if (err || bytes_read <= 0) {
+    /* A sync completion arms the next read from here rather than through a
+     * call back into this function: the drain empties read_buffer on every
+     * pass, so a recursion would carry no bound of its own. */
+    for (;;) {
+        if (conn->read_buffer_len >= conn->read_buffer_size) {
             http_connection_destroy(conn);
             return false;
         }
 
-        conn->read_buffer_len += bytes_read;
-        http_connection_note_inbound_h2(conn);
+        req = ZEND_ASYNC_IO_READ(
+            conn->io,
+            conn->read_buffer + conn->read_buffer_len,
+            conn->read_buffer_size - conn->read_buffer_len);
 
-        bool should_destroy = false;
-
-        if (!http_connection_handle_read_completion(conn, &should_destroy)) {
-            if (should_destroy) {
-                http_connection_destroy(conn);
-            }
-
+        if (req == NULL) {
+            http_connection_destroy(conn);
             return false;
         }
 
-        /* Headers still incomplete — re-arm (tail-recursion is fine,
-         * sync completions are finite). */
-        return http_connection_read(conn);
+        /* Sync-complete fast path — no need to arm a callback. */
+        if (req->completed) {
+            const bool err = (req->exception != NULL);
+            const ssize_t bytes_read = req->transferred;
+
+            if (req->exception != NULL) {
+                OBJ_RELEASE(req->exception);
+                req->exception = NULL;
+            }
+
+            req->dispose(req);
+
+            if (err || bytes_read <= 0) {
+                http_connection_linger_end(conn);
+                http_connection_destroy(conn);
+                return false;
+            }
+
+            conn->read_buffer_len += bytes_read;
+            http_connection_note_inbound_h2(conn);
+
+            /* The drain lives on the armed read and this path has none: the
+             * sync completion is one-shot, so the next pass carries it. */
+            if (UNEXPECTED(conn->linger_close)) {
+                http_connection_linger_note_inbound(conn);
+                continue;
+            }
+
+            bool should_destroy = false;
+
+            if (!http_connection_handle_read_completion(conn, &should_destroy)) {
+                if (should_destroy) {
+                    http_connection_destroy(conn);
+                }
+
+                return false;
+            }
+
+            /* Headers still incomplete — arm again. */
+            continue;
+        }
+
+        break;
     }
 
     /* Async path: allocate the persistent read callback on first use
@@ -2312,6 +2424,13 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
     conn->parse_error_handled = 1;
     conn->keep_alive = false;
 
+    /* From here the parser is done with this connection, and what the peer is
+     * still sending has to go somewhere: left in the read buffer it fills it,
+     * and the next allocation hands the reactor nothing, which arrives as a
+     * read error and takes the refusal down with the connection. The drain
+     * throws those bytes away and holds the close open meanwhile. */
+    http_connection_linger_begin(conn);
+
     /* Build HttpException(message=reason, code=status) directly
      * without EG(exception) side effects. Dispose reads both back
      * via zend_read_property to construct the response. */
@@ -2385,6 +2504,9 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
     conn->keep_alive = false;
     http_server_on_parse_error(conn->counters, status);
     conn->parse_error_handled = 1;
+
+    /* Same drain as the cancel path: the peer is still sending. */
+    http_connection_linger_begin(conn);
 
     if (n <= 0 || (size_t)n >= sizeof(response)) {
         return false;  /* truncation guard — unreachable for current reasons */
@@ -3344,10 +3466,15 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
      * alive idle wait → keepalive_timeout_ms ahead. Going to close →
      * 0 (the close path destroys this conn directly; the watchdog
      * doesn't need to revisit). ZEND_ASYNC_NOW() reads cached loop
-     * time — no syscall on the hot path. */
+     * time — no syscall on the hot path.
+     *
+     * A lingering close is the exception: there the field already carries the
+     * drain's own deadline, and the watchdog is what ends the drain, so zeroing
+     * it here would close the connection the moment this response is written —
+     * which is the abrupt close the drain exists to avoid. */
     if (should_continue && conn->keepalive_timeout_ms > 0) {
         conn->deadline_ms = ZEND_ASYNC_NOW() + conn->keepalive_timeout_ms;
-    } else {
+    } else if (!conn->linger_close) {
         conn->deadline_ms = 0;
     }
 
