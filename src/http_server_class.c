@@ -110,33 +110,23 @@ extern http_server_counters_t *http3_listener_local_counters(http3_listener_t *l
 #endif
 
 /* TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1/0 overrides the default so the
- * shared-fd path can be exercised on Linux CI without a macOS runner.
- * Windows never shares (no POSIX socket dup), so it is always false. */
+ * shared path can be exercised on Linux CI without a macOS runner. */
 static bool http_server_use_shared_listen_fd(void)
 {
-#ifdef PHP_WIN32
-    return false;
-#else
     const char *env = getenv("TRUE_ASYNC_SERVER_SHARED_LISTEN_FD");
     if (env != NULL && (env[0] == '0' || env[0] == '1')) {
         return env[0] == '1';
     }
 
     return HTTP_SHARED_FD_DEFAULT;
-#endif
 }
 
 /* Whether to ask the reactor for SO_REUSEPORT on each listener. This is a
- * kernel capability, NOT the logical inverse of the shared-fd strategy —
- * conflating the two is what broke Windows (issue #82). Three platform camps:
- *   - Linux/FreeBSD: load-balanced REUSEPORT, each worker binds itself.
- *   - macOS/other BSD: no LB REUSEPORT, so the shared-fd dup model instead.
- *   - Windows: NEITHER. Winsock has no SO_REUSEPORT; libuv's uv_tcp_bind()
- *     returns UV_ENOTSUP ("operation not supported on socket") if
- *     UV_TCP_REUSEPORT is set, so it must never be requested. A single
- *     listener (workers=1, the default) then just binds directly.
- * On POSIX the answer is still !use_shared_listen_fd(); Windows is the third
- * case a lone boolean cannot express, hence its own carve-out here. */
+ * kernel capability, not a preference: Winsock has none, and libuv's
+ * uv_tcp_bind() answers UV_ENOTSUP if UV_TCP_REUSEPORT is set on Windows,
+ * so it must never be requested there. Two camps remain — kernels that
+ * load-balance REUSEPORT (Linux, FreeBSD) and everyone else, who share one
+ * bound socket instead (issue #275). */
 static bool http_server_use_reuseport(void)
 {
 #ifdef PHP_WIN32
@@ -160,26 +150,163 @@ typedef struct {
     uint32_t                     protocol_mask;
 } http_listener_t;
 
-/* An AF_UNIX socket bound once by the pool parent (workers > 1) and shared
- * with every worker thread — AF_UNIX has no SO_REUSEPORT, so N independent
- * binds on one path is impossible; instead one fd is bound and each worker
- * adopts a dup of it. POD: copied by value across thread transfer (the fd
- * integer is valid in every worker thread — threads share one fd table).
- * path is retained so the parent can unlink it once the pool drains. */
+/* An AF_UNIX socket bound once and shared with every thread serving the
+ * server — AF_UNIX has no SO_REUSEPORT, so N independent binds on one path
+ * is impossible. path is retained so the last owner can unlink it. */
 typedef struct {
-    char path[108];   /* fits sockaddr_un.sun_path (Linux) */
-    int  fd;
+    char          path[108];   /* fits sockaddr_un.sun_path (Linux) */
+    zend_socket_t fd;
 } http_pool_unix_fd_t;
 
-/* Pre-bound TCP listener fd for the workers-with-no-SO_REUSEPORT path
- * (macOS, Windows). Same model as http_pool_unix_fd_t: parent binds
- * once, each worker dups. host/port are remembered so the worker can
- * match its config entry to the shared fd. */
+/* A TCP listener bound once and shared the same way, for every platform
+ * whose kernel has no load-balanced SO_REUSEPORT. host/port identify the
+ * entry so a thread can match its config against what is already bound. */
 typedef struct {
-    char host[64];
-    int  port;
-    int  fd;
+    char          host[64];
+    int           port;
+    zend_socket_t fd;
 } http_pool_tcp_fd_t;
+
+/* The listening sockets one server shares across its threads (issue #275).
+ *
+ * Bound lazily: whichever thread reaches start() first binds under the lock
+ * and publishes the descriptor, the rest find it and adopt a duplicate of
+ * their own. Duplicates are mandatory rather than cosmetic — the reactor
+ * takes ownership of an adopted descriptor and closes it on dispose, so a
+ * descriptor shared verbatim would die with the first thread to stop.
+ *
+ * Lifetime is a reference count because the set outlives any single object:
+ * the parent, every transfer shell and every worker clone hold a reference,
+ * and the last one out closes the master descriptors. Scoping the set to
+ * one server keeps two independent servers on one port in honest conflict.
+ *
+ * Allocated with malloc, not emalloc: it crosses threads and outlives the
+ * request that created it. */
+typedef struct {
+    uint32_t             refcount;       /* guarded by lock */
+    MUTEX_T              lock;
+    size_t               tcp_count;
+    http_pool_tcp_fd_t   tcp[MAX_LISTENERS];
+#ifndef PHP_WIN32
+    size_t               unix_count;
+    http_pool_unix_fd_t  unix_paths[MAX_LISTENERS];
+#endif
+} http_listen_set_t;
+
+/* Duplicate a listening descriptor so the caller can own and close its copy
+ * independently. On Windows WSADuplicateSocketW is the supported same-process
+ * mechanism — DuplicateHandle is not, once a layered provider is installed.
+ * Returns the duplicate, or the platform's invalid-socket value on failure. */
+static zend_socket_t http_socket_dup(zend_socket_t fd)
+{
+#ifdef PHP_WIN32
+    WSAPROTOCOL_INFOW info;
+
+    if (WSADuplicateSocketW((SOCKET) fd, GetCurrentProcessId(), &info) != 0) {
+        return (zend_socket_t) INVALID_SOCKET;
+    }
+
+    return (zend_socket_t) WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+        FROM_PROTOCOL_INFO, &info, 0, WSA_FLAG_OVERLAPPED);
+#else
+    return dup(fd);
+#endif
+}
+
+/* Whether a descriptor returned by http_socket_dup or a bind is usable. */
+static inline bool http_socket_valid(zend_socket_t fd)
+{
+#ifdef PHP_WIN32
+    return fd != (zend_socket_t) INVALID_SOCKET;
+#else
+    return fd >= 0;
+#endif
+}
+
+static http_listen_set_t *http_listen_set_create(void)
+{
+    http_listen_set_t *set = calloc(1, sizeof(http_listen_set_t));
+
+    if (UNEXPECTED(set == NULL)) {
+        return NULL;
+    }
+
+    set->lock     = tsrm_mutex_alloc();
+    set->refcount = 1;
+
+    return set;
+}
+
+static void http_listen_set_addref(http_listen_set_t *set)
+{
+    if (set == NULL) {
+        return;
+    }
+
+    tsrm_mutex_lock(set->lock);
+    set->refcount++;
+    tsrm_mutex_unlock(set->lock);
+}
+
+/* Close every master descriptor and forget it. The caller holds no lock;
+ * this takes it. Leaves the set usable — a later start() re-binds. */
+static void http_listen_set_clear_tcp(http_listen_set_t *set)
+{
+    if (set == NULL) {
+        return;
+    }
+
+    tsrm_mutex_lock(set->lock);
+
+    for (size_t i = 0; i < set->tcp_count; i++) {
+        closesocket(set->tcp[i].fd);
+    }
+    set->tcp_count = 0;
+
+    tsrm_mutex_unlock(set->lock);
+}
+
+static void http_listen_set_clear_unix(http_listen_set_t *set)
+{
+#ifndef PHP_WIN32
+    if (set == NULL) {
+        return;
+    }
+
+    tsrm_mutex_lock(set->lock);
+
+    for (size_t i = 0; i < set->unix_count; i++) {
+        closesocket(set->unix_paths[i].fd);
+        unlink(set->unix_paths[i].path);
+    }
+    set->unix_count = 0;
+
+    tsrm_mutex_unlock(set->lock);
+#endif
+}
+
+/* Drop one reference. The last one closes the listening sockets and frees
+ * the set, so a server that never reached stop() no longer holds its ports
+ * until the process exits. */
+static void http_listen_set_release(http_listen_set_t *set)
+{
+    if (set == NULL) {
+        return;
+    }
+
+    tsrm_mutex_lock(set->lock);
+    const bool last = (--set->refcount == 0);
+    tsrm_mutex_unlock(set->lock);
+
+    if (!last) {
+        return;
+    }
+
+    http_listen_set_clear_tcp(set);
+    http_listen_set_clear_unix(set);
+    tsrm_mutex_free(set->lock);
+    free(set);
+}
 
 /* AF_UNIX bind() fails with EADDRINUSE on a socket file left behind by a
  * crashed previous run. Probe it: a stale socket refuses connect() with
@@ -300,14 +427,11 @@ struct http_server_object {
     http_listener_t          listeners[MAX_LISTENERS];
     size_t                   listener_count;
 
-    /* AF_UNIX sockets pre-bound by the pool parent (workers > 1), shared
-     * with every worker. Empty for single-worker servers and non-clone
-     * pool parents that have no unix listener. Copied verbatim to each
-     * worker by http_server_transfer_obj. */
-    http_pool_unix_fd_t      pool_unix_fds[MAX_LISTENERS];
-    size_t                   pool_unix_fd_count;
-    http_pool_tcp_fd_t       pool_tcp_fds[MAX_LISTENERS];
-    size_t                   pool_tcp_fd_count;
+    /* Listening sockets shared with every thread serving this server
+     * (issue #275). Refcounted and bound lazily; NULL until the first
+     * thread needs it. Each transfer shell and worker clone holds a
+     * reference, so the sockets die with the last of them. */
+    http_listen_set_t       *listen_set;
 
     /* Pure-C transport reactor pool. Parent-only, brought up when an H3
      * listener is configured and the opt-in env gate is set; NULL otherwise.
@@ -1382,6 +1506,22 @@ static uint32_t http_server_retry_interval_ms(http_server_object *server)
  * A worker clone never mints one: it inherits the parent's through its shell, and
  * a hub created on a clone would be attached by nobody, so every publish through
  * it would report served=0 with no error to show for it. */
+/* The shared listen set, created on first need. Called on the thread that
+ * owns the server before any worker can reach it, so no lock is needed to
+ * publish the pointer itself. Returns NULL only on allocation failure. */
+static http_listen_set_t *http_server_listen_set_ensure(http_server_object *server)
+{
+    if (server == NULL) {
+        return NULL;
+    }
+
+    if (server->listen_set == NULL) {
+        server->listen_set = http_listen_set_create();
+    }
+
+    return server->listen_set;
+}
+
 void *http_server_topic_hub_ensure(http_server_object *server)
 {
     if (server == NULL || server->is_worker_clone) {
@@ -2294,11 +2434,7 @@ static void pool_worker_done_cb(zend_async_event_t *event,
  * this is the final close that releases the socket. Idempotent. */
 static void http_server_close_pool_unix_fds(http_server_object *server)
 {
-    for (size_t i = 0; i < server->pool_unix_fd_count; i++) {
-        closesocket(server->pool_unix_fds[i].fd);
-        unlink(server->pool_unix_fds[i].path);
-    }
-    server->pool_unix_fd_count = 0;
+    http_listen_set_clear_unix(server->listen_set);
 }
 
 /* Bind every AF_UNIX listener once, before the worker pool is spawned, so all
@@ -2309,7 +2445,7 @@ static void http_server_close_pool_unix_fds(http_server_object *server)
 static int http_server_prebind_unix(http_server_object *server)
 {
     http_server_config_t *cfg = http_server_get_config(server);
-    server->pool_unix_fd_count = 0;
+    server->listen_set->unix_count = 0;
 
     if (cfg == NULL) {
         return SUCCESS;
@@ -2322,7 +2458,7 @@ static int http_server_prebind_unix(http_server_object *server)
             continue;
         }
 
-        if (server->pool_unix_fd_count >= MAX_LISTENERS) {
+        if (server->listen_set->unix_count >= MAX_LISTENERS) {
             break;
         }
 
@@ -2360,7 +2496,7 @@ static int http_server_prebind_unix(http_server_object *server)
             return FAILURE;
         }
 
-        http_pool_unix_fd_t *slot = &server->pool_unix_fds[server->pool_unix_fd_count++];
+        http_pool_unix_fd_t *slot = &server->listen_set->unix_paths[server->listen_set->unix_count++];
         memcpy(slot->path, path, path_len + 1);
         slot->fd = fd;
     }
@@ -2372,34 +2508,135 @@ static int http_server_prebind_unix(http_server_object *server)
  * not a pooled worker, or `path` is not one of the pre-bound unix sockets. */
 static int http_server_pool_unix_fd_lookup(const http_server_object *server, const char *path)
 {
-    for (size_t i = 0; i < server->pool_unix_fd_count; i++) {
-        if (strcmp(server->pool_unix_fds[i].path, path) == 0) {
-            return server->pool_unix_fds[i].fd;
+    for (size_t i = 0; i < server->listen_set->unix_count; i++) {
+        if (strcmp(server->listen_set->unix_paths[i].path, path) == 0) {
+            return server->listen_set->unix_paths[i].fd;
         }
     }
     return -1;
 }
 #endif  /* !PHP_WIN32 */
 
-/* The TCP shared-fd path mirrors AF_UNIX above. Compiled on all POSIX
- * targets (not just non-REUSEPORT ones) so the path is reachable on Linux
- * when TRUE_ASYNC_SERVER_SHARED_LISTEN_FD forces it on for testing. */
-#ifndef PHP_WIN32
+/* The TCP shared listener path. Compiled on every target: Windows needs it
+ * most, having no SO_REUSEPORT at all, and Linux reaches it when
+ * TRUE_ASYNC_SERVER_SHARED_LISTEN_FD forces sharing on for testing. */
+
+/* Bind host:port once for the whole set, then hand the caller a duplicate to
+ * adopt. Idempotent: the first caller binds, later ones find the entry. Both
+ * steps happen under the lock so two threads racing on start() cannot both
+ * bind. Returns the duplicate, or an invalid socket with an exception thrown.
+ *
+ * error_out receives a short reason for the caller to phrase; the lock is
+ * never held across a throw. */
+static zend_socket_t http_listen_set_acquire_tcp(http_listen_set_t *set,
+                                                 const char *host, int port,
+                                                 int backlog,
+                                                 const char **error_out)
+{
+    *error_out = NULL;
+
+    tsrm_mutex_lock(set->lock);
+
+    zend_socket_t master = (zend_socket_t) -1;
+    bool found = false;
+
+    for (size_t i = 0; i < set->tcp_count; i++) {
+        if (set->tcp[i].port == port && strcmp(set->tcp[i].host, host) == 0) {
+            master = set->tcp[i].fd;
+            found  = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        if (set->tcp_count >= MAX_LISTENERS) {
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "too many listeners";
+            return (zend_socket_t) -1;
+        }
+
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+
+        struct addrinfo hints = {0};
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags    = AI_PASSIVE;
+
+        struct addrinfo *res = NULL;
+        if (getaddrinfo(host, port_str, &hints, &res) != 0 || res == NULL) {
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "resolve";
+            return (zend_socket_t) -1;
+        }
+
+        const zend_socket_t fd =
+            (zend_socket_t) socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+
+        if (!http_socket_valid(fd)) {
+            freeaddrinfo(res);
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "socket";
+            return (zend_socket_t) -1;
+        }
+
+        int one = 1;
+#ifdef PHP_WIN32
+        /* Winsock's SO_REUSEADDR lets an unrelated process bind over a live
+         * listener and steal its connections. SO_EXCLUSIVEADDRUSE is the
+         * option that means here what SO_REUSEADDR means on POSIX. */
+        (void) setsockopt((SOCKET) fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+            (const char *) &one, sizeof(one));
+#else
+        (void) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#endif
+
+        if (bind(fd, res->ai_addr, (int) res->ai_addrlen) != 0
+            || listen(fd, backlog) != 0) {
+            closesocket(fd);
+            freeaddrinfo(res);
+            tsrm_mutex_unlock(set->lock);
+            *error_out = "bind";
+            return (zend_socket_t) -1;
+        }
+        freeaddrinfo(res);
+
+        http_pool_tcp_fd_t *slot = &set->tcp[set->tcp_count++];
+        size_t host_len = strlen(host);
+        if (host_len >= sizeof(slot->host)) host_len = sizeof(slot->host) - 1;
+        memcpy(slot->host, host, host_len);
+        slot->host[host_len] = '\0';
+        slot->port = port;
+        slot->fd   = fd;
+        master     = fd;
+    }
+
+    const zend_socket_t copy = http_socket_dup(master);
+
+    tsrm_mutex_unlock(set->lock);
+
+    if (!http_socket_valid(copy)) {
+        *error_out = "duplicate";
+        return (zend_socket_t) -1;
+    }
+
+    return copy;
+}
 
 static void http_server_close_pool_tcp_fds(http_server_object *server)
 {
-    for (size_t i = 0; i < server->pool_tcp_fd_count; i++) {
-        closesocket(server->pool_tcp_fds[i].fd);
-    }
-    server->pool_tcp_fd_count = 0;
+    http_listen_set_clear_tcp(server->listen_set);
 }
 
+/* Bind every TCP listener of the configuration into the shared set, so a bind
+ * error surfaces on the thread that called start() rather than inside a
+ * worker. Idempotent — the same lazy path the workers take, reached early.
+ * Throws and returns FAILURE on the first error. */
 static int http_server_prebind_tcp(http_server_object *server)
 {
     http_server_config_t *cfg = http_server_get_config(server);
-    server->pool_tcp_fd_count = 0;
 
-    if (cfg == NULL) {
+    if (cfg == NULL || server->listen_set == NULL) {
         return SUCCESS;
     }
 
@@ -2410,75 +2647,25 @@ static int http_server_prebind_tcp(http_server_object *server)
             continue;
         }
 
-        if (server->pool_tcp_fd_count >= MAX_LISTENERS) {
-            break;
-        }
+        const char *error = NULL;
+        const zend_socket_t copy = http_listen_set_acquire_tcp(
+            server->listen_set, ZSTR_VAL(lc->host), lc->port, cfg->backlog, &error);
 
-        const char *host = ZSTR_VAL(lc->host);
-        char port_str[8];
-        snprintf(port_str, sizeof(port_str), "%d", lc->port);
-
-        struct addrinfo hints = {0};
-        hints.ai_family   = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_flags    = AI_PASSIVE;
-
-        struct addrinfo *res = NULL;
-        if (getaddrinfo(host, port_str, &hints, &res) != 0 || res == NULL) {
-            http_server_close_pool_tcp_fds(server);
+        if (!http_socket_valid(copy)) {
+            http_listen_set_clear_tcp(server->listen_set);
             zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                "Failed to resolve %s:%d", host, lc->port);
+                "Failed to bind TCP listener on %s:%d (%s)",
+                ZSTR_VAL(lc->host), lc->port, error != NULL ? error : "unknown");
             return FAILURE;
         }
 
-        int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (fd < 0) {
-            freeaddrinfo(res);
-            http_server_close_pool_tcp_fds(server);
-            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                "Failed to create TCP socket for %s:%d", host, lc->port);
-            return FAILURE;
-        }
-
-        int one = 1;
-        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-        if (bind(fd, res->ai_addr, res->ai_addrlen) != 0
-            || listen(fd, cfg->backlog) != 0) {
-            closesocket(fd);
-            freeaddrinfo(res);
-            http_server_close_pool_tcp_fds(server);
-            zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                "Failed to bind TCP listener on %s:%d", host, lc->port);
-            return FAILURE;
-        }
-        freeaddrinfo(res);
-
-        http_pool_tcp_fd_t *slot = &server->pool_tcp_fds[server->pool_tcp_fd_count++];
-        size_t host_len = strlen(host);
-        if (host_len >= sizeof(slot->host)) host_len = sizeof(slot->host) - 1;
-        memcpy(slot->host, host, host_len);
-        slot->host[host_len] = '\0';
-        slot->port = lc->port;
-        slot->fd   = fd;
+        /* The set keeps the master; this copy has done its job of proving the
+         * address is ours. */
+        closesocket(copy);
     }
 
     return SUCCESS;
 }
-
-static int http_server_pool_tcp_fd_lookup(const http_server_object *server,
-                                          const char *host, int port)
-{
-    for (size_t i = 0; i < server->pool_tcp_fd_count; i++) {
-        if (server->pool_tcp_fds[i].port == port
-            && strcmp(server->pool_tcp_fds[i].host, host) == 0) {
-            return server->pool_tcp_fds[i].fd;
-        }
-    }
-    return -1;
-}
-
-#endif  /* !PHP_WIN32 */
 
 /* Process-wide registry of worker inboxes. The pool parent creates it; worker
  * clones publish their inbox into it; reactor threads read it to pick a worker.
@@ -3401,6 +3588,10 @@ static int http_server_start_pool(http_server_object *server,
 
     http_server_topic_hub_ensure(server);
 
+    if (!http_server_use_reuseport()) {
+        http_server_listen_set_ensure(server);
+    }
+
     /* One persistent shell per worker. Allocate the whole array up
      * front so cleanup is a single pefree in http_server_free. */
     pool_worker_ctx_t *ctxs = pemalloc(sizeof(*ctxs) * (size_t)workers, 1);
@@ -4031,34 +4222,30 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             unsigned int listen_flags = 0;
             zend_async_listen_event_t *listen_event = NULL;
 
-            /* Strategies for a worker pool sharing host:port. REUSEPORT:
-             * each worker binds independently, the kernel load-balances
-             * (Linux/FreeBSD). Shared fd: the parent bound once and each
-             * worker adopts a dup (macOS/other BSD, no LB REUSEPORT).
-             * Windows has neither — uv_tcp_bind() rejects UV_TCP_REUSEPORT
-             * with ENOTSUP and there is no POSIX dup to share — so it takes
-             * the plain-bind fall-through below (single listener only). */
+            /* Two strategies for several threads on one host:port. Where the
+             * kernel load-balances SO_REUSEPORT (Linux, FreeBSD) each thread
+             * binds for itself. Everywhere else — macOS, the other BSDs,
+             * Solaris and Windows, which has no SO_REUSEPORT at all — the
+             * address is bound once into the shared set and every thread
+             * adopts a duplicate of that one socket. The duplicate is not
+             * cosmetic: the reactor closes what it adopts, so a descriptor
+             * handed out verbatim would die with the first thread to stop. */
             if (http_server_use_reuseport()) {
                 listen_flags |= ZEND_ASYNC_LISTEN_F_REUSEPORT;
-            }
-#ifndef PHP_WIN32
-            else {
-                const int prebound_fd =
-                    http_server_pool_tcp_fd_lookup(server, host, port);
+            } else if (server->listen_set != NULL) {
+                const char *error = NULL;
+                const zend_socket_t adopted = http_listen_set_acquire_tcp(
+                    server->listen_set, host, port, server->backlog, &error);
 
-                if (prebound_fd >= 0) {
-                    const int dup_fd = dup(prebound_fd);
-
-                    if (dup_fd < 0) {
-                        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-                            "Failed to dup TCP listen fd for %s:%d", host, port);
-                    } else {
-                        listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
-                            dup_fd, server->backlog, listen_flags, 0);
-                    }
+                if (!http_socket_valid(adopted)) {
+                    zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+                        "Failed to acquire TCP listener for %s:%d (%s)",
+                        host, port, error != NULL ? error : "unknown");
+                } else {
+                    listen_event = ZEND_ASYNC_SOCKET_LISTEN_FD(
+                        adopted, server->backlog, listen_flags, 0);
                 }
             }
-#endif
 
             if (listen_event == NULL && !EG(exception)) {
                 listen_event = ZEND_ASYNC_SOCKET_LISTEN_EX(
@@ -4351,6 +4538,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     /* Topics (issue #2). Attach needs a live reactor on this thread, which we
      * have here — the mailbox handle is created on it. */
     http_server_topic_hub_ensure(server);
+
+    if (!http_server_use_reuseport()) {
+        http_server_listen_set_ensure(server);
+    }
 
     /* A worker that fails to attach gets no topic tree, and then every
      * subscribe() on it throws while every publish() quietly does nothing. That
@@ -5894,6 +6085,9 @@ static void http_server_free(zend_object *obj)
     room_hub_release(server->topic_hub);
     server->topic_hub = NULL;
 
+    http_listen_set_release(server->listen_set);
+    server->listen_set = NULL;
+
     /* Release this worker's stats slab slot (no-op for a standalone/parent
      * server, or if the pool parent already freed the slab). */
     http_server_stats_down(server);
@@ -6060,6 +6254,9 @@ static void http_server_release_worker_shell(zval *transit)
     room_hub_release(shell->topic_hub);
     shell->topic_hub = NULL;
 
+    http_listen_set_release(shell->listen_set);
+    shell->listen_set = NULL;
+
     http_server_transit_handlers_t *th = shell->transit_handlers;
 
     /* Release every transferred root of this shell — config, each handler closure,
@@ -6199,14 +6396,17 @@ static zend_object *http_server_transfer_obj(
         /* Pre-bound AF_UNIX listen fds (workers > 1). POD array copied by
          * value — the fd integers stay valid in the worker thread because
          * all worker threads share one process-wide fd table. */
-        memcpy(dst_shell->pool_unix_fds, src->pool_unix_fds,
-               sizeof(dst_shell->pool_unix_fds));
-        dst_shell->pool_unix_fd_count = src->pool_unix_fd_count;
+        /* The set must exist before the shell can reference it: the worker
+         * threads loaded from this shell have no other way to reach it. */
+        if (!http_server_use_reuseport()) {
+            http_server_listen_set_ensure(src);
+        }
 
-        /* Same model for TCP on platforms without SO_REUSEPORT load balancing. */
-        memcpy(dst_shell->pool_tcp_fds, src->pool_tcp_fds,
-               sizeof(dst_shell->pool_tcp_fds));
-        dst_shell->pool_tcp_fd_count = src->pool_tcp_fd_count;
+        /* The listening sockets are shared, not copied: the shell takes a
+         * reference so they outlive the parent, and the clone loaded from it
+         * takes its own. */
+        dst_shell->listen_set = src->listen_set;
+        http_listen_set_addref(dst_shell->listen_set);
 
         /* Topic hub (issue #2). The shell outlives this call and the parent may
          * be freed meanwhile, so the reference is taken here, from the live one. */
@@ -6341,13 +6541,8 @@ static zend_object *http_server_transfer_obj(
 
     /* Pre-bound AF_UNIX listen fds — see the TRANSFER side above. The worker
      * looks these up in its start() to adopt the shared socket. */
-    memcpy(dst_obj->pool_unix_fds, src_shell->pool_unix_fds,
-           sizeof(dst_obj->pool_unix_fds));
-    dst_obj->pool_unix_fd_count = src_shell->pool_unix_fd_count;
-
-    memcpy(dst_obj->pool_tcp_fds, src_shell->pool_tcp_fds,
-           sizeof(dst_obj->pool_tcp_fds));
-    dst_obj->pool_tcp_fd_count = src_shell->pool_tcp_fd_count;
+    dst_obj->listen_set = src_shell->listen_set;
+    http_listen_set_addref(dst_obj->listen_set);
 
     return dst;
 }
