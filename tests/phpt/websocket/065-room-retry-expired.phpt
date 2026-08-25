@@ -25,8 +25,6 @@ use TrueAsync\HttpRequest;
 use function Async\spawn;
 use function Async\delay;
 
-const SUBS = 12;
-
 $port = tas_free_port();
 $server = new HttpServer(
     (new HttpServerConfig())
@@ -69,12 +67,12 @@ $server->addHttpHandler(function ($req, $res) { $res->setStatusCode(404)->end();
 spawn(function () use ($port, $server) {
     delay(4000);
 
-    $subs = [];
-    for ($i = 0; $i < SUBS; $i++) {
-        $fp = ws_open($port, '/');
-        if ($fp === null) { echo "sub handshake failed\n"; $server->stop(); return; }
-        $subs[] = $fp;
-    }
+    /* A cross-worker post is what the drainer here gives up on, so the test
+     * needs both workers to hold a subscriber before it forces that post to
+     * fail. Accepts decide where a connection lands and the server promises
+     * nothing about it, so the spread is proved rather than assumed. */
+    $subs = ws_open_spread_subscribers($server, $port, 'rt', 2);
+    if ($subs === null) { echo "no subscriber on a remote worker\n"; $server->stop(); return; }
     $ctl = ws_open($port, '/ctl');
     if ($ctl === null) { echo "ctl handshake failed\n"; $server->stop(); return; }
 
