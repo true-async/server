@@ -1600,18 +1600,29 @@ a release yet except the first two, which are fixed.
   other path that can fill `read_buffer` still ends this way, and none of them
   has a test.
 
-- [x] **The `/dev/null` sweep is not worth doing; five files were (#295).** The
-  literal appears 230 times in `tests/`, and the question was whether to replace
-  it wholesale for Windows. Measured instead: of the 214 tests the Windows suite
-  skipped, **none** skipped because of `/dev/null`. Every `exec('curl --version
-  2>/dev/null')` in a SKIPIF sits under a `die` for Windows that fires first,
-  and most of the remaining occurrences are in `.sh` files Windows never runs.
-  What the literal did cost was one red test, `tls/016`, whose curl never ran;
-  behind it hid a second Windows defect, the text-mode pipe that strips CR from
-  `shell_exec` output and defeats a `\r\n\r\n` search. The measurement also
-  named a POSIX-ism that does cost coverage: `command -v` in four
-  `compression/` SKIPIFs, plus `gunzip`, which Git for Windows ships as a shell
-  script. Evidence: the Windows suite goes from 163 passed / 2 failed to
-  167 passed / 1 failed. The rest of the literals stay: each bites only when its
-  test starts running on Windows, and it is cheaper to fix one then than to
-  rewrite 230 sites now.
+- [x] **The `/dev/null` sweep is not worth doing; six files were (#295).** The
+  literal appears 229 times across 108 files in `tests/` on `main`
+  (`grep -ro '/dev/null' tests/`), and the question was whether to replace it
+  wholesale for Windows. Measured instead: of the 214 tests the Windows suite
+  skipped on 2026-08-25, **none** skipped because of `/dev/null`. Every
+  `exec('curl --version 2>/dev/null')` in a SKIPIF sits under a `die` for
+  Windows that fires first, and most of the remaining occurrences are in `.sh`
+  files Windows never runs. What the literal did cost was one red test,
+  `tls/016`, whose curl never ran; behind it hid a second Windows defect, the
+  text-mode pipe that strips CR from `shell_exec` output and defeats a
+  `\r\n\r\n` search. The measurement also named the POSIX-ism that does cost
+  coverage, `command -v`: four `compression/` SKIPIFs, where `gunzip` compounds
+  it by being a shell script in Git for Windows, and `core/068`, which asks for
+  curl by a probe cmd.exe cannot run and then asks that curl for
+  prior-knowledge HTTP/2 — the probe now asks `h2_skipif(['curl_h2'])` for what
+  the test actually needs. On this build `core/068` is out of reach of either
+  probe: it declares `--EXTENSIONS-- sockets`, which the build lacks, so the
+  test skips before SKIPIF runs; the SKIPIF executed by hand answers
+  `skip curl lacks HTTP/2 support`, which is the truth about a Schannel curl.
+
+  Evidence, `tests/phpt/server` on Windows, 2026-08-25: 379 tests, from
+  163 passed / 2 failed / 214 skipped to 167 passed / 1 warned / 1 failed /
+  210 skipped. The warned one is a test that passed on retry under `-j4`, and
+  which test that is moves between runs. The rest of the literals stay: each
+  bites only when its test starts running on Windows, and it is cheaper to fix
+  one then than to rewrite 228 sites now.
