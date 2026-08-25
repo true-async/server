@@ -4096,9 +4096,12 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             listen_event->base.add_callback(&listen_event->base,
                 ZEND_ASYNC_EVENT_CALLBACK(http_server_accept_callback));
 
-            /* Windows defers an address conflict from bind() to listen(), so
-             * a listener that bound cleanly can still fail here. Dropping the
-             * answer left the server in its accept loop with nothing bound. */
+            /* uv_listen refuses on every platform — a backlog the kernel
+             * will not grant, a descriptor limit — and on Windows an address
+             * conflict is reported here rather than at bind(), so a listener
+             * that bound cleanly still fails at this point. Dropping the
+             * answer left the server in its accept loop with nothing bound
+             * and no exception reaching the caller. */
             if (UNEXPECTED(!listen_event->base.start(&listen_event->base))) {
                 for (size_t i = 0; i < server->listener_count; i++) {
                     http_server_listener_release(&server->listeners[i]);
