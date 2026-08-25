@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 24633,
-      "hit": 20432
+      "total": 24647,
+      "hit": 20455
     },
     "functions": {
       "total": 1725,
-      "hit": 1569
+      "hit": 1572
     }
   },
   "files": {
@@ -412,12 +412,12 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 954,
-        "hit": 819
+        "total": 958,
+        "hit": 823
       },
       "functions": {
         "total": 56,
-        "hit": 51
+        "hit": 52
       }
     },
     "src/http2/http2_stream.c": {
@@ -433,11 +433,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 948,
-        "hit": 797
+        "hit": 800
       },
       "functions": {
         "total": 55,
-        "hit": 49
+        "hit": 50
       }
     },
     "src/http3/http3_connection.c": {
@@ -473,7 +473,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 513
+        "hit": 516
       },
       "functions": {
         "total": 46,
@@ -483,17 +483,17 @@
     "src/http3/http3_packet.c": {
       "lines": {
         "total": 115,
-        "hit": 98
+        "hit": 104
       },
       "functions": {
         "total": 13,
-        "hit": 11
+        "hit": 12
       }
     },
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 240,
-        "hit": 181
+        "hit": 184
       },
       "functions": {
         "total": 17,
@@ -612,8 +612,8 @@
     },
     "src/http_response.c": {
       "lines": {
-        "total": 939,
-        "hit": 844
+        "total": 942,
+        "hit": 847
       },
       "functions": {
         "total": 72,
@@ -662,8 +662,8 @@
     },
     "src/http_send_file.c": {
       "lines": {
-        "total": 93,
-        "hit": 79
+        "total": 97,
+        "hit": 80
       },
       "functions": {
         "total": 5,
@@ -693,7 +693,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2596,
-        "hit": 1923
+        "hit": 1922
       },
       "functions": {
         "total": 138,
@@ -822,8 +822,8 @@
     },
     "src/static/static_handler_class.c": {
       "lines": {
-        "total": 509,
-        "hit": 496
+        "total": 512,
+        "hit": 497
       },
       "functions": {
         "total": 33,
