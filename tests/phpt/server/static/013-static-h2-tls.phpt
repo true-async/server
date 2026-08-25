@@ -6,12 +6,7 @@ true_async
 --SKIPIF--
 <?php
 require __DIR__ . '/../tls/_tls_skipif.inc';
-tls_skipif(['proc_open' => true, 'openssl_cli' => true, 'curl' => true]);
-$probe = shell_exec('curl --http2 -V 2>&1');
-if (strpos($probe ?? '', 'HTTP2') === false && strpos($probe ?? '', 'http2') === false) {
-    echo 'skip curl without HTTP/2 support';
-    exit;
-}
+tls_skipif(['proc_open' => true, 'openssl_cli' => true, 'curl_h2' => true]);
 ?>
 --FILE--
 <?php
