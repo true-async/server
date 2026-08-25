@@ -16,6 +16,7 @@
 #include "Zend/zend_async_API.h"     /* zend_async_event_t * for stream ops */
 #include "ext/json/php_json.h"
 #include "main/php_network.h"   /* php_socket_t, SOCK_ERR */
+#include "main/fopen_wrappers.h" /* php_check_open_basedir_ex */
 #include "Zend/zend_virtual_cwd.h" /* IS_ABSOLUTE_PATH */
 #include "php_http_server.h"
 #include "http_response_internal.h"
@@ -1922,6 +1923,16 @@ ZEND_METHOD(TrueAsync_HttpResponse, sendFile)
     if (UNEXPECTED(!http_path_is_cwd_independent(ZSTR_VAL(path), ZSTR_LEN(path)))) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "sendFile(): path must be absolute", 0);
+        return;
+    }
+
+    /* open_basedir belongs to the operator, not to the handler. The trust
+     * this method places in handler code is a contract with the application;
+     * it does not let the application out of the box the operator put it in,
+     * and the server opens this file itself, so nothing else would check. */
+    if (UNEXPECTED(php_check_open_basedir_ex(ZSTR_VAL(path), 0) != 0)) {
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "sendFile(): path is outside open_basedir: %s", ZSTR_VAL(path));
         return;
     }
 
