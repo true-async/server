@@ -17,21 +17,24 @@
 #include <ctype.h>
 
 #ifdef PHP_WIN32
-/* Minimal glob matching used only for hide-path patterns. Handles '?'
- * (any single non-separator char) and '*' (any sequence of
- * non-separator chars). Case-insensitive on Windows. */
+/* Minimal glob matching used only for hide-path patterns. Handles '?' (any
+ * single character) and '*' (any sequence). Without FNM_PATHNAME both cross
+ * the separator, which is how a caller spells "at any depth".
+ * Case-insensitive on Windows. */
 # define FNM_PATHNAME 0x01
-static int win32_fnmatch_impl(const char *p, const char *s)
+static int win32_fnmatch_impl(const char *p, const char *s, bool cross_separator)
 {
 	while (*p) {
 		if (*p == '?') {
-			if (!*s || *s == '/') return 1;
+			if (!*s || (!cross_separator && *s == '/')) return 1;
 			p++; s++;
 		} else if (*p == '*') {
-			p++;
+			/* A run of stars says no more than one does, and each extra star
+			 * would double the positions the branch below tries. */
+			while (*p == '*') p++;
 			do {
-				if (win32_fnmatch_impl(p, s) == 0) return 0;
-				if (*s == '/' || !*s) break;
+				if (win32_fnmatch_impl(p, s, cross_separator) == 0) return 0;
+				if (!*s || (!cross_separator && *s == '/')) break;
 			} while (*s++);
 			return 1;
 		} else {
@@ -43,8 +46,7 @@ static int win32_fnmatch_impl(const char *p, const char *s)
 }
 static int fnmatch(const char *pattern, const char *string, int flags)
 {
-	(void)flags;
-	return win32_fnmatch_impl(pattern, string);
+	return win32_fnmatch_impl(pattern, string, (flags & FNM_PATHNAME) == 0);
 }
 #else
 # include <fnmatch.h>
@@ -293,30 +295,91 @@ bool http_static_path_join(char *buf, const size_t cap, size_t *len,
 	return true;
 }
 
+/* Whether the pattern names the path itself. An anchored pattern is read against
+ * the whole mount-relative path; a bare one against the file name, because the
+ * directory a file sits in is not part of what a bare pattern reads. */
+static bool http_static_hide_glob_names_path(const char *pattern, const char *relative,
+											 bool anchored, int flags)
+{
+	if (anchored) {
+		if (fnmatch(pattern, relative, flags) == 0) {
+			return true;
+		}
+
+		/* A pattern opening with a double star and a separator reads "in every
+		 * directory", and the mount root is one: there the separator has
+		 * nothing to match, so the root's own file needs the prefix off. */
+		return strncmp(pattern, "**/", 3) == 0 && fnmatch(pattern + 3, relative, flags) == 0;
+	}
+
+	const char *const basename = strrchr(relative, '/');
+
+	return fnmatch(pattern, basename != NULL ? basename + 1 : relative, flags) == 0;
+}
+
 bool http_static_hide_glob_matches(const char *glob, const char *relative)
 {
 	if (glob == NULL || relative == NULL) {
 		return false;
 	}
 
-	if (fnmatch(glob, relative, FNM_PATHNAME) == 0) {
-		return true;
+	/* gitignore's rule, because it is the one an operator already knows and the
+	 * one that fails safe: a separator at the front or the middle anchors the
+	 * pattern at the mount root, a separator at the end names a directory, and
+	 * a pattern with neither names a file wherever it sits. Getting the last one
+	 * wrong costs a disclosure rather than a 404 — `*.php` covering `index.php`
+	 * and handing `admin/tools.php` to the client as source. */
+	const bool rooted = (glob[0] == '/');
+	const char *const body = glob + (rooted ? 1 : 0);
+	size_t body_len = strlen(body);
+	const bool names_directory = (body_len > 0 && body[body_len - 1] == '/');
+
+	if (names_directory) {
+		body_len--;
 	}
 
-	/* A pattern that names no directory names a file, and that file is hidden
-	 * wherever it sits — gitignore's rule, and the one an operator writing
-	 * `*.php` means. FNM_PATHNAME stops `*` at the separator, so without this
-	 * the pattern covers `index.php` and serves `admin/tools.php` as source:
-	 * the surprise costs a disclosure rather than a 404. A pattern that does
-	 * name a directory stays anchored at the mount root, which is the only way
-	 * to say `cache/*` and mean that one directory. */
-	if (strchr(glob, '/') != NULL) {
+	/* StaticHandler::hide refuses a longer pattern, so this is unreachable from
+	 * the PHP API; the matcher is public and answers for itself. */
+	if (body_len == 0 || body_len > HTTP_STATIC_HIDE_GLOB_MAX) {
 		return false;
 	}
 
-	const char *const basename = strrchr(relative, '/');
+	char pattern[HTTP_STATIC_HIDE_GLOB_MAX + 1];
+	memcpy(pattern, body, body_len);
+	pattern[body_len] = '\0';
 
-	return basename != NULL && fnmatch(glob, basename + 1, FNM_PATHNAME) == 0;
+	const bool anchored = rooted || memchr(pattern, '/', body_len) != NULL;
+	/* `**` is how an operator spells "across directories", so the flag that
+	 * stops `*` at a separator comes off for the whole pattern. */
+	const int flags = strstr(pattern, "**") != NULL ? 0 : FNM_PATHNAME;
+
+	if (http_static_hide_glob_names_path(pattern, relative, anchored, flags)) {
+		return true;
+	}
+
+	if (!names_directory) {
+		return false;
+	}
+
+	/* Hiding a directory hides what is under it, at any depth. Spelling "under"
+	 * as a pattern keeps the path itself free of the per-request copy that
+	 * walking its separators would need; `*` crosses them here whatever the
+	 * pattern said, because depth below a hidden directory does not matter. */
+	char under[HTTP_STATIC_HIDE_GLOB_MAX + 5];
+
+	snprintf(under, sizeof(under), "%s/*", pattern);
+
+	if (fnmatch(under, relative, 0) == 0) {
+		return true;
+	}
+
+	if (anchored) {
+		return false;
+	}
+
+	snprintf(under, sizeof(under), "*/%s/*", pattern);
+
+	return fnmatch(under, relative, 0) == 0;
 }
 
 bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *relative,

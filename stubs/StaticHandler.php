@@ -148,8 +148,22 @@ final class StaticHandler
     /**
      * Glob patterns whose matching paths return 404 regardless of
      * existence. Patterns are matched against the path *relative to
-     * the root directory*, with `/` as the separator.
+     * the root directory*, with `/` as the separator, by gitignore's rule:
      *
+     *   `*.php`      a file of that name at any depth
+     *   `/index.php` that file at the root directory only
+     *   `cache/x`    anchored at the root directory, `*` stopping at each `/`
+     *   `cache/`     a directory of that name at any depth, and all it holds
+     *   `cache/**`   anchored, `*` crossing `/`
+     *
+     * A pattern opening with a double star names every directory, the root
+     * directory among them. A pattern without `/` reads the file name, so a
+     * directory named like it keeps serving what it holds — `cache/` is how to
+     * cover a directory. Case follows the platform's own filesystem:
+     * case-insensitive on Windows, case-sensitive elsewhere.
+     *
+     * @throws HttpServerInvalidArgumentException when a pattern is empty or
+     *         longer than 512 bytes.
      * @return static
      */
     public function hide(string ...$globs): static {}

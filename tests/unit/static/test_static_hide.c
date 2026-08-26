@@ -53,6 +53,48 @@ static void test_rooted_pattern_stays_at_the_root(void **state)
 	assert_false(http_static_hide_glob_matches("cache/*", "cache/deep/x.txt"));
 }
 
+static void test_leading_separator_pins_the_root(void **state)
+{
+	(void)state;
+	assert_true(http_static_hide_glob_matches("/index.php", "index.php"));
+	assert_false(http_static_hide_glob_matches("/index.php", "sub/index.php"));
+	assert_true(http_static_hide_glob_matches("/*.php", "index.php"));
+	assert_false(http_static_hide_glob_matches("/*.php", "admin/tools.php"));
+}
+
+static void test_trailing_separator_names_a_directory(void **state)
+{
+	(void)state;
+	assert_true(http_static_hide_glob_matches("cache/", "cache/x.txt"));
+	assert_true(http_static_hide_glob_matches("cache/", "cache/deep/x.txt"));
+	assert_true(http_static_hide_glob_matches("cache/", "var/cache/x.txt"));
+	assert_true(http_static_hide_glob_matches("cache/", "a/b/cache/deep/x.txt"));
+	/* The directory itself, when a request names it. */
+	assert_true(http_static_hide_glob_matches("cache/", "var/cache"));
+	assert_false(http_static_hide_glob_matches("cache/", "var/cached/x.txt"));
+	assert_false(http_static_hide_glob_matches("cache/", "cache.txt"));
+
+	/* A separator inside anchors it, as it does everywhere else. */
+	assert_true(http_static_hide_glob_matches("var/cache/", "var/cache/x.txt"));
+	assert_false(http_static_hide_glob_matches("var/cache/", "app/var/cache/x.txt"));
+}
+
+static void test_double_star_crosses_separators(void **state)
+{
+	(void)state;
+	assert_true(http_static_hide_glob_matches("cache/**", "cache/x.txt"));
+	assert_true(http_static_hide_glob_matches("cache/**", "cache/deep/x.txt"));
+	assert_false(http_static_hide_glob_matches("cache/**", "var/cache/x.txt"));
+	assert_true(http_static_hide_glob_matches("**/secret.txt", "a/b/secret.txt"));
+	/* Every directory includes the one the pattern is written against, and the
+	 * separator after the stars has nothing to match there. */
+	assert_true(http_static_hide_glob_matches("**/secret.txt", "secret.txt"));
+	assert_false(http_static_hide_glob_matches("**/secret.txt", "secret.txt.bak"));
+
+	/* A run of stars says what one says, and costs what one costs. */
+	assert_true(http_static_hide_glob_matches("logs/****", "logs/deep/app.log"));
+}
+
 static void test_pattern_covers_nothing_it_does_not_name(void **state)
 {
 	(void)state;
@@ -60,6 +102,8 @@ static void test_pattern_covers_nothing_it_does_not_name(void **state)
 	assert_false(http_static_hide_glob_matches("*.php", "assets/app.js"));
 	assert_false(http_static_hide_glob_matches(NULL, "index.php"));
 	assert_false(http_static_hide_glob_matches("*.php", NULL));
+	/* A separator and nothing else names no file. */
+	assert_false(http_static_hide_glob_matches("/", "index.php"));
 }
 
 int main(void)
@@ -68,6 +112,9 @@ int main(void)
 		cmocka_unit_test(test_bare_pattern_covers_every_depth),
 		cmocka_unit_test(test_bare_pattern_reads_the_name_not_the_path),
 		cmocka_unit_test(test_rooted_pattern_stays_at_the_root),
+		cmocka_unit_test(test_leading_separator_pins_the_root),
+		cmocka_unit_test(test_trailing_separator_names_a_directory),
+		cmocka_unit_test(test_double_star_crosses_separators),
 		cmocka_unit_test(test_pattern_covers_nothing_it_does_not_name),
 	};
 
