@@ -64,8 +64,10 @@ function ws_client_text_frame(string $payload): string {
     return $hdr . $mask . $masked;
 }
 
+/* No usleep() or microtime() below: run-tests retries a FILE section that calls
+ * either and reports only the retry, which hides a close arriving one run in two. */
 $client = spawn(function () use ($port, $server) {
-    usleep(20000);
+    delay(20);
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 2);
 
     fwrite($fp,
@@ -91,9 +93,13 @@ $client = spawn(function () use ($port, $server) {
      * before the cap are still being drained — so the stream is walked frame
      * by frame rather than sampled at byte 0. */
     $close_code = null;
-    $deadline = microtime(true) + 5;
+    /* Attempts, not a clock: a clock here means microtime(). Only an empty read
+     * waits, and the timeout below caps it, so 60 attempts is about 13 s against
+     * a peer that never answers. */
+    stream_set_timeout($fp, 0, 200000);
+    $attempts_left = 60;
 
-    while (microtime(true) < $deadline) {
+    while ($attempts_left-- > 0) {
         $frame = ws_read_frame($fp);
 
         if ($frame === null) {

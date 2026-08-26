@@ -428,6 +428,14 @@ http_connection_t *http_connection_create(php_socket_t socket_fd,
                                           struct http_server_object *server);
 void http_connection_destroy(http_connection_t *conn);
 
+/* Opens a lingering close: the connection keeps reading and throws away what
+ * arrives, and destroy waits until the peer falls silent or the drain hits its
+ * cap. For a caller that has written something the peer has not read while it
+ * is still sending — without the wait the close resets the socket and takes
+ * that with it. Ignored on a TLS connection, on one whose write side is gone,
+ * and on one already draining; http_connection_linger_end cuts the wait short. */
+void http_connection_linger_begin(http_connection_t *conn);
+
 /* Ends a lingering close, so the next destroy closes instead of waiting out the
  * drain. For a caller tearing the connection down whatever the peer is doing —
  * the drain is finished by the deadline tick, and a caller that outlives the

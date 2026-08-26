@@ -1341,8 +1341,19 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
     }
 
     /* Inbound FIFO overflowed its byte cap: the 1013 close queued in
-     * on_msg_recv was flushed by the drive above; tear the transport down. */
+     * on_msg_recv was flushed by the drive above; tear the transport down.
+     *
+     * The peer outran the reader to get here, so it is still sending and what
+     * it has already put on the wire is unread — the drain keeps the close from
+     * being discarded by the reset that closing on top of those bytes sends.
+     * Only an upgraded H1 connection owns its socket; over H2 the session is
+     * one stream among several, and RFC 8441 ends that stream instead. */
     if (session->recv_overflow) {
+        if (session->conn != NULL
+            && session->conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET) {
+            http_connection_linger_begin(session->conn);
+        }
+
         return -1;
     }
 #ifdef HAVE_HTTP_COMPRESSION
