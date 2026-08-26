@@ -29,7 +29,9 @@ static int win32_fnmatch_impl(const char *p, const char *s, bool cross_separator
 			if (!*s || (!cross_separator && *s == '/')) return 1;
 			p++; s++;
 		} else if (*p == '*') {
-			p++;
+			/* A run of stars says no more than one does, and each extra star
+			 * would double the positions the branch below tries. */
+			while (*p == '*') p++;
 			do {
 				if (win32_fnmatch_impl(p, s, cross_separator) == 0) return 0;
 				if (!*s || (!cross_separator && *s == '/')) break;
@@ -300,7 +302,14 @@ static bool http_static_hide_glob_names_path(const char *pattern, const char *re
 											 bool anchored, int flags)
 {
 	if (anchored) {
-		return fnmatch(pattern, relative, flags) == 0;
+		if (fnmatch(pattern, relative, flags) == 0) {
+			return true;
+		}
+
+		/* A pattern opening with a double star and a separator reads "in every
+		 * directory", and the mount root is one: there the separator has
+		 * nothing to match, so the root's own file needs the prefix off. */
+		return strncmp(pattern, "**/", 3) == 0 && fnmatch(pattern + 3, relative, flags) == 0;
 	}
 
 	const char *const basename = strrchr(relative, '/');

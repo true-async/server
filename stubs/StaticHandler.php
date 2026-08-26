@@ -156,8 +156,11 @@ final class StaticHandler
      *   `cache/`     a directory of that name at any depth, and all it holds
      *   `cache/**`   anchored, `*` crossing `/`
      *
-     * A pattern without `/` reads the file name, so a directory named like it
-     * keeps serving what it holds — `cache/` is how to cover a directory.
+     * A pattern opening with a double star names every directory, the root
+     * directory among them. A pattern without `/` reads the file name, so a
+     * directory named like it keeps serving what it holds — `cache/` is how to
+     * cover a directory. Case follows the platform's own filesystem:
+     * case-insensitive on Windows, case-sensitive elsewhere.
      *
      * @throws HttpServerInvalidArgumentException when a pattern is empty or
      *         longer than 512 bytes.

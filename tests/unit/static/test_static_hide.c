@@ -86,6 +86,13 @@ static void test_double_star_crosses_separators(void **state)
 	assert_true(http_static_hide_glob_matches("cache/**", "cache/deep/x.txt"));
 	assert_false(http_static_hide_glob_matches("cache/**", "var/cache/x.txt"));
 	assert_true(http_static_hide_glob_matches("**/secret.txt", "a/b/secret.txt"));
+	/* Every directory includes the one the pattern is written against, and the
+	 * separator after the stars has nothing to match there. */
+	assert_true(http_static_hide_glob_matches("**/secret.txt", "secret.txt"));
+	assert_false(http_static_hide_glob_matches("**/secret.txt", "secret.txt.bak"));
+
+	/* A run of stars says what one says, and costs what one costs. */
+	assert_true(http_static_hide_glob_matches("logs/****", "logs/deep/app.log"));
 }
 
 static void test_pattern_covers_nothing_it_does_not_name(void **state)

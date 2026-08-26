@@ -11,8 +11,9 @@ true_async
  * pattern in a shape the matcher did not read.
  *
  * /index.php names the root's own file and leaves its namesakes alone, cache/
- * names a directory wherever it sits, and logs/** crosses separators the way
- * logs/* does not. */
+ * names a directory wherever it sits, logs/** crosses separators the way logs/*
+ * does not, and a pattern opening with a double star reaches the root as well
+ * as everything under it. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -33,6 +34,8 @@ $files = [
     '/sub/index.php'      => 'nested-copy',
     '/var/cache/x.txt'    => 'cached',
     '/logs/deep/app.log'  => 'logged',
+    '/secret.txt'         => 'root-note',
+    '/sub/secret.txt'     => 'nested-note',
     '/app.svg'            => 'svg-bytes',
 ];
 
@@ -57,7 +60,7 @@ $server = new HttpServer(
 
 $mount = new StaticHandler('/', $root);
 $mount->setOnMissing(StaticOnMissing::NEXT);
-$mount->hide('/index.php', 'cache/', 'logs/**');
+$mount->hide('/index.php', 'cache/', 'logs/**', '**/secret.txt');
 $server->addStaticHandler($mount);
 
 $server->addHttpHandler(function ($req, $res) {
@@ -73,6 +76,8 @@ spawn(function () use ($port, $server) {
         '/sub/index.php'     => null,
         '/var/cache/x.txt'   => null,
         '/logs/deep/app.log' => null,
+        '/secret.txt'        => null,
+        '/sub/secret.txt'    => null,
     ]) as $path) {
         $c = stream_socket_client("tcp://127.0.0.1:$port", $e1, $e2, 3);
         stream_set_timeout($c, 3);
@@ -114,6 +119,8 @@ echo "Done\n";
 /sub/index.php      -> nested-copy
 /var/cache/x.txt    -> handler:/var/cache/x.txt
 /logs/deep/app.log  -> handler:/logs/deep/app.log
+/secret.txt         -> handler:/secret.txt
+/sub/secret.txt     -> handler:/sub/secret.txt
 512 bytes: accepted
 513 bytes: TrueAsync\HttpServerInvalidArgumentException - StaticHandler hide pattern must be at most 512 bytes
 Done
