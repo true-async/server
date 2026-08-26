@@ -39,8 +39,14 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 $request_count = 0;
-$server->addHttpHandler(function ($req, $res) use (&$request_count, $server) {
+/* Peer port per request. Three requests over one kept-alive connection share a
+ * port; three fresh connections get three. This is the server's own view of
+ * reuse — which is what the test is about, and what curl's verbose log only
+ * reports at second hand, in wording that changes between curl releases. */
+$peer_ports = [];
+$server->addHttpHandler(function ($req, $res) use (&$request_count, &$peer_ports, $server) {
     $request_count++;
+    $peer_ports[] = $req->getRemotePort();
     $res->setStatusCode(200)
         ->setHeader('Content-Type', 'text/plain')
         ->setHeader('X-Seq', (string)$request_count)
@@ -56,10 +62,6 @@ $client = spawn(function () use ($port) {
     /* curl --next fires 3 requests in sequence on the SAME connection.
      * Without --next, curl still keeps the conn alive by default,
      * but --next makes the reuse explicit and comprehensible. */
-    /* Use curl's verbose output; the string "Re-using existing connection"
-     * (sometimes "Reusing existing connection") is curl's own indicator
-     * that it kept the TLS/TCP session. More robust than parsing
-     * num_connects, which is per-transfer. */
     $cmd = sprintf(
         'curl -kv --http1.1 -m 5 '
         . 'https://127.0.0.1:%d/first '
@@ -78,10 +80,8 @@ spawn(function () use ($server) {
 $server->start();
 $out = await($client);
 
-$reuse_count = preg_match_all('/Re-?using existing connection/i', $out);
-
 echo "count: $request_count\n";
-echo "reuses: $reuse_count\n";
+echo "connections: ", count(array_unique($peer_ports)), "\n";
 echo "bodies: "
      . (strpos($out, 'r1:/first')  !== false ? '1' : '_')
      . (strpos($out, 'r2:/second') !== false ? '2' : '_')
@@ -91,6 +91,6 @@ echo "bodies: "
 echo "Done\n";
 --EXPECT--
 count: 3
-reuses: 2
+connections: 1
 bodies: 123
 Done

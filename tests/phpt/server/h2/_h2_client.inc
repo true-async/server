@@ -57,6 +57,13 @@ class H2TestClient
      * a reset is the exception, and nine call sites destructure that tuple. */
     private ?int $last_reset_code = null;
 
+    /* Latched once a frame write reaches a peer that is gone. A server under a
+     * flood is entitled to tear the connection down mid-write, and on Windows
+     * every further fwrite() on a reset socket raises a warning that lands in
+     * the test's own output. The latch turns the run of warnings into one
+     * exception the caller can catch. */
+    private bool $peer_gone = false;
+
     /** @param int $timeout_sec read timeout */
     public function __construct(string $host, int $port, int $timeout_sec = 5)
     {
@@ -115,17 +122,58 @@ class H2TestClient
 
     /* ----- Frame primitives ----- */
 
+    /**
+     * A frame the caller asked for: reaching a peer that is gone is that
+     * caller's business, so it arrives as an exception.
+     *
+     * @throws RuntimeException when the peer is gone, on this call and every
+     *                          later one.
+     */
     private function writeFrame(int $type, int $flags, int $stream_id, string $payload): void
     {
+        if (!$this->tryWriteFrame($type, $flags, $stream_id, $payload)) {
+            throw new RuntimeException(
+                'h2 client: the peer is gone, or stopped reading long enough to time the write out');
+        }
+    }
+
+    /**
+     * A frame this client emits on its own — a SETTINGS or PING ack answering
+     * what it just read. Those run inside collectResponse, whose callers
+     * destructure its tuple and would meet an exception where they expect the
+     * empty response a closed connection gives them.
+     *
+     * @return bool false once the peer is gone, on this call and every later one.
+     */
+    private function tryWriteFrame(int $type, int $flags, int $stream_id, string $payload): bool
+    {
+        if ($this->peer_gone) {
+            return false;
+        }
+
         $len = strlen($payload);
-        $hdr = chr(($len >> 16) & 0xff)
-             . chr(($len >> 8)  & 0xff)
-             . chr( $len        & 0xff)
-             . chr($type)
-             . chr($flags)
-             . pack('N', $stream_id & 0x7fffffff);
-        fwrite($this->sock, $hdr . $payload);
+        $frame = chr(($len >> 16) & 0xff)
+               . chr(($len >> 8)  & 0xff)
+               . chr( $len        & 0xff)
+               . chr($type)
+               . chr($flags)
+               . pack('N', $stream_id & 0x7fffffff)
+               . $payload;
+        $frame_len = strlen($frame);
+
+        /* @ rather than a warning per frame: a peer that went away is reported
+         * once, by the latch, and a run of warnings would land in the output
+         * the test is compared against. */
+        $written = @fwrite($this->sock, $frame);
+
+        if ($written === false || $written < $frame_len) {
+            $this->peer_gone = true;
+            return false;
+        }
+
         fflush($this->sock);
+
+        return true;
     }
 
     /**
@@ -238,8 +286,14 @@ class H2TestClient
      */
     public function sendWindowUpdate(int $stream_id, int $increment): void
     {
-        $payload = pack('N', $increment & 0x7fffffff);
-        $this->writeFrame(H2_FRAME_WINDOW_UPDATE, 0, $stream_id, $payload);
+        $this->writeFrame(H2_FRAME_WINDOW_UPDATE, 0, $stream_id,
+                          self::windowUpdatePayload($increment));
+    }
+
+    /** @param int $increment 1..2^31-1; the reserved high bit is masked off. */
+    private static function windowUpdatePayload(int $increment): string
+    {
+        return pack('N', $increment & 0x7fffffff);
     }
 
     public function sendSettingsAck(): void
@@ -357,7 +411,7 @@ class H2TestClient
             if ($type === H2_FRAME_SETTINGS) {
                 if (!($flags & H2_FLAG_ACK)) {
                     /* Server settings — ack. */
-                    $this->sendSettingsAck();
+                    $this->tryWriteFrame(H2_FRAME_SETTINGS, H2_FLAG_ACK, 0, '');
                 }
                 continue;
             }
@@ -370,7 +424,7 @@ class H2TestClient
             if ($type === H2_FRAME_PING) {
                 if (!($flags & H2_FLAG_ACK)) {
                     /* Reflect payload with ACK bit set. */
-                    $this->writeFrame(H2_FRAME_PING, H2_FLAG_ACK, 0, $payload);
+                    $this->tryWriteFrame(H2_FRAME_PING, H2_FLAG_ACK, 0, $payload);
                 }
                 continue;
             }
@@ -400,8 +454,9 @@ class H2TestClient
 
                 if ($auto_window && $consumed_since_ack >= $ack_threshold) {
                     /* Refill both stream + connection windows. */
-                    $this->sendWindowUpdate($stream_id, $consumed_since_ack);
-                    $this->sendWindowUpdate(0,           $consumed_since_ack);
+                    $credit = self::windowUpdatePayload($consumed_since_ack);
+                    $this->tryWriteFrame(H2_FRAME_WINDOW_UPDATE, 0, $stream_id, $credit);
+                    $this->tryWriteFrame(H2_FRAME_WINDOW_UPDATE, 0, 0,          $credit);
                     $consumed_since_ack = 0;
                 }
 
