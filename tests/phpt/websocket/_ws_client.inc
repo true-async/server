@@ -101,7 +101,14 @@ function ws_write($fp, string $payload, bool $binary = false): void
 function ws_read_frame($fp): ?array
 {
     $hdr = ws_take($fp, 2, false);
-    if (strlen($hdr) < 2) { return null; }
+
+    if (strlen($hdr) < 2) {
+        /* One byte of a header is still part of the next frame: without the
+         * pushback it is dropped and every frame after it reads as garbage. */
+        ws_pushback($fp, $hdr);
+
+        return null;
+    }
 
     $opcode = ord($hdr[0]) & 0x0f;
     $len    = ord($hdr[1]) & 0x7f;
