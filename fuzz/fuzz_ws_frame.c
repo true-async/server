@@ -80,6 +80,13 @@ void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
     (void)conn;
 }
 
+/* The drain the inbound-cap overflow opens on a connection it owns. conn is
+ * NULL here, so the overflow path skips it. */
+void http_connection_linger_begin(http_connection_t *conn)
+{
+    (void)conn;
+}
+
 bool http_connection_send(http_connection_t *conn, const char *data, size_t len)
 {
     (void)conn; (void)data; (void)len;
