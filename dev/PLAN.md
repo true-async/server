@@ -1656,7 +1656,7 @@ a release yet except the first two, which are fixed.
 
 ## A WebSocket close is lost when the peer is still sending (#303 fallout)
 
-- [ ] **The 1013 close never reaches a client that overflowed the inbound
+- [x] **The 1013 close never reaches a client that overflowed the inbound
   cap.** `websocket/035-recv-queue-overflow` fails on Windows with
   `client saw close: NULL` while the handler side reports 1013 correctly, so
   the decision is right and the frame does not arrive. The shape is the one
@@ -1667,10 +1667,24 @@ a release yet except the first two, which are fixed.
   has written. #288 gave HTTP/1 a lingering close for exactly this; the
   WebSocket overflow path has none.
 
-  Not proved yet, and the cheap proof is the same one that settled #287: cut
-  the client's write to just past the cap, leaving nothing unread, and see
-  whether the close arrives. Windows shows it because a reset there is
-  immediate; Linux may be hiding it behind timing rather than avoiding it.
+  The cheap proof is the one that settled #287, and it settled this too: run
+  outside run-tests, the test reads `NULL` on 5 of 10 runs; cut the client's
+  write to 13 frames — just past the cap, nothing left unread — and it is 0 of
+  10, while 60 frames is 7 of 10. The condition is the unread tail, not the
+  volume. Windows shows it because a reset there is immediate; Linux may be
+  hiding it behind timing rather than avoiding it.
+
+  Fixed in #305: the overflow teardown arms the same drain #288 built, and only
+  on an upgraded H1 connection — over H2 the session shares the connection with
+  other streams. 0 of 20 after, and the whole phpt suite is 245 executed, 0
+  failed.
 
   Found while making the group build on Windows at all (#303), where it is the
   single failure out of 61 executed WebSocket tests.
+
+- [ ] **The permessage-deflate teardown has the same shape and no proof.**
+  `pmce_error` queues a 1009 and returns -1 down the same path, so a peer whose
+  compressed message overflows the cap should lose its close for the same
+  reason. No run of it has been made to fail, so it is left as it stands rather
+  than fixed on the resemblance. The proof, if it is wanted, is the one above:
+  a bomb just past the cap against a flood well past it.

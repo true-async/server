@@ -64,8 +64,11 @@ function ws_client_text_frame(string $payload): string {
     return $hdr . $mask . $masked;
 }
 
+/* Neither usleep() nor microtime() appears below on purpose: run-tests retries
+ * any test whose FILE section calls them and prints only the retry's verdict,
+ * which would hide a close that arrives on one run in two. */
 $client = spawn(function () use ($port, $server) {
-    usleep(20000);
+    delay(20);
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 2);
 
     fwrite($fp,
@@ -91,9 +94,11 @@ $client = spawn(function () use ($port, $server) {
      * before the cap are still being drained — so the stream is walked frame
      * by frame rather than sampled at byte 0. */
     $close_code = null;
-    $deadline = microtime(true) + 5;
+    /* 250 × 20 ms of empty reads — the same 5 s ceiling, counted instead of
+     * clocked. */
+    $attempts_left = 250;
 
-    while (microtime(true) < $deadline) {
+    while ($attempts_left-- > 0) {
         $frame = ws_read_frame($fp);
 
         if ($frame === null) {

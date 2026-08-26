@@ -330,6 +330,11 @@ void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
  * nothing about why its upload ended. nginx answers this with lingering_close,
  * Apache with ap_lingering_close.
  *
+ * A refused request is one producer of that condition; a WebSocket peer that
+ * floods past the inbound FIFO cap is another, and its CLOSE 1013 is discarded
+ * by the same reset. Which side arms the drain is the caller's judgement — the
+ * connection layer only holds it.
+ *
  * The drain is the read that is already armed: what arrives is thrown away, and
  * the destroy waits. HTTP_LINGER_IDLE_MS measures silence from the peer and
  * every chunk buys another window of it; HTTP_LINGER_MAX_MS caps the sum, so a
@@ -350,9 +355,9 @@ static uint64_t http_connection_linger_next_deadline(const http_connection_t *co
     return idle_until < conn->linger_until_ms ? idle_until : conn->linger_until_ms;
 }
 
-static void http_connection_linger_begin(http_connection_t *conn)
+void http_connection_linger_begin(http_connection_t *conn)
 {
-    if (conn->linger_close || !conn->parse_error_handled
+    if (conn->linger_close
         || conn->io == NULL || conn->write_failed || conn->write_timed_out) {
         return;
     }
