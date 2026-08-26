@@ -2,11 +2,11 @@
   "totals": {
     "lines": {
       "total": 24757,
-      "hit": 20595
+      "hit": 20590
     },
     "functions": {
       "total": 1733,
-      "hit": 1580
+      "hit": 1578
     }
   },
   "files": {
@@ -143,7 +143,7 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1263,
-        "hit": 1027
+        "hit": 1030
       },
       "functions": {
         "total": 79,
@@ -173,7 +173,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 363,
-        "hit": 267
+        "hit": 268
       },
       "functions": {
         "total": 22,
@@ -383,7 +383,7 @@
     "src/http1/http_parser.c": {
       "lines": {
         "total": 533,
-        "hit": 450
+        "hit": 448
       },
       "functions": {
         "total": 27,
@@ -433,11 +433,11 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 948,
-        "hit": 800
+        "hit": 792
       },
       "functions": {
         "total": 55,
-        "hit": 50
+        "hit": 47
       }
     },
     "src/http3/http3_connection.c": {
@@ -463,7 +463,7 @@
     "src/http3/http3_io.c": {
       "lines": {
         "total": 275,
-        "hit": 246
+        "hit": 245
       },
       "functions": {
         "total": 8,
@@ -473,7 +473,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 520
+        "hit": 516
       },
       "functions": {
         "total": 46,
@@ -483,11 +483,11 @@
     "src/http3/http3_packet.c": {
       "lines": {
         "total": 115,
-        "hit": 98
+        "hit": 104
       },
       "functions": {
         "total": 13,
-        "hit": 11
+        "hit": 12
       }
     },
     "src/http3/http3_static_response.c": {
@@ -693,7 +693,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2659,
-        "hit": 2019
+        "hit": 2020
       },
       "functions": {
         "total": 141,
@@ -883,7 +883,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 542,
-        "hit": 489
+        "hit": 488
       },
       "functions": {
         "total": 37,
