@@ -51,11 +51,23 @@ http_static_path_resolve(const http_static_handler_t *mount, const char *request
  * Used by the index-file resolution loop. */
 bool http_static_path_join(char *buf, size_t cap, size_t *len, const char *name, size_t name_len);
 
-/* Whether one hide glob covers one mount-relative path. A pattern naming a
- * directory (`cache/*`) is anchored at the mount root and `*` stops at each
- * separator; a pattern naming none (`*.php`) covers a file of that name at any
- * depth. Takes the two strings rather than the mount so the rule can be held to
- * a table. Both must be NUL-terminated. */
+/* Longest hide pattern the matcher reads, separators included. StaticHandler::hide
+ * refuses a longer one rather than letting it match nothing. */
+#define HTTP_STATIC_HIDE_GLOB_MAX 512
+
+/* Whether one hide glob covers one mount-relative path, by gitignore's rule:
+ *
+ *   *.php        a file of that name at any depth
+ *   /index.php   that file at the mount root only
+ *   cache/x      anchored at the mount root, * stopping at each separator
+ *   cache/       a directory of that name at any depth, and all it holds
+ *   cache/**     anchored, * crossing separators
+ *
+ * A bare pattern reads the file name, so a directory named like it does not
+ * drag its contents in — `cache/` says that instead. Takes the two strings
+ * rather than the mount so the rule can be held to a table. Both must be
+ * NUL-terminated; a pattern longer than HTTP_STATIC_HIDE_GLOB_MAX covers
+ * nothing. */
 bool http_static_hide_glob_matches(const char *glob, const char *relative);
 
 /* Returns true when the relative path matches one of the mount's hide globs,

@@ -18,6 +18,7 @@
 #include "php_http_server.h"
 #include "main/fopen_wrappers.h" /* php_check_open_basedir_ex */
 #include "static/static_handler.h"
+#include "static/http_static_path.h"  /* HTTP_STATIC_HIDE_GLOB_MAX — the bound hide() holds */
 
 #include <stdint.h>
 #include <string.h>
@@ -768,6 +769,15 @@ ZEND_METHOD(TrueAsync_StaticHandler, hide)
 		if (Z_STRLEN(args[i]) == 0) {
 			zend_throw_exception(http_server_invalid_argument_exception_ce,
 								 "StaticHandler hide pattern must not be empty", 0);
+			return;
+		}
+
+		/* A pattern the matcher cannot read covers nothing, and nothing is the
+		 * answer an operator reads as "hidden". Refuse it where it is written. */
+		if (Z_STRLEN(args[i]) > HTTP_STATIC_HIDE_GLOB_MAX) {
+			zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+									"StaticHandler hide pattern must be at most %d bytes",
+									HTTP_STATIC_HIDE_GLOB_MAX);
 			return;
 		}
 	}
