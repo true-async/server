@@ -330,10 +330,8 @@ void http_connection_destroy_if_idle_deferred(http_connection_t *conn)
  * nothing about why its upload ended. nginx answers this with lingering_close,
  * Apache with ap_lingering_close.
  *
- * A refused request is one producer of that condition; a WebSocket peer that
- * floods past the inbound FIFO cap is another, and its CLOSE 1013 is discarded
- * by the same reset. Which side arms the drain is the caller's judgement — the
- * connection layer only holds it.
+ * A WebSocket peer flooding past the inbound FIFO cap reaches the same reset,
+ * and loses its CLOSE 1013 to it.
  *
  * The drain is the read that is already armed: what arrives is thrown away, and
  * the destroy waits. HTTP_LINGER_IDLE_MS measures silence from the peer and
@@ -363,11 +361,8 @@ void http_connection_linger_begin(http_connection_t *conn)
     }
 
 #ifdef HAVE_OPENSSL
-    /* Arriving bytes are dropped by the plaintext read paths, and the TLS read
-     * FSM has no hook into them: on a TLS connection the wait would run with
-     * nothing being read, and end in the same reset it exists to avoid. Closing
-     * at once loses what a reset loses anyway, without spending the deadline
-     * first. Giving the FSM that hook is an open item in dev/PLAN.md. */
+    /* Only the plaintext read paths drop what arrives, so on TLS the wait would
+     * run with nothing being read and close on the same unread bytes. */
     if (conn->tls != NULL) {
         return;
     }
