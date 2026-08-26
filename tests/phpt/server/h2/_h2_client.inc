@@ -57,6 +57,13 @@ class H2TestClient
      * a reset is the exception, and nine call sites destructure that tuple. */
     private ?int $last_reset_code = null;
 
+    /* Latched once a frame write reaches a peer that is gone. A server under a
+     * flood is entitled to tear the connection down mid-write, and on Windows
+     * every further fwrite() on a reset socket raises a warning that lands in
+     * the test's own output. The latch turns the run of warnings into one
+     * exception the caller can catch. */
+    private bool $peer_gone = false;
+
     /** @param int $timeout_sec read timeout */
     public function __construct(string $host, int $port, int $timeout_sec = 5)
     {
@@ -115,8 +122,15 @@ class H2TestClient
 
     /* ----- Frame primitives ----- */
 
+    /**
+     * @throws RuntimeException once the peer has gone, and on every later call.
+     */
     private function writeFrame(int $type, int $flags, int $stream_id, string $payload): void
     {
+        if ($this->peer_gone) {
+            throw new RuntimeException('h2 client: peer is gone');
+        }
+
         $len = strlen($payload);
         $hdr = chr(($len >> 16) & 0xff)
              . chr(($len >> 8)  & 0xff)
@@ -124,7 +138,17 @@ class H2TestClient
              . chr($type)
              . chr($flags)
              . pack('N', $stream_id & 0x7fffffff);
-        fwrite($this->sock, $hdr . $payload);
+        $frame = $hdr . $payload;
+
+        /* @ rather than a warning per frame: the failure is reported once,
+         * through the exception below. */
+        $written = @fwrite($this->sock, $frame);
+
+        if ($written === false || $written < strlen($frame)) {
+            $this->peer_gone = true;
+            throw new RuntimeException('h2 client: peer closed the connection mid-write');
+        }
+
         fflush($this->sock);
     }
 

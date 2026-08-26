@@ -58,17 +58,27 @@ $enc = HttpServerConfig::getSupportedEncodings();
 $has_br   = in_array('br',   $enc, true);
 $has_zstd = in_array('zstd', $enc, true);
 
+/* One line per encoding the build has, and a verdict that does not depend on
+ * how many that is: a build with brotli but not zstd is a supported build, and
+ * an expectation naming two lines fails it for something the server did right. */
 $client = spawn(function () use ($port, $server, $has_br, $has_zstd) {
     delay(20);
 
+    $status = [];
+
     if ($has_br) {
         /* random bytes are not valid brotli → decoder error → 400 */
-        echo "br garbage: ",   post($port, str_repeat("\xAA", 32),  'br'),   "\n";
+        $status['br']   = post($port, str_repeat("\xAA", 32), 'br');
+        echo "br garbage: ", $status['br'], "\n";
     }
     if ($has_zstd) {
         /* random bytes — no zstd magic → 400 */
-        echo "zstd garbage: ", post($port, str_repeat("\xAA", 32),  'zstd'), "\n";
+        $status['zstd'] = post($port, str_repeat("\xAA", 32), 'zstd');
+        echo "zstd garbage: ", $status['zstd'], "\n";
     }
+
+    echo "every malformed body refused: ",
+         ($status !== [] && array_unique(array_values($status)) === [400]) ? 'yes' : 'no', "\n";
 
     delay(50);
     $server->stop();
@@ -79,6 +89,5 @@ await($client);
 echo "Done\n";
 ?>
 --EXPECTF--
-%Agarbage: 400
-%Agarbage: 400
+%Aevery malformed body refused: yes
 Done
