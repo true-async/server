@@ -434,8 +434,9 @@ void http_connection_destroy(http_connection_t *conn);
  * the peer is still sending — without the wait, the close resets the socket and
  * the refusal is discarded with it.
  *
- * Ignored on a connection whose write side is already gone, and on one that is
- * draining. The wait ends by itself; http_connection_linger_end cuts it short. */
+ * Ignored on a TLS connection, on one whose write side is already gone, and on
+ * one that is draining. The wait ends by itself; http_connection_linger_end
+ * cuts it short. */
 void http_connection_linger_begin(http_connection_t *conn);
 
 /* Ends a lingering close, so the next destroy closes instead of waiting out the

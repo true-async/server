@@ -1674,13 +1674,25 @@ a release yet except the first two, which are fixed.
   volume. Windows shows it because a reset there is immediate; Linux may be
   hiding it behind timing rather than avoiding it.
 
-  Fixed in #305: the overflow teardown arms the same drain #288 built, and only
-  on an upgraded H1 connection — over H2 the session shares the connection with
-  other streams. 0 of 20 after, and the whole phpt suite is 245 executed, 0
-  failed.
+  Fixed in #305 for a plaintext ws connection: the overflow teardown arms the
+  same drain #288 built, on an upgraded H1 connection only — over H2 the session
+  shares the connection with other streams. 0 of 20 after, and the whole phpt
+  suite is 259 executed, 0 failed. Over wss it is still lost; see the TLS item
+  below.
 
   Found while making the group build on Windows at all (#303), where it is the
   single failure out of 61 executed WebSocket tests.
+
+- [ ] **The lingering close has no TLS path, so wss and https keep losing what a
+  reset discards.** The drain is fed from the plaintext read paths alone —
+  `http_connection_linger_note_inbound` is reached from `http_connection.c:1324`
+  and `:1429`, and `http_connection_tls.c` does not mention the drain at all. A
+  TLS connection that armed it would wait with nothing being read and close on
+  the same unread bytes at the end, so `linger_begin` refuses there rather than
+  spending the deadline for nothing. That refusal is the honest state and not
+  the fix: a 413 over https and a 1013 over wss are lost exactly as #287
+  described. Closing it means giving the TLS read FSM the drop-and-refresh hook
+  the plaintext paths already have. Found by the review of #305.
 
 - [ ] **The permessage-deflate teardown has the same shape and no proof.**
   `pmce_error` queues a 1009 and returns -1 down the same path, so a peer whose

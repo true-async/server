@@ -362,6 +362,17 @@ void http_connection_linger_begin(http_connection_t *conn)
         return;
     }
 
+#ifdef HAVE_OPENSSL
+    /* Arriving bytes are dropped by the plaintext read paths, and the TLS read
+     * FSM has no hook into them: on a TLS connection the wait would run with
+     * nothing being read, and end in the same reset it exists to avoid. Closing
+     * at once loses what a reset loses anyway, without spending the deadline
+     * first. Giving the FSM that hook is an open item in dev/PLAN.md. */
+    if (conn->tls != NULL) {
+        return;
+    }
+#endif
+
     conn->linger_close = 1;
     conn->read_buffer_len = 0;
     conn->keep_alive = false;

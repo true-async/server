@@ -94,9 +94,14 @@ $client = spawn(function () use ($port, $server) {
      * before the cap are still being drained — so the stream is walked frame
      * by frame rather than sampled at byte 0. */
     $close_code = null;
-    /* 250 × 20 ms of empty reads — the same 5 s ceiling, counted instead of
-     * clocked. */
-    $attempts_left = 250;
+    /* The walk is bounded by attempts rather than by a clock, because a clock
+     * here means microtime() and that hands the verdict back to run-tests'
+     * retry. Only an empty read waits, and the timeout below caps that wait, so
+     * 60 attempts is at most about 13 s against a peer that says nothing at
+     * all — and a handful of milliseconds on the path this test walks, where
+     * every attempt but the last returns a queued frame. */
+    stream_set_timeout($fp, 0, 200000);
+    $attempts_left = 60;
 
     while ($attempts_left-- > 0) {
         $frame = ws_read_frame($fp);
