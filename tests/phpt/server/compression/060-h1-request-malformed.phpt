@@ -58,9 +58,10 @@ $enc = HttpServerConfig::getSupportedEncodings();
 $has_br   = in_array('br',   $enc, true);
 $has_zstd = in_array('zstd', $enc, true);
 
-/* One line per encoding the build has, and a verdict that does not depend on
- * how many that is: a build with brotli but not zstd is a supported build, and
- * an expectation naming two lines fails it for something the server did right. */
+/* One line per encoding the build has, for the failure diff, and a verdict that
+ * holds whatever that set is. Brotli without zstd is a supported build, and the
+ * property under test — a malformed body is refused — says nothing about how
+ * many encodings were compiled in. */
 $client = spawn(function () use ($port, $server, $has_br, $has_zstd) {
     delay(20);
 

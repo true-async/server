@@ -57,10 +57,18 @@ $client = spawn(function () use ($port, $server) {
     }
 
     /* Open-then-RST burst: HEADERS(END_STREAM) immediately followed by
-     * RST_STREAM(CANCEL) on the same stream id, BURST times. */
-    for ($i = 0; $i < BURST; $i++) {
-        $sid = $c->sendRequest('GET', '/', 'x');
-        $c->sendRstStream($sid, 0x8 /* CANCEL */);
+     * RST_STREAM(CANCEL) on the same stream id, BURST times.
+     *
+     * Tearing the connection down is one legitimate answer to a rapid-reset
+     * attack; the burst then writes into a socket the server has closed, and
+     * the client reports that by throwing. What this test asserts is the
+     * liveness probe below, which opens a connection of its own. */
+    try {
+        for ($i = 0; $i < BURST; $i++) {
+            $sid = $c->sendRequest('GET', '/', 'x');
+            $c->sendRstStream($sid, 0x8 /* CANCEL */);
+        }
+    } catch (\Throwable $e) {
     }
     $c->close();
 
