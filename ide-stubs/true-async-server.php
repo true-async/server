@@ -431,12 +431,21 @@ final class StaticHandler
      *
      * Patterns are matched against the path *relative to the root
      * directory*, with `/` as the separator, by gitignore's rule:
-     * a pattern naming no directory names a file, and covers a file
-     * of that name at any depth, so `*.php` hides `index.php` and
-     * `admin/tools.php` alike. A pattern naming a directory is
-     * anchored at the root and `*` stops at each separator, so
-     * `cache/*` hides the mount's own `cache/` and not `var/cache/`.
      *
+     *   `*.php`      a file of that name at any depth
+     *   `/index.php` that file at the root directory only
+     *   `cache/x`    anchored at the root directory, `*` stopping at each `/`
+     *   `cache/`     a directory of that name at any depth, and all it holds
+     *   `cache/**`   anchored, `*` crossing `/`
+     *
+     * A pattern opening with a double star names every directory, the root
+     * directory among them. A pattern without `/` reads the file name, so a
+     * directory named like it keeps serving what it holds — `cache/` is how to
+     * cover a directory. Case follows the platform's own filesystem:
+     * case-insensitive on Windows, case-sensitive elsewhere.
+     *
+     * @throws HttpServerInvalidArgumentException when a pattern is empty or
+     *         longer than 512 bytes.
      * @return static
      */
     public function hide(string ...$globs): static {}
@@ -558,7 +567,8 @@ final class HttpServerConfig
      * {@see addHttp3Listener()}.
      *
      * @param string $host Host to bind (e.g., "127.0.0.1", "0.0.0.0")
-     * @param int $port Port to listen on
+     * @param int $port Port to listen on, or 0 to take whatever the kernel
+     *                  gives — {@see HttpServer::getBoundListeners()} reports it
      * @param bool $tls Enable TLS for this listener
      * @return static
      */
@@ -1794,6 +1804,23 @@ final class HttpServer
      * Check if server is running.
      */
     public function isRunning(): bool {}
+
+    /**
+     * The listeners the server actually holds, one entry per configured
+     * listener, in configuration order.
+     *
+     * A listener configured with port 0 is bound to a port the kernel picks,
+     * and the entry carries that port: there is no gap between choosing an
+     * address and owning it, which a caller picking a free port beforehand
+     * cannot avoid. HTTP/3 listeners still require an explicit port and
+     * report the configured one.
+     *
+     * Empty while the server is not running: before start(), after stop().
+     *
+     * @return array<int, array{type: 'tcp'|'udp_h3', host: string, port: int, tls: bool}
+     *                  |array{type: 'unix', path: string}>
+     */
+    public function getBoundListeners(): array {}
 
     /**
      * Whether the extension was built with HTTP/2 support (--enable-http2).

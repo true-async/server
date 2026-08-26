@@ -69,7 +69,7 @@ static zend_always_inline bool http_path_is_cwd_independent(const char *path, si
  * static-build codegen (genif.sh) can discover it; see the comment there. */
 #include "php_true_async_server.h"
 
-#define PHP_HTTP_SERVER_VERSION "0.14.0"
+#define PHP_HTTP_SERVER_VERSION "0.15.0"
 
 /*
  * ==========================================================================

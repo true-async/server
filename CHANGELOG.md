@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-26
+
 ### Added
 
 - **A TCP listener can ask the kernel for a port, and say which one it got.** `addListener()`, `addHttp1Listener()` and `addHttp2Listener()` take port 0, which binds to whatever the kernel assigns, and `HttpServer::getBoundListeners()` reports what the server actually holds — one entry per configured listener, in configuration order, empty while the server is not running. Naming a free port before binding it leaves a window in which the port belongs to nobody: the phpt suite picks ports that way and loses the race under `-j4`, where a second server's `start()` answers `Failed to acquire TCP listener for 127.0.0.1:58864 (bind)`. Port 0 removes the window rather than narrowing it. Across several threads such a listener is bound once into the shared set and every thread adopts a duplicate, SO_REUSEPORT or not — binding per thread would hand each a different port. HTTP/3 still requires an explicit port: it binds through the UDP path, which reports no local address, so 0 is refused there rather than answered with a guess.
@@ -1446,7 +1448,9 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/true-async/server/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/true-async/server/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/true-async/server/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/true-async/server/compare/v0.11.3...v0.12.0
 [0.11.3]: https://github.com/true-async/server/compare/v0.11.2...v0.11.3
