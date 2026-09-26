@@ -21,6 +21,7 @@
 
 /* Extension class entries (normally populated at MINIT). */
 zend_class_entry *http_exception_ce __attribute__((weak)) = NULL;
+zend_class_entry *http_server_runtime_exception_ce __attribute__((weak)) = NULL;
 
 /* http_request_init_headers lives in http_request.c (the PHP-object TU, not
  * linked into the fuzz harness). http_parser.c / http2_session.c call it to

@@ -35,6 +35,9 @@ HTTP1_SRC = \
     ../src/grpc/grpc.c \
     ../src/formats/multipart_parser.c \
     ../src/formats/multipart_processor.c \
+    ../src/formats/form_content_type.c \
+    ../src/http_request_form.c \
+    ../src/http_form_vars.c \
     ../src/http_param_parse.c \
     ../src/http_rfc5987.c \
     ../src/http_body_stream.c \
@@ -69,6 +72,9 @@ H2_SRC = \
     ../src/grpc/grpc.c \
     ../src/formats/multipart_parser.c \
     ../src/formats/multipart_processor.c \
+    ../src/formats/form_content_type.c \
+    ../src/http_request_form.c \
+    ../src/http_form_vars.c \
     ../src/http_param_parse.c \
     ../src/http_rfc5987.c \
     ../src/http_body_stream.c \
