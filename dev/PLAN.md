@@ -1716,12 +1716,21 @@ a release yet except the first two, which are fixed.
   multipart ignored `setMaxBodySize()`; HTTP/3 capped a buffered body at a fixed
   16 MiB and handed a cut body to the handler as complete. Edmond, 2026-09-26: the
   silent drop is a bug; the answer is a refusal. Fields count against
-  `max_input_vars`, a value is bounded by the body limit, and the refusal is 400
-  or 413 before the handler, a reset stream on HTTP/2, or `HttpException` from
-  the getter on HTTP/3 (`req->refused_status`). A query string keeps `$_GET`'s
-  rules; whether it should be refused too is open.
-- [ ] **`tests/h3client` never unblocks a flow-control-blocked stream.** It calls
-  `nghttp3_conn_block_stream` on `NGTCP2_ERR_STREAM_DATA_BLOCKED` and has no
-  `extend_max_stream_data` callback, so an upload past the 256 KiB stream window
-  hangs about half the time from 500 KB and always from 1.1 MB; aioquic sends 15 MB
-  through the same server. `h3/035` works around it with a 20 MiB window.
+  `max_input_vars`, a value is bounded by the body limit, and two states keep the
+  refusals apart: `req->refused_status` for a body the transport refused (400 or
+  413 before the handler on HTTP/1, a reset stream on HTTP/2 and HTTP/3, and every
+  read of the body throws), `req->form_refused_status` for a form refused while it
+  was built (the getters throw 400, the body stays readable). Review found HTTP/3
+  pre-sizing a buffered body from the claimed Content-Length without a bound on a
+  reactor and outside a bailout guard on a worker; both fixed (`h3/076`, `h3/077`).
+  Open: a query string keeps `$_GET`'s rules, and a reset HTTP/2 or HTTP/3 stream
+  carries no 400/413 to the client.
+- [ ] **#322 — upload limits are compiled in.** 20 files and 100 MiB per file,
+  reported as codes 100 and 102 that no `UPLOAD_ERR_*` constant names. Proposed:
+  read `upload_max_filesize` and `max_file_uploads` as `max_input_vars` is read.
+- [x] **#320 — `tests/h3client` never unblocked a flow-control-blocked stream.**
+  It called `nghttp3_conn_block_stream` on `NGTCP2_ERR_STREAM_DATA_BLOCKED` and
+  had no `extend_max_stream_data` callback, so an upload past the 256 KiB stream
+  window hung about half the time from 500 KB and always from 1.1 MB, while
+  aioquic sent 15 MB through the same server. #321 adds the callback: `h3/072`
+  uploads past the window, and `h3/035` dropped its 20 MiB window workaround.

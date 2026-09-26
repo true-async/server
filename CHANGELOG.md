@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-26
+
 ### Changed
 
 - **A multipart field or file whose name holds a dot or a space arrives under PHP's name for it (#317).** `a.b` was stored as `a.b` and is `a_b` now, the name `getQuery()` and `$_POST` already give it. A handler that reads such a field by its literal name gets null.
@@ -1469,7 +1471,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/true-async/server/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/true-async/server/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/true-async/server/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/true-async/server/compare/v0.12.0...v0.13.0
