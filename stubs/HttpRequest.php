@@ -238,7 +238,11 @@ final class HttpRequest
      *
      * @param int $maxLen Maximum bytes to return (default 65536).
      * @return string|null Next chunk, or null at end of stream.
-     * @throws \Exception if the body stream errored (peer reset, size cap).
+     * @throws HttpException with the status of a refusal on HTTP/2 or HTTP/3:
+     *         413 past {@see HttpServerConfig::setMaxBodySize()}, 400 for a
+     *         refused multipart body. A read already parked here wakes with it.
+     * @throws \Exception if the body stream broke otherwise (a peer reset, a
+     *         lost connection).
      */
     public function readBody(int $maxLen = 65536): ?string {}
 
