@@ -44,15 +44,24 @@ file_put_contents($big, str_repeat('u', 256 * 1024));
 
 $client = spawn(function () use ($port, $server, $big) {
     usleep(30000);
-    $curl = sprintf("curl --http1.1 -sS --max-time 5 -w ' %%{http_code}' http://127.0.0.1:%d/ ", $port);
-    $fields = static fn(int $n) => implode(' ', array_map(static fn($i) => "-F k$i=v", range(1, $n)));
+    /* Each argument quoted alone, since cmd.exe knows no single quotes; the
+     * status format sits in a file, because escapeshellarg() on Windows turns
+     * % into a space, and the body goes to a file rather than /dev/null. */
+    $format = tempnam(sys_get_temp_dir(), 'h1fmt_');
+    file_put_contents($format, ' %{http_code}');
+    $sink = tempnam(sys_get_temp_dir(), 'h1out_');
+    $curl = static fn(array $args): string => trim((string)shell_exec(sprintf(
+        'curl --http1.1 -sS --max-time 5 -w %s http://127.0.0.1:%d/ ', escapeshellarg("@$format"), $port)
+        . implode(' ', array_map('escapeshellarg', $args)) . ' 2>&1'));
+    $fields = static fn(int $n) => array_merge(...array_map(static fn($i) => ['-F', "k$i=v"], range(1, $n)));
 
-    echo 'five fields: ', trim((string)shell_exec($curl . $fields(5) . ' 2>&1')), "\n";
-    echo 'six fields: ', substr(trim((string)shell_exec($curl . $fields(6) . ' -o /dev/null 2>&1')), -3), "\n";
-    echo 'file past the limit: ', substr(trim((string)shell_exec($curl . "-F 'f=@$big' -o /dev/null 2>&1")), -3), "\n";
-    echo 'chunked past the limit: ', substr(trim((string)shell_exec($curl
-        . "-H 'Transfer-Encoding: chunked' -F 'f=@$big' -o /dev/null 2>&1")), -3), "\n";
+    echo 'five fields: ', $curl($fields(5)), "\n";
+    echo 'six fields: ', substr($curl([...$fields(6), '-o', $sink]), -3), "\n";
+    echo 'file past the limit: ', substr($curl(['-F', "f=@$big", '-o', $sink]), -3), "\n";
+    echo 'chunked past the limit: ', substr($curl(['-H', 'Transfer-Encoding: chunked', '-F', "f=@$big", '-o', $sink]), -3), "\n";
 
+    @unlink($format);
+    @unlink($sink);
     $server->stop();
 });
 
