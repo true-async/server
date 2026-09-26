@@ -26,9 +26,12 @@ foreach ([1, 2] as $attempt) {
         echo "attempt $attempt: ", $e->getCode(), ' ', $e->getMessage(), "\n";
     }
 }
+
+echo 'body after the refusal: ', $request->getBody(), "\n";
 ?>
 --EXPECT--
 {"a":"1","b":"2","c":"3"}
 {"a":"1","b":"2","c":"3"}
 attempt 1: 400 the request form was refused: more fields than max_input_vars
-attempt 2: 400 the request form was refused
+attempt 2: 400 the request form was refused: more fields than max_input_vars
+body after the refusal: a=1&b=2&c=3&d=4

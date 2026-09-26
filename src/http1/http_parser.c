@@ -785,11 +785,7 @@ static int on_message_complete(llhttp_t* llhttp_parser)
      * no-op. It matters for the streaming dispatch-at-headers-complete
      * mode where the handler coroutine is already running and parked
      * on body_event. */
-    if (req->body_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)req->body_event;
-        trig->trigger(trig);
-    }
+    http_request_wake_body_waiters(req);
 
     /* Hand off ownership at message-complete for every not-yet-handed
      * path: the async dispatch_cb branch (buffered handler runs here so
