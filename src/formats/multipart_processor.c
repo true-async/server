@@ -751,15 +751,16 @@ void mp_processor_cleanup_temp_files(mp_processor_t* proc)
         }
     }
 
-    /* A part still being written when the body stopped (a refusal, a reset,
-     * a parse error) is in files[] only once it ends; its file is here. */
+    /* A file part the body stopped inside (a refusal, a reset, a parse
+     * error) reaches files[] only when it ends; until then tmp_path names
+     * its file, open or already closed by a failed write. */
     if (proc->file_handle) {
         fclose(proc->file_handle);
         proc->file_handle = NULL;
+    }
 
-        if (proc->tmp_path) {
-            VCWD_UNLINK(proc->tmp_path);
-        }
+    if (proc->tmp_path) {
+        VCWD_UNLINK(proc->tmp_path);
     }
 }
 

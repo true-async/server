@@ -1700,3 +1700,25 @@ a release yet except the first two, which are fixed.
   reason. No run of it has been made to fail, so it is left as it stands rather
   than fixed on the resemblance. The proof, if it is wanted, is the one above:
   a bomb just past the cap against a flood well past it.
+
+## Forms on every transport (#317, #318)
+
+- [x] **#317 — the form of a request is built in one place, keyed as `$_POST` is.**
+  `getPost()` parsed no url-encoded body, kept multipart names verbatim, and was
+  empty over HTTP/2 and HTTP/3. `src/http_request_form.c` builds the form on first
+  access; names go through `src/http_form_vars.c`, which follows
+  `php_register_variable_ex` without interning keys, and `getQuery()` moved to it
+  too, closing a leak of every distinct key. HTTP/1 and HTTP/2 feed multipart to
+  the processor as DATA arrives; HTTP/3 buffers and parses in 256 KiB slices in
+  the handler (CODING_STANDARDS 1.5). Evidence in the CHANGELOG entries.
+- [ ] **#318 — a form over a limit is refused, never shortened.** The multipart
+  processor drops field 101 onward and cuts fields past 1 MiB silently; HTTP/1
+  multipart ignores `setMaxBodySize()`; HTTP/3 caps a buffered body at a fixed
+  16 MiB and hands a cut body to the handler as complete. Edmond, 2026-09-26: the
+  silent drop is a bug; the answer is a refusal (400/413, or `HttpException` from
+  the getter once the handler runs).
+- [ ] **`tests/h3client` never unblocks a flow-control-blocked stream.** It calls
+  `nghttp3_conn_block_stream` on `NGTCP2_ERR_STREAM_DATA_BLOCKED` and has no
+  `extend_max_stream_data` callback, so an upload past the 256 KiB stream window
+  hangs about half the time from 500 KB and always from 1.1 MB; aioquic sends 15 MB
+  through the same server. `h3/035` works around it with a 20 MiB window.

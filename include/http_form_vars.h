@@ -41,8 +41,9 @@ http_form_vars_result_t http_form_vars_register(HashTable *target, const char *n
 
 /* Runs sapi_module.input_filter over a decoded value, as PHP does before it
  * stores a GET, POST or multipart variable. False when the filter drops the
- * variable. The filter may replace `*value` with a new emalloc'd buffer; the
- * caller frees whichever `*value` holds. `name` is NUL-terminated. */
+ * variable. `*value` is an emalloc'd buffer on entry: the filter may efree it
+ * and put a new one in its place, and the caller frees whichever `*value`
+ * holds afterwards. `name` is NUL-terminated. */
 bool http_form_vars_filter(const char *name, char **value, size_t value_len, size_t *filtered_len);
 
 /* Decodes `name=value` pairs, percent-encoded with `+` for space, into `target`,

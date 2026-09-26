@@ -31,15 +31,17 @@ struct mp_processor_t *http_request_form_open_multipart(const struct http_reques
 														struct http_log_state *log_state);
 
 /* Fills req->post_data and req->files from the request body, once: later calls
- * return at once. While the body is incomplete it does nothing, so the next
- * call builds the form. A request that is not a form gets two empty arrays. A
- * buffered multipart body the processor refuses gives an empty form: HTTP/1
- * and HTTP/2 refuse such a body before it is complete, HTTP/3 buffers it.
+ * return at once, and a call made while another coroutine of the request is
+ * building the form waits for that one to finish. While the body is incomplete
+ * it does nothing, so the next call builds the form. A request that is not a form gets two empty
+ * arrays. A buffered multipart body the processor refuses gives an empty form: HTTP/1 and HTTP/2
+ * refuse such a body before it is complete, HTTP/3 buffers it.
  *
  * Runs on the thread of the handler: the arrays and UploadedFile objects are
  * allocated there. A buffered multipart body is parsed in slices with a yield
- * of the current coroutine between them; false when that yield ended in an
- * exception, and no form is kept then. */
+ * of the current coroutine between them. False with an exception when a yield,
+ * the builder's or a waiter's, ended in one (no form is kept by that call), or
+ * when the call has to wait but runs where nothing can yield. */
 bool http_request_form_build(struct http_request_t *req);
 
 #endif

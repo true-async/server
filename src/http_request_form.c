@@ -17,6 +17,8 @@
 
 #include "php.h"
 #include "Zend/zend_async_API.h"
+#include "Zend/zend_exceptions.h"
+#include "php_http_server.h"
 #include "http_form_vars.h"
 #include "http1/http_parser.h"
 #include "http_request_form.h"
@@ -202,9 +204,17 @@ bool http_request_form_build(http_request_t *req)
 {
 	/* Another coroutine of this request is parsing the body, yielding between
 	 * slices: wait for its form rather than parse the body a second time. */
-	while (req->form_building) {
-		ZEND_ASSERT(ZEND_ASYNC_CURRENT_COROUTINE != NULL);
+	if (req->form_building &&
+		(ZEND_ASYNC_CURRENT_COROUTINE == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT)) {
+		/* Nothing to yield with, so the builder could never finish. */
+		zend_throw_exception(http_server_runtime_exception_ce,
+							 "the form is being built by another coroutine, and this context "
+							 "cannot wait for it",
+							 0);
+		return false;
+	}
 
+	while (req->form_building) {
 		if (!http_request_form_yield()) {
 			return false;
 		}
