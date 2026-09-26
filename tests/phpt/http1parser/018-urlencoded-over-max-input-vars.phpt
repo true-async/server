@@ -31,4 +31,4 @@ foreach ([1, 2] as $attempt) {
 {"a":"1","b":"2","c":"3"}
 {"a":"1","b":"2","c":"3"}
 attempt 1: 400 the request form was refused: more fields than max_input_vars
-attempt 2: 400 the request was refused
+attempt 2: 400 the request form was refused

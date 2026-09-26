@@ -616,24 +616,29 @@ static int on_part_end(multipart_parser_t* parser)
         mp_field_info_t* info = &proc->fields[proc->fields_count];
 
         info->name = proc->field_name ? MP_STRDUP(proc->field_name) : NULL;
-        /* The length, not a NUL, ends a value: a field may carry NUL bytes,
-         * and every strdup variant would stop at the first one. */
-        info->value = MP_MALLOC(proc->field_value_len + 1);
+        /* The accumulated buffer moves into the field rather than being
+         * copied: a value may be as large as the body. The length, not a NUL,
+         * ends it, since a field may carry NUL bytes; str_append keeps room
+         * for the terminator. */
+        if (proc->field_value) {
+            info->value = proc->field_value;
+            proc->field_value = NULL;
+            proc->field_value_cap = 0;
+        } else {
+            info->value = MP_MALLOC(1);
 
-        if (!info->value) {
-            if (info->name) {
-                MP_FREE(info->name);
+            if (!info->value) {
+                if (info->name) {
+                    MP_FREE(info->name);
+                }
+
+                return -1;
             }
-
-            return -1;
-        }
-
-        if (proc->field_value_len > 0) {
-            memcpy(info->value, proc->field_value, proc->field_value_len);
         }
 
         info->value[proc->field_value_len] = '\0';
         info->value_len = proc->field_value_len;
+        proc->field_value_len = 0;
 
         proc->fields_count++;
     }

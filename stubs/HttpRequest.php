@@ -124,12 +124,16 @@ final class HttpRequest
      * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`.
      * Empty for any other Content-Type.
      *
-     * A form over a limit is refused rather than shortened: more fields than
-     * max_input_vars, a name nested deeper than max_input_nesting_level, or a
-     * malformed multipart body throws {@see HttpException} with code 400, and a
-     * body past {@see HttpServerConfig::setMaxBodySize()} with 413. Uncaught, it
-     * answers the request with that status. HTTP/1 refuses such a body before
-     * the handler runs; HTTP/2 resets the stream while the body arrives.
+     * A form over a limit is refused rather than shortened. Where the parser
+     * finds it while the body arrives (more multipart fields than
+     * max_input_vars, a malformed multipart body, a body past
+     * {@see HttpServerConfig::setMaxBodySize()}), HTTP/1 answers 400 or 413
+     * before the handler runs, and HTTP/2 and HTTP/3 reset the stream: the
+     * handler, already running, gets {@see HttpException} with that code, and
+     * the client no status. Where the form is built (an url-encoded form past
+     * max_input_vars, a name nested deeper than max_input_nesting_level), this
+     * getter throws HttpException 400 on every transport; uncaught, it answers
+     * the request with 400. The body itself stays readable then.
      *
      * Over HTTP/2 and HTTP/3 the handler starts before the body has arrived, so
      * this call suspends until it has, as {@see awaitBody()} does. A form body

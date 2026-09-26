@@ -952,10 +952,12 @@ final class HttpServerConfig
     public function getH2StaticBudgetMax(): int {}
 
     /**
-     * Set the maximum request body size accepted on both HTTP/1 and HTTP/2
-     * listeners (bytes). H1 rejects with 413 + connection close; H2 rejects
-     * with RST_STREAM(INTERNAL_ERROR) and the connection stays up for other
-     * streams.
+     * Set the maximum request body size accepted on HTTP/1, HTTP/2 and
+     * HTTP/3 listeners (bytes), multipart uploads included. H1 rejects with
+     * 413 + connection close; H2 rejects with RST_STREAM(ENHANCE_YOUR_CALM) and
+     * H3 with a stream reset, and the connection stays up for other streams; a
+     * handler already running gets HttpException 413 from any read of the
+     * body. HTTP/3 buffers a body in memory and holds it to 16 MiB at most.
      *
      * Default: 10485760 (10 MiB). Valid: 1024 .. 17179869184 (16 GiB).
      *
@@ -2047,12 +2049,16 @@ final class HttpRequest
      * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`.
      * Empty for any other Content-Type.
      *
-     * A form over a limit is refused rather than shortened: more fields than
-     * max_input_vars, a name nested deeper than max_input_nesting_level, or a
-     * malformed multipart body throws {@see HttpException} with code 400, and a
-     * body past {@see HttpServerConfig::setMaxBodySize()} with 413. Uncaught, it
-     * answers the request with that status. HTTP/1 refuses such a body before
-     * the handler runs; HTTP/2 resets the stream while the body arrives.
+     * A form over a limit is refused rather than shortened. Where the parser
+     * finds it while the body arrives (more multipart fields than
+     * max_input_vars, a malformed multipart body, a body past
+     * {@see HttpServerConfig::setMaxBodySize()}), HTTP/1 answers 400 or 413
+     * before the handler runs, and HTTP/2 and HTTP/3 reset the stream: the
+     * handler, already running, gets {@see HttpException} with that code, and
+     * the client no status. Where the form is built (an url-encoded form past
+     * max_input_vars, a name nested deeper than max_input_nesting_level), this
+     * getter throws HttpException 400 on every transport; uncaught, it answers
+     * the request with 400. The body itself stays readable then.
      *
      * Over HTTP/2 and HTTP/3 the handler starts before the body has arrived, so
      * this call suspends until it has, as {@see awaitBody()} does. A form body
