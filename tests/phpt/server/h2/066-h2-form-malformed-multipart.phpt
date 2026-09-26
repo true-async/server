@@ -52,7 +52,7 @@ $client = spawn(function () use ($port, $server, $body) {
         . "-H 'Content-Type: multipart/form-data; boundary=bnd' --data-binary @%s "
         . "http://127.0.0.1:%d/form 2>&1", escapeshellarg($body), $port));
 
-    echo 'client: ', str_contains($out, 'PROTOCOL_ERROR') ? 'stream reset' : $out, "\n";
+    echo 'client: ', str_contains($out, 'CANCEL') ? 'stream reset' : $out, "\n";
     $server->stop();
 });
 

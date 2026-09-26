@@ -31,8 +31,7 @@
 extern zval *uploaded_file_create_from_info(mp_file_info_t *info);
 
 mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
-												 struct http_log_state *log_state,
-												 const size_t body_cap)
+												 struct http_log_state *log_state)
 {
 	const zval *const content_type =
 		zend_hash_str_find(req->headers, "content-type", sizeof("content-type") - 1);
@@ -57,11 +56,13 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
 	memcpy(terminated, boundary, boundary_len);
 	terminated[boundary_len] = '\0';
 
-	/* A field is held to max_input_vars, as a url-encoded one is, and a value
-	 * to the body limit alone: PHP has no per-field limit either. */
+	/* Fields stop at max_input_vars, as url-encoded ones do; the processor
+	 * cannot say "none", so a limit of 0 or less is enforced when the form is
+	 * published. A value is bounded by the body limit the transport applies,
+	 * as in PHP, which has no per-field limit. */
 	const mp_config_t config = {
 		.max_fields = PG(max_input_vars) > 0 ? (size_t)PG(max_input_vars) : 1,
-		.max_field_size = body_cap != 0 ? body_cap : SIZE_MAX,
+		.max_field_size = SIZE_MAX,
 	};
 	mp_processor_t *const processor = mp_processor_create(terminated, &config);
 
@@ -72,17 +73,12 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
 	return processor;
 }
 
-int http_request_form_refusal_status(const mp_processor_t *processor)
-{
-	return processor->refusal == MP_REFUSAL_FIELD_TOO_LARGE ? 413 : 400;
-}
-
 /* Refuses the form: the getter throws HttpException with `status`, which
  * answers the request when the handler does not catch it, and every later
- * getter throws the same. */
+ * getter throws the same. The body stays readable. */
 static bool http_request_form_refuse(http_request_t *req, const int status, const char *reason)
 {
-	req->refused_status = (uint16_t)status;
+	req->form_refused_status = (uint16_t)status;
 	zend_throw_exception_ex(http_exception_ce, status, "the request form was refused: %s", reason);
 	return false;
 }
@@ -92,8 +88,6 @@ static const char *http_request_form_refusal_reason(const mp_processor_t *proces
 	switch (processor->refusal) {
 		case MP_REFUSAL_TOO_MANY_FIELDS:
 			return "more fields than max_input_vars";
-		case MP_REFUSAL_FIELD_TOO_LARGE:
-			return "a field larger than the body limit";
 		default:
 			return "the multipart body is malformed";
 	}
@@ -150,7 +144,7 @@ static void http_request_form_discard(mp_processor_t *processor)
  * when the body is refused or a yield ended in one; nothing is kept then. */
 static bool http_request_form_parse_buffered(http_request_t *req)
 {
-	mp_processor_t *const parsing = http_request_form_open_multipart(req, NULL, 0);
+	mp_processor_t *const parsing = http_request_form_open_multipart(req, NULL);
 
 	if (parsing == NULL) {
 		return http_request_form_refuse(req, 400, "a multipart body without a usable boundary");
@@ -164,11 +158,10 @@ static bool http_request_form_parse_buffered(http_request_t *req)
 			remaining < HTTP_REQUEST_FORM_FEED_SLICE ? remaining : HTTP_REQUEST_FORM_FEED_SLICE;
 
 		if (mp_processor_feed(parsing, next, slice) < 0) {
-			const int status = http_request_form_refusal_status(parsing);
 			const char *const reason = http_request_form_refusal_reason(parsing);
 
 			http_request_form_discard(parsing);
-			return http_request_form_refuse(req, status, reason);
+			return http_request_form_refuse(req, 400, reason);
 		}
 
 		next += slice;
@@ -191,7 +184,10 @@ static bool http_request_form_publish(http_request_t *req, zval *post, zval *fil
 	const mp_field_info_t *const fields = mp_processor_get_fields(processor, &field_count);
 	bool too_deep = false;
 
-	/* The processor already held the field count to max_input_vars. */
+	if ((zend_long)field_count > PG(max_input_vars)) {
+		return http_request_form_refuse(req, 400, "more fields than max_input_vars");
+	}
+
 	for (size_t i = 0; i < field_count; i++) {
 		if (fields[i].name == NULL) {
 			continue;
@@ -267,9 +263,9 @@ bool http_request_form_build(http_request_t *req)
 		}
 	}
 
-	if (req->refused_status != 0) {
-		zend_throw_exception_ex(http_exception_ce, req->refused_status,
-								"the request was refused");
+	if (req->form_refused_status != 0) {
+		zend_throw_exception_ex(http_exception_ce, req->form_refused_status,
+								"the request form was refused");
 		return false;
 	}
 

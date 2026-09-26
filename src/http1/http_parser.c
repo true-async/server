@@ -518,7 +518,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
      * from the processor when a getter asks for it. */
     if (req->form_kind == HTTP_FORM_MULTIPART) {
         req->multipart_proc = http_request_form_open_multipart(
-            req, parser->conn != NULL ? parser->conn->log_state : NULL, parser->max_body_size);
+            req, parser->conn != NULL ? parser->conn->log_state : NULL);
     }
 
     /* Streaming body mode (issue #26). Three-case policy by Content-Length:
@@ -540,8 +540,6 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         /* else: CL < SMALL — pure buffered, no upgrade hook. */
     }
 
-    /* Prepare body buffer based on Content-Length (only if not multipart
-     * AND not streaming) */
     /* A multipart body counts against the limit too, though it is written to
      * its processor rather than buffered; on_body counts a chunked one. */
     if (req->multipart_proc != NULL && req->content_length > parser->max_body_size) {
@@ -549,6 +547,8 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         return -1;  /* 413 Payload Too Large */
     }
 
+    /* Prepare body buffer based on Content-Length (only if not multipart
+     * AND not streaming) */
     if (req->multipart_proc == NULL && !req->body_streaming && req->content_length > 0) {
         /* Check body size limit */
         if (req->content_length > parser->max_body_size) {
@@ -641,10 +641,28 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
             return -1;  /* 413 Payload Too Large */
         }
 
-        if (mp_processor_feed(processor, at, length) < 0) {
-            parser->parse_error = http_request_form_refusal_status(processor) == 413
-                ? HTTP_PARSE_ERR_BODY_TOO_LARGE
-                : HTTP_PARSE_ERR_MALFORMED;
+        /* A field value grows with emalloc up to the body limit, so
+         * memory_limit can bail out mid-feed; see the body pre-allocation
+         * in on_headers_complete for why the bailout must not escape. */
+        volatile ssize_t processed = 0;
+        volatile bool    oom       = false;
+        http_bailout_state_t bailout_state;
+        http_bailout_state_save(&bailout_state);
+
+        zend_try {
+            processed = mp_processor_feed(processor, at, length);
+        } zend_catch {
+            http_bailout_state_restore(&bailout_state);
+            oom = true;
+        } zend_end_try();
+
+        if (UNEXPECTED(oom)) {
+            parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
+            return -1;
+        }
+
+        if (processed < 0) {
+            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;  /* 400 */
             return -1;
         }
 
@@ -1018,6 +1036,19 @@ void http_request_free_fields(http_request_t *req)
     if (req->tracestate_raw) {
         zend_string_release(req->tracestate_raw);
         req->tracestate_raw = NULL;
+    }
+}
+
+void http_request_wake_body_waiters(http_request_t *req)
+{
+    if (req->body_event == NULL) {
+        return;
+    }
+
+    zend_async_trigger_event_t *const trig = (zend_async_trigger_event_t *)req->body_event;
+
+    if (trig->trigger != NULL) {
+        trig->trigger(trig);
     }
 }
 

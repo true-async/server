@@ -564,10 +564,15 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     const size_t current = s->request->persistent
         ? (s->body_pstr != NULL ? ZSTR_LEN(s->body_pstr) : 0)
         : (s->body_buf.s != NULL ? ZSTR_LEN(s->body_buf.s) : 0);
-    /* The operator's setMaxBodySize(), as on HTTP/1 and HTTP/2; the compiled
-     * cap where none is configured. */
-    const size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size != 0
-        ? HTTP_SERVER_G(parser_pool).max_body_size
+    /* setMaxBodySize() as on HTTP/1 and HTTP/2, never past
+     * HTTP3_MAX_BODY_BYTES: the buffered body sits in memory, and the
+     * pre-size below trusts the peer's Content-Length up to this cap
+     * (CODING_STANDARDS 1.5). The global is 0 on a thread that never ran
+     * HttpServer::start(), a reactor thread among them, which then holds
+     * the compiled cap alone. */
+    const size_t configured_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+    const size_t body_cap = configured_cap != 0 && configured_cap < HTTP3_MAX_BODY_BYTES
+        ? configured_cap
         : HTTP3_MAX_BODY_BYTES;
 
     if (UNEXPECTED(SIZE_MAX - current < datalen

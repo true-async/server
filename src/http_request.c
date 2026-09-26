@@ -297,10 +297,28 @@ ZEND_METHOD(TrueAsync_HttpRequest, getHeaders)
     }
 }
 
+/* The transport refused the body after the handler started (an HTTP/2 or
+ * HTTP/3 stream reset past a limit): throws HttpException with that status
+ * and answers true. */
+static bool http_request_body_refused(const http_request_t *req)
+{
+    if (req->refused_status == 0) {
+        return false;
+    }
+
+    zend_throw_exception_ex(http_exception_ce, req->refused_status,
+                            "the request body was refused");
+    return true;
+}
+
 ZEND_METHOD(TrueAsync_HttpRequest, getBody)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
+
+    if (http_request_body_refused(intern->request)) {
+        RETURN_THROWS();
+    }
 
     if (intern->body_cache != NULL) {
         RETURN_STR_COPY(intern->body_cache);
@@ -507,6 +525,10 @@ ZEND_METHOD(TrueAsync_HttpRequest, hasBody)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
+    if (http_request_body_refused(intern->request)) {
+        RETURN_THROWS();
+    }
+
     RETURN_BOOL(intern->request->body && ZSTR_LEN(intern->request->body) > 0);
 }
 
@@ -532,19 +554,6 @@ static bool http_request_await_refused(const char *caller)
     }
 
     return false;
-}
-
-/* The request body was refused after the handler started (an HTTP/3 body
- * past its limit): throws HttpException with that status and answers false. */
-static bool http_request_body_refused(const http_request_t *req)
-{
-    if (req->refused_status == 0) {
-        return false;
-    }
-
-    zend_throw_exception_ex(http_exception_ce, req->refused_status,
-                            "the request was refused");
-    return true;
 }
 
 /* Suspends the current coroutine until the request body is complete; true at
@@ -1136,6 +1145,12 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
 
     if (req == NULL) {
         RETURN_NULL();
+    }
+
+    /* A refused body is incomplete: the reads below would pass what arrived,
+     * or an end, off as the whole of it. */
+    if (http_request_body_refused(req)) {
+        RETURN_THROWS();
     }
 
     /* ─── Case 0/1: body already fully buffered. Return whole, then EOF. */
