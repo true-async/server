@@ -24,18 +24,24 @@ struct http_log_state;
 
 /* A multipart processor for the boundary in the request's Content-Type, or
  * NULL when that header carries no usable boundary. It logs to `log_state`
- * (NULL: nowhere). The caller owns the processor; stored in
- * req->multipart_proc, it is destroyed with the request together with the temp
- * files of uploads nobody moved. */
+ * (NULL: nowhere) and refuses a body with more fields than max_input_vars;
+ * a transport answers that refusal, or a malformed body, with 400. The caller
+ * owns the processor; stored in req->multipart_proc, it is destroyed with the
+ * request together with the temp files of uploads nobody moved. */
 struct mp_processor_t *http_request_form_open_multipart(const struct http_request_t *req,
 														struct http_log_state *log_state);
 
 /* Fills req->post_data and req->files from the request body, once: later calls
  * return at once, and a call made while another coroutine of the request is
  * building the form waits for that one to finish. While the body is incomplete
- * it does nothing, so the next call builds the form. A request that is not a form gets two empty
- * arrays. A buffered multipart body the processor refuses gives an empty form: HTTP/1 and HTTP/2
- * refuse such a body before it is complete, HTTP/3 buffers it.
+ * it does nothing, so the next call builds the form. A request that is not a
+ * form gets two empty arrays.
+ *
+ * A form over a limit is refused, never shortened: more fields than
+ * max_input_vars, a name deeper than max_input_nesting_level, or a multipart
+ * body the processor rejects sets req->form_refused_status and throws
+ * HttpException 400, and so does every later call. A body the transport
+ * refused (req->refused_status) throws that status instead.
  *
  * Runs on the thread of the handler: the arrays and UploadedFile objects are
  * allocated there. A buffered multipart body is parsed in slices with a yield

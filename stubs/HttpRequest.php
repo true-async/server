@@ -121,9 +121,22 @@ final class HttpRequest
      * Form fields of an application/x-www-form-urlencoded or multipart/form-data body.
      *
      * Keys follow PHP's rules for $_POST: name[] appends, user[name] and
-     * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`;
-     * max_input_vars and max_input_nesting_level apply. Empty for any other
-     * Content-Type.
+     * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`.
+     * Empty for any other Content-Type.
+     *
+     * A form over a limit is refused rather than shortened. A body past
+     * {@see HttpServerConfig::setMaxBodySize()} is refused by the transport:
+     * HTTP/1 answers 413 before the handler runs, HTTP/2 and HTTP/3 reset the
+     * stream, and the handler, already running, gets {@see HttpException} 413
+     * from every read of the body while the client gets no status. More
+     * multipart fields than max_input_vars, or a malformed multipart body, is
+     * refused with 400 where the parser meets it: HTTP/1 answers before the
+     * handler runs, and HTTP/2 resets the stream as for an oversized body.
+     * HTTP/3 buffers the body and parses it in this getter, so there, as for
+     * an url-encoded form past max_input_vars or a name nested deeper than
+     * max_input_nesting_level on every transport, this getter throws
+     * HttpException 400, and so does every later form getter; uncaught, it
+     * answers the request with 400. The body itself stays readable then.
      *
      * Over HTTP/2 and HTTP/3 the handler starts before the body has arrived, so
      * this call suspends until it has, as {@see awaitBody()} does. A form body
@@ -137,7 +150,7 @@ final class HttpRequest
     /**
      * Uploaded files of a multipart/form-data body, keyed as in {@see getPost()}:
      * ['avatar' => UploadedFile, 'photos' => [UploadedFile, ...], 'docs' => ['cv' => UploadedFile]].
-     * Waits for the body as getPost() does.
+     * Waits for the body, and is refused, as getPost() is.
      *
      * @return array
      */

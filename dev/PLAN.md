@@ -1711,12 +1711,15 @@ a release yet except the first two, which are fixed.
   too, closing a leak of every distinct key. HTTP/1 and HTTP/2 feed multipart to
   the processor as DATA arrives; HTTP/3 buffers and parses in 256 KiB slices in
   the handler (CODING_STANDARDS 1.5). Evidence in the CHANGELOG entries.
-- [ ] **#318 — a form over a limit is refused, never shortened.** The multipart
-  processor drops field 101 onward and cuts fields past 1 MiB silently; HTTP/1
-  multipart ignores `setMaxBodySize()`; HTTP/3 caps a buffered body at a fixed
-  16 MiB and hands a cut body to the handler as complete. Edmond, 2026-09-26: the
-  silent drop is a bug; the answer is a refusal (400/413, or `HttpException` from
-  the getter once the handler runs).
+- [x] **#318 — a form over a limit is refused, never shortened.** The multipart
+  processor dropped field 101 onward and cut fields past 1 MiB silently; HTTP/1
+  multipart ignored `setMaxBodySize()`; HTTP/3 capped a buffered body at a fixed
+  16 MiB and handed a cut body to the handler as complete. Edmond, 2026-09-26: the
+  silent drop is a bug; the answer is a refusal. Fields count against
+  `max_input_vars`, a value is bounded by the body limit, and the refusal is 400
+  or 413 before the handler, a reset stream on HTTP/2, or `HttpException` from
+  the getter on HTTP/3 (`req->refused_status`). A query string keeps `$_GET`'s
+  rules; whether it should be refused too is open.
 - [ ] **`tests/h3client` never unblocks a flow-control-blocked stream.** It calls
   `nghttp3_conn_block_stream` on `NGTCP2_ERR_STREAM_DATA_BLOCKED` and has no
   `extend_max_stream_data` callback, so an upload past the 256 KiB stream window

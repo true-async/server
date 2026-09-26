@@ -540,6 +540,13 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         /* else: CL < SMALL — pure buffered, no upgrade hook. */
     }
 
+    /* A multipart body counts against the limit too, though it is written to
+     * its processor rather than buffered; on_body counts a chunked one. */
+    if (req->multipart_proc != NULL && req->content_length > parser->max_body_size) {
+        parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+        return -1;  /* 413 Payload Too Large */
+    }
+
     /* Prepare body buffer based on Content-Length (only if not multipart
      * AND not streaming) */
     if (req->multipart_proc == NULL && !req->body_streaming && req->content_length > 0) {
@@ -626,11 +633,37 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
 
     /* If multipart, feed to processor instead */
     if (req->multipart_proc != NULL) {
-        ssize_t result = mp_processor_feed(req->multipart_proc, at, length);
+        mp_processor_t *const processor = req->multipart_proc;
 
-        if (result < 0) {
-            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
-            return -1;  /* Multipart parsing error */
+        if (processor->bytes_fed > parser->max_body_size
+            || length > parser->max_body_size - processor->bytes_fed) {
+            parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+            return -1;  /* 413 Payload Too Large */
+        }
+
+        /* A field value grows with emalloc up to the body limit, so
+         * memory_limit can bail out mid-feed; see the body pre-allocation
+         * in on_headers_complete for why the bailout must not escape. */
+        volatile ssize_t processed = 0;
+        volatile bool    oom       = false;
+        http_bailout_state_t bailout_state;
+        http_bailout_state_save(&bailout_state);
+
+        zend_try {
+            processed = mp_processor_feed(processor, at, length);
+        } zend_catch {
+            http_bailout_state_restore(&bailout_state);
+            oom = true;
+        } zend_end_try();
+
+        if (UNEXPECTED(oom)) {
+            parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
+            return -1;
+        }
+
+        if (processed < 0) {
+            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;  /* 400 */
+            return -1;
         }
 
         return 0;
@@ -752,11 +785,7 @@ static int on_message_complete(llhttp_t* llhttp_parser)
      * no-op. It matters for the streaming dispatch-at-headers-complete
      * mode where the handler coroutine is already running and parked
      * on body_event. */
-    if (req->body_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)req->body_event;
-        trig->trigger(trig);
-    }
+    http_request_wake_body_waiters(req);
 
     /* Hand off ownership at message-complete for every not-yet-handed
      * path: the async dispatch_cb branch (buffered handler runs here so
@@ -1003,6 +1032,19 @@ void http_request_free_fields(http_request_t *req)
     if (req->tracestate_raw) {
         zend_string_release(req->tracestate_raw);
         req->tracestate_raw = NULL;
+    }
+}
+
+void http_request_wake_body_waiters(http_request_t *req)
+{
+    if (req->body_event == NULL) {
+        return;
+    }
+
+    zend_async_trigger_event_t *const trig = (zend_async_trigger_event_t *)req->body_event;
+
+    if (trig->trigger != NULL) {
+        trig->trigger(trig);
     }
 }
 

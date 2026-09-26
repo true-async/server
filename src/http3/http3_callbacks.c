@@ -35,6 +35,7 @@
                                             * http3_connection.h + php_http_server.h */
 #include "Zend/zend_hrtime.h"              /* zend_hrtime — request timing */
 #include "core/http_protocol_handlers.h"   /* http_protocol_get_handler */
+#include "core/bailout_guard.h"            /* zend_try around body appends */
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
 #include "http3_steer.h"                   /* CID steering encode */
@@ -384,14 +385,17 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
 
 /* Persistent body builder for reactor-owned streams. Geometric growth,
  * capacity tracked on the stream (zend_string has no spare-capacity
- * notion of its own). Finalize hands the string to req->body as-is. */
+ * notion of its own). Finalize hands the string to req->body as-is.
+ * The caller has checked used + len <= body_cap; the capacity never
+ * passes body_cap either, whatever Content-Length the peer claimed,
+ * because a persistent allocation that fails ends the process. */
 static void h3_body_pbuf_append(http3_stream_t *s, const uint8_t *data,
-                                const size_t len)
+                                const size_t len, const size_t body_cap)
 {
     const size_t used = s->body_pstr != NULL ? ZSTR_LEN(s->body_pstr) : 0;
 
     if (s->body_pstr == NULL) {
-        size_t cap = s->request->content_length;
+        size_t cap = MIN(s->request->content_length, body_cap);
 
         if (cap < len) {
             cap = len;
@@ -404,7 +408,7 @@ static void h3_body_pbuf_append(http3_stream_t *s, const uint8_t *data,
         s->body_pstr = zend_string_alloc(cap, 1);
         s->body_pstr_cap = cap;
     } else if (used + len > s->body_pstr_cap) {
-        size_t cap = s->body_pstr_cap * 2;
+        size_t cap = MIN(s->body_pstr_cap * 2, body_cap);
 
         if (cap < used + len) {
             cap = used + len;
@@ -416,6 +420,34 @@ static void h3_body_pbuf_append(http3_stream_t *s, const uint8_t *data,
 
     memcpy(ZSTR_VAL(s->body_pstr) + used, data, len);
     ZSTR_LEN(s->body_pstr) = used + len;
+}
+
+/* Request-heap body builder for a worker's own streams. Returns false when
+ * memory_limit is tighter than body_cap and the allocation bailed out: the
+ * caller refuses this stream alone, and the longjmp never crosses the
+ * nghttp3 and ngtcp2 frames below (http2_session.c guards its append the
+ * same way). The one-shot pre-size from Content-Length saves the doubling
+ * reallocations of a large upload. */
+static bool h3_body_buf_append(http3_stream_t *s, const uint8_t *data,
+                               const size_t len, const size_t body_cap)
+{
+    volatile bool oom = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
+    zend_try {
+        if (s->body_buf.s == NULL && s->request->content_length > 0
+            && s->request->content_length <= body_cap) {
+            (void)smart_str_alloc(&s->body_buf, s->request->content_length, 0);
+        }
+
+        smart_str_appendl(&s->body_buf, (const char *)data, len);
+    } zend_catch {
+        http_bailout_state_restore(&bailout_state);
+        oom = true;
+    } zend_end_try();
+
+    return !oom;
 }
 
 /* "Buffered → stream" upgrade: splice buffered bytes into the queue, flip
@@ -541,6 +573,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
                 ? http3_listener_packet_stats(c->listener) : NULL;
 
             if (stats != NULL) stats->h3_request_oversized++;
+            req->refused_status = 413;
             h3_extend_body_window(c, stream_id, datalen);
             h3_reject_request_stream(c, s, stream_id);
             return 0;
@@ -563,13 +596,24 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     const size_t current = s->request->persistent
         ? (s->body_pstr != NULL ? ZSTR_LEN(s->body_pstr) : 0)
         : (s->body_buf.s != NULL ? ZSTR_LEN(s->body_buf.s) : 0);
+    /* setMaxBodySize() as on HTTP/1 and HTTP/2, never past
+     * HTTP3_MAX_BODY_BYTES: the buffered body sits in memory, and the
+     * pre-size below trusts the peer's Content-Length up to this cap
+     * (CODING_STANDARDS 1.5). The global is 0 on a thread that never ran
+     * HttpServer::start(), a reactor thread among them, which then holds
+     * the compiled cap alone. */
+    const size_t configured_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+    const size_t body_cap = configured_cap != 0 && configured_cap < HTTP3_MAX_BODY_BYTES
+        ? configured_cap
+        : HTTP3_MAX_BODY_BYTES;
 
     if (UNEXPECTED(SIZE_MAX - current < datalen
-     || current + datalen > HTTP3_MAX_BODY_BYTES)) {
+     || current + datalen > body_cap)) {
         http3_packet_stats_t *const stats = c != NULL
             ? http3_listener_packet_stats(c->listener) : NULL;
 
         if (stats != NULL) stats->h3_request_oversized++;
+        s->request->refused_status = 413;
         h3_extend_body_window(c, stream_id, datalen);
         /* RFC 9114: reject this stream, don't kill the connection. */
         h3_reject_request_stream(c, s, stream_id);
@@ -579,15 +623,12 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     if (s->request->persistent) {
         /* Reactor mode: build persistent from the first byte — the body
          * crosses to a worker thread and finalize hands it over uncopied. */
-        h3_body_pbuf_append(s, data, datalen);
-    } else {
-        /* Pre-size on first append if the peer told us Content-Length. */
-        if (s->body_buf.s == NULL && s->request->content_length > 0
-            && s->request->content_length <= HTTP3_MAX_BODY_BYTES) {
-            smart_str_alloc(&s->body_buf, s->request->content_length, 0);
-        }
-
-        smart_str_appendl(&s->body_buf, (const char *)data, datalen);
+        h3_body_pbuf_append(s, data, datalen, body_cap);
+    } else if (UNEXPECTED(!h3_body_buf_append(s, data, datalen, body_cap))) {
+        s->request->refused_status = 500;
+        h3_extend_body_window(c, stream_id, datalen);
+        h3_reject_request_stream(c, s, stream_id);
+        return 0;
     }
 
     /* buffered mode consumes right here — return the window immediately */
@@ -1566,14 +1607,7 @@ static void http3_finalize_request_body(http3_stream_t *s)
         req->complete   = true;
         s->fin_received = true;
 
-        if (req->body_event != NULL) {
-            zend_async_trigger_event_t *const trig =
-                (zend_async_trigger_event_t *)req->body_event;
-
-            if (trig->trigger != NULL) {
-                trig->trigger(trig);
-            }
-        }
+        http_request_wake_body_waiters(req);
 
         return;
     }
@@ -1598,14 +1632,7 @@ static void http3_finalize_request_body(http3_stream_t *s)
     /* Wake handlers blocked on $request->awaitBody(). body_event is
      * created lazily on the first awaitBody call; trigger is a no-op
      * when nobody's listening. Same shape as H1/H2 finalize. */
-    if (req->body_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)req->body_event;
-
-        if (trig->trigger != NULL) {
-            trig->trigger(trig);
-        }
-    }
+    http_request_wake_body_waiters(req);
 }
 
 static int h3_end_stream_cb(nghttp3_conn *conn, int64_t stream_id,

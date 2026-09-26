@@ -297,10 +297,28 @@ ZEND_METHOD(TrueAsync_HttpRequest, getHeaders)
     }
 }
 
+/* The transport refused the body after the handler started (an HTTP/2 or
+ * HTTP/3 stream reset past a limit): throws HttpException with that status
+ * and answers true. */
+static bool http_request_body_refused(const http_request_t *req)
+{
+    if (req->refused_status == 0) {
+        return false;
+    }
+
+    zend_throw_exception_ex(http_exception_ce, req->refused_status,
+                            "the request body was refused");
+    return true;
+}
+
 ZEND_METHOD(TrueAsync_HttpRequest, getBody)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
+
+    if (http_request_body_refused(intern->request)) {
+        RETURN_THROWS();
+    }
 
     if (intern->body_cache != NULL) {
         RETURN_STR_COPY(intern->body_cache);
@@ -507,6 +525,10 @@ ZEND_METHOD(TrueAsync_HttpRequest, hasBody)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
+    if (http_request_body_refused(intern->request)) {
+        RETURN_THROWS();
+    }
+
     RETURN_BOOL(intern->request->body && ZSTR_LEN(intern->request->body) > 0);
 }
 
@@ -536,9 +558,14 @@ static bool http_request_await_refused(const char *caller)
 
 /* Suspends the current coroutine until the request body is complete; true at
  * once when it already is. False when the wait could not start (see
- * http_request_await_refused) or ended in an exception. */
+ * http_request_await_refused), ended in an exception, or found the body
+ * refused (http_request_body_refused throws then). */
 static bool http_request_await_complete(http_request_t *req, const char *caller)
 {
+    if (req != NULL && http_request_body_refused(req)) {
+        return false;
+    }
+
     /* Fast path: body has already been fully received. HTTP/1 dispatches
      * at message-complete unless the body streams; HTTP/2 and HTTP/3
      * dispatch at the end of the headers, so a handler there can arrive
@@ -578,7 +605,7 @@ static bool http_request_await_complete(http_request_t *req, const char *caller)
     ZEND_ASYNC_SUSPEND();
     zend_async_waker_clean(coroutine);
 
-    return EG(exception) == NULL;
+    return EG(exception) == NULL && !http_request_body_refused(req);
 }
 
 /* Hands the buffered body to PHP once; the next read sees EOF. A pool slot goes
@@ -1120,6 +1147,12 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
         RETURN_NULL();
     }
 
+    /* A refused body is incomplete: the reads below would pass what arrived,
+     * or an end, off as the whole of it. */
+    if (http_request_body_refused(req)) {
+        RETURN_THROWS();
+    }
+
     /* ─── Case 0/1: body already fully buffered. Return whole, then EOF. */
     if (!req->body_streaming && req->complete) {
         http_request_hand_over_body(req, return_value);
@@ -1157,6 +1190,12 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
 
     /* ─── Case 3: streaming — pop from queue, park on body_data_event. */
     for (;;) {
+        /* A refusal can arrive while this read is parked; the chunks still
+         * queued are then a prefix of a body that will not be whole. */
+        if (http_request_body_refused(req)) {
+            RETURN_THROWS();
+        }
+
         zend_string *chunk = http_body_stream_pop(req);
 
         if (chunk != NULL) {

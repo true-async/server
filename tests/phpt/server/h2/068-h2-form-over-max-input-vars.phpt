@@ -1,5 +1,5 @@
 --TEST--
-HttpServer: HTTP/2 refuses a multipart body its parser rejects, while the body arrives
+HttpServer: HTTP/2 refuses a multipart form past max_input_vars while the body arrives
 --EXTENSIONS--
 true_async_server
 true_async
@@ -8,13 +8,14 @@ true_async
 require __DIR__ . '/_h2_skipif.inc';
 h2_skipif(['curl_h2' => true]);
 ?>
+--INI--
+max_input_vars=5
 --FILE--
 <?php
-/* HTTP/2 feeds a multipart body to its parser frame by frame, as HTTP/1 does,
- * so a body the parser rejects refuses the stream and the handler reads no
- * form. Whether the handler has started by then depends on when the frames
- * land: dispatch happens at the end of the headers. A CR not followed by LF
- * after a boundary is such a body. */
+/* The multipart processor counts fields against max_input_vars and refuses
+ * the body on the one past it, so the stream is reset while the body arrives
+ * and the handler reads no form. It used to keep the first fields and drop
+ * the rest without a word. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -42,8 +43,9 @@ $server->addHttpHandler(function ($req, $resp) use (&$seen) {
     $resp->setStatusCode(200)->setBody('read');
 });
 
-$body = tempnam(sys_get_temp_dir(), 'h2bad_');
-file_put_contents($body, "--bnd\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--bnd\rX");
+$body = tempnam(sys_get_temp_dir(), 'h2many_');
+file_put_contents($body, implode('', array_map(
+    static fn($i) => "--bnd\r\nContent-Disposition: form-data; name=\"k$i\"\r\n\r\nv\r\n", range(1, 6))) . "--bnd--\r\n");
 
 $client = spawn(function () use ($port, $server, $body) {
     usleep(30000);

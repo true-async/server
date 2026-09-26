@@ -428,6 +428,21 @@ static int h2_refuse_stream(http2_session_t *session,
 {
     if (stream != NULL) {
         stream->refused_status = status;
+
+        /* The body stops here and stays incomplete: every later read of it,
+         * a form getter included, throws this status instead of waiting for
+         * a body that will not come. */
+        if (stream->request != NULL) {
+            stream->request->refused_status = status;
+
+            /* readBody() on a streaming body parks on the queue rather
+             * than on body_event: end the queue in error to wake it. */
+            if (stream->request->body_streaming) {
+                http_body_stream_error(stream->request);
+            }
+
+            http_request_wake_body_waiters(stream->request);
+        }
     }
 
     (void)nghttp2_submit_rst_stream(ng, NGHTTP2_FLAG_NONE, stream_id, error_code);
@@ -447,7 +462,7 @@ static size_t h2_body_cap(void)
 
 /* A multipart body goes to its processor as DATA arrives, file parts straight
  * to disk, as on HTTP/1: none of it is buffered. The stream is refused past
- * max_body_size (413), on a body the processor cannot parse (400), and when
+ * max_body_size (413), on a body the processor refuses (400), and when
  * memory_limit runs out (500). */
 static int h2_feed_multipart(http2_session_t *session,
                              nghttp2_session *ng,
@@ -483,9 +498,11 @@ static int h2_feed_multipart(http2_session_t *session,
                                 NGHTTP2_INTERNAL_ERROR, 500);
     }
 
+    /* Too many fields or a malformed body: the server declines the
+     * request, which CANCEL says without blaming the peer for a protocol
+     * violation. */
     if (UNEXPECTED(processed < 0)) {
-        return h2_refuse_stream(session, ng, stream, stream_id,
-                                NGHTTP2_PROTOCOL_ERROR, 400);
+        return h2_refuse_stream(session, ng, stream, stream_id, NGHTTP2_CANCEL, 400);
     }
 
     (void)nghttp2_session_consume(ng, stream_id, len);
@@ -653,14 +670,7 @@ static void finalize_request_body(http2_stream_t *stream)
         http_body_stream_close(req);
         req->complete = true;
 
-        if (req->body_event != NULL) {
-            zend_async_trigger_event_t *trig =
-                (zend_async_trigger_event_t *)req->body_event;
-
-            if (trig->trigger != NULL) {
-                trig->trigger(trig);
-            }
-        }
+        http_request_wake_body_waiters(req);
 
         return;
     }
@@ -679,14 +689,7 @@ static void finalize_request_body(http2_stream_t *stream)
     /* Wake handlers blocked on $request->awaitBody(). body_event is
      * created lazily only if something actually awaited — fire path
      * is a no-op when nobody's listening. */
-    if (req->body_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)req->body_event;
-
-        if (trig->trigger != NULL) {
-            trig->trigger(trig);
-        }
-    }
+    http_request_wake_body_waiters(req);
 }
 
 /* on_frame_recv fires for every completed frame. Two interests:
@@ -965,9 +968,11 @@ static int cb_on_stream_close(nghttp2_session *ng,
         ZVAL_STRING(&message_zv,
                     refused_status == 413
                         ? "request body exceeds the configured limit"
-                        : (refused_status != 0
-                               ? "request body could not be buffered"
-                               : "stream reset by peer"));
+                        : (refused_status == 400
+                               ? "the request form was refused"
+                               : (refused_status != 0
+                                      ? "request body could not be buffered"
+                                      : "stream reset by peer")));
         zend_update_property_ex(http_exception_ce, exc,
                                 ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
         zval_ptr_dtor(&message_zv);

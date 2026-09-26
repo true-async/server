@@ -377,6 +377,66 @@ static void test_too_many_files(void **state) {
 /*
  * Test: Path traversal attack
  */
+/* A field over a limit refuses the whole body, and says which limit: a form
+ * missing a field reads as another form. */
+static void test_field_limits_refuse(void **state) {
+    (void) state;
+
+    const char* boundary = "b";
+    const char* three_fields =
+        "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n"
+        "--b\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n"
+        "--b\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\n3\r\n"
+        "--b--\r\n";
+
+    mp_config_t at_limit = {.max_fields = 3};
+    mp_processor_t* proc = mp_processor_create(boundary, &at_limit);
+    assert_true(mp_processor_feed(proc, three_fields, strlen(three_fields)) > 0);
+    assert_int_equal(proc->refusal, MP_REFUSAL_NONE);
+    mp_processor_destroy(proc);
+
+    mp_config_t two_fields = {.max_fields = 2};
+    proc = mp_processor_create(boundary, &two_fields);
+    assert_true(mp_processor_feed(proc, three_fields, strlen(three_fields)) < 0);
+    assert_int_equal(proc->refusal, MP_REFUSAL_TOO_MANY_FIELDS);
+    mp_processor_destroy(proc);
+
+    const char* long_value =
+        "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n12345\r\n--b--\r\n";
+
+    mp_config_t five_bytes = {.max_field_size = 5};
+    proc = mp_processor_create(boundary, &five_bytes);
+    assert_true(mp_processor_feed(proc, long_value, strlen(long_value)) > 0);
+    mp_processor_destroy(proc);
+
+    mp_config_t four_bytes = {.max_field_size = 4};
+    proc = mp_processor_create(boundary, &four_bytes);
+    assert_true(mp_processor_feed(proc, long_value, strlen(long_value)) < 0);
+    assert_int_equal(proc->refusal, MP_REFUSAL_FIELD_TOO_LARGE);
+    mp_processor_destroy(proc);
+
+    const char* malformed = "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--b\rX";
+
+    proc = mp_processor_create(boundary, NULL);
+    assert_true(mp_processor_feed(proc, malformed, strlen(malformed)) < 0);
+    assert_int_equal(proc->refusal, MP_REFUSAL_MALFORMED);
+    mp_processor_destroy(proc);
+}
+
+/* Every byte handed to feed counts, those past the closing boundary too. */
+static void test_bytes_fed_counts_the_whole_input(void **state) {
+    (void) state;
+
+    const char* body = "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--b--\r\n";
+    const char* trailer = "after the end";
+    mp_processor_t* proc = mp_processor_create("b", NULL);
+
+    assert_true(mp_processor_feed(proc, body, strlen(body)) > 0);
+    assert_true(mp_processor_feed(proc, trailer, strlen(trailer)) >= 0);
+    assert_int_equal(proc->bytes_fed, strlen(body) + strlen(trailer));
+    mp_processor_destroy(proc);
+}
+
 static void test_path_traversal(void **state) {
     (void) state;
 
@@ -1117,6 +1177,8 @@ int main(void) {
         cmocka_unit_test(test_empty_file),
         cmocka_unit_test(test_file_size_limit),
         cmocka_unit_test(test_too_many_files),
+        cmocka_unit_test(test_field_limits_refuse),
+        cmocka_unit_test(test_bytes_fed_counts_the_whole_input),
         cmocka_unit_test(test_path_traversal),
         cmocka_unit_test(test_chunked_processing),
         cmocka_unit_test(test_array_field_names),

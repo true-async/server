@@ -412,10 +412,14 @@ final class HttpServerConfig
     public function getH2StaticBudgetMax(): int {}
 
     /**
-     * Set the maximum request body size accepted on both HTTP/1 and HTTP/2
-     * listeners (bytes). H1 rejects with 413 + connection close; H2 rejects
-     * with RST_STREAM(INTERNAL_ERROR) and the connection stays up for other
-     * streams.
+     * Set the maximum request body size accepted on HTTP/1, HTTP/2 and
+     * HTTP/3 listeners (bytes), multipart uploads included. H1 rejects with
+     * 413 + connection close; H2 rejects with RST_STREAM(ENHANCE_YOUR_CALM) and
+     * H3 with a stream reset, and the connection stays up for other streams; a
+     * handler already running gets HttpException 413 from any read of the
+     * body. HTTP/3 buffers a body in memory and holds it to 16 MiB at most.
+     * In reactor-pool mode the reactor threads that receive HTTP/3 do not see
+     * this setting, and every HTTP/3 body there is held to 16 MiB.
      *
      * Default: 10485760 (10 MiB). Valid: 1024 .. 17179869184 (16 GiB).
      *

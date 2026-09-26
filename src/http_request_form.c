@@ -56,7 +56,15 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
 	memcpy(terminated, boundary, boundary_len);
 	terminated[boundary_len] = '\0';
 
-	mp_processor_t *const processor = mp_processor_create(terminated, NULL);
+	/* Fields stop at max_input_vars, as url-encoded ones do; the processor
+	 * cannot say "none", so a limit of 0 or less is enforced when the form is
+	 * published. A value is bounded by the body limit the transport applies,
+	 * as in PHP, which has no per-field limit. */
+	const mp_config_t config = {
+		.max_fields = PG(max_input_vars) > 0 ? (size_t)PG(max_input_vars) : 1,
+		.max_field_size = SIZE_MAX,
+	};
+	mp_processor_t *const processor = mp_processor_create(terminated, &config);
 
 	if (processor != NULL) {
 		processor->log_state = log_state;
@@ -65,14 +73,43 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
 	return processor;
 }
 
-static void http_request_form_decode_urlencoded(const http_request_t *req, zval *post)
+/* Refuses the form: the getter throws HttpException with `status`, which
+ * answers the request when the handler does not catch it, and every later
+ * getter throws the same. The body stays readable. */
+static bool http_request_form_refuse(http_request_t *req, const int status, const char *reason)
+{
+	req->form_refused_status = (uint16_t)status;
+	req->form_refused_reason = reason;
+	zend_throw_exception_ex(http_exception_ce, status, "the request form was refused: %s", reason);
+	return false;
+}
+
+static const char *http_request_form_refusal_reason(const mp_processor_t *processor)
+{
+	switch (processor->refusal) {
+		case MP_REFUSAL_TOO_MANY_FIELDS:
+			return "more fields than max_input_vars";
+		default:
+			return "the multipart body is malformed";
+	}
+}
+
+static bool http_request_form_decode_urlencoded(http_request_t *req, zval *post)
 {
 	if (req->body == NULL || ZSTR_LEN(req->body) == 0) {
-		return;
+		return true;
 	}
 
-	http_form_vars_decode(Z_ARRVAL_P(post), ZSTR_VAL(req->body), ZSTR_LEN(req->body), "&",
-						  PG(max_input_vars), PG(max_input_nesting_level));
+	switch (http_form_vars_decode(Z_ARRVAL_P(post), ZSTR_VAL(req->body), ZSTR_LEN(req->body), "&",
+								  PG(max_input_vars), PG(max_input_nesting_level))) {
+		case HTTP_FORM_VARS_TOO_MANY:
+			return http_request_form_refuse(req, 400, "more fields than max_input_vars");
+		case HTTP_FORM_VARS_TOO_DEEP:
+			return http_request_form_refuse(req, 400,
+											"a name nested deeper than max_input_nesting_level");
+		default:
+			return true;
+	}
 }
 
 /* A buffered multipart body (HTTP/3) is fed in slices, and the handler yields
@@ -98,58 +135,61 @@ static bool http_request_form_yield(void)
 	return EG(exception) == NULL;
 }
 
-/* The processor of a buffered body in `*processor`, NULL when the body is
- * absent or the processor refuses it. False when a yield ended in an
- * exception; nothing is kept then. */
-static bool http_request_form_parse_buffered(const http_request_t *req, mp_processor_t **processor)
+static void http_request_form_discard(mp_processor_t *processor)
 {
-	*processor = NULL;
+	mp_processor_cleanup_temp_files(processor);
+	mp_processor_destroy(processor);
+}
 
-	if (req->body == NULL) {
-		return true;
-	}
-
+/* Parses a buffered body into req->multipart_proc. False with an exception
+ * when the body is refused or a yield ended in one; nothing is kept then. */
+static bool http_request_form_parse_buffered(http_request_t *req)
+{
 	mp_processor_t *const parsing = http_request_form_open_multipart(req, NULL);
 
 	if (parsing == NULL) {
-		return true;
+		return http_request_form_refuse(req, 400, "a multipart body without a usable boundary");
 	}
 
-	const char *next = ZSTR_VAL(req->body);
-	size_t remaining = ZSTR_LEN(req->body);
+	const char *next = req->body != NULL ? ZSTR_VAL(req->body) : "";
+	size_t remaining = req->body != NULL ? ZSTR_LEN(req->body) : 0;
 
 	while (remaining > 0) {
 		const size_t slice =
 			remaining < HTTP_REQUEST_FORM_FEED_SLICE ? remaining : HTTP_REQUEST_FORM_FEED_SLICE;
 
 		if (mp_processor_feed(parsing, next, slice) < 0) {
-			mp_processor_cleanup_temp_files(parsing);
-			mp_processor_destroy(parsing);
-			return true;
+			const char *const reason = http_request_form_refusal_reason(parsing);
+
+			http_request_form_discard(parsing);
+			return http_request_form_refuse(req, 400, reason);
 		}
 
 		next += slice;
 		remaining -= slice;
 
 		if (remaining > 0 && !http_request_form_yield()) {
-			mp_processor_cleanup_temp_files(parsing);
-			mp_processor_destroy(parsing);
+			http_request_form_discard(parsing);
 			return false;
 		}
 	}
 
-	*processor = parsing;
+	req->multipart_proc = parsing;
 	return true;
 }
 
-static void http_request_form_publish(const mp_processor_t *processor, zval *post, zval *files)
+static bool http_request_form_publish(http_request_t *req, zval *post, zval *files)
 {
+	const mp_processor_t *const processor = req->multipart_proc;
 	size_t field_count;
 	const mp_field_info_t *const fields = mp_processor_get_fields(processor, &field_count);
+	bool too_deep = false;
 
-	zend_long field_budget = PG(max_input_vars);
+	if ((zend_long)field_count > PG(max_input_vars)) {
+		return http_request_form_refuse(req, 400, "more fields than max_input_vars");
+	}
 
-	for (size_t i = 0; i < field_count && field_budget > 0; i++) {
+	for (size_t i = 0; i < field_count; i++) {
 		if (fields[i].name == NULL) {
 			continue;
 		}
@@ -157,14 +197,14 @@ static void http_request_form_publish(const mp_processor_t *processor, zval *pos
 		char *value = estrndup(fields[i].value, fields[i].value_len);
 		size_t filtered_len;
 
-		field_budget--;
-
 		if (http_form_vars_filter(fields[i].name, &value, fields[i].value_len, &filtered_len)) {
 			zval stored;
 
 			ZVAL_STRINGL_FAST(&stored, value, filtered_len);
-			http_form_vars_register(Z_ARRVAL_P(post), fields[i].name, strlen(fields[i].name),
-									&stored, PG(max_input_nesting_level));
+			too_deep |= http_form_vars_register(Z_ARRVAL_P(post), fields[i].name,
+												strlen(fields[i].name), &stored,
+												PG(max_input_nesting_level))
+						== HTTP_FORM_VARS_TOO_DEEP;
 		}
 
 		efree(value);
@@ -180,24 +220,28 @@ static void http_request_form_publish(const mp_processor_t *processor, zval *pos
 
 		zval *const upload = uploaded_file_create_from_info(&uploads[i]);
 
-		http_form_vars_register(Z_ARRVAL_P(files), uploads[i].field_name,
-								strlen(uploads[i].field_name), upload, PG(max_input_nesting_level));
+		too_deep |= http_form_vars_register(Z_ARRVAL_P(files), uploads[i].field_name,
+											strlen(uploads[i].field_name), upload,
+											PG(max_input_nesting_level))
+					== HTTP_FORM_VARS_TOO_DEEP;
 		efree(upload);
 	}
+
+	if (too_deep) {
+		return http_request_form_refuse(req, 400,
+										"a name nested deeper than max_input_nesting_level");
+	}
+
+	return true;
 }
 
 static bool http_request_form_decode_multipart(http_request_t *req, zval *post, zval *files)
 {
-	if (req->multipart_proc == NULL &&
-		!http_request_form_parse_buffered(req, &req->multipart_proc)) {
+	if (req->multipart_proc == NULL && !http_request_form_parse_buffered(req)) {
 		return false;
 	}
 
-	if (req->multipart_proc != NULL) {
-		http_request_form_publish(req->multipart_proc, post, files);
-	}
-
-	return true;
+	return http_request_form_publish(req, post, files);
 }
 
 bool http_request_form_build(http_request_t *req)
@@ -220,6 +264,12 @@ bool http_request_form_build(http_request_t *req)
 		}
 	}
 
+	if (req->form_refused_status != 0) {
+		zend_throw_exception_ex(http_exception_ce, req->form_refused_status,
+								"the request form was refused: %s", req->form_refused_reason);
+		return false;
+	}
+
 	if (req->post_data != NULL || !req->complete) {
 		return true;
 	}
@@ -233,7 +283,7 @@ bool http_request_form_build(http_request_t *req)
 	req->form_building = true;
 
 	if (req->form_kind == HTTP_FORM_URLENCODED) {
-		http_request_form_decode_urlencoded(req, &post);
+		built = http_request_form_decode_urlencoded(req, &post);
 	} else if (req->form_kind == HTTP_FORM_MULTIPART) {
 		built = http_request_form_decode_multipart(req, &post, &files);
 	}

@@ -281,6 +281,18 @@ struct http_request_t {
     uint8_t      grpc_mode;
     /* http_form_kind_t, stamped beside grpc_mode from the same header. */
     uint8_t      form_kind;
+    /* The HTTP status the transport refused the body with once a handler was
+     * running (an HTTP/2 or HTTP/3 stream reset past a limit); 0 while it has
+     * not. The body is incomplete then, and every read of it throws
+     * HttpException with this status. */
+    uint16_t     refused_status;
+    /* The HTTP status the form was refused with (400: over max_input_vars or
+     * max_input_nesting_level, or malformed); 0 while it has not. Only the
+     * form getters throw with it: the body itself is whole. */
+    uint16_t     form_refused_status;
+    /* Why the form was refused, for the message of every getter that throws;
+     * a string literal, so it is valid on any thread. NULL while it has not. */
+    const char  *form_refused_reason;
 };
 
 /* Single chunk node in the streaming body queue (linked list).
@@ -448,6 +460,11 @@ void http_request_store_header(http_request_t *req, zend_string *name,
  * post-dispatch while the PHP HttpRequest object independently owns
  * its own ref. NULL-safe. */
 void http_request_addref(http_request_t *req);
+
+/* Resumes every coroutine suspended in a wait for the request body (awaitBody(),
+ * a form getter), whether the body completed or was refused. No-op when
+ * nothing waits. */
+void http_request_wake_body_waiters(http_request_t *req);
 
 /* Release a request reference. Decrements refcount; when it hits 0
  * the request is actually freed. Pre-refcount the function name was
