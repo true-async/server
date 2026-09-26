@@ -534,11 +534,29 @@ static bool http_request_await_refused(const char *caller)
     return false;
 }
 
+/* The request body was refused after the handler started (an HTTP/3 body
+ * past its limit): throws HttpException with that status and answers false. */
+static bool http_request_body_refused(const http_request_t *req)
+{
+    if (req->refused_status == 0) {
+        return false;
+    }
+
+    zend_throw_exception_ex(http_exception_ce, req->refused_status,
+                            "the request was refused");
+    return true;
+}
+
 /* Suspends the current coroutine until the request body is complete; true at
  * once when it already is. False when the wait could not start (see
- * http_request_await_refused) or ended in an exception. */
+ * http_request_await_refused), ended in an exception, or found the body
+ * refused (http_request_body_refused throws then). */
 static bool http_request_await_complete(http_request_t *req, const char *caller)
 {
+    if (req != NULL && http_request_body_refused(req)) {
+        return false;
+    }
+
     /* Fast path: body has already been fully received. HTTP/1 dispatches
      * at message-complete unless the body streams; HTTP/2 and HTTP/3
      * dispatch at the end of the headers, so a handler there can arrive
@@ -578,7 +596,7 @@ static bool http_request_await_complete(http_request_t *req, const char *caller)
     ZEND_ASYNC_SUSPEND();
     zend_async_waker_clean(coroutine);
 
-    return EG(exception) == NULL;
+    return EG(exception) == NULL && !http_request_body_refused(req);
 }
 
 /* Hands the buffered body to PHP once; the next read sees EOF. A pool slot goes

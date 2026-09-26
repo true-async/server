@@ -541,6 +541,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
                 ? http3_listener_packet_stats(c->listener) : NULL;
 
             if (stats != NULL) stats->h3_request_oversized++;
+            req->refused_status = 413;
             h3_extend_body_window(c, stream_id, datalen);
             h3_reject_request_stream(c, s, stream_id);
             return 0;
@@ -563,13 +564,19 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     const size_t current = s->request->persistent
         ? (s->body_pstr != NULL ? ZSTR_LEN(s->body_pstr) : 0)
         : (s->body_buf.s != NULL ? ZSTR_LEN(s->body_buf.s) : 0);
+    /* The operator's setMaxBodySize(), as on HTTP/1 and HTTP/2; the compiled
+     * cap where none is configured. */
+    const size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size != 0
+        ? HTTP_SERVER_G(parser_pool).max_body_size
+        : HTTP3_MAX_BODY_BYTES;
 
     if (UNEXPECTED(SIZE_MAX - current < datalen
-     || current + datalen > HTTP3_MAX_BODY_BYTES)) {
+     || current + datalen > body_cap)) {
         http3_packet_stats_t *const stats = c != NULL
             ? http3_listener_packet_stats(c->listener) : NULL;
 
         if (stats != NULL) stats->h3_request_oversized++;
+        s->request->refused_status = 413;
         h3_extend_body_window(c, stream_id, datalen);
         /* RFC 9114: reject this stream, don't kill the connection. */
         h3_reject_request_stream(c, s, stream_id);
@@ -583,7 +590,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
     } else {
         /* Pre-size on first append if the peer told us Content-Length. */
         if (s->body_buf.s == NULL && s->request->content_length > 0
-            && s->request->content_length <= HTTP3_MAX_BODY_BYTES) {
+            && s->request->content_length <= body_cap) {
             smart_str_alloc(&s->body_buf, s->request->content_length, 0);
         }
 
