@@ -50,10 +50,10 @@ typedef enum {
     GRPC_MODE_WEB_TEXT,   /* application/grpc-web-text — WEB + per-frame base64 */
 } grpc_mode_t;
 
-/* Delivery mode from the request content-type; NONE for non-gRPC. Called
+/* Delivery mode from a request content-type value; NONE for non-gRPC. Called
  * only by http_request_classify_protocols — everyone else reads the
  * req->grpc_mode stamp. */
-grpc_mode_t grpc_request_mode(const struct http_request_t *req);
+grpc_mode_t grpc_content_type_mode(const char *content_type, size_t content_type_len);
 
 /* Stamped mode gated on a registered gRPC handler; every dispatch path
  * (H2 / H3 / worker) must classify through this. */

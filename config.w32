@@ -25,6 +25,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "src\\http_server_config.c " +
         "src\\http_server_class.c " +
         "src\\http_request.c " +
+        "src\\http_request_form.c " +
+        "src\\http_form_vars.c " +
         "src\\http_response.c " +
         "src\\http_response_framing.c " +
         "src\\grpc\\grpc.c " +
@@ -85,7 +87,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
     var http_server_formats =
         "multipart_parser.c " +
-        "multipart_processor.c ";
+        "multipart_processor.c " +
+        "form_content_type.c ";
 
     var http_server_log =
         "http_log.c " +

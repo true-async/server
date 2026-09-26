@@ -26,40 +26,28 @@
 #  include "compression/http_compression_request.h"
 #endif
 
-grpc_mode_t grpc_request_mode(const http_request_t *req)
+grpc_mode_t grpc_content_type_mode(const char *content_type, size_t content_type_len)
 {
-    if (req->headers == NULL) {
-        return GRPC_MODE_NONE;
-    }
-
-    zval *content_type = zend_hash_str_find(req->headers, "content-type",
-                                            sizeof("content-type") - 1);
-
-    if (content_type == NULL || Z_TYPE_P(content_type) != IS_STRING) {
-        return GRPC_MODE_NONE;
-    }
-
-    const char *val = Z_STRVAL_P(content_type);
-    size_t      len = Z_STRLEN_P(content_type);
-
     const size_t grpc_len = sizeof(GRPC_CONTENT_TYPE) - 1;
 
-    if (len < grpc_len || strncasecmp(val, GRPC_CONTENT_TYPE, grpc_len) != 0) {
+    if (content_type_len < grpc_len
+        || strncasecmp(content_type, GRPC_CONTENT_TYPE, grpc_len) != 0) {
         return GRPC_MODE_NONE;
     }
 
     /* "-web" is a prefix of "-web-text" — check web-text first */
-    val += grpc_len;
-    len -= grpc_len;
+    content_type += grpc_len;
+    content_type_len -= grpc_len;
 
     const size_t text_len = sizeof(GRPC_WEB_TEXT_SUFFIX) - 1;
     const size_t web_len  = sizeof(GRPC_WEB_SUFFIX) - 1;
 
-    if (len >= text_len && strncasecmp(val, GRPC_WEB_TEXT_SUFFIX, text_len) == 0) {
+    if (content_type_len >= text_len
+        && strncasecmp(content_type, GRPC_WEB_TEXT_SUFFIX, text_len) == 0) {
         return GRPC_MODE_WEB_TEXT;
     }
 
-    if (len >= web_len && strncasecmp(val, GRPC_WEB_SUFFIX, web_len) == 0) {
+    if (content_type_len >= web_len && strncasecmp(content_type, GRPC_WEB_SUFFIX, web_len) == 0) {
         return GRPC_MODE_WEB;
     }
 

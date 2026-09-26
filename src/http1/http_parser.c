@@ -22,6 +22,8 @@
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/http_protocol_handlers.h"   /* http_request_classify_protocols */
+#include "formats/form_content_type.h"
+#include "http_request_form.h"
 
 #include <string.h>
 #ifndef PHP_WIN32
@@ -29,8 +31,6 @@
 #endif
 
 static void save_current_header(http1_parser_t *parser);
-static char* extract_boundary(const char *content_type);
-static void finalize_multipart(http1_parser_t *parser);
 static void http1_request_body_upgrade(http_request_t *req);
 
 /* Strict Content-Length parser per RFC 9110 §8.6 (Content-Length = 1*DIGIT)
@@ -59,135 +59,11 @@ static int parse_content_length(const char *s, size_t len, uint64_t *out)
     return 0;
 }
 
-/* External: Create UploadedFile object from file info */
-extern zval* uploaded_file_create_from_info(mp_file_info_t *info);
-
 /* Helper: Check if string buffer can be reused (only we own it) */
 static inline bool can_reuse_string_buffer(zend_string *str)
 {
     /* Can reuse if: string exists, not interned, and refcount == 1 */
     return str && !ZSTR_IS_INTERNED(str) && GC_REFCOUNT(str) == 1;
-}
-
-/* Helper: Extract boundary from Content-Type header */
-static char* extract_boundary(const char *content_type)
-{
-    const char *boundary_start = strstr(content_type, "boundary=");
-
-    if (!boundary_start) {
-        return NULL;
-    }
-
-    boundary_start += 9;  /* Skip "boundary=" */
-
-    /* Skip optional quotes */
-    if (*boundary_start == '"') {
-        boundary_start++;
-        const char *boundary_end = strchr(boundary_start, '"');
-
-        if (!boundary_end) {
-            return NULL;
-        }
-
-        return estrndup(boundary_start, boundary_end - boundary_start);
-    }
-
-    /* No quotes - find end (semicolon, space, or end of string) */
-    const char *boundary_end = boundary_start;
-    while (*boundary_end && *boundary_end != ';' && *boundary_end != ' ' && *boundary_end != '\t') {
-        boundary_end++;
-    }
-
-    size_t len = boundary_end - boundary_start;
-
-    if (len == 0) {
-        return NULL;
-    }
-
-    return estrndup(boundary_start, len);
-}
-
-/* Helper: Finalize multipart processing and create PHP arrays */
-static void finalize_multipart(http1_parser_t *parser)
-{
-    http_request_t *req = parser->request;
-
-    if (!req || !req->multipart_proc) {
-        return;
-    }
-
-    mp_processor_t *proc = req->multipart_proc;
-
-    /* Create POST data HashTable */
-    ALLOC_HASHTABLE(req->post_data);
-    zend_hash_init(req->post_data, 8, NULL, ZVAL_PTR_DTOR, 0);
-
-    /* Get fields from processor */
-    size_t field_count;
-    mp_field_info_t *fields = mp_processor_get_fields(proc, &field_count);
-
-    for (size_t i = 0; i < field_count; i++) {
-        mp_field_info_t *field = &fields[i];
-
-        if (!field->name) continue;
-
-        zval zv;
-        ZVAL_STRINGL(&zv, field->value, field->value_len);
-
-        /* TODO: Handle PHP array notation (field[], field[key]) */
-        /* For now, simple key=value storage */
-        zend_hash_str_update(req->post_data, field->name, strlen(field->name), &zv);
-    }
-
-    /* Create Files HashTable */
-    ALLOC_HASHTABLE(req->files);
-    zend_hash_init(req->files, 8, NULL, ZVAL_PTR_DTOR, 0);
-
-    /* Get files from processor */
-    size_t file_count;
-    mp_file_info_t *mp_files = mp_processor_get_files(proc, &file_count);
-
-    for (size_t i = 0; i < file_count; i++) {
-        mp_file_info_t *file = &mp_files[i];
-
-        if (!file->field_name) continue;
-
-        /* Create UploadedFile object */
-        zval *file_obj = uploaded_file_create_from_info(file);
-
-        /* Check if field name ends with [] (array notation) */
-        size_t name_len = strlen(file->field_name);
-        bool is_array = (name_len >= 2 &&
-                        file->field_name[name_len - 2] == '[' &&
-                        file->field_name[name_len - 1] == ']');
-
-        if (is_array) {
-            /* Strip [] from name */
-            char *clean_name = estrndup(file->field_name, name_len - 2);
-
-            /* Find or create array */
-            zval *existing = zend_hash_str_find(req->files, clean_name, name_len - 2);
-
-            if (existing && Z_TYPE_P(existing) == IS_ARRAY) {
-                /* Add to existing array */
-                zend_hash_next_index_insert(Z_ARRVAL_P(existing), file_obj);
-                efree(file_obj);
-            } else {
-                /* Create new array */
-                zval arr;
-                array_init(&arr);
-                zend_hash_next_index_insert(Z_ARRVAL(arr), file_obj);
-                efree(file_obj);
-                zend_hash_str_update(req->files, clean_name, name_len - 2, &arr);
-            }
-
-            efree(clean_name);
-        } else {
-            /* Single file */
-            zend_hash_str_update(req->files, file->field_name, name_len, file_obj);
-            efree(file_obj);
-        }
-    }
 }
 
 /* llhttp callbacks */
@@ -636,37 +512,22 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         }
     }
 
-    /* Check for multipart/form-data */
-    zval *content_type = zend_hash_str_find(req->headers, "content-type", sizeof("content-type") - 1);
-
-    if (content_type && Z_TYPE_P(content_type) == IS_STRING) {
-        const char *ct = Z_STRVAL_P(content_type);
-
-        if (strncasecmp(ct, "multipart/form-data", 19) == 0) {
-            char *boundary = extract_boundary(ct);
-
-            if (boundary) {
-                req->multipart_proc = mp_processor_create(boundary, NULL);
-
-                if (req->multipart_proc != NULL && parser->conn != NULL) {
-                    req->multipart_proc->log_state = parser->conn->log_state;
-                }
-
-                req->use_multipart = true;
-                efree(boundary);
-            }
-        }
-    }
-
     http_request_classify_protocols(req);
+
+    /* Parts are written to disk while the body arrives; the form is built
+     * from the processor when a getter asks for it. */
+    if (req->form_kind == HTTP_FORM_MULTIPART) {
+        req->multipart_proc = http_request_form_open_multipart(
+            req, parser->conn != NULL ? parser->conn->log_state : NULL);
+    }
 
     /* Streaming body mode (issue #26). Three-case policy by Content-Length:
      *   CL >= AUTO_THRESHOLD or CL == 0 (chunked) → stream immediately;
      *   CL >= SMALL but < AUTO → buffer, upgrade if readBody is called;
      *   CL <  SMALL                       → buffer, never upgrade.
-     * Multipart bypasses streaming entirely (no current use case for
-     * raw-multipart streaming; see plan §5 edge-case). */
-    if (!req->use_multipart && !http_request_body_must_buffer(req)
+     * A form body never streams (http_request_body_must_buffer): a form
+     * getter reads it whole, and multipart goes to its processor. */
+    if (!http_request_body_must_buffer(req)
         && parser->conn != NULL && parser->conn->view != NULL
         && parser->conn->view->body_streaming_enabled) {
         if (req->content_length == 0
@@ -681,7 +542,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     /* Prepare body buffer based on Content-Length (only if not multipart
      * AND not streaming) */
-    if (!req->use_multipart && !req->body_streaming && req->content_length > 0) {
+    if (req->multipart_proc == NULL && !req->body_streaming && req->content_length > 0) {
         /* Check body size limit */
         if (req->content_length > parser->max_body_size) {
             parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
@@ -696,9 +557,10 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
          * scheduler down with it. Same pattern below for chunked. */
         /* body_pool slots are IS_STR_INTERNED — opaque to PHP's refcount,
          * lifecycle owned here. Fine for getBody (RETURN_STR_COPY hands
-         * out a view), but readBody/upgrade transfer ownership to PHP
-         * and a pool slot would leak. Skip the pool when streaming is
-         * enabled — the body may be transferred. */
+         * out a view) and readBody (it hands out a copy), but the upgrade
+         * to streaming transfers ownership to PHP and a pool slot would
+         * leak. Skip the pool when streaming is enabled — the body may be
+         * transferred. */
         const bool can_pool = (parser->conn == NULL || parser->conn->view == NULL
                                || !parser->conn->view->body_streaming_enabled);
         volatile bool oom = false;
@@ -732,8 +594,9 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
      * handler always sees the full body in $req->getBody() — TCP-level
      * fragmentation would otherwise run the handler against a partial
      * body. Streaming handlers must dispatch immediately to consume
-     * incoming chunks via readBody(). Multipart populates files/post
-     * arrays during parse and is only safe to expose when complete.
+     * incoming chunks via readBody(). Multipart parts are written by the
+     * processor during parse, and the form built from them is whole only
+     * once the message is complete.
      *
      * For the sync caller (dispatch_cb == NULL, http_parse_request) we
      * also defer ownership transfer — the caller fetches the request
@@ -762,7 +625,7 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
     }
 
     /* If multipart, feed to processor instead */
-    if (req->use_multipart && req->multipart_proc) {
+    if (req->multipart_proc != NULL) {
         ssize_t result = mp_processor_feed(req->multipart_proc, at, length);
 
         if (result < 0) {
@@ -868,11 +731,6 @@ static int on_message_complete(llhttp_t* llhttp_parser)
      * connection is already flagged for teardown — stop parsing. */
     if (UNEXPECTED(req == NULL)) {
         return HPE_PAUSED;
-    }
-
-    /* Finalize multipart processing */
-    if (req->use_multipart && req->multipart_proc) {
-        finalize_multipart(parser);
     }
 
     /* Streaming: signal EOF to readBody() consumer; no req->body

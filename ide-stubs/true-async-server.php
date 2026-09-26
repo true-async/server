@@ -2004,7 +2004,8 @@ final class HttpRequest
 
     /**
      * Get request body.
-     * Returns empty string if no body.
+     * Returns empty string if no body. A multipart body is not kept on HTTP/1
+     * and HTTP/2: its parts go to {@see getPost()} and {@see getFiles()}.
      */
     public function getBody(): string {}
 
@@ -2040,16 +2041,26 @@ final class HttpRequest
     public function getRemotePort(): ?int {}
 
     /**
-     * Get POST data from multipart/form-data or application/x-www-form-urlencoded.
-     * Supports PHP-style arrays: name[], user[name], matrix[0][1]
+     * Form fields of an application/x-www-form-urlencoded or multipart/form-data body.
+     *
+     * Keys follow PHP's rules for $_POST: name[] appends, user[name] and
+     * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`;
+     * max_input_vars and max_input_nesting_level apply. Empty for any other
+     * Content-Type.
+     *
+     * Over HTTP/2 and HTTP/3 the handler starts before the body has arrived, so
+     * this call suspends until it has, as {@see awaitBody()} does. A form body
+     * does not stream even with {@see HttpServerConfig::setBodyStreamingEnabled()},
+     * and reading it with {@see readBody()} leaves the form in place.
      *
      * @return array
      */
     public function getPost(): array {}
 
     /**
-     * Get all uploaded files.
-     * Multiple files with same name: ['photos' => [UploadedFile, UploadedFile, ...]]
+     * Uploaded files of a multipart/form-data body, keyed as in {@see getPost()}:
+     * ['avatar' => UploadedFile, 'photos' => [UploadedFile, ...], 'docs' => ['cv' => UploadedFile]].
+     * Waits for the body as getPost() does.
      *
      * @return array
      */
@@ -2057,7 +2068,8 @@ final class HttpRequest
 
     /**
      * Get single uploaded file by name.
-     * For multiple files (photos[]), returns first one.
+     * For an array of files (photos[], docs[cv]), returns the first file directly
+     * in it; deeper arrays are read through {@see getFiles()}.
      *
      * @param string $name Field name
      * @return UploadedFile|null File object or null if not found

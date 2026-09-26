@@ -615,7 +615,23 @@ static int on_part_end(multipart_parser_t* parser)
         mp_field_info_t* info = &proc->fields[proc->fields_count];
 
         info->name = proc->field_name ? MP_STRDUP(proc->field_name) : NULL;
-        info->value = proc->field_value ? MP_STRDUP(proc->field_value) : MP_STRDUP("");
+        /* The length, not a NUL, ends a value: a field may carry NUL bytes,
+         * and every strdup variant would stop at the first one. */
+        info->value = MP_MALLOC(proc->field_value_len + 1);
+
+        if (!info->value) {
+            if (info->name) {
+                MP_FREE(info->name);
+            }
+
+            return -1;
+        }
+
+        if (proc->field_value_len > 0) {
+            memcpy(info->value, proc->field_value, proc->field_value_len);
+        }
+
+        info->value[proc->field_value_len] = '\0';
         info->value_len = proc->field_value_len;
 
         proc->fields_count++;
@@ -663,7 +679,16 @@ mp_processor_t* mp_processor_create(const char* boundary, const mp_config_t* con
 ssize_t mp_processor_feed(mp_processor_t* proc, const char* data, size_t len)
 {
     if (!proc || !data) return -1;
-    return multipart_parser_execute(proc->parser, data, len);
+
+    const ssize_t processed = multipart_parser_execute(proc->parser, data, len);
+
+    /* All of `len` counts: past the closing boundary the parser consumes
+     * nothing, and bytes a peer keeps sending there are body bytes still. */
+    if (processed >= 0) {
+        proc->bytes_fed += len;
+    }
+
+    return processed;
 }
 
 bool mp_processor_is_complete(const mp_processor_t* proc)
@@ -724,6 +749,18 @@ void mp_processor_cleanup_temp_files(mp_processor_t* proc)
         if (proc->files[i].tmp_path) {
             VCWD_UNLINK(proc->files[i].tmp_path);
         }
+    }
+
+    /* A file part the body stopped inside (a refusal, a reset, a parse
+     * error) reaches files[] only when it ends; until then tmp_path names
+     * its file, open or already closed by a failed write. */
+    if (proc->file_handle) {
+        fclose(proc->file_handle);
+        proc->file_handle = NULL;
+    }
+
+    if (proc->tmp_path) {
+        VCWD_UNLINK(proc->tmp_path);
     }
 }
 

@@ -16,6 +16,10 @@ set(HTTP1_PARSER_SRC
     # Request builders and the protocol classifier that http_parser.c calls.
     ${CMAKE_SOURCE_DIR}/../src/http_request.c
     ${CMAKE_SOURCE_DIR}/../src/core/http_protocol_handlers.c
+    # The form a request carries, and the Content-Type test behind it.
+    ${CMAKE_SOURCE_DIR}/../src/http_request_form.c
+    ${CMAKE_SOURCE_DIR}/../src/http_form_vars.c
+    ${CMAKE_SOURCE_DIR}/../src/formats/form_content_type.c
     # http_body_stream.c wakes its reader through a plain event.
     ${CMAKE_SOURCE_DIR}/../src/core/async_plain_event.c
     # http_request.c classifies gRPC requests and stamps the trace context.
@@ -465,6 +469,70 @@ add_test(NAME ResponseFraming COMMAND test_response_framing)
 
 if(UNIX AND NOT APPLE)
     set_tests_properties(ResponseFraming PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
+# Recognising a form in a Content-Type value: src/formats/form_content_type.c
+# is pure C and links alone.
+add_executable(test_form_content_type
+    http/test_form_content_type.c
+    ${CMAKE_SOURCE_DIR}/../src/formats/form_content_type.c
+    ${CMAKE_SOURCE_DIR}/../src/http_param_parse.c
+)
+
+target_include_directories(test_form_content_type PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+)
+
+target_link_libraries(test_form_content_type
+    test_common
+    ${CMOCKA_LIBRARIES}
+)
+
+if(UNIX)
+    target_link_libraries(test_form_content_type m pthread)
+endif()
+
+add_test(NAME FormContentType COMMAND test_form_content_type)
+
+if(UNIX AND NOT APPLE)
+    set_tests_properties(FormContentType PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
+# Query and form variables keyed by PHP's name rules. Needs the PHP runtime
+# for its arrays and php_url_decode.
+add_executable(test_form_vars
+    http/test_form_vars.c
+    ${CMAKE_SOURCE_DIR}/../src/http_form_vars.c
+)
+
+target_include_directories(test_form_vars PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/../src
+)
+
+target_link_libraries(test_form_vars
+    test_common
+    ${CMOCKA_LIBRARIES}
+    ${CMAKE_DL_LIBS}
+)
+
+if(UNIX)
+    target_link_libraries(test_form_vars m pthread rt)
+endif()
+
+add_test(NAME FormVars COMMAND test_form_vars)
+
+if(WIN32)
+    set_tests_properties(FormVars PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+elseif(UNIX AND NOT APPLE)
+    set_tests_properties(FormVars PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )
 endif()

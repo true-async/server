@@ -13,7 +13,8 @@
 #include "php.h"
 #include "http_protocol_handlers.h"
 #include "http1/http_parser.h"   /* http_request_t */
-#include "grpc/grpc.h"           /* grpc_request_mode */
+#include "grpc/grpc.h"           /* grpc_content_type_mode */
+#include "formats/form_content_type.h"
 
 /* {{{ http_protocol_type_to_string */
 const char* http_protocol_type_to_string(http_protocol_type_t type)
@@ -132,13 +133,26 @@ bool http_protocol_has_handler(HashTable *handlers, http_protocol_type_t protoco
 /* {{{ http_request_classify_protocols */
 void http_request_classify_protocols(http_request_t *req)
 {
-    req->grpc_mode = (uint8_t)grpc_request_mode(req);
+    const zval *const content_type = req->headers != NULL
+        ? zend_hash_str_find(req->headers, "content-type", sizeof("content-type") - 1)
+        : NULL;
+
+    if (content_type == NULL || Z_TYPE_P(content_type) != IS_STRING) {
+        req->grpc_mode = GRPC_MODE_NONE;
+        req->form_kind = HTTP_FORM_NONE;
+        return;
+    }
+
+    req->grpc_mode = (uint8_t)grpc_content_type_mode(Z_STRVAL_P(content_type),
+                                                     Z_STRLEN_P(content_type));
+    req->form_kind = (uint8_t)http_form_kind_of(Z_STRVAL_P(content_type),
+                                                Z_STRLEN_P(content_type));
 }
 /* }}} */
 
 bool http_request_body_must_buffer(const http_request_t *req)
 {
-    return req->grpc_mode == GRPC_MODE_WEB_TEXT;
+    return req->grpc_mode == GRPC_MODE_WEB_TEXT || req->form_kind != HTTP_FORM_NONE;
 }
 
 bool http_request_body_size_uncapped(const http_request_t *req)

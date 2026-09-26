@@ -105,10 +105,11 @@ struct http_request_t {
     zend_string *grpc_text_body;
 
     /* Body-progress event.
-     * Lazily created by awaitBody() on the first suspend; notified by
-     * the parser on body_complete once the event-loop read path lands.
-     * Currently stays NULL because dispatch still happens at
-     * message-complete, so handlers never need to wait. */
+     * Lazily created by the first wait for the body (awaitBody(), a form
+     * getter, readBody()); notified by the parser on body_complete. On
+     * HTTP/1 it stays NULL unless the body streams, because dispatch
+     * happens at message-complete; HTTP/2 and HTTP/3 dispatch at the end
+     * of the headers, so their handlers can wait. */
     zend_async_event_t *body_event;
 
     /* Coroutine running the user handler for THIS request. Set in
@@ -197,7 +198,12 @@ struct http_request_t {
     bool         chunked        : 1;
     bool         keep_alive     : 1;
     bool         complete       : 1;
-    bool         use_multipart  : 1;
+    /* A form getter is building the form and yields while it parses;
+     * another getter waits for it instead of parsing again. */
+    bool         form_building  : 1;
+    /* readBody() has handed a form request's body out; the body stays for
+     * the form, and the next read is EOF. */
+    bool         body_handed_out : 1;
     bool         body_streaming : 1;
     bool         body_eof       : 1;
     bool         body_error     : 1;
@@ -273,6 +279,8 @@ struct http_request_t {
     /* grpc_mode_t stamped once at headers-complete; body policy derives
      * from it (http_request_body_must_buffer / _size_uncapped). */
     uint8_t      grpc_mode;
+    /* http_form_kind_t, stamped beside grpc_mode from the same header. */
+    uint8_t      form_kind;
 };
 
 /* Single chunk node in the streaming body queue (linked list).
