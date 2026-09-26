@@ -6,18 +6,17 @@
   +----------------------------------------------------------------------+
 */
 
-/* Names go through PHP's own routines, php_default_treat_data for an
- * url-encoded body and php_register_variable_ex for multipart parts, so a
- * form reads exactly like $_POST: array notation, max_input_vars,
- * max_input_nesting_level, and `.` or space in a base name turned into `_`.
- * getQuery() parses the query string the same way. */
+/* Keys follow PHP's rules for $_POST (http_form_vars.h): array notation,
+ * max_input_vars, max_input_nesting_level, and a dot or a space in a base name
+ * turned into `_`. An url-encoded body splits on `&` alone, as $_POST does. */
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
 
 #include "php.h"
-#include "main/php_variables.h"
+#include "Zend/zend_async_API.h"
+#include "http_form_vars.h"
 #include "http1/http_parser.h"
 #include "http_request_form.h"
 #include "formats/form_content_type.h"
@@ -59,29 +58,75 @@ static void http_request_form_decode_urlencoded(const http_request_t *req, zval 
 		return;
 	}
 
-	/* php_default_treat_data takes the copy and frees it. */
-	php_default_treat_data(PARSE_STRING, estrndup(ZSTR_VAL(req->body), ZSTR_LEN(req->body)), post);
+	http_form_vars_decode(Z_ARRVAL_P(post), ZSTR_VAL(req->body), ZSTR_LEN(req->body), "&",
+						  PG(max_input_vars), PG(max_input_nesting_level));
 }
 
-static mp_processor_t *http_request_form_parse_buffered(const http_request_t *req)
+/* A buffered multipart body (HTTP/3) is fed in slices, and the handler yields
+ * between them. The processor writes file parts synchronously, and on HTTP/3
+ * the handler shares its thread with the QUIC transport, whose ACKs one long
+ * span would delay for every connection (CODING_STANDARDS 1.5). */
+#define HTTP_REQUEST_FORM_FEED_SLICE (256u * 1024u)
+
+/* False when the yield ended in an exception, a cancellation among them. */
+static bool http_request_form_yield(void)
 {
+	zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
+	/* No coroutine to yield: http_parse_request() outside the server. */
+	if (coroutine == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+		return true;
+	}
+
+	ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
+	ZEND_ASYNC_SUSPEND();
+	zend_async_waker_clean(coroutine);
+
+	return EG(exception) == NULL;
+}
+
+/* The processor of a buffered body in `*processor`, NULL when the body is
+ * absent or the processor refuses it. False when a yield ended in an
+ * exception; nothing is kept then. */
+static bool http_request_form_parse_buffered(const http_request_t *req, mp_processor_t **processor)
+{
+	*processor = NULL;
+
 	if (req->body == NULL) {
-		return NULL;
+		return true;
 	}
 
-	mp_processor_t *const processor = http_request_form_open_multipart(req);
+	mp_processor_t *const parsing = http_request_form_open_multipart(req);
 
-	if (processor == NULL) {
-		return NULL;
+	if (parsing == NULL) {
+		return true;
 	}
 
-	if (mp_processor_feed(processor, ZSTR_VAL(req->body), ZSTR_LEN(req->body)) < 0) {
-		mp_processor_cleanup_temp_files(processor);
-		mp_processor_destroy(processor);
-		return NULL;
+	const char *next = ZSTR_VAL(req->body);
+	size_t remaining = ZSTR_LEN(req->body);
+
+	while (remaining > 0) {
+		const size_t slice =
+			remaining < HTTP_REQUEST_FORM_FEED_SLICE ? remaining : HTTP_REQUEST_FORM_FEED_SLICE;
+
+		if (mp_processor_feed(parsing, next, slice) < 0) {
+			mp_processor_cleanup_temp_files(parsing);
+			mp_processor_destroy(parsing);
+			return true;
+		}
+
+		next += slice;
+		remaining -= slice;
+
+		if (remaining > 0 && !http_request_form_yield()) {
+			mp_processor_cleanup_temp_files(parsing);
+			mp_processor_destroy(parsing);
+			return false;
+		}
 	}
 
-	return processor;
+	*processor = parsing;
+	return true;
 }
 
 static void http_request_form_publish(const mp_processor_t *processor, zval *post, zval *files)
@@ -89,10 +134,19 @@ static void http_request_form_publish(const mp_processor_t *processor, zval *pos
 	size_t field_count;
 	const mp_field_info_t *const fields = mp_processor_get_fields(processor, &field_count);
 
-	for (size_t i = 0; i < field_count; i++) {
-		if (fields[i].name != NULL) {
-			php_register_variable_safe(fields[i].name, fields[i].value, fields[i].value_len, post);
+	zend_long field_budget = PG(max_input_vars);
+
+	for (size_t i = 0; i < field_count && field_budget > 0; i++) {
+		if (fields[i].name == NULL) {
+			continue;
 		}
+
+		zval value;
+
+		ZVAL_STRINGL(&value, fields[i].value, fields[i].value_len);
+		field_budget--;
+		http_form_vars_register(Z_ARRVAL_P(post), fields[i].name, strlen(fields[i].name), &value,
+								PG(max_input_nesting_level));
 	}
 
 	size_t upload_count;
@@ -105,30 +159,30 @@ static void http_request_form_publish(const mp_processor_t *processor, zval *pos
 
 		zval *const upload = uploaded_file_create_from_info(&uploads[i]);
 
-		if (upload == NULL) {
-			continue;
-		}
-
-		php_register_variable_ex(uploads[i].field_name, upload, files);
+		http_form_vars_register(Z_ARRVAL_P(files), uploads[i].field_name,
+								strlen(uploads[i].field_name), upload, PG(max_input_nesting_level));
 		efree(upload);
 	}
 }
 
-static void http_request_form_decode_multipart(http_request_t *req, zval *post, zval *files)
+static bool http_request_form_decode_multipart(http_request_t *req, zval *post, zval *files)
 {
-	if (req->multipart_proc == NULL) {
-		req->multipart_proc = http_request_form_parse_buffered(req);
+	if (req->multipart_proc == NULL
+		&& !http_request_form_parse_buffered(req, &req->multipart_proc)) {
+		return false;
 	}
 
 	if (req->multipart_proc != NULL) {
 		http_request_form_publish(req->multipart_proc, post, files);
 	}
+
+	return true;
 }
 
-void http_request_form_build(http_request_t *req)
+bool http_request_form_build(http_request_t *req)
 {
-	if (req->form_built || !req->complete) {
-		return;
+	if (req->post_data != NULL || !req->complete) {
+		return true;
 	}
 
 	zval post;
@@ -139,11 +193,14 @@ void http_request_form_build(http_request_t *req)
 
 	if (req->form_kind == HTTP_FORM_URLENCODED) {
 		http_request_form_decode_urlencoded(req, &post);
-	} else if (req->form_kind == HTTP_FORM_MULTIPART) {
-		http_request_form_decode_multipart(req, &post, &files);
+	} else if (req->form_kind == HTTP_FORM_MULTIPART
+			   && !http_request_form_decode_multipart(req, &post, &files)) {
+		zval_ptr_dtor(&post);
+		zval_ptr_dtor(&files);
+		return false;
 	}
 
 	req->post_data = Z_ARR(post);
 	req->files = Z_ARR(files);
-	req->form_built = true;
+	return true;
 }

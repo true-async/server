@@ -8,12 +8,15 @@
 
 /* The form of a request: the fields and files of an url-encoded or multipart
  * body, keyed the way PHP fills $_POST, so `list[]`, `map[key]` and
- * `m[0][1]` nest. All three transports share it. HTTP/1 streams a multipart
- * body into its processor while the body arrives; HTTP/2 and HTTP/3 buffer the
- * body and the processor reads it here, on first use. */
+ * `m[0][1]` nest. All three transports share it. HTTP/1 and HTTP/2 feed a
+ * multipart body to its processor while the body arrives; HTTP/3 buffers the
+ * body, since its transport callbacks may not write files, and the processor
+ * reads it here, on first use. */
 
 #ifndef TRUE_ASYNC_HTTP_REQUEST_FORM_H
 #define TRUE_ASYNC_HTTP_REQUEST_FORM_H
+
+#include <stdbool.h>
 
 struct http_request_t;
 struct mp_processor_t;
@@ -28,11 +31,12 @@ struct mp_processor_t *http_request_form_open_multipart(const struct http_reques
  * return at once. While the body is incomplete it does nothing, so the next
  * call builds the form. A request that is not a form gets two empty arrays. A
  * buffered multipart body the processor refuses gives an empty form: HTTP/1
- * refuses such a body with 400 before any handler runs, HTTP/2 and HTTP/3
- * have started the handler already.
+ * and HTTP/2 refuse such a body before it is complete, HTTP/3 buffers it.
  *
  * Runs on the thread of the handler: the arrays and UploadedFile objects are
- * allocated there. */
-void http_request_form_build(struct http_request_t *req);
+ * allocated there. A buffered multipart body is parsed in slices with a yield
+ * of the current coroutine between them; false when that yield ended in an
+ * exception, and no form is kept then. */
+bool http_request_form_build(struct http_request_t *req);
 
 #endif

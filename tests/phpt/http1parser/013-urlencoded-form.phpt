@@ -23,6 +23,10 @@ var_dump($request->getFiles());
 /* The same bytes under another media type are not a form. */
 var_dump($parse('text/plain', $form)->getPost());
 var_dump($parse('application/x-www-form-urlencoded-not', $form)->getPost());
+
+/* Reading the body first leaves the form readable. */
+$request = $parse('application/x-www-form-urlencoded', 'x=1&y=2');
+var_dump($request->readBody(), $request->readBody(), $request->getPost());
 ?>
 --EXPECT--
 array(6) {
@@ -62,4 +66,12 @@ array(0) {
 array(0) {
 }
 array(0) {
+}
+string(7) "x=1&y=2"
+NULL
+array(2) {
+  ["x"]=>
+  string(1) "1"
+  ["y"]=>
+  string(1) "2"
 }

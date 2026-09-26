@@ -551,6 +551,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/formats/form_content_type.c
     src/http_request.c
     src/http_request_form.c
+    src/http_form_vars.c
     src/http_response.c
     src/grpc/grpc.c
     src/grpc/grpc_call.c

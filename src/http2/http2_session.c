@@ -27,6 +27,9 @@
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/async_plain_event.h"
+#include "formats/form_content_type.h"
+#include "formats/multipart_processor.h"
+#include "http_request_form.h"
 
 #include <string.h>
 
@@ -437,6 +440,57 @@ static int h2_refuse_stream(http2_session_t *session,
  * the window and somehow keeps shipping bytes, we refuse at this
  * layer too. A refusal goes out through h2_refuse_stream as a
  * stream-level reset; connection stays up for other streams. */
+/* A multipart body goes to its processor as DATA arrives, file parts straight
+ * to disk, as on HTTP/1: none of it is buffered. The stream is refused past
+ * max_body_size (413), on a body the processor cannot parse (400), and when
+ * memory_limit runs out (500). */
+static int h2_feed_multipart(http2_session_t *session,
+                             nghttp2_session *ng,
+                             http2_stream_t *stream,
+                             const int32_t stream_id,
+                             const uint8_t *data,
+                             const size_t len)
+{
+    mp_processor_t *const processor = stream->request->multipart_proc;
+    size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+
+    if (body_cap == 0) {
+        body_cap = HTTP2_MAX_BODY_SIZE;
+    }
+
+    if (processor->bytes_fed > body_cap || len > body_cap - processor->bytes_fed) {
+        return h2_refuse_stream(session, ng, stream, stream_id,
+                                NGHTTP2_ENHANCE_YOUR_CALM, 413);
+    }
+
+    /* Field values are accumulated with emalloc, so memory_limit can bail
+     * out mid-feed; see the buffered branch of cb_on_data_chunk_recv. */
+    volatile ssize_t processed = 0;
+    volatile bool    oom       = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
+    zend_try {
+        processed = mp_processor_feed(processor, (const char *)data, len);
+    } zend_catch {
+        http_bailout_state_restore(&bailout_state);
+        oom = true;
+    } zend_end_try();
+
+    if (UNEXPECTED(oom)) {
+        return h2_refuse_stream(session, ng, stream, stream_id,
+                                NGHTTP2_INTERNAL_ERROR, 500);
+    }
+
+    if (UNEXPECTED(processed < 0)) {
+        return h2_refuse_stream(session, ng, stream, stream_id,
+                                NGHTTP2_PROTOCOL_ERROR, 400);
+    }
+
+    (void)nghttp2_session_consume(ng, stream_id, len);
+    return 0;
+}
+
 static int cb_on_data_chunk_recv(nghttp2_session *ng,
                                  const uint8_t flags,
                                  const int32_t stream_id,
@@ -518,6 +572,10 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
         }
 
         return 0;
+    }
+
+    if (stream->request != NULL && stream->request->multipart_proc != NULL) {
+        return h2_feed_multipart(session, ng, stream, stream_id, data, len);
     }
 
     const size_t current = stream->request_body_buf.s != NULL
@@ -670,6 +728,16 @@ static int cb_on_frame_recv(nghttp2_session *ng,
             }
 
             http_request_classify_protocols(stream->request);
+
+            /* Opened before the first DATA frame, which follows END_HEADERS. */
+            if (stream->request->form_kind == HTTP_FORM_MULTIPART) {
+                stream->request->multipart_proc =
+                    http_request_form_open_multipart(stream->request);
+
+                if (stream->request->multipart_proc != NULL && session->conn != NULL) {
+                    stream->request->multipart_proc->log_state = session->conn->log_state;
+                }
+            }
 
             /* Streaming body mode (issue #26). Three-case policy by
              * Content-Length, see H1 parser for the full doc:

@@ -212,8 +212,6 @@ struct http_request_t {
      * default), true = persistent malloc (reactor-built) → those frees go
      * through pefree, flag-aware. Body/worker-derived fields stay ZMM. */
     bool         persistent     : 1;
-    /* post_data and files hold the form; set by http_request_form_build. */
-    bool         form_built     : 1;
 
     zend_string *traceparent_raw;
     zend_string *tracestate_raw;

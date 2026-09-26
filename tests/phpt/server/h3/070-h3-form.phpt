@@ -11,7 +11,8 @@ h3_skipif(['openssl_cli' => true, 'h3client' => true]);
 --FILE--
 <?php
 /* HTTP/3 starts the handler at the end of the headers, so the handler here
- * reads the form without awaitBody(): a form getter waits for the body itself. */
+ * reads the form without awaitBody(): a form getter waits for the body itself.
+ * The third body is parsed in two 256 KiB slices with a yield between them. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -40,6 +41,14 @@ file_put_contents($multipart,
     . "Content-Type: text/plain\r\n\r\nfile-bytes\r\n"
     . "--$boundary--\r\n");
 
+$sliced = $tmp . '/sliced.bin';
+file_put_contents($sliced,
+    "--$boundary\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nbefore\r\n"
+    . "--$boundary\r\nContent-Disposition: form-data; name=\"big\"; filename=\"big.bin\"\r\n"
+    . "Content-Type: application/octet-stream\r\n\r\n" . str_repeat('z', 400 * 1024) . "\r\n"
+    . "--$boundary\r\nContent-Disposition: form-data; name=\"after\"\r\n\r\nyes\r\n"
+    . "--$boundary--\r\n");
+
 require_once __DIR__ . '/../_free_port.inc';
 
 $port   = tas_free_port_span(2);
@@ -61,7 +70,7 @@ $server->addHttpHandler(function ($req, $res) {
 
 $client_bin = __DIR__ . '/../../../h3client/h3client';
 
-$client = spawn(function () use ($server, $port, $client_bin, $urlencoded, $multipart, $boundary) {
+$client = spawn(function () use ($server, $port, $client_bin, $urlencoded, $multipart, $sliced, $boundary) {
     usleep(80000);
 
     $request = static function (string $content_type, string $body_path) use ($client_bin, $port): string {
@@ -74,6 +83,7 @@ $client = spawn(function () use ($server, $port, $client_bin, $urlencoded, $mult
 
     echo $request('application/x-www-form-urlencoded', $urlencoded), "\n";
     echo $request("multipart/form-data; boundary=\"$boundary\"", $multipart), "\n";
+    echo $request("multipart/form-data; boundary=$boundary", $sliced), "\n";
 
     $server->stop();
 });
@@ -81,10 +91,11 @@ $client = spawn(function () use ($server, $port, $client_bin, $urlencoded, $mult
 $server->start();
 await($client);
 
-@unlink($cert); @unlink($key); @unlink($urlencoded); @unlink($multipart); @rmdir($tmp);
+@unlink($cert); @unlink($key); @unlink($urlencoded); @unlink($multipart); @unlink($sliced); @rmdir($tmp);
 echo "done\n";
 ?>
 --EXPECT--
 {"post":{"a":"1","list":["2","3"],"map":{"key":"4"}},"files":[]}
 {"post":{"list":["2","3"]},"files":{"docs":{"cv":"cv.txt:10"}}}
+{"post":{"note":"before","after":"yes"},"files":{"big":"big.bin:409600"}}
 done

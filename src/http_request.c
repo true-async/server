@@ -19,9 +19,10 @@
 #include "log/trace_context.h"
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_exceptions.h"
-#include "main/php_variables.h"
 #include "formats/form_content_type.h"
 #include "http_request_form.h"
+#include "http_form_vars.h"
+#include "core/body_pool.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -517,30 +518,49 @@ ZEND_METHOD(TrueAsync_HttpRequest, isKeepAlive)
     RETURN_BOOL(intern->request->keep_alive);
 }
 
+/* The wait http_request_await_complete could not start. With a `caller` it
+ * throws naming that method; without one the caller answers for itself. */
+static bool http_request_await_refused(const char *caller)
+{
+    if (caller != NULL) {
+        /* Nothing to suspend on, and no caller has a value to say so with:
+         * awaitBody() returns `static`, and $this would report a body this
+         * call never waited for; a form getter's empty array would read as
+         * a form without fields. */
+        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
+            "%s: the current coroutine cannot be suspended", caller);
+    }
+
+    return false;
+}
+
 /* Suspends the current coroutine until the request body is complete; true at
- * once when it already is. False with an exception thrown when the coroutine
- * cannot suspend or the wait ended in one; `caller` names the method in the
- * message. */
+ * once when it already is. False when the wait could not start (see
+ * http_request_await_refused) or ended in an exception. */
 static bool http_request_await_complete(http_request_t *req, const char *caller)
 {
-    /* Fast path: body has already been fully received. This is the
-     * default state because dispatch currently runs at message-complete;
-     * streaming mode (dispatch-at-headers-complete) is the one that
-     * actually needs the suspend path below. */
+    /* Fast path: body has already been fully received. HTTP/1 dispatches
+     * at message-complete unless the body streams; HTTP/2 and HTTP/3
+     * dispatch at the end of the headers, so a handler there can arrive
+     * before its body. */
     if (req == NULL || req->complete) {
         return true;
     }
 
+    zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    if (coroutine == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
+        return http_request_await_refused(caller);
+    }
+
     /* Lazy-create the body_event trigger. Once installed, the parser's
      * on_message_complete hook fires it, which resolves all attached
-     * wakers. */
+     * wakers. Out of memory or reactor shutdown leaves nothing to wait on. */
     if (req->body_event == NULL) {
         zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
 
         if (trig == NULL) {
-            /* Out of memory / reactor shutdown — fall back to answering
-             * as if the wait had completed. */
-            return true;
+            return http_request_await_refused(caller);
         }
 
         req->body_event = &trig->base;
@@ -548,16 +568,8 @@ static bool http_request_await_complete(http_request_t *req, const char *caller)
 
     /* Attach a waker to body_event and suspend. Mirrors the pattern
      * used by http_connection's async_io_req_await. */
-    zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
-
     if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
-        /* Nothing to suspend on, and no caller has a value to say so with:
-         * awaitBody() returns `static`, and $this would report a body this
-         * call never waited for; a form getter's empty array would read as
-         * a form without fields. */
-        zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
-            "%s: the current coroutine cannot be suspended", caller);
-        return false;
+        return http_request_await_refused(caller);
     }
 
     zend_async_resume_when(coroutine, req->body_event, false,
@@ -569,17 +581,42 @@ static bool http_request_await_complete(http_request_t *req, const char *caller)
     return EG(exception) == NULL;
 }
 
-/* A form getter waits for the body: HTTP/2 and HTTP/3 start the handler at
- * the end of the headers, and an answer before the body would read as a form
- * without fields. */
-static bool http_request_form_ready(http_request_t *req, const char *caller)
+/* Hands the buffered body to PHP once; the next read sees EOF. The form of a
+ * form request is built first, so its getters still answer afterwards. */
+static void http_request_hand_over_body(http_request_t *req, zval *return_value)
+{
+    if (req->form_kind != HTTP_FORM_NONE && !http_request_form_build(req)) {
+        return;
+    }
+
+    if (req->body == NULL || ZSTR_LEN(req->body) == 0) {
+        RETURN_NULL();
+    }
+
+    zend_string *const body = req->body;
+    req->body = NULL;
+
+    /* A pool slot goes back to the pool and a reactor-built body lives on the
+     * persistent heap; neither can become a PHP value, so PHP gets a copy. */
+    if (body_pool_owns(body) || (GC_FLAGS(body) & IS_STR_PERSISTENT)) {
+        RETVAL_STRINGL(ZSTR_VAL(body), ZSTR_LEN(body));
+        body_release(body);
+        return;
+    }
+
+    RETURN_STR(body);
+}
+
+/* Waits for the body of a form request, then builds its form. HTTP/2 and
+ * HTTP/3 start the handler at the end of the headers, and an answer before the
+ * body would read as a form without fields. */
+static bool http_request_await_form(http_request_t *req, const char *caller)
 {
     if (req->form_kind != HTTP_FORM_NONE && !http_request_await_complete(req, caller)) {
         return false;
     }
 
-    http_request_form_build(req);
-    return true;
+    return http_request_form_build(req);
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getPost)
@@ -587,7 +624,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getPost)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
-    if (!http_request_form_ready(intern->request, "getPost()")) {
+    if (!http_request_await_form(intern->request, "getPost()")) {
         RETURN_THROWS();
     }
 
@@ -603,7 +640,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFiles)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
-    if (!http_request_form_ready(intern->request, "getFiles()")) {
+    if (!http_request_await_form(intern->request, "getFiles()")) {
         RETURN_THROWS();
     }
 
@@ -623,7 +660,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFile)
         Z_PARAM_STR(name)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!http_request_form_ready(intern->request, "getFile()")) {
+    if (!http_request_await_form(intern->request, "getFile()")) {
         RETURN_THROWS();
     }
 
@@ -631,7 +668,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, getFile)
         RETURN_NULL();
     }
 
-    zval *file = zend_hash_find(intern->request->files, name);
+    /* symtable: a numeric field name is stored under an integer key */
+    zval *file = zend_symtable_find(intern->request->files, name);
 
     if (!file) {
         RETURN_NULL();
@@ -693,10 +731,11 @@ static void http_request_ensure_uri_parsed(http_request_t *req)
     size_t qslen = ulen - (size_t)(q + 1 - uri);
 
     if (qslen > 0) {
-        /* php_default_treat_data takes ownership of the string (calls efree),
-         * handles percent-decoding, '+'-as-space, PHP array notation, and
-         * max_input_vars — identical to how PHP populates $_GET. */
-        php_default_treat_data(PARSE_STRING, estrndup(q + 1, qslen), &arr);
+        /* Percent-decoding, '+' as space, PHP array notation, max_input_vars
+         * and arg_separator.input, as PHP populates $_GET. */
+        http_form_vars_decode(Z_ARRVAL(arr), q + 1, qslen,
+                              ZSTR_VAL(PG(arg_separator).input),
+                              PG(max_input_vars), PG(max_input_nesting_level));
     }
 
     req->query_params = Z_ARR(arr);
@@ -1081,13 +1120,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
 
     /* ─── Case 0/1: body already fully buffered. Return whole, then EOF. */
     if (!req->body_streaming && req->complete) {
-        if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
-            zend_string *body = req->body;
-            req->body = NULL;
-            RETURN_STR(body);
-        }
-
-        RETURN_NULL();
+        http_request_hand_over_body(req, return_value);
+        return;
     }
 
     /* ─── Case 1 (still arriving, small body): just wait for completion
@@ -1097,44 +1131,17 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
      * HTTP_BODY_STREAM_THRESHOLD and therefore left body_streaming=false
      * AND did NOT install body_upgrade_to_stream. */
     if (!req->body_streaming && req->body_upgrade_to_stream == NULL) {
-        if (req->body_event == NULL) {
-            zend_async_trigger_event_t *trig = ZEND_ASYNC_NEW_TRIGGER_EVENT();
-
-            if (trig == NULL) {
-                RETURN_NULL();
+        if (!http_request_await_complete(req, NULL)) {
+            if (EG(exception) != NULL) {
+                return;
             }
 
-            req->body_event = &trig->base;
-        }
-
-        zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
-
-        if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) {
             RETURN_NULL();
         }
 
-        if (ZEND_ASYNC_WAKER_NEW(co) == NULL) {
-            return;
-        }
-
-        zend_async_resume_when(co, req->body_event, false,
-                               zend_async_waker_callback_resolve, NULL);
-
-        ZEND_ASYNC_SUSPEND();
-        zend_async_waker_clean(co);
-
-        if (EG(exception) != NULL) {
-            return;
-        }
-
         /* Body is now complete — drain req->body once. */
-        if (req->body != NULL && ZSTR_LEN(req->body) > 0) {
-            zend_string *body = req->body;
-            req->body = NULL;
-            RETURN_STR(body);
-        }
-
-        RETURN_NULL();
+        http_request_hand_over_body(req, return_value);
+        return;
     }
 
     /* ─── Case 2: middle band (SMALL <= CL < AUTO). Parser was buffering
