@@ -43,15 +43,16 @@ zend_fcall_t *http_protocol_pick_handler(HashTable *handlers,
                                          http_protocol_type_t protocol,
                                          bool is_grpc);
 
-/* Stamp the request's grpc_mode once at headers-complete, before any
- * body-streaming decision; transports never classify themselves and read
- * the body policy through the predicates below. */
+/* Stamp the request's grpc_mode and form_kind once at headers-complete,
+ * before any body-streaming decision; transports never classify themselves
+ * and read the body policy through the predicates below. */
 void http_request_classify_protocols(struct http_request_t *req);
 
-/* Body policy derived from the stamped grpc_mode, keeping transports
- * gRPC-agnostic. must_buffer: never stream (grpc-web-text decodes the whole
- * body). size_uncapped: waive the cumulative max_body_size cap (gRPC streams
- * are unbounded; the in-flight window still bounds memory). */
+/* Body policy derived from the stamped grpc_mode and form_kind, keeping
+ * transports gRPC-agnostic. must_buffer: never stream (grpc-web-text decodes
+ * the whole body, and a form getter reads the whole body). size_uncapped:
+ * waive the cumulative max_body_size cap (gRPC streams are unbounded; the
+ * in-flight window still bounds memory). */
 bool http_request_body_must_buffer(const struct http_request_t *req);
 bool http_request_body_size_uncapped(const struct http_request_t *req);
 

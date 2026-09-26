@@ -548,7 +548,9 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/http1/http1_format.c
     src/formats/multipart_parser.c
     src/formats/multipart_processor.c
+    src/formats/form_content_type.c
     src/http_request.c
+    src/http_request_form.c
     src/http_response.c
     src/grpc/grpc.c
     src/grpc/grpc_call.c

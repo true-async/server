@@ -212,6 +212,8 @@ struct http_request_t {
      * default), true = persistent malloc (reactor-built) → those frees go
      * through pefree, flag-aware. Body/worker-derived fields stay ZMM. */
     bool         persistent     : 1;
+    /* post_data and files hold the form; set by http_request_form_build. */
+    bool         form_built     : 1;
 
     zend_string *traceparent_raw;
     zend_string *tracestate_raw;
@@ -273,6 +275,8 @@ struct http_request_t {
     /* grpc_mode_t stamped once at headers-complete; body policy derives
      * from it (http_request_body_must_buffer / _size_uncapped). */
     uint8_t      grpc_mode;
+    /* http_form_kind_t, stamped beside grpc_mode from the same header. */
+    uint8_t      form_kind;
 };
 
 /* Single chunk node in the streaming body queue (linked list).

@@ -26,22 +26,8 @@
 #  include "compression/http_compression_request.h"
 #endif
 
-grpc_mode_t grpc_request_mode(const http_request_t *req)
+grpc_mode_t grpc_content_type_mode(const char *val, size_t len)
 {
-    if (req->headers == NULL) {
-        return GRPC_MODE_NONE;
-    }
-
-    zval *content_type = zend_hash_str_find(req->headers, "content-type",
-                                            sizeof("content-type") - 1);
-
-    if (content_type == NULL || Z_TYPE_P(content_type) != IS_STRING) {
-        return GRPC_MODE_NONE;
-    }
-
-    const char *val = Z_STRVAL_P(content_type);
-    size_t      len = Z_STRLEN_P(content_type);
-
     const size_t grpc_len = sizeof(GRPC_CONTENT_TYPE) - 1;
 
     if (len < grpc_len || strncasecmp(val, GRPC_CONTENT_TYPE, grpc_len) != 0) {
