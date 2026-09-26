@@ -513,8 +513,8 @@ static int on_part_data(multipart_parser_t* parser, const char* at, size_t lengt
         /* Subtractive form — see file_size check above (S-02). */
         if (proc->field_value_len > max_size ||
             length > max_size - proc->field_value_len) {
-            /* Field too large - truncate silently */
-            return 0;
+            proc->refusal = MP_REFUSAL_FIELD_TOO_LARGE;
+            return -1;
         }
 
         if (str_append(&proc->field_value, &proc->field_value_len,
@@ -591,7 +591,8 @@ static int on_part_end(multipart_parser_t* parser)
                             proc->config.max_fields : MP_MAX_FIELDS;
 
         if (proc->fields_count >= max_fields) {
-            return 0;  /* Skip, too many fields */
+            proc->refusal = MP_REFUSAL_TOO_MANY_FIELDS;
+            return -1;
         }
 
         /* Expand array if needed */
@@ -681,6 +682,10 @@ ssize_t mp_processor_feed(mp_processor_t* proc, const char* data, size_t len)
     if (!proc || !data) return -1;
 
     const ssize_t processed = multipart_parser_execute(proc->parser, data, len);
+
+    if (processed < 0 && proc->refusal == MP_REFUSAL_NONE) {
+        proc->refusal = MP_REFUSAL_MALFORMED;
+    }
 
     /* All of `len` counts: past the closing boundary the parser consumes
      * nothing, and bytes a peer keeps sending there are body bytes still. */

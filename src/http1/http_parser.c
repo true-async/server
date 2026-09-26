@@ -518,7 +518,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
      * from the processor when a getter asks for it. */
     if (req->form_kind == HTTP_FORM_MULTIPART) {
         req->multipart_proc = http_request_form_open_multipart(
-            req, parser->conn != NULL ? parser->conn->log_state : NULL);
+            req, parser->conn != NULL ? parser->conn->log_state : NULL, parser->max_body_size);
     }
 
     /* Streaming body mode (issue #26). Three-case policy by Content-Length:
@@ -542,6 +542,13 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     /* Prepare body buffer based on Content-Length (only if not multipart
      * AND not streaming) */
+    /* A multipart body counts against the limit too, though it is written to
+     * its processor rather than buffered; on_body counts a chunked one. */
+    if (req->multipart_proc != NULL && req->content_length > parser->max_body_size) {
+        parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+        return -1;  /* 413 Payload Too Large */
+    }
+
     if (req->multipart_proc == NULL && !req->body_streaming && req->content_length > 0) {
         /* Check body size limit */
         if (req->content_length > parser->max_body_size) {
@@ -626,11 +633,19 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
 
     /* If multipart, feed to processor instead */
     if (req->multipart_proc != NULL) {
-        ssize_t result = mp_processor_feed(req->multipart_proc, at, length);
+        mp_processor_t *const processor = req->multipart_proc;
 
-        if (result < 0) {
-            parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
-            return -1;  /* Multipart parsing error */
+        if (processor->bytes_fed > parser->max_body_size
+            || length > parser->max_body_size - processor->bytes_fed) {
+            parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+            return -1;  /* 413 Payload Too Large */
+        }
+
+        if (mp_processor_feed(processor, at, length) < 0) {
+            parser->parse_error = http_request_form_refusal_status(processor) == 413
+                ? HTTP_PARSE_ERR_BODY_TOO_LARGE
+                : HTTP_PARSE_ERR_MALFORMED;
+            return -1;
         }
 
         return 0;

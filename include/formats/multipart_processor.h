@@ -54,6 +54,16 @@
 #define MP_UPLOAD_ERR_INVALID_NAME    101 /* Invalid filename */
 #define MP_UPLOAD_ERR_TOO_LARGE       102 /* File too large */
 
+/* Why mp_processor_feed refused the body. A limit over a form field refuses
+ * the whole body: a form missing a field reads as a different form. The file
+ * limits answer per file instead, through mp_file_info_t.error, as PHP does. */
+typedef enum {
+    MP_REFUSAL_NONE = 0,
+    MP_REFUSAL_MALFORMED,        /* the parser rejected the bytes */
+    MP_REFUSAL_TOO_MANY_FIELDS,  /* more fields than config.max_fields */
+    MP_REFUSAL_FIELD_TOO_LARGE,  /* a field value past config.max_field_size */
+} mp_refusal_t;
+
 /* Uploaded file info */
 typedef struct {
     char*    field_name;       /* Form field name (e.g., "avatar" or "files[]") */
@@ -129,6 +139,9 @@ struct mp_processor_t {
     mp_field_info_t*    fields;            /* Array of form fields */
     size_t              fields_count;
     size_t              fields_capacity;
+
+    /* Why the last feed failed; MP_REFUSAL_NONE while it has not */
+    mp_refusal_t        refusal;
 
     /* Body bytes handed to mp_processor_feed so far, parsed or not */
     size_t              bytes_fed;

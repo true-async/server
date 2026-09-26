@@ -121,9 +121,15 @@ final class HttpRequest
      * Form fields of an application/x-www-form-urlencoded or multipart/form-data body.
      *
      * Keys follow PHP's rules for $_POST: name[] appends, user[name] and
-     * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`;
-     * max_input_vars and max_input_nesting_level apply. Empty for any other
-     * Content-Type.
+     * matrix[0][1] nest, and a `.` or a space in the base name becomes `_`.
+     * Empty for any other Content-Type.
+     *
+     * A form over a limit is refused rather than shortened: more fields than
+     * max_input_vars, a name nested deeper than max_input_nesting_level, or a
+     * malformed multipart body throws {@see HttpException} with code 400, and a
+     * body past {@see HttpServerConfig::setMaxBodySize()} with 413. Uncaught, it
+     * answers the request with that status. HTTP/1 refuses such a body before
+     * the handler runs; HTTP/2 resets the stream while the body arrives.
      *
      * Over HTTP/2 and HTTP/3 the handler starts before the body has arrived, so
      * this call suspends until it has, as {@see awaitBody()} does. A form body
@@ -137,7 +143,7 @@ final class HttpRequest
     /**
      * Uploaded files of a multipart/form-data body, keyed as in {@see getPost()}:
      * ['avatar' => UploadedFile, 'photos' => [UploadedFile, ...], 'docs' => ['cv' => UploadedFile]].
-     * Waits for the body as getPost() does.
+     * Waits for the body, and is refused, as getPost() is.
      *
      * @return array
      */

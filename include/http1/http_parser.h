@@ -281,6 +281,11 @@ struct http_request_t {
     uint8_t      grpc_mode;
     /* http_form_kind_t, stamped beside grpc_mode from the same header. */
     uint8_t      form_kind;
+    /* The HTTP status the request body or its form was refused with, once a
+     * handler is running: an HTTP/3 body past its limit, or a form over one.
+     * 0 while nothing was refused. Waits for the body and form getters throw
+     * HttpException with it. */
+    uint16_t     refused_status;
 };
 
 /* Single chunk node in the streaming body queue (linked list).
