@@ -34,16 +34,24 @@ typedef enum
 /* Stores `value` in `target` under the PHP variable `name` (`name_len` bytes,
  * not NUL-terminated; a NUL ends the name as it ends a C string). Takes the
  * value in every case: stored, or released when the name is empty after its
- * leading spaces or nests deeper than `max_depth` bracket levels. */
+ * leading spaces, nests deeper than `max_depth` bracket levels, or spells a
+ * `__Host-`/`__Secure-` key the name as sent does not begin with. */
 http_form_vars_result_t http_form_vars_register(HashTable *target, const char *name,
 												size_t name_len, zval *value, zend_long max_depth);
 
-/* Decodes `name=value` pairs, percent-encoded with `+` for space, into `target`.
- * A pair ends at any byte of `separators` (NUL-terminated; "&" for a form
- * body, arg_separator.input for a query string); an empty pair is skipped and
- * a pair without `=` has the empty value. Stops at the first pair past
- * `max_vars` or the first name deeper than `max_depth` and says which; what
- * was stored before that stays. */
+/* Runs sapi_module.input_filter over a decoded value, as PHP does before it
+ * stores a GET, POST or multipart variable. False when the filter drops the
+ * variable. The filter may replace `*value` with a new emalloc'd buffer; the
+ * caller frees whichever `*value` holds. `name` is NUL-terminated. */
+bool http_form_vars_filter(const char *name, char **value, size_t value_len, size_t *filtered_len);
+
+/* Decodes `name=value` pairs, percent-encoded with `+` for space, into `target`,
+ * passing each value through http_form_vars_filter. A pair
+ * ends at any byte of `separators` (NUL-terminated; "&" for a form body,
+ * arg_separator.input for a query string); an empty pair is skipped and a
+ * pair without `=` has the empty value. A name deeper than `max_depth` is
+ * dropped and the rest is still read (the result says TOO_DEEP); past
+ * `max_vars` pairs decoding stops (TOO_MANY), keeping what was stored. */
 http_form_vars_result_t http_form_vars_decode(HashTable *target, const char *data, size_t data_len,
 											  const char *separators, zend_long max_vars,
 											  zend_long max_depth);

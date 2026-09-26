@@ -18,6 +18,8 @@
 
 #include "php.h"
 #include "ext/standard/url.h"
+#include "SAPI.h"
+#include "main/php_variables.h"
 #include "http_form_vars.h"
 
 #include <string.h>
@@ -41,6 +43,31 @@ static void mangle_base(char *from, const char *to, const bool bracket_too)
 			*p = '_';
 		}
 	}
+}
+
+/* php_is_forbidden_variable_name: a key spelling a cookie prefix is refused
+ * unless the name as sent begins with it, so "a[__Host-x]" cannot plant a key
+ * that later code reads as a prefixed cookie. */
+static bool is_forbidden_key(const char *key, const size_t key_len, const char *name,
+							 const size_t name_len)
+{
+	static const struct
+	{
+		const char *text;
+		size_t len;
+	} prefixes[] = {
+		{"__Host-", sizeof("__Host-") - 1},
+		{"__Secure-", sizeof("__Secure-") - 1},
+	};
+
+	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+		if (key_len >= prefixes[i].len && memcmp(key, prefixes[i].text, prefixes[i].len) == 0 &&
+			(name_len < prefixes[i].len || memcmp(name, prefixes[i].text, prefixes[i].len) != 0)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 /* The array one level down: appended when `append`, else the entry at `key`,
@@ -159,6 +186,12 @@ http_form_vars_result_t http_form_vars_register(HashTable *target, const char *n
 			break;
 		}
 
+		if (!append && is_forbidden_key(key, key_len, name, name_len)) {
+			zval_ptr_dtor_nogc(value);
+			free_alloca(buffer, use_heap);
+			return HTTP_FORM_VARS_OK;
+		}
+
 		table = descend(table, key, key_len, append);
 
 		if (UNEXPECTED(table == NULL)) {
@@ -178,9 +211,30 @@ http_form_vars_result_t http_form_vars_register(HashTable *target, const char *n
 		}
 	}
 
-	store(table, key, key_len, append, value);
+	if (!append && is_forbidden_key(key, key_len, name, name_len)) {
+		zval_ptr_dtor_nogc(value);
+	} else {
+		store(table, key, key_len, append, value);
+	}
+
 	free_alloca(buffer, use_heap);
 	return HTTP_FORM_VARS_OK;
+}
+
+bool http_form_vars_filter(const char *name, char **value, const size_t value_len,
+						   size_t *filtered_len)
+{
+	*filtered_len = value_len;
+
+	if (sapi_module.input_filter == NULL) {
+		return true;
+	}
+
+	/* PARSE_STRING, the argument parse_str() passes, whatever the source: for
+	 * PARSE_POST and PARSE_GET ext/filter also stores the variable in $_POST or
+	 * $_GET and in its INPUT_* copies, which belong to the whole worker here,
+	 * not to one request, and stores it through the interning registration. */
+	return sapi_module.input_filter(PARSE_STRING, name, value, value_len, filtered_len) != 0;
 }
 
 static http_form_vars_result_t decode_pair(HashTable *target, const char *pair,
@@ -193,16 +247,19 @@ static http_form_vars_result_t decode_pair(HashTable *target, const char *pair,
 
 	char *const name = estrndup(pair, name_len);
 	const size_t decoded_name_len = php_url_decode(name, name_len);
+	char *value = estrndup(raw_value, raw_value_len);
+	const size_t value_len = php_url_decode(value, raw_value_len);
+	size_t filtered_len;
+	http_form_vars_result_t result = HTTP_FORM_VARS_OK;
 
-	zend_string *const decoded_value = zend_string_init(raw_value, raw_value_len, 0);
-	ZSTR_LEN(decoded_value) = php_url_decode(ZSTR_VAL(decoded_value), raw_value_len);
+	if (http_form_vars_filter(name, &value, value_len, &filtered_len)) {
+		zval stored;
 
-	zval value;
-	ZVAL_STR(&value, decoded_value);
+		ZVAL_STRINGL_FAST(&stored, value, filtered_len);
+		result = http_form_vars_register(target, name, decoded_name_len, &stored, max_depth);
+	}
 
-	const http_form_vars_result_t result =
-		http_form_vars_register(target, name, decoded_name_len, &value, max_depth);
-
+	efree(value);
 	efree(name);
 	return result;
 }
@@ -214,6 +271,7 @@ http_form_vars_result_t http_form_vars_decode(HashTable *target, const char *dat
 	const char *const end = data + data_len;
 	const char *pair = data;
 	zend_long count = 0;
+	http_form_vars_result_t result = HTTP_FORM_VARS_OK;
 
 	while (pair < end) {
 		const char *pair_end = pair;
@@ -227,16 +285,16 @@ http_form_vars_result_t http_form_vars_decode(HashTable *target, const char *dat
 				return HTTP_FORM_VARS_TOO_MANY;
 			}
 
-			const http_form_vars_result_t result =
-				decode_pair(target, pair, (size_t)(pair_end - pair), max_depth);
-
-			if (result != HTTP_FORM_VARS_OK) {
-				return result;
+			/* A name too deep is dropped alone, as PHP drops it; the pairs
+			 * after it are still read. */
+			if (decode_pair(target, pair, (size_t)(pair_end - pair), max_depth) ==
+				HTTP_FORM_VARS_TOO_DEEP) {
+				result = HTTP_FORM_VARS_TOO_DEEP;
 			}
 		}
 
 		pair = pair_end + 1;
 	}
 
-	return HTTP_FORM_VARS_OK;
+	return result;
 }

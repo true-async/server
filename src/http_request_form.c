@@ -7,8 +7,9 @@
 */
 
 /* Keys follow PHP's rules for $_POST (http_form_vars.h): array notation,
- * max_input_vars, max_input_nesting_level, and a dot or a space in a base name
- * turned into `_`. An url-encoded body splits on `&` alone, as $_POST does. */
+ * the input filter, max_input_vars, max_input_nesting_level, and a dot or a
+ * space in a base name turned into `_`. An url-encoded body splits on `&`
+ * alone, as $_POST does. */
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -27,7 +28,8 @@
 /* uploaded_file.c; an emalloc'd zval the caller frees after moving the object out. */
 extern zval *uploaded_file_create_from_info(mp_file_info_t *info);
 
-mp_processor_t *http_request_form_open_multipart(const http_request_t *req)
+mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
+												 struct http_log_state *log_state)
 {
 	const zval *const content_type =
 		zend_hash_str_find(req->headers, "content-type", sizeof("content-type") - 1);
@@ -52,7 +54,13 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req)
 	memcpy(terminated, boundary, boundary_len);
 	terminated[boundary_len] = '\0';
 
-	return mp_processor_create(terminated, NULL);
+	mp_processor_t *const processor = mp_processor_create(terminated, NULL);
+
+	if (processor != NULL) {
+		processor->log_state = log_state;
+	}
+
+	return processor;
 }
 
 static void http_request_form_decode_urlencoded(const http_request_t *req, zval *post)
@@ -99,7 +107,7 @@ static bool http_request_form_parse_buffered(const http_request_t *req, mp_proce
 		return true;
 	}
 
-	mp_processor_t *const parsing = http_request_form_open_multipart(req);
+	mp_processor_t *const parsing = http_request_form_open_multipart(req, NULL);
 
 	if (parsing == NULL) {
 		return true;
@@ -144,12 +152,20 @@ static void http_request_form_publish(const mp_processor_t *processor, zval *pos
 			continue;
 		}
 
-		zval value;
+		char *value = estrndup(fields[i].value, fields[i].value_len);
+		size_t filtered_len;
 
-		ZVAL_STRINGL(&value, fields[i].value, fields[i].value_len);
 		field_budget--;
-		http_form_vars_register(Z_ARRVAL_P(post), fields[i].name, strlen(fields[i].name), &value,
-								PG(max_input_nesting_level));
+
+		if (http_form_vars_filter(fields[i].name, &value, fields[i].value_len, &filtered_len)) {
+			zval stored;
+
+			ZVAL_STRINGL_FAST(&stored, value, filtered_len);
+			http_form_vars_register(Z_ARRVAL_P(post), fields[i].name, strlen(fields[i].name),
+									&stored, PG(max_input_nesting_level));
+		}
+
+		efree(value);
 	}
 
 	size_t upload_count;
@@ -184,20 +200,37 @@ static bool http_request_form_decode_multipart(http_request_t *req, zval *post, 
 
 bool http_request_form_build(http_request_t *req)
 {
+	/* Another coroutine of this request is parsing the body, yielding between
+	 * slices: wait for its form rather than parse the body a second time. */
+	while (req->form_building) {
+		ZEND_ASSERT(ZEND_ASYNC_CURRENT_COROUTINE != NULL);
+
+		if (!http_request_form_yield()) {
+			return false;
+		}
+	}
+
 	if (req->post_data != NULL || !req->complete) {
 		return true;
 	}
 
 	zval post;
 	zval files;
+	bool built = true;
 
 	array_init(&post);
 	array_init(&files);
+	req->form_building = true;
 
 	if (req->form_kind == HTTP_FORM_URLENCODED) {
 		http_request_form_decode_urlencoded(req, &post);
-	} else if (req->form_kind == HTTP_FORM_MULTIPART &&
-			   !http_request_form_decode_multipart(req, &post, &files)) {
+	} else if (req->form_kind == HTTP_FORM_MULTIPART) {
+		built = http_request_form_decode_multipart(req, &post, &files);
+	}
+
+	req->form_building = false;
+
+	if (!built) {
 		zval_ptr_dtor(&post);
 		zval_ptr_dtor(&files);
 		return false;

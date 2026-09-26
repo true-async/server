@@ -30,6 +30,7 @@ $corpus = [
     'n%00ame=1&o[k%00ey]=2',
     'a[b][c][d][e]=deep',
     'GLOBALS=1&this=2&__Host-x=3',
+    'a[__Host-x]=1&a[__Secure-y][z]=2&__Secure-w=4&b[x][__Host-q]=5',
 ];
 
 $query = static fn(string $qs): array => TrueAsync\http_parse_request("GET /?$qs HTTP/1.1\r\nHost: t\r\n\r\n")->getQuery();
@@ -74,3 +75,4 @@ v=%00bin%FF+plus%2B&w=%zz&x=%4           query=same post=same
 n%00ame=1&o[k%00ey]=2                    query=same post=same
 a[b][c][d][e]=deep                       query=same post=same
 GLOBALS=1&this=2&__Host-x=3              query=same post=same
+a[__Host-x]=1&a[__Secure-y][z]=2&__Secure-w=4&b[x][__Host-q]=5 query=same post=same

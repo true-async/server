@@ -2004,7 +2004,8 @@ final class HttpRequest
 
     /**
      * Get request body.
-     * Returns empty string if no body.
+     * Returns empty string if no body. A multipart body is not kept on HTTP/1
+     * and HTTP/2: its parts go to {@see getPost()} and {@see getFiles()}.
      */
     public function getBody(): string {}
 
@@ -2067,7 +2068,8 @@ final class HttpRequest
 
     /**
      * Get single uploaded file by name.
-     * For an array of files (photos[], docs[cv]), returns the first file in it.
+     * For an array of files (photos[], docs[cv]), returns the first file directly
+     * in it; deeper arrays are read through {@see getFiles()}.
      *
      * @param string $name Field name
      * @return UploadedFile|null File object or null if not found

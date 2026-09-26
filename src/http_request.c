@@ -581,30 +581,31 @@ static bool http_request_await_complete(http_request_t *req, const char *caller)
     return EG(exception) == NULL;
 }
 
-/* Hands the buffered body to PHP once; the next read sees EOF. The form of a
- * form request is built first, so its getters still answer afterwards. */
+/* Hands the buffered body to PHP once; the next read sees EOF. A pool slot goes
+ * back to the pool and a reactor-built body lives on the persistent heap, so
+ * neither becomes a PHP value itself: PHP gets a copy. A form request keeps its
+ * body, which its form is built from when a getter asks. */
 static void http_request_hand_over_body(http_request_t *req, zval *return_value)
 {
-    if (req->form_kind != HTTP_FORM_NONE && !http_request_form_build(req)) {
-        return;
-    }
-
-    if (req->body == NULL || ZSTR_LEN(req->body) == 0) {
+    if (req->body_handed_out || req->body == NULL || ZSTR_LEN(req->body) == 0) {
         RETURN_NULL();
     }
 
     zend_string *const body = req->body;
-    req->body = NULL;
 
-    /* A pool slot goes back to the pool and a reactor-built body lives on the
-     * persistent heap; neither can become a PHP value, so PHP gets a copy. */
-    if (body_pool_owns(body) || (GC_FLAGS(body) & IS_STR_PERSISTENT)) {
+    if (body_pool_owns(body)) {
         RETVAL_STRINGL(ZSTR_VAL(body), ZSTR_LEN(body));
-        body_release(body);
+    } else {
+        http_request_retval_str(return_value, body);
+    }
+
+    if (req->form_kind != HTTP_FORM_NONE) {
+        req->body_handed_out = true;
         return;
     }
 
-    RETURN_STR(body);
+    req->body = NULL;
+    body_release(body);
 }
 
 /* Waits for the body of a form request, then builds its form. HTTP/2 and
@@ -731,8 +732,9 @@ static void http_request_ensure_uri_parsed(http_request_t *req)
     size_t qslen = ulen - (size_t)(q + 1 - uri);
 
     if (qslen > 0) {
-        /* Percent-decoding, '+' as space, PHP array notation, max_input_vars
-         * and arg_separator.input, as PHP populates $_GET. */
+        /* Percent-decoding, '+' as space, PHP array notation, the input
+         * filter, max_input_vars and arg_separator.input, as PHP populates
+         * $_GET. */
         http_form_vars_decode(Z_ARRVAL(arr), q + 1, qslen,
                               ZSTR_VAL(PG(arg_separator).input),
                               PG(max_input_vars), PG(max_input_nesting_level));

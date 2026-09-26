@@ -180,6 +180,13 @@ static void test_depth_limit(void **state)
 	assert_int_equal(result, HTTP_FORM_VARS_OK);
 	zend_array_destroy(at_limit);
 
+	/* A name too deep drops alone; the pairs after it are still read. */
+	HashTable *const middle = decode_with("x=1&d[1][2][3][4]=v&y=2", "&", VARS, 3, &result);
+	assert_int_equal(result, HTTP_FORM_VARS_TOO_DEEP);
+	assert_string_at(middle, "x", "1");
+	assert_string_at(middle, "y", "2");
+	zend_array_destroy(middle);
+
 	/* One level past: dropped with everything already under its base name. */
 	HashTable *const past = decode_with("a[x]=1&a[1][2][3][4]=v", "&", VARS, 3, &result);
 	assert_int_equal(result, HTTP_FORM_VARS_TOO_DEEP);
@@ -201,6 +208,19 @@ static void test_count_limit(void **state)
 	assert_int_equal(result, HTTP_FORM_VARS_TOO_MANY);
 	assert_int_equal(zend_hash_num_elements(past), 3);
 	zend_array_destroy(past);
+}
+
+/* A key spelling a cookie prefix is dropped unless the name begins with it. */
+static void test_forbidden_cookie_prefix_keys(void **state)
+{
+	(void)state;
+	HashTable *const table = decode("a[__Host-x]=1&a[__Secure-y]=2&__Host-z=3&a[ok]=4");
+	HashTable *const a = Z_ARRVAL_P(at(table, "a"));
+
+	assert_int_equal(zend_hash_num_elements(a), 1);
+	assert_string_at(a, "ok", "4");
+	assert_string_at(table, "__Host-z", "3");
+	zend_array_destroy(table);
 }
 
 /* register() takes the value in every case, stored or dropped. */
@@ -247,6 +267,7 @@ int main(void)
 		cmocka_unit_test(test_separators),
 		cmocka_unit_test(test_depth_limit),
 		cmocka_unit_test(test_count_limit),
+		cmocka_unit_test(test_forbidden_cookie_prefix_keys),
 		cmocka_unit_test(test_register_takes_the_value),
 	};
 

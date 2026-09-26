@@ -198,7 +198,12 @@ struct http_request_t {
     bool         chunked        : 1;
     bool         keep_alive     : 1;
     bool         complete       : 1;
-    bool         use_multipart  : 1;
+    /* A form getter is building the form and yields while it parses;
+     * another getter waits for it instead of parsing again. */
+    bool         form_building  : 1;
+    /* readBody() has handed a form request's body out; the body stays for
+     * the form, and the next read is EOF. */
+    bool         body_handed_out : 1;
     bool         body_streaming : 1;
     bool         body_eof       : 1;
     bool         body_error     : 1;

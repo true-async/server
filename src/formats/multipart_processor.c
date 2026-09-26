@@ -682,8 +682,10 @@ ssize_t mp_processor_feed(mp_processor_t* proc, const char* data, size_t len)
 
     const ssize_t processed = multipart_parser_execute(proc->parser, data, len);
 
-    if (processed > 0) {
-        proc->bytes_fed += (size_t)processed;
+    /* All of `len` counts: past the closing boundary the parser consumes
+     * nothing, and bytes a peer keeps sending there are body bytes still. */
+    if (processed >= 0) {
+        proc->bytes_fed += len;
     }
 
     return processed;
@@ -746,6 +748,17 @@ void mp_processor_cleanup_temp_files(mp_processor_t* proc)
     for (size_t i = 0; i < proc->files_count; i++) {
         if (proc->files[i].tmp_path) {
             VCWD_UNLINK(proc->files[i].tmp_path);
+        }
+    }
+
+    /* A part still being written when the body stopped (a refusal, a reset,
+     * a parse error) is in files[] only once it ends; its file is here. */
+    if (proc->file_handle) {
+        fclose(proc->file_handle);
+        proc->file_handle = NULL;
+
+        if (proc->tmp_path) {
+            VCWD_UNLINK(proc->tmp_path);
         }
     }
 }

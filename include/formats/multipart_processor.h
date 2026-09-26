@@ -130,7 +130,7 @@ struct mp_processor_t {
     size_t              fields_count;
     size_t              fields_capacity;
 
-    /* Body bytes accepted by mp_processor_feed so far */
+    /* Body bytes handed to mp_processor_feed so far, parsed or not */
     size_t              bytes_fed;
 
     /* Error tracking */

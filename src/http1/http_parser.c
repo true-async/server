@@ -517,15 +517,8 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     /* Parts are written to disk while the body arrives; the form is built
      * from the processor when a getter asks for it. */
     if (req->form_kind == HTTP_FORM_MULTIPART) {
-        req->multipart_proc = http_request_form_open_multipart(req);
-
-        if (req->multipart_proc != NULL) {
-            if (parser->conn != NULL) {
-                req->multipart_proc->log_state = parser->conn->log_state;
-            }
-
-            req->use_multipart = true;
-        }
+        req->multipart_proc = http_request_form_open_multipart(
+            req, parser->conn != NULL ? parser->conn->log_state : NULL);
     }
 
     /* Streaming body mode (issue #26). Three-case policy by Content-Length:
@@ -549,7 +542,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     /* Prepare body buffer based on Content-Length (only if not multipart
      * AND not streaming) */
-    if (!req->use_multipart && !req->body_streaming && req->content_length > 0) {
+    if (req->multipart_proc == NULL && !req->body_streaming && req->content_length > 0) {
         /* Check body size limit */
         if (req->content_length > parser->max_body_size) {
             parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
@@ -564,9 +557,10 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
          * scheduler down with it. Same pattern below for chunked. */
         /* body_pool slots are IS_STR_INTERNED — opaque to PHP's refcount,
          * lifecycle owned here. Fine for getBody (RETURN_STR_COPY hands
-         * out a view), but readBody/upgrade transfer ownership to PHP
-         * and a pool slot would leak. Skip the pool when streaming is
-         * enabled — the body may be transferred. */
+         * out a view) and readBody (it hands out a copy), but the upgrade
+         * to streaming transfers ownership to PHP and a pool slot would
+         * leak. Skip the pool when streaming is enabled — the body may be
+         * transferred. */
         const bool can_pool = (parser->conn == NULL || parser->conn->view == NULL
                                || !parser->conn->view->body_streaming_enabled);
         volatile bool oom = false;
@@ -631,7 +625,7 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
     }
 
     /* If multipart, feed to processor instead */
-    if (req->use_multipart && req->multipart_proc) {
+    if (req->multipart_proc != NULL) {
         ssize_t result = mp_processor_feed(req->multipart_proc, at, length);
 
         if (result < 0) {

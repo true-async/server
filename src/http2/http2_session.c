@@ -436,10 +436,15 @@ static int h2_refuse_stream(http2_session_t *session,
     return 0;
 }
 
-/* top of the per-stream flow-control window — if the peer ignores
- * the window and somehow keeps shipping bytes, we refuse at this
- * layer too. A refusal goes out through h2_refuse_stream as a
- * stream-level reset; connection stays up for other streams. */
+/* The per-stream body limit: setMaxBodySize(), else the compile-time
+ * default when the server was never started through http_server_class. */
+static size_t h2_body_cap(void)
+{
+    const size_t configured = HTTP_SERVER_G(parser_pool).max_body_size;
+
+    return configured != 0 ? configured : HTTP2_MAX_BODY_SIZE;
+}
+
 /* A multipart body goes to its processor as DATA arrives, file parts straight
  * to disk, as on HTTP/1: none of it is buffered. The stream is refused past
  * max_body_size (413), on a body the processor cannot parse (400), and when
@@ -452,11 +457,7 @@ static int h2_feed_multipart(http2_session_t *session,
                              const size_t len)
 {
     mp_processor_t *const processor = stream->request->multipart_proc;
-    size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
-
-    if (body_cap == 0) {
-        body_cap = HTTP2_MAX_BODY_SIZE;
-    }
+    const size_t body_cap = h2_body_cap();
 
     if (processor->bytes_fed > body_cap || len > body_cap - processor->bytes_fed) {
         return h2_refuse_stream(session, ng, stream, stream_id,
@@ -491,6 +492,10 @@ static int h2_feed_multipart(http2_session_t *session,
     return 0;
 }
 
+/* top of the per-stream flow-control window — if the peer ignores
+ * the window and somehow keeps shipping bytes, we refuse at this
+ * layer too. A refusal goes out through h2_refuse_stream as a
+ * stream-level reset; connection stays up for other streams. */
 static int cb_on_data_chunk_recv(nghttp2_session *ng,
                                  const uint8_t flags,
                                  const int32_t stream_id,
@@ -546,11 +551,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
      * per chunk in http_body_stream_pop after the handler drains it. */
     if (stream->request != NULL && stream->request->body_streaming) {
         http_request_t *req = stream->request;
-        size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
-
-        if (body_cap == 0) {
-            body_cap = HTTP2_MAX_BODY_SIZE;
-        }
+        const size_t body_cap = h2_body_cap();
 
         /* Live bytes cap memory for everyone; the cumulative cap is the
          * operator's max_body_size contract, waived only for gRPC. */
@@ -581,14 +582,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
     const size_t current = stream->request_body_buf.s != NULL
         ? ZSTR_LEN(stream->request_body_buf.s) : 0;
     /* Shared cap with H1 parser pool; configured via
-     * HttpServerConfig::setMaxBodySize(). Fall back to the compile-time
-     * default if the global was never initialised (e.g. server running
-     * without having been started via http_server_class). */
-    size_t body_cap = HTTP_SERVER_G(parser_pool).max_body_size;
-
-    if (body_cap == 0) {
-        body_cap = HTTP2_MAX_BODY_SIZE;
-    }
+     * HttpServerConfig::setMaxBodySize(). */
+    const size_t body_cap = h2_body_cap();
 
     if (SIZE_MAX - current < len ||
         current + len > body_cap) {
@@ -731,12 +726,8 @@ static int cb_on_frame_recv(nghttp2_session *ng,
 
             /* Opened before the first DATA frame, which follows END_HEADERS. */
             if (stream->request->form_kind == HTTP_FORM_MULTIPART) {
-                stream->request->multipart_proc =
-                    http_request_form_open_multipart(stream->request);
-
-                if (stream->request->multipart_proc != NULL && session->conn != NULL) {
-                    stream->request->multipart_proc->log_state = session->conn->log_state;
-                }
+                stream->request->multipart_proc = http_request_form_open_multipart(
+                    stream->request, session->conn != NULL ? session->conn->log_state : NULL);
             }
 
             /* Streaming body mode (issue #26). Three-case policy by
