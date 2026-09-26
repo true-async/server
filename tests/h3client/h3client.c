@@ -282,6 +282,19 @@ static bool init_h3(h3c_t *c) {
     return true;
 }
 
+/* MAX_STREAM_DATA from the server reopens a stream the send loop blocked on
+ * NGTCP2_ERR_STREAM_DATA_BLOCKED. nghttp3 skips a blocked stream until it is
+ * unblocked, so without this an upload past the server's stream window stops
+ * there for good. The server's bridge pairs the same two calls. */
+static int extend_max_stream_data_cb(ngtcp2_conn *qc, int64_t stream_id,
+                                     uint64_t max_data, void *user_data,
+                                     void *stream_user_data) {
+    (void)qc; (void)max_data; (void)stream_user_data;
+    h3c_t *c = user_data;
+    if (c->h3) (void)nghttp3_conn_unblock_stream(c->h3, stream_id);
+    return 0;
+}
+
 static int handshake_completed_cb(ngtcp2_conn *qc, void *user_data) {
     (void)qc;
     h3c_t *c = user_data;
@@ -309,6 +322,7 @@ static const ngtcp2_callbacks CALLBACKS = {
     .stream_close            = stream_close_cb,
     .stream_reset            = stream_reset_cb,
     .extend_max_local_streams_bidi = extend_max_local_streams_bidi_cb,
+    .extend_max_stream_data  = extend_max_stream_data_cb,
 };
 
 static const nghttp3_callbacks H3_CB = {

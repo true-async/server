@@ -15,11 +15,7 @@ h3_skipif(['openssl_cli' => true, 'h3client' => true]);
  * h3_request_oversized + rejects the stream (STOP_SENDING/RESET_STREAM) when
  * the uploaded body crosses the cap — a stream-level reject; the connection
  * must survive. The reject also wakes a handler suspended in awaitBody()
- * (regression guard for the stream-slot leak that fix introduced).
- *
- * The stream window is 20 MiB (> the 16 MiB body cap) so the whole 17 MiB
- * upload fits in one window and the cap trips cleanly — h3client is
- * single-shot and does not resume a flow-control-blocked upload. */
+ * (regression guard for the stream-slot leak that fix introduced). */
 
 require __DIR__ . '/_h3_skipif.inc';
 
@@ -45,8 +41,7 @@ $port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
-    ->setHttp3StreamWindowBytes(20 * 1024 * 1024);   /* > 16 MiB body cap */
+    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
 $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) {
     try { $req->awaitBody(); } catch (\Throwable $e) { /* rejected stream */ }
