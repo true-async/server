@@ -434,6 +434,13 @@ static int h2_refuse_stream(http2_session_t *session,
          * a body that will not come. */
         if (stream->request != NULL) {
             stream->request->refused_status = status;
+
+            /* readBody() on a streaming body parks on the queue rather
+             * than on body_event: end the queue in error to wake it. */
+            if (stream->request->body_streaming) {
+                http_body_stream_error(stream->request);
+            }
+
             http_request_wake_body_waiters(stream->request);
         }
     }
@@ -663,14 +670,7 @@ static void finalize_request_body(http2_stream_t *stream)
         http_body_stream_close(req);
         req->complete = true;
 
-        if (req->body_event != NULL) {
-            zend_async_trigger_event_t *trig =
-                (zend_async_trigger_event_t *)req->body_event;
-
-            if (trig->trigger != NULL) {
-                trig->trigger(trig);
-            }
-        }
+        http_request_wake_body_waiters(req);
 
         return;
     }
@@ -689,14 +689,7 @@ static void finalize_request_body(http2_stream_t *stream)
     /* Wake handlers blocked on $request->awaitBody(). body_event is
      * created lazily only if something actually awaited — fire path
      * is a no-op when nobody's listening. */
-    if (req->body_event != NULL) {
-        zend_async_trigger_event_t *trig =
-            (zend_async_trigger_event_t *)req->body_event;
-
-        if (trig->trigger != NULL) {
-            trig->trigger(trig);
-        }
-    }
+    http_request_wake_body_waiters(req);
 }
 
 /* on_frame_recv fires for every completed frame. Two interests:

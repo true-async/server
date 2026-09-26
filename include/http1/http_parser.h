@@ -290,6 +290,9 @@ struct http_request_t {
      * max_input_nesting_level, or malformed); 0 while it has not. Only the
      * form getters throw with it: the body itself is whole. */
     uint16_t     form_refused_status;
+    /* Why the form was refused, for the message of every getter that throws;
+     * a string literal, so it is valid on any thread. NULL while it has not. */
+    const char  *form_refused_reason;
 };
 
 /* Single chunk node in the streaming body queue (linked list).

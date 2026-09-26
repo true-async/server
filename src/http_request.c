@@ -1190,6 +1190,12 @@ ZEND_METHOD(TrueAsync_HttpRequest, readBody)
 
     /* ─── Case 3: streaming — pop from queue, park on body_data_event. */
     for (;;) {
+        /* A refusal can arrive while this read is parked; the chunks still
+         * queued are then a prefix of a body that will not be whole. */
+        if (http_request_body_refused(req)) {
+            RETURN_THROWS();
+        }
+
         zend_string *chunk = http_body_stream_pop(req);
 
         if (chunk != NULL) {

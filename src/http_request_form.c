@@ -79,6 +79,7 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
 static bool http_request_form_refuse(http_request_t *req, const int status, const char *reason)
 {
 	req->form_refused_status = (uint16_t)status;
+	req->form_refused_reason = reason;
 	zend_throw_exception_ex(http_exception_ce, status, "the request form was refused: %s", reason);
 	return false;
 }
@@ -265,7 +266,7 @@ bool http_request_form_build(http_request_t *req)
 
 	if (req->form_refused_status != 0) {
 		zend_throw_exception_ex(http_exception_ce, req->form_refused_status,
-								"the request form was refused");
+								"the request form was refused: %s", req->form_refused_reason);
 		return false;
 	}
 
