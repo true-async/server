@@ -2048,8 +2048,9 @@ final class HttpRequest
      * Content-Type.
      *
      * Over HTTP/2 and HTTP/3 the handler starts before the body has arrived, so
-     * this call suspends until it has, as {@see awaitBody()} does. A form body is
-     * buffered whole even with {@see HttpServerConfig::setBodyStreamingEnabled()}.
+     * this call suspends until it has, as {@see awaitBody()} does. A form body
+     * does not stream even with {@see HttpServerConfig::setBodyStreamingEnabled()},
+     * and reading it with {@see readBody()} leaves the form in place.
      *
      * @return array
      */

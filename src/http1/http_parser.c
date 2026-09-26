@@ -532,9 +532,9 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
      *   CL >= AUTO_THRESHOLD or CL == 0 (chunked) → stream immediately;
      *   CL >= SMALL but < AUTO → buffer, upgrade if readBody is called;
      *   CL <  SMALL                       → buffer, never upgrade.
-     * Multipart bypasses streaming entirely (no current use case for
-     * raw-multipart streaming; see plan §5 edge-case). */
-    if (!req->use_multipart && !http_request_body_must_buffer(req)
+     * A form body never streams (http_request_body_must_buffer): a form
+     * getter reads it whole, and multipart goes to its processor. */
+    if (!http_request_body_must_buffer(req)
         && parser->conn != NULL && parser->conn->view != NULL
         && parser->conn->view->body_streaming_enabled) {
         if (req->content_length == 0
@@ -600,8 +600,9 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
      * handler always sees the full body in $req->getBody() — TCP-level
      * fragmentation would otherwise run the handler against a partial
      * body. Streaming handlers must dispatch immediately to consume
-     * incoming chunks via readBody(). Multipart populates files/post
-     * arrays during parse and is only safe to expose when complete.
+     * incoming chunks via readBody(). Multipart parts are written by the
+     * processor during parse, and the form built from them is whole only
+     * once the message is complete.
      *
      * For the sync caller (dispatch_cb == NULL, http_parse_request) we
      * also defer ownership transfer — the caller fetches the request

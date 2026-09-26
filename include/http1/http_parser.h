@@ -105,10 +105,11 @@ struct http_request_t {
     zend_string *grpc_text_body;
 
     /* Body-progress event.
-     * Lazily created by awaitBody() on the first suspend; notified by
-     * the parser on body_complete once the event-loop read path lands.
-     * Currently stays NULL because dispatch still happens at
-     * message-complete, so handlers never need to wait. */
+     * Lazily created by the first wait for the body (awaitBody(), a form
+     * getter, readBody()); notified by the parser on body_complete. On
+     * HTTP/1 it stays NULL unless the body streams, because dispatch
+     * happens at message-complete; HTTP/2 and HTTP/3 dispatch at the end
+     * of the headers, so their handlers can wait. */
     zend_async_event_t *body_event;
 
     /* Coroutine running the user handler for THIS request. Set in

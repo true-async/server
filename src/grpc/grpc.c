@@ -26,8 +26,10 @@
 #  include "compression/http_compression_request.h"
 #endif
 
-grpc_mode_t grpc_content_type_mode(const char *val, size_t len)
+grpc_mode_t grpc_content_type_mode(const char *content_type, size_t content_type_len)
 {
+    const char *val = content_type;
+    size_t      len = content_type_len;
     const size_t grpc_len = sizeof(GRPC_CONTENT_TYPE) - 1;
 
     if (len < grpc_len || strncasecmp(val, GRPC_CONTENT_TYPE, grpc_len) != 0) {

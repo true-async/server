@@ -44,6 +44,9 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req)
 		return NULL;
 	}
 
+	/* The Content-Type check and the multipart parser hold one limit (RFC 2046). */
+	ZEND_STATIC_ASSERT(HTTP_FORM_BOUNDARY_MAX_LEN == MULTIPART_MAX_BOUNDARY_LEN,
+					   "boundary limits disagree");
 	char terminated[HTTP_FORM_BOUNDARY_MAX_LEN + 1];
 
 	memcpy(terminated, boundary, boundary_len);
@@ -167,8 +170,8 @@ static void http_request_form_publish(const mp_processor_t *processor, zval *pos
 
 static bool http_request_form_decode_multipart(http_request_t *req, zval *post, zval *files)
 {
-	if (req->multipart_proc == NULL
-		&& !http_request_form_parse_buffered(req, &req->multipart_proc)) {
+	if (req->multipart_proc == NULL &&
+		!http_request_form_parse_buffered(req, &req->multipart_proc)) {
 		return false;
 	}
 
@@ -193,8 +196,8 @@ bool http_request_form_build(http_request_t *req)
 
 	if (req->form_kind == HTTP_FORM_URLENCODED) {
 		http_request_form_decode_urlencoded(req, &post);
-	} else if (req->form_kind == HTTP_FORM_MULTIPART
-			   && !http_request_form_decode_multipart(req, &post, &files)) {
+	} else if (req->form_kind == HTTP_FORM_MULTIPART &&
+			   !http_request_form_decode_multipart(req, &post, &files)) {
 		zval_ptr_dtor(&post);
 		zval_ptr_dtor(&files);
 		return false;
