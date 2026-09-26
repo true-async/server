@@ -24,6 +24,9 @@ require_once __DIR__ . '/../_free_port.inc';
 
 $upload = tempnam(sys_get_temp_dir(), 'h2form_');
 file_put_contents($upload, 'file-bytes');
+$form = tempnam(sys_get_temp_dir(), 'h2urlenc_');
+/* A file, not an argument: escapeshellarg() on Windows turns % into a space. */
+file_put_contents($form, 'a=1&list%5B%5D=2&list%5B%5D=3&map%5Bkey%5D=4');
 $big = tempnam(sys_get_temp_dir(), 'h2big_');
 file_put_contents($big, 'big=' . str_repeat('x', 1200 * 1024) . '&tail=end');
 
@@ -51,15 +54,18 @@ foreach ([false, true] as $streaming) {
         $resp->setStatusCode(200)->setBody(json_encode(['post' => $post, 'files' => $files]));
     });
 
-    $client = spawn(function () use ($port, $server, $upload, $big, $streaming) {
+    $client = spawn(function () use ($port, $server, $upload, $form, $big, $streaming) {
         usleep(30000);
-        $curl = sprintf('curl --http2-prior-knowledge -sS --max-time 5 http://127.0.0.1:%d/form ', $port);
+        /* Each argument quoted alone: cmd.exe knows no single quotes. */
+        $curl = static fn(array $args): string => (string)shell_exec(sprintf(
+            'curl --http2-prior-knowledge -sS --max-time 5 http://127.0.0.1:%d/form ', $port)
+            . implode(' ', array_map('escapeshellarg', $args)) . ' 2>&1');
 
         echo 'streaming=', (int)$streaming, "\n";
-        echo shell_exec($curl . "--data 'a=1&list%5B%5D=2&list%5B%5D=3&map%5Bkey%5D=4' 2>&1"), "\n";
-        echo shell_exec($curl . "-F a=1 -F 'list[]=2' -F 'list[]=3' -F 'map[key]=4' "
-            . sprintf("-F 'photos[]=@%s;filename=one.txt' -F 'docs[cv]=@%s;filename=cv.txt' 2>&1", $upload, $upload)), "\n";
-        echo shell_exec($curl . sprintf("--data-binary @%s 2>&1", escapeshellarg($big))), "\n";
+        echo $curl(['--data-binary', "@$form"]), "\n";
+        echo $curl(['-F', 'a=1', '-F', 'list[]=2', '-F', 'list[]=3', '-F', 'map[key]=4',
+            '-F', "photos[]=@$upload;filename=one.txt", '-F', "docs[cv]=@$upload;filename=cv.txt"]), "\n";
+        echo $curl(['--data-binary', "@$big"]), "\n";
 
         $server->stop();
     });
@@ -69,6 +75,7 @@ foreach ([false, true] as $streaming) {
 }
 
 @unlink($upload);
+@unlink($form);
 @unlink($big);
 echo "Done\n";
 ?>
