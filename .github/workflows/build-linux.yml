@@ -545,6 +545,7 @@ jobs:
           # shares one address space so it races across workers and SIGBUS on
           # SHM writes. Off here — production defaults it off and real
           # compilation is serialized by the SHM lock.
+          set -o pipefail
           /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
             -d opcache.protect_memory=0 \
             -P -q -j"$(nproc)" \
@@ -554,7 +555,10 @@ jobs:
             --show-diff \
             --show-slow 4000 \
             --set-timeout 120 \
-            tests/phpt
+            tests/phpt | tee /tmp/phpt-run.log
+          # run-tests passes a test that failed once and then passed its retry (#313).
+          /usr/local/bin/php -n .github/scripts/assert_no_new_retries.php \
+            .github/scripts/retry-baseline.txt /tmp/phpt-run.log
 
       # macOS, the other BSDs and Solaris have no load-balanced SO_REUSEPORT, so
       # there the parent binds one listening socket and every worker accepts off
@@ -568,6 +572,7 @@ jobs:
           TRUE_ASYNC_SERVER_SHARED_LISTEN_FD: "1"
         run: |
           ulimit -c unlimited
+          set -o pipefail
           /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
             -d opcache.protect_memory=0 \
             -P -q -j"$(nproc)" \
@@ -577,7 +582,9 @@ jobs:
             --show-diff \
             --show-slow 4000 \
             --set-timeout 120 \
-            tests/phpt
+            tests/phpt | tee /tmp/phpt-shared-fd.log
+          /usr/local/bin/php -n .github/scripts/assert_no_new_retries.php \
+            .github/scripts/retry-baseline.txt /tmp/phpt-shared-fd.log
 
       # A room is not a WebSocket feature, and the only thing that proves it is
       # building the configuration that has no WebSocket. Two defects reached
@@ -588,7 +595,7 @@ jobs:
       - name: Rooms without WebSocket — build and probe
         if: matrix.debug == true
         run: |
-          set -eux
+          set -euxo pipefail
           cp -a "$GITHUB_WORKSPACE/http-server" "$GITHUB_WORKSPACE/http-server-nows"
           cd "$GITHUB_WORKSPACE/http-server-nows"
           make clean >/dev/null || true
@@ -622,6 +629,8 @@ jobs:
             tests/phpt/room | tee /tmp/nows-tests.log
           passed=$(sed -n 's/^Tests passed *: *\([0-9]*\).*/\1/p' /tmp/nows-tests.log)
           test "${passed:-0}" -ge 10
+          /usr/local/bin/php -n .github/scripts/assert_no_new_retries.php \
+            .github/scripts/retry-baseline.txt /tmp/nows-tests.log
 
       - name: Collect core dumps + backtraces
         if: failure()

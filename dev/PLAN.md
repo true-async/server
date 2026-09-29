@@ -27,7 +27,7 @@ an item marked "reproduce" gets its failing run before any code.
 2. #312 — permessage-deflate close: reproduced and fixed with #311. #327, a
    frame queued while a send is parked in its write, found through `035` on
    Windows CI and fixed in the same PR.
-3. #313 — retry ratchet in CI; the clock removal follows in batches.
+3. #313 — retry ratchet in CI: PR 331. The clock removal follows in batches.
 4. SSE byte count (issue to open).
 5. #322 — upload limits from `upload_max_filesize` and `max_file_uploads`.
 6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
@@ -1816,6 +1816,13 @@ a release yet except the first two, which are fixed.
   a test that keeps one says why in a comment. A proof for an intermittent
   defect is written without those calls and with a failure line the output
   list does not match, as `035` is, and is run outside run-tests.
+
+  The ratchet, PR 331: `.github/scripts/assert_no_new_retries.php` reads the
+  warned summary of every gating phpt run and fails the job on a retried test
+  outside `.github/scripts/retry-baseline.txt`. The baseline, from 89 green
+  jobs on 2026-09-29: `core/023` on macOS release (2 of 15 jobs) and `tls/003`
+  on Windows (2 of 29); no Linux job retried. Both are open defects, and an
+  entry leaves the list when its test is fixed.
 
 - [ ] **#314 — `compression/070` hung twice on one Windows job and passed on
   the rerun.** `tests/phpt/server/compression/070-encoder-pool-reuse.phpt`

@@ -59,4 +59,8 @@ REM module check cannot: a suite gated off for some other reason.
 %PHP_BUILD_DIR%\php.exe -n %~dp0assert_executed.php phpt-run.log
 if errorlevel 1 exit /b 1
 
+REM run-tests.php passes a test that failed once and then passed its retry (#313).
+%PHP_BUILD_DIR%\php.exe -n %~dp0..\assert_no_new_retries.php %~dp0..\retry-baseline.txt phpt-run.log
+if errorlevel 1 exit /b 1
+
 exit /b %SUITE_RC%

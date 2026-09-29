@@ -148,6 +148,7 @@ jobs:
           # SIGBUS on SHM writes (opcache admits "mprotect() is process-global
           # and races", ZendAccelerator.c). Not a production concern — the flag
           # defaults off and real compilation is serialized by the SHM lock.
+          set -o pipefail
           /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
             -d opcache.protect_memory=0 \
             -P -q -j"$(sysctl -n hw.logicalcpu)" \
@@ -157,7 +158,10 @@ jobs:
             --show-diff \
             --show-slow 4000 \
             --set-timeout 120 \
-            tests/phpt
+            tests/phpt | tee /tmp/phpt-run.log
+          # run-tests passes a test that failed once and then passed its retry (#313).
+          /usr/local/bin/php -n .github/scripts/assert_no_new_retries.php \
+            .github/scripts/retry-baseline.txt /tmp/phpt-run.log
 
       - name: Collect crash backtraces
         if: failure()
