@@ -1,0 +1,15 @@
+diff --git a/run-tests.php b/run-tests.php
+index 916300f..4e574a4 100644
+--- a/run-tests.php
++++ b/run-tests.php
+@@ -2910,6 +2910,10 @@ COMMAND $orig_cmd
+         $wanted_re = null;
+     }
+     if (!$passed && !$retried && error_may_be_retried($test, $output)) {
++        /* true-async/server CI: the retry discards the first attempt, and a
++         * test that passes on it leaves only its name behind (#313). */
++        echo "RETRY $shortname: the first attempt failed\n",
++            generate_diff($wanted, $wanted_re, $output), "\n";
+         $retried = true;
+         goto retry;
+     }
