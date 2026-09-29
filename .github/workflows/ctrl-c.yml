@@ -19,10 +19,8 @@ on:
       - '.github/workflows/ctrl-c.yml'
 
 env:
-  # TODO: back to `true-async` / `main` after the #109 sigaction-hook pair merges
-  # (php-src 109-zend-sigaction-hook + php-async fix-signal-pcntl-clobber).
-  PHP_SRC_BRANCH: 109-zend-sigaction-hook
-  PHP_ASYNC_BRANCH: fix-signal-pcntl-clobber
+  PHP_SRC_BRANCH: true-async
+  PHP_ASYNC_BRANCH: main
   CCACHE_DIR: /tmp/ccache
 
 jobs:
