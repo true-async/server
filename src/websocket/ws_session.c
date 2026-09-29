@@ -1284,6 +1284,19 @@ void ws_session_mark_peer_closed(ws_session_t *session)
     ws_notify_recv_waiter(session);
 }
 
+/* For a teardown whose close was just queued while the peer is still sending:
+ * what it has already put on the wire is unread, and the drain keeps the close
+ * from being discarded by the reset that closing on top of those bytes sends.
+ * Only an upgraded H1 connection owns its socket; over H2 the session is one
+ * stream among several, and RFC 8441 ends that stream instead. */
+static void ws_session_linger_before_teardown(ws_session_t *session)
+{
+    if (session->conn != NULL
+        && session->conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET) {
+        http_connection_linger_begin(session->conn);
+    }
+}
+
 int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
 {
     /* Stage the chunk so the recv_callback can see it, then drive
@@ -1342,26 +1355,20 @@ int ws_session_feed(ws_session_t *session, const uint8_t *data, size_t len)
 
     /* Inbound FIFO overflowed its byte cap: the 1013 close queued in
      * on_msg_recv was flushed by the drive above; tear the transport down.
-     *
-     * The peer outran the reader to get here, so it is still sending and what
-     * it has already put on the wire is unread — the drain keeps the close from
-     * being discarded by the reset that closing on top of those bytes sends.
-     * Only an upgraded H1 connection owns its socket; over H2 the session is
-     * one stream among several, and RFC 8441 ends that stream instead. */
+     * The peer outran the reader to get here, so it is still sending. */
     if (session->recv_overflow) {
-        if (session->conn != NULL
-            && session->conn->protocol_type == HTTP_PROTOCOL_WEBSOCKET) {
-            http_connection_linger_begin(session->conn);
-        }
-
+        ws_session_linger_before_teardown(session);
         return -1;
     }
 #ifdef HAVE_HTTP_COMPRESSION
     /* A compressed message overflowed the cap (or was malformed): the
      * 1009 close queued in on_msg_recv was just flushed above; tear down.
-     * on_msg_recv already marked peer-closed, but keep it explicit + idempotent. */
+     * on_msg_recv already marked peer-closed, but keep it explicit + idempotent.
+     * A bomb arrives in one message, and the peer that sent it may still be
+     * sending the ones after it. */
     if (session->pmce_error) {
         ws_session_mark_peer_closed(session);
+        ws_session_linger_before_teardown(session);
         return -1;
     }
 #endif
