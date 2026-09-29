@@ -18,6 +18,25 @@ a test that fails without it, a measurement, or both. Issue numbers point at
 
 ## Next
 
+### Order of the open defects, 2026-09-28
+
+Defects before features (#133, #106, #72, #48, #6 wait). Fixed in this order;
+an item marked "reproduce" gets its failing run before any code.
+
+1. #311 — lingering close over TLS. Done.
+2. #312 — permessage-deflate close: reproduced and fixed with #311. #327, a
+   frame queued while a send is parked in its write, found through `035` on
+   Windows CI and fixed in the same PR.
+3. #313 — retry ratchet in CI; the clock removal follows in batches.
+4. SSE byte count (issue to open).
+5. #322 — upload limits from `upload_max_filesize` and `max_file_uploads`.
+6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
+7. #315 — iterative matcher in the Windows fnmatch shim.
+8. Worker path: compression, dropped FULL wire, protocol version (issue to open).
+9. `test_static_decoders` back in the unit suite (issue to open).
+10. #314 — no action until it recurs.
+11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
+
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
   (YanGusik/laravel-spawn#57). Remove it once a build with the flush is in use, and
@@ -1683,8 +1702,17 @@ a release yet except the first two, which are fixed.
   Found while making the group build on Windows at all (#303), where it is the
   single failure out of 61 executed WebSocket tests.
 
-- [ ] **The lingering close has no TLS path, so wss and https keep losing what a
-  reset discards.** The drain is fed from the plaintext read paths alone —
+- [x] **The lingering close has no TLS path, so wss and https keep losing what a
+  reset discards.** Closed by #311: the TLS read drains into `read_buffer` and
+  drops each chunk undecrypted, and the read stays armed while the drain is
+  pending, a cancelled handler still unwinding included. `tls/017`, `tls/018` and
+  `websocket/071` fail before and pass after; the flood that proves it on Linux is the client's write failing
+  midway, since Linux still delivers the 413 or 1013 that arrived before a reset.
+  Critic 2026-09-29: two findings left open by design. `stop()` closes no
+  connection, draining or idle, until the server object is freed (the TODO in
+  `http_server_do_stop`); frames pipelined before the 101 that trip a cap arm the
+  drain without the FSM reaching CLOSING, so the deadline tick ends it and no
+  close_notify is sent. Before: The drain is fed from the plaintext read paths alone —
   `http_connection_linger_note_inbound` is reached from `http_connection.c:1324`
   and `:1429`, and `http_connection_tls.c` does not mention the drain at all. A
   TLS connection that armed it would wait with nothing being read and close on
@@ -1694,7 +1722,10 @@ a release yet except the first two, which are fixed.
   described. Closing it means giving the TLS read FSM the drop-and-refresh hook
   the plaintext paths already have. Found by the review of #305.
 
-- [ ] **The permessage-deflate teardown has the same shape and no proof.**
+- [x] **The permessage-deflate teardown has the same shape and no proof.** Proved
+  and closed with #311 (#312): `websocket/072` fails the client's flood after the
+  bomb on 10 of 10 runs before the teardown opens the drain, and passes after.
+  Before:
   `pmce_error` queues a 1009 and returns -1 down the same path, so a peer whose
   compressed message overflows the cap should lose its close for the same
   reason. No run of it has been made to fail, so it is left as it stands rather
@@ -1734,3 +1765,52 @@ a release yet except the first two, which are fixed.
   window hung about half the time from 500 KB and always from 1.1 MB, while
   aioquic sent 15 MB through the same server. #321 adds the callback: `h3/072`
   uploads past the window, and `h3/035` dropped its 20 MiB window workaround.
+
+## Three defects found by the reviews of #305 and #310 (#313, #314, #315)
+
+- [ ] **#313 — run-tests reports only the second attempt of a retried test.**
+  `is_flaky` (`run-tests.php:3118-3140`) marks a test for retry when its FILE
+  section calls `disk_free_space`, `hrtime`, `microtime`, `sleep` or `usleep`;
+  `is_flaky_output` (`:3143-3155`) retries any failure whose output holds
+  "timed out", "connection refused" or four other strings, so a hung test is
+  retried whatever it calls. A failed first attempt is discarded (`:2912-2914`)
+  and the verdict is the second one, listed under `WARNED TEST SUMMARY`
+  (`:3460-3469`) as "passed on retry attempt"; CI runs with `-g FAIL,BORK,LEAK,XLEAK`
+  (`build-linux.yml:551`, `.github/scripts/windows/test_task.bat:46`), so the
+  summary is the only trace. Counted on 2026-09-28 with the same regex: 352 of
+  520 phpt files under `tests/phpt` match. `websocket/035` failed 5 of 10 runs
+  outside run-tests while the suite was green (#305). Two halves, in order: a
+  ratchet in CI first (count the warned summary, hold the number at today's
+  baseline, refuse a rise), then the clock calls out of the tests in batches;
+  a test that keeps one says why in a comment. A proof for an intermittent
+  defect is written without those calls and with a failure line the output
+  list does not match, as `035` is, and is run outside run-tests.
+
+- [ ] **#314 — `compression/070` hung twice on one Windows job and passed on
+  the rerun.** `tests/phpt/server/compression/070-encoder-pool-reuse.phpt`
+  calls none of the clock functions, but its timeout text (`run-tests.php:1374`)
+  matches `is_flaky_output`, so the failure the job printed was the second
+  consecutive 120 s hang (`test_task.bat:50`). Not reproducible on a local
+  Windows build: the test needs zlib, which that build lacks. No fix without a
+  loop. On recurrence the job's `*.log` (already uploaded by
+  `build-windows.yml:113-121`) is what to read: no output at all points at
+  startup or at the first response, not at the pool reuse the test is named
+  for.
+
+- [ ] **#315 — the Windows fnmatch shim takes exponential time on a
+  star-heavy hide pattern.** `win32_fnmatch_impl`
+  (`src/static/http_static_path.c:25-46`) re-enters itself at every position
+  for each `*`. `FNM_PATHNAME` comes off for a pattern holding `**` (`:354`),
+  and off unconditionally for the two forms a directory pattern is expanded
+  to, `<pattern>/*` and `*/<pattern>/*` (`:369-382`), so `*` crosses the
+  whole request path there. Measured on 2026-09-28 with the shim compiled
+  verbatim on Linux at -O2, cross-separator, against a path of `a`s that does
+  not match: `*/a*a*b/*` 6 ms at 2048 bytes, `*/a*a*a*b/*` 4.3 s, `*/a*a*a*a*b/*`
+  10 s at 512 bytes and over 30 s at 2048. A request path pins the reactor
+  thread for that long, on Windows only and only under a pattern with three
+  or more stars over a repeating literal, which is why it is hardening rather
+  than a field defect. Fix: the iterative matcher with one saved star
+  position, `*` stopping at a separator under `FNM_PATHNAME`; the `StaticHide`
+  table (`tests/unit/static/test_static_hide.c`) is the check, and a step
+  budget is refused as the alternative because giving up would have to mean
+  hidden.

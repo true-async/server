@@ -74,6 +74,14 @@ static bool tls_arm_one_shot_read(http_connection_t *conn);
 static void tls_advance_state(http_connection_t *conn);
 static bool tls_finalize_if_closing(http_connection_t *conn);
 
+/* Whether the FSM keeps a read armed. An in-flight handler parks the
+ * read so the next request's bytes wait in the kernel; a lingering close
+ * does not wait for the handler, since the bytes it reads are dropped. */
+static inline bool tls_read_wanted(const http_connection_t *conn)
+{
+    return !conn->tls_awaiting_handler || conn->linger_close;
+}
+
 /* Producer + drain (issue #23): tls_push (coroutine) → plaintext_bio →
  * tls_drain (scheduler) → SSL_write → WRITE_EX → tls_cipher_completion. */
 
@@ -350,9 +358,24 @@ static void tls_fsm_io_callback_fn(
         req->dispose(req);
 
         if (UNEXPECTED(err || bytes_read <= 0)) {
+            /* The peer has stopped: a drain in progress is complete. */
+            http_connection_linger_end(conn);
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
             (void)tls_finalize_if_closing(conn);
+        } else if (UNEXPECTED(conn->linger_close)) {
+            /* Draining: the chunk landed in read_buffer and is dropped
+             * undecrypted; the finalize below re-arms the read. */
+            conn->read_buffer_len = 0;
+            http_connection_linger_note_inbound(conn);
+
+            if (!tls_finalize_if_closing(conn)
+                && UNEXPECTED(!tls_arm_one_shot_read(conn))) {
+                http_connection_linger_end(conn);
+                conn->state = CONN_STATE_CLOSING;
+                tls_advance_state(conn);
+                (void)tls_finalize_if_closing(conn);
+            }
         } else if (UNEXPECTED(!tls_commit_cipher_in(conn->tls, (size_t)bytes_read))) {
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
@@ -363,7 +386,7 @@ static void tls_fsm_io_callback_fn(
             tls_advance_state(conn);
 
             if (!tls_finalize_if_closing(conn)) {
-                if (!conn->tls_awaiting_handler) {
+                if (tls_read_wanted(conn)) {
                     if (UNEXPECTED(!tls_arm_one_shot_read(conn))) {
                         conn->state = CONN_STATE_CLOSING;
                         tls_advance_state(conn);
@@ -543,10 +566,11 @@ bool http_connection_tls_fsm_send_plaintext_atomic(http_connection_t *conn,
  *     is awaiting a handler or has transitioned to CLOSING.
  * ======================================================================== */
 
-/* Submit one ciphertext read directly into a BIO slot. Returns true if
- * the read is armed (or completed sync); false on submission failure
- * (caller transitions to CLOSING). The unified io callback's read_req
- * slot tracks the outstanding req. */
+/* Submit one ciphertext read directly into a BIO slot, or into
+ * read_buffer while a lingering close drains. Returns true if the read
+ * is armed (or completed sync); false on submission failure (caller
+ * transitions to CLOSING). The unified io callback's read_req slot
+ * tracks the outstanding req. */
 static bool tls_arm_one_shot_read(http_connection_t *conn)
 {
     if (UNEXPECTED(!tls_fsm_io_cb_attach(conn))) {
@@ -559,27 +583,43 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
         return true;   /* already armed */
     }
 
-    char *slot = NULL;
-    const size_t space = tls_reserve_cipher_in(conn->tls, &slot);
+    for (;;) {
+        char *slot = NULL;
+        size_t space;
 
-    if (UNEXPECTED(space == 0 || slot == NULL)) {
-        /* Cipher BIO full — the decrypt step should have drained it
-         * before we got here. Treat as a hard error. */
-        return false;
-    }
+        /* A drained chunk is never decrypted, so it has no business in the
+         * cipher ring: read_buffer, emptied when the drain began, takes it
+         * whole, where a ring slot cut short by a partial record would read
+         * the peer's upload a few bytes at a time. */
+        if (UNEXPECTED(conn->linger_close)) {
+            slot = conn->read_buffer;
+            space = conn->read_buffer_size;
+        } else {
+            space = tls_reserve_cipher_in(conn->tls, &slot);
+        }
 
-    zend_async_io_req_t *req = ZEND_ASYNC_IO_READ(conn->io, slot, space);
+        if (UNEXPECTED(space == 0 || slot == NULL)) {
+            /* Cipher BIO full — the decrypt step should have drained it
+             * before we got here. Treat as a hard error. */
+            return false;
+        }
 
-    if (UNEXPECTED(req == NULL)) {
-        tls_absorb_io_submission_exception(conn, "read");
-        return false;
-    }
+        zend_async_io_req_t *req = ZEND_ASYNC_IO_READ(conn->io, slot, space);
 
-    /* Sync-complete fast path: the libuv layer occasionally surfaces a
-     * synchronous EAGAIN-then-data sequence on Windows + some Linux
-     * kernels. Handle inline so we don't bounce through the event loop
-     * when the bytes are already there. */
-    if (req->completed) {
+        if (UNEXPECTED(req == NULL)) {
+            tls_absorb_io_submission_exception(conn, "read");
+            return false;
+        }
+
+        if (!req->completed) {
+            cb->read_req = req;
+            return true;
+        }
+
+        /* Sync-complete fast path: the libuv layer occasionally surfaces a
+         * synchronous EAGAIN-then-data sequence on Windows + some Linux
+         * kernels. Handle inline so we don't bounce through the event loop
+         * when the bytes are already there. */
         const bool err = (req->exception != NULL);
         const ssize_t bytes_read = req->transferred;
 
@@ -591,7 +631,16 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
         req->dispose(req);
 
         if (UNEXPECTED(err || bytes_read <= 0)) {
+            /* The peer has stopped: nothing is left unread, so a drain
+             * in progress has done its job and the close can follow. */
+            http_connection_linger_end(conn);
             return false;
+        }
+
+        if (UNEXPECTED(conn->linger_close)) {
+            conn->read_buffer_len = 0;
+            http_connection_linger_note_inbound(conn);
+            continue;
         }
 
         if (UNEXPECTED(!tls_commit_cipher_in(conn->tls, (size_t)bytes_read))) {
@@ -605,15 +654,10 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
             return true;
         }
 
-        if (!conn->tls_awaiting_handler) {
-            return tls_arm_one_shot_read(conn);
+        if (!tls_read_wanted(conn)) {
+            return true;
         }
-
-        return true;
     }
-
-    cb->read_req = req;
-    return true;
 }
 
 /* ------------------------------------------------------------------------
@@ -1025,7 +1069,9 @@ static void tls_advance_state(http_connection_t *conn)
  * FSM (read completion, send completion, post-handler resume): if the
  * state machine landed in CLOSING and there is no in-flight FSM send
  * keeping the heap buffer alive, tear the connection down. Returns
- * true if conn was destroyed (caller MUST stop touching conn). */
+ * true if the caller has nothing left to do on conn: it was destroyed,
+ * or it is draining under a lingering close with the read armed (the
+ * caller MUST stop touching conn either way). */
 static bool tls_finalize_if_closing(http_connection_t *conn)
 {
     if (conn->state != CONN_STATE_CLOSING) {
@@ -1037,6 +1083,17 @@ static bool tls_finalize_if_closing(http_connection_t *conn)
          * the BIO ring slot. The free_cb re-runs teardown via
          * destroy_pending. */
         return false;
+    }
+
+    /* Destroy would only defer here, and a drain nobody reads for would
+     * close on the same unread bytes it waited out. The read callback
+     * drops what arrives; the deadline tick or the peer's EOF ends it. */
+    if (http_connection_linger_pending(conn)) {
+        if (tls_arm_one_shot_read(conn)) {
+            return true;
+        }
+
+        http_connection_linger_end(conn);
     }
 
     http_connection_destroy(conn);
@@ -1086,7 +1143,7 @@ void http_connection_tls_resume_after_handler(http_connection_t *conn)
         return;
     }
 
-    if (!conn->tls_awaiting_handler) {
+    if (tls_read_wanted(conn)) {
         if (UNEXPECTED(!tls_arm_one_shot_read(conn))) {
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);

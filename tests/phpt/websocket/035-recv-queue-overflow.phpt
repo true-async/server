@@ -29,7 +29,11 @@ $server = new HttpServer($config);
 $outcome = ['code' => null, 'overflowed' => null];
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use (&$outcome) {
-    /* Stalled consumer: let the client flood past the 8 KiB cap. */
+    /* The 101 goes out on the first WebSocket I/O, so the send commits the
+     * upgrade and the delay after it is a consumer that is really stalled:
+     * a delay before any I/O would hold the 101 back, and the flood would
+     * meet a handler already draining in recv(). */
+    $ws->send('go');
     delay(300);
 
     try {
@@ -81,6 +85,8 @@ $client = spawn(function () use ($port, $server) {
         if ($chunk === false || $chunk === '') break;
         $hs .= $chunk;
     }
+    /* The handler's first frame can share a segment with the 101. */
+    ws_pushback($fp, substr($hs, strpos($hs, "\r\n\r\n") + 4));
 
     /* 24 × 700 B ≈ 16.4 KiB — twice the 8 KiB cap. */
     $frame = ws_client_text_frame(str_repeat('x', 700));

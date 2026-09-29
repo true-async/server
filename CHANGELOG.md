@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Over TLS a refused upload lost its 413, and a WebSocket peer flooding past the inbound cap was reset (#311).** The lingering close that #288 and #305 gave plaintext connections had no TLS path: the TLS read did not drop what arrived, so `http_connection_linger_begin` refused a TLS connection and the socket was closed on top of the peer's unread bytes. That close is a reset. A client uploading past `setMaxBodySize()` over https read no status at all and failed the rest of its body; a wss peer failed the rest of its flood, and on Windows the reset also discards the CLOSE 1013. During the drain the TLS read now reads into the connection's plaintext buffer and drops each chunk without decrypting it, and stays armed until the peer stops or the drain's deadline passes, including while a cancelled handler is still unwinding. Evidence: `tls/017` reads an empty reply after 9 to 41 of 192 chunks on 10 of 10 runs before, and the whole body and a 413 after; `tls/018`, whose handler takes 3 s to unwind from the refusal, fails 5 of 5 against the first version of this fix and passes after; `websocket/071` writes about 3,700 of 8,000 frames before and all of them after.
+- **A WebSocket peer whose compressed message broke the size cap was reset while it was still sending (#312).** The permessage-deflate teardown queued CLOSE 1009 and closed without the drain the inbound-cap teardown opens. It opens the same drain now. Evidence: `websocket/072` writes 3,723 of 8,000 frames after the bomb on 10 of 10 runs before and all of them after. On Linux the 1009 arrives either way; the reset is what discards it on Windows, as #305 recorded for the 1013.
+
+### Fixed
+
+- **A WebSocket frame queued while a send was parked in its write waited for the next send, and a CLOSE never went out (#327).** `ws_session_drive_send` serialized wslay's queue once and wrote it. A send to a peer that is not reading parks in that write, and a frame queued meanwhile by another path stayed in the queue, because those paths leave the flush to the coroutine already flushing: the CLOSE after an inbound overflow, a protocol error or a deflate failure, a keepalive PING, an auto-PONG, another coroutine's `send()`. The drive now repeats until wslay has nothing queued. Evidence: `websocket/073` delivers a 16 MiB message and no CLOSE 1013 on 5 of 5 runs before, and the CLOSE after; `websocket/035` lost its 1013 the same way on the Windows CI job, where the 101's write was still in flight when the flood arrived.
+
 ## [0.16.0] - 2026-09-26
 
 ### Changed
