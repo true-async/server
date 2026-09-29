@@ -350,9 +350,23 @@ static void tls_fsm_io_callback_fn(
         req->dispose(req);
 
         if (UNEXPECTED(err || bytes_read <= 0)) {
+            /* The peer has stopped: a drain in progress is complete. */
+            http_connection_linger_end(conn);
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
             (void)tls_finalize_if_closing(conn);
+        } else if (UNEXPECTED(conn->linger_close)) {
+            /* Draining: the slot is left uncommitted, which drops the chunk
+             * without decrypting it; the finalize below re-arms the read. */
+            http_connection_linger_note_inbound(conn);
+
+            if (!tls_finalize_if_closing(conn)
+                && UNEXPECTED(!tls_arm_one_shot_read(conn))) {
+                http_connection_linger_end(conn);
+                conn->state = CONN_STATE_CLOSING;
+                tls_advance_state(conn);
+                (void)tls_finalize_if_closing(conn);
+            }
         } else if (UNEXPECTED(!tls_commit_cipher_in(conn->tls, (size_t)bytes_read))) {
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
@@ -591,7 +605,17 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
         req->dispose(req);
 
         if (UNEXPECTED(err || bytes_read <= 0)) {
+            /* The peer has stopped: nothing is left unread, so a drain
+             * in progress has done its job and the close can follow. */
+            http_connection_linger_end(conn);
             return false;
+        }
+
+        /* Draining: the slot is left uncommitted, which drops the chunk
+         * without decrypting it. */
+        if (UNEXPECTED(conn->linger_close)) {
+            http_connection_linger_note_inbound(conn);
+            return tls_arm_one_shot_read(conn);
         }
 
         if (UNEXPECTED(!tls_commit_cipher_in(conn->tls, (size_t)bytes_read))) {
@@ -1025,7 +1049,9 @@ static void tls_advance_state(http_connection_t *conn)
  * FSM (read completion, send completion, post-handler resume): if the
  * state machine landed in CLOSING and there is no in-flight FSM send
  * keeping the heap buffer alive, tear the connection down. Returns
- * true if conn was destroyed (caller MUST stop touching conn). */
+ * true if the caller has nothing left to do on conn: it was destroyed,
+ * or it is draining under a lingering close with the read armed (the
+ * caller MUST stop touching conn either way). */
 static bool tls_finalize_if_closing(http_connection_t *conn)
 {
     if (conn->state != CONN_STATE_CLOSING) {
@@ -1037,6 +1063,17 @@ static bool tls_finalize_if_closing(http_connection_t *conn)
          * the BIO ring slot. The free_cb re-runs teardown via
          * destroy_pending. */
         return false;
+    }
+
+    /* Destroy would only defer here, and a drain nobody reads for would
+     * close on the same unread bytes it waited out. The read callback
+     * drops what arrives; the deadline tick or the peer's EOF ends it. */
+    if (http_connection_linger_pending(conn)) {
+        if (tls_arm_one_shot_read(conn)) {
+            return true;
+        }
+
+        http_connection_linger_end(conn);
     }
 
     http_connection_destroy(conn);

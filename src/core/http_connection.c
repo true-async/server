@@ -360,14 +360,6 @@ void http_connection_linger_begin(http_connection_t *conn)
         return;
     }
 
-#ifdef HAVE_OPENSSL
-    /* Only the plaintext read paths drop what arrives, so on TLS the wait would
-     * run with nothing being read and close on the same unread bytes. */
-    if (conn->tls != NULL) {
-        return;
-    }
-#endif
-
     conn->linger_close = 1;
     conn->read_buffer_len = 0;
     conn->keep_alive = false;
@@ -375,7 +367,7 @@ void http_connection_linger_begin(http_connection_t *conn)
     conn->deadline_ms = http_connection_linger_next_deadline(conn);
 }
 
-static bool http_connection_linger_pending(const http_connection_t *conn)
+bool http_connection_linger_pending(const http_connection_t *conn)
 {
     if (!conn->linger_close) {
         return false;
@@ -384,8 +376,7 @@ static bool http_connection_linger_pending(const http_connection_t *conn)
     return ZEND_ASYNC_NOW() < conn->deadline_ms;
 }
 
-/* A chunk from the peer buys the drain another window and is dropped. */
-static void http_connection_linger_note_inbound(http_connection_t *conn)
+void http_connection_linger_note_inbound(http_connection_t *conn)
 {
     conn->read_buffer_len = 0;
     conn->deadline_ms = http_connection_linger_next_deadline(conn);
