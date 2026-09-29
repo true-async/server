@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `stop()` that ran while `start()` was still starting was lost, and `start()` never returned (#332).** `start()` opens the log sinks before it marks the server running, and a TCP sink's connect suspends it there; a coroutine spawned before `start()` runs in that window, found the server not running and returned. With a syslog TCP sink this happened 3 of 3 runs. `start()` now carries such a stop out before it waits, and returns at once (`core/079`).
 - **A WebSocket frame queued while a send was parked in its write waited for the next send, and a CLOSE never went out (#327).** `ws_session_drive_send` serialized wslay's queue once and wrote it. A send to a peer that is not reading parks in that write, and a frame queued meanwhile by another path stayed in the queue, because those paths leave the flush to the coroutine already flushing: the CLOSE after an inbound overflow, a protocol error or a deflate failure, a keepalive PING, an auto-PONG, another coroutine's `send()`. The drive now repeats until wslay has nothing queued. Evidence: `websocket/073` delivers a 16 MiB message and no CLOSE 1013 on 5 of 5 runs before, and the CLOSE after; `websocket/035` lost its 1013 the same way on the Windows CI job, where the 101's write was still in flight when the flood arrived.
 
 ## [0.16.0] - 2026-09-26

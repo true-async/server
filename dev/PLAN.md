@@ -27,7 +27,9 @@ an item marked "reproduce" gets its failing run before any code.
 2. #312 — permessage-deflate close: reproduced and fixed with #311. #327, a
    frame queued while a send is parked in its write, found through `035` on
    Windows CI and fixed in the same PR.
-3. #313 — retry ratchet in CI: PR 331. The clock removal follows in batches.
+3. #313 — retry ratchet in CI: PR 331, merged. The clock removal is dropped
+   (Sage, 2026-09-29): fix `core/023` and `tls/003` until the baseline is
+   empty, then print the first attempt's diff before a retry in CI.
 4. SSE byte count (issue to open).
 5. #322 — upload limits from `upload_max_filesize` and `max_file_uploads`.
 6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
@@ -37,6 +39,11 @@ an item marked "reproduce" gets its failing run before any code.
 10. #314 — no action until it recurs.
 11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
 12. `http_server_pause_listeners` and the accept it may not stop: reproduce.
+13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
+    `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
+    with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
+    pass alone, and one full `-j4` suite of two hit it. A test that counts
+    CPU should not see a bounded ring's designed drop; decide which side moves.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
@@ -1823,6 +1830,22 @@ a release yet except the first two, which are fixed.
   jobs on 2026-09-29: `core/023` on macOS release (2 of 15 jobs) and `tls/003`
   on Windows (2 of 29); no Linux job retried. Both are open defects, and an
   entry leaves the list when its test is fixed.
+
+  The clock removal is dropped, by the Sage on 2026-09-29, at Edmond's
+  request. The ratchet already refuses a new retry, and 354 rewritten files
+  would still leave the retries `is_flaky_output` grants on "connection
+  refused" and "timed out", which a network suite prints most. Instead, in
+  order:
+  - [x] `core/023` and `tls/003` wait on the event under a deadline instead of
+    a fixed sleep; the baseline is empty. `core/023` read its buffer without
+    waiting for the coroutine that fills it: 0 of 20 with that reader delayed
+    200 ms, 20 of 20 after. `tls/003` stopped the server 1.5 s in whatever
+    s_client was doing: `tls13: no` with the client delayed 2 s, `yes` after.
+    Rewriting `023` found #332, a `stop()` lost while `start()` was still
+    starting; fixed in the same PR, `core/079` red 3 of 3 before.
+  - [ ] CI patches php-src's `run-tests.php` with `git apply` to print the
+    first attempt's diff before `goto retry`, and fails if the patch stops
+    applying. Its own PR.
 
 - [ ] **#314 — `compression/070` hung twice on one Windows job and passed on
   the rerun.** `tests/phpt/server/compression/070-encoder-pool-reuse.phpt`

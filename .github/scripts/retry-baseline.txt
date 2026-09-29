@@ -2,11 +2,5 @@
 # assert_no_new_retries.php. Paths are relative to tests/phpt. An entry leaves
 # when its test is fixed; a new one is not added to get a job green (#313).
 #
-# Taken on 2026-09-29 from the WARNED TEST SUMMARY of 89 green jobs: 15 of each
-# Linux and macOS leg, 29 of Windows. 4 retries in all, none of them on Linux.
-
-# macOS release, 2 of 15 jobs.
-server/core/023-log-syslog-tcp.phpt
-
-# Windows, 2 of 29 jobs.
-server/tls/003-tls-handshake.phpt
+# Empty: core/023 and tls/003, the two tests that retried in 89 green jobs on
+# 2026-09-29, wait on the event they test instead of on a fixed sleep.
