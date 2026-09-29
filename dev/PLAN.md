@@ -27,9 +27,9 @@ an item marked "reproduce" gets its failing run before any code.
 2. #312 — permessage-deflate close: reproduced and fixed with #311. #327, a
    frame queued while a send is parked in its write, found through `035` on
    Windows CI and fixed in the same PR.
-3. #313 — retry ratchet in CI: PR 331, merged. The clock removal is dropped
-   (Sage, 2026-09-29): fix `core/023` and `tls/003` until the baseline is
-   empty, then print the first attempt's diff before a retry in CI.
+3. #313 — done: the ratchet (PR 331), `core/023` and `tls/003` fixed with an
+   empty baseline (PR 333, which also fixed #332), the first attempt's diff
+   printed before a retry (PR 334). The clock removal is dropped (Sage).
 4. SSE byte count (issue to open).
 5. #322 — upload limits from `upload_max_filesize` and `max_file_uploads`.
 6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
@@ -1806,7 +1806,7 @@ a release yet except the first two, which are fixed.
 
 ## Three defects found by the reviews of #305 and #310 (#313, #314, #315)
 
-- [ ] **#313 — run-tests reports only the second attempt of a retried test.**
+- [x] **#313 — run-tests reports only the second attempt of a retried test.**
   `is_flaky` (`run-tests.php:3118-3140`) marks a test for retry when its FILE
   section calls `disk_free_space`, `hrtime`, `microtime`, `sleep` or `usleep`;
   `is_flaky_output` (`:3143-3155`) retries any failure whose output holds
@@ -1843,9 +1843,10 @@ a release yet except the first two, which are fixed.
     s_client was doing: `tls13: no` with the client delayed 2 s, `yes` after.
     Rewriting `023` found #332, a `stop()` lost while `start()` was still
     starting; fixed in the same PR, `core/079` red 3 of 3 before.
-  - [ ] CI patches php-src's `run-tests.php` with `git apply` to print the
+  - [x] CI patches php-src's `run-tests.php` with `git apply` to print the
     first attempt's diff before `goto retry`, and fails if the patch stops
-    applying. Its own PR.
+    applying: PR 334. The step passed in all five build jobs; the `RETRY`
+    block was shown locally with `-j2 -g FAIL`, since no CI run retried.
 
 - [ ] **#314 — `compression/070` hung twice on one Windows job and passed on
   the rerun.** `tests/phpt/server/compression/070-encoder-pool-reuse.phpt`
