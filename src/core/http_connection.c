@@ -360,6 +360,13 @@ void http_connection_linger_begin(http_connection_t *conn)
         return;
     }
 
+#ifdef HAVE_OPENSSL
+    /* A refusal that could not be encrypted or sent has nothing to protect. */
+    if (conn->tls != NULL && conn->tls_write_error) {
+        return;
+    }
+#endif
+
     conn->linger_close = 1;
     conn->read_buffer_len = 0;
     conn->keep_alive = false;

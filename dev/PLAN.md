@@ -1701,12 +1701,16 @@ a release yet except the first two, which are fixed.
   single failure out of 61 executed WebSocket tests.
 
 - [x] **The lingering close has no TLS path, so wss and https keep losing what a
-  reset discards.** Closed by #311: the TLS read drops a drained chunk by leaving
-  its ciphertext slot uncommitted, and `tls_finalize_if_closing` keeps the read
-  armed while the drain is pending. `tls/017` and `websocket/071` fail before and
-  pass after; the flood that proves it on Linux is the client's write failing
+  reset discards.** Closed by #311: the TLS read drains into `read_buffer` and
+  drops each chunk undecrypted, and the read stays armed while the drain is
+  pending, a cancelled handler still unwinding included. `tls/017`, `tls/018` and
+  `websocket/071` fail before and pass after; the flood that proves it on Linux is the client's write failing
   midway, since Linux still delivers the 413 or 1013 that arrived before a reset.
-  Before: The drain is fed from the plaintext read paths alone —
+  Critic 2026-09-29: two findings left open by design. `stop()` closes no
+  connection, draining or idle, until the server object is freed (the TODO in
+  `http_server_do_stop`); frames pipelined before the 101 that trip a cap arm the
+  drain without the FSM reaching CLOSING, so the deadline tick ends it and no
+  close_notify is sent. Before: The drain is fed from the plaintext read paths alone —
   `http_connection_linger_note_inbound` is reached from `http_connection.c:1324`
   and `:1429`, and `http_connection_tls.c` does not mention the drain at all. A
   TLS connection that armed it would wait with nothing being read and close on
