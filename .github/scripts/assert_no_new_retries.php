@@ -40,7 +40,8 @@ if ($unexpected !== []) {
     foreach ($unexpected as $test) {
         fwrite(STDERR, "  {$test}\n");
     }
-    fwrite(STDERR, "Reproduce it outside run-tests and fix it; the baseline"
+    fwrite(STDERR, "The first attempt's diff is in the log above, under 'RETRY <test>'."
+        . " Reproduce it outside run-tests and fix it; the baseline"
         . " in {$argv[1]} is for tests that already retried when it was written.\n");
     exit(1);
 }

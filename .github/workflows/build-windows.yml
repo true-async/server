@@ -107,6 +107,12 @@ jobs:
       - name: Build PHP + http_server
         run: .github/scripts/windows/build.bat
 
+      # run-tests.php discards a retried test's first attempt, so a test that
+      # passes on the retry leaves only its name; the patch prints that
+      # attempt's diff, and a php-src it no longer applies to fails here (#313).
+      - name: Patch run-tests.php to print a retried test's first diff
+        run: git apply .github/scripts/run-tests-retry-diff.patch
+
       - name: Test http_server (phpt)
         run: .github/scripts/windows/test.bat
 

@@ -139,6 +139,12 @@ jobs:
           /usr/local/bin/php -m | grep -i 'true_async_server'
           /usr/local/bin/php --ri true_async_server || true
 
+      # run-tests.php discards a retried test's first attempt, so a test that
+      # passes on the retry leaves only its name; the patch prints that
+      # attempt's diff, and a php-src it no longer applies to fails here (#313).
+      - name: Patch run-tests.php to print a retried test's first diff
+        run: git -C "$GITHUB_WORKSPACE/php-src" apply "$GITHUB_WORKSPACE/http-server/.github/scripts/run-tests-retry-diff.patch"
+
       - name: Run http_server phpt suite
         working-directory: http-server
         run: |
