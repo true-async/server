@@ -31,7 +31,7 @@ jobs:
   # --------------------------------------------------------------------
   ctrl-c-macos:
     name: "CTRLC_MACOS_ARM64"
-    runs-on: macos-14
+    runs-on: macos-15  # macos-14 runners are removed on 2026-11-02
     timeout-minutes: 60
 
     steps:

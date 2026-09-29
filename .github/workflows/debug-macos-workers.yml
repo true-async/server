@@ -18,7 +18,7 @@ env:
 jobs:
   workers:
     name: MACOS_ARM64_WORKERS_DEBUG
-    runs-on: macos-14
+    runs-on: macos-15  # macOS 14: no Homebrew bottles, runners removed 2026-11-02
     timeout-minutes: 40
 
     steps:
