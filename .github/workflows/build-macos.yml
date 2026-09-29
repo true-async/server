@@ -26,7 +26,10 @@ jobs:
       matrix:
         debug: [false, true]
         zts:   [true]
-        os: ['14']
+        # Homebrew 7.0.0 made macOS 14 Tier 3 and builds no bottles for it, so
+        # every dependency built from source there, llvm among them for nghttp2;
+        # GitHub removes the macos-14 runners on 2026-11-02.
+        os: ['15']
 
     name: "MACOS_ARM64_${{ matrix.debug && 'DEBUG' || 'RELEASE' }}_${{ matrix.zts && 'ZTS' || 'NTS' }}"
     runs-on: macos-${{ matrix.os }}
