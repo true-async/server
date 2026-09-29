@@ -15,6 +15,7 @@ use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 use function Async\await;
+use function Async\delay;
 
 // ---- Generate self-signed cert in a temp dir.
 $tmp_dir = __DIR__ . '/tmp-061';
@@ -50,10 +51,9 @@ $server->addHttpHandler(function ($req, $res) {
 
 // ---- Client coroutine: `openssl s_client` — standard TLS client
 // with machine-readable status. Exits when the server closes.
+// The listener is bound before start() suspends, and this coroutine first
+// runs at that suspend, so the connect needs no head start.
 $client = spawn(function () use ($port, $cert_path) {
-    // Let the listener settle.
-    usleep(50000);
-
     /* -brief prints the negotiated protocol + ciphersuite + peer DN
      * on stderr and nothing else. Enough signal to prove the
      * handshake reached TLS_ESTABLISHED; ALPN-driven dispatch is
@@ -72,12 +72,13 @@ $client = spawn(function () use ($port, $cert_path) {
     return $out;
 });
 
-// Safety net — stop the server even if the client hangs.
-spawn(function () use ($server) {
-    usleep(1500000);   // 1.5 s
-    if ($server->isRunning()) {
-        $server->stop();
-    }
+// Safety net — stop the server if the client hangs. The client stops it
+// itself when s_client exits, which can take seconds where process start is
+// slow, so this fires only on a hang, and says so.
+$watchdog = spawn(function () use ($server) {
+    delay(10000);
+    echo "FAIL: s_client still running after 10 s\n";
+    $server->stop();
 });
 
 global $server;
@@ -85,6 +86,7 @@ $GLOBALS['server'] = $server;
 $server->start();
 
 $out = await($client);
+$watchdog->cancel();
 
 // ---- Assertions. -brief emits:
 //   Protocol version: TLSv1.3

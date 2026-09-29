@@ -548,6 +548,10 @@ struct http_server_object {
     /* State flags (clustered) */
     bool                     running;
     bool                     stopping;
+    /* True while start() opens the log sinks, before it sets `running`: a TCP
+     * sink connects there and suspends start(), and a stop() in that window
+     * only sets `stopping`, which start() carries out before it waits. */
+    bool                     starting;
     bool                     listeners_paused;
     /* Set once start()'s post-wakeup drain has emptied server_scope, so the
      * http_server_free fallback drain is skipped on the normal stop() path
@@ -3904,6 +3908,59 @@ cleanup:
 }
 /* }}} */
 
+/* Suspends start() until stop() resolves the server's wait event, or until the
+ * coroutine is cancelled. Returns false with an exception set when no waker can
+ * be made; *bailout is set when the suspend unwound by a bailout, which the
+ * caller rethrows after its own teardown. */
+static bool http_server_await_stop(http_server_object *server, bool *bailout)
+{
+    /* Create wait event and suspend until stop() is called */
+    zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    server->wait_event = create_server_wait_event();
+
+    /* Create waker for coroutine */
+    if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
+        server->wait_event->dispose(server->wait_event);
+        server->wait_event = NULL;
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Failed to create waker for server", 0);
+        return false;
+    }
+
+    /* Attach coroutine to wait event - will suspend until stop() resolves it */
+    zend_async_resume_when(coroutine, server->wait_event, true,
+                           zend_async_waker_callback_resolve, NULL);
+
+    /* Suspend coroutine - control returns to event loop. zend_try is
+     * the only way to run deadline_tick_stop on a bailout exit too —
+     * otherwise longjmp skips it and the periodic timer keeps libuv
+     * loop alive past worker shutdown (scheduler.c:1964 asserts). */
+    volatile bool bailed = false;
+    http_bailout_state_t bailout_state;
+    http_bailout_state_save(&bailout_state);
+
+    zend_try {
+        ZEND_ASYNC_SUSPEND();
+        /* The waker owns the wait_event (resume_when took ownership) and
+         * waker_clean disposes it below — drop our pointer first so a late
+         * stop() on a coroutine torn down by cancellation (not by stop())
+         * does not notify a freed event. */
+        server->wait_event = NULL;
+        zend_async_waker_clean(coroutine);
+
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+    } zend_catch {
+        http_bailout_state_restore(&bailout_state);
+        bailed = true;
+    } zend_end_try();
+
+    *bailout = bailed;
+    return true;
+}
+
 /* {{{ proto HttpServer::start(): bool */
 ZEND_METHOD(TrueAsync_HttpServer, start)
 {
@@ -4643,6 +4700,9 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     }
 #endif
 
+    server->stopping = false;
+    server->starting = true;
+
     {
         http_server_config_t *cfg = http_server_config_from_obj(Z_OBJ(server->config));
         http_server_start_logging(server, cfg);
@@ -4651,6 +4711,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
                        server->backlog, server->max_connections);
     }
 
+    server->starting = false;
     server->running = true;
     current_server = server;
 
@@ -4678,55 +4739,23 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         RETURN_FALSE;
     }
 
-    /* Create wait event and suspend until stop() is called */
-    zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+    bool bailout = false;
 
-    server->wait_event = create_server_wait_event();
-
-    /* Create waker for coroutine */
-    if (ZEND_ASYNC_WAKER_NEW(coroutine) == NULL) {
-        server->wait_event->dispose(server->wait_event);
-        server->wait_event = NULL;
-
+    if (UNEXPECTED(server->stopping)) {
+        /* A stop() that ran while the log sinks were opening found the server
+         * not yet running and left the stop to start(). The wait event does not
+         * exist yet, so do_stop has nothing to wake and there is nothing to
+         * wait for. */
+        http_server_do_stop(server, NULL);
+    } else if (!http_server_await_stop(server, &bailout)) {
         /* This path never reaches the exits below, so the slot and the hub
          * reference are dropped here instead. */
         if (room_hub_attached) {
             room_hub_detach(server->topic_hub);
         }
 
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Failed to create waker for server", 0);
         RETURN_FALSE;
     }
-
-    /* Attach coroutine to wait event - will suspend until stop() resolves it */
-    zend_async_resume_when(coroutine, server->wait_event, true,
-                           zend_async_waker_callback_resolve, NULL);
-
-    /* Suspend coroutine - control returns to event loop. zend_try is
-     * the only way to run deadline_tick_stop on a bailout exit too —
-     * otherwise longjmp skips it and the periodic timer keeps libuv
-     * loop alive past worker shutdown (scheduler.c:1964 asserts). */
-    volatile bool bailout = false;
-    http_bailout_state_t bailout_state;
-    http_bailout_state_save(&bailout_state);
-
-    zend_try {
-        ZEND_ASYNC_SUSPEND();
-        /* The waker owns the wait_event (resume_when took ownership) and
-         * waker_clean disposes it below — drop our pointer first so a late
-         * stop() on a coroutine torn down by cancellation (not by stop())
-         * does not notify a freed event. */
-        server->wait_event = NULL;
-        zend_async_waker_clean(coroutine);
-
-        if (EG(exception)) {
-            zend_clear_exception();
-        }
-    } zend_catch {
-        http_bailout_state_restore(&bailout_state);
-        bailout = true;
-    } zend_end_try();
 
     /* Pair to deadline_tick_start above — same lifecycle, runs on every
      * exit (normal, cancellation, bailout). Without this the periodic
@@ -4882,6 +4911,10 @@ ZEND_METHOD(TrueAsync_HttpServer, stop)
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     if (!server->running) {
+        if (server->starting) {
+            server->stopping = true;
+        }
+
         RETURN_TRUE;
     }
 
