@@ -29,7 +29,11 @@ $server = new HttpServer($config);
 $outcome = ['code' => null, 'overflowed' => null];
 
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) use (&$outcome) {
-    /* Stalled consumer: let the client flood past the 8 KiB cap. */
+    /* The 101 goes out on the first WebSocket I/O, so the send commits the
+     * upgrade and the delay after it is a consumer that is really stalled:
+     * a delay before any I/O would hold the 101 back, and the flood would
+     * meet a handler already draining in recv(). */
+    $ws->send('go');
     delay(300);
 
     try {
