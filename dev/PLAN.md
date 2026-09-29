@@ -36,6 +36,7 @@ an item marked "reproduce" gets its failing run before any code.
 9. `test_static_decoders` back in the unit suite (issue to open).
 10. #314 — no action until it recurs.
 11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
+12. `http_server_pause_listeners` and the accept it may not stop: reproduce.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
@@ -1672,6 +1673,36 @@ a release yet except the first two, which are fixed.
   Left open: `errors_summed` in `telemetry/012` has never had a spread guard and
   still has none, so its summation is proved only on a run where the six bad
   requests did land on more than one worker. The file's header comment says so.
+
+## The room retry tests on the shared listen fd (#329)
+
+- [x] **`064`–`066` skip on the shared listen fd.** They need a subscriber on each
+  of two workers, which the server does not promise (#240), and on the shared fd
+  it measurably does not happen: `065`/`066` failed there three times in two runs
+  of PR #328, and locally `065` read `no subscriber on a remote worker` on 3 of
+  10, 5 of 20 and 2 of 20 runs against 0 of 16 on SO_REUSEPORT. The instrumented
+  helper showed the failing runs at `[0,4]` after round 0 and `[0,32]` after
+  round 7; in passing ones the first worker held 1 to 3. The retry queue they
+  test (`room_hub_post_locked`) reads nothing about the listener and stays
+  covered by the first CI pass. `tests/phpt/websocket/_ws_spread_skipif.inc`
+  mirrors `core/076`'s condition. Evidence: with
+  `TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1` the three tests skip with the reason;
+  without it each passes 10 of 10. Decided with Edmond on 2026-09-29.
+
+  Left open: the cause of the skew is not traced — every shared-fd run gave the
+  majority to the second worker, which the idea of a busy worker winning does
+  not explain; the measurements and the tracing step are in #329, together with
+  the question whether #240's answer still holds. `telemetry/012` rests on the
+  same premise in the second pass and has not failed yet; the same predicate
+  applies if it does. Opening connections in a burst, so both workers drain one
+  backlog, is an untried alternative to skipping.
+
+- [ ] **`http_server_pause_listeners` may not stop accepting on the socket.** It
+  calls the listen event's `stop`, and `libuv_listen_stop` in `ext/async`'s
+  reactor only drops a reference count ("uv_listen doesn't have a stop
+  function"); the pause tests check counters, not the fd (`h1/011`: "Don't
+  check listeners_paused"). Found while reading for #329, not run: the first step
+  is a test that stays connected-and-accepted while the listeners are paused.
 
 ## A WebSocket close is lost when the peer is still sending (#303 fallout)
 

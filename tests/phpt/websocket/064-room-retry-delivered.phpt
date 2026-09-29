@@ -5,6 +5,8 @@ Rooms reliable-send: a full target parks then a retry lands it (retry_queued -> 
 if (!function_exists('TrueAsync\\__test_force_topic_post_full')) {
     echo "skip requires --enable-tas-test-hooks (fault-injection hook absent)";
 }
+require __DIR__ . '/_ws_spread_skipif.inc';
+ws_spread_skipif();
 ?>
 --EXTENSIONS--
 true_async_server
