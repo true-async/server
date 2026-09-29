@@ -85,6 +85,8 @@ $client = spawn(function () use ($port, $server) {
         if ($chunk === false || $chunk === '') break;
         $hs .= $chunk;
     }
+    /* The handler's first frame can share a segment with the 101. */
+    ws_pushback($fp, substr($hs, strpos($hs, "\r\n\r\n") + 4));
 
     /* 24 × 700 B ≈ 16.4 KiB — twice the 8 KiB cap. */
     $frame = ws_client_text_frame(str_repeat('x', 700));

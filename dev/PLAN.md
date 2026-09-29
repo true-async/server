@@ -24,7 +24,9 @@ Defects before features (#133, #106, #72, #48, #6 wait). Fixed in this order;
 an item marked "reproduce" gets its failing run before any code.
 
 1. #311 — lingering close over TLS. Done.
-2. #312 — permessage-deflate close: reproduced and fixed with #311.
+2. #312 — permessage-deflate close: reproduced and fixed with #311. #327, a
+   frame queued while a send is parked in its write, found through `035` on
+   Windows CI and fixed in the same PR.
 3. #313 — retry ratchet in CI; the clock removal follows in batches.
 4. SSE byte count (issue to open).
 5. #322 — upload limits from `upload_max_filesize` and `max_file_uploads`.

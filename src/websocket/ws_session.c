@@ -192,8 +192,19 @@ static void ws_session_flush_output(ws_session_t *s)
 
 int ws_session_drive_send(ws_session_t *session)
 {
-    const int rc = wslay_event_send(session->ctx);
-    ws_session_flush_output(session);
+    int rc;
+
+    /* The flusher is the only writer: another path that queues a frame while
+     * flushing is set leaves it for this loop (a CLOSE the feed queued, a
+     * keepalive PING, another coroutine's send). A producer flush can park
+     * in the transport write, so frames queued meanwhile are not in the
+     * batch it serialized and need another pass. */
+    do {
+        rc = wslay_event_send(session->ctx);
+        ws_session_flush_output(session);
+    } while (rc == 0 && !session->write_error
+             && wslay_event_want_write(session->ctx));
+
     return rc;
 }
 /* }}} */
