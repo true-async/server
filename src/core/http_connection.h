@@ -297,6 +297,12 @@ struct _http_connection_t {
      * rather than read off the server, which runs again after a restart while
      * this connection still carries the previous run's scope. */
     unsigned                 retired : 1;
+    /* The socket read is stopped because read_buffer has no room for the
+     * pipelined bytes behind a request in flight; the kernel buffer and the
+     * TCP window hold the peer back until http_connection_read_resume starts
+     * reading again. Plaintext HTTP/1 only: TLS reads one chunk at a
+     * time and HTTP/2 and WebSocket consume all they are fed. */
+    unsigned                 read_paused : 1;
     /* Latched on the first parse-error tick so subsequent multishot
      * deliveries (the kernel's already-buffered tail of the same
      * connection) don't re-enter cancel/emit and double-count
@@ -580,6 +586,13 @@ bool http_connection_emit_parse_error(http_connection_t *conn, http1_parser_t *p
  * handler coroutine is spawned from on_request_ready and re-arms
  * reads itself for keep-alive. */
 bool http_connection_read(http_connection_t *conn);
+
+/* Starts the socket read again after a pause once read_buffer has room: at
+ * most half full while a request is in flight, any room otherwise. A no-op
+ * when the read is not paused. Arms the read and does nothing else; false
+ * when it could not, and the caller decides what that means for the
+ * connection. */
+bool http_connection_read_resume(http_connection_t *conn);
 
 /* Mint a per-request scope as a child of server_scope. The request
  * handler coroutine and everything it spawns run under this scope; it
