@@ -1,7 +1,16 @@
 diff --git a/run-tests.php b/run-tests.php
-index 916300f..4e574a4 100644
+index 79205c1..9d1834d 100755
 --- a/run-tests.php
 +++ b/run-tests.php
+@@ -1419,7 +1419,7 @@ function system_with_timeout(
+     }
+ 
+     if ($stat['signaled']) {
+-        $data .= "\nTermsig=" . $stat['stopsig'] . "\n";
++        $data .= "\nTermsig=" . $stat['termsig'] . "\n";
+     }
+     if ($stat["exitcode"] > 128 && $stat["exitcode"] < 160) {
+         $data .= "\nTermsig=" . ($stat["exitcode"] - 128) . "\n";
 @@ -2910,6 +2910,10 @@ COMMAND $orig_cmd
          $wanted_re = null;
      }
