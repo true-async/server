@@ -191,10 +191,11 @@ void http_static_handler_shared_release(http_static_handler_t *mount);
  * on_done        — fires when the protocol's send_static_response op
  *                  finishes (or engine failed before delegating).
  *                  status==0 ok, non-zero abort. Drop pinned resources.
- * on_passthrough — on_missing:Next rollback. Caller spawns its PHP
- *                  handler coroutine. NULL is invalid for mounts that
- *                  opt into HTTP_STATIC_FLAG_ON_MISSING_NEXT.
- * keep_alive     — per-protocol keep-alive verdict. NULL → assume true. */
+ * keep_alive     — per-protocol keep-alive verdict. NULL → assume true.
+ *
+ * An on_missing:Next rollback fires no callback: try_serve returns
+ * HTTP_STATIC_PASSTHROUGH and the caller runs its PHP handler, as for a
+ * request no mount matched. */
 #include "send_file.h"
 typedef send_file_cbs_t http_static_dispatch_cbs_t;
 

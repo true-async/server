@@ -39,9 +39,10 @@ typedef enum
 	 * Internal errors (stat fail, etc): same. — sendFile: caller already
 	 * passed a path it expects to exist; failure is server-side. */
 	SEND_FILE_ERR_INLINE_500 = 0,
-	/* Open failure: rollback to PHP via cbs->on_passthrough; engine
-	 * tears down without writing response_obj. Internal errors: emit
-	 * 500 via the protocol op. — StaticHandler with on_missing:Next. */
+	/* Open failure: return SEND_FILE_PASSTHROUGH, and the caller runs its
+	 * PHP handler; the engine tears down without writing response_obj or
+	 * firing a callback. Internal errors: emit 500 via the protocol op.
+	 * — StaticHandler with on_missing:Next. */
 	SEND_FILE_ERR_PASSTHROUGH_PHP = 1,
 	/* Open failure: emit 404 via the protocol op. Internal errors: 500
 	 * via the op. — StaticHandler default (no on_missing:Next). */
@@ -123,10 +124,6 @@ typedef struct
 	 * non-zero abort. NULL = nothing to do. */
 	void (*on_done)(void *user, int status);
 
-	/* on_error == PASSTHROUGH_PHP only: the engine is asking the caller
-	 * to spawn its PHP-handler coroutine. NULL is invalid in that mode. */
-	void (*on_passthrough)(void *user);
-
 	/* Per-protocol keep-alive verdict (H1 reads conn->keep_alive,
 	 * multiplexed transports return true). NULL → assume true. */
 	bool (*keep_alive)(void *user);
@@ -134,7 +131,8 @@ typedef struct
 
 typedef enum
 {
-	/* on_passthrough was fired (PASSTHROUGH_PHP only). */
+	/* The file did not open under PASSTHROUGH_PHP: nothing was written and
+	 * no callback fired; the caller runs its PHP handler. */
 	SEND_FILE_PASSTHROUGH = 0,
 	/* response_obj populated synchronously (304 or 4xx error body). */
 	SEND_FILE_HANDLED = 1,

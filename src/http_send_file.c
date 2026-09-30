@@ -215,7 +215,6 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	const send_file_cbs_t cbs = {
 		.on_armed = NULL,
 		.on_done = sf_adapter_on_done,
-		.on_passthrough = NULL,
 		.keep_alive = sf_adapter_keep_alive,
 	};
 

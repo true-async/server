@@ -629,14 +629,7 @@ static send_file_result_t engine_handle_open_failure(engine_state_t *state)
 	const send_file_config_t *cfg = &state->cfg;
 
 	if (cfg->on_error == SEND_FILE_ERR_PASSTHROUGH_PHP) {
-		const send_file_cbs_t cbs_copy = state->cbs;
-		void *user = state->user;
 		engine_state_free(state);
-
-		if (cbs_copy.on_passthrough != NULL) {
-			cbs_copy.on_passthrough(user);
-		}
-
 		return SEND_FILE_PASSTHROUGH;
 	}
 
