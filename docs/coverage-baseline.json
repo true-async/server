@@ -1,8 +1,8 @@
 {
   "totals": {
     "lines": {
-      "total": 25171,
-      "hit": 21060
+      "total": 25176,
+      "hit": 21062
     },
     "functions": {
       "total": 1765,
@@ -143,7 +143,7 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1264,
-        "hit": 1056
+        "hit": 1054
       },
       "functions": {
         "total": 79,
@@ -273,7 +273,7 @@
     "src/core/tls_layer.c": {
       "lines": {
         "total": 381,
-        "hit": 294
+        "hit": 292
       },
       "functions": {
         "total": 33,
@@ -742,8 +742,8 @@
     },
     "src/http_sse.c": {
       "lines": {
-        "total": 227,
-        "hit": 199
+        "total": 232,
+        "hit": 204
       },
       "functions": {
         "total": 14,
@@ -913,7 +913,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 554,
-        "hit": 499
+        "hit": 500
       },
       "functions": {
         "total": 38,
