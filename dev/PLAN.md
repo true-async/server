@@ -37,17 +37,19 @@ an item marked "reproduce" gets its failing run before any code.
    2026-09-30: its 2M default would cut uploads the body limit admits. The
    design went through the Critic. A `..` in a client filename answering 101
    is split out as #339.
-6. #341 — full read buffer on plaintext HTTP/1: PR 344, which waits for #345.
-   #345: `stop()` leaves connections open, and they start requests in the
-   server scope `start()` has cancelled; once that scope empties php-async
-   frees it. Found through PR 344's `h1/061`: SIGSEGV in 3 to 4 runs of 30
-   on the debug build, and on `main` a keep-alive connection still answers
-   after `start()` returns.
+6. #341 — full read buffer on plaintext HTTP/1: done. The read pauses by
+   disposing the multishot request (the reactor's own `uv_read_stop`) and
+   resumes at half a buffer; no php-async change. Designed by the Architect,
+   reviewed by the Critic (two remarks taken, no dispute left for the Sage).
+   Its `h1/061` found #345, fixed first (PR 347): `stop()` left connections
+   open, and they started requests in the server scope `start()` had
+   cancelled. With both, `h1/061` passes 30 of 30 runs; 3 to 4 of 30 crashed
+   before.
 7. #315 — iterative matcher in the Windows fnmatch shim: done. The matcher is
    `http_static_glob_match`, built on every platform; `StaticHide` checks it
    against POSIX `fnmatch` over 19 patterns x 18 paths both ways, and a
    4 KiB path the recursive form did not finish in 30 s passes under 1 s.
-8. Worker path: compression, dropped FULL wire, protocol version (issue to open).
+8. #350 — worker path: compression, dropped FULL wire, protocol version.
 9. `test_static_decoders` back in the unit suite (issue to open).
 10. #314 — recurred on 2026-09-30 in PR 340's Windows job: `compression/070`
     hung 120 s and passed on retry, and the ratchet failed the job. Suspect the
@@ -66,11 +68,9 @@ an item marked "reproduce" gets its failing run before any code.
     80 other tests still take a span, most of them HTTP/3 and skipped there.
 15. #346 — the reactor-pool worker inbox spawns into the server scope after
     `stop()` and across a restart, the path #345 left out: reproduce.
-16. Static passthrough on HTTP/1: `h1_static_on_passthrough_to_php` spawns the
-    handler, and `http_connection_dispatch_request` may read the same
-    `PASSTHROUGH` as "nothing done" and spawn again on one ctx (a static-cache
-    hit for a file deleted since, `on_missing: Next`). Found by the #345
-    Critic, by reading: reproduce.
+16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
+    fails the engine's `open()` (mode 0) started the handler twice on one ctx
+    and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
@@ -1653,7 +1653,13 @@ a release yet except the first two, which are fixed.
   condition before any code was read. After the fix `h1/005` passes 5 of 5 and
   `tests/phpt/server` loses two failures without gaining one.
 
-- [ ] **A full read buffer kills any connection, not only a refused one.**
+- [x] **A full read buffer kills any connection, not only a refused one (#341).**
+  Fixed: the read pauses on a full buffer and resumes at half; `h1/060`
+  104 of 151 and 64 of 3001 answered before, all after; `h1/061` (413 and
+  stop() while paused) and `websocket/074` (frames behind the upgrade). TLS
+  reads through its own one-shot path, which the pause does not touch: 151 of
+  151 and 3001 of 3001 through `openssl s_client` with this change; the old
+  code was not run over TLS.
   `http_connection_alloc_cb` answers a full buffer with `base = NULL, len = 0`,
   and libuv turns that into `UV_ENOBUFS` on the read — a fatal error where the
   intent was backpressure. The drain above removes the parse-error case. Every

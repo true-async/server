@@ -95,6 +95,7 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
 void http_handler_coroutine_entry(void);
 void http_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 static void http_connection_alloc_cb(zend_async_io_t *io, size_t suggested, zend_async_buf_t *out);
+static void http_connection_read_pause(http_connection_t *conn);
 static void http_connection_read_callback_fn(
     zend_async_event_t *event,
     zend_async_event_callback_t *callback,
@@ -236,8 +237,8 @@ http_connection_t *http_connection_create(const php_socket_t socket_fd,
      * each chunk is delivered, instead of completing + requiring a new req per
      * chunk. Saves one req allocation and one uv_read_start per chunk for
      * body streaming and keep-alive pipelines. The req is only disposed on
-     * a terminal event (EOF/error) or when we explicitly stop the reader at
-     * request hand-off. */
+     * a terminal event (EOF/error) or when read_buffer has no room for the
+     * pipelined bytes behind a request in flight (http_connection_read_pause). */
     ZEND_ASYNC_IO_SET_MULTISHOT(conn->io);
 
     conn->state = CONN_STATE_READING_HEADERS;
@@ -403,6 +404,11 @@ void http_connection_linger_begin(http_connection_t *conn)
     conn->keep_alive = false;
     conn->linger_until_ms = ZEND_ASYNC_NOW() + HTTP_LINGER_MAX_MS;
     conn->deadline_ms = http_connection_linger_next_deadline(conn);
+
+    /* The drain reads what the peer is still sending; a read paused on a full
+     * buffer would leave it unread and the close would reset it. A read that
+     * cannot start leaves the drain to its deadline. */
+    (void)http_connection_read_resume(conn);
 }
 
 bool http_connection_linger_pending(const http_connection_t *conn)
@@ -1412,8 +1418,14 @@ static void http_connection_read_callback_fn(
      * suspended at an await), so the parser must not run — feeding new bytes
      * could on_message_complete and dispatch a *second* handler on the same
      * conn while the first one's response slot is still live. Just buffer the
-     * tail; handler dispose will pull it out via handle_read_completion. */
+     * tail; handler dispose will pull it out via handle_read_completion.
+     * A full buffer stops the read here, in the callback that filled it and
+     * before libuv asks alloc_cb for room that is not there. */
     if (!terminal && conn->request_in_flight) {
+        if (conn->read_buffer_len >= conn->read_buffer_size) {
+            http_connection_read_pause(conn);
+        }
+
         return;
     }
 
@@ -1437,6 +1449,76 @@ static void http_connection_read_callback_fn(
     }
 }
 /* }}} */
+
+/* Stops the socket read: disposing the armed multishot request is the
+ * reactor's own uv_read_stop, which libuv honours inside the read loop that
+ * filled the buffer. Without it alloc_cb could only answer "no room" with an
+ * empty buffer, which libuv reports as UV_ENOBUFS and the reactor as a read
+ * error — the connection closed with every unread request. */
+static void http_connection_read_pause(http_connection_t *conn)
+{
+    zend_async_io_req_t *const req = conn->read_cb != NULL ? conn->read_cb->active_req : NULL;
+
+    if (req == NULL) {
+        return;
+    }
+
+    conn->read_cb->active_req = NULL;
+    conn->read_paused = true;
+    req->dispose(req);
+}
+
+bool http_connection_read_resume(http_connection_t *conn)
+{
+    if (!conn->read_paused || conn->io == NULL || conn->read_cb == NULL) {
+        return true;
+    }
+
+    /* Waiting for half the buffer rather than one free byte: the handler
+     * behind each pipelined request frees only that request's bytes, and
+     * resuming on those would stop and start the read once per request. */
+    if (conn->request_in_flight && conn->read_buffer_len > conn->read_buffer_size / 2) {
+        return true;
+    }
+
+    zend_async_io_req_t *const req = ZEND_ASYNC_IO_READ(
+        conn->io,
+        conn->read_buffer + conn->read_buffer_len,
+        conn->read_buffer_size - conn->read_buffer_len);
+
+    if (req == NULL) {
+        return false;
+    }
+
+    conn->read_paused = false;
+
+    /* Answered on the spot: the handle is at EOF, or the Windows sync read,
+     * which a live listener rules out. No read is armed after it, so the
+     * bytes join the buffer and the read stays paused for the next resume;
+     * an end of input means the peer has stopped. */
+    if (UNEXPECTED(req->completed)) {
+        const ssize_t bytes_read = req->exception == NULL ? req->transferred : -1;
+
+        if (req->exception != NULL) {
+            OBJ_RELEASE(req->exception);
+            req->exception = NULL;
+        }
+
+        req->dispose(req);
+
+        if (bytes_read > 0) {
+            conn->read_buffer_len += (size_t) bytes_read;
+            conn->read_paused = true;
+        } else {
+            conn->keep_alive = false;
+        }
+
+        return true;
+    }
+
+    conn->read_cb->active_req = req;
+    return true;
+}
 
 /* Per-chunk allocator wired into conn->io->alloc_cb. Hands the reactor
  * the next free slice of read_buffer so multishot keeps writing at the
@@ -3602,6 +3684,13 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {
             if (should_destroy) {
                 http_connection_destroy(conn);
+                return;
+            }
+
+            /* The next pipelined request is in flight and holds the
+             * connection; a read that cannot start ends it after that one. */
+            if (!http_connection_read_resume(conn)) {
+                conn->keep_alive = false;
             }
 
             return;
@@ -3612,8 +3701,13 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
         http_connection_destroy(conn);
         return;
     }
+
     /* Multishot reader on conn->io is armed for the connection's lifetime;
-     * the next request's bytes will arrive via the read callback. */
+     * the next request's bytes will arrive via the read callback — unless a
+     * full buffer paused it, and then it starts again here. */
+    if (!http_connection_read_resume(conn)) {
+        http_connection_destroy(conn);
+    }
 }
 /* }}} */
 

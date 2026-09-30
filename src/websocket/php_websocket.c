@@ -480,6 +480,13 @@ bool ws_commit_upgrade(websocket_object *w, bool install_session)
         conn->read_buffer_len = 0;
     }
 
+    /* The exception to "stays armed": frames pipelined behind the upgrade GET
+     * that filled read_buffer while the upgrade was in flight paused the read,
+     * and the buffer just emptied. */
+    if (!http_connection_read_resume(conn)) {
+        conn->keep_alive = false;
+    }
+
 #ifdef HAVE_OPENSSL
     /* TLS: the FSM set tls_awaiting_handler after the upgrade GET and
      * idled WITHOUT re-arming the one-shot read. Clear the gate and arm
