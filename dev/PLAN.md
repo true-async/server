@@ -83,6 +83,63 @@ socket several workers share on Windows, an EMFILE spin, no named pipes).
         several held connections, which only a Windows AF_UNIX listener
         (pending pipe instances) produces: item 34.
 
+## S2 — A failed or short HTTP/1 file body keeps the connection alive (item 12a)  [in progress]
+
+Goal: a file body that fails or comes up short ends the connection, so no later
+response is read as the rest of that body.
+Done when: item 12a's criterion holds on Linux, macOS and Windows CI.
+Tests: first
+Base: eaa2d57 (server), a97cd13 (php-async)
+
+Critic 2026-09-30 on the plan, all taken: `should_continue=false` still serves a
+pipelined request (`http_request_finalize` drains the buffer unless the framing
+is lost); the defer failure finalizes inside `llhttp_execute`, so closing there
+frees what the parser still reads; a plaintext truncation is absorbed by the
+socket buffers, while a stale `st_size` in the open-file cache gives a
+deterministic short transfer; php-async's TransmitFile counts the requested
+bytes, so Windows cannot see a short transfer; libfiu's `failnum` is a return
+value, not a count.
+
+- [x] S2.1 Fault injection in the build
+      done: `--enable-fault-injection` defines FIU_ENABLE and links libfiu;
+        `include/fiu-local.h` compiles the points to nothing without it;
+        `_http_fault_enable(string $name, bool $once = true)` and
+        `_http_fault_disable(string $name)` exist under the flag; a phpt sees an
+        enabled point fail and skips on a build without the flag, which has no
+        libfiu symbol (nm); the Linux debug CI leg installs libfiu and passes it
+      tier: T2 · role: Critic
+      Critic 2026-09-30 on the diff: a misspelt or removed point leaves a test
+        on the healthy path — taken: points go through fiu_enable_external and
+        `_http_fault_hits()` counts the failures injected. Rejected with reason:
+        an errno argument (no point here shims a syscall; added with the first
+        that does); fail-the-Nth-check (the control requests of these tests
+        never reach the points); clearing points at shutdown (each phpt runs in
+        its own process, and once-points disarm themselves); a CMake option
+        (the root CMakeLists builds on Windows, where libfiu does not).
+      handoff: `src/core/fault_hooks.c`, `core/083` passes with the flag and
+        skips without it; 0 `fiu_` symbols and no libfiu in ldd without it. The
+        CI leg's first run is part of S2.5.
+- [ ] S2.2 Red tests for the three failures
+      done: red on `main` for the named reason: the static path with a stale
+        cached size, plaintext and TLS, a second request pipelined behind it;
+        `sendFile()` with a fault point that shortens the transfer, plaintext
+        and TLS; a fault point in `engine_defer_schedule` on both paths closes
+        the connection without a crash
+      tier: T1 · role: —
+- [ ] S2.3 The fix in the server
+      done: S2.2 green; both `on_done` callbacks honour `status`; a short body
+        marks the framing lost; plaintext reports `bytes_sent < body_length` as
+        -1; a failed defer returns its own result and the caller drops
+        keep-alive after llhttp returns; the whole phpt suite passes
+      tier: T2 · role: Critic
+- [ ] S2.4 php-async: TransmitFile reports the bytes it sent
+      done: a php-async PR merged with CI green; the server's static
+        short-transfer test passes on Windows against it
+      tier: T1 · role: —
+- [ ] S2.5 Issue, CHANGELOG and the server PR
+      done: merged with every CI platform green
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28
