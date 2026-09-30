@@ -1068,7 +1068,7 @@ static void http3_steer_feed_fn(void *arg)
     pefree(m, 1);
 }
 
-/* KNOWN LIMITATION (see docs/PLAN_REACTOR_POOL.md, D6): forwarding works
+/* KNOWN LIMITATION: forwarding works
  * correctly, but pathological back-to-back migrations (7+ NAT rebinds on one
  * connection in milliseconds) can deadlock ngtcp2 path validation — investigated
  * to a circular validation/cwnd stall, ~5% at 15 rebinds, 0% at a realistic

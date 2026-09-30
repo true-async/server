@@ -118,10 +118,10 @@ helper abstractions. Three similar lines beat a premature abstraction.
 
 ## 8. Git workflow
 
-- "Merge" means **merge commit**. When asked to merge a branch, run
-  `git merge` (preferring `--no-ff` to preserve topology). Never
-  silently substitute a rebase. Use rebase only when explicitly asked
-  for rebase or for linear history.
+- A PR lands on `main` as one squash commit (`gh pr merge --squash`);
+  `dev/WORKFLOW.md` holds the rule and its one exception. A branch behind
+  `main` is rebased before the merge, and a conflict in `dev/PLAN.md`
+  keeps both sides' items.
 - Prefer new commits over `--amend` when iterating after a hook failure.
   A pre-commit hook failure means the commit did not happen — amending
   in that state mutates the **previous** commit and can destroy work.

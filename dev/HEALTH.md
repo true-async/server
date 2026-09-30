@@ -9,9 +9,10 @@ Suite: `run-tests.php -n -j4 tests/phpt/`, 537 tests, 110.3 s on the dev laptop 
   release build, 2026-09-30); `ctest` in tests/build, 21 tests, 0.41 s (same day)
 Coverage: CI lcov on the Linux release ZTS job, `docs/coverage-baseline.json`: 21,203 of 25,340
   lines, 1,624 of 1,776 functions (main at 3425391, 2026-09-30); phpt only, ctest not instrumented
-Mutants: no tool yet
-Practices: fault tests (5 libFuzzer targets, Http11Probe, Autobahn, h2spec, scheduler chaos), CI;
-  missing: mutation tool, dev/PRINCIPLES.md, specification tests with dev/TESTING.md
+Mutants: no tool yet; Mull on the cmocka binaries decided 2026-09-30 (PLAN 32)
+Practices: fault tests (5 libFuzzer targets, Http11Probe, Autobahn, h2spec, scheduler chaos), CI,
+  dev/PRINCIPLES.md (2026-09-30); missing: mutation tool (PLAN 32), fault points (libfiu, PLAN 12a,
+  31), specification tests with dev/TESTING.md (deferred, dev/DECISIONS.md 2026-09-30)
 Slices: src/core + src/http1, src/http2 + src/http3, src/static + src/compression + src/formats,
   the rest (room, websocket, log, grpc, the class files); next: src/core + src/http1
 Rotation: 5, 7, 6, 8, 9, 10; last run: all six on 2026-09-30 (baseline)
@@ -43,8 +44,8 @@ Known dark places: src/http_server_class.c (644 of 2,682 lines not run), src/log
 - 3 tests/phpt/server/tls/007-tls-pipelining.phpt:97: a fixed watchdog sleep sets the test time; 24 files sleep 1 s or more in one call (PLAN 26)
 - 2 tests/phpt/server/core/020-builtin-worker-pool.phpt:8: workers > 1 on Windows has no test; 56 phpt skip there on SO_REUSEPORT (PLAN 27)
 - 2 tests/phpt/server/static/009-static-symlink-owner.phpt:13, 021:15: "tracked gap" skip on Windows names no issue (PLAN 27)
-- 2 tests/e2e/*.phpt: 11 tests no workflow runs (decision pending)
-- 2 tests/fuzz/h3_datagram_fuzz.c:123: built and run by nothing, exercises no project source (decision pending)
+- 2 tests/e2e/*.phpt: 11 tests no workflow runs (PLAN 30)
+- 2 tests/fuzz/h3_datagram_fuzz.c:123: built and run by nothing, exercises no project source (PLAN 30)
 - 8 src/core/http_protocol_strategy.h:85,90: send_response and reset slots never called; six empty bodies (PLAN 28)
 - 8 include/php_http_server.h:417-456: _http_listen_event_t and _http_server_t unused (PLAN 28)
 - 8 src/core/thread_queue.cc:197-275: the SPSC queue and deps/concurrentqueue/readerwriterqueue.h serve only a unit test (PLAN 28)
@@ -53,8 +54,6 @@ Known dark places: src/http_server_class.c (644 of 2,682 lines not run), src/log
 - 8 src/compression/http_compression.c:66 and 12 more functions with no caller (pass 8 list, 2026-09-30) (PLAN 28)
 - 7 src/http_server.c:196, include/php_http_server.h:388,1425,1431, src/http2/http2_static_response.c:39, src/core/http_protocol_strategy.c:227, src/http_server_class.c:4885: TODO without an owner (PLAN 28)
 - 9 CHANGELOG.md:76: says WebSocket is absent on Windows; 5557cd9 built it (PLAN 29)
-- 9 docs/CODING_STANDARDS.md:144: cites docs/PLAN_REACTOR_POOL.md, which does not exist; :155-159 still calls pooled compression pending (PLAN 29)
-- 9 dev/WORKFLOW.md:55-57: the local command runs tests/phpt/server/, CI runs tests/phpt/ (PLAN 29)
 - 4 dev/PLAN.md: step lines for the worker-path compression, #322 and #315 left open after their fix; the Critic note of the #311 step still says stop() closes no connection (PLAN 29)
 - fine 2 tests/phpt/server/h2/009-h2-h2spec-gate.phpt:9: skips in phpt; conformance.yml:102-113 runs h2spec and fails on any failure
 - fine 2 tests/unit/http1/test_parser_security.c:1009,1060: no assertion; h1/019-host-validation.phpt rejects the same inputs end to end
@@ -70,7 +69,8 @@ Passes: 1–10 (baseline, whole project); 1, 2, 5–10 by health-auditor agents,
   model, all findings weighed by a Sage that read the code for each claimed defect
 Numbers: phpt 537 tests, 512 passed, 25 skipped, 110.3 s; ctest 21 of 21, 0.41 s (dev laptop,
   main at 3425391); coverage 21,203 of 25,340 lines (CI, same commit); mutants: none, no tool
-Findings: 35 NEW, listed under Open findings; 0 resolved (no earlier check)
+Findings: 35 NEW; 2 resolved in the same change (the dead PLAN_REACTOR_POOL.md reference and the
+  stale compression text in CODING_STANDARDS, the local test command in WORKFLOW)
 Refuted: an EMFILE accept error does not stop the listener (php-async re-arms it); the finding
   keeps only the missing log and counter
 Looks bad but is fine:
@@ -91,5 +91,8 @@ Looks bad but is fine:
 Strategy signals: no closed step reopened; four `[~]` steps older than four weeks ("Migration",
   "#240", the php-async bump, "WINDOWS_X64_ZTS_RELEASE is green on an absent extension"); the
   step lines and the ordered list drifted on five items; the plan has no 23.10 review lines
-Plan: items 12a, 12b and 17–29 added to "Order of the open defects"
+Decided (Edmond took the Sage's recommendations): squash merges and the coverage bot's commits recorded in WORKFLOW; the
+  reactor/worker split sanctioned in CODING_STANDARDS §1.3; §4 defers to §13a.4; dev/PRINCIPLES.md
+  from eight candidates; S<n> for new steps; Mull and libfiu; scenario tests deferred
+Plan: items 12a, 12b and 17–32 added to "Order of the open defects"
 Next: 5, 7

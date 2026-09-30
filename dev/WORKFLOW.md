@@ -28,6 +28,10 @@ same PR, should have been one issue.
 ## Branch and commit
 
 Work happens on a branch off `main`; `main` itself takes merges, not direct commits.
+A PR lands as one squash commit (`gh pr merge --squash`), its subject ending in the
+PR number. One exception to both rules: the CI coverage job commits
+`docs/coverage-baseline.json` to `main` as `ci: refresh coverage baseline [skip ci]`,
+that file only.
 Commit subjects follow Conventional Commits with a scope taken from the source tree
 (`fix(compression):`, `feat(room):`, `refactor(h3):`), one line, imperative mood,
 issue number at the end where one exists.
@@ -54,7 +58,7 @@ Commands, from the repository root:
 make -j4                                   # builds modules/true_async_server.so
 TEST_PHP_EXECUTABLE=/usr/local/bin/php \
   /usr/local/bin/php run-tests.php -n \
-  -d extension=$(pwd)/modules/true_async_server.so -j4 tests/phpt/server/
+  -d extension=$(pwd)/modules/true_async_server.so -j4 tests/phpt/
 cd tests/build && make && ctest             # unit suite
 ```
 
@@ -65,3 +69,15 @@ tests run against the installed build rather than the one just compiled.
 
 `TODO.md` is a performance backlog with its own step numbering, kept apart from the
 plan below. An item there is a candidate, not a commitment.
+
+## PLAN.md
+
+`dev/PLAN.md` has one queue: the numbered list under "Order of the open defects".
+A new step of more than one commit is written in the stage format `S<n>` with
+`done:`, `tier:` and `role:` fields; the sections below the queue are history and
+are not converted.
+
+## HEALTH.md
+
+`dev/HEALTH.md` holds the weekly health check: how the project is checked, the open
+findings, and a journal. A finding becomes a queue item in `dev/PLAN.md`.

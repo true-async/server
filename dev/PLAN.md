@@ -83,6 +83,9 @@ an item marked "reproduce" gets its failing run before any code.
     (`http2_static_response.c:593-603`). Done when it sends
     RST_STREAM(INTERNAL_ERROR) and an h2 test that truncates a file reads error
     code 2. Reproduce.
+    The failure in 12a and 12b comes from a libfiu fault point (`fiu_do_on`)
+    in the sendfile engine; installing libfiu and wiring it into the debug
+    build is part of 12a (`dev/DECISIONS.md`, 2026-09-30).
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
     `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
@@ -144,11 +147,21 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     the SPSC queue with `readerwriterqueue.h`, the unread `HAVE_*` macros,
     `H3_TRACE`, the duplicate CMake entry for `negotiate.c`, and the TODOs
     without an owner; the non-Linux H3 branches are built in one job or removed.
-29. Stale text: CHANGELOG 0.15.0 on WebSocket for Windows, CODING_STANDARDS.md
-    :144 and :155-159, `chaos.yml:10`, the local command in WORKFLOW.md, and
+29. Stale text: CHANGELOG 0.15.0 on WebSocket for Windows, `chaos.yml:10`, and
     the step lines of this file left open after their fix ("Compression is not
     wired into the worker path", "#322", "#315") or stale (the Critic note
     of the #311 step says `stop()` closes no connection; #345 changed that).
+30. The tests nothing runs: `tests/e2e/*.phpt` (11) move to
+    `tests/phpt/server/h1/` and pass there; `tests/fuzz/h3_datagram_fuzz.c`,
+    which exercises only ngtcp2 and OpenSSL, is deleted. Edmond, 2026-09-30.
+31. A nightly job runs the phpt suite under ASan and UBSan
+    (`scripts/build-with-sanitizers.sh`, used by no workflow today), and a
+    second pass under `fiu-run` with random `posix/io/*` and `libc/mm/*`
+    failures; the pass fails on a crash, a hang or a leak, not on output.
+32. Mull on the cmocka binaries, weekly in the fuzz-embedded job, after 22 and
+    23 put the HTTP/3 and static targets in the population. The first run
+    passes the known-answer check of rule 28.1; the survivors go into
+    `dev/HEALTH.md` as the reference run.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
