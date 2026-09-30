@@ -67,6 +67,22 @@ an item marked "reproduce" gets its failing run before any code.
     not hang again; the pipe hang itself, if real, belongs to php-async.
 11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
 12. `http_server_pause_listeners` and the accept it may not stop: reproduce.
+    The accept callback also drops an error such as EMFILE with no log and no
+    counter (`http_server_class.c:2218-2223`); php-async re-arms the listener,
+    so only the signal is missing (health check 2026-09-30).
+12a. A failed or short HTTP/1 file body keeps the connection alive:
+    `h1_static_on_static_done` and `h1_sendfile_on_done` discard `status`
+    (`http_connection.c:2744`, `:2833`), the plaintext completion reports a
+    short transfer as success (`http1_sendfile.c:297-309`), and a failed defer
+    schedule finalizes with nothing written (`send_file.c:617`, `:758`). The
+    next response on the connection follows a short body, against USAGE.md:195.
+    Done when a file truncated mid-send, plaintext and TLS, drops keep-alive and
+    a pipelined second request gets no bytes glued to the first body (template:
+    `h3/056`). Reproduce. Found by the health check, verified by the Sage.
+12b. The same on HTTP/2: a truncated or failed file body ends with END_STREAM
+    (`http2_static_response.c:593-603`). Done when it sends
+    RST_STREAM(INTERNAL_ERROR) and an h2 test that truncates a file reads error
+    code 2. Reproduce.
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
     `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
@@ -82,6 +98,57 @@ an item marked "reproduce" gets its failing run before any code.
 16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
     fails the engine's `open()` (mode 0) started the handler twice on one ctx
     and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
+
+Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
+
+17. The HTTP server test hooks run in CI: the debug leg passes
+    `--enable-http-server-test-hooks`, and the 20 phpt gated on `_http_*`
+    functions (reactor_pool, telemetry 001-003, eight in core) run and pass.
+    Run them locally with the flag first: nothing has run them in CI.
+18. A failed `fflush` or `fclose` fails the upload with CANT_WRITE
+    (`multipart_processor.c:580-581`); a cmocka case reaches CANT_WRITE and
+    NO_TMP_DIR through `tmp_path_generator`. Reproduce.
+19. Multipart takes memory from `emalloc` in every build: `HAVE_PHP_H` is set
+    only by the unit and fuzz builds, so the shipped POSIX build uses libc
+    `malloc`, outside `memory_limit`, and the tested branch is not the shipped one.
+20. The H3 slot release stops retrying once the reactor leaves RUN
+    (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
+    counter. Reproduce through a hook that fails the post, or bound it anyway.
+21. `test_parser_security.c` asserts the parse outcome: 23 of 55 cases end in
+    `(void)result`, among them two Transfer-Encoding headers (`:625`).
+22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
+    ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
+    inspects the stateless reset it emits (length clamp, header bits, token).
+23. Test strength of the static decoders, beside item 9: cmocka links
+    `http_range.c`, `http_etag.c`, `http_date.c` and covers the range clamp and
+    reject, a non-matching If-None-Match, a new ETag for a changed file, invalid
+    dates and the `http_static_path.c` rejections at :111, :118, :171, :183;
+    `static/011` compares the HTTP/1 range body; a test sends `x-gzip`.
+24. The public API does what it says. `setWriteBufferSize`,
+    `enableProtocolDetection`, `enableTls` and `setAutoAwaitBody` store a value
+    nothing reads; `getTelemetry()` returns `bytes_received`, `bytes_sent` and
+    `errors` as a literal 0; `CODEL_TARGET_MS` parses "abc" as 0. Each is wired
+    up or removed with a tombstone (CODING_STANDARDS 484-485). First narrow
+    `h3/023:34` and `h3/030:41`, which catch Throwable and would count a removed
+    setter as rejected.
+25. Coverage measures what runs: the ctest run is instrumented and merged into
+    the baseline, and `thread_queue.cc` gets coverage through CXXFLAGS.
+26. A watchdog is a ceiling, not a wait: the 24 phpt that sleep 1 s or more in
+    one call stop the server when the client finishes; tls/007 (15.1 s),
+    h2/021, tls/005, tls/015 and tls/009 each drop under 2 s.
+27. Workers > 1 on Windows has a test (USAGE.md:688 promises it; 56 phpt skip
+    there on SO_REUSEPORT), and static/009 and static/021 name an issue for
+    their "tracked gap" skip.
+28. Dead code out: the strategy `send_response` and `reset` slots, the unused
+    `_http_listen_event_t` and `_http_server_t`, the functions with no caller,
+    the SPSC queue with `readerwriterqueue.h`, the unread `HAVE_*` macros,
+    `H3_TRACE`, the duplicate CMake entry for `negotiate.c`, and the TODOs
+    without an owner; the non-Linux H3 branches are built in one job or removed.
+29. Stale text: CHANGELOG 0.15.0 on WebSocket for Windows, CODING_STANDARDS.md
+    :144 and :155-159, `chaos.yml:10`, the local command in WORKFLOW.md, and
+    the step lines of this file left open after their fix ("Compression is not
+    wired into the worker path", "#322", "#315") or stale (the Critic note
+    of the #311 step says `stop()` closes no connection; #345 changed that).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
