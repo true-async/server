@@ -17,40 +17,64 @@
 #include <ctype.h>
 
 #ifdef PHP_WIN32
-/* Minimal glob matching used only for hide-path patterns. Handles '?' (any
- * single character) and '*' (any sequence). Without FNM_PATHNAME both cross
- * the separator, which is how a caller spells "at any depth".
- * Case-insensitive on Windows. */
-# define FNM_PATHNAME 0x01
-static int win32_fnmatch_impl(const char *p, const char *s, bool cross_separator)
-{
-	while (*p) {
-		if (*p == '?') {
-			if (!*s || (!cross_separator && *s == '/')) return 1;
-			p++; s++;
-		} else if (*p == '*') {
-			/* A run of stars says no more than one does, and each extra star
-			 * would double the positions the branch below tries. */
-			while (*p == '*') p++;
-			do {
-				if (win32_fnmatch_impl(p, s, cross_separator) == 0) return 0;
-				if (!*s || (!cross_separator && *s == '/')) break;
-			} while (*s++);
-			return 1;
-		} else {
-			if (tolower((unsigned char)*p) != tolower((unsigned char)*s)) return 1;
-			p++; s++;
-		}
-	}
-	return (*s != '\0') ? 1 : 0;
-}
-static int fnmatch(const char *pattern, const char *string, int flags)
-{
-	return win32_fnmatch_impl(pattern, string, (flags & FNM_PATHNAME) == 0);
-}
+# define FNM_PATHNAME HTTP_STATIC_GLOB_PATHNAME
+# define fnmatch http_static_glob_match
 #else
 # include <fnmatch.h>
 #endif
+
+/* One saved star instead of a branch per star: on a mismatch the last star
+ * takes one more character and matching resumes after it. An earlier star
+ * never needs to be revisited, because whatever it could take the last one
+ * can take instead; so each string position is tried against the pattern at
+ * most once per star, where the recursive form tried every split and ran
+ * 2^stars. Under PATHNAME a star that reaches '/' ends the match: the
+ * separator is a literal the pattern has already placed, and no earlier star
+ * may cross it either. */
+int http_static_glob_match(const char *pattern, const char *string, const int flags)
+{
+	const bool cross_separator = (flags & HTTP_STATIC_GLOB_PATHNAME) == 0;
+	const char *p = pattern;
+	const char *s = string;
+	const char *star_p = NULL;   /* pattern just past the last star */
+	const char *star_s = NULL;   /* first string byte that star has not taken */
+
+	while (*s != '\0') {
+		if (*p == '*') {
+			/* A run of stars says no more than one does. */
+			while (*p == '*') {
+				p++;
+			}
+
+			star_p = p;
+			star_s = s;
+			continue;
+		}
+
+		const bool one_matches = *p == '?'
+			? cross_separator || *s != '/'
+			: *p != '\0' && tolower((unsigned char)*p) == tolower((unsigned char)*s);
+
+		if (one_matches) {
+			p++;
+			s++;
+			continue;
+		}
+
+		if (star_p == NULL || (!cross_separator && *star_s == '/')) {
+			return 1;
+		}
+
+		p = star_p;
+		s = ++star_s;
+	}
+
+	while (*p == '*') {
+		p++;
+	}
+
+	return *p != '\0' ? 1 : 0;
+}
 
 /* Returns -1 on non-hex input. */
 static inline int hex_value(const char c)
