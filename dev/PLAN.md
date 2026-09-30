@@ -54,6 +54,13 @@ socket several workers share on Windows, an EMFILE spin, no named pipes).
       handoff: php-async PR #306 (commit 7965109). asynctest 5 of 5 green, 3 of
         3 runs; php-async phpt 1214 of 1220, the 6 fail on main alike (a
         symlinked ext/async breaks their ../../../../ includes).
+      Windows CI 2026-09-30: `h1/064` failed on #306. libuv keeps completed
+        AcceptEx requests in a LIFO stack, and the switch to single accept at
+        the first stop() completes only after all 32 pre-posted requests are
+        used, so a pause delivered the newest connection first. Sage: single
+        accept before the first uv_listen of every Windows TCP listener
+        (php-async PR #307); a FIFO queue in php-async was rejected. 064 green
+        on Windows with #307. Its accept-rate cost is item 33.
 - [x] S1.3 server: 062, a burst test and a re-pause test green on the patched
         php-async; the comments at `http_server_class.c` on REUSEPORT and pause
         say what happens; the 503 safety net and dropped accept errors are counted
@@ -146,7 +153,11 @@ an item marked "reproduce" gets its failing run before any code.
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
     pass alone, and one full `-j4` suite of two hit it. A test that counts
     CPU should not see a bounded ring's designed drop; decide which side moves.
-14. `tas_free_port_span` on Windows: it hands out adjacent ports, and Windows
+14. The port helpers race. `tas_free_port` binds port 0, reads the number and
+    closes the socket, so another test's outgoing connection can take the port
+    before the test binds it: `core/027` failed its bind on 127.0.0.1:49353 on
+    macOS debug (run 36718896142, PR 360), passing on retry. Port 0 listeners
+    (81c0437) avoid the window. And `tas_free_port_span` on Windows: it hands out adjacent ports, and Windows
     gives ephemeral ports in order, so `base + 1` is the next port another test
     under `-j2` receives. `core/023` failed its bind that way (PR 337's Windows
     job) and PR 338 moved it and `core/079` to separate kernel-assigned ports;
@@ -217,6 +228,9 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     23 put the HTTP/3 and static targets in the population. The first run
     passes the known-answer check of rule 28.1; the survivors go into
     `dev/HEALTH.md` as the reference run.
+33. A connect storm on Windows CI (N parallel connects, time until all are
+    accepted), reported and not gating, before and after php-async #307: one
+    AcceptEx at a time costs one accept per loop iteration, not measured.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
