@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 25207,
-      "hit": 21109
+      "hit": 21107
     },
     "functions": {
       "total": 1766,
@@ -173,7 +173,7 @@
     "src/core/http_connection_tls.c": {
       "lines": {
         "total": 389,
-        "hit": 295
+        "hit": 296
       },
       "functions": {
         "total": 22,
@@ -443,7 +443,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 962,
-        "hit": 830
+        "hit": 829
       },
       "functions": {
         "total": 56,
@@ -913,7 +913,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 554,
-        "hit": 502
+        "hit": 500
       },
       "functions": {
         "total": 38,
