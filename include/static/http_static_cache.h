@@ -62,6 +62,10 @@ typedef struct
 bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size_t path_len,
 							  http_static_cache_view_t *out_view);
 
+/* Drop the entry for path, if any: its metadata is known not to match
+ * the file. No-op on a miss or a disabled cache. */
+void http_static_cache_remove(http_static_cache_t *cache, const char *path, size_t path_len);
+
 /* Insert / replace. Caller passes pre-computed metadata; the cache
  * copies/owns everything. mime/etag/last_modified buffers are
  * memcpy'd into the entry. content_type pointer is borrowed (it

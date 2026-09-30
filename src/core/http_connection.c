@@ -2739,9 +2739,21 @@ static void h1_static_on_hard_zero_armed(void *user)
     http_server_on_request_dispatch(conn->counters);
 }
 
+/* The keep-alive verdict after a file body. A failed or short body has
+ * promised the peer bytes it will not send, so the connection ends with it. */
+static bool h1_file_body_continue(http1_request_ctx_t *ctx, const int status,
+                                  const bool should_continue)
+{
+    if (status == 0) {
+        return should_continue;
+    }
+
+    ctx->file_body_failed = true;
+    return false;
+}
+
 static void h1_static_on_static_done(void *user, int status)
 {
-    (void)status;
     http1_request_ctx_t *ctx = (http1_request_ctx_t *)user;
     http_connection_t *conn = ctx->conn;
 
@@ -2756,7 +2768,7 @@ static void h1_static_on_static_done(void *user, int status)
         conn->current_request = NULL;
     }
 
-    const bool should_continue = conn->keep_alive != 0;
+    const bool should_continue = h1_file_body_continue(ctx, status, conn->keep_alive != 0);
     http_request_finalize(conn, ctx, should_continue);
 }
 
@@ -2787,11 +2799,10 @@ typedef struct {
 
 static void h1_sendfile_on_done(void *user, int status)
 {
-    (void)status;
     h1_sendfile_user_t *u = (h1_sendfile_user_t *)user;
     http_connection_t *conn = u->conn;
     http1_request_ctx_t *ctx = u->ctx;
-    const bool should_continue = u->should_continue;
+    const bool should_continue = h1_file_body_continue(ctx, status, u->should_continue);
     efree(u);
 
     http_request_finalize(conn, ctx, should_continue);
@@ -3539,12 +3550,13 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
                              conn->counters, conn->log_state);
     }
 
-    /* Two ways a connection is left with no boundary the peer can find, and
-     * nothing more may be written to it in either. A chunked body that stopped
-     * short of its terminator is one. A body the close delimits is the other:
-     * there the peer reads to EOF, so a second response would arrive as the
-     * first one's last bytes. Read below, before ctx is freed. */
-    const bool framing_lost = ctx->stream_dead || ctx->close_delimited;
+    /* Three ways a connection is left with no boundary the peer can find, and
+     * nothing more may be written to it in any. A chunked body that stopped
+     * short of its terminator is one, and a file body short of its
+     * Content-Length is its fixed-length twin. A body the close delimits is the
+     * last: there the peer reads to EOF, so a second response would arrive as
+     * the first one's last bytes. Read below, before ctx is freed. */
+    const bool framing_lost = ctx->stream_dead || ctx->close_delimited || ctx->file_body_failed;
 
     /* Tear down per-request state. Zvals + ctx are owned solely by
      * this finalize; no other path looks at them after the caller

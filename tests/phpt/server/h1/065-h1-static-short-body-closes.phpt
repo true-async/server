@@ -15,7 +15,8 @@ tls_skipif(['openssl_cli' => true, 'proc_open' => true, 'php_ssl' => true]);
  * 4 KiB: plaintext sendfile returns 0, the TLS read returns 0. The peer is
  * then owed 2 MiB - 4 KiB bytes it will never get, so anything the server
  * writes next on the connection is read as body. The connection has to close
- * after the short body; the request pipelined behind it goes unanswered. */
+ * after the short body; the request pipelined behind it goes unanswered, and
+ * the next request for the file is sized from the file again. */
 
 require_once __DIR__ . '/../tls/_tls_skipif.inc';
 require_once __DIR__ . '/../_free_port.inc';
@@ -71,6 +72,8 @@ foreach (['tcp', 'ssl'] as $scheme) {
         clearstatcache();
 
         echo "$scheme short: ", h1_pipeline_probe($scheme, $port, '/s/big.bin', '/s/small.txt');
+        /* The failure evicted the stale entry, so the size is taken afresh. */
+        echo "$scheme after: ", h1_pipeline_probe($scheme, $port, '/s/big.bin', '/s/small.txt');
         $server->stop();
     });
 
@@ -86,5 +89,7 @@ foreach (['tcp', 'ssl'] as $scheme) {
 --EXPECT--
 tcp warm: served
 tcp short: status=200 declared=2097152 got=4096 extra=none end=closed
+tcp after: status=200 declared=4096 got=4096 extra=200 end=closed
 ssl warm: served
 ssl short: status=200 declared=2097152 got=4096 extra=none end=closed
+ssl after: status=200 declared=4096 got=4096 extra=200 end=closed

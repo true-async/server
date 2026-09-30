@@ -276,6 +276,22 @@ bool http_static_cache_lookup(http_static_cache_t *cache, const char *path, size
 	return true;
 }
 
+void http_static_cache_remove(http_static_cache_t *cache, const char *path, size_t path_len)
+{
+	ZEND_ASSERT(cache != NULL);
+	ZEND_ASSERT(path != NULL);
+
+	if (cache_disabled(cache, path_len)) {
+		return;
+	}
+
+	entry_t *const e = (entry_t *)zend_hash_str_find_ptr(&cache->index, path, path_len);
+
+	if (e != NULL) {
+		evict_entry(cache, e);
+	}
+}
+
 void http_static_cache_insert(http_static_cache_t *cache, const char *path, size_t path_len,
 							  const zend_stat_t *st, const char *content_type,
 							  size_t content_type_len, const char *etag, size_t etag_len,

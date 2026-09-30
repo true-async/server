@@ -133,12 +133,26 @@ value, not a count.
         pipelined request 400 and sendFile() leaves /f unanswered. The defer
         design changed: the schedule moves before on_armed, and a failure
         returns SEND_FILE_HANDLED, which both callers already answer.
-- [ ] S2.3 The fix in the server
+- [x] S2.3 The fix in the server
       done: S2.2 green; both `on_done` callbacks honour `status`; a short body
         marks the framing lost; plaintext reports `bytes_sent < body_length` as
         -1; a failed defer returns its own result and the caller drops
         keep-alive after llhttp returns; the whole phpt suite passes
       tier: T2 · role: Critic
+      Critic 2026-09-30 on the diff, taken: a real timer refusal raises an
+        exception the fault point did not, and a pending one stops the
+        fallback answer — cleared in `engine_defer_schedule`, the point now
+        throws the same way; a stale cache entry failed every request until its
+        TTL — evicted on a non-zero status (`http_static_cache_remove`); the
+        `SEND_FILE_HANDLED` and `on_done` docs were wrong — rewritten. Known:
+        Windows needs S2.4. Rejected: the synchronous fallback slurping a large
+        file after a refusal (the existing path for every refusal, not this
+        change's); the access log showing a short body as a plain 200 (item 35).
+      handoff: the defer failure keeps keep-alive, unlike the done line: the
+        timer is taken before on_armed and a refusal returns SEND_FILE_REFUSED,
+        which both callers answer whole (S2.2). 065, 066, 067 green; with the
+        exception clear or the eviction removed, 067 or 065 fails. Suite 520 of
+        545 passed, 25 skipped, 0 failed.
 - [ ] S2.4 php-async: TransmitFile reports the bytes it sent
       done: a php-async PR merged with CI green; the server's static
         short-transfer test passes on Windows against it
@@ -307,6 +321,9 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     hold up to four pending instances): all are served after the resume, in
     order. The only case where php-async's delivery loop runs more than once,
     so its two outcome branches have no test that kills a mutant of them.
+35. A file body that failed or came up short is access-logged and counted as a
+    plain 200 with a short byte count (S2.3): mark it failed, as an aborted
+    stream is.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

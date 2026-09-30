@@ -225,7 +225,8 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 	}
 
 	/* Engine refused before kick-off (MAXPATHLEN, FS_OPEN failure,
-	 * cb alloc). adapter wasn't handed off; on_done not fired. */
+	 * cb alloc, no timer for the deferred start). adapter wasn't handed
+	 * off; on_done not fired. */
 	sf_adapter_free(adapter);
 
 	if (r != SEND_FILE_HANDLED) {

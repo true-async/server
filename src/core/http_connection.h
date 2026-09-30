@@ -410,6 +410,10 @@ typedef struct {
                                                   * connection close and by nothing else
                                                   * (H1_FRAMING_CLOSE), so no message may
                                                   * follow it on this connection. */
+    bool               file_body_failed;          /* a file body ended in an error or short
+                                                  * of its Content-Length: the peer still
+                                                  * counts down bytes that will not come,
+                                                  * so no message may follow it either. */
     bool               skip_php_handler;         /* static handler (issue #13) populated the
                                                   * response in C; coroutine entry must NOT
                                                   * call the user PHP handler. Dispose still

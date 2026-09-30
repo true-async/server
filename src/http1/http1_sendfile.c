@@ -352,10 +352,15 @@ static void h1_send_dispatch(zend_async_event_t *event,
 
 static void h1_send_handle_sendfile_done(h1_send_state_t *state)
 {
+    /* sendfile stops at EOF without an error, so a file that shrank after its
+     * size was taken shows only as a short count. */
+    if (state->bytes_sent < state->body_length) {
+        state->status = -1;
+    }
+
     /* Body sent (or partially sent on error). On error we still
      * finalize — bytes already on the wire are out of our control;
-     * the keep-alive verdict the static handler set decides what
-     * happens to the connection next. */
+     * on_done ends the connection on a non-zero status. */
     h1_send_finalize(state);
 }
 
