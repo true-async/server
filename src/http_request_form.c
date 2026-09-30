@@ -235,6 +235,9 @@ static bool http_request_form_publish(http_request_t *req, zval *post, zval *fil
 
 		zval *const upload = uploaded_file_create_from_info(&uploads[i]);
 
+		/* The UploadedFile deletes the file from here on. */
+		mp_file_info_release_tmp_path(&uploads[i]);
+
 		too_deep |= http_form_vars_register(Z_ARRVAL_P(files), uploads[i].field_name,
 											strlen(uploads[i].field_name), upload,
 											PG(max_input_nesting_level))

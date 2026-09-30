@@ -483,6 +483,8 @@ static int on_headers_complete(multipart_parser_t* parser)
 
         if (!proc->file_handle) {
             proc->current_error = MP_UPLOAD_ERR_CANT_WRITE;
+            /* The name was taken by creating the file. */
+            VCWD_UNLINK(proc->tmp_path);
             MP_FREE(proc->tmp_path);
             proc->tmp_path = NULL;
             return 0;
@@ -827,6 +829,14 @@ void mp_processor_cleanup_temp_files(mp_processor_t* proc)
 
     if (proc->tmp_path) {
         VCWD_UNLINK(proc->tmp_path);
+    }
+}
+
+void mp_file_info_release_tmp_path(mp_file_info_t* info)
+{
+    if (info && info->tmp_path) {
+        MP_FREE(info->tmp_path);
+        info->tmp_path = NULL;
     }
 }
 

@@ -83,6 +83,45 @@ socket several workers share on Windows, an EMFILE spin, no named pipes).
         several held connections, which only a Windows AF_UNIX listener
         (pending pipe instances) produces: item 34.
 
+## S3 — Windows problems of the server  [in progress]
+
+Goal: the Windows build is tested on the same behaviour as Linux, except for
+features Windows lacks, and its known flakes and unmeasured costs are settled.
+Done when: every Windows CI skip has a reason or an open plan item, and S3.1,
+S3.2 and S3.4 are closed with evidence.
+Base: 05c871c (server), 1521d69 (php-async)
+
+- [x] S3.1 `multipart/009` fails on Windows (items 37 and 18)
+      done: a local command reproduces the NULL `getSize()` at a stated rate;
+        the fix brings it to 0 of the same number of runs; a test is red
+        without the fix
+      tier: T1 · role: —
+      handoff: cause is a second delete of a temp file path (request end and
+        the UploadedFile both unlinked it), which on Windows removes another
+        process's file: GetTempFileName keeps 3 prefix chars and a clock-based
+        16-bit number. Error 6, `chmod` ENOENT. The test body in 8 processes:
+        6 to 10 of 400 failed before, 0 of 1200 after; `multipart/025` red
+        before. Full phpt suite locally 284 passed, 0 failed, 263 skipped.
+        The unlink after a failed `fopen` has no test: item 18's cmocka case.
+- [x] S3.2 Decide how synchronous TransmitFile moves the file pointer
+      done: a C probe answers three questions on this machine (does the
+        pointer advance; what a count past the file end does; why `h1/065`
+        got 0 bytes before php-async 1521d69); answers and the verdict on the
+        clamp in `io_transmitfile_work_cb` recorded in `dev/DECISIONS.md`
+      tier: T1 · role: —
+      handoff: recorded in `dev/DECISIONS.md`; the clamp stays. Two php-async
+        comments said the opposite of the probe and are corrected on branch
+        `transmitfile-comments` (not pushed). `h1/065` reads got=4096 on
+        Windows, 3 of 3. The probe source is not in a repository.
+- [ ] S3.3 Sort the Windows CI skips (235 of 546 on 2026-09-30)
+      done: each skipping phpt listed with its reason in `dev/plans/S3.md`,
+        marked justified or given an open plan item; items 27 and 34 included
+      tier: T1 · role: Critic
+- [ ] S3.4 Connect storm on Windows before and after php-async #307 (item 33)
+      done: time until N parallel connects are accepted, for both builds, in
+        `dev/BENCHMARKS.md` with N, machine and run count
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28

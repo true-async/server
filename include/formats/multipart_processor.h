@@ -230,7 +230,8 @@ void* mp_processor_get_user_data(const mp_processor_t* proc);
 
 /**
  * Cleanup temp files.
- * Call this to delete temp files that weren't moved.
+ * Call this to delete the temp files the processor still holds: those not
+ * handed over with mp_file_info_release_tmp_path().
  */
 void mp_processor_cleanup_temp_files(mp_processor_t* proc);
 
@@ -239,6 +240,13 @@ void mp_processor_cleanup_temp_files(mp_processor_t* proc);
  * Does NOT delete temp files (call cleanup first if needed).
  */
 void mp_processor_destroy(mp_processor_t* proc);
+
+/**
+ * Hand the temp file at info->tmp_path to the caller, who deletes it when done.
+ * The processor forgets the path, so mp_processor_cleanup_temp_files() leaves
+ * the file alone: a name deleted twice may by then belong to another upload.
+ */
+void mp_file_info_release_tmp_path(mp_file_info_t* info);
 
 /**
  * Free a file info structure contents (not the struct itself).
