@@ -85,7 +85,7 @@ foreach (['ssl'] as $scheme) {
     await($client);
 }
 ?>
---EXPECT--
+--EXPECTF--
 ssl warm: status=200 declared=2097152 got=2097152 extra=200 end=closed
-ssl short: status=200 declared=2097152 got=4096 extra=none end=closed
+ssl short: status=200 declared=2097152 got=%d extra=none end=closed
 ssl after: status=200 declared=4096 got=4096 extra=200 end=closed

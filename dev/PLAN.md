@@ -125,10 +125,24 @@ value, not a count.
         exception clear or the eviction removed, 067 or 065 fails. Suite 520 of
         545 passed, 25 skipped, 0 failed.
 - [ ] S2.4 php-async: TransmitFile reports the bytes it sent
-      done: a php-async PR merged with CI green; the server's static
+      done: php-async PR #308 merged with CI green; the server's static
         short-transfer test passes on Windows against it
       tier: T1 · role: —
-- [ ] S2.5 Issue, CHANGELOG and the server PR
+      CI 2026-09-30 (server #363 against php-async main): Windows already
+        closes after the truncated file, with 0 body bytes, so 065 asserts a
+        short body, not its length; #308 stays for the count it reports.
+- [ ] S2.5 php-async: a sendfile the socket refuses with EAGAIN waits for it
+        instead of failing
+      done: on macOS CI the server's 2 MiB plaintext file arrives whole
+        (`h1/065` warm line), red on php-async main; dispose during the wait
+        frees the request
+      tier: T2 · role: Critic
+      CI 2026-09-30: macOS debug and release cut the 2 MiB warm-up transfer at
+        1,129,404 and 998,696 bytes. libuv's Darwin/FreeBSD sendfile returns
+        -1/EAGAIN when a full socket took nothing (src/unix/fs.c), and
+        `io_sendfile_zc_cb` completes that as an error. Linux goes through
+        libuv's poll-based emulation. Edmond 2026-09-30: fix it in this stage.
+- [ ] S2.6 Issue, CHANGELOG and the server PR
       done: merged with every CI platform green
       tier: T1 · role: —
 
@@ -295,6 +309,10 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 35. A file body that failed or came up short is access-logged and counted as a
     plain 200 with a short byte count (S2.3): mark it failed, as an aborted
     stream is.
+36. The HTTP/1 file-body phase has no write deadline: a peer that stops reading
+    holds the chain, and with it the connection, for good (Linux: libuv's copy
+    loop in `poll(-1)`; macOS: php-async's EAGAIN wait). Critic on php-async
+    #308, 2026-09-30. Reproduce with a client that reads 100 KiB and stalls.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
