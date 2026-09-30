@@ -83,55 +83,6 @@ socket several workers share on Windows, an EMFILE spin, no named pipes).
         several held connections, which only a Windows AF_UNIX listener
         (pending pipe instances) produces: item 34.
 
-## S2 — A failed or short HTTP/1 file body keeps the connection alive (item 12a)  [in progress]
-
-Goal: a file body that fails or comes up short ends the connection, so no later
-response is read as the rest of that body.
-Done when: item 12a's criterion holds on Linux, macOS and Windows CI.
-Tests: first
-Base: eaa2d57 (server), a97cd13 (php-async)
-
-Critic 2026-09-30 on the plan, all taken: `should_continue=false` still serves a
-pipelined request (`http_request_finalize` drains the buffer unless the framing
-is lost); the defer failure finalizes inside `llhttp_execute`, so closing there
-frees what the parser still reads; a plaintext truncation is absorbed by the
-socket buffers, while a stale `st_size` in the open-file cache gives a
-deterministic short transfer; php-async's TransmitFile counts the requested
-bytes, so Windows cannot see a short transfer; libfiu's `failnum` is a return
-value, not a count.
-
-- [x] S2.1 Fault injection in the build
-      handoff: `src/core/fault_hooks.c`; `core/083` passes with the flag, skips without.
-- [x] S2.2 Red tests for the three failures
-      handoff: `h1/065`, `066`, `067`, red 5 of 5 and 3 of 3 on eaa2d57.
-- [x] S2.3 The fix in the server
-      handoff: 86111c7; a refused defer answers the request whole
-        (SEND_FILE_REFUSED), not by dropping keep-alive. Suite 520 of 545.
-- [x] S2.4 php-async: TransmitFile reports the bytes it sent
-      done: php-async PR #308 merged with CI green; the server's static
-        short-transfer test passes on Windows against it
-      tier: T1 · role: —
-      handoff: the file pointer did not measure what TransmitFile sent (a full
-        2 MiB counted short on CI); each pass is clamped to the file's size and
-        positioned by the worker. php-async 1521d69; `h1/065` green on Windows.
-- [x] S2.5 php-async: a sendfile the socket refuses with EAGAIN waits for it
-        instead of failing
-      done: on macOS CI the server's 2 MiB plaintext file arrives whole
-        (`h1/065` warm line), red on php-async main; dispose during the wait
-        frees the request
-      tier: T2 · role: Critic
-      Critic 2026-09-30 on the diff, taken: a close of the destination io ends
-        the wait (the dup kept the socket open and its number could be reused);
-        the dup is close-on-exec. Moved to item 36: no write deadline on the
-        file-body phase (Linux blocks in libuv's poll(-1) alike). Rejected: the
-        head overtaken by the body on macOS (not shown, and possible before).
-      handoff: in php-async #308 (1521d69). macOS debug and release: warm line
-        2097152 of 2097152, red before at 1129404 and 998696. Dispose during
-        the wait was exercised on Linux only through a forced-EAGAIN hack.
-- [ ] S2.6 Issue, CHANGELOG and the server PR
-      done: merged with every CI platform green
-      tier: T1 · role: —
-
 ## Next
 
 ### Order of the open defects, 2026-09-28
@@ -189,22 +140,15 @@ an item marked "reproduce" gets its failing run before any code.
 12. `http_server_pause_listeners` and the accept it may not stop: stage S1
     above (#359, true-async/php-async#305). The accept errors it used to drop
     are counted in `accept_errors_total`; they are still not logged.
-12a. Done: stage S2 (#362). A failed or short HTTP/1 file body keeps the connection alive:
-    `h1_static_on_static_done` and `h1_sendfile_on_done` discard `status`
-    (`http_connection.c:2744`, `:2833`), the plaintext completion reports a
-    short transfer as success (`http1_sendfile.c:297-309`), and a failed defer
-    schedule finalizes with nothing written (`send_file.c:617`, `:758`). The
-    next response on the connection follows a short body, against USAGE.md:195.
-    Done when a file truncated mid-send, plaintext and TLS, drops keep-alive and
-    a pipelined second request gets no bytes glued to the first body (template:
-    `h3/056`). Reproduce. Found by the health check, verified by the Sage.
+12a. A failed or short HTTP/1 file body kept the connection alive: done,
+    stage S2 (#362, true-async/php-async#308); tests `h1/065` to `h1/068`.
 12b. The same on HTTP/2: a truncated or failed file body ends with END_STREAM
     (`http2_static_response.c:593-603`). Done when it sends
     RST_STREAM(INTERNAL_ERROR) and an h2 test that truncates a file reads error
     code 2. Reproduce.
-    The failure in 12a and 12b comes from a libfiu fault point (`fiu_do_on`)
-    in the sendfile engine; installing libfiu and wiring it into the debug
-    build is part of 12a (`dev/DECISIONS.md`, 2026-09-30).
+    The failure comes from a libfiu fault point, as `h1/066` does; the build
+    flag and the `_http_fault_*` hooks exist (`src/core/fault_hooks.c`), and
+    `h1/065`'s stale-cache truncation is the template for a real short file.
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
     `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
@@ -303,6 +247,10 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     runs of that branch): the third upload's `getSize()` read NULL, an upload
     error. Passed on rerun and on main 8 of 8. Suspect the temporary file
     (item 18's CANT_WRITE path); reproduce under `-j` on Windows.
+38. A small php-async PR: regenerate `async_arginfo.h` (its stub hash is stale,
+    every build rewrites it), and assert in `sendfile_wait_writable` that the
+    destination io has no other sendfile waiting, since `sendfile_waiting`
+    holds one (Code Reviewer on S2, 2026-09-30).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

@@ -63,7 +63,7 @@ $end = feof($c) ? 'closed' : 'open';
 $head_end = strpos($in, "\r\n\r\n");
 
 if ($head_end === false) {
-    echo "status=none got=0 extra=none end=$end\n";
+    echo "status=none declared=? got=0 extra=none end=$end\n";
     exit(0);
 }
 

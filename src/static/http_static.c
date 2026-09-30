@@ -516,8 +516,8 @@ http_static_result_t http_static_try_serve_mounts(
 				return HTTP_STATIC_PASSTHROUGH;
 			}
 			/* SEND_FILE_HANDLED or SEND_FILE_REFUSED — engine refused
-			 * before kick-off (rare: MAXPATHLEN, ZEND_ASYNC_FS_OPEN
-			 * failure, ecalloc failure, no timer for the deferred start).
+			 * before kick-off (rare: a path over MAXPATHLEN, no protocol
+			 * op, no timer for the deferred start).
 			 * Fall through to the synchronous fallback path below. */
 		}
 

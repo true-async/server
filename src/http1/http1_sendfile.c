@@ -419,7 +419,8 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
 {
     if (UNEXPECTED(err) || bytes_read < 0) {
         /* Read error mid-stream — bytes already on the wire belong
-         * to the client, finalize and let keep-alive policy decide. */
+         * to the client; finalize, and on_done ends the connection
+         * on the non-zero status. */
         state->status = -1;
         h1_send_finalize(state);
         return;

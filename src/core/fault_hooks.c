@@ -118,6 +118,8 @@ PHP_FUNCTION(_http_fault_enable)
 
     fault_point_t *point = fault_point_find(ZSTR_VAL(name));
 
+    /* The slot is taken without a lock: points are enabled from the test's
+     * own PHP thread, one at a time; reactor threads only read the table. */
     if (point == NULL) {
         const int used = zend_atomic_int_load(&fault_points_used);
 

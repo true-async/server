@@ -187,7 +187,7 @@ static void engine_finalize(engine_state_t *state, int status)
 
 	/* A failed body may have been sized from a cache entry the file no longer
 	 * matches; left in place it would fail every request until its TTL. */
-	if (status != 0 && state->fs_path != NULL) {
+	if (status != 0 && state->armed && state->fs_path != NULL) {
 		http_static_cache_t *const cache = engine_cache(&state->cfg);
 
 		if (cache != NULL) {
