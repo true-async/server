@@ -51,7 +51,7 @@ static void test_simple_field(void **state) {
 
     /* Check files */
     size_t file_count;
-    mp_file_info_t* files = mp_processor_get_files(proc, &file_count);
+    mp_processor_get_files(proc, &file_count);
     assert_int_equal(file_count, 0);
 
     mp_processor_destroy(proc);
@@ -325,7 +325,11 @@ static void test_file_size_limit(void **state) {
     mp_file_info_t* files = mp_processor_get_files(proc, &file_count);
     assert_int_equal(file_count, 1);
 
-    assert_int_equal(files[0].error, MP_UPLOAD_ERR_TOO_LARGE);
+    /* PHP's code for a file past the server's limit, with no temp file and
+     * no size left behind. */
+    assert_int_equal(files[0].error, MP_UPLOAD_ERR_INI_SIZE);
+    assert_null(files[0].tmp_path);
+    assert_int_equal(files[0].size, 0);
 
     mp_processor_destroy(proc);
 }
@@ -336,8 +340,15 @@ static void test_file_size_limit(void **state) {
 static void test_too_many_files(void **state) {
     (void) state;
 
+    /* An empty file part ("no file selected") does not spend the count; a
+     * file past it is left out, and so is an empty part after it, as PHP
+     * leaves them out. The field after them all still arrives. */
     const char* boundary = "----WebKitFormBoundary";
     const char* body =
+        "------WebKitFormBoundary\r\n"
+        "Content-Disposition: form-data; name=\"f0\"; filename=\"\"\r\n"
+        "\r\n"
+        "\r\n"
         "------WebKitFormBoundary\r\n"
         "Content-Disposition: form-data; name=\"f1\"; filename=\"1.txt\"\r\n"
         "\r\n"
@@ -350,10 +361,18 @@ static void test_too_many_files(void **state) {
         "Content-Disposition: form-data; name=\"f3\"; filename=\"3.txt\"\r\n"
         "\r\n"
         "3\r\n"
+        "------WebKitFormBoundary\r\n"
+        "Content-Disposition: form-data; name=\"f4\"; filename=\"\"\r\n"
+        "\r\n"
+        "\r\n"
+        "------WebKitFormBoundary\r\n"
+        "Content-Disposition: form-data; name=\"after\"\r\n"
+        "\r\n"
+        "kept\r\n"
         "------WebKitFormBoundary--\r\n";
 
     mp_config_t config = {0};
-    config.max_files = 2;  /* Only allow 2 files */
+    config.max_files = 2;
 
     mp_processor_t* proc = mp_processor_create(boundary, &config);
     assert_non_null(proc);
@@ -364,13 +383,136 @@ static void test_too_many_files(void **state) {
     size_t file_count;
     mp_file_info_t* files = mp_processor_get_files(proc, &file_count);
 
-    /* First 2 files should be OK, 3rd should have error */
     assert_int_equal(file_count, 3);
-    assert_int_equal(files[0].error, MP_UPLOAD_ERR_OK);
+    assert_string_equal(files[0].field_name, "f0");
+    assert_int_equal(files[0].error, MP_UPLOAD_ERR_NO_FILE);
+    assert_string_equal(files[1].field_name, "f1");
     assert_int_equal(files[1].error, MP_UPLOAD_ERR_OK);
-    assert_int_equal(files[2].error, MP_UPLOAD_ERR_TOO_MANY_FILES);
+    assert_string_equal(files[2].field_name, "f2");
+    assert_int_equal(files[2].error, MP_UPLOAD_ERR_OK);
+
+    size_t field_count;
+    mp_field_info_t* fields = mp_processor_get_fields(proc, &field_count);
+    assert_int_equal(field_count, 1);
+    assert_string_equal(fields[0].name, "after");
 
     mp_processor_cleanup_temp_files(proc);
+    mp_processor_destroy(proc);
+}
+
+/* file_uploads=Off: every file part is left out, the fields arrive. */
+static void test_skip_files(void **state) {
+    (void) state;
+
+    const char* boundary = "b";
+    const char* body =
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"f\"; filename=\"1.txt\"\r\n"
+        "\r\n"
+        "1\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"k\"\r\n"
+        "\r\n"
+        "v\r\n"
+        "--b--\r\n";
+
+    mp_config_t config = {.skip_files = true};
+    mp_processor_t* proc = mp_processor_create(boundary, &config);
+    assert_non_null(proc);
+
+    mp_processor_feed(proc, body, strlen(body));
+    assert_true(mp_processor_is_complete(proc));
+
+    size_t file_count;
+    mp_processor_get_files(proc, &file_count);
+    assert_int_equal(file_count, 0);
+
+    size_t field_count;
+    mp_processor_get_fields(proc, &field_count);
+    assert_int_equal(field_count, 1);
+
+    mp_processor_destroy(proc);
+}
+
+/* A MAX_FILE_SIZE field limits the files after it, not the ones before, and
+ * a file past it answers UPLOAD_ERR_FORM_SIZE with nothing kept. */
+static void test_form_max_file_size(void **state) {
+    (void) state;
+
+    const char* boundary = "b";
+    const char* body =
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"before\"; filename=\"a.txt\"\r\n"
+        "\r\n"
+        "0123456789\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n"
+        "\r\n"
+        "5\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"big\"; filename=\"b.txt\"\r\n"
+        "\r\n"
+        "0123456789\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"small\"; filename=\"c.txt\"\r\n"
+        "\r\n"
+        "01234\r\n"
+        "--b--\r\n";
+
+    mp_processor_t* proc = mp_processor_create(boundary, NULL);
+    assert_non_null(proc);
+
+    mp_processor_feed(proc, body, strlen(body));
+    assert_true(mp_processor_is_complete(proc));
+
+    size_t file_count;
+    mp_file_info_t* files = mp_processor_get_files(proc, &file_count);
+    assert_int_equal(file_count, 3);
+
+    assert_int_equal(files[0].error, MP_UPLOAD_ERR_OK);
+    assert_int_equal(files[0].size, 10);
+    assert_int_equal(files[1].error, MP_UPLOAD_ERR_FORM_SIZE);
+    assert_null(files[1].tmp_path);
+    assert_int_equal(files[1].size, 0);
+    assert_int_equal(files[2].error, MP_UPLOAD_ERR_OK);
+    assert_int_equal(files[2].size, 5);
+
+    mp_processor_cleanup_temp_files(proc);
+    mp_processor_destroy(proc);
+}
+
+/* Past max_parts the body is refused, and the refusal names the limit. */
+static void test_parts_limit_refuses(void **state) {
+    (void) state;
+
+    const char* boundary = "b";
+    const char* body =
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"f\"; filename=\"\"\r\n"
+        "\r\n"
+        "\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"g\"; filename=\"\"\r\n"
+        "\r\n"
+        "\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"k\"\r\n"
+        "\r\n"
+        "v\r\n"
+        "--b--\r\n";
+
+    mp_config_t at_limit = {.max_parts = 3};
+    mp_processor_t* proc = mp_processor_create(boundary, &at_limit);
+    assert_non_null(proc);
+    assert_true(mp_processor_feed(proc, body, strlen(body)) >= 0);
+    assert_int_equal(proc->refusal, MP_REFUSAL_NONE);
+    mp_processor_destroy(proc);
+
+    mp_config_t below = {.max_parts = 2};
+    proc = mp_processor_create(boundary, &below);
+    assert_non_null(proc);
+    assert_true(mp_processor_feed(proc, body, strlen(body)) < 0);
+    assert_int_equal(proc->refusal, MP_REFUSAL_TOO_MANY_PARTS);
     mp_processor_destroy(proc);
 }
 
@@ -1041,7 +1183,7 @@ static void test_missing_content_disposition(void **state) {
 
     /* The valid field should still be captured */
     size_t field_count;
-    mp_field_info_t* fields = mp_processor_get_fields(proc, &field_count);
+    mp_processor_get_fields(proc, &field_count);
 
     /* At least the valid field should be present */
     /* (malformed part may or may not be captured depending on implementation) */
@@ -1177,6 +1319,9 @@ int main(void) {
         cmocka_unit_test(test_empty_file),
         cmocka_unit_test(test_file_size_limit),
         cmocka_unit_test(test_too_many_files),
+        cmocka_unit_test(test_skip_files),
+        cmocka_unit_test(test_form_max_file_size),
+        cmocka_unit_test(test_parts_limit_refuses),
         cmocka_unit_test(test_field_limits_refuse),
         cmocka_unit_test(test_bytes_fed_counts_the_whole_input),
         cmocka_unit_test(test_path_traversal),

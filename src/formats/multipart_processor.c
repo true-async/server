@@ -272,6 +272,29 @@ static bool has_path_traversal_or_nul(const char* filename, size_t len)
     return false;
 }
 
+/* True when @p add more bytes on top of @p have pass @p limit; 0 is no limit.
+ * Subtractive, so a count near SIZE_MAX cannot wrap (S-02). */
+static bool size_exceeds(const size_t have, const size_t add, const size_t limit)
+{
+    return limit > 0 && (have > limit || add > limit - have);
+}
+
+/* The code a file is refused with when @p length more bytes would pass a
+ * limit, UPLOAD_ERR_OK while they fit. The server's limit is checked before
+ * the form's, as PHP checks upload_max_filesize before MAX_FILE_SIZE. */
+static int file_size_error(const mp_processor_t *proc, const size_t length)
+{
+    if (size_exceeds(proc->file_size, length, proc->config.max_file_size)) {
+        return MP_UPLOAD_ERR_INI_SIZE;
+    }
+
+    if (size_exceeds(proc->file_size, length, proc->form_max_file_size)) {
+        return MP_UPLOAD_ERR_FORM_SIZE;
+    }
+
+    return MP_UPLOAD_ERR_OK;
+}
+
 /* Callbacks */
 
 static int on_part_begin(multipart_parser_t* parser)
@@ -301,6 +324,7 @@ static int on_part_begin(multipart_parser_t* parser)
 
     if (proc->tmp_path) { MP_FREE(proc->tmp_path); proc->tmp_path = NULL; }
     proc->file_size = 0;
+    proc->skip_part = false;
 
     if (proc->field_value) {
         proc->field_value[0] = '\0';
@@ -394,6 +418,35 @@ static int on_headers_complete(multipart_parser_t* parser)
                     proc->field_name ? proc->field_name : "(null)",
                     proc->filename ? proc->filename : "(null)");
 
+    /* Every part that names itself counts, fields and files alike, as PHP
+     * counts them against max_multipart_body_parts. */
+    if (proc->field_name != NULL || proc->filename != NULL) {
+        if (proc->config.max_parts > 0 && proc->parts_count >= proc->config.max_parts) {
+            proc->refusal = MP_REFUSAL_TOO_MANY_PARTS;
+            return -1;
+        }
+
+        proc->parts_count++;
+    }
+
+    /* Once the file count is spent, every later file part is left out, an
+     * empty one ("no file selected") too, as PHP leaves them out
+     * (main/rfc1867.c). Only a saved file spends the count. */
+    if (proc->filename != NULL) {
+        const size_t max_files = proc->config.max_files > 0 ? proc->config.max_files : MP_MAX_FILES;
+
+        if (proc->config.skip_files || proc->files_saved >= max_files) {
+            if (!proc->config.skip_files && !proc->files_warned) {
+                proc->files_warned = true;
+                http_logf_warn(proc->log_state,
+                    "multipart.files_left_out max_file_uploads=%zu", max_files);
+            }
+
+            proc->skip_part = true;
+            return 0;
+        }
+    }
+
     /* Determine if this is a file or field */
     if (proc->filename != NULL && strlen(proc->filename) > 0) {
         /* This is a FILE upload */
@@ -416,16 +469,9 @@ static int on_headers_complete(multipart_parser_t* parser)
             return 0;
         }
 
-        /* Check file count limit */
-        size_t max_files = proc->config.max_files > 0 ? proc->config.max_files : MP_MAX_FILES;
-
-        if (proc->files_count >= max_files) {
-            proc->current_error = MP_UPLOAD_ERR_TOO_MANY_FILES;
-            return 0;
-        }
-
         /* Generate temp file path */
         proc->tmp_path = generate_tmp_path(proc, proc->filename);
+        proc->files_saved++;
 
         if (!proc->tmp_path) {
             proc->current_error = MP_UPLOAD_ERR_NO_TMP_DIR;
@@ -472,23 +518,21 @@ static int on_part_data(multipart_parser_t* parser, const char* at, size_t lengt
     if (proc->file_handle) {
         /* FILE: write to disk */
 
-        /* Check size limit. Subtractive form avoids size_t wrap when
-         * file_size is already near SIZE_MAX (S-02). length and
-         * file_size are both size_t; max_size - file_size is safe
-         * because file_size <= max_size is invariant on this path
-         * (we bail the moment we'd cross). */
-        size_t max_size = proc->config.max_file_size > 0 ?
-                          proc->config.max_file_size : MP_MAX_FILE_SIZE;
+        const int size_error = file_size_error(proc, length);
 
-        if (proc->file_size > max_size || length > max_size - proc->file_size) {
-            proc->current_error = MP_UPLOAD_ERR_TOO_LARGE;
+        if (size_error != MP_UPLOAD_ERR_OK) {
+            proc->current_error = size_error;
             fclose(proc->file_handle);
             proc->file_handle = NULL;
-            /* Remove partial file */
+
+            /* A refused file has no temp file and no size, as in PHP. */
             if (proc->tmp_path) {
                 VCWD_UNLINK(proc->tmp_path);
+                MP_FREE(proc->tmp_path);
+                proc->tmp_path = NULL;
             }
 
+            proc->file_size = 0;
             return 0;  /* Continue parsing but don't write */
         }
 
@@ -536,6 +580,10 @@ static int on_part_end(multipart_parser_t* parser)
         fflush(proc->file_handle);
         fclose(proc->file_handle);
         proc->file_handle = NULL;
+    }
+
+    if (proc->skip_part) {
+        return 0;
     }
 
     /* Store result */
@@ -639,6 +687,14 @@ static int on_part_end(multipart_parser_t* parser)
         info->value[proc->field_value_len] = '\0';
         info->value_len = proc->field_value_len;
         proc->field_value_len = 0;
+
+        /* The form's own limit on the files that follow it, as PHP reads it.
+         * A value that is not a positive number sets none. */
+        if (info->name != NULL && strcasecmp(info->name, "MAX_FILE_SIZE") == 0) {
+            const long long limit = strtoll(info->value, NULL, 10);
+
+            proc->form_max_file_size = limit > 0 ? (size_t)limit : 0;
+        }
 
         proc->fields_count++;
     }

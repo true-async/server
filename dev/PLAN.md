@@ -31,7 +31,12 @@ an item marked "reproduce" gets its failing run before any code.
    empty baseline (PR 333, which also fixed #332), the first attempt's diff
    printed before a retry (PR 334). The clock removal is dropped (Sage).
 4. SSE byte count (issue to open).
-5. #322 — upload limits from `upload_max_filesize` and `max_file_uploads`.
+5. #322 — upload limits as PHP: `max_file_uploads` (extra files left out),
+   `max_multipart_body_parts`, `file_uploads`, `MAX_FILE_SIZE`; no per-file cap
+   past `setMaxBodySize()`. `upload_max_filesize` is not read, by Edmond on
+   2026-09-30: its 2M default would cut uploads the body limit admits. The
+   design went through the Critic. A `..` in a client filename answering 101
+   is split out as #339.
 6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
 7. #315 — iterative matcher in the Windows fnmatch shim.
 8. Worker path: compression, dropped FULL wire, protocol version (issue to open).
