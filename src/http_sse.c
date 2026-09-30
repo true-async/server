@@ -254,7 +254,20 @@ static int sse_dispatch(http_response_object *response, zend_string *payload, co
 		return HTTP_STREAM_APPEND_OK;
 	}
 
+	/* Counted for the access log before the transport sees it, as write()
+	 * counts: append_chunk suspends, and a second writer would read a total
+	 * about to change. A record the transport did not queue is given back:
+	 * a dead stream's, and a non-blocking offer's refusal — a blocking one
+	 * answers BACKPRESSURE for a record it did queue. */
+	const size_t len = ZSTR_LEN(payload);
+	response->written_length += len;
+
 	const int rc = response->stream_ops->append_chunk(response->stream_ctx, payload, nonblocking);
+
+	if (rc == HTTP_STREAM_APPEND_STREAM_DEAD
+		|| (nonblocking && rc == HTTP_STREAM_APPEND_BACKPRESSURE)) {
+		response->written_length -= len;
+	}
 
 	if (rc == HTTP_STREAM_APPEND_STREAM_DEAD) {
 		zend_throw_exception_ex(http_exception_ce, 499, "stream closed by peer");

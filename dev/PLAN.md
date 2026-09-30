@@ -1377,7 +1377,13 @@ a release yet except the first two, which are fixed.
   worth stating: a request whose wire was not delivered is not a delivered
   response, which means the telemetry call at `:768` has to see the flag.
 
-- [ ] **SSE never counts the bytes it sends.** `sse_dispatch`
+- [x] **SSE never counts the bytes it sends (#336).** Fixed at the call site:
+  `sse_dispatch` adds the record to `written_length` before `append_chunk` and
+  takes it back for a dead stream or a refused non-blocking offer. `core/080`
+  logged 11 of 69 octets on HTTP/1 and HTTP/2 before, 69 after, 20 of 20; the
+  single funnel suggested below is not built. HTTP/3 not run.
+
+  `sse_dispatch`
   (`src/http_sse.c:257`) hands its record to `append_chunk` without going through
   `response_check_declared_length`, the only function that advances
   `written_length` — and `written_length` is what
