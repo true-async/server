@@ -32,6 +32,8 @@
 #include "static/static_handler.h" /* http_static_cache_acquire decl */
 #include "static/http_static_cache.h"
 #include "log/http_log.h" /* access-log emit */
+#include "fiu-local.h"
+#include "zend_exceptions.h"
 
 #include <sys/stat.h>
 #ifdef PHP_WIN32
@@ -156,6 +158,17 @@ static bool engine_resolve_content_type(const engine_state_t *state, const char 
 	return http_mime_lookup_by_ext(state->fs_path, state->fs_path_len, out, out_len);
 }
 
+/* The open-file cache this request reads and fills: the mount's own, else
+ * the server's; NULL when neither is configured. */
+static http_static_cache_t *engine_cache(const send_file_config_t *cfg)
+{
+	if (cfg->cache != NULL) {
+		return cfg->cache;
+	}
+
+	return cfg->server != NULL ? http_static_cache_acquire(cfg->server) : NULL;
+}
+
 static void engine_on_protocol_done(void *user, int status);
 
 static void engine_defer_cleanup(engine_state_t *state);
@@ -170,6 +183,16 @@ static void engine_finalize(engine_state_t *state, int status)
 		}
 
 		state->file_io = NULL;
+	}
+
+	/* A failed body may have been sized from a cache entry the file no longer
+	 * matches; left in place it would fail every request until its TTL. */
+	if (status != 0 && state->armed && state->fs_path != NULL) {
+		http_static_cache_t *const cache = engine_cache(&state->cfg);
+
+		if (cache != NULL) {
+			http_static_cache_remove(cache, state->fs_path, state->fs_path_len);
+		}
 	}
 
 	if (state->cfg.delete_after_send && status == 0 && state->fs_path != NULL) {
@@ -316,9 +339,8 @@ static void engine_handle_stat(engine_state_t *state)
 
 	/* === Cache insert (only on miss path) =========================== */
 
-	if (view == NULL && (cfg->cache != NULL || cfg->server != NULL)) {
-		http_static_cache_t *const cache =
-			cfg->cache != NULL ? cfg->cache : http_static_cache_acquire(cfg->server);
+	if (view == NULL) {
+		http_static_cache_t *const cache = engine_cache(cfg);
 
 		if (cache != NULL) {
 			http_static_cache_insert(cache, state->fs_path, state->fs_path_len, &state->st,
@@ -561,9 +583,20 @@ static void engine_defer_dispatch(zend_async_event_t *event, zend_async_event_ca
 
 /* Defer onto the next loop tick so on_done never re-enters the
  * request dispatcher on send_file()'s synchronous call stack. */
-static bool engine_defer_schedule(engine_state_t *state)
+static bool engine_defer_schedule_timer(engine_state_t *state)
 {
 	zend_async_timer_event_t *timer = ZEND_ASYNC_NEW_TIMER_EVENT(0, false);
+
+	/* Fault point: the loop refuses the timer the way php-async does, with
+	 * NULL and an exception raised. */
+	fiu_do_on("send_file/defer_schedule", {
+		if (timer != NULL) {
+			timer->base.dispose(&timer->base);
+		}
+
+		zend_throw_error(NULL, "Failed to initialize timer handle: fault point");
+		timer = NULL;
+	});
 
 	if (UNEXPECTED(timer == NULL)) {
 		return false;
@@ -597,28 +630,54 @@ static bool engine_defer_schedule(engine_state_t *state)
 	return true;
 }
 
+static bool engine_defer_schedule(engine_state_t *state)
+{
+	if (EXPECTED(engine_defer_schedule_timer(state))) {
+		return true;
+	}
+
+	/* php-async raises an exception with each refusal. The caller answers
+	 * the request itself after a refusal, and a pending exception would stop
+	 * that answer: no handler coroutine is spawned while one is set. */
+	if (EG(exception) != NULL) {
+		zend_clear_exception();
+	}
+
+	return false;
+}
+
+/* Defer the rest of the chain onto the next loop tick and arm the caller.
+ * The timer is taken first: a loop that cannot take one leaves the caller
+ * unarmed and nothing written, free to answer the request itself, where a
+ * failure after on_armed would complete the request inside the caller's
+ * synchronous frame (the HTTP/1 parser's, for the static handler). */
+static send_file_result_t engine_arm_and_defer(engine_state_t *state)
+{
+	if (UNEXPECTED(!engine_defer_schedule(state))) {
+		engine_finalize(state, -1);
+		return SEND_FILE_REFUSED;
+	}
+
+	if (state->cbs.on_armed != NULL) {
+		state->cbs.on_armed(state->user);
+	}
+
+	state->armed = true;
+	return SEND_FILE_ASYNC;
+}
+
 /* Schedule a deferred error emission via the protocol op. on_armed
  * fires synchronously here (caller pins resources), the actual head
  * is written on the next loop tick. */
 static send_file_result_t engine_arm_and_defer_error(engine_state_t *state, int status,
 													  const char *body, size_t body_len)
 {
-	if (state->cbs.on_armed != NULL) {
-		state->cbs.on_armed(state->user);
-	}
-
-	state->armed = true;
 	state->defer_emit_error = true;
 	state->defer_status = status;
 	state->defer_body = body;
 	state->defer_body_len = body_len;
 
-	if (UNEXPECTED(!engine_defer_schedule(state))) {
-		engine_finalize(state, -1);
-		return SEND_FILE_ASYNC;
-	}
-
-	return SEND_FILE_ASYNC;
+	return engine_arm_and_defer(state);
 }
 
 /* PASSTHROUGH_PHP fires sync — caller switches paths on the return
@@ -742,18 +801,7 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 		return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
 	}
 
-	if (state->cbs.on_armed != NULL) {
-		state->cbs.on_armed(user);
-	}
-
-	state->armed = true;
-
-	if (UNEXPECTED(!engine_defer_schedule(state))) {
-		engine_finalize(state, -1);
-		return SEND_FILE_ASYNC;
-	}
-
-	return SEND_FILE_ASYNC;
+	return engine_arm_and_defer(state);
 }
 
 zend_string *fs_slurp_fd(const int fd, const size_t expected_size)

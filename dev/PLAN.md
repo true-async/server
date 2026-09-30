@@ -140,22 +140,15 @@ an item marked "reproduce" gets its failing run before any code.
 12. `http_server_pause_listeners` and the accept it may not stop: stage S1
     above (#359, true-async/php-async#305). The accept errors it used to drop
     are counted in `accept_errors_total`; they are still not logged.
-12a. A failed or short HTTP/1 file body keeps the connection alive:
-    `h1_static_on_static_done` and `h1_sendfile_on_done` discard `status`
-    (`http_connection.c:2744`, `:2833`), the plaintext completion reports a
-    short transfer as success (`http1_sendfile.c:297-309`), and a failed defer
-    schedule finalizes with nothing written (`send_file.c:617`, `:758`). The
-    next response on the connection follows a short body, against USAGE.md:195.
-    Done when a file truncated mid-send, plaintext and TLS, drops keep-alive and
-    a pipelined second request gets no bytes glued to the first body (template:
-    `h3/056`). Reproduce. Found by the health check, verified by the Sage.
+12a. A failed or short HTTP/1 file body kept the connection alive: done,
+    stage S2 (#362, true-async/php-async#308); tests `h1/065` to `h1/068`.
 12b. The same on HTTP/2: a truncated or failed file body ends with END_STREAM
     (`http2_static_response.c:593-603`). Done when it sends
     RST_STREAM(INTERNAL_ERROR) and an h2 test that truncates a file reads error
     code 2. Reproduce.
-    The failure in 12a and 12b comes from a libfiu fault point (`fiu_do_on`)
-    in the sendfile engine; installing libfiu and wiring it into the debug
-    build is part of 12a (`dev/DECISIONS.md`, 2026-09-30).
+    The failure comes from a libfiu fault point, as `h1/066` does; the build
+    flag and the `_http_fault_*` hooks exist (`src/core/fault_hooks.c`), and
+    `h1/065`'s stale-cache truncation is the template for a real short file.
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
     `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
@@ -243,6 +236,21 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     hold up to four pending instances): all are served after the resume, in
     order. The only case where php-async's delivery loop runs more than once,
     so its two outcome branches have no test that kills a mutant of them.
+35. A file body that failed or came up short is access-logged and counted as a
+    plain 200 with a short byte count (S2.3): mark it failed, as an aborted
+    stream is.
+36. The HTTP/1 file-body phase has no write deadline: a peer that stops reading
+    holds the chain, and with it the connection, for good (Linux: libuv's copy
+    loop in `poll(-1)`; macOS: php-async's EAGAIN wait). Critic on php-async
+    #308, 2026-09-30. Reproduce with a client that reads 100 KiB and stalls.
+37. `multipart/009` failed once on Windows (PR 363, run 36743616544, 1 of 4
+    runs of that branch): the third upload's `getSize()` read NULL, an upload
+    error. Passed on rerun and on main 8 of 8. Suspect the temporary file
+    (item 18's CANT_WRITE path); reproduce under `-j` on Windows.
+38. A small php-async PR: regenerate `async_arginfo.h` (its stub hash is stale,
+    every build rewrites it), and assert in `sendfile_wait_writable` that the
+    destination io has no other sendfile waiting, since `sendfile_waiting`
+    holds one (Code Reviewer on S2, 2026-09-30).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

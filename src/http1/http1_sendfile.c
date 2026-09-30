@@ -54,6 +54,7 @@
 #include "core/tls_layer.h"
 #endif
 #include "http1/http1_sendfile.h"
+#include "fiu-local.h"
 
 #include <inttypes.h>
 #ifdef __linux__
@@ -302,7 +303,8 @@ static void h1_send_dispatch(zend_async_event_t *event,
             req->dispose(req);
         }
 
-        if (UNEXPECTED(exception != NULL)) {
+        /* Fault point: the transfer ended in an I/O error. */
+        if (UNEXPECTED(exception != NULL) || fiu_fail("h1/file_body/io_error")) {
             state->status = -1;
         }
 
@@ -317,7 +319,9 @@ static void h1_send_dispatch(zend_async_event_t *event,
 
         state->pending_req = NULL;
         const ssize_t got = req->transferred;
-        const bool err = (exception != NULL || req->exception != NULL);
+        /* Fault point: the file read ended in an I/O error. */
+        const bool err = (exception != NULL || req->exception != NULL
+                          || fiu_fail("h1/file_body/io_error"));
 
         if (req->exception != NULL) {
             OBJ_RELEASE(req->exception);
@@ -348,10 +352,15 @@ static void h1_send_dispatch(zend_async_event_t *event,
 
 static void h1_send_handle_sendfile_done(h1_send_state_t *state)
 {
+    /* sendfile stops at EOF without an error, so a file that shrank after its
+     * size was taken shows only as a short count. */
+    if (state->bytes_sent < state->body_length) {
+        state->status = -1;
+    }
+
     /* Body sent (or partially sent on error). On error we still
      * finalize — bytes already on the wire are out of our control;
-     * the keep-alive verdict the static handler set decides what
-     * happens to the connection next. */
+     * on_done ends the connection on a non-zero status. */
     h1_send_finalize(state);
 }
 
@@ -410,7 +419,8 @@ static void h1_send_handle_tls_read_done(h1_send_state_t *state,
 {
     if (UNEXPECTED(err) || bytes_read < 0) {
         /* Read error mid-stream — bytes already on the wire belong
-         * to the client, finalize and let keep-alive policy decide. */
+         * to the client; finalize, and on_done ends the connection
+         * on the non-zero status. */
         state->status = -1;
         h1_send_finalize(state);
         return;

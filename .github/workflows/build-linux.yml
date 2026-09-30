@@ -482,9 +482,14 @@ jobs:
           # double-free, all four running nowhere until this flag appeared here.
           # Debug leg only: configure calls the build unshippable, and the
           # release leg is what the release resembles.
-          ENABLE_TEST_HOOKS: ${{ matrix.debug && '--enable-tas-test-hooks' || '' }}
+          # The libfiu fault points (dev/DECISIONS.md, 2026-09-30) are compiled
+          # in on the same leg, for the same reason: their tests skip elsewhere.
+          ENABLE_TEST_HOOKS: ${{ matrix.debug && '--enable-tas-test-hooks --enable-fault-injection' || '' }}
         run: |
           set -eux
+          if [ -n "$ENABLE_TEST_HOOKS" ]; then
+            sudo apt-get install -y --no-install-recommends libfiu-dev
+          fi
           PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
           ./configure \
             --with-php-config=/usr/local/bin/php-config \

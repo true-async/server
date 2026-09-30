@@ -23,6 +23,7 @@
 #endif
 #include "http_known_strings.h"
 #include "core/reactor_pool_test.h"
+#include "core/fault_hooks.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
 #include "http_send_file.h"
@@ -223,6 +224,9 @@ PHP_MINIT_FUNCTION(http_server)
 
 	/* Reliable-room fault-injection hook; a no-op unless built with TAS_TEST_HOOKS. */
 	room_hub_test_register(type);
+
+	/* libfiu fault points under PHP control; a no-op unless built with FIU_ENABLE. */
+	fault_hooks_register(type);
 
 	return SUCCESS;
 }

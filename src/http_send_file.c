@@ -224,14 +224,15 @@ bool http_send_file_dispatch(http_request_t *request, zend_object *response_obj,
 		return true;
 	}
 
-	/* Engine refused before kick-off (MAXPATHLEN, FS_OPEN failure,
-	 * cb alloc). adapter wasn't handed off; on_done not fired. */
+	/* Engine refused before kick-off: HANDLED for its arguments (a path
+	 * over MAXPATHLEN, no protocol op), REFUSED for no timer to defer the
+	 * start. adapter wasn't handed off; on_done not fired. */
 	sf_adapter_free(adapter);
 
 	if (r != SEND_FILE_HANDLED) {
 		http_response_synth_error(response_obj, 500, "sendFile: engine refused");
 	} else {
-		http_response_synth_error(response_obj, 500, "sendFile: cannot open file");
+		http_response_synth_error(response_obj, 500, "sendFile: engine refused its arguments");
 	}
 
 	return false;

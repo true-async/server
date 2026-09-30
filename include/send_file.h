@@ -119,9 +119,10 @@ typedef struct
 	 * counter). Paired with on_done. NULL = nothing to do. */
 	void (*on_armed)(void *user);
 
-	/* Called when delivery finishes — synchronously for the 304/error
-	 * inline paths, or async after the protocol op. status==0 ok,
-	 * non-zero abort. NULL = nothing to do. */
+	/* Called once when delivery finishes, never on send_file()'s own call
+	 * stack: every path, the 304 and error heads included, runs from the
+	 * deferred tick. status==0 ok; non-zero means the body failed or came up
+	 * short of what the head declared. NULL = nothing to do. */
 	void (*on_done)(void *user, int status);
 
 	/* Per-protocol keep-alive verdict (H1 reads conn->keep_alive,
@@ -134,10 +135,15 @@ typedef enum
 	/* The file did not open under PASSTHROUGH_PHP: nothing was written and
 	 * no callback fired; the caller runs its PHP handler. */
 	SEND_FILE_PASSTHROUGH = 0,
-	/* response_obj populated synchronously (304 or 4xx error body). */
+	/* The engine refused its arguments before starting (no protocol op, a
+	 * path over MAXPATHLEN): nothing was written to response_obj and no
+	 * callback fired; the caller answers the request itself. */
 	SEND_FILE_HANDLED = 1,
 	/* Async chain in flight; on_armed fired, on_done will fire later. */
 	SEND_FILE_ASYNC = 2,
+	/* The chain could not start (the loop refused its timer): nothing was
+	 * written, no callback fired, the caller answers the request itself. */
+	SEND_FILE_REFUSED = 3,
 } send_file_result_t;
 
 send_file_result_t send_file(struct http_request_t *request, zend_object *response_obj,

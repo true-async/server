@@ -41,6 +41,13 @@ PHP_ARG_ENABLE([tas-test-hooks],
   [no],
   [no])
 
+PHP_ARG_ENABLE([fault-injection],
+  [whether to compile libfiu fault points],
+  [AS_HELP_STRING([--enable-fault-injection],
+    [Compile the libfiu fault points and the PHP functions that enable them (needs libfiu). For test/CI builds only; never enable for release.])],
+  [no],
+  [no])
+
 PHP_ARG_WITH([openssl],
   [for OpenSSL TLS support],
   [AS_HELP_STRING([--with-openssl@<:@=DIR@:>@],
@@ -537,6 +544,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/thread_mailbox.c
     src/core/reactor_pool.c
     src/core/reactor_pool_test_hooks.c
+    src/core/fault_hooks.c
     src/core/response_wire.c
     src/core/worker_dispatch.c
     src/core/worker_inbox.c
@@ -717,9 +725,22 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     TAS_TEST_HOOKS_FLAG="-DTAS_TEST_HOOKS=1"
   fi
 
+  dnl libfiu fault points (include/fiu-local.h). Without the flag they expand to
+  dnl nothing and libfiu is neither needed nor linked.
+  FAULT_INJECTION_FLAG=""
+  if test "$PHP_FAULT_INJECTION" = "yes"; then
+    AC_CHECK_LIB([fiu], [fiu_enable], [
+      PHP_ADD_LIBRARY([fiu], [1], [TRUE_ASYNC_SERVER_SHARED_LIBADD])
+    ], [
+      AC_MSG_ERROR([--enable-fault-injection needs libfiu. Install libfiu-dev])
+    ])
+    AC_MSG_NOTICE([http_server: fault injection ENABLED — do not ship this build])
+    FAULT_INJECTION_FLAG="-DFIU_ENABLE=1"
+  fi
+
   dnl Create extension. The trailing "cxx" arg makes the shared module link
   dnl through $(CXX) so the C++ TU's runtime (libstdc++) is pulled in.
-  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING $HTTP_SERVER_TEST_HOOKS_FLAG $TAS_TEST_HOOKS_FLAG $HTTP_SERVER_WSLAY_DEFS, cxx)
+  PHP_NEW_EXTENSION(true_async_server, $http_server_sources, $ext_shared,, -Wall -Wextra -Wno-unused-parameter $HTTP_SERVER_HARDENING $HTTP_SERVER_TEST_HOOKS_FLAG $TAS_TEST_HOOKS_FLAG $FAULT_INJECTION_FLAG $HTTP_SERVER_WSLAY_DEFS, cxx)
   PHP_SUBST(TRUE_ASYNC_SERVER_SHARED_LIBADD)
 
   dnl Add include paths
