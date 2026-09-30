@@ -151,14 +151,6 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
  * premature EOF. Used by the small-file slurp fast-paths. */
 zend_string *fs_slurp_fd(int fd, size_t expected_size);
 
-/* Returns true when the request's conditional-GET headers match the
- * resource state and the server SHOULD answer 304. The etag value,
- * when supplied, must be the canonical W/"..." form produced by
- * http_etag_format_strong. last_modified is in seconds. */
-bool http_conditional_check(const char *if_none_match, size_t if_none_match_len,
-							const char *if_modified_since, size_t if_modified_since_len,
-							const char *etag, size_t etag_len, time_t last_modified);
-
 /* File-size threshold below which the static-handler's slurp fast-path
  * is strictly cheaper than the async engine. See http_static_try_serve
  * routing and the matching slurp branch inside the send_file engine. */
