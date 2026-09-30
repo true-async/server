@@ -16,6 +16,65 @@ a test that fails without it, a measurement, or both. Issue numbers point at
   codec's own decoder, including through the `NEED_OUTPUT` loop; cost measured in
   `dev/BENCHMARKS.md`. Merged.
 
+## S1 — A paused listener leaves new connections in the backlog (item 12)  [in progress]
+
+Goal: `http_server_pause_listeners` stops accepting, so a connection that arrives
+during a pause is served after the resume instead of answered 503.
+Done when: `h1/062` passes on Linux, macOS and Windows CI against php-async `main`.
+Tests: first
+Base: 068cd09 (server), e580c15 (php-async)
+
+Cause: php-async's `libuv_listen_stop` cannot stop `uv_listen` (libuv has no such
+call), so accepts go on. Design E, by the Critic and the Sage on 2026-09-30,
+approved by Edmond: `stop` makes the connection callback return without
+`uv_accept`, and libuv stops watching the fd itself (`unix/stream.c:528-531`);
+the first `start` runs `uv_listen`, a later one unpauses and delivers the held
+connection on the next tick; Windows TCP listeners take one AcceptEx at a time,
+set before `uv_listen`. Rejected: a `uv_poll` accept loop (a busy loop on a
+socket several workers share on Windows, an EMFILE spin, no named pipes).
+
+- [x] S1.1 php-async: an asynctest cmocka test of stop and start, red first
+      done: stop, three connects, no callback; start, three callbacks on the next
+        tick and none inside start(); pause and resume twice with a held
+        connection; dispose while paused leaks nothing under ASan
+      tier: T2 · role: —
+      handoff: `sapi/asynctest/tests/test_listen_pause.c` in php-src (PR
+        true-async/php-src#38), 5 cases, all red on php-async e580c15. Under
+        ASan with LeakSanitizer (USE_ZEND_ALLOC=0): 5 of 5, 3 of 3 runs, no
+        report; a leak planted in listen_close_cb is reported (528 bytes).
+- [x] S1.2 php-async: design E in the listen event
+      done: S1.1 green; the php-async phpt suite passes; a callback that returns
+        without accepting while not paused is re-delivered, not lost
+      tier: T2 · role: Critic
+      Critic 2026-09-30 on the diff: single accept at creation slowed every
+        Windows listener (libuv can switch after listen) — moved to the first
+        stop(); the init-failure retry could spin — now a loud error; recover
+        skips a closing handle; a failed accept waits for the next tick. All
+        taken.
+      handoff: php-async PR #306 (commit 7965109). asynctest 5 of 5 green, 3 of
+        3 runs; php-async phpt 1214 of 1220, the 6 fail on main alike (a
+        symlinked ext/async breaks their ../../../../ includes).
+      Windows CI 2026-09-30: `h1/064` failed on #306. libuv keeps completed
+        AcceptEx requests in a LIFO stack, and the switch to single accept at
+        the first stop() completes only after all 32 pre-posted requests are
+        used, so a pause delivered the newest connection first. Sage: single
+        accept before the first uv_listen of every Windows TCP listener
+        (php-async PR #307); a FIFO queue in php-async was rejected. 064 green
+        on Windows with #307. Its accept-rate cost is item 33.
+- [x] S1.3 server: 062, a burst test and a re-pause test green on the patched
+        php-async; the comments at `http_server_class.c` on REUSEPORT and pause
+        say what happens; the 503 safety net and dropped accept errors are counted
+      done: the three phpt pass locally; `h1/062` fails on unpatched php-async
+      tier: T1 · role: —
+      handoff: 062, 063, 064 read 503 on php-async main and pass 10 of 10 on the
+        branch; the whole suite 516 of 516 on it. telemetry/009 lists the two
+        new counters. Issue #359.
+- [~] S1.4 Both PRs: php-async first, then the server against its `main`
+      done: both merged with every CI platform green; the Windows accept rate
+        before and after single accept is recorded in `dev/BENCHMARKS.md`, or
+        named as not measured
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28
@@ -70,10 +129,9 @@ an item marked "reproduce" gets its failing run before any code.
     the suspect `proc_open()` pipe path is out of the suite. Closed if 070 does
     not hang again; the pipe hang itself, if real, belongs to php-async.
 11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
-12. `http_server_pause_listeners` and the accept it may not stop: reproduce.
-    The accept callback also drops an error such as EMFILE with no log and no
-    counter (`http_server_class.c:2218-2223`); php-async re-arms the listener,
-    so only the signal is missing (health check 2026-09-30).
+12. `http_server_pause_listeners` and the accept it may not stop: stage S1
+    above (#359, true-async/php-async#305). The accept errors it used to drop
+    are counted in `accept_errors_total`; they are still not logged.
 12a. A failed or short HTTP/1 file body keeps the connection alive:
     `h1_static_on_static_done` and `h1_sendfile_on_done` discard `status`
     (`http_connection.c:2744`, `:2833`), the plaintext completion reports a
@@ -95,7 +153,11 @@ an item marked "reproduce" gets its failing run before any code.
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
     pass alone, and one full `-j4` suite of two hit it. A test that counts
     CPU should not see a bounded ring's designed drop; decide which side moves.
-14. `tas_free_port_span` on Windows: it hands out adjacent ports, and Windows
+14. The port helpers race. `tas_free_port` binds port 0, reads the number and
+    closes the socket, so another test's outgoing connection can take the port
+    before the test binds it: `core/027` failed its bind on 127.0.0.1:49353 on
+    macOS debug (run 36718896142, PR 360), passing on retry. Port 0 listeners
+    (81c0437) avoid the window. And `tas_free_port_span` on Windows: it hands out adjacent ports, and Windows
     gives ephemeral ports in order, so `base + 1` is the next port another test
     under `-j2` receives. `core/023` failed its bind that way (PR 337's Windows
     job) and PR 338 moved it and `core/079` to separate kernel-assigned ports;
@@ -166,6 +228,9 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     23 put the HTTP/3 and static targets in the population. The first run
     passes the known-answer check of rule 28.1; the survivors go into
     `dev/HEALTH.md` as the reference run.
+33. A connect storm on Windows CI (N parallel connects, time until all are
+    accepted), reported and not gating, before and after php-async #307: one
+    AcceptEx at a time costs one accept per loop iteration, not measured.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

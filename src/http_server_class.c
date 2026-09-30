@@ -1055,11 +1055,16 @@ static void http_server_deadline_tick_stop(http_server_object *server)
     }
 }
 
-/* Backpressure primitives. Calling stop()/start() on a zend_async listen
- * event toggles its presence in the reactor poll set — no fd is closed,
- * so new SYNs accumulate in the kernel backlog while we are paused and
- * are picked up normally when we resume. Hard cap and CoDel share the
- * same pause/resume plumbing; they differ only in their trigger. */
+/* Backpressure primitives. stop() on a zend_async listen event pauses it:
+ * no fd is closed, the reactor stops accepting, and new connections wait in
+ * the kernel backlog until start(). The reactor itself holds the one it had
+ * already taken when the pause began (on Windows an AF_UNIX listener holds
+ * its pending pipe instances, four by default) and delivers it first on
+ * resume. Under SO_REUSEPORT the kernel keeps hashing a paused worker's share
+ * of new connections to its socket: they wait for this worker, or are
+ * dropped once its backlog is full, and other workers do not take them.
+ * Hard cap and CoDel share the same pause/resume plumbing; they differ only
+ * in their trigger. */
 static void http_server_pause_listeners(http_server_object *server, bool drain_connections);
 static void http_server_resume_listeners(http_server_object *server);
 
@@ -1087,7 +1092,8 @@ http_server_aggregate_sample(http_server_object *s,
     }
 }
 
-/* Pauses accept (REUSEPORT hash excludes this worker) and, if the
+/* Pauses accept (see the backpressure note above: under REUSEPORT the
+ * kernel still sends this worker its share) and, if the
  * caller is an overload trigger (drain_connections=true), also bumps
  * the drain epoch so already-accepted connections get a migration
  * signal on their next response. The bool lets future maintenance-
@@ -2219,6 +2225,7 @@ static void http_server_accept_callback(
         /* Accept error — reactor already attached the exception; drop it
          * here to avoid stopping the loop for a transient per-connection
          * failure. */
+        server->counters_live->accept_errors_total++;
         return;
     }
 
@@ -2245,6 +2252,7 @@ static void http_server_accept_callback(
                                "Service Unavailable";
         send(client_fd, response, (int)strlen(response), MSG_NOSIGNAL);
         closesocket(client_fd);
+        server->counters_live->accepts_refused_at_cap_total++;
         /* Make sure listeners are paused so we stop accepting new ones. */
         if (!server->listeners_paused) {
             /* Race fallback — still counts as overload, drain existing. */
@@ -5631,6 +5639,9 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long (return_value, "codel_trips_total",    (zend_long)server->counters_live->codel_trips_total);
     add_assoc_double(return_value, "paused_total_ms",
                      (double)server->counters_live->paused_total_ns * ns_to_ms);
+    add_assoc_long (return_value, "accepts_refused_at_cap_total",
+                    (zend_long)server->counters_live->accepts_refused_at_cap_total);
+    add_assoc_long (return_value, "accept_errors_total", (zend_long)server->counters_live->accept_errors_total);
     /* This worker's slot — getStats() is what sums them across the pool. */
     const http_server_counters_t *const tc = server->counters_live;
 
@@ -5747,6 +5758,8 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->counters_live->pause_count_total    = 0;
     server->counters_live->codel_trips_total    = 0;
     server->counters_live->paused_total_ns      = 0;
+    server->counters_live->accepts_refused_at_cap_total = 0;
+    server->counters_live->accept_errors_total          = 0;
     server->counters_live->tls_handshakes_total           = 0;
     server->counters_live->tls_handshake_failures_total   = 0;
     server->counters_live->tls_handshake_ns_sum           = 0;

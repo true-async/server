@@ -988,6 +988,12 @@ typedef struct http_server_counters_s {
     uint64_t pause_count_total;
     uint64_t codel_trips_total;
     uint64_t paused_total_ns;
+    /* Connections answered 503 by the hard-cap safety net in the accept
+     * callback. A paused listener accepts nothing, so a nonzero count is a
+     * pause that did not hold. accept_errors_total counts accepts the reactor
+     * reported as failed. */
+    uint64_t accepts_refused_at_cap_total;
+    uint64_t accept_errors_total;
 
     /* The sum and the count are separate fields because the mean is taken after
      * the pool is summed: averaging per-worker averages weights a quiet worker
@@ -1092,6 +1098,8 @@ typedef struct http_server_counters_s {
     X(pause_count_total,                     SUM)            \
     X(codel_trips_total,                     SUM)            \
     X(paused_total_ns,                       SUM)            \
+    X(accepts_refused_at_cap_total,          SUM)            \
+    X(accept_errors_total,                   SUM)            \
     X(tls_handshakes_total,                  SUM)            \
     X(tls_handshake_failures_total,          SUM)            \
     X(tls_handshake_ns_sum,                  SUM)            \

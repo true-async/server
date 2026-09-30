@@ -37,6 +37,7 @@ $expected = [
     'sojourn_sum_ns', 'service_sum_ns', 'sojourn_samples', 'sojourn_max_ns',
     'active_connections',
     'pause_count_total', 'codel_trips_total', 'paused_total_ns',
+    'accepts_refused_at_cap_total', 'accept_errors_total',
     'tls_handshakes_total', 'tls_handshake_failures_total',
     'tls_handshake_ns_sum', 'tls_handshake_ns_count', 'tls_resumed_total',
     'tls_ktls_tx_total', 'tls_ktls_rx_total',
