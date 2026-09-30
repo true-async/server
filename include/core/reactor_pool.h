@@ -28,7 +28,7 @@
  * whether the inbound channel is being drained (reactor_pool_processed). A
  * consumer that stops draining is exactly a stalled reactor; a bounded mailbox
  * turns that into backpressure at the producer (reactor_pool_post returning
- * false), which is the real health signal. See docs/PLAN_REACTOR_POOL.md.
+ * false), which is the real health signal.
  *
  * Threading contract:
  *   - reactor_pool_create()/destroy() run on the owning (parent) thread.

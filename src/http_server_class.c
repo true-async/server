@@ -126,7 +126,7 @@ static bool http_server_use_shared_listen_fd(void)
  * uv_tcp_bind() answers UV_ENOTSUP if UV_TCP_REUSEPORT is set on Windows,
  * so it must never be requested there. Two camps remain — kernels that
  * load-balance REUSEPORT (Linux, FreeBSD) and everyone else, who share one
- * bound socket instead (issue #275). */
+ * bound socket instead. */
 static bool http_server_use_reuseport(void)
 {
 #ifdef PHP_WIN32
@@ -171,7 +171,7 @@ typedef struct {
     zend_socket_t fd;
 } http_pool_tcp_fd_t;
 
-/* The listening sockets one server shares across its threads (issue #275).
+/* The listening sockets one server shares across its threads.
  *
  * Bound lazily: whichever thread reaches start() first binds under the lock
  * and publishes the descriptor, the rest find it and adopt a duplicate of
@@ -431,8 +431,8 @@ struct http_server_object {
     http_listener_t          listeners[MAX_LISTENERS];
     size_t                   listener_count;
 
-    /* Listening sockets shared with every thread serving this server
-     * (issue #275). Refcounted and bound lazily; NULL until the first
+    /* Listening sockets shared with every thread serving this server.
+     * Refcounted and bound lazily; NULL until the first
      * thread needs it. Each transfer shell and worker clone holds a
      * reference, so the sockets die with the last of them. */
     http_listen_set_t       *listen_set;

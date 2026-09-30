@@ -44,9 +44,14 @@ Consequences for code:
 Each worker owns the full `accept` → TLS → parse → handler → encode →
 `send` pipeline end-to-end on one core. Pipelining stages across cores is
 forbidden: it loses to share-nothing on modern hardware (cache-coherency
-traffic, USL β > 0). The only acceptable off-load is the **TLS handshake**
-(asymmetric crypto), because handshakes are rare enough that the
-cross-core transfer cost is amortised.
+traffic, USL β > 0). Two off-loads are sanctioned. The **TLS handshake**
+(asymmetric crypto) moves because handshakes are rare enough that the
+cross-core transfer cost is amortised. The **reactor/worker split**
+(`TRUE_ASYNC_SERVER_REACTOR_POOL=1`, §1.5) moves the PHP handler off the
+transport reactor, because a handler that renders or compresses would
+otherwise stall every connection on that reactor; it costs a mailbox post
+per request and per response, and it is opt-in (`dev/DECISIONS.md`,
+2026-09-30).
 
 ### 1.4 Choosing an event primitive for in-thread wakeups
 
@@ -140,8 +145,7 @@ not perform an unbounded synchronous span:
   attacker-sized input — none of these belong inline on a callback or in
   the dispose commit. Cap it, or move it onto the PHP worker (a handler
   coroutine that `await`s; the reactor/worker split keeps response
-  rendering — including compression — off the transport reactor, see
-  `docs/PLAN_REACTOR_POOL.md`).
+  rendering — including compression — off the transport reactor).
 - **Every loop over peer-controlled counts has a cap.** Follow the
   existing precedents: `H3_DRAIN_ITER_CAP` (drain), `HTTP3_MAX_BODY_BYTES`
   (body assembly), the `recvmmsg` batch cap (poll-cb).
@@ -152,10 +156,11 @@ awaits monopolises the reactor exactly like inline reactor code; "it's in
 a coroutine" is not a yield. When a handler must do heavy CPU, it has to
 reach an await (chunk + yield), not run it in one synchronous span.
 
-The buffered-response compression in `http3_stream_submit_response`
-(`src/http3/http3_callbacks.c`) runs synchronously in dispose context — a
-current example of inline CPU on the reactor. The reactor/worker split
-moves response rendering onto the PHP worker; until then, keep buffered
+Without the reactor pool, the buffered-response compression in
+`http3_stream_submit_response` (`src/http3/http3_callbacks.c`) runs
+synchronously in dispose context — inline CPU on the reactor. With the
+pool, the worker encodes the body before it posts the response
+(`src/core/worker_dispatch.c`). On the in-thread path, keep buffered
 bodies modest and prefer the streaming path for large ones.
 
 **Watchdog.** The reactor self-times each tick and each timer fire and
@@ -250,7 +255,8 @@ Do not write:
 - Decorative comments restating WHAT the next line does.
 - Multi-paragraph docstrings on internal helpers.
 - References to the current task / PR / fix ("added for the upload flow",
-  "fixes #123") — those belong in the commit message.
+  "fixes #123") — those belong in the commit message. The one exception,
+  an issue number in a module-header banner, is in §13a.4.
 - "Used by X" call-site notes — they rot the moment the caller moves.
 
 Before writing a comment, ask: *if I delete this line, does a future reader
