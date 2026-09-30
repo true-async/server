@@ -33,7 +33,7 @@ env:
   # --disable-all + a fixed allowlist (matches the modules the H3 tests
   # expect to be present at runtime).
   PHP_SRC_BRANCH: true-async
-  PHP_ASYNC_BRANCH: transmitfile-sent-count
+  PHP_ASYNC_BRANCH: main
 
 jobs:
   # --------------------------------------------------------------------
