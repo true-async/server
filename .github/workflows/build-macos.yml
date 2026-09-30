@@ -17,7 +17,7 @@ on:
 
 env:
   PHP_SRC_BRANCH: true-async
-  PHP_ASYNC_BRANCH: main
+  PHP_ASYNC_BRANCH: transmitfile-sent-count
 
 jobs:
   build-macos:
