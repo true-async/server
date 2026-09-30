@@ -38,7 +38,10 @@ an item marked "reproduce" gets its failing run before any code.
    design went through the Critic. A `..` in a client filename answering 101
    is split out as #339.
 6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
-7. #315 — iterative matcher in the Windows fnmatch shim.
+7. #315 — iterative matcher in the Windows fnmatch shim: done. The matcher is
+   `http_static_glob_match`, built on every platform; `StaticHide` checks it
+   against POSIX `fnmatch` over 19 patterns x 18 paths both ways, and a
+   4 KiB path the recursive form did not finish in 30 s passes under 1 s.
 8. Worker path: compression, dropped FULL wire, protocol version (issue to open).
 9. `test_static_decoders` back in the unit suite (issue to open).
 10. #314 — no action until it recurs.

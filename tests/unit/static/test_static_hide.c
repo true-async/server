@@ -27,6 +27,12 @@
 #include "static/static_handler.h"
 #include "static/http_static_path.h"
 
+#include <string.h>
+#include <time.h>
+#ifndef _WIN32
+#include <fnmatch.h>
+#endif
+
 static void test_bare_pattern_covers_every_depth(void **state)
 {
 	(void)state;
@@ -106,6 +112,62 @@ static void test_pattern_covers_nothing_it_does_not_name(void **state)
 	assert_false(http_static_hide_glob_matches("/", "index.php"));
 }
 
+#ifndef _WIN32
+/* The Windows matcher against the POSIX one, over what the hide rule feeds it:
+ * lower-case names, '*' and '?', with and without PATHNAME. Brackets and
+ * escapes are left out, since the Windows matcher reads them as literals. */
+static void test_windows_matcher_agrees_with_fnmatch(void **state)
+{
+	(void)state;
+	static const char *const patterns[] = {
+		"*", "**", "*.php", "a*", "*a", "a*b", "a?c", "?", "*/*", "a/*", "*/a/*",
+		"a*/b", "a/**", "**/b", "*a*a*b", "a*a*a*b/*", "*.tar.gz", "a/b/c", "",
+	};
+	static const char *const strings[] = {
+		"", "a", "ab", "abc", "a/b", "a/b/c", "x/a/y", "index.php", "admin/tools.php",
+		"aab", "aaab/c", "a.tar.gz", "a/a/b", "ax/b", "ax/y/b", "b", "a/", "/a",
+	};
+
+	for (size_t i = 0; i < sizeof(patterns) / sizeof(*patterns); i++) {
+		for (size_t j = 0; j < sizeof(strings) / sizeof(*strings); j++) {
+			for (int pathname = 0; pathname <= 1; pathname++) {
+				const int want = fnmatch(patterns[i], strings[j], pathname ? FNM_PATHNAME : 0) == 0;
+				const int got = http_static_glob_match(patterns[i], strings[j],
+					pathname ? HTTP_STATIC_GLOB_PATHNAME : 0) == 0;
+
+				if (want != got) {
+					fail_msg("'%s' against '%s'%s: fnmatch %d, matcher %d", patterns[i], strings[j],
+						pathname ? " (PATHNAME)" : "", want, got);
+				}
+			}
+		}
+	}
+}
+#endif
+
+/* The shape that took the recursive matcher 10 s at 512 bytes and past 30 s at
+ * 2 KiB: many stars over a repeating literal that finally does not match. The
+ * bound is loose on purpose; the old form does not finish inside it. */
+static void test_windows_matcher_is_not_exponential(void **state)
+{
+	(void)state;
+	char path[2 + 4096 + 1];
+
+	memcpy(path, "x/", 2);
+	memset(path + 2, 'a', 4096);
+	path[2 + 4096] = '\0';
+
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	const int rc = http_static_glob_match("*/a*a*a*a*a*a*a*b/*", path, 0);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+
+	const double seconds = (double)(end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+
+	assert_int_equal(rc, 1);
+	assert_true(seconds < 1.0);
+}
+
 int main(void)
 {
 	const struct CMUnitTest tests[] = {
@@ -116,6 +178,10 @@ int main(void)
 		cmocka_unit_test(test_trailing_separator_names_a_directory),
 		cmocka_unit_test(test_double_star_crosses_separators),
 		cmocka_unit_test(test_pattern_covers_nothing_it_does_not_name),
+#ifndef _WIN32
+		cmocka_unit_test(test_windows_matcher_agrees_with_fnmatch),
+#endif
+		cmocka_unit_test(test_windows_matcher_is_not_exponential),
 	};
 
 	return cmocka_run_group_tests(tests, NULL, NULL);

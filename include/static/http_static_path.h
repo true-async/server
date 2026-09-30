@@ -75,6 +75,18 @@ bool http_static_path_join(char *buf, size_t cap, size_t *len, const char *name,
  * longer than HTTP_STATIC_HIDE_GLOB_MAX covers nothing. */
 bool http_static_hide_glob_matches(const char *glob, const char *relative);
 
+/* Flag for http_static_glob_match: '*' and '?' stop at '/', as FNM_PATHNAME. */
+#define HTTP_STATIC_GLOB_PATHNAME 0x01
+
+/* The glob matcher Windows uses in place of fnmatch(3), which it lacks; built
+ * on every platform so the unit suite holds it to the POSIX one. Handles '?'
+ * (any one character) and '*' (any run), case-insensitively; no brackets and
+ * no escapes. Without HTTP_STATIC_GLOB_PATHNAME both cross '/', which is how a
+ * caller spells "at any depth". Returns 0 on a match and 1 otherwise, as
+ * fnmatch does. Takes time linear in the pattern times the string, whatever
+ * the stars. */
+int http_static_glob_match(const char *pattern, const char *string, int flags);
+
 /* Returns true when the relative path matches one of the mount's hide globs,
  * by the rule above. */
 bool http_static_path_is_hidden(const http_static_handler_t *mount, const char *relative,
