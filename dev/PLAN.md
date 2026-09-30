@@ -16,7 +16,7 @@ a test that fails without it, a measurement, or both. Issue numbers point at
   codec's own decoder, including through the `NEED_OUTPUT` loop; cost measured in
   `dev/BENCHMARKS.md`. Merged.
 
-## S1 — A paused listener leaves new connections in the backlog (item 12)  [in progress]
+## S1 — A paused listener leaves new connections in the backlog (item 12)  [done]
 
 Goal: `http_server_pause_listeners` stops accepting, so a connection that arrives
 during a pause is served after the resume instead of answered 503.
@@ -69,11 +69,19 @@ socket several workers share on Windows, an EMFILE spin, no named pipes).
       handoff: 062, 063, 064 read 503 on php-async main and pass 10 of 10 on the
         branch; the whole suite 516 of 516 on it. telemetry/009 lists the two
         new counters. Issue #359.
-- [~] S1.4 Both PRs: php-async first, then the server against its `main`
+- [x] S1.4 Both PRs: php-async first, then the server against its `main`
       done: both merged with every CI platform green; the Windows accept rate
         before and after single accept is recorded in `dev/BENCHMARKS.md`, or
         named as not measured
       tier: T1 · role: —
+      handoff: php-src #38 (into true-async and true-async-stable), php-async
+        #306 and #307, server #360 (bd919ae); every platform green. Windows
+        accept rate not measured: item 33. Hand mutants (28.2) on the php-async
+        diff: 6 of 10 killed by the asynctest. Survivors: dup() `< 0` to `<= 0`
+        is equivalent (fd 0 stays stdin); the re-arm after a failed uv_accept
+        cannot be reached on Linux; the two branches of the delivery loop need
+        several held connections, which only a Windows AF_UNIX listener
+        (pending pipe instances) produces: item 34.
 
 ## Next
 
@@ -231,6 +239,10 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 33. A connect storm on Windows CI (N parallel connects, time until all are
     accepted), reported and not gating, before and after php-async #307: one
     AcceptEx at a time costs one accept per loop iteration, not measured.
+34. A Windows AF_UNIX listener paused with several clients queued (named pipes
+    hold up to four pending instances): all are served after the resume, in
+    order. The only case where php-async's delivery loop runs more than once,
+    so its two outcome branches have no test that kills a mutant of them.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
