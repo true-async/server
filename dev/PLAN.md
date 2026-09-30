@@ -110,18 +110,14 @@ Notes: dev/plans/S3.md
       done: each skipping phpt listed with its reason in `dev/plans/S3.md`,
         marked justified or given an open plan item; items 27 and 34 included
       tier: T1 · role: Critic
-      Critic 2026-09-30: the SO_REUSEPORT reason is false for all 56, since
-        `setWorkers(2)` tests already run on Windows CI; TLS tests do run; six
-        "justified" tests use a POSIX mechanism only in their setup; aioquic
-        and #240 keep tests skipped after the fixes; the libfiu citation and
-        the perf-gate owner were wrong. All taken, checked against the tests.
-      handoff: `dev/plans/S3.md`: 226 skips hide code, 10 are justified; owners
-        S3.5-S3.9 and item 27 (tracked gaps). Item 27's premise does not hold:
-        USAGE.md:688 promises no parallelism, and workers > 1 already run.
-- [ ] S3.4 Connect storm on Windows before and after php-async #307 (item 33)
+      handoff: `dev/plans/S3.md`: 226 skips hide code, 10 are justified.
+- [x] S3.4 Connect storm on Windows before and after php-async #307 (item 33)
       done: time until N parallel connects are accepted, for both builds, in
         `dev/BENCHMARKS.md` with N, machine and run count
       tier: T1 · role: —
+      handoff: `dev/BENCHMARKS.md` 2026-09-30: 1000 connects take 578-595 ms with
+        #307 and 156-172 ms without, 7 runs each, A/B/A. The cost goes to S3.10.
+        Scripts `storm*.php` are not in a repository.
 - [ ] S3.5 Drop the false "SO_REUSEPORT" skip from its 56 tests, and make the
         `curl --version 2>/dev/null` check of 22 test files run under cmd
       done: none of the 56 skips on Windows CI for either reason; each failure
@@ -145,6 +141,10 @@ Notes: dev/plans/S3.md
         (`dev/plans/S3.md`)
       done: the six run and pass on Windows CI
       tier: T1 · role: —
+- [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
+        at 3.5 times the time for a 1000-connect burst (S3.4)
+      done: choice and reason recorded in `dev/DECISIONS.md`
+      tier: T2 · role: Critic
 
 ## Next
 
