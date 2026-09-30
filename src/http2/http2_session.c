@@ -1723,6 +1723,13 @@ static ssize_t h2_dp_streaming_emit(http2_stream_t *stream,
     const size_t avail = h2_stream_pending_bytes(stream);
 
     if (avail == 0) {
+        /* A body the server failed ends in RST_STREAM(INTERNAL_ERROR), which
+         * nghttp2 sends itself for this return; END_STREAM would tell the peer
+         * the bytes it has are the whole body. */
+        if (stream->streaming_ended && stream->local_aborted) {
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        }
+
         if (stream->streaming_ended) {
             h2_dp_mark_eof(stream, data_flags);
             return 0;
@@ -1733,7 +1740,7 @@ static ssize_t h2_dp_streaming_emit(http2_stream_t *stream,
 
     const size_t to_emit = avail < length ? avail : length;
 
-    if (to_emit == avail && stream->streaming_ended) {
+    if (to_emit == avail && stream->streaming_ended && !stream->local_aborted) {
         h2_dp_mark_eof(stream, data_flags);
     }
 
@@ -1767,7 +1774,12 @@ static ssize_t h2_dp_streaming_copy(http2_stream_t *stream,
         h2_chunk_queue_walk(stream, length, h2_copy_chunk_slice, &ctx);
 
     if (stream->chunk_queue_head == stream->chunk_queue_tail) {
-        if (stream->streaming_ended) {
+        /* A failed body: the reset follows the last byte, as in emit. */
+        if (stream->streaming_ended && stream->local_aborted) {
+            if (written == 0) {
+                return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+            }
+        } else if (stream->streaming_ended) {
             h2_dp_mark_eof(stream, data_flags);
         } else if (written == 0) {
             return NGHTTP2_ERR_DEFERRED;

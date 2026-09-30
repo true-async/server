@@ -142,13 +142,13 @@ an item marked "reproduce" gets its failing run before any code.
     are counted in `accept_errors_total`; they are still not logged.
 12a. A failed or short HTTP/1 file body kept the connection alive: done,
     stage S2 (#362, true-async/php-async#308); tests `h1/065` to `h1/068`.
-12b. The same on HTTP/2: a truncated or failed file body ends with END_STREAM
-    (`http2_static_response.c:593-603`). Done when it sends
-    RST_STREAM(INTERNAL_ERROR) and an h2 test that truncates a file reads error
-    code 2. Reproduce.
-    The failure comes from a libfiu fault point, as `h1/066` does; the build
-    flag and the `_http_fault_*` hooks exist (`src/core/fault_hooks.c`), and
-    `h1/065`'s stale-cache truncation is the template for a real short file.
+12b. The same on HTTP/2: done (#364). A failed or short file body is marked
+    `local_aborted`, and the data provider answers the drained ring with
+    `NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE`, which nghttp2 turns into
+    RST_STREAM(INTERNAL_ERROR); the unread part of a short chunk is debited from
+    the static budget, which leaked it before. Tests `h2/071` (truncation),
+    `h2/072` (fault point `h2/file_body/io_error`). The provider's copy branch
+    (`h2_dp_streaming_copy`, a flush outside emit) has no test.
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
     `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
