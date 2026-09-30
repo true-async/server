@@ -2,6 +2,12 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-09-30 A failed or short HTTP/1 file body ends the connection through the
+  framing-lost path of `http_request_finalize`; a deferred start the loop refuses
+  is answered before anything is written, with SEND_FILE_REFUSED.
+  Why: `should_continue=false` alone still served the pipelined request; closing
+  from a refused start ran inside `llhttp_execute` (Critic, S2).
+  Rejected: closing the connection on a refused start; a 500 written by the engine.
 - 2026-09-30 The reactor/worker split is the second sanctioned cross-thread off-load
   (CODING_STANDARDS §1.3), beside the TLS handshake.
   Why: §1.3 forbade any stage crossing cores while §1.5 and the reactor pool already

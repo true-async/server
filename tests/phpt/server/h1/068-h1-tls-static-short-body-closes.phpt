@@ -1,22 +1,24 @@
 --TEST--
-HttpServer: a static file body cut short closes the connection instead of serving the pipelined request
+HttpServer: a static file body cut short over TLS closes the connection instead of serving the pipelined request
 --EXTENSIONS--
 true_async_server
 true_async
 --SKIPIF--
 <?php
-if (!function_exists('proc_open')) die('skip needs proc_open');
+require __DIR__ . '/../tls/_tls_skipif.inc';
+tls_skipif(['openssl_cli' => true, 'proc_open' => true, 'php_ssl' => true]);
 ?>
 --FILE--
 <?php
 /* The open-file cache keeps the size it saw for its TTL. Truncating the file
  * after the first request makes the next one declare 2 MiB and find EOF at
- * 4 KiB: sendfile returns 0 there. The TLS path is 068. The peer is
+ * 4 KiB: the TLS file read returns 0 there. The plaintext path is 065. The peer is
  * then owed 2 MiB - 4 KiB bytes it will never get, so anything the server
  * writes next on the connection is read as body. The connection has to close
  * after the short body; the request pipelined behind it goes unanswered, and
  * the next request for the file is sized from the file again. */
 
+require_once __DIR__ . '/../tls/_tls_skipif.inc';
 require_once __DIR__ . '/../_free_port.inc';
 
 use TrueAsync\HttpServer;
@@ -25,28 +27,35 @@ use TrueAsync\StaticHandler;
 use function Async\spawn;
 use function Async\await;
 
-$tmp = __DIR__ . '/tmp-065';
+$tmp = __DIR__ . '/tmp-068';
 $root = "$tmp/docroot";
 @mkdir($root, 0700, true);
+$cert = "$tmp/cert.pem";
+$key  = "$tmp/key.pem";
+if (!tls_gen_cert($key, $cert)) { echo "cert generation failed\n"; exit(1); }
 
 $size = 2 * 1024 * 1024;
 $file = "$root/big.bin";
 
 register_shutdown_function(function () use ($tmp, $root, $file) {
     @unlink($file); @unlink("$root/small.txt"); @rmdir($root);
-    @rmdir($tmp);
+    @unlink("$tmp/cert.pem"); @unlink("$tmp/key.pem"); @rmdir($tmp);
 });
 
 require_once __DIR__ . '/_pipeline_probe.inc';
 
-foreach (['tcp'] as $scheme) {
+foreach (['ssl'] as $scheme) {
     file_put_contents($file, str_repeat('ABCDEFGHIJKLMNOP', $size / 16));
     file_put_contents("$root/small.txt", 'small');
 
     $port = tas_free_port();
     $config = (new HttpServerConfig())
-        ->addListener('127.0.0.1', $port)
+        ->addListener('127.0.0.1', $port, $scheme === 'ssl')
         ->setReadTimeout(10)->setWriteTimeout(10);
+
+    if ($scheme === 'ssl') {
+        $config->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
+    }
 
     $server = new HttpServer($config);
     $server->addStaticHandler((new StaticHandler('/s/', $root))->setOpenFileCache(16, 60));
@@ -77,6 +86,6 @@ foreach (['tcp'] as $scheme) {
 }
 ?>
 --EXPECT--
-tcp warm: status=200 declared=2097152 got=2097152 extra=200 end=closed
-tcp short: status=200 declared=2097152 got=4096 extra=none end=closed
-tcp after: status=200 declared=4096 got=4096 extra=200 end=closed
+ssl warm: status=200 declared=2097152 got=2097152 extra=200 end=closed
+ssl short: status=200 declared=2097152 got=4096 extra=none end=closed
+ssl after: status=200 declared=4096 got=4096 extra=200 end=closed
