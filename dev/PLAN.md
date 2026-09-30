@@ -149,11 +149,11 @@ an item marked "reproduce" gets its failing run before any code.
     the static budget, which leaked it before. Tests `h2/071` (truncation),
     `h2/072` (fault point `h2/file_body/io_error`). The provider's copy branch
     (`h2_dp_streaming_copy`, a flush outside emit) has no test.
-13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
-    `ring overflow, dropped=N` line on stderr fails the test. 30 of 30 runs
-    with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
-    pass alone, and one full `-j4` suite of two hit it. A test that counts
-    CPU should not see a bounded ring's designed drop; decide which side moves.
+13. `core/018` under load: done. The log ring's drop is designed and counted,
+    so the test moves, not the sink: `--EXPECTREGEX--` admits the sink's
+    `ring overflow, dropped=N` notice before the output and nowhere else. The
+    notice appeared in 2 of 12 direct runs, six in parallel; the test passes
+    18 of 18 under `-j6`, none on retry.
 14. The port helpers race. `tas_free_port` binds port 0, reads the number and
     closes the socket, so another test's outgoing connection can take the port
     before the test binds it: `core/027` failed its bind on 127.0.0.1:49353 on
