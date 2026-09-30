@@ -44,6 +44,11 @@ an item marked "reproduce" gets its failing run before any code.
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
     pass alone, and one full `-j4` suite of two hit it. A test that counts
     CPU should not see a bounded ring's designed drop; decide which side moves.
+14. `tas_free_port_span` on Windows: it hands out adjacent ports, and Windows
+    gives ephemeral ports in order, so `base + 1` is the next port another test
+    under `-j2` receives. `core/023` failed its bind that way (PR 337's Windows
+    job) and PR 338 moved it and `core/079` to separate kernel-assigned ports;
+    80 other tests still take a span, most of them HTTP/3 and skipped there.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
