@@ -2760,48 +2760,6 @@ static void h1_static_on_static_done(void *user, int status)
     http_request_finalize(conn, ctx, should_continue);
 }
 
-static void h1_static_on_passthrough_to_php(void *user)
-{
-    http1_request_ctx_t *ctx = (http1_request_ctx_t *)user;
-    http_connection_t *conn = ctx->conn;
-
-    /* Spawn the regular PHP-handler coroutine — same shape as the
-     * dispatch tail below, but as a continuation from the FSM. Counters
-     * / handler_refcount were NOT pinned (on_hard_zero_armed never
-     * fired), so we bump them here to match the normal path. */
-    /* Per-request scope + handler coroutine (see
-     * http_request_handler_coroutine_new). */
-    zend_coroutine_t *coroutine = http_request_handler_coroutine_new(
-        conn->scope, http_handler_coroutine_entry, ctx,
-        http_handler_coroutine_dispose,
-        conn->view != NULL ? conn->view->request_scope : true);
-
-    if (UNEXPECTED(coroutine == NULL)) {
-        zval_ptr_dtor(&ctx->request_zv);
-        zval_ptr_dtor(&ctx->response_zv);
-        efree(ctx);
-        http_connection_destroy(conn);
-        return;
-    }
-
-    if (conn->handler == NULL) {
-        http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
-        http_response_static_set_header(Z_OBJ(ctx->response_zv), "content-type", 12,
-                                        "text/plain; charset=utf-8", 25);
-        http_response_static_set_body_cstr(Z_OBJ(ctx->response_zv), "Not Found", 9);
-        ctx->skip_php_handler = true;
-    }
-
-    if (ctx->request != NULL) {
-        ctx->request->coroutine = coroutine;
-    }
-
-    http_server_on_request_dispatch(conn->counters);
-    conn->handler_refcount++;
-
-    ZEND_ASYNC_ENQUEUE_COROUTINE(coroutine);
-}
-
 static bool h1_static_keep_alive(void *user)
 {
     const http1_request_ctx_t *ctx = (const http1_request_ctx_t *)user;
@@ -2811,7 +2769,6 @@ static bool h1_static_keep_alive(void *user)
 const http_static_dispatch_cbs_t h1_static_dispatch_cbs = {
     .on_armed   = h1_static_on_hard_zero_armed,
     .on_done       = h1_static_on_static_done,
-    .on_passthrough = h1_static_on_passthrough_to_php,
     .keep_alive           = h1_static_keep_alive,
 };
 /* }}} */

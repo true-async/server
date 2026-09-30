@@ -107,7 +107,6 @@ static bool h3_static_keep_alive(void *user)
 static const http_static_dispatch_cbs_t h3_static_dispatch_cbs = {
     .on_armed       = h3_static_on_hard_zero_armed,
     .on_done        = h3_static_on_static_done,
-    .on_passthrough = NULL,
     .keep_alive     = h3_static_keep_alive,
 };
 

@@ -513,8 +513,6 @@ http_static_result_t http_static_try_serve_mounts(
 			}
 
 			if (r == SEND_FILE_PASSTHROUGH) {
-				/* engine fired on_passthrough — caller's hook already
-				 * released its pinned protocol-side resources. */
 				return HTTP_STATIC_PASSTHROUGH;
 			}
 			/* SEND_FILE_HANDLED — engine refused before kick-off (rare:

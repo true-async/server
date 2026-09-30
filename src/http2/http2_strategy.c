@@ -141,10 +141,7 @@ static void h2c_writev_free_cb(void *user_data, zend_async_io_t *io);
  *   - HARD_ZERO arms by pinning conn->handler_refcount + bumping the
  *     stream refcount so the close hook can run after dispose.
  *   - on_static_done releases the conn pin and lets the stream clean
- *     up via http2_stream_release; no PHP-side coroutine to dispose.
- *   - on_passthrough_to_php is unused (H2 currently doesn't expose
- *     on_missing:Next on this code path — falling back to PHP from
- *     a stream that armed-then-rolled is a follow-up). */
+ *     up via http2_stream_release; no PHP-side coroutine to dispose. */
 static void h2_static_on_hard_zero_armed(void *user)
 {
     http2_stream_t *stream = (http2_stream_t *)user;
@@ -195,7 +192,6 @@ static bool h2_static_keep_alive(void *user)
 static const http_static_dispatch_cbs_t h2_static_dispatch_cbs = {
     .on_armed    = h2_static_on_hard_zero_armed,
     .on_done        = h2_static_on_static_done,
-    .on_passthrough = NULL,
     .keep_alive            = h2_static_keep_alive,
 };
 
