@@ -37,7 +37,6 @@
 #define MP_MAX_CONTENT_TYPE_LEN  256
 #define MP_MAX_CHARSET_LEN       64
 #define MP_MAX_FIELD_VALUE_LEN   (1 * 1024 * 1024)   /* 1MB per field */
-#define MP_MAX_FILE_SIZE         (100 * 1024 * 1024) /* 100MB per file */
 #define MP_MAX_FILES             20
 #define MP_MAX_FIELDS            100
 
@@ -50,18 +49,19 @@
 #define MP_UPLOAD_ERR_NO_TMP_DIR      6   /* No temp directory */
 #define MP_UPLOAD_ERR_CANT_WRITE      7   /* Failed to write to disk */
 #define MP_UPLOAD_ERR_EXTENSION       8   /* Extension stopped upload */
-#define MP_UPLOAD_ERR_TOO_MANY_FILES  100 /* Too many files */
 #define MP_UPLOAD_ERR_INVALID_NAME    101 /* Invalid filename */
-#define MP_UPLOAD_ERR_TOO_LARGE       102 /* File too large */
 
-/* Why mp_processor_feed refused the body. A limit over a form field refuses
- * the whole body: a form missing a field reads as a different form. The file
- * limits answer per file instead, through mp_file_info_t.error, as PHP does. */
+/* Why mp_processor_feed refused the body. A limit over a form field or over
+ * the number of parts refuses the whole body: a form missing a part reads as a
+ * different form. The file limits answer as PHP does instead: a file past a
+ * size limit through mp_file_info_t.error, a file past the count by being
+ * left out. */
 typedef enum {
     MP_REFUSAL_NONE = 0,
     MP_REFUSAL_MALFORMED,        /* the parser rejected the bytes */
     MP_REFUSAL_TOO_MANY_FIELDS,  /* more fields than config.max_fields */
     MP_REFUSAL_FIELD_TOO_LARGE,  /* a field value past config.max_field_size */
+    MP_REFUSAL_TOO_MANY_PARTS,   /* more parts than config.max_parts */
 } mp_refusal_t;
 
 /* Uploaded file info */
@@ -91,10 +91,12 @@ typedef char* (*mp_tmp_path_generator_t)(mp_processor_t* proc, const char* origi
 
 /* Processor configuration */
 typedef struct {
-    size_t   max_file_size;    /* Max size per file (0 = default) */
+    size_t   max_file_size;    /* Max size per file, past it UPLOAD_ERR_INI_SIZE (0 = none) */
     size_t   max_field_size;   /* Max size per field (0 = default) */
-    size_t   max_files;        /* Max number of files (0 = default) */
+    size_t   max_files;        /* Files saved before the rest are left out (0 = default) */
+    bool     skip_files;       /* Leave every file out, as file_uploads=Off does */
     size_t   max_fields;       /* Max number of fields (0 = default) */
+    size_t   max_parts;        /* Max parts, fields and files together (0 = none) */
     char*    tmp_dir;          /* Temp directory (NULL = upload_tmp_dir, else the system one) */
     mp_tmp_path_generator_t tmp_path_generator; /* Custom temp path generator */
 } mp_config_t;
@@ -125,6 +127,11 @@ struct mp_processor_t {
     FILE*               file_handle;       /* Current file being written */
     char*               tmp_path;          /* Current temp file path */
     size_t              file_size;         /* Current file size */
+    bool                skip_part;         /* The current file part is left out */
+    size_t              files_saved;       /* Temp files opened; spends config.max_files */
+    bool                files_warned;      /* The files-left-out warning is logged */
+    size_t              parts_count;       /* Parts with a Content-Disposition so far */
+    size_t              form_max_file_size;/* From a MAX_FILE_SIZE field; 0 = none */
 
     /* Field handling */
     char*               field_value;       /* Buffer for field value */

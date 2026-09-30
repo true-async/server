@@ -58,11 +58,24 @@ mp_processor_t *http_request_form_open_multipart(const http_request_t *req,
 
 	/* Fields stop at max_input_vars, as url-encoded ones do; the processor
 	 * cannot say "none", so a limit of 0 or less is enforced when the form is
-	 * published. A value is bounded by the body limit the transport applies,
-	 * as in PHP, which has no per-field limit. */
+	 * published. A value and a file are bounded by the body limit the
+	 * transport applies (setMaxBodySize), as post_max_size bounds them in PHP;
+	 * upload_max_filesize is not read, so a php.ini default of 2M does not cut
+	 * uploads the body limit admits. The file count and the part count are
+	 * PHP's, read as main/rfc1867.c reads them. */
+	const zend_long max_files = zend_ini_long_literal("max_file_uploads");
+	zend_long max_parts = zend_ini_long_literal("max_multipart_body_parts");
+
+	if (max_parts < 0) {
+		max_parts = PG(max_input_vars) + max_files;
+	}
+
 	const mp_config_t config = {
 		.max_fields = PG(max_input_vars) > 0 ? (size_t)PG(max_input_vars) : 1,
 		.max_field_size = SIZE_MAX,
+		.max_files = max_files > 0 ? (size_t)max_files : 0,
+		.skip_files = !PG(file_uploads) || max_files <= 0,
+		.max_parts = max_parts > 0 ? (size_t)max_parts : 1,
 	};
 	mp_processor_t *const processor = mp_processor_create(terminated, &config);
 
@@ -89,6 +102,8 @@ static const char *http_request_form_refusal_reason(const mp_processor_t *proces
 	switch (processor->refusal) {
 		case MP_REFUSAL_TOO_MANY_FIELDS:
 			return "more fields than max_input_vars";
+		case MP_REFUSAL_TOO_MANY_PARTS:
+			return "more parts than max_multipart_body_parts";
 		default:
 			return "the multipart body is malformed";
 	}
