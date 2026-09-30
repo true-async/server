@@ -23,6 +23,7 @@
 #include "http2/http2_static_response.h"
 #include "http_response_internal.h"
 #include "core/async_plain_event.h"
+#include "fiu-local.h"
 
 #include <nghttp2/nghttp2.h>
 #include <errno.h>
@@ -501,6 +502,22 @@ static void h2_static_mark_ended(h2_static_state_t *state)
     }
 }
 
+/* The body the headers promised will not arrive in full: a read failed, the
+ * file came up short of the declared length, or no memory was left for the
+ * next chunk. The chunks already read still go out; after them the data
+ * provider resets the stream instead of ending it (h2_dp_streaming_emit), so
+ * the peer does not take the bytes it got for the whole file. */
+static void h2_static_mark_failed(h2_static_state_t *state)
+{
+    state->status = -1;
+
+    if (state->stream != NULL) {
+        state->stream->local_aborted = true;
+    }
+
+    h2_static_mark_ended(state);
+}
+
 static void h2_static_kick(h2_static_state_t *state)
 {
     if (state->session == NULL || state->stream == NULL
@@ -543,8 +560,7 @@ static void h2_static_on_window_open(zend_async_event_t *event,
     if (!state->read_in_flight && !state->eof_reached
         && h2_static_want_more_reads(state)) {
         if (UNEXPECTED(!h2_static_submit_read(state))) {
-            state->status = -1;
-            h2_static_mark_ended(state);
+            h2_static_mark_failed(state);
         }
     }
 
@@ -576,7 +592,8 @@ static void h2_static_dispatch(zend_async_event_t *event,
     state->read_in_flight = false;
 
     const ssize_t transferred = (ssize_t)req->transferred;
-    const bool err = (exception != NULL || req->exception != NULL);
+    const bool err = exception != NULL || req->exception != NULL
+                     || fiu_fail("h2/file_body/io_error");
 
     if (req->exception != NULL) {
         OBJ_RELEASE(req->exception);
@@ -590,23 +607,24 @@ static void h2_static_dispatch(zend_async_event_t *event,
     zend_string *chunk = state->pending_chunk;
     state->pending_chunk = NULL;
 
+    /* A read is submitted only while bytes remain, so 0 is a file that came
+     * up short of the length the headers declared, not the end of the body. */
     if (UNEXPECTED(err) || transferred <= 0) {
-            if (chunk != NULL) {
+        if (chunk != NULL) {
             h2_static_account_release_pending(state->conn, chunk);
         }
 
-        if (err || transferred < 0) {
-            state->status = -1;
-        }
-
-        h2_static_mark_ended(state);
+        h2_static_mark_failed(state);
         h2_static_kick(state);
         return;
     }
 
-    /* Shrink to actual bytes — alloc was sized for the request. The
-     * delta (alloc_want - transferred) stays charged against the
-     * counters until release; minor overcounting, not worth a debit. */
+    /* Shrink to actual bytes — alloc was sized for the request. Every
+     * release debits ZSTR_LEN, so the part not read is debited here. */
+    if ((size_t)transferred < ZSTR_LEN(chunk)) {
+        h2_static_account_debit(state->conn, ZSTR_LEN(chunk) - (size_t)transferred);
+    }
+
     ZSTR_LEN(chunk) = (size_t)transferred;
     ZSTR_VAL(chunk)[transferred] = '\0';
     state->bytes_read += (uint64_t)transferred;
@@ -624,8 +642,7 @@ static void h2_static_dispatch(zend_async_event_t *event,
     } else if (h2_static_want_more_reads(state)) {
         /* Double-buffer: next read overlaps this chunk's writev. */
         if (UNEXPECTED(!h2_static_submit_read(state))) {
-            state->status = -1;
-            h2_static_mark_ended(state);
+            h2_static_mark_failed(state);
         }
     }
 
@@ -1005,8 +1022,7 @@ int h2_stream_send_static_response(void *ctx,
         }
 
         if (rc == 0 && UNEXPECTED(!h2_static_submit_read(state))) {
-            state->status = -1;
-            h2_static_mark_ended(state);
+            h2_static_mark_failed(state);
         }
     }
 
