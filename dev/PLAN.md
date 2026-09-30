@@ -154,15 +154,18 @@ an item marked "reproduce" gets its failing run before any code.
     with six copies in parallel, on `main` and on the #313 branch alike; 8 of 8
     pass alone, and one full `-j4` suite of two hit it. A test that counts
     CPU should not see a bounded ring's designed drop; decide which side moves.
-14. The port helpers race. `tas_free_port` binds port 0, reads the number and
-    closes the socket, so another test's outgoing connection can take the port
-    before the test binds it: `core/027` failed its bind on 127.0.0.1:49353 on
-    macOS debug (run 36718896142, PR 360), passing on retry. Port 0 listeners
-    (81c0437) avoid the window. And `tas_free_port_span` on Windows: it hands out adjacent ports, and Windows
-    gives ephemeral ports in order, so `base + 1` is the next port another test
-    under `-j2` receives. `core/023` failed its bind that way (PR 337's Windows
-    job) and PR 338 moved it and `core/079` to separate kernel-assigned ports;
-    80 other tests still take a span, most of them HTTP/3 and skipped there.
+14. The port helpers race: done, not reproduced. `tas_free_port` handed out a
+    kernel-assigned ephemeral port and closed it, so an outgoing connection
+    could take it before the server bound it (`core/027`, macOS, run
+    36718896142; `core/023`, Windows, PR 337). The helpers now take ports from
+    21000-27999, below every platform's ephemeral range and clear of the
+    literal ports older tests use, and hold a flock()ed file per port for the
+    life of the test process; TCP and UDP are probed. On Linux the window did
+    not fail once in 3000 tries, with a 500-port range and two processes
+    churning connections, old helper or new, so the evidence is the mechanism
+    and the macOS and Windows CI legs over the coming runs. Port 0 listeners
+    (81c0437) stay the stronger form for tests that can read
+    `getBoundListeners()`.
 15. #346 — the reactor-pool worker inbox spawns into the server scope after
     `stop()` and across a restart, the path #345 left out: reproduce.
 16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
