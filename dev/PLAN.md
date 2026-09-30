@@ -39,8 +39,9 @@ socket several workers share on Windows, an EMFILE spin, no named pipes).
         connection; dispose while paused leaks nothing under ASan
       tier: T2 · role: —
       handoff: `sapi/asynctest/tests/test_listen_pause.c` in php-src (PR
-        true-async/php-src#38), 5 cases, all red on php-async e580c15. Not
-        run under ASan: the check is the handle count returning to its start.
+        true-async/php-src#38), 5 cases, all red on php-async e580c15. Under
+        ASan with LeakSanitizer (USE_ZEND_ALLOC=0): 5 of 5, 3 of 3 runs, no
+        report; a leak planted in listen_close_cb is reported (528 bytes).
 - [x] S1.2 php-async: design E in the listen event
       done: S1.1 green; the php-async phpt suite passes; a callback that returns
         without accepting while not paused is re-delivered, not lost
