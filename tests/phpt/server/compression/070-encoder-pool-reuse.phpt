@@ -6,12 +6,9 @@ true_async
 --SKIPIF--
 <?php
 if (!class_exists('TrueAsync\HttpServerConfig')) die('skip http_server not loaded');
-/* `command -v` is a shell builtin cmd.exe does not have, and Git for
- * Windows ships gunzip as a shell script with only gzip.exe beside it,
- * so the probe and the decode below both go through gzip. */
-$probe_rc = 0; $probe_out = [];
-@exec('gzip --version 2>&1', $probe_out, $probe_rc);
-if ($probe_rc !== 0) die('skip gzip(1) not in PATH');
+/* The gzip round trip runs in this process: a gzip(1) child piped through
+ * proc_open() hung on the Windows job (#314). */
+if (!extension_loaded('zlib')) die('skip zlib required');
 ?>
 --FILE--
 <?php
@@ -75,20 +72,6 @@ function fetch_gz(string $host, int $port, string $tag): array {
     return [$headers, $body];
 }
 
-function gunzip(string $data): string {
-    $proc = proc_open(['gzip', '-d'], [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w'],
-    ], $pipes);
-    fwrite($pipes[0], $data);
-    fclose($pipes[0]);
-    $out = stream_get_contents($pipes[1]);
-    fclose($pipes[1]); fclose($pipes[2]);
-    proc_close($proc);
-    return $out;
-}
-
 $client = spawn(function () use ($port, $server) {
     delay(20);
 
@@ -112,7 +95,7 @@ $client = spawn(function () use ($port, $server) {
             continue;
         }
 
-        $decoded = gunzip($body);
+        $decoded = gzdecode($body);
         $expected = str_repeat("payload-{$tag}-", 200);
 
         if ($decoded === $expected) {

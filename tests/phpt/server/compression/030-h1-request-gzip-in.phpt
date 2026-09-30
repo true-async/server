@@ -6,11 +6,9 @@ true_async
 --SKIPIF--
 <?php
 if (!class_exists('TrueAsync\HttpServerConfig')) die('skip http_server not loaded');
-/* `command -v` is a shell builtin cmd.exe does not have; asking the
- * tool itself answers on both. */
-$probe_rc = 0; $probe_out = [];
-@exec('gzip --version 2>&1', $probe_out, $probe_rc);
-if ($probe_rc !== 0) die('skip gzip(1) not in PATH');
+/* The gzip round trip runs in this process: a gzip(1) child piped through
+ * proc_open() hung on the Windows job (#314). */
+if (!extension_loaded('zlib')) die('skip zlib required');
 ?>
 --FILE--
 <?php
@@ -39,19 +37,6 @@ $server->addHttpHandler(function ($req, $resp) {
          ->end();
 });
 
-/* Build a gzipped payload via gzip(1) so we don't depend on ext/zlib. */
-function gzip_string(string $s): string {
-    $proc = proc_open(['gzip', '-c'], [
-        0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w'],
-    ], $pipes);
-    fwrite($pipes[0], $s);
-    fclose($pipes[0]);
-    $out = stream_get_contents($pipes[1]);
-    fclose($pipes[1]); fclose($pipes[2]);
-    proc_close($proc);
-    return $out;
-}
-
 function post(string $port, string $body, string $content_encoding): array {
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 2);
     stream_set_timeout($fp, 2);
@@ -77,7 +62,7 @@ $client = spawn(function () use ($port, $server) {
 
     /* 1. gzipped 1 KiB payload — handler must see decoded bytes. */
     $payload = str_repeat("A", 1024);
-    $gz = gzip_string($payload);
+    $gz = gzencode($payload);
     [$status, $body] = post($port, $gz, 'gzip');
     echo "gzip status: $status\n";
     echo "gzip body: $body\n";
@@ -85,7 +70,7 @@ $client = spawn(function () use ($port, $server) {
     /* 2. bomb: 200 KiB of 'A' compresses to ~200 bytes; cap is 64 KiB
      *    → decoder must reject with 413. */
     $bomb = str_repeat("A", 200 * 1024);
-    $gzbomb = gzip_string($bomb);
+    $gzbomb = gzencode($bomb);
     [$status,] = post($port, $gzbomb, 'gzip');
     echo "bomb status: $status\n";
 
