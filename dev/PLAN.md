@@ -90,36 +90,60 @@ features Windows lacks, and its known flakes and unmeasured costs are settled.
 Done when: every Windows CI skip has a reason or an open plan item, and S3.1,
 S3.2 and S3.4 are closed with evidence.
 Base: 05c871c (server), 1521d69 (php-async)
+Notes: dev/plans/S3.md
 
 - [x] S3.1 `multipart/009` fails on Windows (items 37 and 18)
       done: a local command reproduces the NULL `getSize()` at a stated rate;
         the fix brings it to 0 of the same number of runs; a test is red
         without the fix
       tier: T1 · role: —
-      handoff: cause is a second delete of a temp file path (request end and
-        the UploadedFile both unlinked it), which on Windows removes another
-        process's file: GetTempFileName keeps 3 prefix chars and a clock-based
-        16-bit number. Error 6, `chmod` ENOENT. The test body in 8 processes:
-        6 to 10 of 400 failed before, 0 of 1200 after; `multipart/025` red
-        before. Full phpt suite locally 284 passed, 0 failed, 263 skipped.
-        The unlink after a failed `fopen` has no test: item 18's cmocka case.
+      handoff: #368, PR 369; `multipart/025`, 0 of 1200 runs fail after (6-10 of
+        400 before). The unlink after a failed `fopen` has no test: item 18.
 - [x] S3.2 Decide how synchronous TransmitFile moves the file pointer
       done: a C probe answers three questions on this machine (does the
         pointer advance; what a count past the file end does; why `h1/065`
         got 0 bytes before php-async 1521d69); answers and the verdict on the
         clamp in `io_transmitfile_work_cb` recorded in `dev/DECISIONS.md`
       tier: T1 · role: —
-      handoff: recorded in `dev/DECISIONS.md`; the clamp stays. Two php-async
-        comments said the opposite of the probe and are corrected on branch
-        `transmitfile-comments` (not pushed). `h1/065` reads got=4096 on
-        Windows, 3 of 3. The probe source is not in a repository.
-- [ ] S3.3 Sort the Windows CI skips (235 of 546 on 2026-09-30)
+      handoff: `dev/DECISIONS.md` 2026-09-30; comments in true-async/php-async#309.
+- [x] S3.3 Sort the Windows CI skips (236 of 548, run 36767391692)
       done: each skipping phpt listed with its reason in `dev/plans/S3.md`,
         marked justified or given an open plan item; items 27 and 34 included
       tier: T1 · role: Critic
+      Critic 2026-09-30: the SO_REUSEPORT reason is false for all 56, since
+        `setWorkers(2)` tests already run on Windows CI; TLS tests do run; six
+        "justified" tests use a POSIX mechanism only in their setup; aioquic
+        and #240 keep tests skipped after the fixes; the libfiu citation and
+        the perf-gate owner were wrong. All taken, checked against the tests.
+      handoff: `dev/plans/S3.md`: 226 skips hide code, 10 are justified; owners
+        S3.5-S3.9 and item 27 (tracked gaps). Item 27's premise does not hold:
+        USAGE.md:688 promises no parallelism, and workers > 1 already run.
 - [ ] S3.4 Connect storm on Windows before and after php-async #307 (item 33)
       done: time until N parallel connects are accepted, for both builds, in
         `dev/BENCHMARKS.md` with N, machine and run count
+      tier: T1 · role: —
+- [ ] S3.5 Drop the false "SO_REUSEPORT" skip from its 56 tests, and make the
+        `curl --version 2>/dev/null` check of 22 test files run under cmd
+      done: none of the 56 skips on Windows CI for either reason; each failure
+        among them becomes a step of its own
+      tier: T1 · role: —
+- [ ] S3.6 The Windows job builds ext/sockets, ext/openssl, zstd and both test
+        hook options (added to `config.w32`)
+      done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
+        its listed reason; failures as in S3.5
+      tier: T1 · role: —
+- [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
+      done: no test of those groups skips on Windows CI for its listed reason;
+        failures as in S3.5
+      tier: T1 · role: —
+- [ ] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
+        OpenSSL >= 3.5 on the runner)
+      done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
+        in S3.5
+      tier: T2 · role: Critic
+- [ ] S3.9 Port the six tests whose POSIX mechanism is only their setup
+        (`dev/plans/S3.md`)
+      done: the six run and pass on Windows CI
       tier: T1 · role: —
 
 ## Next
