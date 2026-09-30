@@ -27,10 +27,15 @@ var_dump(_http_fault_fail($p), _http_fault_hits($p), _http_fault_hits('test/neve
 
 _http_fault_disable('test/never-enabled');
 
-try {
-    _http_fault_enable('');
-} catch (ValueError $e) {
-    echo $e->getMessage(), "\n";
+_http_fault_enable(str_repeat('n', 63));
+var_dump(_http_fault_fail(str_repeat('n', 63)));
+
+foreach (['', str_repeat('n', 64)] as $name) {
+    try {
+        _http_fault_enable($name);
+    } catch (ValueError $e) {
+        echo $e->getMessage(), "\n";
+    }
 }
 ?>
 --EXPECT--
@@ -44,4 +49,6 @@ bool(true)
 bool(false)
 int(3)
 int(0)
+bool(true)
+_http_fault_enable(): Argument #1 ($name) must be 1 to 63 bytes long
 _http_fault_enable(): Argument #1 ($name) must be 1 to 63 bytes long
