@@ -696,17 +696,16 @@ if(_compr_test_ok)
     endif()
 endif()
 
-# Static-handler decoder tests (issue #13 §13c.4). Exercises the three
+# Static-handler decoder tests (CODING_STANDARDS 13c.4). Exercises the three
 # parsing surfaces — MIME extension lookup, If-None-Match / If-Modified-
 # Since matching, and percent-decode + segment validation. Each decoder
 # TU is compiled directly into the test binary; no llhttp / zlib needed.
-# Guard with existence check: mime/etag sources are added in a later PR.
-if(EXISTS "${CMAKE_SOURCE_DIR}/../src/static/http_static_mime.c" AND
-   EXISTS "${CMAKE_SOURCE_DIR}/../src/static/http_static_etag.c")
+# No existence guard: a renamed source has to break this build, not skip it.
 add_executable(test_static_decoders
     static/test_static_decoders.c
-    ${CMAKE_SOURCE_DIR}/../src/static/http_static_mime.c
-    ${CMAKE_SOURCE_DIR}/../src/static/http_static_etag.c
+    ${CMAKE_SOURCE_DIR}/../src/http_mime.c
+    ${CMAKE_SOURCE_DIR}/../src/http_etag.c
+    ${CMAKE_SOURCE_DIR}/../src/http_date.c
     ${CMAKE_SOURCE_DIR}/../src/static/http_static_path.c
 )
 
@@ -735,9 +734,6 @@ elseif(UNIX AND NOT APPLE)
     set_tests_properties(StaticDecoders PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${PHP_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
     )
-endif()
-else()
-    message(STATUS "Skipping test_static_decoders: http_static_mime.c / http_static_etag.c not yet present")
 endif()
 
 # StaticHandler::hide() as a rule over its inputs. Registered without an

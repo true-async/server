@@ -4,10 +4,10 @@
   +----------------------------------------------------------------------+
   | Licensed under the Apache License, Version 2.0                       |
   +----------------------------------------------------------------------+
-  | Unit tests for static-handler decoders (issue #13 §13c.4).           |
+  | Unit tests for static-handler decoders (CODING_STANDARDS 13c.4).     |
   | Covers:                                                              |
-  |   - http_static_mime_lookup       (mime extension lookup)            |
-  |   - http_static_conditional_match (If-None-Match + If-Modified-Since)|
+  |   - http_mime_lookup_by_ext       (mime extension lookup)            |
+  |   - http_conditional_check        (If-None-Match + If-Modified-Since)|
   |   - http_static_path_resolve      (percent-decode + segment guard)   |
   +----------------------------------------------------------------------+
 */
@@ -20,8 +20,8 @@
 #include "php.h"
 #include "common/php_sapi_test.h"
 #include "static/static_handler.h"
-#include "static/http_static_mime.h"
-#include "static/http_static_etag.h"
+#include "http_mime.h"
+#include "http_etag.h"
 #include "static/http_static_path.h"
 
 /* libphp is linked but does not export zend_print_backtrace_ex (used by
@@ -70,13 +70,13 @@ static void test_mime_lookup_known(void **state)
 	const char *out = NULL;
 	size_t out_len = 0;
 
-	assert_true(http_static_mime_lookup(NULL, "x.html", 6, &out, &out_len));
+	assert_true(http_mime_lookup_by_ext("x.html", 6, &out, &out_len));
 	assert_string_equal(out, "text/html; charset=utf-8");
 
-	assert_true(http_static_mime_lookup(NULL, "x.JS", 4, &out, &out_len));
+	assert_true(http_mime_lookup_by_ext("x.JS", 4, &out, &out_len));
 	assert_string_equal(out, "text/javascript; charset=utf-8");
 
-	assert_true(http_static_mime_lookup(NULL, "img.PNG", 7, &out, &out_len));
+	assert_true(http_mime_lookup_by_ext("img.PNG", 7, &out, &out_len));
 	assert_string_equal(out, "image/png");
 }
 
@@ -85,7 +85,7 @@ static void test_mime_lookup_unknown(void **state)
 	(void)state;
 	const char *out = NULL;
 	size_t out_len = 0;
-	assert_false(http_static_mime_lookup(NULL, "file.unknownext", 15, &out, &out_len));
+	assert_false(http_mime_lookup_by_ext("file.unknownext", 15, &out, &out_len));
 }
 
 static void test_mime_lookup_no_extension(void **state)
@@ -93,8 +93,8 @@ static void test_mime_lookup_no_extension(void **state)
 	(void)state;
 	const char *out = NULL;
 	size_t out_len = 0;
-	assert_false(http_static_mime_lookup(NULL, "Makefile", 8, &out, &out_len));
-	assert_false(http_static_mime_lookup(NULL, "", 0, &out, &out_len));
+	assert_false(http_mime_lookup_by_ext("Makefile", 8, &out, &out_len));
+	assert_false(http_mime_lookup_by_ext("", 0, &out, &out_len));
 }
 
 static void test_mime_lookup_dotfile(void **state)
@@ -105,7 +105,7 @@ static void test_mime_lookup_dotfile(void **state)
 	 * built-in table. */
 	const char *out = NULL;
 	size_t out_len = 0;
-	assert_false(http_static_mime_lookup(NULL, ".bashrc", 7, &out, &out_len));
+	assert_false(http_mime_lookup_by_ext(".bashrc", 7, &out, &out_len));
 }
 
 static void test_mime_lookup_separator_guard(void **state)
@@ -114,7 +114,7 @@ static void test_mime_lookup_separator_guard(void **state)
 	/* "foo.tar/bar" — last '.' is in the parent dir; must not leak it. */
 	const char *out = NULL;
 	size_t out_len = 0;
-	assert_false(http_static_mime_lookup(NULL, "foo.tar/bar", 11, &out, &out_len));
+	assert_false(http_mime_lookup_by_ext("foo.tar/bar", 11, &out, &out_len));
 }
 
 static void test_mime_lookup_extension_overflow(void **state)
@@ -129,7 +129,7 @@ static void test_mime_lookup_extension_overflow(void **state)
 	path[sizeof(path) - 1] = '\0';
 	const char *out = NULL;
 	size_t out_len = 0;
-	assert_false(http_static_mime_lookup(NULL, path, strlen(path), &out, &out_len));
+	assert_false(http_mime_lookup_by_ext(path, strlen(path), &out, &out_len));
 }
 
 static void test_mime_lookup_multiple_dots(void **state)
@@ -138,7 +138,7 @@ static void test_mime_lookup_multiple_dots(void **state)
 	/* "archive.tar.gz" — rightmost dot wins; "gz" → application/gzip. */
 	const char *out = NULL;
 	size_t out_len = 0;
-	assert_true(http_static_mime_lookup(NULL, "archive.tar.gz", 14, &out, &out_len));
+	assert_true(http_mime_lookup_by_ext("archive.tar.gz", 14, &out, &out_len));
 	assert_string_equal(out, "application/gzip");
 }
 
@@ -152,7 +152,7 @@ static void test_inm_single_weak_match(void **state)
 	const char *etag = "W/\"abc123\"";
 	const char *header = "W/\"abc123\"";
 	assert_true(
-		http_static_conditional_match(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
+		http_conditional_check(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
 }
 
 static void test_inm_strong_vs_weak_equal(void **state)
@@ -162,7 +162,7 @@ static void test_inm_strong_vs_weak_equal(void **state)
 	const char *etag = "W/\"abc\"";
 	const char *header = "\"abc\"";
 	assert_true(
-		http_static_conditional_match(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
+		http_conditional_check(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
 }
 
 static void test_inm_wildcard(void **state)
@@ -171,7 +171,7 @@ static void test_inm_wildcard(void **state)
 	const char *etag = "W/\"abc\"";
 	const char *header = "*";
 	assert_true(
-		http_static_conditional_match(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
+		http_conditional_check(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
 }
 
 static void test_inm_list_match(void **state)
@@ -180,7 +180,7 @@ static void test_inm_list_match(void **state)
 	const char *etag = "W/\"def\"";
 	const char *header = "W/\"abc\", W/\"def\", W/\"ghi\"";
 	assert_true(
-		http_static_conditional_match(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
+		http_conditional_check(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
 }
 
 static void test_inm_no_match(void **state)
@@ -189,7 +189,7 @@ static void test_inm_no_match(void **state)
 	const char *etag = "W/\"xyz\"";
 	const char *header = "W/\"abc\", W/\"def\"";
 	assert_false(
-		http_static_conditional_match(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
+		http_conditional_check(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
 }
 
 static void test_inm_malformed_double_comma(void **state)
@@ -199,7 +199,7 @@ static void test_inm_malformed_double_comma(void **state)
 	const char *etag = "W/\"abc\"";
 	const char *header = ",, W/\"abc\" ,,";
 	assert_true(
-		http_static_conditional_match(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
+		http_conditional_check(header, strlen(header), NULL, 0, etag, strlen(etag), 0));
 }
 
 static void test_ims_not_modified(void **state)
@@ -208,7 +208,16 @@ static void test_ims_not_modified(void **state)
 	/* mtime 2020-01-01 00:00:00 UTC = 1577836800. If-Modified-Since later
 	 * → not modified. */
 	const char *ims = "Sat, 01 Feb 2020 00:00:00 GMT";
-	assert_true(http_static_conditional_match(NULL, 0, ims, strlen(ims), NULL, 0, 1577836800));
+	assert_true(http_conditional_check(NULL, 0, ims, strlen(ims), NULL, 0, 1577836800));
+}
+
+static void test_ims_equal_not_modified(void **state)
+{
+	(void)state;
+	/* RFC 9110 §13.1.3: not modified unless the resource changed after the
+	 * date, so a date equal to the mtime answers 304. */
+	const char *ims = "Wed, 01 Jan 2020 00:00:00 GMT"; /* = 1577836800 */
+	assert_true(http_conditional_check(NULL, 0, ims, strlen(ims), NULL, 0, 1577836800));
 }
 
 static void test_ims_modified(void **state)
@@ -216,14 +225,14 @@ static void test_ims_modified(void **state)
 	(void)state;
 	const char *ims = "Wed, 01 Jan 2020 00:00:00 GMT"; /* = 1577836800 */
 	assert_false(
-		http_static_conditional_match(NULL, 0, ims, strlen(ims), NULL, 0, 1577923200 /* +1d */));
+		http_conditional_check(NULL, 0, ims, strlen(ims), NULL, 0, 1577923200 /* +1d */));
 }
 
 static void test_ims_garbage_rejected(void **state)
 {
 	(void)state;
 	const char *ims = "this is not a date";
-	assert_false(http_static_conditional_match(NULL, 0, ims, strlen(ims), NULL, 0, 1577836800));
+	assert_false(http_conditional_check(NULL, 0, ims, strlen(ims), NULL, 0, 1577836800));
 }
 
 static void test_ims_out_of_range_rejected(void **state)
@@ -231,14 +240,14 @@ static void test_ims_out_of_range_rejected(void **state)
 	(void)state;
 	/* day=99 is out of range; tm_fields_in_range must reject. */
 	const char *ims = "Sun, 99 Nov 1994 08:49:37 GMT";
-	assert_false(http_static_conditional_match(NULL, 0, ims, strlen(ims), NULL, 0, 0));
+	assert_false(http_conditional_check(NULL, 0, ims, strlen(ims), NULL, 0, 0));
 }
 
 static void test_ims_leap_second_rejected(void **state)
 {
 	(void)state;
 	const char *ims = "Sun, 06 Nov 1994 08:49:60 GMT";
-	assert_false(http_static_conditional_match(NULL, 0, ims, strlen(ims), NULL, 0, 0));
+	assert_false(http_conditional_check(NULL, 0, ims, strlen(ims), NULL, 0, 0));
 }
 
 static void test_inm_takes_precedence(void **state)
@@ -249,7 +258,7 @@ static void test_inm_takes_precedence(void **state)
 	const char *etag = "W/\"abc\"";
 	const char *inm = "W/\"def\"";
 	const char *ims = "Sat, 01 Feb 2020 00:00:00 GMT";
-	assert_false(http_static_conditional_match(inm, strlen(inm), ims, strlen(ims), etag,
+	assert_false(http_conditional_check(inm, strlen(inm), ims, strlen(ims), etag,
 											   strlen(etag), 1577836800));
 }
 
@@ -518,6 +527,7 @@ int main(void)
 		cmocka_unit_test(test_inm_no_match),
 		cmocka_unit_test(test_inm_malformed_double_comma),
 		cmocka_unit_test(test_ims_not_modified),
+		cmocka_unit_test(test_ims_equal_not_modified),
 		cmocka_unit_test(test_ims_modified),
 		cmocka_unit_test(test_ims_garbage_rejected),
 		cmocka_unit_test(test_ims_out_of_range_rejected),

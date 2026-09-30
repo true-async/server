@@ -57,7 +57,11 @@ an item marked "reproduce" gets its failing run before any code.
    the TTL drops go uncounted too, which needs its own design (a reactor-side
    reset, a label that is not `wire_failed`). Pooled requests also lose their
    trace context: #352.
-9. `test_static_decoders` back in the unit suite (issue to open).
+9. #354 — `test_static_decoders` back in the unit suite: done. The CMake target
+   has no existence guard now, the cases call `http_mime_lookup_by_ext` and
+   `http_conditional_check` (moved from `send_file.c` into `http_etag.c` so the
+   test links without the engine), and a boundary case was added after `<=`
+   turned into `<` passed all 32: 33 cases, `ctest` 22 of 22.
 10. #314 — `compression/070` hung 120 s on the Windows job twice on 2026-09-30
     (PR 340, then PR 349's rebase), passing on retry each time. Not reproduced
     on Linux. It is the only test that pipes through a `gzip -d` child 30 times
@@ -1486,7 +1490,7 @@ a release yet except the first two, which are fixed.
 
   Evidence: 355 of 375 phpt (20 skipped, 0 failed), `ctest` 19 of 19.
 
-- [ ] **`test_static_decoders` has been switched off, and nothing said so.** Its
+- [x] **`test_static_decoders` has been switched off, and nothing said so (#354).** Its
   CMake guard tests for `src/static/http_static_mime.c` and
   `http_static_etag.c`; both were renamed to `src/http_mime.c` and
   `src/http_etag.c` with their headers, so the guard has been false ever since
