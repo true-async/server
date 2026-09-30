@@ -58,9 +58,13 @@ an item marked "reproduce" gets its failing run before any code.
    reset, a label that is not `wire_failed`). Pooled requests also lose their
    trace context: #352.
 9. `test_static_decoders` back in the unit suite (issue to open).
-10. #314 — recurred on 2026-09-30 in PR 340's Windows job: `compression/070`
-    hung 120 s and passed on retry, and the ratchet failed the job. Suspect the
-    `proc_open('gzip -d')` pipe read on Windows.
+10. #314 — `compression/070` hung 120 s on the Windows job twice on 2026-09-30
+    (PR 340, then PR 349's rebase), passing on retry each time. Not reproduced
+    on Linux. It is the only test that pipes through a `gzip -d` child 30 times
+    per run; 010, 012 and 030 do it once and never hung. The four now encode and
+    decode with ext/zlib in-process (static in the Linux and Windows builds), so
+    the suspect `proc_open()` pipe path is out of the suite. Closed if 070 does
+    not hang again; the pipe hang itself, if real, belongs to php-async.
 11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
 12. `http_server_pause_listeners` and the accept it may not stop: reproduce.
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
