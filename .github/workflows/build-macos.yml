@@ -142,8 +142,10 @@ jobs:
       # run-tests.php discards a retried test's first attempt, so a test that
       # passes on the retry leaves only its name; the patch prints that
       # attempt's diff, and a php-src it no longer applies to fails here (#313).
-      - name: Patch run-tests.php to print a retried test's first diff
-        run: git -C "$GITHUB_WORKSPACE/php-src" apply "$GITHUB_WORKSPACE/http-server/.github/scripts/run-tests-retry-diff.patch"
+      # It also prints the signal a crashed test died of, which run-tests.php
+      # reads from stopsig and so always prints as Termsig=0 (#345).
+      - name: Patch run-tests.php to print a retried test's first diff and a crash's signal
+        run: git -C "$GITHUB_WORKSPACE/php-src" apply "$GITHUB_WORKSPACE/http-server/.github/scripts/run-tests.patch"
 
       - name: Run http_server phpt suite
         working-directory: http-server
