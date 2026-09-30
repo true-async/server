@@ -105,6 +105,32 @@ static void http_connection_read_callback_dispose(
     zend_async_event_t *event);
 static void http_write_timer_dispose(http_connection_t *conn);
 
+/* Refuses a request parsed on a retired connection: its handler would run in
+ * the server scope start() has cancelled, so no handler runs. Takes ownership
+ * of req and frees it; the connection closes without an answer, as it would
+ * had stop() come before the request arrived. The parser's pointer to req is
+ * cleared first, because the parser may still be feeding a streamed body into
+ * it. Plaintext is destroyed once the feed unwinds; TLS is marked CLOSING and
+ * closed by its state machine after the feed. */
+static void http_connection_refuse_request(http_connection_t *conn, http_request_t *req)
+{
+    if (conn->parser != NULL) {
+        http_parser_clear_request(conn->parser);
+    }
+
+    http_request_destroy(req);
+    conn->keep_alive = false;
+
+#ifdef HAVE_OPENSSL
+    if (conn->tls != NULL) {
+        conn->state = CONN_STATE_CLOSING;
+        return;
+    }
+#endif
+
+    http_connection_destroy(conn);
+}
+
 /* {{{ http_connection_on_request_ready
  *
  * Dispatch callback. Fired synchronously from deep inside
@@ -130,6 +156,11 @@ void http_connection_on_request_ready(http_connection_t *conn, http_request_t *r
     conn->http_version[2] = '0' + (char)req->http_minor;
     conn->http_version[3] = '\0';
     conn->keep_alive = req->keep_alive;
+
+    if (UNEXPECTED(conn->retired)) {
+        http_connection_refuse_request(conn, req);
+        return;
+    }
 
     /* CoDel enqueue point: parser finished, request about to be
      * dispatched. Stamping on req (not conn) so concurrent streams
@@ -397,6 +428,44 @@ void http_connection_linger_end(http_connection_t *conn)
     conn->linger_until_ms = 0;
 }
 /* }}} */
+
+/* h2 retire — defined in src/http2/http2_strategy.c when HAVE_HTTP2 is set;
+ * without HTTP/2 there is no session to wind down. */
+#ifdef HAVE_HTTP2
+extern bool http2_conn_retire(http_connection_t *conn);
+#else
+static inline bool http2_conn_retire(http_connection_t *conn) { (void)conn; return true; }
+#endif
+
+void http_connection_retire(http_connection_t *conn)
+{
+    conn->retired = true;
+    conn->keep_alive = false;
+
+    /* The tick that would end a lingering close is stopped along with the
+     * server. */
+    http_connection_linger_end(conn);
+
+    const bool session_done = http2_conn_retire(conn);
+
+    /* A handler closes its connection itself once its response is out, since
+     * keep_alive is false; an HTTP/2 session with work left closes once its
+     * streams are done. */
+    if (conn->handler_refcount > 0 || !session_done) {
+        return;
+    }
+
+#ifdef HAVE_OPENSSL
+    if (conn->tls != NULL) {
+        http_connection_tls_close(conn);
+        return;
+    }
+#endif
+
+    /* A write still in flight defers the destroy to its completion, which
+     * sends whatever is still queued first. */
+    http_connection_destroy(conn);
+}
 
 /* {{{ http_connection_destroy */
 void http_connection_destroy(http_connection_t *conn)
@@ -3525,7 +3594,9 @@ void http_request_finalize(http_connection_t *conn, http1_request_ctx_t *ctx,
      * terminator exists to prevent. */
     conn->request_in_flight = false;
 
-    if (conn->read_buffer_len > 0 && !framing_lost) {
+    /* Nor on a retired connection: a pipelined request would only be refused,
+     * and should_continue is false because retiring cleared keep_alive. */
+    if (conn->read_buffer_len > 0 && !framing_lost && !conn->retired) {
         bool should_destroy = false;
 
         if (!http_connection_handle_read_completion(conn, &should_destroy)) {

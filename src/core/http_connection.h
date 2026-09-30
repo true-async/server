@@ -292,6 +292,11 @@ struct _http_connection_t {
      * cycle that the old "stop multishot before dispatch, re-arm in dispose"
      * pattern produced. */
     unsigned                 request_in_flight : 1;
+    /* Set by http_connection_retire when the server stops: the connection
+     * finishes what it is doing and starts no further request. Per connection
+     * rather than read off the server, which runs again after a restart while
+     * this connection still carries the previous run's scope. */
+    unsigned                 retired : 1;
     /* Latched on the first parse-error tick so subsequent multishot
      * deliveries (the kernel's already-buffered tail of the same
      * connection) don't re-enter cancel/emit and double-count
@@ -449,6 +454,15 @@ void http_connection_linger_note_inbound(http_connection_t *conn);
  * the drain is finished by the deadline tick, and a caller that outlives the
  * tick has to finish it itself. */
 void http_connection_linger_end(http_connection_t *conn);
+
+/* Takes the connection out of service for a server that has stopped.
+ * No request starts on it afterwards: a request already parsed is refused and
+ * the connection closed, and HTTP/2 sends GOAWAY and refuses new streams.
+ * A connection with nothing in flight closes now; one running a handler
+ * finishes that response with Connection: close and closes after it. Safe to
+ * call again: the second call closes a connection the first left busy if it
+ * has gone idle since. */
+void http_connection_retire(http_connection_t *conn);
 
 /* Bare peer IP (REMOTE_ADDR form: no port, no brackets) as a fresh zend_string
  * the caller owns, or NULL when there is no IP peer (Unix-socket listener).

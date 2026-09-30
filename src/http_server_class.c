@@ -555,7 +555,8 @@ struct http_server_object {
     bool                     listeners_paused;
     /* Set once start()'s post-wakeup drain has emptied server_scope, so the
      * http_server_free fallback drain is skipped on the normal stop() path
-     * (issue #74). */
+     * (issue #74). Belongs to one run: start() clears it with each new
+     * server_scope, or a restarted server skips its drain. */
     bool                     scope_drained;
     /* Set in transfer_obj LOAD when this object was constructed by the
      * built-in worker pool (issue #11) — start() skips re-spawning the
@@ -787,6 +788,7 @@ static void pool_ctl_command(pool_ctl_t *ctl, const pool_cmd_t cmd)
 }
 
 static void http_server_do_stop(http_server_object *server, const char *reason);
+static void http_server_retire_connections(http_server_object *server);
 static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
                                       http_server_config_t *cfg);
 static void http_server_hot_reload_down(http_server_object *server);
@@ -4266,6 +4268,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
         RETURN_FALSE;
     }
 
+    server->scope_drained = false;
+
     /* Hard-terminate handler coroutines at shutdown instead of zombifying them:
      * clear DISPOSE_SAFELY (inherited from the main scope), else cancel() leaves
      * zombies and the shutdown drain's awaitAfterCancellation waits forever
@@ -4788,6 +4792,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
      * the object is freed (issue #74). On bailout we already longjmp'd above. */
     http_server_drain_scope(server);
 
+    /* do_stop retired the connections already; one it left busy may be idle
+     * now that the drain has ended the handlers, and closes here. */
+    http_server_retire_connections(server);
+
     /* Only now: a WebSocket session unsubscribes itself as it is destroyed, and
      * the drain above is what destroys them. Detaching first frees the topic
      * tree out from under that teardown, which walks it — SIGSEGV on any stop()
@@ -4799,6 +4807,21 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     RETURN_TRUE;
 }
 /* }}} */
+
+/* Retires every live connection of a stopped server: none starts a request,
+ * each finishes what it is running and closes, and one with nothing in flight
+ * closes now. A second call closes the connections the first left busy. */
+static void http_server_retire_connections(http_server_object *server)
+{
+    http_connection_t *c = server->conn_arena.alive_head;
+
+    while (c != NULL) {
+        /* `next` captured first: a connection that closes unlinks itself. */
+        http_connection_t *next = c->next_conn;
+        http_connection_retire(c);
+        c = next;
+    }
+}
 
 /* stop() core, shared by the PHP method and the hot-reload self-stop coroutine
  * (issue #93). Never suspends. `reason` != NULL tags the log line. */
@@ -4836,6 +4859,8 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 
     server->http3_listener_count = 0;
 #endif
+
+    http_server_retire_connections(server);
 
     /* Logger teardown must precede the wait_event notify: waking
      * start() can let the scheduler tear down before our async write

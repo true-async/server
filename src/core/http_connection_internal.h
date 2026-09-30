@@ -130,6 +130,11 @@ bool http_connection_tls_arm_read(http_connection_t *conn);
  * response. */
 void http_connection_tls_resume_after_handler(http_connection_t *conn);
 
+/* Close a TLS connection that runs no handler the way a non-keep-alive
+ * response does: close_notify behind the application data already queued,
+ * and destroy once no ciphertext write is in flight. */
+void http_connection_tls_close(http_connection_t *conn);
+
 /* True iff a non-blocking FSM async send is currently in flight on
  * this connection. http_connection_destroy uses this to defer
  * teardown until the libuv write completes — the heap buffer is

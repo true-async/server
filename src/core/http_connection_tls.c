@@ -1010,6 +1010,13 @@ static void tls_advance_state(http_connection_t *conn)
 
         const int feed = tls_feed_parser_step(conn);
 
+        /* CLOSING after a successful feed: http_connection_refuse_request
+         * refused the request just parsed on a retired connection, and no
+         * handler runs to end the wait below. */
+        if (feed >= 0 && UNEXPECTED(conn->state == CONN_STATE_CLOSING)) {
+            continue;
+        }
+
         if (feed < 0) {
             /* See http_connection.c handle_read_completion: latch on
              * the first parse-error tick to avoid double-counting +
@@ -1127,6 +1134,13 @@ bool http_connection_tls_arm_read(http_connection_t *conn)
 bool http_connection_tls_fsm_send_in_flight(const http_connection_t *conn)
 {
     return conn->tls_cipher_inflight != 0;
+}
+
+void http_connection_tls_close(http_connection_t *conn)
+{
+    conn->state = CONN_STATE_CLOSING;
+    tls_advance_state(conn);
+    (void)tls_finalize_if_closing(conn);
 }
 
 /* Re-enter the FSM after a handler coroutine has finished its dispose.

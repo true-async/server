@@ -224,6 +224,16 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         return;
     }
 
+    /* A stream the peer opened before it read the GOAWAY a stopping server
+     * sent: its handler would run in the scope start() has cancelled.
+     * REFUSED_STREAM tells the peer nothing was processed, so it may retry
+     * the request elsewhere. The inbound path emits the frame after feed. */
+    if (UNEXPECTED(self->conn->retired)) {
+        (void)http2_session_submit_rst_stream(self->session, stream_id,
+                                              NGHTTP2_REFUSED_STREAM);
+        return;
+    }
+
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
     /* RFC 8441 Extended CONNECT → WebSocket. Detected before the normal
      * request / static / handler-null checks below (a WS-only server has
@@ -2401,6 +2411,44 @@ void http2_conn_notify_emit(http_connection_t *conn)
     if (self->session != NULL) {
         http2_session_emit(self->session);
     }
+}
+
+/* Submits GOAWAY(NO_ERROR) once per connection and flushes it. Returns true
+ * when the connection may close now: the session has no active stream and
+ * nothing left to write, or the connection is not HTTP/2. */
+bool http2_conn_retire(http_connection_t *conn)
+{
+    if (conn == NULL || conn->strategy == NULL ||
+        conn->protocol_type != HTTP_PROTOCOL_HTTP2) {
+        return true;
+    }
+
+    const http2_strategy_t *self = (const http2_strategy_t *)conn->strategy;
+
+    if (self->session == NULL) {
+        return true;
+    }
+
+    if (!conn->drain_submitted) {
+        (void)http2_session_terminate(self->session, NGHTTP2_NO_ERROR);
+        conn->drain_submitted = true;
+        http_server_on_h2_goaway_sent(conn->counters);
+    }
+
+    http2_session_emit(self->session);
+
+    /* nghttp2 stops wanting to read once the GOAWAY has left and no stream is
+     * active. A write in flight holds the GOAWAY back, and then the session
+     * is still busy here. */
+    if (http2_session_want_read(self->session)) {
+        return false;
+    }
+
+    if (http2_session_want_write(self->session)) {
+        http2_session_emit_now(self->session);
+    }
+
+    return !http2_session_want_write(self->session);
 }
 
 static void http2_strategy_send_response(http_connection_t *conn, void *response)

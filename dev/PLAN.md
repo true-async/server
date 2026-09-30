@@ -30,21 +30,28 @@ an item marked "reproduce" gets its failing run before any code.
 3. #313 — done: the ratchet (PR 331), `core/023` and `tls/003` fixed with an
    empty baseline (PR 333, which also fixed #332), the first attempt's diff
    printed before a retry (PR 334). The clock removal is dropped (Sage).
-4. SSE byte count (issue to open).
+4. #336 — SSE byte count: done (PR 337).
 5. #322 — upload limits as PHP: `max_file_uploads` (extra files left out),
    `max_multipart_body_parts`, `file_uploads`, `MAX_FILE_SIZE`; no per-file cap
    past `setMaxBodySize()`. `upload_max_filesize` is not read, by Edmond on
    2026-09-30: its 2M default would cut uploads the body limit admits. The
    design went through the Critic. A `..` in a client filename answering 101
    is split out as #339.
-6. Full read buffer on plaintext HTTP/1: reproduce (issue to open).
+6. #341 — full read buffer on plaintext HTTP/1: PR 344, which waits for #345.
+   #345: `stop()` leaves connections open, and they start requests in the
+   server scope `start()` has cancelled; once that scope empties php-async
+   frees it. Found through PR 344's `h1/061`: SIGSEGV in 3 to 4 runs of 30
+   on the debug build, and on `main` a keep-alive connection still answers
+   after `start()` returns.
 7. #315 — iterative matcher in the Windows fnmatch shim: done. The matcher is
    `http_static_glob_match`, built on every platform; `StaticHide` checks it
    against POSIX `fnmatch` over 19 patterns x 18 paths both ways, and a
    4 KiB path the recursive form did not finish in 30 s passes under 1 s.
 8. Worker path: compression, dropped FULL wire, protocol version (issue to open).
 9. `test_static_decoders` back in the unit suite (issue to open).
-10. #314 — no action until it recurs.
+10. #314 — recurred on 2026-09-30 in PR 340's Windows job: `compression/070`
+    hung 120 s and passed on retry, and the ratchet failed the job. Suspect the
+    `proc_open('gzip -d')` pipe read on Windows.
 11. HTTP/3 `chunk_queue` primer: with the next change to `h3_stream_append_chunk`.
 12. `http_server_pause_listeners` and the accept it may not stop: reproduce.
 13. `core/018` under load: its DEBUG run overflows the log ring and the sink's
@@ -57,6 +64,13 @@ an item marked "reproduce" gets its failing run before any code.
     under `-j2` receives. `core/023` failed its bind that way (PR 337's Windows
     job) and PR 338 moved it and `core/079` to separate kernel-assigned ports;
     80 other tests still take a span, most of them HTTP/3 and skipped there.
+15. #346 — the reactor-pool worker inbox spawns into the server scope after
+    `stop()` and across a restart, the path #345 left out: reproduce.
+16. Static passthrough on HTTP/1: `h1_static_on_passthrough_to_php` spawns the
+    handler, and `http_connection_dispatch_request` may read the same
+    `PASSTHROUGH` as "nothing done" and spawn again on one ctx (a static-cache
+    hit for a file deleted since, `on_missing: Next`). Found by the #345
+    Critic, by reading: reproduce.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
