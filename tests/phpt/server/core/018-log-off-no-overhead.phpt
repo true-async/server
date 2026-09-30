@@ -35,7 +35,14 @@ use function Async\await;
  * measured quantity under that noise is what made this comparison a coin
  * flip: measured over 1000 connects the ratio scattered from 0.96 to 1.04
  * across seven paired rounds, and over one connection it sits at 0.83–0.89,
- * seven rounds of seven below the threshold. */
+ * seven rounds of seven below the threshold.
+ *
+ * The DEBUG run can outpace the log thread when other processes hold the
+ * CPU: the producer's 64 KiB ring fills, the record is dropped by design, and
+ * the sink prints its rate-limited notice to stderr. The notice comes before
+ * the first echo, and the expectation admits it there and nowhere else. A
+ * dropped record only makes the DEBUG run cheaper, so the comparison below
+ * stays on the safe side. */
 
 const N = 2000;
 const FIELDS = 8;
@@ -139,8 +146,8 @@ $ratio = $t_off / max($t_debug, 1e-6);
 echo "off < debug: ", ($ratio < 1.0 ? "yes" : "no"), "\n";
 
 echo "Done\n";
---EXPECT--
-off run finite: yes
+--EXPECTREGEX--
+(http_server log sink failed: ring overflow, dropped=\d+\n)*off run finite: yes
 debug run finite: yes
 off < debug: yes
 Done
