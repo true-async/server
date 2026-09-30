@@ -53,17 +53,26 @@ $server->addHttpHandler(function ($req, $res) {
 // with machine-readable status. Exits when the server closes.
 // The listener is bound before start() suspends, and this coroutine first
 // runs at that suspend, so the connect needs no head start.
-$client = spawn(function () use ($port, $cert_path) {
+$client = spawn(function () use ($port, $cert_path, $tmp_dir) {
     /* -brief prints the negotiated protocol + ciphersuite + peer DN
      * on stderr and nothing else. Enough signal to prove the
      * handshake reached TLS_ESTABLISHED; ALPN-driven dispatch is
-     * verified once Step 5 wires HTTP through the session. */
+     * verified once Step 5 wires HTTP through the session.
+     *
+     * s_client leaves once the server closes. An HTTP/1.0 request on its
+     * stdin gets one answer and the close; an empty stdin does not do it on
+     * Windows, where s_client did not see the pipe end and ran until the
+     * server was stopped under it. A file redirect reads the same in cmd.exe
+     * and sh. */
+    $request = $tmp_dir . '/request.txt';
+    file_put_contents($request, "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
     $cmd = sprintf(
-        'echo "" | openssl s_client -connect 127.0.0.1:%d ' .
-        '-servername localhost -tls1_3 -brief 2>&1',
-        $port
+        'openssl s_client -connect 127.0.0.1:%d ' .
+        '-servername localhost -tls1_3 -brief < %s 2>&1',
+        $port, escapeshellarg($request)
     );
     $out = shell_exec($cmd);
+    @unlink($request);
 
     // Tear the server down once the client has finished.
     global $server;
