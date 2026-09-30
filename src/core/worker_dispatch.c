@@ -27,6 +27,10 @@
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 #include "log/http_log.h"                    /* access-log emit */
+#ifdef HAVE_HTTP_COMPRESSION
+#include "compression/http_compression_request.h"   /* request body decode */
+#include "compression/http_compression_response.h"  /* response encode */
+#endif
 
 #define WORKER_STREAM_INFLIGHT_CAP (1024 * 1024)
 
@@ -82,6 +86,36 @@ typedef struct {
     uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
 
+#ifdef HAVE_HTTP_COMPRESSION
+/* Decodes a Content-Encoding request body in place before the handler, as the
+ * transports do. False when the body cannot be decoded: the response then
+ * carries the status the decoder names (415, 413 or 400) and a plain-text
+ * reason, the request carries its service window for the access record, and
+ * the caller must not run the handler. */
+static bool worker_decode_request_body(worker_dispatch_ctx_t *ctx)
+{
+    ZEND_ASSERT(!Z_ISUNDEF(ctx->request_zv));
+
+    http_request_t *const req = http_request_from_zobj(Z_OBJ(ctx->request_zv));
+    const int status =
+        http_compression_decode_request_body(req, http_server_get_config(ctx->server));
+
+    if (status == HTTP_DECODE_OK) {
+        return true;
+    }
+
+    http_response_set_error(Z_OBJ(ctx->response_zv), status,
+                            http_compression_decode_status_text(status));
+
+    if (ctx->stamps) {
+        req->start_ns = ctx->start_ns;
+        req->end_ns   = zend_hrtime();
+    }
+
+    return false;
+}
+#endif
+
 /* Handler coroutine body: run the registered user handler with (request, response). */
 static void worker_dispatch_entry(void)
 {
@@ -105,6 +139,12 @@ static void worker_dispatch_entry(void)
     if (ctx->stamps) {
         ctx->start_ns = zend_hrtime();
     }
+
+#ifdef HAVE_HTTP_COMPRESSION
+    if (!worker_decode_request_body(ctx)) {
+        return;
+    }
+#endif
 
     zval params[2], retval;
     ZVAL_COPY_VALUE(&params[0], &ctx->request_zv);
@@ -580,6 +620,12 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
         return NULL;
     }
 
+#ifdef HAVE_HTTP_COMPRESSION
+    /* Before the head and the length are read: encoding replaces the body and
+     * sets Content-Encoding and Vary. */
+    http_compression_apply_buffered(resp);
+#endif
+
     char cl[HTTP_CONTENT_LENGTH_DIGITS];
     bool keep_cl;
     const size_t cl_len = http_response_wire_content_length(resp, cl, &keep_cl);
@@ -669,6 +715,8 @@ static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx
             worker_req_header(req, "if-modified-since", 17, &wsf.if_modified_since_len);
         wsf.if_none_match =
             worker_req_header(req, "if-none-match", 13, &wsf.if_none_match_len);
+        wsf.accept_encoding =
+            worker_req_header(req, "accept-encoding", 15, &wsf.accept_encoding_len);
     }
 
     if (!response_wire_set_send_file(rw, &wsf)) {
@@ -858,12 +906,30 @@ bool worker_dispatch_request(http_server_object *server,
     ZVAL_COPY_VALUE(&ctx->request_zv, req_obj);
     efree(req_obj);                 /* the heap zval wrapper, not the object */
 
+    /* The request's own version in the "major.minor" form HTTP/1 sets: "3.0" on HTTP/3. */
+    const char version[] = {
+        (char)('0' + req->http_major), '.', (char)('0' + req->http_minor), '\0'
+    };
+
     object_init_ex(&ctx->response_zv, http_response_ce);
-    http_response_set_protocol_version(Z_OBJ(ctx->response_zv), "3.0");
+    http_response_set_protocol_version(Z_OBJ(ctx->response_zv), version);
     http_response_set_head(Z_OBJ(ctx->response_zv), is_head);
 
     http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
                                      &worker_stream_ops, ctx);
+
+    /* The config a worker clone loaded on its own thread from the frozen
+     * snapshot, so the MIME whitelist compression reads belongs to this
+     * thread. A streamed body is wrapped at its first write(); a buffered
+     * one is encoded when worker_render_response flattens it. */
+    http_server_config_t *const cfg = http_server_get_config(server);
+
+    if (cfg != NULL) {
+#ifdef HAVE_HTTP_COMPRESSION
+        http_compression_attach(Z_OBJ(ctx->response_zv), req, cfg);
+#endif
+        http_response_set_default_json_flags(Z_OBJ(ctx->response_zv), cfg->json_encode_flags);
+    }
 
     if (is_grpc) {
         grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_mode);

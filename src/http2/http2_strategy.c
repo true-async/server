@@ -38,6 +38,9 @@
 #include "grpc/grpc_call.h"      /* gRPC call lifecycle policy */
 #include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 #include "core/bailout_guard.h"
+#ifdef HAVE_HTTP_COMPRESSION
+#include "compression/http_compression_request.h"   /* request body decode */
+#endif
 #include "static/static_handler.h"
 #include "http_send_file.h"
 #include "http_response_internal.h"
@@ -302,7 +305,6 @@ static void http2_strategy_dispatch(struct http_request_t *request,
 #endif
     /* Per-request JSON encode default for HttpResponse::json(). */
     if (self->conn->config != NULL) {
-        extern void http_response_set_default_json_flags(zend_object *, uint32_t);
         http_response_set_default_json_flags(
             Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
     }
@@ -456,17 +458,12 @@ static void http2_handler_coroutine_entry(void)
      * handler-entry hook — produces a canned error response and skips
      * the user handler when decoding fails. */
     if (stream->request != NULL) {
-        extern int http_compression_decode_request_body(
-            http_request_t *, http_server_config_t *);
-        extern void http_response_set_error(zend_object *, int, const char *);
         int dec = http_compression_decode_request_body(
             stream->request, conn->config);
 
         if (dec != 0) {
             http_response_set_error(Z_OBJ(stream->response_zv), dec,
-                dec == 415 ? "Unsupported Content-Encoding" :
-                dec == 413 ? "Payload Too Large after decompression" :
-                             "Malformed compressed request body");
+                http_compression_decode_status_text(dec));
 
             if (stamps) stream->request->end_ns = zend_hrtime();
             return;

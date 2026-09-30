@@ -71,6 +71,9 @@ typedef struct {
      * >64 triggers realloc-doubling). Reset between requests in
      * multi-request mode. */
     unsigned long                response_header_count;
+    /* H3CLIENT_PRINT_HEADERS: each non-status response header goes to stderr
+     * as "HDR <name>: <value>" as it arrives, before the STATUS= line. */
+    bool                         print_headers;
     bool                         response_done;
     /* The peer reset our request stream: whatever arrived is a partial body, and
      * the client exits non-zero so a test cannot mistake it for a complete one. */
@@ -127,8 +130,14 @@ static int h3_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
         c->response_status = atoi(buf);
     } else {
         c->response_header_count++;
+
+        if (c->print_headers) {
+            const nghttp3_vec hname = nghttp3_rcbuf_get_buf(name);
+            const nghttp3_vec hval = nghttp3_rcbuf_get_buf(value);
+            fprintf(stderr, "HDR %.*s: %.*s\n", (int)hname.len, (const char *)hname.base,
+                    (int)hval.len, (const char *)hval.base);
+        }
     }
-    (void)name;
     return 0;
 }
 
@@ -729,6 +738,8 @@ int main(int argc, char **argv) {
      * stream don't regress. Phpt 116 enables this to verify the
      * single-pass-emit overflow path. */
     bool verbose_headers = (getenv("H3CLIENT_VERBOSE_HEADERS") != NULL);
+
+    c.print_headers = (getenv("H3CLIENT_PRINT_HEADERS") != NULL);
 
     /* H3CLIENT_BLOAT_HEADER_KIB=N — add a single x-bloat header of N
      * KiB to the FIRST request so phpt 118 can drive the server's

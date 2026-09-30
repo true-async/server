@@ -1525,6 +1525,12 @@ void http_response_set_protocol_version(zend_object *obj, const char *version);
  * chunks silently when set. Stamped at dispatch wherever the request is
  * known. */
 void http_response_set_head(zend_object *obj, bool is_head);
+/* The JSON flags HttpResponse::json() uses when its $flags is 0: the server's
+ * setJsonEncodeFlags(), stamped at dispatch. */
+void http_response_set_default_json_flags(zend_object *obj, uint32_t flags);
+/* Status and plain-text body for a request refused before its handler runs;
+ * the response is emitted as if the handler had built it. */
+void http_response_set_error(zend_object *obj, int status, const char *message);
 bool http_response_is_closed(zend_object *obj);
 
 /* Whether the body was disowned mid-flight — abort(), or the dispose path

@@ -71,9 +71,10 @@ struct response_wire_s {
         size_t   ifr_off,   ifr_len;
         size_t   ims_off,   ims_len;
         size_t   inm_off,   inm_len;
+        size_t   ae_off,    ae_len;
         bool     ct_present, dn_present, cc_present;
         bool     mth_present, uri_present, rng_present;
-        bool     ifr_present, ims_present, inm_present;
+        bool     ifr_present, ims_present, inm_present, ae_present;
         int      status;
         uint8_t  disposition;
         bool     disposition_set, etag, last_modified, accept_ranges,
@@ -205,6 +206,7 @@ bool response_wire_set_send_file(response_wire_t *rw,
     WIRE_SF_STR(if_range,      ifr_off, ifr_len, ifr_present)
     WIRE_SF_STR(if_modified_since, ims_off, ims_len, ims_present)
     WIRE_SF_STR(if_none_match, inm_off, inm_len, inm_present)
+    WIRE_SF_STR(accept_encoding, ae_off, ae_len, ae_present)
 #undef WIRE_SF_STR
 
     rw->sf.status            = sf->status;
@@ -247,6 +249,7 @@ bool response_wire_get_send_file(const response_wire_t *rw,
     WIRE_SF_GET(if_range,          ifr_off, ifr_len, ifr_present)
     WIRE_SF_GET(if_modified_since, ims_off, ims_len, ims_present)
     WIRE_SF_GET(if_none_match,     inm_off, inm_len, inm_present)
+    WIRE_SF_GET(accept_encoding,   ae_off,  ae_len,  ae_present)
 #undef WIRE_SF_GET
 
     out->status            = rw->sf.status;
