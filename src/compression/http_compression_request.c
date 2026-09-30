@@ -144,6 +144,15 @@ static int decode_gzip(http_request_t *req, size_t cap)
     return HTTP_DECODE_OK;
 }
 
+const char *http_compression_decode_status_text(const int status)
+{
+    switch (status) {
+        case HTTP_DECODE_UNKNOWN_CODING: return "Unsupported Content-Encoding";
+        case HTTP_DECODE_TOO_LARGE:      return "Payload Too Large after decompression";
+        default:                         return "Malformed compressed request body";
+    }
+}
+
 int http_compression_decode_request_body(http_request_t *req,
                                          http_server_config_t *cfg)
 {

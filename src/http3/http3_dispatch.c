@@ -32,6 +32,10 @@
 #include "static/static_handler.h"         /* http_static_try_serve / count */
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
 #include "core/worker_dispatch.h"           /* response_wire_discard */
+#ifdef HAVE_HTTP_COMPRESSION
+#include "compression/http_compression_request.h"   /* request body decode */
+#include "compression/http_compression_response.h"  /* response encode */
+#endif
 
 /* Defined in src/http_request.c. Declared here because the public
  * php_http_server.h header doesn't expose it (it lives in the C boundary
@@ -292,6 +296,7 @@ static http_request_t *h3_reactor_request_from_wire(http3_connection_t *c,
         { "if-range",          8,  w->if_range,          w->if_range_len },
         { "if-modified-since", 17, w->if_modified_since, w->if_modified_since_len },
         { "if-none-match",     13, w->if_none_match,     w->if_none_match_len },
+        { "accept-encoding",   15, w->accept_encoding,   w->accept_encoding_len },
     };
 
     for (size_t i = 0; i < sizeof hdrs / sizeof hdrs[0]; i++) {
@@ -652,26 +657,23 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
         grpc_call_init_response(Z_OBJ(s->response_zv), grpc_mode);
     }
 
-#ifdef HAVE_HTTP_COMPRESSION
-    /* Attach compression state. Server pointer comes from
-     * the listener — same pattern that http3_handler_coroutine uses
+    /* Attach compression state and the JSON default. Server pointer comes
+     * from the listener — same pattern that http3_handler_coroutine uses
      * for the request-sample bookkeeping. */
     {
-        extern void http_compression_attach(zend_object *,
-            http_request_t *, http_server_config_t *);
-        extern void http_response_set_default_json_flags(zend_object *, uint32_t);
         http_server_object *srv =
             (http_server_object *)http3_listener_server_obj(c->listener);
         http_server_config_t *cfg = http_server_get_config(srv);
 
         if (cfg != NULL) {
+#ifdef HAVE_HTTP_COMPRESSION
             http_compression_attach(Z_OBJ(s->response_zv),
                                     s->request, cfg);
+#endif
             http_response_set_default_json_flags(
                 Z_OBJ(s->response_zv), cfg->json_encode_flags);
         }
     }
-#endif
 
     /* Static-handler dispatch. Same policy as the H1/H2
      * sites:
@@ -782,17 +784,12 @@ static void h3_handler_coroutine_entry(void)
     /* Inbound Content-Encoding decode. Same shape as the
      * H1/H2 handler entries. */
     if (s->request != NULL) {
-        extern int http_compression_decode_request_body(
-            http_request_t *, http_server_config_t *);
-        extern void http_response_set_error(zend_object *, int, const char *);
         http_server_config_t *cfg = http_server_get_config(server);
         int dec = http_compression_decode_request_body(s->request, cfg);
 
         if (dec != 0) {
             http_response_set_error(Z_OBJ(s->response_zv), dec,
-                dec == 415 ? "Unsupported Content-Encoding" :
-                dec == 413 ? "Payload Too Large after decompression" :
-                             "Malformed compressed request body");
+                http_compression_decode_status_text(dec));
 
             if (s->request != NULL && stamps) s->request->end_ns = zend_hrtime();
             return;

@@ -67,14 +67,16 @@ typedef struct {
      * long after the worker's dispose has freed its request — and those fields
      * live in the worker's allocation domain, so the reactor must never touch
      * them. Everything the engine reads off a request travels here instead:
-     * the method/URI it reports, and the four conditional headers it honours
-     * (RFC 9110 §13). NULL = header absent. */
+     * the method/URI it reports, the four conditional headers it honours
+     * (RFC 9110 §13), and the Accept-Encoding a precompressed sidecar is
+     * chosen by. NULL = header absent. */
     const char *method;            size_t method_len;
     const char *uri;               size_t uri_len;
     const char *range;             size_t range_len;
     const char *if_range;          size_t if_range_len;
     const char *if_modified_since; size_t if_modified_since_len;
     const char *if_none_match;     size_t if_none_match_len;
+    const char *accept_encoding;   size_t accept_encoding_len;
     int      status;
     uint8_t  disposition;
     bool     disposition_set;

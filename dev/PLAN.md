@@ -49,7 +49,14 @@ an item marked "reproduce" gets its failing run before any code.
    `http_static_glob_match`, built on every platform; `StaticHide` checks it
    against POSIX `fnmatch` over 19 patterns x 18 paths both ways, and a
    4 KiB path the recursive form did not finish in 30 s passes under 1 s.
-8. #350 — worker path: compression, dropped FULL wire, protocol version.
+8. #350 — worker path: compression and protocol version, done. A pooled response
+   is encoded as in-thread HTTP/3 encodes it, a `Content-Encoding` body is
+   decoded, `json()` follows the flags, and the sendFile wire carries
+   Accept-Encoding so a `.gz` sidecar is served. The dropped FULL wire moved to
+   #351: the Critic found the peer is left waiting and the other wire kinds and
+   the TTL drops go uncounted too, which needs its own design (a reactor-side
+   reset, a label that is not `wire_failed`). Pooled requests also lose their
+   trace context: #352.
 9. `test_static_decoders` back in the unit suite (issue to open).
 10. #314 — recurred on 2026-09-30 in PR 340's Windows job: `compression/070`
     hung 120 s and passed on retry, and the ratchet failed the job. Suspect the

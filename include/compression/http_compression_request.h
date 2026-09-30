@@ -41,6 +41,10 @@ typedef struct _http_server_config_t http_server_config_t;
 int http_compression_decode_request_body(http_request_t *req,
                                          http_server_config_t *cfg);
 
+/* The plain-text reason a refused decode answers with, for the non-OK
+ * HTTP_DECODE_* status http_compression_decode_request_body returned. */
+const char *http_compression_decode_status_text(int status);
+
 /* Per-codec request decoders. Defined in their respective backend TUs;
  * declared here so http_compression_request.c can dispatch without
  * pulling in the codec-specific headers (libbrotli / libzstd). The

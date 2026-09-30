@@ -31,15 +31,14 @@
 #include "http_response_internal.h"  /* http_response_take_send_file */
 #include "core/async_plain_event.h"
 #include "core/bailout_guard.h"
+#ifdef HAVE_HTTP_COMPRESSION
+#include "compression/http_compression_request.h"   /* request body decode */
+#endif
 
 static bool h1_sendfile_arm(http_connection_t *conn,
                             http1_request_ctx_t *ctx,
                             http_send_file_request_t *req,
                             bool should_continue);
-
-/* Declared here rather than in php_http_server.h to avoid pulling the full
- * http_response internal header into every TU. */
-extern void http_response_set_default_json_flags(zend_object *, uint32_t);
 
 /* php_network.h (pulled in via http_connection.h) supplies socket
  * types and closesocket on both POSIX and Windows. No direct POSIX
@@ -3144,16 +3143,11 @@ void http_handler_coroutine_entry(void)
     /* Request body decode (Content-Encoding: gzip in). Failures emit
      * a canned error response and skip the handler. */
     if (req != NULL) {
-        extern int http_compression_decode_request_body(
-            http_request_t *, http_server_config_t *);
-        extern void http_response_set_error(zend_object *, int, const char *);
         const int dec = http_compression_decode_request_body(req, conn->config);
 
         if (dec != 0) {
             http_response_set_error(Z_OBJ(ctx->response_zv), dec,
-                dec == 415 ? "Unsupported Content-Encoding" :
-                dec == 413 ? "Payload Too Large after decompression" :
-                             "Malformed compressed request body");
+                http_compression_decode_status_text(dec));
 
             if (req && stamps) req->end_ns = zend_hrtime();
             return;  /* Skip handler call; dispose emits the response. */
