@@ -54,6 +54,7 @@
 #include "core/tls_layer.h"
 #endif
 #include "http1/http1_sendfile.h"
+#include "fiu-local.h"
 
 #include <inttypes.h>
 #ifdef __linux__
@@ -302,7 +303,8 @@ static void h1_send_dispatch(zend_async_event_t *event,
             req->dispose(req);
         }
 
-        if (UNEXPECTED(exception != NULL)) {
+        /* Fault point: the transfer ended in an I/O error. */
+        if (UNEXPECTED(exception != NULL) || fiu_fail("h1/file_body/io_error")) {
             state->status = -1;
         }
 
@@ -317,7 +319,9 @@ static void h1_send_dispatch(zend_async_event_t *event,
 
         state->pending_req = NULL;
         const ssize_t got = req->transferred;
-        const bool err = (exception != NULL || req->exception != NULL);
+        /* Fault point: the file read ended in an I/O error. */
+        const bool err = (exception != NULL || req->exception != NULL
+                          || fiu_fail("h1/file_body/io_error"));
 
         if (req->exception != NULL) {
             OBJ_RELEASE(req->exception);

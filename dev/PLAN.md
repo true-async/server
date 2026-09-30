@@ -119,13 +119,20 @@ value, not a count.
       handoff: `src/core/fault_hooks.c`, `core/083` passes with the flag and
         skips without it; 0 `fiu_` symbols and no libfiu in ldd without it. The
         CI leg's first run is part of S2.5.
-- [ ] S2.2 Red tests for the three failures
+- [x] S2.2 Red tests for the three failures
       done: red on `main` for the named reason: the static path with a stale
         cached size, plaintext and TLS, a second request pipelined behind it;
         `sendFile()` with a fault point that shortens the transfer, plaintext
         and TLS; a fault point in `engine_defer_schedule` on both paths closes
         the connection without a crash
       tier: T1 · role: —
+      handoff: `h1/065` (stale cache), `066` (point `h1/file_body/io_error`),
+        `067` (point `send_file/defer_schedule`), client `h1/_pipeline_probe.inc`.
+        Red 5 of 5 (065) and 3 of 3 (066, 067): the pipelined 200 is glued
+        after the short body; on a failed defer the static path answers the
+        pipelined request 400 and sendFile() leaves /f unanswered. The defer
+        design changed: the schedule moves before on_armed, and a failure
+        returns SEND_FILE_HANDLED, which both callers already answer.
 - [ ] S2.3 The fix in the server
       done: S2.2 green; both `on_done` callbacks honour `status`; a short body
         marks the framing lost; plaintext reports `bytes_sent < body_length` as

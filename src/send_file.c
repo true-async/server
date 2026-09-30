@@ -32,6 +32,7 @@
 #include "static/static_handler.h" /* http_static_cache_acquire decl */
 #include "static/http_static_cache.h"
 #include "log/http_log.h" /* access-log emit */
+#include "fiu-local.h"
 
 #include <sys/stat.h>
 #ifdef PHP_WIN32
@@ -563,6 +564,9 @@ static void engine_defer_dispatch(zend_async_event_t *event, zend_async_event_ca
  * request dispatcher on send_file()'s synchronous call stack. */
 static bool engine_defer_schedule(engine_state_t *state)
 {
+	/* Fault point: the loop cannot take the timer. */
+	fiu_return_on("send_file/defer_schedule", false);
+
 	zend_async_timer_event_t *timer = ZEND_ASYNC_NEW_TIMER_EVENT(0, false);
 
 	if (UNEXPECTED(timer == NULL)) {
