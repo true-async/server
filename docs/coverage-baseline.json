@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 25390,
-      "hit": 21315
+      "total": 25407,
+      "hit": 21331
     },
     "functions": {
-      "total": 1783,
-      "hit": 1634
+      "total": 1785,
+      "hit": 1636
     }
   },
   "files": {
@@ -63,7 +63,7 @@
     "src/compression/http_compression_request.c": {
       "lines": {
         "total": 77,
-        "hit": 76
+        "hit": 77
       },
       "functions": {
         "total": 4,
@@ -153,7 +153,7 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1298,
-        "hit": 1085
+        "hit": 1088
       },
       "functions": {
         "total": 82,
@@ -342,12 +342,12 @@
     },
     "src/formats/multipart_processor.c": {
       "lines": {
-        "total": 377,
-        "hit": 332
+        "total": 382,
+        "hit": 338
       },
       "functions": {
-        "total": 28,
-        "hit": 23
+        "total": 29,
+        "hit": 24
       }
     },
     "src/grpc/grpc.c": {
@@ -402,12 +402,12 @@
     },
     "src/http1/http_parser.c": {
       "lines": {
-        "total": 491,
-        "hit": 432
+        "total": 503,
+        "hit": 442
       },
       "functions": {
-        "total": 26,
-        "hit": 25
+        "total": 27,
+        "hit": 26
       }
     },
     "src/http2/http2_session.c": {
@@ -453,7 +453,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 962,
-        "hit": 830
+        "hit": 831
       },
       "functions": {
         "total": 56,
@@ -733,7 +733,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2718,
-        "hit": 2069
+        "hit": 2068
       },
       "functions": {
         "total": 145,
@@ -883,7 +883,7 @@
     "src/websocket/php_websocket.c": {
       "lines": {
         "total": 605,
-        "hit": 479
+        "hit": 478
       },
       "functions": {
         "total": 48,
@@ -923,7 +923,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 554,
-        "hit": 500
+        "hit": 497
       },
       "functions": {
         "total": 38,

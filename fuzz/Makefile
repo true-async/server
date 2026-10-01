@@ -55,7 +55,7 @@ STUBS_SRC = ../tests/unit/common/multipart_stubs.c fuzz_stubs.c
 all: fuzz_multipart
 
 fuzz_multipart: fuzz_multipart.c $(MULTIPART_SRC)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
+	$(CC) $(CFLAGS) $(INCLUDES) -DMP_PARSER_LIBC_ALLOC=1 -o $@ $^
 
 fuzz_http1_parser: fuzz_http1_parser.c harness_common.c $(HTTP1_SRC) $(STUBS_SRC)
 	$(CC) $(CFLAGS) $(INCLUDES) $(PHP_CFLAGS) \
