@@ -15,8 +15,8 @@ if (!function_exists('proc_open')) die('skip needs proc_open');
  * get, so anything the server writes next on the connection is read as body.
  * The connection has to close after the short body; the request pipelined
  * behind it goes unanswered, and the next request for the file is sized from
- * the file again. The short body's length is not pinned: on Windows it
- * arrives empty. The TLS path is 068. */
+ * the file again. The short body's length is not pinned. The TLS path is
+ * 068. */
 
 require_once __DIR__ . '/../_free_port.inc';
 

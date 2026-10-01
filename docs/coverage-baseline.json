@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 25355,
-      "hit": 21276
+      "total": 25362,
+      "hit": 21281
     },
     "functions": {
-      "total": 1780,
-      "hit": 1631
+      "total": 1781,
+      "hit": 1632
     }
   },
   "files": {
@@ -153,7 +153,7 @@
     "src/core/http_connection.c": {
       "lines": {
         "total": 1298,
-        "hit": 1086
+        "hit": 1088
       },
       "functions": {
         "total": 82,
@@ -342,12 +342,12 @@
     },
     "src/formats/multipart_processor.c": {
       "lines": {
-        "total": 371,
-        "hit": 327
+        "total": 377,
+        "hit": 332
       },
       "functions": {
-        "total": 27,
-        "hit": 22
+        "total": 28,
+        "hit": 23
       }
     },
     "src/grpc/grpc.c": {
@@ -403,7 +403,7 @@
     "src/http1/http_parser.c": {
       "lines": {
         "total": 491,
-        "hit": 432
+        "hit": 430
       },
       "functions": {
         "total": 26,
@@ -493,7 +493,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 513
+        "hit": 512
       },
       "functions": {
         "total": 46,
@@ -642,8 +642,8 @@
     },
     "src/http_request_form.c": {
       "lines": {
-        "total": 136,
-        "hit": 121
+        "total": 137,
+        "hit": 122
       },
       "functions": {
         "total": 8,
@@ -733,7 +733,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2690,
-        "hit": 2043
+        "hit": 2045
       },
       "functions": {
         "total": 143,
@@ -743,7 +743,7 @@
     "src/http_server_config.c": {
       "lines": {
         "total": 1711,
-        "hit": 1583
+        "hit": 1584
       },
       "functions": {
         "total": 152,
@@ -923,7 +923,7 @@
     "src/websocket/ws_session.c": {
       "lines": {
         "total": 554,
-        "hit": 500
+        "hit": 497
       },
       "functions": {
         "total": 38,

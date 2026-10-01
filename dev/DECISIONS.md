@@ -2,6 +2,10 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-09-30 php-async clamps each TransmitFile pass to the file size (1521d69); it stays.
+  Why: a probe (Windows 11) found the file pointer 32 KiB in after any larger send, and a
+  count or start past EOF fails with WSAEINVAL, sending none of a 4 KiB file (`h1/065`).
+  Rejected: counting from the file pointer (php-async 4102d7f).
 - 2026-09-30 A failed or short HTTP/1 file body ends the connection through the
   framing-lost path of `http_request_finalize`; a deferred start the loop refuses
   is answered before anything is written, with SEND_FILE_REFUSED.

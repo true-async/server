@@ -40,10 +40,12 @@ if errorlevel 1 (
 
 REM protect_memory is process-global page protection toggled outside the compile
 REM lock; the threaded worker pool shares one address space and races on it. Off.
+REM SKIP is listed with its reason: this job skips about 40 % of the suite, and the
+REM summary gives only the count.
 %PHP_BUILD_DIR%\php.exe run-tests.php ^
     -d opcache.protect_memory=0 ^
     -P -q -j2 ^
-    -g FAIL,BORK,LEAK,XLEAK ^
+    -g FAIL,BORK,LEAK,XLEAK,SKIP ^
     --no-progress ^
     --offline ^
     --show-diff ^
