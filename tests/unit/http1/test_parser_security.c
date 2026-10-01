@@ -167,14 +167,9 @@ static void test_missing_host_http11(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* llhttp may not enforce Host requirement - check if parsed */
-    /* Server should return 400 Bad Request */
-    http_request_t *req = http_parser_get_request(ctx);
-    if (result == 0 && req) {
-        /* If parsed, Host header should be missing */
-        zval *host = zend_hash_str_find(req->headers, "host", sizeof("host") - 1);
-        assert_null(host);
-    }
+    /* RFC 9112 §3.2: an HTTP/1.1 request without Host is 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_INVALID_HOST);
 
     http_parser_destroy(ctx);
 }
@@ -288,8 +283,10 @@ static void test_invalid_transfer_encoding(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Unknown Transfer-Encoding should cause error or be ignored */
-    (void)result;
+    /* RFC 9112 §6.1: a coding the server does not know, with Content-Length
+     * beside it, is answered 400; the length is not taken instead. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -318,8 +315,9 @@ static void test_null_byte_in_uri(void **state) {
 
     int result = http_parser_execute(ctx, request_data, len, NULL);
 
-    /* Should either reject or truncate at null byte */
-    (void)result;
+    /* A NUL is no URI character: 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -345,8 +343,9 @@ static void test_null_byte_in_header(void **state) {
 
     int result = http_parser_execute(ctx, request_data, offset + 10, NULL);
 
-    /* Should handle null byte appropriately */
-    (void)result;
+    /* RFC 9110 §5.5: NUL in a field value is rejected. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -368,15 +367,18 @@ static void test_crlf_injection_header(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    if (result == 0) {
-        http_request_t *req = http_parser_get_request(ctx);
-        if (req) {
-            /* X-Fake should either not exist or be properly separated */
-            zval *fake = zend_hash_str_find(req->headers, "x-fake", sizeof("x-fake") - 1);
-            /* If llhttp creates X-Fake as separate header, that's acceptable */
-            /* But value of X-Injected should not contain CRLF */
-        }
-    }
+    /* The CRLF ends the first line, so these are two fields, and neither value
+     * carries a line break. */
+    assert_int_equal(result, 0);
+    assert_true(http_parser_is_complete(ctx));
+
+    http_request_t *req = http_parser_get_request(ctx);
+    zval *injected = zend_hash_str_find(req->headers, "x-injected", sizeof("x-injected") - 1);
+    zval *fake = zend_hash_str_find(req->headers, "x-fake", sizeof("x-fake") - 1);
+    assert_non_null(injected);
+    assert_non_null(fake);
+    assert_string_equal(Z_STRVAL_P(injected), "value");
+    assert_string_equal(Z_STRVAL_P(fake), "injected");
 
     http_parser_destroy(ctx);
 }
@@ -620,9 +622,10 @@ static void test_multiple_transfer_encoding(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Parser behavior - just ensure no crash */
-    /* Combined as "chunked, identity" per RFC 7230 */
-    (void)result;
+    /* The two lines combine to "chunked, identity". RFC 9112 §6.3: chunked
+     * that is not the final coding leaves the length unknown, so 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -648,9 +651,12 @@ static void test_te_trailing_whitespace(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Should handle trailing whitespace - OWS is allowed */
-    /* Just ensure no crash and consistent behavior */
-    (void)result;
+    /* RFC 9110 §5.5: OWS around a field value is not part of it, so this is
+     * "chunked" and the body is read as chunked. */
+    assert_int_equal(result, 0);
+    assert_true(http_parser_is_complete(ctx));
+    assert_int_equal(ZSTR_LEN(http_parser_get_request(ctx)->body), 5);
+    assert_memory_equal(ZSTR_VAL(http_parser_get_request(ctx)->body), "hello", 5);
 
     http_parser_destroy(ctx);
 }
@@ -679,9 +685,10 @@ static void test_obs_fold_space(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Should either reject (400) or handle by replacing with SP */
-    /* Just ensure no crash */
-    (void)result;
+    /* RFC 9112 §5.2: a server rejects obs-fold with 400 or unfolds it; this
+     * one rejects. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -704,8 +711,9 @@ static void test_obs_fold_tab(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Should either reject or handle */
-    (void)result;
+    /* RFC 9112 §5.2: as with a space, obs-fold is rejected. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -731,9 +739,10 @@ static void test_bare_lf_in_headers(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Some parsers accept bare LF, some reject */
-    /* Ensure consistent behavior, no crash */
-    (void)result;
+    /* RFC 9112 §2.2 lets a recipient accept a bare LF; this parser does not,
+     * which leaves no line ending another hop could read differently. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -755,8 +764,9 @@ static void test_mixed_line_endings(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Ensure consistent behavior */
-    (void)result;
+    /* A bare LF among CRLFs is rejected as one alone is. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -777,8 +787,9 @@ static void test_bare_cr(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Should reject or handle consistently */
-    (void)result;
+    /* RFC 9112 §2.2: a bare CR is rejected or replaced; rejected here. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -907,8 +918,12 @@ static void test_chunk_size_too_long(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Should either parse or reject, no crash */
-    (void)result;
+    /* Leading zeros are HEXDIG like any other: the size is 5 however many
+     * precede it, and nothing overflows. */
+    assert_int_equal(result, 0);
+    assert_true(http_parser_is_complete(ctx));
+    assert_int_equal(ZSTR_LEN(http_parser_get_request(ctx)->body), 5);
+    assert_memory_equal(ZSTR_VAL(http_parser_get_request(ctx)->body), "hello", 5);
 
     http_parser_destroy(ctx);
 }
@@ -964,8 +979,11 @@ static void test_multiple_spaces_request_line(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* llhttp accepts this (lenient mode) - verify no crash */
-    (void)result;
+    /* RFC 9112 §3 lets a recipient split the request line on whitespace runs;
+     * llhttp does, and the target is still "/". */
+    assert_int_equal(result, 0);
+    assert_true(http_parser_is_complete(ctx));
+    assert_string_equal(ZSTR_VAL(http_parser_get_request(ctx)->uri), "/");
 
     http_parser_destroy(ctx);
 }
@@ -1020,10 +1038,9 @@ static void test_multiple_host_headers(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Per our implementation, duplicate headers are combined with comma */
-    /* This is technically allowed for most headers, but Host is special */
-    /* Just ensure no crash */
-    (void)result;
+    /* RFC 9112 §3.2: more than one Host is 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_INVALID_HOST);
 
     http_parser_destroy(ctx);
 }
@@ -1070,9 +1087,10 @@ static void test_empty_host_header(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Empty Host is valid for HTTP/1.1 to authority-form targets */
-    /* Just ensure no crash */
-    (void)result;
+    /* RFC 9112 §3.2: an http target has an authority, so an empty Host is an
+     * invalid value: 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_INVALID_HOST);
 
     http_parser_destroy(ctx);
 }
@@ -1095,9 +1113,11 @@ static void test_http09_simple_request(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Most modern parsers reject HTTP/0.9 */
-    /* Just ensure no crash */
-    (void)result;
+    /* llhttp reads "GET /" without a version as a request line still in
+     * progress: no error yet and no request, so the read timeout ends it. */
+    assert_int_equal(result, 0);
+    assert_false(http_parser_is_complete(ctx));
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_OK);
 
     http_parser_destroy(ctx);
 }
@@ -1118,9 +1138,9 @@ static void test_http2_in_http1_parser(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* llhttp may accept or reject HTTP/2.0 version string */
-    /* Just ensure no crash */
-    (void)result;
+    /* The HTTP/2 preface reads as version HTTP/2.0, which this parser refuses. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_INVALID_HTTP_VERSION);
 
     http_parser_destroy(ctx);
 }
@@ -1171,8 +1191,9 @@ static void test_cve_2022_35256_header_no_crlf(void **state) {
 
     int result = http_parser_execute(ctx, request_data, sizeof(request_data) - 1, NULL);
 
-    /* Should reject or handle safely */
-    (void)result;
+    /* A header line without its CRLF is rejected, not joined to the next. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -1201,8 +1222,9 @@ static void test_cve_2022_32215_multiline_te(void **state) {
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
 
-    /* Should reject obs-fold in Transfer-Encoding or handle safely */
-    (void)result;
+    /* A Transfer-Encoding continued on the next line is obs-fold: 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -1228,8 +1250,9 @@ static void test_2025_improper_header_termination(void **state) {
 
     int result = http_parser_execute(ctx, request_data, sizeof(request_data) - 1, NULL);
 
-    /* Should reject - \r\r is not valid header termination */
-    (void)result;
+    /* Headers that do not end in CRLF CRLF are rejected. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -1267,9 +1290,10 @@ static void test_cve_2024_22019_long_chunk_extension(void **state) {
 
     int result = http_parser_execute(ctx, request_data, offset, NULL);
 
-    /* Should either parse (if within limits) or reject safely */
-    /* Must not cause unbounded memory/CPU usage */
-    (void)result;
+    /* 50 KB of chunk extension, past HTTP_MAX_CHUNK_EXTENSIONS: 413 before
+     * the chunk data. No other limit counts these bytes. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_BODY_TOO_LARGE);
 
     free(request_data);
     http_parser_destroy(ctx);
@@ -1295,8 +1319,9 @@ static void test_cve_2022_32214_cr_only_delimiter(void **state) {
 
     int result = http_parser_execute(ctx, request_data, sizeof(request_data) - 1, NULL);
 
-    /* Should reject - only CRLF is valid per RFC 7230 */
-    (void)result;
+    /* A CR alone is no line ending: 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -1347,8 +1372,9 @@ static void test_null_in_chunk_size(void **state) {
     /* Use sizeof to include NUL byte */
     int result = http_parser_execute(ctx, request_data, sizeof(request_data) - 1, NULL);
 
-    /* Should handle NUL byte safely */
-    (void)result;
+    /* NUL is no HEXDIG: 400. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_MALFORMED);
 
     http_parser_destroy(ctx);
 }
@@ -1379,9 +1405,9 @@ static void test_extremely_long_header_line(void **state) {
 
     int result = http_parser_execute(ctx, request_data, offset, NULL);
 
-    /* Should either accept (if within limits) or reject with error */
-    /* Must not crash or overflow */
-    (void)result;
+    /* Past HTTP_MAX_HEADER_VALUE: 431. */
+    assert_int_equal(result, -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_HEADER_VALUE_TOO_LARGE);
 
     free(request_data);
     http_parser_destroy(ctx);
@@ -1580,6 +1606,62 @@ static void test_cl_empty_value(void **state) {
 /*
  * Main test suite
  */
+/* A chunked request whose chunks carry the given extension values: "x=" and the
+ * value per chunk, each chunk one byte of data. */
+static int parse_with_extensions(http1_parser_t *ctx, const size_t *values, const int chunks)
+{
+    smart_str req = {0};
+    smart_str_appends(&req, "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n");
+
+    for (int c = 0; c < chunks; c++) {
+        smart_str_appends(&req, "1;x=");
+        for (size_t i = 0; i < values[c]; i++) {
+            smart_str_appendc(&req, 'A');
+        }
+        smart_str_appends(&req, "\r\nh\r\n");
+    }
+
+    smart_str_appends(&req, "0\r\n\r\n");
+    smart_str_0(&req);
+
+    const int result = http_parser_execute(ctx, ZSTR_VAL(req.s), ZSTR_LEN(req.s), NULL);
+    smart_str_free(&req);
+    return result;
+}
+
+/* The cap counts names and values together: "x" and 16383 bytes is exactly
+ * HTTP_MAX_CHUNK_EXTENSIONS and passes, one byte more does not. */
+static void test_chunk_extensions_at_the_cap(void **state) {
+    (void) state;
+
+    http1_parser_t *ctx = http_parser_create(10 * 1024 * 1024);
+    assert_non_null(ctx);
+    const size_t at_cap[] = { HTTP_MAX_CHUNK_EXTENSIONS - 1 };
+    assert_int_equal(parse_with_extensions(ctx, at_cap, 1), 0);
+    assert_true(http_parser_is_complete(ctx));
+    http_parser_destroy(ctx);
+
+    ctx = http_parser_create(10 * 1024 * 1024);
+    assert_non_null(ctx);
+    const size_t past_cap[] = { HTTP_MAX_CHUNK_EXTENSIONS };
+    assert_int_equal(parse_with_extensions(ctx, past_cap, 1), -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_BODY_TOO_LARGE);
+    http_parser_destroy(ctx);
+}
+
+/* The cap is per request, not per chunk: chunks of one data byte each would
+ * otherwise multiply it by the body limit. */
+static void test_chunk_extensions_add_up_across_chunks(void **state) {
+    (void) state;
+
+    http1_parser_t *ctx = http_parser_create(10 * 1024 * 1024);
+    assert_non_null(ctx);
+    const size_t halves[] = { 9000, 9000 };
+    assert_int_equal(parse_with_extensions(ctx, halves, 2), -1);
+    assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_BODY_TOO_LARGE);
+    http_parser_destroy(ctx);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         /* RFC Compliance */
@@ -1656,6 +1738,8 @@ int main(void) {
         cmocka_unit_test(test_cve_2022_32215_multiline_te),
         cmocka_unit_test(test_2025_improper_header_termination),
         cmocka_unit_test(test_cve_2024_22019_long_chunk_extension),
+        cmocka_unit_test(test_chunk_extensions_at_the_cap),
+        cmocka_unit_test(test_chunk_extensions_add_up_across_chunks),
         cmocka_unit_test(test_cve_2022_32214_cr_only_delimiter),
         cmocka_unit_test(test_cve_2021_22959_space_after_header_name),
         cmocka_unit_test(test_null_in_chunk_size),
