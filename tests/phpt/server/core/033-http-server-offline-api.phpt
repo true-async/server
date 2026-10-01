@@ -81,6 +81,10 @@ $expected_keys = [
 ];
 $missing = array_diff($expected_keys, array_keys($t));
 echo "telemetry-missing-keys: ", count($missing) === 0 ? 'none' : implode(',', $missing), "\n";
+/* Keys that only ever held 0 are gone; byte counters are #396. */
+foreach (['bytes_received', 'bytes_sent', 'errors'] as $gone) {
+    echo "telemetry-$gone: ", array_key_exists($gone, $t) ? 'present' : 'absent', "\n";
+}
 echo "telemetry-total_requests-zero: ", $t['total_requests'] === 0 ? 'yes' : 'no', "\n";
 echo "telemetry-active_connections-zero: ", $t['active_connections'] === 0 ? 'yes' : 'no', "\n";
 
@@ -102,6 +106,9 @@ static-handler-locked: yes
 getConfig-identity: yes
 isRunning-before-start: no
 telemetry-missing-keys: none
+telemetry-bytes_received: absent
+telemetry-bytes_sent: absent
+telemetry-errors: absent
 telemetry-total_requests-zero: yes
 telemetry-active_connections-zero: yes
 resetTelemetry: true
