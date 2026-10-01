@@ -81,6 +81,11 @@ bool reactor_pool_exec(reactor_pool_t *rp, int idx, reactor_exec_fn fn, void *ar
  * and decides to drop/retry). Any thread; must not race destroy(). */
 bool reactor_pool_post_exec(reactor_pool_t *rp, int idx, reactor_exec_fn fn, void *arg);
 
+/* Whether reactor `idx` is in its loop and takes posts. False for a bad index,
+ * before the loop starts and once it has left; a reactor that left does not
+ * come back. Any thread; must not race destroy(). */
+bool reactor_pool_is_running(const reactor_pool_t *rp, int idx);
+
 /* Count of items reactor `idx` has drained from its inbound. Rises as the
  * reactor services work — "alive" == "draining". Returns 0 for a bad index. */
 uint64_t reactor_pool_processed(const reactor_pool_t *rp, int idx);

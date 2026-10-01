@@ -126,11 +126,16 @@ Notes: dev/plans/S3.md
       handoff: PR 377; Windows CI run 36828469004 skips none of the 56 for either
         reason (212 of 549 skipped, 0 failed). The 9 first failures were the
         tests' own POSIX shell; the pool imbalance `012` found is S3.11.
-- [ ] S3.6 The Windows job builds ext/sockets, ext/openssl, zstd and both test
+- [x] S3.6 (#390) The Windows job builds ext/sockets, ext/openssl, zstd and both test
         hook options (added to `config.w32`)
       done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
         its listed reason; failures as in S3.5
       tier: T1 · role: —
+      handoff: PR 392; Windows CI run 36839041561 skips no test for those four
+        reasons (167 of 553 skipped, 0 failed). `core/020` fixed by #391,
+        `h1/038` made order-independent, `h1/055` skipped with a measured
+        reason (`dev/plans/S3.md`). `h3/079` and `080`, added after S3.5, lost
+        the false SO_REUSEPORT skip here.
 - [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
@@ -288,9 +293,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `multipart/026` (a 4 MiB field held at 3,152 bytes on main, 3 of 3) passes,
     and kills the mutant that keeps the doubled buffer (8.4 MB held). A 40 MiB
     field under `memory_limit=32M`: 503 at the parse, was 500 in the handler.
-20. The H3 slot release stops retrying once the reactor leaves RUN
-    (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
-    counter. Reproduce through a hook that fails the post, or bound it anyway.
+20. The H3 slot release stops retrying once the reactor leaves RUN: done,
+    bounded (#384), not reproduced. `reactor_pool_is_running()` decides; a
+    release for a reactor that left is dropped with one stderr notice, not a
+    counter: the drop happens at shutdown, where nothing would read one.
+    `h3/081` drives it through the fault point `h3/slot_release/reactor_gone`
+    (red on main: the point is missing). The check inside the retry loop runs
+    only when the deferral fails, which no test reaches.
 21. `test_parser_security.c` asserts the parse outcome: done. 25 cases asserted
     nothing (23 `(void)result`, plus the missing-Host and CRLF cases under an
     `if` that never ran); each now asserts what was measured, with its RFC
@@ -298,9 +307,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     four accept correctly. The fifth, a 50 KB chunk extension, was accepted
     with nothing counting it: #386 caps extensions at 16 KiB per request (413),
     with two boundary cases and `h1/069`.
-22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
-    ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
-    inspects the stateless reset it emits (length clamp, header bits, token).
+22. The HTTP/3 cmocka targets run in CI: fuzz-embedded restores the nghttp3
+    and ngtcp2 caches and passes `PKG_CONFIG_PATH` to CMake, so
+    `HTTP3Packet` and `HTTP3SlotRelease` build; the step fails if any of the
+    three HTTP/3 targets is missing from `ctest -N`. `test_http3_packet` reads
+    the stateless reset from the send stub: length (41 → 40, 100 → 99,
+    1201 and 1500 → 1200), the short-header bits and the token; dropping the
+    header-bit fix fails it 3 of 3, dropping the clamp overruns the buffer.
 23. Test strength of the static decoders: done. `test_static_decoders` links
     `http_range.c` and checks 18 range headers (clamp, suffix, 416 past the end
     and on an empty file, refusals); a file's ETag changes with its size and

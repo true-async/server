@@ -33,7 +33,12 @@ $server = new HttpServer(
         ->setWriteTimeout(5)
 );
 
-$server->addHttpHandler(function ($req, $res) {
+/* The client prints the handler's report once both requests are done: whether
+ * it reads the body before the refused write runs depends on whether the first
+ * write suspends the handler, which differs by platform. */
+$report = '';
+
+$server->addHttpHandler(function ($req, $res) use (&$report) {
     /* The reuse probe below runs this handler a second time; one report of the
      * refusal is the subject here. */
     static $reported = false;
@@ -47,12 +52,12 @@ $server->addHttpHandler(function ($req, $res) {
         $res->write('surplus');
 
         if (!$reported) {
-            echo "no throw\n";
+            $report .= "no throw\n";
         }
     } catch (\Throwable $e) {
         if (!$reported) {
-            echo "class: ", get_class($e), "\n";
-            echo "message: ", $e->getMessage(), "\n";
+            $report .= "class: " . get_class($e) . "\n";
+            $report .= "message: " . $e->getMessage() . "\n";
         }
     }
 
@@ -60,7 +65,7 @@ $server->addHttpHandler(function ($req, $res) {
     $res->end();
 });
 
-spawn(function () use ($port, $server) {
+spawn(function () use ($port, $server, &$report) {
     usleep(50000);
 
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 5);
@@ -82,11 +87,12 @@ spawn(function () use ($port, $server) {
     $len  = preg_match('/^content-length:\s*(\d+)/mi', $head, $m) ? (int) $m[1] : 0;
     $body = $len > 0 ? tas_read_exact($fp, $len) : '';
 
-    echo "content-length: ", $len, "\n";
-    echo "body: ", json_encode($body), "\n";
-
     fwrite($fp, "GET /again HTTP/1.1\r\nHost: x\r\n\r\n");
     $tail = fread($fp, 32);
+
+    echo $report;
+    echo "content-length: ", $len, "\n";
+    echo "body: ", json_encode($body), "\n";
     echo "connection reusable: ", (int) str_starts_with((string) $tail, 'HTTP/1.1 200'), "\n";
 
     fclose($fp);
