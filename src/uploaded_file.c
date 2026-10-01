@@ -101,8 +101,9 @@ static void uploaded_file_free_object(zend_object *object)
     }
 
     if (intern->tmp_path) {
-        /* Delete temp file if not moved */
-        if (!intern->moved && intern->is_ready) {
+        /* Delete temp file if not moved. The object is the file's only owner
+         * (mp_file_info_release_tmp_path), a failed upload's partial file too. */
+        if (!intern->moved) {
             VCWD_UNLINK(ZSTR_VAL(intern->tmp_path));
         }
 
