@@ -126,11 +126,14 @@ Notes: dev/plans/S3.md
       handoff: PR 377; Windows CI run 36828469004 skips none of the 56 for either
         reason (212 of 549 skipped, 0 failed). The 9 first failures were the
         tests' own POSIX shell; the pool imbalance `012` found is S3.11.
-- [ ] S3.6 The Windows job builds ext/sockets, ext/openssl, zstd and both test
+- [ ] S3.6 (#390) The Windows job builds ext/sockets, ext/openssl, zstd and both test
         hook options (added to `config.w32`)
       done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
         its listed reason; failures as in S3.5
       tier: T1 · role: —
+      handoff: local build 43 pass, 8 skip for other groups; the 3 failures
+        fixed (#391, `h1/038`) or skipped with a measured reason (`h1/055`),
+        `dev/plans/S3.md`. Windows CI not run yet.
 - [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
