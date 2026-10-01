@@ -4,6 +4,12 @@ HTTP/1 — a terminator that never left retires the connection
 true_async_server
 true_async
 sockets
+--SKIPIF--
+<?php
+if (PHP_OS_FAMILY === 'Windows') {
+    die('skip a send on Windows loopback never parks against a peer that does not read: 4 MiB and the terminator go in 1 ms');
+}
+?>
 --FILE--
 <?php
 /* Chunked framing ends at `0\r\n\r\n` and nowhere else, so a body whose

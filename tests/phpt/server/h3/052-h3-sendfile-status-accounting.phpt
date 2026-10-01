@@ -48,7 +48,7 @@ $port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+    ->setCertificate($cert)->setPrivateKey($key)
     ->setStatsEnabled(true)
     ->setLogSinks([
         ['type' => 'stream', 'stream' => $fh, 'format' => 'json',

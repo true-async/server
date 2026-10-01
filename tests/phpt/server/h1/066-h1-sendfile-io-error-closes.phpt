@@ -48,7 +48,7 @@ foreach (['tcp', 'ssl'] as $scheme) {
         ->setReadTimeout(10)->setWriteTimeout(10);
 
     if ($scheme === 'ssl') {
-        $config->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
+        $config->setCertificate($cert)->setPrivateKey($key);
     }
 
     $server = new HttpServer($config);

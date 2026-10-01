@@ -170,7 +170,6 @@ struct _http_server_config_t {
     zend_string *http3_hq_docroot;
 
     /* Buffer sizes */
-    size_t write_buffer_size;   /* Write buffer size (default: 65536) */
 
     /* Connection settings */
     int backlog;            /* Listen backlog (default: 128); passed to listen(2) as int */
@@ -384,11 +383,6 @@ struct _http_server_config_t {
     http_server_shared_config_t *frozen;
 
     /* Boolean flags (clustered) */
-    bool http2_enabled;              /* Enable HTTP/2 */
-    bool websocket_enabled;          /* Enable WebSocket (TODO: not yet supported) */
-    bool protocol_detection_enabled; /* Auto-detect protocol */
-    bool tls_enabled;                /* Enable TLS */
-    bool auto_await_body;            /* Automatically await request body */
     bool body_streaming_enabled;     /* Issue #26 — push parser DATA chunks
                                       * into per-request queue instead of
                                       * accumulating into req->body. Handlers

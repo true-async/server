@@ -381,11 +381,11 @@ final class HttpServerConfig
      * Per-stream chunk-queue cap for HttpResponse::write() backpressure.
      *
      * When the handler's write() call grows the stream's chunk queue past
-     * this many bytes, the coroutine suspends until nghttp2 drains
-     * enough to drop below. HTTP/2 only; HTTP/1 chunked path uses
-     * the kernel send buffer instead.
+     * this many bytes, the coroutine suspends until it drains enough to
+     * drop below. It bounds HTTP/2 streams, the HTTP/1 connection's
+     * outbound queue and WebSocket sends.
      *
-     * Default: 262144 (256 KiB). Valid: 4096 .. 67108864 (64 MiB).
+     * Default: 262144 (256 KiB). Valid: 4096 .. 4194304 (4 MiB).
      * Industry: gRPC-Go 64 KiB, Envoy 1 MiB, Node.js 16 KiB.
      *
      * @param int $bytes
@@ -903,75 +903,114 @@ final class HttpServerConfig
     // === Buffers ===
 
     /**
-     * Set write buffer size
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
      *
-     * @param int $size Buffer size in bytes
-     * @return static
+     * setStreamWriteBufferBytes() bounds the bytes queued on a connection or
+     * stream (4 KiB to 4 MiB; HTTP/1, HTTP/2 and WebSocket).
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function setWriteBufferSize(int $size): static {}
 
     /**
-     * Get write buffer size
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
+     *
+     * setStreamWriteBufferBytes() bounds the bytes queued on a connection or
+     * stream (4 KiB to 4 MiB; HTTP/1, HTTP/2 and WebSocket).
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function getWriteBufferSize(): int {}
 
     // === Protocol options ===
 
     /**
-     * Enable HTTP/2 support (TODO)
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
      *
-     * @param bool $enable Enable HTTP/2
-     * @return static
+     * HTTP/2 is per listener: addListener() negotiates it, addHttp2Listener()
+     * serves only HTTP/2, addHttp2Handler() handles it.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function enableHttp2(bool $enable): static {}
 
     /**
-     * Check if HTTP/2 is enabled
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
+     *
+     * HTTP/2 is per listener: addListener() negotiates it, addHttp2Listener()
+     * serves only HTTP/2, addHttp2Handler() handles it.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function isHttp2Enabled(): bool {}
 
     /**
-     * Legacy toggle. WebSocket is enabled by registering a handler with
-     * HttpServer::addWebSocketHandler() — there is no separate flag to set.
-     * enableWebSocket(true) therefore throws, pointing at that API;
-     * enableWebSocket(false) is a no-op that stores the flag.
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
      *
-     * @param bool $enable
-     * @return static
-     * @throws HttpServerRuntimeException when passed true
+     * HttpServer::addWebSocketHandler() enables WebSocket.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function enableWebSocket(bool $enable): static {}
 
     /**
-     * Check if WebSocket is enabled
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
+     *
+     * HttpServer::addWebSocketHandler() enables WebSocket.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function isWebSocketEnabled(): bool {}
 
     /**
-     * Enable automatic protocol detection
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
      *
-     * @param bool $enable Enable detection
-     * @return static
+     * Protocol detection always runs, limited by each listener's protocols and
+     * the registered handlers.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function enableProtocolDetection(bool $enable): static {}
 
     /**
-     * Check if protocol detection is enabled
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
+     *
+     * Protocol detection always runs, limited by each listener's protocols and
+     * the registered handlers.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function isProtocolDetectionEnabled(): bool {}
 
     // === TLS configuration (TODO) ===
 
     /**
-     * Enable TLS for default listener
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
      *
-     * @param bool $enable Enable TLS
-     * @return static
+     * TLS is per listener: addListener($host, $port, true), addHttp1Listener()
+     * or addHttp2Listener(). The constructor's listener is plaintext, and HTTP/3
+     * listeners are always TLS.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function enableTls(bool $enable): static {}
 
     /**
-     * Check if TLS is enabled
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
+     *
+     * getListeners() reports 'tls' for each listener.
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function isTlsEnabled(): bool {}
 
@@ -1020,18 +1059,28 @@ final class HttpServerConfig
     // === Body handling ===
 
     /**
-     * Set auto-await mode for request body
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
      *
-     * When enabled, non-multipart requests wait for full body before handler is called.
-     * Multipart requests always use streaming.
+     * It never decided when the handler starts. HTTP/1 starts it after the body;
+     * HTTP/2 and HTTP/3 may start it after the headers, so call awaitBody() before
+     * getBody(). setBodyStreamingEnabled(true) delivers a large body through
+     * readBody().
      *
-     * @param bool $enable Enable auto-await
-     * @return static
+     * @throws HttpServerRuntimeException always
      */
     public function setAutoAwaitBody(bool $enable): static {}
 
     /**
-     * Check if auto-await is enabled
+     * Removed: the value it stored was read by nothing. The declaration stays for
+     * one minor release and always throws.
+     *
+     * It never decided when the handler starts. HTTP/1 starts it after the body;
+     * HTTP/2 and HTTP/3 may start it after the headers, so call awaitBody() before
+     * getBody(). setBodyStreamingEnabled(true) delivers a large body through
+     * readBody().
+     *
+     * @throws HttpServerRuntimeException always
      */
     public function isAutoAwaitBodyEnabled(): bool {}
 
@@ -1139,8 +1188,9 @@ final class HttpServerConfig
 
     /**
      * Stream request bodies into a per-request queue (issue #26) instead
-     * of accumulating into `req->body`. Handlers must consume via
-     * {@see HttpRequest::readBody()}; getBody() throws.
+     * of accumulating into `req->body`. A large or unsized body streams and
+     * is consumed via {@see HttpRequest::readBody()}; a small one and a form
+     * are still buffered. getBody() returns "" for a body that streams.
      *
      * @return static
      */

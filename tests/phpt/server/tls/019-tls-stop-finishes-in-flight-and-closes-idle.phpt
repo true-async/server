@@ -45,7 +45,6 @@ function serve(int $port, string $cert, string $key, callable $handler): HttpSer
 {
     $server = new HttpServer((new HttpServerConfig())
         ->addListener('127.0.0.1', $port, true)
-        ->enableTls(true)
         ->setCertificate($cert)
         ->setPrivateKey($key)
         ->setReadTimeout(10)

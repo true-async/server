@@ -6,7 +6,6 @@ true_async
 --SKIPIF--
 <?php
 require __DIR__ . '/_h3_skipif.inc';
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
 h3_skipif(['openssl_cli' => true, 'h3client' => true]);
 ?>
 --ENV--
@@ -42,7 +41,7 @@ $port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)   /* TCP listener required by start() */
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+    ->setCertificate($cert)->setPrivateKey($key)
     ->setWorkers(2);
 $server = new HttpServer($config);
 
