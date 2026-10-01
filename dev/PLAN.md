@@ -166,8 +166,18 @@ an item marked "reproduce" gets its failing run before any code.
     and the macOS and Windows CI legs over the coming runs. Port 0 listeners
     (81c0437) stay the stronger form for tests that can read
     `getBoundListeners()`.
-15. #346 — the reactor-pool worker inbox spawns into the server scope after
-    `stop()` and across a restart, the path #345 left out: reproduce.
+15. #346 — the reactor-pool worker inbox after `stop()`: done. A handler's
+    `stop()` on its worker clone left the inbox in the registry; on main
+    `h3/079` reads 6 to 10 of 16 requests after the stop answered by the
+    stopped clone, `h3/080` 6 to 7 of 16 sent while the stopping handler held
+    its thread, 3 runs of 3 each, and both pass with the fix. `do_stop`
+    unpublishes the inbox; `start()` fences the reactors after its wait and
+    waits out a retire the pool coroutine still runs; the bailout and free
+    paths unpublish before the free. Mutants: dropping the `do_stop` unpublish
+    fails `h3/080`; dropping the fence in `start()` passes every local pool
+    test (a dispatch that loaded the inbox just before the unpublish, no hook
+    widens it). The restart half is unreachable: the pool loads a fresh clone
+    per worker run and starts it once.
 16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
     fails the engine's `open()` (mode 0) started the handler twice on one ctx
     and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
