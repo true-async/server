@@ -484,7 +484,9 @@ jobs:
           # release leg is what the release resembles.
           # The libfiu fault points (dev/DECISIONS.md, 2026-09-30) are compiled
           # in on the same leg, for the same reason: their tests skip elsewhere.
-          ENABLE_TEST_HOOKS: ${{ matrix.debug && '--enable-tas-test-hooks --enable-fault-injection' || '' }}
+          # So are the `_http_*` hooks that 20 phpt need: the log sinks,
+          # reactor_pool/* and telemetry 001-003.
+          ENABLE_TEST_HOOKS: ${{ matrix.debug && '--enable-tas-test-hooks --enable-fault-injection --enable-http-server-test-hooks' || '' }}
         run: |
           set -eux
           if [ -n "$ENABLE_TEST_HOOKS" ]; then

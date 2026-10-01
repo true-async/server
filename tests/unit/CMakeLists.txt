@@ -706,6 +706,7 @@ add_executable(test_static_decoders
     ${CMAKE_SOURCE_DIR}/../src/http_mime.c
     ${CMAKE_SOURCE_DIR}/../src/http_etag.c
     ${CMAKE_SOURCE_DIR}/../src/http_date.c
+    ${CMAKE_SOURCE_DIR}/../src/http_range.c
     ${CMAKE_SOURCE_DIR}/../src/static/http_static_path.c
 )
 
