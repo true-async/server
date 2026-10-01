@@ -282,9 +282,12 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     kept, 3 of 3; now both read CANT_WRITE with no temp file and size 0, as
     PHP. NO_TMP_DIR has a case too. The generator's header comment now says
     the processor frees the path with its own allocator.
-19. Multipart takes memory from `emalloc` in every build: `HAVE_PHP_H` is set
-    only by the unit and fuzz builds, so the shipped POSIX build uses libc
-    `malloc`, outside `memory_limit`, and the tested branch is not the shipped one.
+19. Multipart takes memory from `emalloc` in every build: done (#382). The
+    processor has no fork left; the parser takes libc only under
+    `MP_PARSER_LIBC_ALLOC`, which the PHP-less `fuzz_multipart` sets.
+    `multipart/026` (a 4 MiB field held at 3,152 bytes on main, 3 of 3) passes,
+    and kills the mutant that keeps the doubled buffer (8.4 MB held). A 40 MiB
+    field under `memory_limit=32M`: 503 at the parse, was 500 in the handler.
 20. The H3 slot release stops retrying once the reactor leaves RUN
     (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
     counter. Reproduce through a hook that fails the post, or bound it anyway.
