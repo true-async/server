@@ -8,10 +8,9 @@
 
 /*
  * libFuzzer harness for the multipart/form-data state machine in
- * src/formats/multipart_parser.c. The parser's memory path is
- * conditional on HAVE_PHP_H — building the harness WITHOUT that
- * define makes the parser allocate via libc malloc/free, so we can
- * exercise it without spinning up the PHP runtime (fast execs =
+ * src/formats/multipart_parser.c. The harness builds the parser with
+ * MP_PARSER_LIBC_ALLOC, which makes it allocate via libc malloc/free
+ * instead of emalloc, so it runs without the PHP runtime (fast execs =
  * more coverage per hour).
  *
  * Entry point: first 16 bytes of the fuzz input are treated as the
