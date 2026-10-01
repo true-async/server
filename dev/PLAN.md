@@ -242,9 +242,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 19. Multipart takes memory from `emalloc` in every build: `HAVE_PHP_H` is set
     only by the unit and fuzz builds, so the shipped POSIX build uses libc
     `malloc`, outside `memory_limit`, and the tested branch is not the shipped one.
-20. The H3 slot release stops retrying once the reactor leaves RUN
-    (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
-    counter. Reproduce through a hook that fails the post, or bound it anyway.
+20. The H3 slot release stops retrying once the reactor leaves RUN: done,
+    bounded (#384), not reproduced. `reactor_pool_is_running()` decides; a
+    release for a reactor that left is dropped with one stderr notice, not a
+    counter: the drop happens at shutdown, where nothing would read one.
+    `h3/081` drives it through the fault point `h3/slot_release/reactor_gone`
+    (red on main: the point is missing). The check inside the retry loop runs
+    only when the deferral fails, which no test reaches.
 21. `test_parser_security.c` asserts the parse outcome: 23 of 55 cases end in
     `(void)result`, among them two Transfer-Encoding headers (`:625`).
 22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
