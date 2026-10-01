@@ -6,7 +6,6 @@ true_async
 --SKIPIF--
 <?php
 require __DIR__ . '/_h3_skipif.inc';
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
 h3_skipif(['openssl_cli' => true, 'h3client' => true]);
 ?>
 --ENV--

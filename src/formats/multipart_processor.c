@@ -498,6 +498,26 @@ static int on_headers_complete(multipart_parser_t* parser)
     return 0;
 }
 
+/* Fail the file in flight as PHP fails one (main/rfc1867.c): the error, and no
+ * temp file and no size left behind. */
+static void cancel_file(mp_processor_t* proc, const int error)
+{
+    proc->current_error = error;
+
+    if (proc->file_handle) {
+        fclose(proc->file_handle);
+        proc->file_handle = NULL;
+    }
+
+    if (proc->tmp_path) {
+        VCWD_UNLINK(proc->tmp_path);
+        MP_FREE(proc->tmp_path);
+        proc->tmp_path = NULL;
+    }
+
+    proc->file_size = 0;
+}
+
 static int on_part_data(multipart_parser_t* parser, const char* at, size_t length)
 {
     mp_processor_t* proc = multipart_parser_get_data(parser);
@@ -508,18 +528,7 @@ static int on_part_data(multipart_parser_t* parser, const char* at, size_t lengt
         const int size_error = file_size_error(proc, length);
 
         if (size_error != MP_UPLOAD_ERR_OK) {
-            proc->current_error = size_error;
-            fclose(proc->file_handle);
-            proc->file_handle = NULL;
-
-            /* A refused file has no temp file and no size, as in PHP. */
-            if (proc->tmp_path) {
-                VCWD_UNLINK(proc->tmp_path);
-                MP_FREE(proc->tmp_path);
-                proc->tmp_path = NULL;
-            }
-
-            proc->file_size = 0;
+            cancel_file(proc, size_error);
             return 0;  /* Continue parsing but don't write */
         }
 
@@ -527,9 +536,7 @@ static int on_part_data(multipart_parser_t* parser, const char* at, size_t lengt
         size_t written = fwrite(at, 1, length, proc->file_handle);
 
         if (written != length) {
-            proc->current_error = MP_UPLOAD_ERR_CANT_WRITE;
-            fclose(proc->file_handle);
-            proc->file_handle = NULL;
+            cancel_file(proc, MP_UPLOAD_ERR_CANT_WRITE);
             return 0;
         }
 
@@ -563,10 +570,17 @@ static int on_part_end(multipart_parser_t* parser)
     mp_processor_t* proc = multipart_parser_get_data(parser);
 
     if (proc->file_handle) {
-        /* Close file */
-        fflush(proc->file_handle);
-        fclose(proc->file_handle);
+        /* A part smaller than the stdio buffer reaches the disk only here, so
+         * a failed flush or close is a failed write. */
+        FILE* const file = proc->file_handle;
         proc->file_handle = NULL;
+
+        const bool flushed = fflush(file) == 0;
+        const bool closed  = fclose(file) == 0;
+
+        if (!flushed || !closed) {
+            cancel_file(proc, MP_UPLOAD_ERR_CANT_WRITE);
+        }
     }
 
     if (proc->skip_part) {

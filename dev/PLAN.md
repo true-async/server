@@ -90,37 +90,71 @@ features Windows lacks, and its known flakes and unmeasured costs are settled.
 Done when: every Windows CI skip has a reason or an open plan item, and S3.1,
 S3.2 and S3.4 are closed with evidence.
 Base: 05c871c (server), 1521d69 (php-async)
+Notes: dev/plans/S3.md
 
 - [x] S3.1 `multipart/009` fails on Windows (items 37 and 18)
       done: a local command reproduces the NULL `getSize()` at a stated rate;
         the fix brings it to 0 of the same number of runs; a test is red
         without the fix
       tier: T1 · role: —
-      handoff: cause is a second delete of a temp file path (request end and
-        the UploadedFile both unlinked it), which on Windows removes another
-        process's file: GetTempFileName keeps 3 prefix chars and a clock-based
-        16-bit number. Error 6, `chmod` ENOENT. The test body in 8 processes:
-        6 to 10 of 400 failed before, 0 of 1200 after; `multipart/025` red
-        before. Full phpt suite locally 284 passed, 0 failed, 263 skipped.
-        The unlink after a failed `fopen` has no test: item 18's cmocka case.
+      handoff: #368, PR 369; `multipart/025`, 0 of 1200 runs fail after (6-10 of
+        400 before). The unlink after a failed `fopen` has no test: item 18.
 - [x] S3.2 Decide how synchronous TransmitFile moves the file pointer
       done: a C probe answers three questions on this machine (does the
         pointer advance; what a count past the file end does; why `h1/065`
         got 0 bytes before php-async 1521d69); answers and the verdict on the
         clamp in `io_transmitfile_work_cb` recorded in `dev/DECISIONS.md`
       tier: T1 · role: —
-      handoff: recorded in `dev/DECISIONS.md`; the clamp stays. Two php-async
-        comments said the opposite of the probe and are corrected on branch
-        `transmitfile-comments` (not pushed). `h1/065` reads got=4096 on
-        Windows, 3 of 3. The probe source is not in a repository.
-- [ ] S3.3 Sort the Windows CI skips (235 of 546 on 2026-09-30)
+      handoff: `dev/DECISIONS.md` 2026-09-30; comments in true-async/php-async#309.
+- [x] S3.3 Sort the Windows CI skips (236 of 548, run 36767391692)
       done: each skipping phpt listed with its reason in `dev/plans/S3.md`,
         marked justified or given an open plan item; items 27 and 34 included
       tier: T1 · role: Critic
-- [ ] S3.4 Connect storm on Windows before and after php-async #307 (item 33)
+      handoff: `dev/plans/S3.md`: 226 skips hide code, 10 are justified.
+- [x] S3.4 Connect storm on Windows before and after php-async #307 (item 33)
       done: time until N parallel connects are accepted, for both builds, in
         `dev/BENCHMARKS.md` with N, machine and run count
       tier: T1 · role: —
+      handoff: `dev/BENCHMARKS.md` 2026-09-30: 1000 connects take 578-595 ms with
+        #307 and 156-172 ms without, 7 runs each, A/B/A. The cost goes to S3.10.
+        Scripts `storm*.php` are not in a repository.
+- [x] S3.5 (#374) Drop the false "SO_REUSEPORT" skip from its 56 tests, and make the
+        `curl --version 2>/dev/null` check of 22 test files run under cmd
+      done: none of the 56 skips on Windows CI for either reason; each failure
+        among them becomes a step of its own
+      tier: T1 · role: —
+      handoff: PR 377; Windows CI run 36828469004 skips none of the 56 for either
+        reason (212 of 549 skipped, 0 failed). The 9 first failures were the
+        tests' own POSIX shell; the pool imbalance `012` found is S3.11.
+- [ ] S3.6 The Windows job builds ext/sockets, ext/openssl, zstd and both test
+        hook options (added to `config.w32`)
+      done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
+        its listed reason; failures as in S3.5
+      tier: T1 · role: —
+- [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
+      done: no test of those groups skips on Windows CI for its listed reason;
+        failures as in S3.5
+      tier: T1 · role: —
+- [ ] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
+        OpenSSL >= 3.5 on the runner)
+      done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
+        in S3.5
+      tier: T2 · role: Critic
+- [ ] S3.9 Port the six tests whose POSIX mechanism is only their setup
+        (`dev/plans/S3.md`)
+      done: the six run and pass on Windows CI
+      tier: T1 · role: —
+- [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
+        at 3.5 times the time for a 1000-connect burst (S3.4)
+      done: choice and reason recorded in `dev/DECISIONS.md`
+      tier: T2 · role: Critic
+- [ ] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
+        nothing in 30 of 30 runs, the worker started last took every request in
+        23 (`dev/plans/S3.md`, S3.5)
+      done: the cause found (shared socket, one AcceptEx at a time, or the
+        reactor) with the failing run named; the pool spreads or the limit is
+        decided in `dev/DECISIONS.md`; USAGE.md:688 states the measured behaviour
+      tier: T2 · role: Critic
 
 ## Next
 
@@ -217,12 +251,15 @@ an item marked "reproduce" gets its failing run before any code.
     test (a dispatch that loaded the inbox just before the unpublish, no hook
     widens it). The restart half is unreachable: the pool loads a fresh clone
     per worker run and starts it once.
-15a. #376 — `start()` from a handler after `stop()` runs inside the outer
-    run: it releases the scope the outer `start()` drains next
-    (`http_server_class.c`, the restart branch before the scope is created),
-    then fails at the room hub attach with "all 1024 slots are taken" while
-    one slot is held. Settle refuse-or-wait in the issue, then a test that
-    fails first.
+15a. #376 — `start()` from a handler after `stop()`: done, refused. Waiting
+    for the drain is not an option: the drain waits for that handler. A
+    `start_active` flag spans `start()` from entry to return; a `start()` while
+    it holds on a stopped server throws "Server is still stopping" before it
+    touches the server. `core/084` reads a 500 for the handler's own request
+    and the misleading room hub error against main, 3 runs of 3, and passes
+    here; it also kills the mutant whose refused `start()` on a running server
+    clears the flag of the run on the stack. The flag's reset on the bailout
+    exit has no test.
 16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
     fails the engine's `open()` (mode 0) started the handler twice on one ctx
     and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
@@ -233,9 +270,12 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `--enable-http-server-test-hooks`, and the 20 phpt gated on `_http_*`
     functions (reactor_pool, telemetry 001-003, eight in core) run and pass.
     Run them locally with the flag first: nothing has run them in CI.
-18. A failed `fflush` or `fclose` fails the upload with CANT_WRITE
-    (`multipart_processor.c:580-581`); a cmocka case reaches CANT_WRITE and
-    NO_TMP_DIR through `tmp_path_generator`. Reproduce.
+18. A failed `fflush` or `fclose` fails the upload: done (#380). A
+    `tmp_path_generator` linking to `/dev/full` gives a 16-byte part
+    `UPLOAD_ERR_OK` and a 64 KiB part CANT_WRITE with its partial temp file
+    kept, 3 of 3; now both read CANT_WRITE with no temp file and size 0, as
+    PHP. NO_TMP_DIR has a case too. The generator's header comment now says
+    the processor frees the path with its own allocator.
 19. Multipart takes memory from `emalloc` in every build: done (#382). The
     processor has no fork left; the parser takes libc only under
     `MP_PARSER_LIBC_ALLOC`, which the PHP-less `fuzz_multipart` sets.

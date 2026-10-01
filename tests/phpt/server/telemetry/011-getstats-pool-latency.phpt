@@ -5,8 +5,8 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
-if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
+exec('curl --version 2>&1', $out, $rc);
+if ($rc !== 0) die('skip curl CLI not available');
 ?>
 --FILE--
 <?php
@@ -51,15 +51,18 @@ spawn(function () use ($server, $port) {
      * nine requests offered in turn can all be taken by whichever one is free —
      * measured on a macOS runner, where this test then reported a single worker
      * and failed. Nine at once cannot all be accepted by one. */
-    $cmds = [];
+    $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+    $procs = [];
 
     for ($i = 0; $i < N; $i++) {
         $path = ($i % 3 === 0) ? '/slow' : '/fast';
-        $cmds[] = sprintf('curl -s -o /dev/null --http1.1 --max-time 5 http://127.0.0.1:%d%s &',
-                          $port, $path);
+        $procs[] = proc_open(['curl', '-s', '-o', $null, '--http1.1', '--max-time', '5',
+                              "http://127.0.0.1:$port$path"], [], $pipes);
     }
 
-    shell_exec(implode(' ', $cmds) . ' wait');
+    foreach ($procs as $proc) {
+        proc_close($proc);
+    }
 
     $stats = [];
     for ($p = 0; $p < 60; $p++) {
