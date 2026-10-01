@@ -178,6 +178,12 @@ an item marked "reproduce" gets its failing run before any code.
     test (a dispatch that loaded the inbox just before the unpublish, no hook
     widens it). The restart half is unreachable: the pool loads a fresh clone
     per worker run and starts it once.
+15a. #376 — `start()` from a handler after `stop()` runs inside the outer
+    run: it releases the scope the outer `start()` drains next
+    (`http_server_class.c`, the restart branch before the scope is created),
+    then fails at the room hub attach with "all 1024 slots are taken" while
+    one slot is held. Settle refuse-or-wait in the issue, then a test that
+    fails first.
 16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
     fails the engine's `open()` (mode 0) started the handler twice on one ctx
     and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
