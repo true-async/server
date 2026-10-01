@@ -7,7 +7,8 @@ true_async
 <?php
 if (PHP_OS_FAMILY === 'Windows') die('skip POSIX-only test (AF_UNIX shared fd)');
 if (!extension_loaded('posix')) die('skip posix extension not available');
-if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
+exec('curl --version 2>&1', $out, $rc);
+if ($rc !== 0) die('skip curl CLI not available');
 ?>
 --FILE--
 <?php

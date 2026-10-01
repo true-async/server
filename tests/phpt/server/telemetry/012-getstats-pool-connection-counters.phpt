@@ -5,7 +5,6 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
 ?>
 --FILE--
 <?php
@@ -60,9 +59,11 @@ spawn(function () use ($server, $port) {
     $held = [];
     $stats = [];
     $spread = 'none';
-    /* A SO_REUSEPORT set on macOS gives every accept to one socket, so more
-     * rounds cannot produce a spread there and one round is all that is run. */
-    $rounds = PHP_OS_FAMILY === 'Darwin' ? 1 : SPREAD_ROUNDS;
+    /* On macOS and Windows the workers share one listen socket and one worker
+     * takes its accepts (on Windows the worker started last), so more rounds
+     * cannot produce a spread there and one round is all that is run. */
+    $one_acceptor = PHP_OS_FAMILY === 'Darwin' || PHP_OS_FAMILY === 'Windows';
+    $rounds = $one_acceptor ? 1 : SPREAD_ROUNDS;
 
     for ($round = 0; $round < $rounds; $round++) {
         for ($i = 0; $i < CONNS; $i++) {
@@ -91,8 +92,8 @@ spawn(function () use ($server, $port) {
         }
     }
 
-    if ($spread === 'none' && PHP_OS_FAMILY === 'Darwin') {
-        $spread = 'darwin-none';
+    if ($spread === 'none' && $one_acceptor) {
+        $spread = strtolower(PHP_OS_FAMILY) . '-none';
     }
 
     $w = array_values($stats['workers']);
@@ -144,7 +145,7 @@ $server->start();
 --EXPECTF--
 gauge_total=1
 gauge_summed=1
-gauge_spread=%rproven|darwin-none%r
+gauge_spread=%rproven|darwin-none|windows-none%r
 replies_400=1
 errors_total=1
 errors_summed=1
