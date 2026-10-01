@@ -24,33 +24,15 @@
 #include "http_rfc5987.h"
 #include "http_param_parse.h"
 
-/* Memory allocation macros */
-#ifdef PHP_WIN32
-# include "php.h"
-# define MP_MALLOC(size)     emalloc(size)
-# define MP_CALLOC(n, size)  ecalloc(n, size)
-# define MP_REALLOC(ptr, size) erealloc(ptr, size)
-# define MP_FREE(ptr)        efree(ptr)
-# define MP_STRDUP(s)        estrdup(s)
-# define MP_STRNDUP(s, n)    estrndup(s, n)
-#else
-# ifdef HAVE_PHP_H
-#  include "php.h"
-#  define MP_MALLOC(size)     emalloc(size)
-#  define MP_CALLOC(n, size)  ecalloc(n, size)
-#  define MP_REALLOC(ptr, size) erealloc(ptr, size)
-#  define MP_FREE(ptr)        efree(ptr)
-#  define MP_STRDUP(s)        estrdup(s)
-#  define MP_STRNDUP(s, n)    estrndup(s, n)
-# else
-#  define MP_MALLOC(size)     malloc(size)
-#  define MP_CALLOC(n, size)  calloc(n, size)
-#  define MP_REALLOC(ptr, size) realloc(ptr, size)
-#  define MP_FREE(ptr)        free(ptr)
-#  define MP_STRDUP(s)        strdup(s)
-#  define MP_STRNDUP(s, n)    strndup(s, n)
-# endif
-#endif
+/* PHP's request allocator in every build: the processor runs on the worker
+ * thread that owns the request, and what an upload costs counts against
+ * memory_limit like the rest of the request. */
+#define MP_MALLOC(size)       emalloc(size)
+#define MP_CALLOC(n, size)    ecalloc(n, size)
+#define MP_REALLOC(ptr, size) erealloc(ptr, size)
+#define MP_FREE(ptr)          efree(ptr)
+#define MP_STRDUP(s)          estrdup(s)
+#define MP_STRNDUP(s, n)      estrndup(s, n)
 
 #define INITIAL_FILES_CAPACITY  4
 #define INITIAL_FIELDS_CAPACITY 8
@@ -671,7 +653,10 @@ static int on_part_end(multipart_parser_t* parser)
          * ends it, since a field may carry NUL bytes; str_append keeps room
          * for the terminator. */
         if (proc->field_value) {
-            info->value = proc->field_value;
+            /* Trimmed to the value: the buffer grew by doubling, and a value
+             * as large as the body would hold up to twice its size until the
+             * request ends. */
+            info->value = MP_REALLOC(proc->field_value, proc->field_value_len + 1);
             proc->field_value = NULL;
             proc->field_value_cap = 0;
         } else {
