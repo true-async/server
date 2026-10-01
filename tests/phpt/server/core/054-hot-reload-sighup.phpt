@@ -6,7 +6,8 @@ true_async
 --SKIPIF--
 <?php
 if (PHP_OS_FAMILY === 'Windows') die('skip no SIGHUP on Windows');
-if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
+exec('curl --version 2>&1', $out, $rc);
+if ($rc !== 0) die('skip curl CLI not available');
 ?>
 --FILE--
 <?php
@@ -42,7 +43,7 @@ $server->addHttpHandler(function ($req, $res) {
 
 spawn(function () use ($port, $bfile) {
     $curl = static fn (): string => (string) shell_exec(sprintf(
-        'curl -s --max-time 2 http://127.0.0.1:%d/ 2>/dev/null', $port));
+        'curl -s --max-time 2 http://127.0.0.1:%d/', $port));
 
     $up = '';
     for ($i = 0; $i < 50 && $up !== 'pong'; $i++) {

@@ -3,6 +3,30 @@
 One entry per measurement, newest first. An entry names the machine, the build and
 the scenario, because a number without them cannot be compared with the next one.
 
+## 2026-09-30 — what one AcceptEx at a time (php-async #307) costs a connect storm
+
+Builds: php-src `440f9b1`, php-async `1521d69` (after), and the same tree with the
+`uv_tcp_simultaneous_accepts(..., 0)` call in `libuv_listen_start` disabled
+(before: libuv's default of several pending AcceptEx). Server `feat/S3` at
+`80c57aa`, statically linked, Release ZTS, built as the Windows CI job builds.
+Machine: Windows 11 Pro 26200, i7-11700K, 16 logical cores, loopback.
+Server: one worker, backlog 1024, no connection cap, CoDel off, a handler that
+answers `ok`. Load: 5 or 10 client processes of 200 non-blocking connects each,
+started at one wall-clock instant; each sends `GET / HTTP/1.0` and reads to EOF.
+Time is first connect to last response. 7 runs per cell, run as after, before,
+after; every response was a 200.
+
+| | 1000 connects, ms | 2000 connects, ms |
+|---|---|---|
+| after (#307) | 578 … 591 | 1620 … 2127 |
+| before | 156 … 172 | 322 … 1601 |
+| after, repeated | 583 … 595 | not run |
+
+**One AcceptEx at a time makes a 1000-connect burst 3.5 times slower**: about
+0.58 ms per connection against 0.16 ms. At 2000 both builds split into a fast and
+a slow mode near 1.1 s apart; not explained (a SYN retransmit after a full backlog
+is a guess, not checked). Several workers were not measured.
+
 ## 2026-08-24 — what #235 gives back by stating the count as an nv entry
 
 Builds: `538f37e`, `main` before the change, against `8dc2913`, which is #235.
