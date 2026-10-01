@@ -44,14 +44,14 @@ $config->setMaxBodySize(64 * 1024 * 1024);
 
 // HTTP/3 (QUIC, UDP) on the interop port — the path the runner's client uses.
 // A plain TCP listener is required by start(); the interop client never connects
-// to it. TLS — the cert AND the QUIC "h3" ALPN selector — is enabled at CONFIG
-// level via enableTls(); the H3 listener inherits both from here. Configuring the
-// cert on a per-listener TLS addListener() instead leaves the QUIC ALPN as the TCP
+// to it. TLS — the cert AND the QUIC "h3" ALPN selector — comes from the
+// config-level setCertificate()/setPrivateKey(); the H3 listener inherits both
+// from here. Configuring the cert on a per-listener TLS addListener() instead leaves the QUIC ALPN as the TCP
 // list (h2/http1.1), so the server answers the client's "h3" with a fatal
 // no_application_protocol alert and the handshake stalls.
 $config->addListener('0.0.0.0', $port + 1);
 $config->addHttp3Listener('0.0.0.0', $port);
-$config->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
+$config->setCertificate($cert)->setPrivateKey($key);
 
 // hq-interop (HTTP/0.9-over-QUIC): the runner negotiates this ALPN for the
 // whole transport matrix (migration/rebinding/multiplexing/loss). The hq shim

@@ -45,7 +45,7 @@ $kept = [];
 $server = new HttpServer(
     (new HttpServerConfig())
         ->addHttp3Listener('127.0.0.1', $port)
-        ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+        ->setCertificate($cert)->setPrivateKey($key)
         ->setReadTimeout(10)->setWriteTimeout(10)
 );
 

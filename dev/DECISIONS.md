@@ -2,6 +2,20 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-10-01 A config method whose value nothing reads is a tombstone: it throws
+  `HttpServerRuntimeException` on any argument, naming what does the job, for one
+  minor release; its getter throws too. Twelve methods (#393), `enableHttp2` and
+  `enableWebSocket` brought to the same shape.
+  Why: an accepted value still makes the getter misreport the server
+  (`isHttp2Enabled()` false while h2c is served). Sage, Final.
+  Rejected: accepting the value that is already true (enableHttp2's old pattern);
+  wiring `enableTls()` to the constructor's listener (a feature, a second spelling
+  of `addListener(..., true)`); E_DEPRECATED through `@deprecated`, which hides
+  the replacement behind a generic notice.
+  Principle: P1.2, P4.1.
+- 2026-10-01 `getTelemetry()` drops keys that were always 0 rather than wiring them
+  in the same change; byte counters are a separate feature (#396).
+  Why: P4.1, the defect is the constant, the counters are new work. Sage, Final.
 - 2026-09-30 php-async clamps each TransmitFile pass to the file size (1521d69); it stays.
   Why: a probe (Windows 11) found the file pointer 32 KiB in after any larger send, and a
   count or start past EOF fails with WSAEINVAL, sending none of a 4 KiB file (`h1/065`).

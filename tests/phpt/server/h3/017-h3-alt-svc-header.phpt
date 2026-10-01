@@ -35,7 +35,7 @@ function run_server(int $tcp_port, int $udp_port, string $cert, string $key, boo
     $config = (new HttpServerConfig())
         ->addListener('127.0.0.1', $tcp_port, true /* tls */)
         ->addHttp3Listener('127.0.0.1', $udp_port)
-        ->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
+        ->setCertificate($cert)->setPrivateKey($key);
     /* Drive Alt-Svc emission through the config setter — putenv() is
      * unreliable on Windows where PHP's env table doesn't propagate to
      * proc_open children (the env-var path is still honoured at start()
