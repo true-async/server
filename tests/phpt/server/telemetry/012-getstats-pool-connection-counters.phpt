@@ -59,10 +59,9 @@ spawn(function () use ($server, $port) {
     $held = [];
     $stats = [];
     $spread = 'none';
-    /* A SO_REUSEPORT set on macOS gives every accept to one socket, and on
-     * Windows the worker started last takes the accepts of the shared socket
-     * (dev/PLAN.md, S3.11), so more rounds cannot produce a spread there and
-     * one round is all that is run. */
+    /* On macOS and Windows the workers share one listen socket and one worker
+     * takes its accepts (on Windows the worker started last), so more rounds
+     * cannot produce a spread there and one round is all that is run. */
     $one_acceptor = PHP_OS_FAMILY === 'Darwin' || PHP_OS_FAMILY === 'Windows';
     $rounds = $one_acceptor ? 1 : SPREAD_ROUNDS;
 
