@@ -86,7 +86,9 @@ typedef struct {
 /* Forward declaration */
 typedef struct mp_processor_t mp_processor_t;
 
-/* Callback for temp file path generation */
+/* Callback for temp file path generation. Returns the path of a file it has
+ * created, which the processor owns from then on and frees with its own
+ * allocator (emalloc in a PHP build); NULL fails the file with NO_TMP_DIR. */
 typedef char* (*mp_tmp_path_generator_t)(mp_processor_t* proc, const char* original_filename);
 
 /* Processor configuration */
