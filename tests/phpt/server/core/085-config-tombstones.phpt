@@ -4,11 +4,10 @@ HttpServerConfig: twelve methods whose value nothing read throw, naming what doe
 true_async_server
 --FILE--
 <?php
-/* Each of these stored a value nothing read, and its getter reported the
- * stored value rather than the server: enableTls(true) on the constructor's
- * listener served plaintext, isHttp2Enabled() said false while h2c was served.
- * Each now throws on any argument, and the message names the mechanism that
- * does the job. */
+/* Each tombstone throws on any argument, and the message names the mechanism
+ * that does the job. A setter whose value nothing reads leaves its getter
+ * misreporting the server: enableTls(true) does not make the constructor's
+ * listener TLS, and isHttp2Enabled() reads false while the listener serves h2c. */
 
 use TrueAsync\HttpServerConfig;
 
