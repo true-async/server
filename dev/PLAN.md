@@ -287,11 +287,16 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
     ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
     inspects the stateless reset it emits (length clamp, header bits, token).
-23. Test strength of the static decoders, beside item 9: cmocka links
-    `http_range.c`, `http_etag.c`, `http_date.c` and covers the range clamp and
-    reject, a non-matching If-None-Match, a new ETag for a changed file, invalid
-    dates and the `http_static_path.c` rejections at :111, :118, :171, :183;
-    `static/011` compares the HTTP/1 range body; a test sends `x-gzip`.
+23. Test strength of the static decoders: done. `test_static_decoders` links
+    `http_range.c` and checks 18 range headers (clamp, suffix, 416 past the end
+    and on an empty file, refusals); a file's ETag changes with its size and
+    its mtime; the path rejections have their edges (a length that cuts an
+    escape before valid hex, one bad nibble on either side, 256 against 257
+    segments, an inner against a trailing empty segment), which kill the `>=`,
+    `||` and segment-cap mutants the old cases let through. Non-matching
+    If-None-Match and invalid dates were covered already. `static/011`
+    compares the range bodies; `compression/076` sends `x-gzip` both ways and
+    fails without either alias.
 24. The public API does what it says. `setWriteBufferSize`,
     `enableProtocolDetection`, `enableTls` and `setAutoAwaitBody` store a value
     nothing reads; `getTelemetry()` returns `bytes_received`, `bytes_sent` and
