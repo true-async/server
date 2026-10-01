@@ -7,7 +7,6 @@ true_async
 <?php
 require __DIR__ . '/../tls/_tls_skipif.inc';
 tls_skipif(['openssl_cli' => true, 'curl' => true]);
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
 ?>
 --FILE--
 <?php

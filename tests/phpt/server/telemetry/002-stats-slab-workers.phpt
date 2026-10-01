@@ -5,11 +5,11 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
 if (!function_exists('_http_server_stats_slab_snapshot')) {
     die('skip built without --enable-http-server-test-hooks');
 }
-if (!exec('curl --version 2>/dev/null')) die('skip curl CLI not available');
+exec('curl --version 2>&1', $out, $rc);
+if ($rc !== 0) die('skip curl CLI not available');
 ?>
 --FILE--
 <?php

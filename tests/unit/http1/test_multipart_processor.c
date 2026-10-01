@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <cmocka.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -18,6 +19,14 @@
 #endif
 
 #include "formats/multipart_processor.h"
+
+/* A path from tmp_path_generator is freed by the processor, with its allocator. */
+#ifdef HAVE_PHP_H
+# include "php.h"
+# define TEST_STRDUP(s) estrdup(s)
+#else
+# define TEST_STRDUP(s) strdup(s)
+#endif
 
 /*
  * Test: Simple form field
@@ -1308,6 +1317,155 @@ static int group_teardown(void **state) {
 }
 
 /* Main test runner */
+#ifdef __linux__
+/* tmp_path_generator for the write-failure cases: a symlink to /dev/full, which
+ * opens for writing and fails every write that reaches it with ENOSPC. The
+ * unlink on failure removes the link, never the device. */
+static char full_dir[64];
+static char full_link[96];
+
+static char *generate_dev_full_link(mp_processor_t *proc, const char *original_filename)
+{
+    (void) proc;
+    (void) original_filename;
+    snprintf(full_link, sizeof(full_link), "%s/upload", full_dir);
+    assert_int_equal(symlink("/dev/full", full_link), 0);
+    return TEST_STRDUP(full_link);
+}
+
+static mp_file_info_t *upload_to_dev_full(mp_processor_t **proc_out, size_t body_len)
+{
+    strcpy(full_dir, "/tmp/mp-full-XXXXXX");
+    assert_non_null(mkdtemp(full_dir));
+
+    char *data = malloc(body_len + 1);
+    assert_non_null(data);
+    memset(data, 'X', body_len);
+    data[body_len] = '\0';
+
+    const size_t cap = body_len + 512;
+    char *body = malloc(cap);
+    assert_non_null(body);
+    snprintf(body, cap,
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
+        "\r\n"
+        "%s\r\n"
+        "--b--\r\n",
+        data);
+
+    mp_config_t config = {0};
+    config.tmp_path_generator = generate_dev_full_link;
+
+    mp_processor_t *proc = mp_processor_create("b", &config);
+    assert_non_null(proc);
+    mp_processor_feed(proc, body, strlen(body));
+    assert_true(mp_processor_is_complete(proc));
+    free(body);
+    free(data);
+
+    size_t file_count;
+    mp_file_info_t *files = mp_processor_get_files(proc, &file_count);
+    assert_int_equal(file_count, 1);
+    *proc_out = proc;
+    return &files[0];
+}
+
+static void assert_cant_write_leaves_nothing(mp_processor_t *proc, const mp_file_info_t *file)
+{
+    /* PHP's answer to a failed write: the error, no temp file, no size. */
+    assert_int_equal(file->error, MP_UPLOAD_ERR_CANT_WRITE);
+    assert_false(file->is_ready);
+    assert_null(file->tmp_path);
+    assert_int_equal(file->size, 0);
+
+    struct stat st;
+    assert_int_not_equal(lstat(full_link, &st), 0);
+
+    mp_processor_destroy(proc);
+    unlink(full_link);
+    rmdir(full_dir);
+}
+
+/*
+ * Test: a part small enough to sit in the stdio buffer is written by the
+ * flush at the part's end, and a failed flush fails the upload.
+ */
+static void test_failed_flush_is_cant_write(void **state) {
+    (void) state;
+
+    if (access("/dev/full", W_OK) != 0) {
+        skip();
+    }
+
+    mp_processor_t *proc;
+    const mp_file_info_t *file = upload_to_dev_full(&proc, 16);
+    assert_cant_write_leaves_nothing(proc, file);
+}
+
+/*
+ * Test: a part past the stdio buffer fails in fwrite itself.
+ */
+static void test_failed_write_is_cant_write(void **state) {
+    (void) state;
+
+    if (access("/dev/full", W_OK) != 0) {
+        skip();
+    }
+
+    mp_processor_t *proc;
+    const mp_file_info_t *file = upload_to_dev_full(&proc, 64 * 1024);
+    assert_cant_write_leaves_nothing(proc, file);
+}
+#endif
+
+static char *generate_no_path(mp_processor_t *proc, const char *original_filename)
+{
+    (void) proc;
+    (void) original_filename;
+    return NULL;
+}
+
+/*
+ * Test: no temp path for a file is NO_TMP_DIR, and the parse goes on.
+ */
+static void test_no_tmp_path_is_no_tmp_dir(void **state) {
+    (void) state;
+
+    const char *body =
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
+        "\r\n"
+        "data\r\n"
+        "--b\r\n"
+        "Content-Disposition: form-data; name=\"after\"\r\n"
+        "\r\n"
+        "kept\r\n"
+        "--b--\r\n";
+
+    mp_config_t config = {0};
+    config.tmp_path_generator = generate_no_path;
+
+    mp_processor_t *proc = mp_processor_create("b", &config);
+    assert_non_null(proc);
+    mp_processor_feed(proc, body, strlen(body));
+    assert_true(mp_processor_is_complete(proc));
+
+    size_t file_count;
+    mp_file_info_t *files = mp_processor_get_files(proc, &file_count);
+    assert_int_equal(file_count, 1);
+    assert_int_equal(files[0].error, MP_UPLOAD_ERR_NO_TMP_DIR);
+    assert_null(files[0].tmp_path);
+    assert_int_equal(files[0].size, 0);
+
+    size_t field_count;
+    mp_field_info_t *fields = mp_processor_get_fields(proc, &field_count);
+    assert_int_equal(field_count, 1);
+    assert_string_equal(fields[0].value, "kept");
+
+    mp_processor_destroy(proc);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         /* Original tests */
@@ -1342,6 +1500,11 @@ int main(void) {
         cmocka_unit_test(test_missing_content_disposition),
         cmocka_unit_test(test_binary_data_like_boundary),
         cmocka_unit_test(test_byte_by_byte_feeding),
+#ifdef __linux__
+        cmocka_unit_test(test_failed_flush_is_cant_write),
+        cmocka_unit_test(test_failed_write_is_cant_write),
+#endif
+        cmocka_unit_test(test_no_tmp_path_is_no_tmp_dir),
     };
 
     return cmocka_run_group_tests(tests, group_setup, group_teardown);
