@@ -552,6 +552,9 @@ struct http_server_object {
      * sink connects there and suspends start(), and a stop() in that window
      * only sets `stopping`, which start() carries out before it waits. */
     bool                     starting;
+    /* True from start()'s entry to its return, the drain after stop() included:
+     * a start() from a handler of that run is refused while it holds. */
+    bool                     start_active;
     bool                     listeners_paused;
     /* Set once start()'s post-wakeup drain has emptied server_scope, so the
      * http_server_free fallback drain is skipped on the normal stop() path
@@ -3971,11 +3974,9 @@ static bool http_server_await_stop(http_server_object *server, bool *bailout)
     return true;
 }
 
-/* {{{ proto HttpServer::start(): bool */
-ZEND_METHOD(TrueAsync_HttpServer, start)
+/* One run of the server, from binding the listeners to the drain after stop(). */
+static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
     if (server->running) {
@@ -4746,7 +4747,7 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     if (server->topic_hub != NULL && !room_hub_attached) {
         zend_throw_exception_ex(http_server_runtime_exception_ce, 0,
             "Failed to attach this worker to the room hub: all %d slots "
-            "are taken",
+            "are taken, or this thread is still attached",
             ROOM_HUB_MAX_WORKERS);
         RETURN_FALSE;
     }
@@ -4786,6 +4787,8 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
             room_hub_detach_request_over(server->topic_hub);
         }
 
+        /* zend_bailout() does not return to the wrapper that set it. */
+        server->start_active = false;
         zend_bailout();
     }
 
@@ -4813,6 +4816,35 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     }
 
     RETURN_TRUE;
+}
+
+/* {{{ proto HttpServer::start(): bool */
+ZEND_METHOD(TrueAsync_HttpServer, start)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_server_object *const server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    /* stop() has cleared `running`, and the run it ended is still draining the
+     * scope a handler calling this runs in: a second run would release that
+     * scope under it. */
+    if (server->start_active && !server->running) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Server is still stopping: start() was called before the previous "
+            "start() returned", 0);
+        RETURN_FALSE;
+    }
+
+    /* Set on a running server too: the run below refuses it at once and must
+     * not clear the flag of the run that is still on the stack. */
+    const bool outer = !server->start_active;
+    server->start_active = true;
+
+    http_server_start_run(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+
+    if (outer) {
+        server->start_active = false;
+    }
 }
 /* }}} */
 
