@@ -131,9 +131,9 @@ Notes: dev/plans/S3.md
       done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
         its listed reason; failures as in S3.5
       tier: T1 · role: —
-      handoff: local build 43 pass, 8 skip for other groups; the 3 failures
-        fixed (#391, `h1/038`) or skipped with a measured reason (`h1/055`),
-        `dev/plans/S3.md`. Windows CI not run yet.
+      handoff: local build 45 pass, 0 fail, 9 skip (8 for other groups, and
+        `h1/055` with a measured reason); `core/020` fixed by #391, `h1/038`
+        made order-independent, `dev/plans/S3.md`. Windows CI not run yet.
 - [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
