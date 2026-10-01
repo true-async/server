@@ -245,8 +245,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 20. The H3 slot release stops retrying once the reactor leaves RUN
     (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
     counter. Reproduce through a hook that fails the post, or bound it anyway.
-21. `test_parser_security.c` asserts the parse outcome: 23 of 55 cases end in
-    `(void)result`, among them two Transfer-Encoding headers (`:625`).
+21. `test_parser_security.c` asserts the parse outcome: done. 25 cases asserted
+    nothing (23 `(void)result`, plus the missing-Host and CRLF cases under an
+    `if` that never ran); each now asserts what was measured, with its RFC
+    reason. 18 refuse as RFC 9112 asks (two Transfer-Encoding lines: 400);
+    four accept correctly. The fifth, a 50 KB chunk extension, was accepted
+    with nothing counting it: #386 caps extensions at 16 KiB per request (413),
+    with two boundary cases and `h1/069`.
 22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
     ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
     inspects the stateless reset it emits (length clamp, header bits, token).
