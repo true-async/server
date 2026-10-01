@@ -123,9 +123,20 @@ spawn(function () use ($server, $room, $ack) {
     /* What the dead worker was holding: 200 bodies in its mailbox and its
      * receiver's ring, persistent memory whose owner died with it. valgrind
      * cannot see this class — a body still pointed at from a leaked structure is
-     * not "definitely lost" — so the balance is the instrument. Nothing is queued
-     * anywhere by now, so the two counters must meet. */
-    $st = $server->getRuntimeStats();
+     * not "definitely lost" — so the balance is the instrument. The dead worker
+     * retires its slot first and drains its mailbox and ring after, on its own
+     * thread, so a released slot does not mean the drain is done: poll until the
+     * two counters meet, or report where they stopped. */
+    for ($waited = 0; $waited < 3000; $waited += 50) {
+        $st = $server->getRuntimeStats();
+
+        if ($st['ws_bodies'] === $st['ws_bodies_freed']) {
+            break;
+        }
+
+        delay(50);
+    }
+
     echo 'bodies balanced: ',
         $st['ws_bodies'] === $st['ws_bodies_freed']
             ? 'yes'
