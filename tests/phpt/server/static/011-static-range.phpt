@@ -75,16 +75,15 @@ $client = spawn(function() use ($port, $server, $body) {
     [$s, $h, $b] = $do("Range: bytes=0-9\r\n");
     echo "first-10 status=$s cr=", ($h['content-range'] ?? '-'),
          " cl=", ($h['content-length'] ?? '-'),
-         " body=", bin2hex($b), "\n";
-    /* Expected slice: bytes 0..9 of $body. */
+         " body=", $b === substr($body, 0, 10) ? 'match' : 'MISMATCH', "\n";
 
     [$s, $h, $b] = $do("Range: bytes=990-\r\n");
     echo "open-end status=$s cr=", ($h['content-range'] ?? '-'),
-         " body=", bin2hex($b), "\n";
+         " body=", $b === substr($body, 990) ? 'match' : 'MISMATCH', "\n";
 
     [$s, $h, $b] = $do("Range: bytes=-5\r\n");
     echo "suffix-5 status=$s cr=", ($h['content-range'] ?? '-'),
-         " body=", bin2hex($b), "\n";
+         " body=", $b === substr($body, -5) ? 'match' : 'MISMATCH', "\n";
 
     [$s, $h, $b] = $do("Range: bytes=2000-3000\r\n");
     echo "unsatisfiable status=$s cr=", ($h['content-range'] ?? '-'),
@@ -107,18 +106,13 @@ $client = spawn(function() use ($port, $server, $body) {
 $server->start();
 await($client);
 
-/* Assertions baked in: print expected snippets too. */
-echo "expect-first-10=", bin2hex(substr($body, 0, 10)), "\n";
-echo "expect-suffix-5=", bin2hex(substr($body, -5)), "\n";
 echo "done\n";
 --EXPECTF--
-first-10 status=HTTP/1.1 206 Partial Content cr=bytes 0-9/1000 cl=10 body=%s
-open-end status=HTTP/1.1 206 Partial Content cr=bytes 990-999/1000 body=%s
-suffix-5 status=HTTP/1.1 206 Partial Content cr=bytes 995-999/1000 body=%s
+first-10 status=HTTP/1.1 206 Partial Content cr=bytes 0-9/1000 cl=10 body=match
+open-end status=HTTP/1.1 206 Partial Content cr=bytes 990-999/1000 body=match
+suffix-5 status=HTTP/1.1 206 Partial Content cr=bytes 995-999/1000 body=match
 unsatisfiable status=HTTP/1.1 416 Range Not Satisfiable cr=bytes */1000 ar=-
 multi-range status=HTTP/1.1 200 OK cr=- cl=1000
 if-range-match status=HTTP/1.1 206 Partial Content cr=bytes 0-9/1000
 if-range-miss status=HTTP/1.1 200 OK cr=- cl=1000
-expect-first-10=%s
-expect-suffix-5=%s
 done

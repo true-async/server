@@ -16,12 +16,19 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <cmocka.h>
+#include <stdlib.h>
+#include <string.h>
+#ifndef _WIN32
+# include <unistd.h>
+# include <utime.h>
+#endif
 
 #include "php.h"
 #include "common/php_sapi_test.h"
 #include "static/static_handler.h"
 #include "http_mime.h"
 #include "http_etag.h"
+#include "http_range.h"
 #include "static/http_static_path.h"
 
 /* libphp is linked but does not export zend_print_backtrace_ex (used by
@@ -507,6 +514,152 @@ static int suite_teardown(void **state)
 	return 0;
 }
 
+/* ========================================================================
+ * Range — RFC 9110 §14.1.2, one range
+ * ======================================================================== */
+
+typedef struct {
+	const char *header;
+	uint64_t size;
+	http_range_result_t result;
+	uint64_t first, last;
+} range_case_t;
+
+static void test_range_parse_cases(void **state)
+{
+	(void)state;
+	const range_case_t cases[] = {
+		{"bytes=0-9", 1000, HTTP_RANGE_OK, 0, 9},
+		{"bytes= 0-9 ", 1000, HTTP_RANGE_OK, 0, 9},          /* OWS around the spec */
+		{"bytes=990-", 1000, HTTP_RANGE_OK, 990, 999},       /* open end */
+		{"bytes=990-5000", 1000, HTTP_RANGE_OK, 990, 999},   /* last clamped to EOF */
+		{"bytes=999-999", 1000, HTTP_RANGE_OK, 999, 999},    /* the last byte */
+		{"bytes=-5", 1000, HTTP_RANGE_OK, 995, 999},         /* suffix */
+		{"bytes=-5000", 1000, HTTP_RANGE_OK, 0, 999},        /* suffix past the start: all */
+		{"bytes=1000-", 1000, HTTP_RANGE_NOT_SATISFIABLE, 0, 0},
+		{"bytes=2000-3000", 1000, HTTP_RANGE_NOT_SATISFIABLE, 0, 0},
+		{"bytes=0-", 0, HTTP_RANGE_NOT_SATISFIABLE, 0, 0},   /* empty representation */
+		{"bytes=0-9,20-29", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},
+		{"bytes=9-0", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},   /* last before first */
+		{"bytes=-0", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},
+		{"bytes=-", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},
+		{"bytes=a-9", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},
+		{"bytes=0-9x", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},
+		{"items=0-9", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},
+		{"bytes=99999999999999999999-", 1000, HTTP_RANGE_UNSUPPORTED, 0, 0},  /* past uint64 */
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		uint64_t first = 0, last = 0;
+		const http_range_result_t got = http_range_parse(
+			cases[i].header, strlen(cases[i].header), cases[i].size, &first, &last);
+
+		if (got != cases[i].result) {
+			fail_msg("%s over %llu: result %d, want %d", cases[i].header,
+					 (unsigned long long)cases[i].size, (int)got, (int)cases[i].result);
+		}
+
+		if (got == HTTP_RANGE_OK) {
+			assert_int_equal(first, cases[i].first);
+			assert_int_equal(last, cases[i].last);
+		}
+	}
+
+	uint64_t first = 0, last = 0;
+	assert_int_equal(http_range_parse(NULL, 0, 1000, &first, &last), HTTP_RANGE_ABSENT);
+}
+
+/* ========================================================================
+ * ETag — a changed file gets a new one
+ * ======================================================================== */
+
+#ifndef _WIN32
+static void etag_of(const char *path, char out[HTTP_ETAG_BUF_LEN])
+{
+	zend_stat_t st;
+	assert_int_equal(stat(path, &st), 0);
+	http_etag_format_strong(&st, out);
+}
+
+static void test_etag_follows_the_file(void **state)
+{
+	(void)state;
+	char path[] = "/tmp/etag-XXXXXX";
+	const int fd = mkstemp(path);
+	assert_true(fd >= 0);
+	assert_int_equal(write(fd, "a", 1), 1);
+
+	char before[HTTP_ETAG_BUF_LEN], again[HTTP_ETAG_BUF_LEN];
+	char grown[HTTP_ETAG_BUF_LEN], touched[HTTP_ETAG_BUF_LEN];
+	etag_of(path, before);
+	etag_of(path, again);
+	assert_string_equal(before, again);
+
+	assert_int_equal(write(fd, "b", 1), 1);
+	etag_of(path, grown);
+	assert_string_not_equal(before, grown);
+
+	/* Same size, another mtime. */
+	struct utimbuf times = { .actime = 1000000000, .modtime = 1000000000 };
+	assert_int_equal(utime(path, &times), 0);
+	etag_of(path, touched);
+	assert_string_not_equal(grown, touched);
+
+	close(fd);
+	unlink(path);
+}
+#endif
+
+/* ========================================================================
+ * Path resolve — the edges of each rejection
+ * ======================================================================== */
+
+static http_static_path_result_t resolve_n(const http_static_handler_t *h, const char *path,
+										   const size_t len)
+{
+	char buf[4096];
+	size_t out_len = 0;
+	return http_static_path_resolve(h, path, len, buf, sizeof(buf), &out_len, NULL, NULL);
+}
+
+static void test_path_resolve_escape_edges(void **state)
+{
+	(void)state;
+	http_static_handler_t *h = make_test_handler("/s/", "/r", 0);
+
+	/* The length ends the escape even when hex digits follow in memory. */
+	assert_int_equal(resolve_n(h, "/s/a%41", strlen("/s/a%4")), HTTP_STATIC_PATH_BAD_REQUEST);
+	assert_int_equal(resolve_n(h, "/s/a%41", strlen("/s/a%41")), HTTP_STATIC_PATH_OK);
+
+	/* One bad digit, on either side, spoils the escape. */
+	assert_int_equal(resolve_n(h, "/s/a%4Z", strlen("/s/a%4Z")), HTTP_STATIC_PATH_BAD_REQUEST);
+	assert_int_equal(resolve_n(h, "/s/a%Z4", strlen("/s/a%Z4")), HTTP_STATIC_PATH_BAD_REQUEST);
+
+	free_test_handler(h);
+}
+
+static void test_path_resolve_segment_edges(void **state)
+{
+	(void)state;
+	http_static_handler_t *h = make_test_handler("/s/", "/r", 0);
+
+	/* An empty segment inside the path is refused; a trailing slash ends the
+	 * last one and is not a segment. */
+	assert_int_equal(resolve_n(h, "/s/a//b", strlen("/s/a//b")), HTTP_STATIC_PATH_BAD_REQUEST);
+	assert_int_equal(resolve_n(h, "/s/a/b/", strlen("/s/a/b/")), HTTP_STATIC_PATH_OK);
+
+	/* 256 segments pass, 257 do not. */
+	char path[2048] = "/s";
+	for (int i = 0; i < 256; i++) {
+		strcat(path, "/a");
+	}
+	assert_int_equal(resolve_n(h, path, strlen(path)), HTTP_STATIC_PATH_OK);
+	strcat(path, "/a");
+	assert_int_equal(resolve_n(h, path, strlen(path)), HTTP_STATIC_PATH_BAD_REQUEST);
+
+	free_test_handler(h);
+}
+
 int main(void)
 {
 	const struct CMUnitTest tests[] = {
@@ -548,6 +701,12 @@ int main(void)
 		cmocka_unit_test(test_path_resolve_query_stripped),
 		cmocka_unit_test(test_path_resolve_prefix_mismatch),
 		cmocka_unit_test(test_path_resolve_depth_cap),
+		cmocka_unit_test(test_path_resolve_escape_edges),
+		cmocka_unit_test(test_path_resolve_segment_edges),
+		cmocka_unit_test(test_range_parse_cases),
+#ifndef _WIN32
+		cmocka_unit_test(test_etag_follows_the_file),
+#endif
 	};
 
 	return cmocka_run_group_tests(tests, suite_setup, suite_teardown);

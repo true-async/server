@@ -260,16 +260,22 @@ an item marked "reproduce" gets its failing run before any code.
     here; it also kills the mutant whose refused `start()` on a running server
     clears the flag of the run on the stack. The flag's reset on the bailout
     exit has no test.
-16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
-    fails the engine's `open()` (mode 0) started the handler twice on one ctx
-    and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
+16. #348 — static passthrough on HTTP/1: done, PR 349 (09ab593). A file under
+    `on_missing: Next` that fails the engine's `open()` (mode 0) started the
+    handler twice on one ctx and crashed, 3 of 3; `static/025`.
 
 Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 
 17. The HTTP server test hooks run in CI: the debug leg passes
     `--enable-http-server-test-hooks`, and the 20 phpt gated on `_http_*`
     functions (reactor_pool, telemetry 001-003, eight in core) run and pass.
-    Run them locally with the flag first: nothing has run them in CI.
+    Locally, built with the flag: `core/030` crashed 3 of 3 in php-async's
+    `io_pipe_write_cb`, which cleared `io` on a write request its listener had
+    freed and reallocated (true-async/php-async#310, fix #311, asynctest case
+    true-async/php-src#39). With the fix the 20, with the four tas-hooks tests
+    and the rest of `reactor_pool/`, pass 35 of 35, 3 runs of 3. In CI the
+    first run of this change crashed `core/030` the same way, 544 others
+    passing; php-async #311 is merged.
 18. A failed `fflush` or `fclose` fails the upload: done (#380). A
     `tmp_path_generator` linking to `/dev/full` gives a 16-byte part
     `UPLOAD_ERR_OK` and a 64 KiB part CANT_WRITE with its partial temp file
@@ -282,16 +288,26 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 20. The H3 slot release stops retrying once the reactor leaves RUN
     (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
     counter. Reproduce through a hook that fails the post, or bound it anyway.
-21. `test_parser_security.c` asserts the parse outcome: 23 of 55 cases end in
-    `(void)result`, among them two Transfer-Encoding headers (`:625`).
+21. `test_parser_security.c` asserts the parse outcome: done. 25 cases asserted
+    nothing (23 `(void)result`, plus the missing-Host and CRLF cases under an
+    `if` that never ran); each now asserts what was measured, with its RFC
+    reason. 18 refuse as RFC 9112 asks (two Transfer-Encoding lines: 400);
+    four accept correctly. The fifth, a 50 KB chunk extension, was accepted
+    with nothing counting it: #386 caps extensions at 16 KiB per request (413),
+    with two boundary cases and `h1/069`.
 22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
     ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
     inspects the stateless reset it emits (length clamp, header bits, token).
-23. Test strength of the static decoders, beside item 9: cmocka links
-    `http_range.c`, `http_etag.c`, `http_date.c` and covers the range clamp and
-    reject, a non-matching If-None-Match, a new ETag for a changed file, invalid
-    dates and the `http_static_path.c` rejections at :111, :118, :171, :183;
-    `static/011` compares the HTTP/1 range body; a test sends `x-gzip`.
+23. Test strength of the static decoders: done. `test_static_decoders` links
+    `http_range.c` and checks 18 range headers (clamp, suffix, 416 past the end
+    and on an empty file, refusals); a file's ETag changes with its size and
+    its mtime; the path rejections have their edges (a length that cuts an
+    escape before valid hex, one bad nibble on either side, 256 against 257
+    segments, an inner against a trailing empty segment), which kill the `>=`,
+    `||` and segment-cap mutants the old cases let through. Non-matching
+    If-None-Match and invalid dates were covered already. `static/011`
+    compares the range bodies; `compression/076` sends `x-gzip` both ways and
+    fails without either alias.
 24. The public API does what it says. `setWriteBufferSize`,
     `enableProtocolDetection`, `enableTls` and `setAutoAwaitBody` store a value
     nothing reads; `getTelemetry()` returns `bytes_received`, `bytes_sent` and
