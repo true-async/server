@@ -37,6 +37,9 @@
 #define INITIAL_FILES_CAPACITY  4
 #define INITIAL_FIELDS_CAPACITY 8
 #define INITIAL_FIELD_VALUE_CAP 256
+/* Spare capacity a finished field value may keep; past it the value is copied
+ * into a buffer of its own size. */
+#define MP_FIT_SLACK            4096
 #define INITIAL_HEADER_CAP      128
 
 static int on_part_begin(multipart_parser_t* parser);
@@ -653,10 +656,20 @@ static int on_part_end(multipart_parser_t* parser)
          * ends it, since a field may carry NUL bytes; str_append keeps room
          * for the terminator. */
         if (proc->field_value) {
-            /* Trimmed to the value: the buffer grew by doubling, and a value
-             * as large as the body would hold up to twice its size until the
-             * request ends. */
-            info->value = MP_REALLOC(proc->field_value, proc->field_value_len + 1);
+            /* Fitted to the value: the buffer grew by doubling, and a value as
+             * large as the body would hold up to twice its size until the
+             * request ends. A copy, not erealloc: Windows cannot shrink a huge
+             * block in place, and keeps all of it. */
+            const size_t fitted = proc->field_value_len + 1;
+
+            if (proc->field_value_cap - fitted >= MP_FIT_SLACK) {
+                info->value = MP_MALLOC(fitted);
+                memcpy(info->value, proc->field_value, fitted);
+                MP_FREE(proc->field_value);
+            } else {
+                info->value = proc->field_value;
+            }
+
             proc->field_value = NULL;
             proc->field_value_cap = 0;
         } else {
