@@ -14,6 +14,7 @@
 #include "zend_exceptions.h"
 #include "zend_interfaces.h"
 #include "zend_closures.h"
+#include "ext/standard/basic_functions.h" /* php_getenv */
 #include "main/php_network.h"           /* php_socket_t, SOCK_ERR, closesocket, php_socket_errno */
 #include "Zend/zend_async_API.h"
 #include "core/bailout_guard.h"
@@ -4020,34 +4021,39 @@ static bool http_server_await_stop(http_server_object *server, bool *bailout)
 /* CODEL_TARGET_MS, the ops override of the CoDel target: a whole number of
  * milliseconds in 0..10000, 0 turning CoDel off. Sets *set to false when the
  * variable is unset or empty. Anything else throws, naming the variable and
- * its value: a value read as 0 would switch CoDel off without a word. */
+ * its value: a value read as 0 would switch CoDel off without a word.
+ * Read as PHP's getenv() reads it: on Windows ZTS, putenv() sets only the
+ * process environment, which the CRT's getenv() does not see. */
 static bool http_server_codel_env_target(bool *set, uint64_t *ms)
 {
-    const char *const env = getenv("CODEL_TARGET_MS");
+    zend_string *const env = php_getenv(ZEND_STRL("CODEL_TARGET_MS"));
 
     *set = false;
 
-    if (env == NULL || *env == '\0') {
+    if (env == NULL) {
         return true;
     }
 
     uint64_t value = 0;
-    const char *p = env;
+    const char *p = ZSTR_VAL(env);
 
     for (; *p >= '0' && *p <= '9' && value <= 10000; p++) {
         value = value * 10 + (uint64_t)(*p - '0');
     }
 
-    if (*p != '\0' || value > 10000) {
+    const bool valid = *p == '\0' && value <= 10000;
+
+    if (!valid) {
         zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
             "CODEL_TARGET_MS must be a whole number of milliseconds from 0 to "
-            "10000, got \"%s\"", env);
-        return false;
+            "10000, got \"%s\"", ZSTR_VAL(env));
+    } else if (ZSTR_LEN(env) > 0) {
+        *set = true;
+        *ms  = value;
     }
 
-    *set = true;
-    *ms  = value;
-    return true;
+    zend_string_release(env);
+    return valid;
 }
 
 /* One run of the server, from binding the listeners to the drain after stop(). */

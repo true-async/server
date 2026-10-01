@@ -5,11 +5,12 @@ true_async_server
 true_async
 --FILE--
 <?php
-/* The variable overrides setBackpressureTargetMs(). It was read with strtol:
- * "abc" became 0 and turned CoDel off, "50ms" became 50, and an out-of-range
- * value was dropped, all without a word. A sojourn sample is taken per request
- * only while CoDel is on (telemetry and the access log are off here), so
- * sojourn_samples shows which target the server took. */
+/* The variable overrides setBackpressureTargetMs(), and anything but a whole
+ * number of milliseconds in 0..10000 is refused: strtol() would read "abc" as 0,
+ * turning CoDel off, and "50ms" as 50. putenv() sets it as PHP does, which on
+ * Windows ZTS the CRT's getenv() does not see. A sojourn sample is taken per
+ * request only while CoDel is on (telemetry and the access log are off here),
+ * so sojourn_samples shows which target the server took. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
