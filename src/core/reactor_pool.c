@@ -324,6 +324,15 @@ bool reactor_pool_post_exec(reactor_pool_t *rp, const int idx,
     return thread_cmd_mailbox_post(rc->mailbox, &cmd);
 }
 
+bool reactor_pool_is_running(const reactor_pool_t *rp, const int idx)
+{
+    if (UNEXPECTED(rp == NULL || idx < 0 || idx >= rp->count)) {
+        return false;
+    }
+
+    return zend_atomic_int_load_ex(&rp->ctx[idx].phase) == REACTOR_PHASE_RUN;
+}
+
 uint64_t reactor_pool_processed(const reactor_pool_t *rp, const int idx)
 {
     if (UNEXPECTED(rp == NULL || idx < 0 || idx >= rp->count)) {

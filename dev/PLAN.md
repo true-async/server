@@ -293,9 +293,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `multipart/026` (a 4 MiB field held at 3,152 bytes on main, 3 of 3) passes,
     and kills the mutant that keeps the doubled buffer (8.4 MB held). A 40 MiB
     field under `memory_limit=32M`: 503 at the parse, was 500 in the handler.
-20. The H3 slot release stops retrying once the reactor leaves RUN
-    (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
-    counter. Reproduce through a hook that fails the post, or bound it anyway.
+20. The H3 slot release stops retrying once the reactor leaves RUN: done,
+    bounded (#384), not reproduced. `reactor_pool_is_running()` decides; a
+    release for a reactor that left is dropped with one stderr notice, not a
+    counter: the drop happens at shutdown, where nothing would read one.
+    `h3/081` drives it through the fault point `h3/slot_release/reactor_gone`
+    (red on main: the point is missing). The check inside the retry loop runs
+    only when the deferral fails, which no test reaches.
 21. `test_parser_security.c` asserts the parse outcome: done. 25 cases asserted
     nothing (23 `(void)result`, plus the missing-Host and CRLF cases under an
     `if` that never ran); each now asserts what was measured, with its RFC
