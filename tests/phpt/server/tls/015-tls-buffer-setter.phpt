@@ -57,7 +57,7 @@ $want_sha = sha1($body);
 
 $cfg = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+    ->setCertificate($cert)->setPrivateKey($key)
     ->setTlsBufferBytes(17408)                             /* one record — smallest ring */
     ->setReadTimeout(10)->setWriteTimeout(10);
 $server = new HttpServer($cfg);

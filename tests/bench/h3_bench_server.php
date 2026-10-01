@@ -33,7 +33,7 @@ if (!is_file($cert)) {
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $PORT + 1)
     ->addHttp3Listener('127.0.0.1', $PORT)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
+    ->setCertificate($cert)->setPrivateKey($key);
 $server = new HttpServer($config);
 
 $body = str_repeat('x', $BODY);

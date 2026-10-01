@@ -62,8 +62,12 @@ $collect = static function (H2TestClient $c, string $payload): int {
 $client = spawn(function () use ($port, $server, $collect) {
     try {
         $live = new H2TestClient('127.0.0.1', $port, 3);
-        $live->sendRequest('GET', '/', "127.0.0.1:$port");
+        /* The PING goes first: its ACK is queued when the PING is read, so it
+         * reaches the client ahead of the response's END_STREAM, where the
+         * count stops. A PING behind the request may be read only after the
+         * response is out, and its ACK would follow the END_STREAM. */
         $live->sendPing('LIVEPING');
+        $live->sendRequest('GET', '/', "127.0.0.1:$port");
         echo 'live acks: ', $collect($live, 'LIVEPING'), "\n";
         $live->close();
     } catch (Throwable $e) {

@@ -7,6 +7,8 @@ ARG_ENABLE('http-compression', 'Enable HTTP body compression (gzip via zlib)', '
 ARG_ENABLE('brotli',            'Enable Brotli backend (requires libbrotli)', 'yes');
 ARG_ENABLE('zstd',              'Enable zstd backend (requires libzstd)',     'yes');
 ARG_ENABLE('websocket',         'Enable WebSocket (RFC 6455) via bundled wslay', 'yes');
+ARG_ENABLE('http-server-test-hooks', 'Compile internal C test hooks (test/CI builds only, never for release)', 'no');
+ARG_ENABLE('tas-test-hooks',    'Compile the reliable-room test hook (test/CI builds only, never for release)', 'no');
 
 if (PHP_TRUE_ASYNC_SERVER == "yes") {
 
@@ -162,6 +164,18 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     // /EHsc enables C++ exception unwinding for the one C++ TU (thread_queue.cc,
     // issue #81); moodycamel and operator new can throw and the wrapper catches.
     ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/EHsc");
+
+    // Test-only hooks, gated behind a define so a release build has none;
+    // the same two options as config.m4.
+    if (PHP_HTTP_SERVER_TEST_HOOKS == "yes") {
+        WARNING("true_async_server: internal test hooks enabled; do not ship this build");
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D HTTP_SERVER_TEST_HOOKS=1");
+    }
+
+    if (PHP_TAS_TEST_HOOKS == "yes") {
+        WARNING("true_async_server: reliable-room test hooks enabled; do not ship this build");
+        ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D TAS_TEST_HOOKS=1");
+    }
 
     // OpenSSL (required for TLS layer inside the extension — matches config.m4
     // default of --with-openssl=yes).
@@ -338,10 +352,11 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
     }
 
     // zstd — single library, drops in. static lib is named zstd_static.lib
-    // by upstream's CMake; some distributions ship libzstd.lib instead.
+    // by upstream's CMake; some distributions ship libzstd.lib instead, and
+    // the PHP SDK deps package names it libzstd_a.lib.
     if (PHP_ZSTD == "yes" && PHP_HTTP_COMPRESSION == "yes") {
         if (CHECK_HEADER_ADD_INCLUDE("zstd.h", "CFLAGS_TRUE_ASYNC_SERVER", PHP_PHP_BUILD + "\\include")
-            && CHECK_LIB("zstd_static.lib;zstd.lib;libzstd.lib", "true_async_server")) {
+            && CHECK_LIB("zstd_static.lib;libzstd_a.lib;zstd.lib;libzstd.lib", "true_async_server")) {
             AC_DEFINE("HAVE_HTTP_ZSTD", 1, "Whether zstd compression backend is available");
             ADD_FLAG("CFLAGS_TRUE_ASYNC_SERVER", "/D ZSTD_STATIC_LINKING_ONLY /D HAVE_HTTP_ZSTD=1");
             ADD_SOURCES(configure_module_dirname + "/src/compression",

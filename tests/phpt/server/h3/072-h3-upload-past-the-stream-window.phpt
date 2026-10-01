@@ -42,7 +42,7 @@ $port   = tas_free_port_span(2);
 $server = new HttpServer((new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key));
+    ->setCertificate($cert)->setPrivateKey($key));
 
 $server->addHttpHandler(function ($req, $res) {
     $req->awaitBody();

@@ -126,11 +126,16 @@ Notes: dev/plans/S3.md
       handoff: PR 377; Windows CI run 36828469004 skips none of the 56 for either
         reason (212 of 549 skipped, 0 failed). The 9 first failures were the
         tests' own POSIX shell; the pool imbalance `012` found is S3.11.
-- [ ] S3.6 The Windows job builds ext/sockets, ext/openssl, zstd and both test
+- [x] S3.6 (#390) The Windows job builds ext/sockets, ext/openssl, zstd and both test
         hook options (added to `config.w32`)
       done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
         its listed reason; failures as in S3.5
       tier: T1 · role: —
+      handoff: PR 392; Windows CI run 36839041561 skips no test for those four
+        reasons (167 of 553 skipped, 0 failed). `core/020` fixed by #391,
+        `h1/038` made order-independent, `h1/055` skipped with a measured
+        reason (`dev/plans/S3.md`). `h3/079` and `080`, added after S3.5, lost
+        the false SO_REUSEPORT skip here.
 - [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
@@ -288,9 +293,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `multipart/026` (a 4 MiB field held at 3,152 bytes on main, 3 of 3) passes,
     and kills the mutant that keeps the doubled buffer (8.4 MB held). A 40 MiB
     field under `memory_limit=32M`: 503 at the parse, was 500 in the handler.
-20. The H3 slot release stops retrying once the reactor leaves RUN
-    (`http3_stream.c:123-125` spins with no bound); the slot is dropped with a
-    counter. Reproduce through a hook that fails the post, or bound it anyway.
+20. The H3 slot release stops retrying once the reactor leaves RUN: done,
+    bounded (#384), not reproduced. `reactor_pool_is_running()` decides; a
+    release for a reactor that left is dropped with one stderr notice, not a
+    counter: the drop happens at shutdown, where nothing would read one.
+    `h3/081` drives it through the fault point `h3/slot_release/reactor_gone`
+    (red on main: the point is missing). The check inside the retry loop runs
+    only when the deferral fails, which no test reaches.
 21. `test_parser_security.c` asserts the parse outcome: done. 25 cases asserted
     nothing (23 `(void)result`, plus the missing-Host and CRLF cases under an
     `if` that never ran); each now asserts what was measured, with its RFC
@@ -298,9 +307,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     four accept correctly. The fifth, a 50 KB chunk extension, was accepted
     with nothing counting it: #386 caps extensions at 16 KiB per request (413),
     with two boundary cases and `h1/069`.
-22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
-    ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
-    inspects the stateless reset it emits (length clamp, header bits, token).
+22. The HTTP/3 cmocka targets run in CI: fuzz-embedded restores the nghttp3
+    and ngtcp2 caches and passes `PKG_CONFIG_PATH` to CMake, so
+    `HTTP3Packet` and `HTTP3SlotRelease` build; the step fails if any of the
+    three HTTP/3 targets is missing from `ctest -N`. `test_http3_packet` reads
+    the stateless reset from the send stub: length (41 → 40, 100 → 99,
+    1201 and 1500 → 1200), the short-header bits and the token; dropping the
+    header-bit fix fails it 3 of 3, dropping the clamp overruns the buffer.
 23. Test strength of the static decoders: done. `test_static_decoders` links
     `http_range.c` and checks 18 range headers (clamp, suffix, 416 past the end
     and on an empty file, refusals); a file's ETag changes with its size and
@@ -311,13 +324,30 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     If-None-Match and invalid dates were covered already. `static/011`
     compares the range bodies; `compression/076` sends `x-gzip` both ways and
     fails without either alias.
-24. The public API does what it says. `setWriteBufferSize`,
-    `enableProtocolDetection`, `enableTls` and `setAutoAwaitBody` store a value
-    nothing reads; `getTelemetry()` returns `bytes_received`, `bytes_sent` and
-    `errors` as a literal 0; `CODEL_TARGET_MS` parses "abc" as 0. Each is wired
-    up or removed with a tombstone (CODING_STANDARDS 484-485). First narrow
-    `h3/023:34` and `h3/030:41`, which catch Throwable and would count a removed
-    setter as rejected.
+24. The public API does what it says, in three issues:
+    - #393, done: twelve `HttpServerConfig` methods throw
+      `HttpServerRuntimeException` naming what does the job (`enableTls`,
+      `enableProtocolDetection`, `setWriteBufferSize`, `setAutoAwaitBody`,
+      `enableHttp2`, `enableWebSocket` and their getters); their fields are
+      gone; 122 `enableTls(true)` calls are deleted. `core/085` reads
+      "returned" for each on main and the throw here.
+    - #394: `getTelemetry()` loses `bytes_received`, `bytes_sent`, `errors`.
+    - #395: `start()` refuses a `CODEL_TARGET_MS` that is not 0..10000.
+    The `h3/023`, `h3/030` catch of Throwable guarded none of the twelve; both
+    now print the class, which pins InvalidArgument against Runtime (locked).
+    Critic A 2026-10-01: the auto-await message named a switch that does not
+    decide when the handler starts; `@deprecated` in a stub makes gen_stub
+    emit E_DEPRECATED before the throw; the replacement stubs misstated their
+    ranges; "accept the true value" (enableHttp2's pattern) would break no one.
+    First three accepted and fixed. Critic B 2026-10-01: getTelemetry() is a
+    per-worker view; "bytes" was undefined; CODEL warn-and-ignore switches
+    CoDel off for "50ms"; the PR mixes three risk profiles. Accepted: CoDel
+    throws in start(), three PRs.
+    Sage 2026-10-01: full tombstone for all six pairs, enableHttp2 and
+    enableWebSocket included (P1.2: an accepted value still makes the getter
+    misreport); wiring enableTls to the constructor's listener is a feature
+    (P4.1). Final. Sage 2026-10-01: remove the three telemetry keys now; byte
+    counters become item 39 (P4.1). Final.
 25. Coverage measures what runs: the ctest run is instrumented and merged into
     the baseline, and `thread_queue.cc` gets coverage through CXXFLAGS.
 26. A watchdog is a ceiling, not a wait: the 24 phpt that sleep 1 s or more in
@@ -368,6 +398,10 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     every build rewrites it), and assert in `sendfile_wait_writable` that the
     destination io has no other sendfile waiting, since `sendfile_waiting`
     holds one (Code Reviewer on S2, 2026-09-30).
+39. #396 — byte counters, a feature: `bytes_received_total`/`bytes_sent_total`
+    as SUM rows, counted on the socket (plaintext as written, TLS as
+    ciphertext, HTTP/3 datagram payload). Edmond confirms the definition when
+    this is picked up (Sage, item 24).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

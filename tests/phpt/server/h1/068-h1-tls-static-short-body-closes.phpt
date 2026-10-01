@@ -51,7 +51,7 @@ file_put_contents("$root/small.txt", 'small');
 $port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+    ->setCertificate($cert)->setPrivateKey($key)
     ->setReadTimeout(10)->setWriteTimeout(10);
 
 $server = new HttpServer($config);

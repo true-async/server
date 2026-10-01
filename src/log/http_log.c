@@ -692,16 +692,28 @@ size_t http_log_format_pretty(const http_log_record_t *rec,
     return sb.len;
 }
 
+/* Whether the process environment defines NAME, an empty value included. On
+ * Windows a ZTS putenv() updates only the Win32 environment block and not the
+ * CRT copy getenv() reads, so the block is asked directly. */
+static bool log_env_is_set(const char *name)
+{
+#ifdef PHP_WIN32
+    return GetEnvironmentVariableA(name, NULL, 0) != 0;
+#else
+    return getenv(name) != NULL;
+#endif
+}
+
 /* Colour decision for a pretty sink, resolved once against the target fd:
  * NO_COLOR disables (https://no-color.org, wins for accessibility), else
  * CLICOLOR_FORCE enables, else colour follows whether the fd is a TTY. */
 bool http_log_color_for_fd(int fd)
 {
-    if (getenv("NO_COLOR") != NULL) {
+    if (log_env_is_set("NO_COLOR")) {
         return false;
     }
 
-    if (getenv("CLICOLOR_FORCE") != NULL) {
+    if (log_env_is_set("CLICOLOR_FORCE")) {
         return true;
     }
 

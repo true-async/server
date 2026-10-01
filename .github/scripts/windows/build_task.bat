@@ -60,6 +60,10 @@ cmd /c configure.bat ^
     --enable-async ^
     --enable-true-async-server ^
     --enable-http2 ^
+    --enable-http-server-test-hooks ^
+    --enable-tas-test-hooks ^
+    --enable-sockets ^
+    --with-openssl=yes ^
     %ADD_CONF% ^
     --disable-test-ini
 if %errorlevel% neq 0 exit /b 3

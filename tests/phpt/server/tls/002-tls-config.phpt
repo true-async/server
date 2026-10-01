@@ -34,13 +34,12 @@ require_once __DIR__ . '/../_free_port.inc';
 $port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)   // tls=true
-    ->enableTls(true)
     ->setCertificate($cert_path)
     ->setPrivateKey($key_path)
     ->setReadTimeout(5)
     ->setWriteTimeout(5);
 
-echo "isTlsEnabled: " . ($config->isTlsEnabled() ? 'yes' : 'no') . "\n";
+echo "listener tls: " . ($config->getListeners()[0]['tls'] ? 'yes' : 'no') . "\n";
 echo "cert: " . basename($config->getCertificate()) . "\n";
 echo "key: "  . basename($config->getPrivateKey())  . "\n";
 
@@ -61,7 +60,6 @@ echo "stopped\n";
 // --- Case 2: TLS listener but no cert configured → start() throws.
 $config2 = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1, true)
-    ->enableTls(true)
     ->setReadTimeout(5);
 
 $server2 = new HttpServer($config2);
@@ -83,7 +81,7 @@ try {
 
 echo "Done\n";
 --EXPECT--
-isTlsEnabled: yes
+listener tls: yes
 cert: cert.pem
 key: key.pem
 starting...

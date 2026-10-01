@@ -31,7 +31,6 @@ if (!is_file($cert) || !is_file($key)) {
 
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
-    ->enableTls(true)
     ->setCertificate($cert)
     ->setPrivateKey($key)
     ->setReadTimeout(10)

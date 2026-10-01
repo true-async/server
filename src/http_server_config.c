@@ -57,7 +57,6 @@ struct _http_server_shared_config_t {
     zend_string            *tls_key_path;
     zend_string            *http3_hq_docroot;    /* persistent; hq-interop docroot */
 
-    size_t                  write_buffer_size;
     int                     backlog;
     int                     max_connections;
     int                     workers;                /* built-in pool size; 1 = off (issue #11) */
@@ -115,11 +114,6 @@ struct _http_server_shared_config_t {
     size_t                  compression_mime_count;
     uint32_t                json_encode_flags;
 
-    bool                    http2_enabled;
-    bool                    websocket_enabled;
-    bool                    protocol_detection_enabled;
-    bool                    tls_enabled;
-    bool                    auto_await_body;
     bool                    body_streaming_enabled;   /* Issue #26 */
     /* Alt-Svc: h3=":<port>"; ma=86400 emission on H1/H2 responses when an
      * H3 listener is up. Default true. setHttp3AltSvcEnabled(false) lets
@@ -164,7 +158,6 @@ static void http_server_config_populate_from_shared(
 #define DEFAULT_WRITE_TIMEOUT           30     /* 30 seconds */
 #define DEFAULT_KEEPALIVE_TIMEOUT       5      /* 5 seconds */
 #define DEFAULT_SHUTDOWN_TIMEOUT        5      /* 5 seconds */
-#define DEFAULT_WRITE_BUFFER_SIZE       65536  /* 64KB */
 #define DEFAULT_BACKPRESSURE_TARGET_MS  0      /* CoDel off by default — sojourn-based AQM
                                                 * misfires on HTTP/2 mux (sustained pipeline
                                                 * looks like persistent queue). Opt-in via
@@ -485,8 +478,6 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, __construct)
     config->http3_alt_svc_enabled = true;  /* RFC 7838 advertise on by default */
     config->http3_pacing = false;          /* QUIC send pacing — opt-in (#59) */
     config->request_scope = true;          /* Per-request child scope on by default */
-    config->write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
-    config->auto_await_body = true;  /* Default: wait for body on non-multipart */
     ZVAL_UNDEF(&config->bootloader);
 
     /* Add default listener if host provided */
@@ -2527,181 +2518,149 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getRequestMaxDecompressedSize)
     RETURN_LONG((zend_long)config->request_max_decompressed_size);
 }
 
-/* {{{ proto HttpServerConfig::setWriteBufferSize(int $size): static */
+/* {{{ proto HttpServerConfig::setWriteBufferSize(int $size): static
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setWriteBufferSize)
 {
-    zend_long size;
+    (void)return_value;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_LONG(size)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    if (size < 1024) {
-        zend_throw_exception(http_server_invalid_argument_exception_ce,
-            "Write buffer size must be at least 1024 bytes", 0);
-        return;
-    }
-
-    config->write_buffer_size = (size_t)size;
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "setWriteBufferSize() is gone. setStreamWriteBufferBytes() bounds the "
+        "bytes queued on a connection or stream (4 KiB to 4 MiB; HTTP/1, "
+        "HTTP/2 and WebSocket)", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::getWriteBufferSize(): int */
+/* {{{ proto HttpServerConfig::getWriteBufferSize(): int
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, getWriteBufferSize)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-    RETURN_LONG((zend_long)config->write_buffer_size);
+    (void)return_value;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "getWriteBufferSize() is gone. setStreamWriteBufferBytes() bounds the "
+        "bytes queued on a connection or stream (4 KiB to 4 MiB; HTTP/1, "
+        "HTTP/2 and WebSocket)", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::enableHttp2(bool $enable): static */
+/* {{{ proto HttpServerConfig::enableHttp2(bool $enable): static
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, enableHttp2)
 {
-    bool enable;
+    (void)return_value;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_BOOL(enable)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    /* enableHttp2() is the legacy flag; the working path is
-     * addHttp2Listener() / addHttp2Handler(). Reject the toggle so
-     * users land on the supported API rather than a silently-ignored
-     * flag. */
-    if (enable) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Use addHttp2Listener() / addHttp2Handler() to enable HTTP/2", 0);
-        return;
-    }
-
-    config->http2_enabled = enable;
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "enableHttp2() is gone. HTTP/2 is per listener: addListener() "
+        "negotiates it, addHttp2Listener() serves only HTTP/2, "
+        "addHttp2Handler() handles it", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::isHttp2Enabled(): bool */
+/* {{{ proto HttpServerConfig::isHttp2Enabled(): bool
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, isHttp2Enabled)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-    RETURN_BOOL(config->http2_enabled);
+    (void)return_value;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "isHttp2Enabled() is gone. HTTP/2 is per listener: addListener() "
+        "negotiates it, addHttp2Listener() serves only HTTP/2, "
+        "addHttp2Handler() handles it", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::enableWebSocket(bool $enable): static */
+/* {{{ proto HttpServerConfig::enableWebSocket(bool $enable): static
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, enableWebSocket)
 {
-    bool enable;
+    (void)return_value;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_BOOL(enable)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    /* enableWebSocket() is the legacy flag; the working path is
-     * addWebSocketHandler(). Reject the toggle so users land on the
-     * supported API rather than a silently-ignored flag. */
-    if (enable) {
-        zend_throw_exception(http_server_runtime_exception_ce,
-            "Use addWebSocketHandler() to enable WebSocket", 0);
-        return;
-    }
-
-    config->websocket_enabled = enable;
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "enableWebSocket() is gone. HttpServer::addWebSocketHandler() enables "
+        "WebSocket", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::isWebSocketEnabled(): bool */
+/* {{{ proto HttpServerConfig::isWebSocketEnabled(): bool
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, isWebSocketEnabled)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-    RETURN_BOOL(config->websocket_enabled);
+    (void)return_value;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "isWebSocketEnabled() is gone. HttpServer::addWebSocketHandler() "
+        "enables WebSocket", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::enableProtocolDetection(bool $enable): static */
+/* {{{ proto HttpServerConfig::enableProtocolDetection(bool $enable): static
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, enableProtocolDetection)
 {
-    bool enable;
+    (void)return_value;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_BOOL(enable)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    config->protocol_detection_enabled = enable;
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "enableProtocolDetection() is gone. Protocol detection always runs, "
+        "limited by each listener's protocols and the registered handlers", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::isProtocolDetectionEnabled(): bool */
+/* {{{ proto HttpServerConfig::isProtocolDetectionEnabled(): bool
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, isProtocolDetectionEnabled)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-    RETURN_BOOL(config->protocol_detection_enabled);
+    (void)return_value;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "isProtocolDetectionEnabled() is gone. Protocol detection always "
+        "runs, limited by each listener's protocols and the registered "
+        "handlers", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::enableTls(bool $enable): static */
+/* {{{ proto HttpServerConfig::enableTls(bool $enable): static
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, enableTls)
 {
-    bool enable;
+    (void)return_value;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_BOOL(enable)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    /* Flag is persisted; SSL_CTX is built at start() from
-     * setCertificate()/setPrivateKey(). Failures to load credentials
-     * are surfaced there, not here, to keep config pure. */
-    config->tls_enabled = enable;
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "enableTls() is gone. TLS is per listener: addListener($host, $port, "
+        "true), addHttp1Listener() or addHttp2Listener(); the constructor's "
+        "listener is plaintext, and HTTP/3 listeners are always TLS", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::isTlsEnabled(): bool */
+/* {{{ proto HttpServerConfig::isTlsEnabled(): bool
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, isTlsEnabled)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-    RETURN_BOOL(config->tls_enabled);
+    (void)return_value;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "isTlsEnabled() is gone. getListeners() reports 'tls' for each "
+        "listener", 0);
 }
 /* }}} */
 
@@ -2830,33 +2789,37 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getHttp3HqDocroot)
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::setAutoAwaitBody(bool $enable): static */
+/* {{{ proto HttpServerConfig::setAutoAwaitBody(bool $enable): static
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setAutoAwaitBody)
 {
-    bool enable;
+    (void)return_value;
 
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-        Z_PARAM_BOOL(enable)
-    ZEND_PARSE_PARAMETERS_END();
-
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-
-    if (config_check_locked(config)) {
-        return;
-    }
-
-    config->auto_await_body = enable;
-
-    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "setAutoAwaitBody() is gone. It never decided when the handler "
+        "starts. HTTP/1 starts it after the body; HTTP/2 and HTTP/3 may start "
+        "it after the headers, so call awaitBody() before getBody(). "
+        "setBodyStreamingEnabled(true) delivers a large body through "
+        "readBody()", 0);
 }
 /* }}} */
 
-/* {{{ proto HttpServerConfig::isAutoAwaitBodyEnabled(): bool */
+/* {{{ proto HttpServerConfig::isAutoAwaitBodyEnabled(): bool
+ *
+ * Tombstone: the value it stored was read by nothing. The declaration
+ * stays for one minor release so a caller learns what does the job. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, isAutoAwaitBodyEnabled)
 {
-    ZEND_PARSE_PARAMETERS_NONE();
-    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
-    RETURN_BOOL(config->auto_await_body);
+    (void)return_value;
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "isAutoAwaitBodyEnabled() is gone. It never decided when the handler "
+        "starts. HTTP/1 starts it after the body; HTTP/2 and HTTP/3 may start "
+        "it after the headers, so call awaitBody() before getBody(). "
+        "setBodyStreamingEnabled(true) delivers a large body through "
+        "readBody()", 0);
 }
 /* }}} */
 
@@ -3215,15 +3178,9 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->http3_alt_svc_enabled = true;
     config->http3_pacing = false;
     config->request_scope = true;
-    config->write_buffer_size = 0;
-    config->http2_enabled = false;
-    config->websocket_enabled = false;
-    config->protocol_detection_enabled = false;
-    config->tls_enabled = false;
     config->tls_cert_path = NULL;
     config->tls_key_path = NULL;
     config->http3_hq_docroot = NULL;
-    config->auto_await_body = false;
     config->is_locked = false;
     config->log_severity = 0;          /* HTTP_LOG_OFF */
     ZVAL_UNDEF(&config->log_stream);
@@ -3402,13 +3359,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->request_scope                = src->request_scope;
     shared->stats_enabled                = src->stats_enabled;
     shared->telemetry_enabled            = src->telemetry_enabled;
-    shared->write_buffer_size  = src->write_buffer_size;
 
-    shared->http2_enabled              = src->http2_enabled;
-    shared->websocket_enabled          = src->websocket_enabled;
-    shared->protocol_detection_enabled = src->protocol_detection_enabled;
-    shared->tls_enabled                = src->tls_enabled;
-    shared->auto_await_body            = src->auto_await_body;
     shared->body_streaming_enabled     = src->body_streaming_enabled;
 
     shared->compression_enabled           = src->compression_enabled;
@@ -3643,13 +3594,7 @@ static void http_server_config_populate_from_shared(
     dst->request_scope                = src->request_scope;
     dst->stats_enabled                = src->stats_enabled;
     dst->telemetry_enabled            = src->telemetry_enabled;
-    dst->write_buffer_size  = src->write_buffer_size;
 
-    dst->http2_enabled              = src->http2_enabled;
-    dst->websocket_enabled          = src->websocket_enabled;
-    dst->protocol_detection_enabled = src->protocol_detection_enabled;
-    dst->tls_enabled                = src->tls_enabled;
-    dst->auto_await_body            = src->auto_await_body;
     dst->body_streaming_enabled     = src->body_streaming_enabled;
 
     dst->compression_enabled           = src->compression_enabled;

@@ -40,7 +40,7 @@ $port = 30000 + (getmypid() % 30000);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key);
+    ->setCertificate($cert)->setPrivateKey($key);
 $server = new HttpServer($config);
 
 /* Pre-build response body of requested size. */

@@ -22,6 +22,7 @@
 #include "http_body_stream.h"   /* sever body_h3_conn + wake a parked consumer */
 #include "http_response_internal.h" /* http_response_replace_stream_ops */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
+#include "fiu-local.h"
 
 /* Static-delivery memory accounting (http3_static_response.c). Declared here
  * rather than via the heavy http3_internal.h — teardown only needs the debit. */
@@ -95,6 +96,28 @@ static void http3_reactor_consumed_apply(void *arg)
     http3_stream_release((http3_stream_t *)arg);
 }
 
+/* Set by the first slot release dropped in the process; later ones are silent. */
+static zend_atomic_bool slot_release_drop_reported;
+
+/* A reactor that has left its loop takes no post and does not come back, so a
+ * release bound for it is dropped: the slot goes with the pool's slab. */
+static bool http3_stream_slot_reactor_gone(const http3_stream_t *s)
+{
+    fiu_return_on("h3/slot_release/reactor_gone", true);
+
+    return !reactor_pool_is_running(s->req_reactor_pool, s->req_reactor_id);
+}
+
+static void http3_stream_slot_release_drop(const http3_stream_t *s)
+{
+    if (!zend_atomic_bool_exchange(&slot_release_drop_reported, true)) {
+        fprintf(stderr,
+            "[true-async-server] HTTP/3 slot release dropped: reactor %d has left its loop "
+            "(later drops are not reported)\n", s->req_reactor_id);
+        fflush(stderr);
+    }
+}
+
 static void http3_stream_release_via_request(http_request_t *req)
 {
     /* Offset-0 invariant: _request_storage is the first field of
@@ -115,13 +138,24 @@ static void http3_stream_release_via_request(http_request_t *req)
      * take work for it again and nothing can be racing for the slot — and the
      * posts below refuse there, which is what would hang a shutdown. */
     if (http3_stream_slot_goes_to_reactor(s)) {
+        if (http3_stream_slot_reactor_gone(s)) {
+            http3_stream_slot_release_drop(s);
+            return;
+        }
+
         /* Hand the release back via the worker's ordered FIFO — no busy-spin,
          * stays behind any parked wire of this stream. The fallback only fires
-         * when no timer can be armed (stopping loop), where the FIFO is empty. */
+         * when no timer can be armed (stopping loop), where the FIFO is empty;
+         * it spins while the reactor's mailbox is full, which its loop drains,
+         * and stops when the reactor leaves that loop. */
         if (!http_worker_reactor_post_release(s->req_reactor_id,
                                               http3_reactor_consumed_apply, s)) {
             while (!reactor_pool_post_exec(s->req_reactor_pool, s->req_reactor_id,
                                            http3_reactor_consumed_apply, s)) {
+                if (http3_stream_slot_reactor_gone(s)) {
+                    http3_stream_slot_release_drop(s);
+                    break;
+                }
             }
         }
 

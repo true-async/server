@@ -40,7 +40,7 @@ $server = new HttpServer((new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)
     ->setMaxBodySize(16 * 1024 * 1024)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key));
+    ->setCertificate($cert)->setPrivateKey($key));
 
 $server->addHttpHandler(function ($req, $res) {
     $res->setStatusCode(200)->setBody('ok');
