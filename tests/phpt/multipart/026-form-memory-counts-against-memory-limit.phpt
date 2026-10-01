@@ -11,7 +11,9 @@ memory_limit=256M
  * buffer grows by doubling while the field arrives, and is cut to the value
  * when the field ends, so a value costs about its own size. */
 
-$size  = 4 << 20;
+/* Just past 4 MiB: the doubled buffer is 8 MiB, and the fitted value stays
+ * under 1.5x even on Windows, which rounds a huge block up to 2 MiB. */
+$size  = (4 << 20) + (64 << 10);
 $body  = "--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"
        . str_repeat('x', $size)
        . "\r\n--b--\r\n";
@@ -31,4 +33,4 @@ echo "value: ", strlen($request->getPost()['f']), "\n";
 --EXPECT--
 held at least the value: yes
 held under 1.5x the value: yes
-value: 4194304
+value: 4259840
