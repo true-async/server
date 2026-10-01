@@ -372,6 +372,13 @@ static void http_server_listener_release(http_listener_t *listener)
 
 typedef struct pool_ctl_s pool_ctl_t;   /* pool control channel (#117), defined below */
 
+/* How far the retire of a worker clone's request inbox has got. */
+typedef enum {
+    WORKER_INBOX_LIVE = 0,
+    WORKER_INBOX_RETIRING,   /* unpublished; the fence or the drain is in flight */
+    WORKER_INBOX_RETIRED,    /* no reactor can post into it any more */
+} worker_inbox_state_t;
+
 /* Server object structure.
  * Field order grouped by alignment to minimise padding. zend_object must
  * remain last per PHP object layout contract.
@@ -446,6 +453,11 @@ struct http_server_object {
      * running under the reactor-pool gate; the reactor posts parsed requests
      * here and the drain dispatches them on this thread. */
     worker_inbox_t          *worker_inbox;
+
+    /* A stop through the pool retires the inbox on its own coroutine, and
+     * start() retires it after its wait; the second retire waits for the
+     * first instead of running again. */
+    worker_inbox_state_t     worker_inbox_state;
 
 #ifdef HAVE_HTTP_SERVER_HTTP3
     /* HTTP/3 UDP listeners — parallel to TCP listeners[] because they have
@@ -796,6 +808,7 @@ static void http_server_hot_reload_up(http_server_object *server, zval *this_zv,
                                       http_server_config_t *cfg);
 static void http_server_hot_reload_down(http_server_object *server);
 static void http_server_worker_inbox_retire(http_server_object *server);
+static void http_server_worker_inbox_unpublish(http_server_object *server);
 
 /* Runs on a fresh coroutine, not on the control wakeup's own callback: the stop
  * below disposes libuv handles, which must not happen from inside a handle's
@@ -815,6 +828,11 @@ static void http_server_pool_retire_entry(void)
     /* Reactor-pool mode: unpublish our inbox and fence the reactors BEFORE the
      * stop — a producer must never post into a dying worker's inbox (#93). */
     http_server_worker_inbox_retire(server);
+
+    /* The retire suspends, and a handler's stop() may have stopped us meanwhile. */
+    if (!server->running || server->stopping) {
+        return;
+    }
 
     server->stopping = true;
     http_server_do_stop(server, reason);   /* logs server.stop reason=... */
@@ -3447,13 +3465,26 @@ static void http_server_inbox_fence_cb(void *arg)
  * producers, which is the contract it always assumed. */
 static void http_server_worker_inbox_retire(http_server_object *server)
 {
-    if (server->worker_inbox == NULL || g_worker_registry == NULL) {
+    if (server->worker_inbox == NULL || g_worker_registry == NULL
+        || server->worker_inbox_state == WORKER_INBOX_RETIRED) {
         return;
     }
 
-    worker_registry_retire(g_worker_registry, server->worker_inbox);
-
     zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    /* start() woken by a handler's stop() while the pool's retire is still
+     * fencing: returning now would let start() free the server under it. */
+    if (server->worker_inbox_state == WORKER_INBOX_RETIRING) {
+        while (co != NULL && server->worker_inbox_state == WORKER_INBOX_RETIRING) {
+            hot_reload_sleep_ms(co, 5);
+        }
+
+        return;
+    }
+
+    http_server_worker_inbox_unpublish(server);
+    server->worker_inbox_state = WORKER_INBOX_RETIRING;
+
     const int n = g_reactor_pool != NULL ? reactor_pool_count(g_reactor_pool) : 0;
 
     if (n > 0 && co != NULL) {
@@ -3505,6 +3536,18 @@ static void http_server_worker_inbox_retire(http_server_object *server)
 
     http_logf_info(&server->log_state, "reload.inbox retired depth=%zu",
                    worker_inbox_depth(server->worker_inbox));
+    server->worker_inbox_state = WORKER_INBOX_RETIRED;
+}
+
+/* Step 1 of the retire alone: no reactor picks this worker from now on. It
+ * does not suspend, so do_stop runs it on every stop, whichever way the stop
+ * came; without it a clone stopped by its own handler takes requests until
+ * start() resumes, and runs them after the stop. Idempotent. */
+static void http_server_worker_inbox_unpublish(http_server_object *server)
+{
+    if (server->worker_inbox != NULL && g_worker_registry != NULL) {
+        (void)worker_registry_retire(g_worker_registry, server->worker_inbox);
+    }
 }
 
 /* Claim this worker clone's stats slab slot and point its live counters at it,
@@ -4293,10 +4336,6 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
      * explicitly release it. */
     server->scope_object = server->server_scope->scope_object;
 
-    /* Worker-pool clone under the reactor-pool gate: publish a request inbox so
-     * a reactor can route parsed requests to this worker. No-op otherwise. */
-    http_server_worker_inbox_up(server);
-
     /* Build TLS context up-front if any listener declared tls=true.
      * Doing this *before* binding sockets keeps the failure path cheap:
      * a bad cert means no listen_event allocation at all, and the
@@ -4752,6 +4791,14 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
         RETURN_FALSE;
     }
 
+    /* Worker-pool clone under the reactor-pool gate: publish a request inbox so
+     * a reactor can route parsed requests to this worker. No-op otherwise.
+     * Not when a stop() already waits: the inbox would take requests until the
+     * do_stop below unpublished it, and run them after the stop. */
+    if (!server->stopping) {
+        http_server_worker_inbox_up(server);
+    }
+
     bool bailout = false;
 
     if (UNEXPECTED(server->stopping)) {
@@ -4763,6 +4810,8 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
     } else if (!http_server_await_stop(server, &bailout)) {
         /* This path never reaches the exits below, so the slot and the hub
          * reference are dropped here instead. */
+        http_server_worker_inbox_unpublish(server);
+
         if (room_hub_attached) {
             room_hub_detach(server->topic_hub);
         }
@@ -4787,6 +4836,10 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
             room_hub_detach_request_over(server->topic_hub);
         }
 
+        /* No fence on this path: unpublishing at least keeps new picks off an
+         * inbox that http_server_free frees. */
+        http_server_worker_inbox_unpublish(server);
+
         /* zend_bailout() does not return to the wrapper that set it. */
         server->start_active = false;
         zend_bailout();
@@ -4797,6 +4850,11 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
     if (server->running) {
         http_server_do_stop(server, "shutdown");
     }
+
+    /* do_stop unpublished the inbox but cannot suspend for the fence; a stop
+     * through the pool has run the whole retire before it already. The
+     * requests still in the inbox drain into server_scope with the rest. */
+    http_server_worker_inbox_retire(server);
 
     /* Drain in-flight per-request handler coroutines now, while we are still
      * on the start() coroutine and can suspend, so server_scope is empty when
@@ -4901,6 +4959,7 @@ static void http_server_do_stop(http_server_object *server, const char *reason)
 #endif
 
     http_server_retire_connections(server);
+    http_server_worker_inbox_unpublish(server);
 
     /* Logger teardown must precede the wait_event notify: waking
      * start() can let the scheduler tear down before our async write
@@ -6395,8 +6454,11 @@ static void http_server_free(zend_object *obj)
     http_server_reactor_pool_down(server);
 
     /* This worker clone's request inbox. Producers (reactors) have quiesced by
-     * the time a worker is freed. */
+     * the time a worker is freed, unless start() left by a bailout or a failed
+     * wait: those paths do not fence, and only the unpublish keeps a reactor
+     * from picking an inbox freed here. */
     if (server->worker_inbox != NULL) {
+        http_server_worker_inbox_unpublish(server);
         worker_inbox_free(server->worker_inbox);
         server->worker_inbox = NULL;
     }
