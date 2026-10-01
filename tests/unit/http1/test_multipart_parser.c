@@ -968,8 +968,8 @@ static void test_max_length_boundary(void **state) {
     multipart_parser_destroy(parser);
 }
 
-/* Group setup/teardown — initialize PHP runtime so emalloc/efree
- * from the HAVE_PHP_H-compiled multipart_parser.c has a live heap. */
+/* Group setup/teardown — initialize PHP runtime so the emalloc/efree of
+ * multipart_parser.c has a live heap. */
 #include "common/php_sapi_test.h"
 
 static int group_setup(void **state) {

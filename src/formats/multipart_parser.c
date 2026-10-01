@@ -15,23 +15,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Use PHP memory functions if available */
-#ifdef PHP_WIN32
+/* PHP's request allocator, as in multipart_processor.c, which owns the parser.
+ * MP_PARSER_LIBC_ALLOC is for a build without PHP: the fuzz harness of the
+ * parser alone (fuzz/Makefile, fuzz_multipart). */
+#ifdef MP_PARSER_LIBC_ALLOC
+# define MP_MALLOC(size)     malloc(size)
+# define MP_CALLOC(n, size)  calloc(n, size)
+# define MP_FREE(ptr)        free(ptr)
+#else
 # include "php.h"
 # define MP_MALLOC(size)     emalloc(size)
 # define MP_CALLOC(n, size)  ecalloc(n, size)
 # define MP_FREE(ptr)        efree(ptr)
-#else
-# ifdef HAVE_PHP_H
-#  include "php.h"
-#  define MP_MALLOC(size)     emalloc(size)
-#  define MP_CALLOC(n, size)  ecalloc(n, size)
-#  define MP_FREE(ptr)        efree(ptr)
-# else
-#  define MP_MALLOC(size)     malloc(size)
-#  define MP_CALLOC(n, size)  calloc(n, size)
-#  define MP_FREE(ptr)        free(ptr)
-# endif
 #endif
 
 /* Helper macros */
