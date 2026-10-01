@@ -221,14 +221,15 @@ final class HttpServer
     public function isRunning(): bool {}
 
     /**
-     * Get server telemetry (TODO)
+     * This server's counters and backpressure state. Under a worker pool each
+     * worker reports its own slot; getStats() sums the pool.
      *
      * @return array Telemetry data
      */
     public function getTelemetry(): array {}
 
     /**
-     * Reset telemetry counters (TODO)
+     * Reset this server's telemetry counters.
      *
      * @return bool True if reset successfully
      */

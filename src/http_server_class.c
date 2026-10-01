@@ -5763,9 +5763,6 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long(return_value, "active_requests", (zend_long)server->counters_live->active_requests);
     add_assoc_long(return_value, "max_inflight_requests", (zend_long)server->max_inflight_requests);
     add_assoc_long(return_value, "requests_shed_total", (zend_long)server->counters_live->requests_shed_total);
-    add_assoc_long(return_value, "bytes_received", 0);  /* TODO */
-    add_assoc_long(return_value, "bytes_sent", 0);      /* TODO */
-    add_assoc_long(return_value, "errors", 0);          /* TODO */
 
     /* Backpressure telemetry. All durations exposed in milliseconds
      * (float) so PHP callers can graph without extra conversion. */
