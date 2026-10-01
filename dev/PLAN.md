@@ -355,8 +355,14 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     misreport); wiring enableTls to the constructor's listener is a feature
     (P4.1). Final. Sage 2026-10-01: remove the three telemetry keys now; byte
     counters become item 39 (P4.1). Final.
-25. Coverage measures what runs: the ctest run is instrumented and merged into
-    the baseline, and `thread_queue.cc` gets coverage through CXXFLAGS.
+25. Coverage measures what runs: done (#403). The release leg builds PHP with
+    `--enable-embed=shared` and runs the cmocka suite with `--coverage`;
+    `scripts/lcov-add-hits.py` adds its hits to the extension's lines, since a
+    union of the two line tables counted 704 lines the -O2 extension does not
+    have and read 83.5 %. `thread_queue.cc` gets the flags through CXXFLAGS:
+    0 to 98 of 120 lines. Counters update atomically: without it lcov 2.0
+    refused negative counts in `room_hub.c` and `concurrentqueue.h`. CI, run
+    against 176237f's baseline: 21284 of 25369 lines to 21576 of 25507.
 26. A watchdog is a ceiling, not a wait: the 24 phpt that sleep 1 s or more in
     one call stop the server when the client finishes; tls/007 (15.1 s),
     h2/021, tls/005, tls/015 and tls/009 each drop under 2 s.
