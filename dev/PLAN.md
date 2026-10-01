@@ -123,6 +123,9 @@ Notes: dev/plans/S3.md
       done: none of the 56 skips on Windows CI for either reason; each failure
         among them becomes a step of its own
       tier: T1 · role: —
+      handoff: local Windows build 24 pass, 0 fail, 35 skip for other groups;
+        the 9 first failures were the tests' own POSIX shell, fixed; the pool
+        imbalance `012` found is S3.11 (`dev/plans/S3.md`). Windows CI not run yet.
 - [ ] S3.6 The Windows job builds ext/sockets, ext/openssl, zstd and both test
         hook options (added to `config.w32`)
       done: no test of those groups in `dev/plans/S3.md` skips on Windows CI for
@@ -144,6 +147,13 @@ Notes: dev/plans/S3.md
 - [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
+      tier: T2 · role: Critic
+- [ ] S3.11 A Windows worker pool serves from one worker: worker 0 accepted
+        nothing in 30 of 30 runs, the worker started last took every request in
+        23 (`dev/plans/S3.md`, S3.5)
+      done: the cause found (shared socket, one AcceptEx at a time, or the
+        reactor) with the failing run named; the pool spreads or the limit is
+        decided in `dev/DECISIONS.md`; USAGE.md:688 states the measured behaviour
       tier: T2 · role: Critic
 
 ## Next
