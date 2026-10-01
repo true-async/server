@@ -307,9 +307,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     four accept correctly. The fifth, a 50 KB chunk extension, was accepted
     with nothing counting it: #386 caps extensions at 16 KiB per request (413),
     with two boundary cases and `h1/069`.
-22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
-    ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
-    inspects the stateless reset it emits (length clamp, header bits, token).
+22. The HTTP/3 cmocka targets run in CI: fuzz-embedded restores the nghttp3
+    and ngtcp2 caches and passes `PKG_CONFIG_PATH` to CMake, so
+    `HTTP3Packet` and `HTTP3SlotRelease` build; the step fails if any of the
+    three HTTP/3 targets is missing from `ctest -N`. `test_http3_packet` reads
+    the stateless reset from the send stub: length (41 → 40, 100 → 99,
+    1201 and 1500 → 1200), the short-header bits and the token; dropping the
+    header-bit fix fails it 3 of 3, dropping the clamp overruns the buffer.
 23. Test strength of the static decoders: done. `test_static_decoders` links
     `http_range.c` and checks 18 range headers (clamp, suffix, 416 past the end
     and on an empty file, refusals); a file's ETag changes with its size and
