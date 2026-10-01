@@ -233,9 +233,12 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `--enable-http-server-test-hooks`, and the 20 phpt gated on `_http_*`
     functions (reactor_pool, telemetry 001-003, eight in core) run and pass.
     Run them locally with the flag first: nothing has run them in CI.
-18. A failed `fflush` or `fclose` fails the upload with CANT_WRITE
-    (`multipart_processor.c:580-581`); a cmocka case reaches CANT_WRITE and
-    NO_TMP_DIR through `tmp_path_generator`. Reproduce.
+18. A failed `fflush` or `fclose` fails the upload: done (#380). A
+    `tmp_path_generator` linking to `/dev/full` gives a 16-byte part
+    `UPLOAD_ERR_OK` and a 64 KiB part CANT_WRITE with its partial temp file
+    kept, 3 of 3; now both read CANT_WRITE with no temp file and size 0, as
+    PHP. NO_TMP_DIR has a case too. The generator's header comment now says
+    the processor frees the path with its own allocator.
 19. Multipart takes memory from `emalloc` in every build: `HAVE_PHP_H` is set
     only by the unit and fuzz builds, so the shipped POSIX build uses libc
     `malloc`, outside `memory_limit`, and the tested branch is not the shipped one.
