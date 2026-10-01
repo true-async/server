@@ -118,7 +118,7 @@ Notes: dev/plans/S3.md
       handoff: `dev/BENCHMARKS.md` 2026-09-30: 1000 connects take 578-595 ms with
         #307 and 156-172 ms without, 7 runs each, A/B/A. The cost goes to S3.10.
         Scripts `storm*.php` are not in a repository.
-- [ ] S3.5 Drop the false "SO_REUSEPORT" skip from its 56 tests, and make the
+- [ ] S3.5 (#374) Drop the false "SO_REUSEPORT" skip from its 56 tests, and make the
         `curl --version 2>/dev/null` check of 22 test files run under cmd
       done: none of the 56 skips on Windows CI for either reason; each failure
         among them becomes a step of its own
@@ -148,7 +148,7 @@ Notes: dev/plans/S3.md
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
-- [ ] S3.11 A Windows worker pool serves from one worker: worker 0 accepted
+- [ ] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
         23 (`dev/plans/S3.md`, S3.5)
       done: the cause found (shared socket, one AcceptEx at a time, or the
