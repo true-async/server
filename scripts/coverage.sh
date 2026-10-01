@@ -89,19 +89,25 @@ PHPT_FAIL=$(grep -E "^Tests failed" "$PHPT_OUT" | tail -1 || echo "Tests failed:
 echo "    $PHPT_PASS"
 echo "    $PHPT_FAIL"
 
-# 4. Run C unit tests via CMake/ctest if present and --quick not set.
-if [ "$QUICK" -eq 0 ] && [ -d tests/build/unit ]; then
-    log "Running C unit tests (cmake)"
-    if ( cd tests/build/unit && ctest --output-on-failure ) >/tmp/cov-unit.log 2>&1; then
+# 4. Build and run the C unit tests with coverage unless --quick. Their own
+#    build directory, so the developer's tests/build keeps its flags; lcov
+#    merges the counters per source file with the extension's.
+if [ "$QUICK" -eq 0 ]; then
+    log "Building and running C unit tests (cmake, tests/build-coverage)"
+    UNIT_DIR="$PROJECT_DIR/tests/build-coverage"
+    UNIT_FLAGS="--coverage -fprofile-update=atomic"
+    if cmake -S tests -B "$UNIT_DIR" \
+             -DCMAKE_C_FLAGS="$UNIT_FLAGS" -DCMAKE_CXX_FLAGS="$UNIT_FLAGS" \
+             -DCMAKE_EXE_LINKER_FLAGS=--coverage >/tmp/cov-unit.log 2>&1 \
+       && cmake --build "$UNIT_DIR" -j"$(nproc)" >>/tmp/cov-unit.log 2>&1 \
+       && ctest --test-dir "$UNIT_DIR" --output-on-failure >>/tmp/cov-unit.log 2>&1; then
         ok "C unit tests passed"
     else
         warn "C unit tests reported failures (continuing)"
         tail -30 /tmp/cov-unit.log
     fi
-elif [ "$QUICK" -eq 1 ]; then
-    log "Skipping C unit tests (--quick)"
 else
-    warn "tests/build/unit not present; skipping C unit tests"
+    log "Skipping C unit tests (--quick)"
 fi
 
 # 5. Capture post-run counters and merge with baseline.

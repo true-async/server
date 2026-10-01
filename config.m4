@@ -490,9 +490,13 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     ])
   fi
 
-  dnl Code coverage support
+  dnl Code coverage support. Counter updates are atomic: the reactors and the
+  dnl worker pool run the same code on several threads, and a lost update
+  dnl leaves a negative count that lcov 2 refuses to capture. CXXFLAGS carries
+  dnl the flags to src/core/thread_queue.cc, the one C++ unit.
   if test "$PHP_COVERAGE" = "yes"; then
-    CFLAGS="$CFLAGS -fprofile-arcs -ftest-coverage"
+    CFLAGS="$CFLAGS -fprofile-arcs -ftest-coverage -fprofile-update=atomic"
+    CXXFLAGS="$CXXFLAGS -fprofile-arcs -ftest-coverage -fprofile-update=atomic"
     LDFLAGS="$LDFLAGS -lgcov"
     AC_DEFINE(HAVE_COVERAGE, 1, [Whether code coverage is enabled])
   fi

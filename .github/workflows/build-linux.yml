@@ -439,6 +439,7 @@ jobs:
             --with-zlib \
             --with-config-file-path=/etc \
             --with-config-file-scan-dir=/etc/php.d \
+            ${{ matrix.debug == false && '--enable-embed=shared' || '' }} \
             --${{ matrix.debug && 'enable' || 'disable' }}-debug \
             --${{ matrix.zts && 'enable' || 'disable' }}-zts
 
@@ -468,9 +469,9 @@ jobs:
           set -eux
           /usr/local/bin/phpize
 
-      - name: Install lcov (release ZTS only — coverage capture)
+      - name: Install lcov and cmocka (release ZTS only — coverage capture)
         if: matrix.debug == false
-        run: sudo apt-get install -y --no-install-recommends lcov
+        run: sudo apt-get install -y --no-install-recommends lcov libcmocka-dev
 
       - name: Configure http_server
         working-directory: http-server
@@ -697,6 +698,23 @@ jobs:
       # above), so we don't have to rebuild everything just to collect
       # gcda. Replaces the old standalone `coverage` job.
       # ----------------------------------------------------------------
+      # The cmocka suite reaches decoders no phpt can, so its counters go into
+      # the same report: lcov merges them per source file with the
+      # extension's. It links libphp, hence --enable-embed on this leg's PHP.
+      # Counter updates are atomic as in config.m4: ThreadQueue runs threads.
+      - name: Run the cmocka unit suite with coverage
+        if: matrix.debug == false && success()
+        working-directory: http-server
+        run: |
+          set -eux
+          flags="--coverage -fprofile-update=atomic"
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+          cmake -S tests -B tests/build \
+            -DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" \
+            -DCMAKE_EXE_LINKER_FLAGS=--coverage
+          cmake --build tests/build -j"$(nproc)"
+          ctest --test-dir tests/build --output-on-failure
+
       - name: Capture lcov + extract JSON
         if: matrix.debug == false && success()
         working-directory: http-server
@@ -708,7 +726,7 @@ jobs:
                --directory . \
                --output-file coverage/baseline.info \
                --rc geninfo_unexecuted_blocks=1 --quiet
-          # Post-run counters (phpt has already run via the previous step).
+          # Post-run counters of the phpt suite and the cmocka suite.
           lcov --capture --directory . \
                --output-file coverage/run.info \
                --rc geninfo_unexecuted_blocks=1 --quiet
