@@ -223,16 +223,21 @@ an item marked "reproduce" gets its failing run before any code.
     then fails at the room hub attach with "all 1024 slots are taken" while
     one slot is held. Settle refuse-or-wait in the issue, then a test that
     fails first.
-16. #348 — static passthrough on HTTP/1: a file under `on_missing: Next` that
-    fails the engine's `open()` (mode 0) started the handler twice on one ctx
-    and crashed, 3 of 3; PR 349 drops the HTTP/1 hook that spawned it.
+16. #348 — static passthrough on HTTP/1: done, PR 349 (09ab593). A file under
+    `on_missing: Next` that fails the engine's `open()` (mode 0) started the
+    handler twice on one ctx and crashed, 3 of 3; `static/025`.
 
 Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 
 17. The HTTP server test hooks run in CI: the debug leg passes
     `--enable-http-server-test-hooks`, and the 20 phpt gated on `_http_*`
     functions (reactor_pool, telemetry 001-003, eight in core) run and pass.
-    Run them locally with the flag first: nothing has run them in CI.
+    Locally, built with the flag: `core/030` crashed 3 of 3 in php-async's
+    `io_pipe_write_cb`, which cleared `io` on a write request its listener had
+    freed and reallocated (true-async/php-async#310, fix #311, asynctest case
+    true-async/php-src#39). With the fix the 20, with the four tas-hooks tests
+    and the rest of `reactor_pool/`, pass 35 of 35, 3 runs of 3. The CI change
+    lands after php-async #311.
 18. A failed `fflush` or `fclose` fails the upload with CANT_WRITE
     (`multipart_processor.c:580-581`); a cmocka case reaches CANT_WRITE and
     NO_TMP_DIR through `tmp_path_generator`. Reproduce.
