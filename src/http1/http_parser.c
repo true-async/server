@@ -68,6 +68,22 @@ static inline bool can_reuse_string_buffer(zend_string *str)
 
 /* llhttp callbacks */
 
+/* Chunk-extension names and values are parsed and dropped; only their size is
+ * kept, against HTTP_MAX_CHUNK_EXTENSIONS. 413, as Node answers the same cap. */
+static int on_chunk_extension(llhttp_t* llhttp_parser, const char* at, size_t length)
+{
+    (void)at;
+    http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
+
+    if (length > HTTP_MAX_CHUNK_EXTENSIONS - parser->chunk_extensions_size) {
+        parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+        return -1;
+    }
+
+    parser->chunk_extensions_size += length;
+    return 0;
+}
+
 static int on_message_begin(llhttp_t* llhttp_parser)
 {
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
@@ -95,6 +111,7 @@ static int on_message_begin(llhttp_t* llhttp_parser)
     parser->in_header_value = false;
     parser->body_offset = 0;
     parser->total_headers_size = 0;
+    parser->chunk_extensions_size = 0;
     parser->parse_error = HTTP_PARSE_OK;
 
     /* Smuggling-defense state (RFC 9112 §6.3) */
@@ -830,6 +847,8 @@ http1_parser_t* http_parser_create(size_t max_body_size)
     parser->settings.on_headers_complete = on_headers_complete;
     parser->settings.on_body = on_body;
     parser->settings.on_message_complete = on_message_complete;
+    parser->settings.on_chunk_extension_name = on_chunk_extension;
+    parser->settings.on_chunk_extension_value = on_chunk_extension;
 
     /* Initialize parser */
     llhttp_init(&parser->parser, HTTP_REQUEST, &parser->settings);
@@ -1169,6 +1188,7 @@ void http_parser_reset_for_reuse(http1_parser_t *parser)
     parser->paused = false;
     parser->body_offset = 0;
     parser->total_headers_size = 0;
+    parser->chunk_extensions_size = 0;
     parser->parse_error = HTTP_PARSE_OK;
 
 #ifdef HAVE_LLHTTP
