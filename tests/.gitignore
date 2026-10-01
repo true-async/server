@@ -1,5 +1,6 @@
 # CMake build directory
 build/
+build-coverage/
 cmake-build-*/
 
 # CMake cache
