@@ -69,6 +69,10 @@ typedef enum {
 #define HTTP_MAX_HEADER_VALUE    (8 * 1024)      /* 8 KB */
 #define HTTP_MAX_HEADERS_TOTAL   (64 * 1024)     /* 64 KB */
 #define HTTP_MAX_HEADER_COUNT    256             /* Per-request cap on number of header fields (DoS) */
+/* Per-request cap on chunk-extension bytes, names and values together. They are
+ * not body bytes, so no body limit counts them, and a request could otherwise
+ * make the server read without end (CVE-2024-22019 in Node, the same cap). */
+#define HTTP_MAX_CHUNK_EXTENSIONS (16 * 1024)    /* 16 KB */
 #define HTTP_DEFAULT_BODY_BUFFER (8 * 1024)      /* 8 KB for chunked */
 #define HTTP_HEADERS_INITIAL_SIZE 16             /* Initial HashTable size */
 
@@ -346,6 +350,7 @@ typedef struct http1_parser_t {
     /* 8-byte counters */
     size_t            body_offset;           /* Offset for pre-allocated body */
     size_t            total_headers_size;    /* Total size of all headers (DDoS) */
+    size_t            chunk_extensions_size; /* Chunk-extension bytes of this request */
     size_t            max_body_size;         /* Configurable body size limit */
 
     /* Smuggling-defense state (RFC 9112 §6.3). Tracked across all
