@@ -2,6 +2,7 @@
  * no server, no socket, no network. Covers:
  *   - stateless-reset token derivation (determinism + HMAC oracle);
  *   - the stateless-reset size gate (refuse <41, otherwise emit);
+ *   - the stateless reset it emits: length clamp, header bits, token;
  *   - the sendmsg-errno -> stat-bucket mapping.
  * Linked against http3_packet.c + a one-symbol stub (http3_stubs.c). */
 #include <stdarg.h>
@@ -70,6 +71,47 @@ static void test_stateless_reset_size_gate(void **state) {
         (const struct sockaddr *)&peer, sizeof(peer)));    /* large -> emit */
 }
 
+/* ---- stateless reset on the wire: length, header bits, token ---- */
+extern uint8_t http3_stub_last_packet[1500];
+extern size_t  http3_stub_last_packet_len;
+
+static void assert_stateless_reset(const size_t inbound, const size_t expected_len)
+{
+    uint8_t key[32]; memset(key, 0x77, sizeof(key));
+    const uint8_t dcid[8] = {7,7,7,7,1,2,3,4};
+
+    struct sockaddr_in peer; memset(&peer, 0, sizeof(peer));
+    peer.sin_family = AF_INET;
+    peer.sin_port   = htons(443);
+    peer.sin_addr.s_addr = htonl(0x7f000001);
+
+    http3_stub_last_packet_len = 0;
+    assert_true(http3_packet_send_stateless_reset(
+        (http3_listener_t *)0x1, key, dcid, sizeof(dcid), inbound,
+        (const struct sockaddr *)&peer, sizeof(peer)));
+
+    /* RFC 9000 §10.3: smaller than the packet that triggered it, so no
+     * amplification, and no larger than 1200. */
+    assert_int_equal(http3_stub_last_packet_len, expected_len);
+
+    /* A short header: form bit clear, fixed bit set. */
+    assert_int_equal(http3_stub_last_packet[0] & 0xC0, 0x40);
+
+    /* The last 16 bytes are the token for the DCID it answers. */
+    uint8_t token[16];
+    http3_packet_compute_sr_token(key, dcid, sizeof(dcid), token);
+    assert_memory_equal(http3_stub_last_packet + expected_len - 16, token, 16);
+}
+
+static void test_stateless_reset_on_the_wire(void **state) {
+    (void)state;
+
+    assert_stateless_reset(41, 40);      /* the smallest trigger answered */
+    assert_stateless_reset(100, 99);     /* one byte under the trigger */
+    assert_stateless_reset(1201, 1200);  /* the clamp starts here */
+    assert_stateless_reset(1500, 1200);
+}
+
 /* ---- sendmsg errno -> stat bucket ---- */
 static void test_account_send_error_buckets(void **state) {
     (void)state;
@@ -91,6 +133,7 @@ int main(void) {
         cmocka_unit_test(test_sr_token_deterministic),
         cmocka_unit_test(test_sr_token_differs_by_dcid),
         cmocka_unit_test(test_stateless_reset_size_gate),
+        cmocka_unit_test(test_stateless_reset_on_the_wire),
         cmocka_unit_test(test_account_send_error_buckets),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);

@@ -247,9 +247,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     counter. Reproduce through a hook that fails the post, or bound it anyway.
 21. `test_parser_security.c` asserts the parse outcome: 23 of 55 cases end in
     `(void)result`, among them two Transfer-Encoding headers (`:625`).
-22. The HTTP/3 cmocka targets run in CI: the fuzz-embedded job builds no
-    ngtcp2 or nghttp3, so ctest runs 19 targets, not 21. `test_http3_packet`
-    inspects the stateless reset it emits (length clamp, header bits, token).
+22. The HTTP/3 cmocka targets run in CI: fuzz-embedded restores the nghttp3
+    and ngtcp2 caches and passes `PKG_CONFIG_PATH` to CMake, so
+    `HTTP3Packet` and `HTTP3SlotRelease` build; the step fails if any of the
+    three HTTP/3 targets is missing from `ctest -N`. `test_http3_packet` reads
+    the stateless reset from the send stub: length (41 → 40, 100 → 99,
+    1201 and 1500 → 1200), the short-header bits and the token; dropping the
+    header-bit fix fails it 3 of 3, dropping the clamp overruns the buffer.
 23. Test strength of the static decoders, beside item 9: cmocka links
     `http_range.c`, `http_etag.c`, `http_date.c` and covers the range clamp and
     reject, a non-matching If-None-Match, a new ETag for a changed file, invalid

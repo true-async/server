@@ -958,6 +958,29 @@ jobs:
           key: ${{ runner.os }}-nghttp2-${{ env.NGHTTP2_VERSION }}-r4
           fail-on-cache-miss: true
 
+      # The HTTP/3 cmocka targets build only where CMake finds ngtcp2 and
+      # nghttp3; without these two restores it skips them in silence.
+      - name: Restore nghttp3 cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libnghttp3*
+            /usr/local/include/nghttp3
+            /usr/local/lib/pkgconfig/libnghttp3.pc
+          key: ${{ runner.os }}-nghttp3-${{ env.NGHTTP3_VERSION }}-r4
+          fail-on-cache-miss: true
+
+      - name: Restore ngtcp2 cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            /usr/local/lib/libngtcp2*
+            /usr/local/include/ngtcp2
+            /usr/local/lib/pkgconfig/libngtcp2.pc
+            /usr/local/lib/pkgconfig/libngtcp2_crypto_*.pc
+          key: ${{ runner.os }}-ngtcp2-${{ env.NGTCP2_VERSION }}-ossl-${{ env.OPENSSL_VERSION }}-r5
+          fail-on-cache-miss: true
+
       - name: Restore libuv cache
         uses: actions/cache/restore@v5
         with:
@@ -1018,8 +1041,13 @@ jobs:
         run: |
           set -eux
           sudo apt-get install -y --no-install-recommends libcmocka-dev
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
           cmake -S tests -B tests/build
           cmake --build tests/build -j"$(nproc)"
+          # A target CMake leaves out does not fail ctest; name the HTTP/3 ones.
+          for t in HTTP3Packet HTTP3SlotRelease HTTP3Steer; do
+            ctest --test-dir tests/build -N | grep -qw "$t"
+          done
           ctest --test-dir tests/build --output-on-failure
 
       - name: Build fuzz_http1_parser + fuzz_h2_session + the WebSocket targets
