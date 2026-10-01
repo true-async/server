@@ -81,7 +81,8 @@ $expected_keys = [
 ];
 $missing = array_diff($expected_keys, array_keys($t));
 echo "telemetry-missing-keys: ", count($missing) === 0 ? 'none' : implode(',', $missing), "\n";
-/* Keys that only ever held 0 are gone; byte counters are #396. */
+/* No key reports a constant 0: these three have no counter behind them. Byte
+ * counters are #396. */
 foreach (['bytes_received', 'bytes_sent', 'errors'] as $gone) {
     echo "telemetry-$gone: ", array_key_exists($gone, $t) ? 'present' : 'absent', "\n";
 }
