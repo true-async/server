@@ -8,11 +8,9 @@ true_async_server
  *   - setCertificate / setPrivateKey config_validate_readable_file arms:
  *       missing, not-regular-file, regular-file happy path
  *   - getCertificate / getPrivateKey getters before/after set
- *   - enableTls / isTlsEnabled
  *   - setLogSeverity round-trip for every enum case + getLogSeverity
  *   - setLogStream: null (clear), non-resource (throw), valid stream
- *   - setTelemetryEnabled / isTelemetryEnabled
- *   - setAutoAwaitBody / isAutoAwaitBodyEnabled */
+ *   - setTelemetryEnabled / isTelemetryEnabled */
 
 use TrueAsync\HttpServerConfig;
 use TrueAsync\LogSeverity;
@@ -46,16 +44,6 @@ expectThrow('key-missing', fn() => $c2->setPrivateKey('/missing-' . bin2hex(rand
 expectThrow('key-dir',     fn() => $c2->setPrivateKey(sys_get_temp_dir()));
 $c2->setPrivateKey($tmp);
 echo "key-set: ", $c2->getPrivateKey() === $tmp ? 'yes' : 'no', "\n";
-
-/* ---- enableTls / isTlsEnabled ---- */
-$c3 = new HttpServerConfig();
-echo "tls-default: ", $c3->isTlsEnabled() ? 'on' : 'off', "\n";
-/* enableTls requires cert + key first (it throws otherwise). Wire them. */
-$c3->setCertificate($tmp)->setPrivateKey($tmp);
-$c3->enableTls(true);
-echo "tls-after-enable: ", $c3->isTlsEnabled() ? 'on' : 'off', "\n";
-$c3->enableTls(false);
-echo "tls-after-disable: ", $c3->isTlsEnabled() ? 'on' : 'off', "\n";
 
 /* ---- setLogSeverity ↔ getLogSeverity for each enum case ---- */
 $c4 = new HttpServerConfig();
@@ -91,19 +79,13 @@ if (function_exists('curl_init')) {
     echo "log-stream-curl: TrueAsync\\HttpServerInvalidArgumentException\n";
 }
 
-/* ---- setTelemetryEnabled / setAutoAwaitBody round-trip ---- */
+/* ---- setTelemetryEnabled round-trip ---- */
 $c6 = new HttpServerConfig();
 echo "tel-default: ",  $c6->isTelemetryEnabled() ? 'on' : 'off', "\n";
 $c6->setTelemetryEnabled(true);
 echo "tel-on: ",       $c6->isTelemetryEnabled() ? 'on' : 'off', "\n";
 $c6->setTelemetryEnabled(false);
 echo "tel-off: ",      $c6->isTelemetryEnabled() ? 'on' : 'off', "\n";
-
-echo "aab-default: ",  $c6->isAutoAwaitBodyEnabled() ? 'on' : 'off', "\n";
-$c6->setAutoAwaitBody(true);
-echo "aab-on: ",       $c6->isAutoAwaitBodyEnabled() ? 'on' : 'off', "\n";
-$c6->setAutoAwaitBody(false);
-echo "aab-off: ",      $c6->isAutoAwaitBodyEnabled() ? 'on' : 'off', "\n";
 
 echo "done\n";
 ?>
@@ -117,9 +99,6 @@ key-default: NULL
 key-missing: TrueAsync\HttpServerInvalidArgumentException
 key-dir: TrueAsync\HttpServerInvalidArgumentException
 key-set: yes
-tls-default: off
-tls-after-enable: on
-tls-after-disable: off
 log-sev:OFF→OFF ok
 log-sev:DEBUG→DEBUG ok
 log-sev:INFO→INFO ok
@@ -135,7 +114,4 @@ log-stream-curl: TrueAsync\HttpServerInvalidArgumentException
 tel-default: off
 tel-on: on
 tel-off: off
-aab-default: on
-aab-on: on
-aab-off: off
 done

@@ -40,7 +40,7 @@ $port = tas_free_port_span(2);
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port + 1)
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+    ->setCertificate($cert)->setPrivateKey($key)
     ->setWorkers(2)
     /* Floor the reverse mailbox at its minimum (64). A 150-chunk reply cannot
      * fit, so most STREAM_CHUNKs and the final stream-slot release take the

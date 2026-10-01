@@ -797,7 +797,7 @@ static int on_message_complete(llhttp_t* llhttp_parser)
     req->complete = true;
 
     /* Notify any coroutine waiting inside $request->awaitBody(). In
-     * the default auto_await_body=true path no waiter ever exists
+     * the default buffered path no waiter ever exists
      * (dispatch runs only after message-complete), so this is a cheap
      * no-op. It matters for the streaming dispatch-at-headers-complete
      * mode where the handler coroutine is already running and parked

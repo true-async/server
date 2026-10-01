@@ -42,7 +42,7 @@ $tcp_port = tas_free_port();
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $tcp_port)   /* TCP listener required by start() */
     ->addHttp3Listener('127.0.0.1', $port)
-    ->enableTls(true)->setCertificate($cert)->setPrivateKey($key)
+    ->setCertificate($cert)->setPrivateKey($key)
     ->setWorkers(2);
 $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) {

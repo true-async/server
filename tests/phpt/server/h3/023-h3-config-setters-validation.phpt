@@ -33,7 +33,7 @@ echo "set peer=",     $c->getHttp3PeerConnectionBudget(), "\n";
 // === negative / out-of-range rejection ===
 function expect_reject(callable $fn, string $label): void {
     try { $fn(); echo "$label ACCEPTED\n"; }
-    catch (Throwable $e) { echo "$label rejected\n"; }
+    catch (Throwable $e) { echo "$label rejected: ", $e::class, "\n"; }
 }
 expect_reject(fn() => $c->setHttp3IdleTimeoutMs(-1),                   "idle<0");
 expect_reject(fn() => $c->setHttp3StreamWindowBytes(0),                "window=0");
@@ -71,18 +71,18 @@ set idle=120000
 set window=4194304
 set streams=500
 set peer=64
-idle<0 rejected
-window=0 rejected
-window<1024 rejected
-window>1GiB rejected
-streams=0 rejected
-streams<0 rejected
-streams>1M rejected
-peer=0 rejected
-peer>4096 rejected
+idle<0 rejected: TrueAsync\HttpServerInvalidArgumentException
+window=0 rejected: TrueAsync\HttpServerInvalidArgumentException
+window<1024 rejected: TrueAsync\HttpServerInvalidArgumentException
+window>1GiB rejected: TrueAsync\HttpServerInvalidArgumentException
+streams=0 rejected: TrueAsync\HttpServerInvalidArgumentException
+streams<0 rejected: TrueAsync\HttpServerInvalidArgumentException
+streams>1M rejected: TrueAsync\HttpServerInvalidArgumentException
+peer=0 rejected: TrueAsync\HttpServerInvalidArgumentException
+peer>4096 rejected: TrueAsync\HttpServerInvalidArgumentException
 idle=0 accepted=1
-idle locked rejected
-window locked rejected
-streams locked rejected
-peer locked rejected
+idle locked rejected: TrueAsync\HttpServerRuntimeException
+window locked rejected: TrueAsync\HttpServerRuntimeException
+streams locked rejected: TrueAsync\HttpServerRuntimeException
+peer locked rejected: TrueAsync\HttpServerRuntimeException
 ok

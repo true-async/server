@@ -1,5 +1,5 @@
 --TEST--
-HttpServerConfig: compression knobs + HTTP/2/WS/protocol-detection toggles
+HttpServerConfig: compression knobs
 --EXTENSIONS--
 true_async_server
 --FILE--
@@ -8,9 +8,7 @@ true_async_server
  * the existing 001-/011-/032- tests don't reach:
  *
  *   compression: enable/level/brotli/zstd/min-size/mime-types/
- *                request-max-decompressed/write-buffer-size
- *   toggles:     enableHttp2 (reject), enableWebSocket (reject),
- *                enableProtocolDetection (round-trip) */
+ *                request-max-decompressed */
 
 use TrueAsync\HttpServerConfig;
 
@@ -98,34 +96,6 @@ echo "rmdz-get=", $c->getRequestMaxDecompressedSize(), "\n";
 $c->setRequestMaxDecompressedSize(0);
 echo "rmdz-zero=", $c->getRequestMaxDecompressedSize(), "\n";
 
-/* ---- setWriteBufferSize ---- */
-$c = new HttpServerConfig();
-ex('wbs-tiny', fn() => $c->setWriteBufferSize(1023));
-$c->setWriteBufferSize(8192);
-echo "wbs-get=", $c->getWriteBufferSize(), "\n";
-
-/* ---- enableHttp2: legacy flag — toggle-on rejected, toggle-off ok ---- */
-$c = new HttpServerConfig();
-echo "h2-default: ", $c->isHttp2Enabled() ? 'on' : 'off', "\n";
-ex('h2-enable-throws', fn() => $c->enableHttp2(true));
-$c->enableHttp2(false);
-echo "h2-off: ", $c->isHttp2Enabled() ? 'on' : 'off', "\n";
-
-/* ---- enableWebSocket: legacy toggle — enable(true) throws, use addWebSocketHandler() ---- */
-$c = new HttpServerConfig();
-echo "ws-default: ", $c->isWebSocketEnabled() ? 'on' : 'off', "\n";
-ex('ws-enable-throws', fn() => $c->enableWebSocket(true));
-$c->enableWebSocket(false);
-echo "ws-off: ", $c->isWebSocketEnabled() ? 'on' : 'off', "\n";
-
-/* ---- enableProtocolDetection ---- */
-$c = new HttpServerConfig();
-echo "pd-default: ", $c->isProtocolDetectionEnabled() ? 'on' : 'off', "\n";
-$c->enableProtocolDetection(true);
-echo "pd-on: ",     $c->isProtocolDetectionEnabled() ? 'on' : 'off', "\n";
-$c->enableProtocolDetection(false);
-echo "pd-off: ",    $c->isProtocolDetectionEnabled() ? 'on' : 'off', "\n";
-
 echo "done\n";
 ?>
 --EXPECT--
@@ -148,15 +118,4 @@ cmt-list=application/json,text/html,text/plain
 rmdz-neg: TrueAsync\HttpServerInvalidArgumentException
 rmdz-get=8388608
 rmdz-zero=0
-wbs-tiny: TrueAsync\HttpServerInvalidArgumentException
-wbs-get=8192
-h2-default: off
-h2-enable-throws: TrueAsync\HttpServerRuntimeException
-h2-off: off
-ws-default: off
-ws-enable-throws: TrueAsync\HttpServerRuntimeException
-ws-off: off
-pd-default: off
-pd-on: on
-pd-off: off
 done

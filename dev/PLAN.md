@@ -324,13 +324,30 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     If-None-Match and invalid dates were covered already. `static/011`
     compares the range bodies; `compression/076` sends `x-gzip` both ways and
     fails without either alias.
-24. The public API does what it says. `setWriteBufferSize`,
-    `enableProtocolDetection`, `enableTls` and `setAutoAwaitBody` store a value
-    nothing reads; `getTelemetry()` returns `bytes_received`, `bytes_sent` and
-    `errors` as a literal 0; `CODEL_TARGET_MS` parses "abc" as 0. Each is wired
-    up or removed with a tombstone (CODING_STANDARDS 484-485). First narrow
-    `h3/023:34` and `h3/030:41`, which catch Throwable and would count a removed
-    setter as rejected.
+24. The public API does what it says, in three issues:
+    - #393, done: twelve `HttpServerConfig` methods throw
+      `HttpServerRuntimeException` naming what does the job (`enableTls`,
+      `enableProtocolDetection`, `setWriteBufferSize`, `setAutoAwaitBody`,
+      `enableHttp2`, `enableWebSocket` and their getters); their fields are
+      gone; 122 `enableTls(true)` calls are deleted. `core/085` reads
+      "returned" for each on main and the throw here.
+    - #394: `getTelemetry()` loses `bytes_received`, `bytes_sent`, `errors`.
+    - #395: `start()` refuses a `CODEL_TARGET_MS` that is not 0..10000.
+    The `h3/023`, `h3/030` catch of Throwable guarded none of the twelve; both
+    now print the class, which pins InvalidArgument against Runtime (locked).
+    Critic A 2026-10-01: the auto-await message named a switch that does not
+    decide when the handler starts; `@deprecated` in a stub makes gen_stub
+    emit E_DEPRECATED before the throw; the replacement stubs misstated their
+    ranges; "accept the true value" (enableHttp2's pattern) would break no one.
+    First three accepted and fixed. Critic B 2026-10-01: getTelemetry() is a
+    per-worker view; "bytes" was undefined; CODEL warn-and-ignore switches
+    CoDel off for "50ms"; the PR mixes three risk profiles. Accepted: CoDel
+    throws in start(), three PRs.
+    Sage 2026-10-01: full tombstone for all six pairs, enableHttp2 and
+    enableWebSocket included (P1.2: an accepted value still makes the getter
+    misreport); wiring enableTls to the constructor's listener is a feature
+    (P4.1). Final. Sage 2026-10-01: remove the three telemetry keys now; byte
+    counters become item 39 (P4.1). Final.
 25. Coverage measures what runs: the ctest run is instrumented and merged into
     the baseline, and `thread_queue.cc` gets coverage through CXXFLAGS.
 26. A watchdog is a ceiling, not a wait: the 24 phpt that sleep 1 s or more in
@@ -381,6 +398,10 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     every build rewrites it), and assert in `sendfile_wait_writable` that the
     destination io has no other sendfile waiting, since `sendfile_waiting`
     holds one (Code Reviewer on S2, 2026-09-30).
+39. #396 — byte counters, a feature: `bytes_received_total`/`bytes_sent_total`
+    as SUM rows, counted on the socket (plaintext as written, TLS as
+    ciphertext, HTTP/3 datagram payload). Edmond confirms the definition when
+    this is picked up (Sage, item 24).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

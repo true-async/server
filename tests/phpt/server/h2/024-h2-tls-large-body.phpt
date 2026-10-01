@@ -36,7 +36,6 @@ $body = str_repeat('A', $size);
 
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port, true)
-    ->enableTls(true)
     ->setCertificate($cert)
     ->setPrivateKey($key)
     ->setReadTimeout(10)

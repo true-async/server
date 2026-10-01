@@ -40,7 +40,7 @@ echo "max=", $c->getHttp3SocketBufferBytes(), "\n";
 
 function expect_reject(callable $fn, string $label): void {
     try { $fn(); echo "$label ACCEPTED\n"; }
-    catch (Throwable $e) { echo "$label rejected\n"; }
+    catch (Throwable $e) { echo "$label rejected: ", $e::class, "\n"; }
 }
 expect_reject(fn() => $c->setHttp3SocketBufferBytes(-1),                  "neg");
 expect_reject(fn() => $c->setHttp3SocketBufferBytes(256 * 1024 * 1024 + 1), "over256MiB");
@@ -59,7 +59,7 @@ chain=1
 set=16777216
 zero=1
 max=268435456
-neg rejected
-over256MiB rejected
-locked rejected
+neg rejected: TrueAsync\HttpServerInvalidArgumentException
+over256MiB rejected: TrueAsync\HttpServerInvalidArgumentException
+locked rejected: TrueAsync\HttpServerRuntimeException
 ok
