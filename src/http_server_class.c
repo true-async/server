@@ -14,6 +14,7 @@
 #include "zend_exceptions.h"
 #include "zend_interfaces.h"
 #include "zend_closures.h"
+#include "ext/standard/basic_functions.h" /* php_getenv */
 #include "main/php_network.h"           /* php_socket_t, SOCK_ERR, closesocket, php_socket_errno */
 #include "Zend/zend_async_API.h"
 #include "core/bailout_guard.h"
@@ -4017,6 +4018,44 @@ static bool http_server_await_stop(http_server_object *server, bool *bailout)
     return true;
 }
 
+/* CODEL_TARGET_MS, the ops override of the CoDel target: a whole number of
+ * milliseconds in 0..10000, 0 turning CoDel off. Sets *set to false when the
+ * variable is unset or empty. Anything else throws, naming the variable and
+ * its value: a value read as 0 would switch CoDel off without a word.
+ * Read as PHP's getenv() reads it: on Windows ZTS, putenv() sets only the
+ * process environment, which the CRT's getenv() does not see. */
+static bool http_server_codel_env_target(bool *set, uint64_t *ms)
+{
+    zend_string *const env = php_getenv(ZEND_STRL("CODEL_TARGET_MS"));
+
+    *set = false;
+
+    if (env == NULL) {
+        return true;
+    }
+
+    uint64_t value = 0;
+    const char *p = ZSTR_VAL(env);
+
+    for (; *p >= '0' && *p <= '9' && value <= 10000; p++) {
+        value = value * 10 + (uint64_t)(*p - '0');
+    }
+
+    const bool valid = *p == '\0' && value <= 10000;
+
+    if (!valid) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "CODEL_TARGET_MS must be a whole number of milliseconds from 0 to "
+            "10000, got \"%s\"", ZSTR_VAL(env));
+    } else if (ZSTR_LEN(env) > 0) {
+        *set = true;
+        *ms  = value;
+    }
+
+    zend_string_release(env);
+    return valid;
+}
+
 /* One run of the server, from binding the listeners to the drain after stop(). */
 static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
 {
@@ -4062,6 +4101,16 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
      * be active at this point — ThreadPool::__construct registers
      * worker threads with the reactor, and Future::await suspends the
      * calling coroutine. */
+    /* Checked on the caller's thread, before any worker starts. */
+    {
+        bool codel_env_set;
+        uint64_t codel_env_ms;
+
+        if (!http_server_codel_env_target(&codel_env_set, &codel_env_ms)) {
+            RETURN_FALSE;
+        }
+    }
+
     if (!server->is_worker_clone) {
         zval workers_zv;
         ZVAL_UNDEF(&workers_zv);
@@ -4157,14 +4206,12 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL,
                                    "getBackpressureTargetMs", &retval);
     uint64_t codel_target_ms = (uint64_t)Z_LVAL(retval);
-    const char *codel_env = getenv("CODEL_TARGET_MS");
+    bool codel_env_set;
+    uint64_t codel_env_ms;
 
-    if (codel_env && *codel_env) {
-        const long parsed = strtol(codel_env, NULL, 10);
-
-        if (parsed >= 0 && parsed <= 10000) {
-            codel_target_ms = (uint64_t)parsed;
-        }
+    /* Valid here: start() checked it before the pool branch. */
+    if (http_server_codel_env_target(&codel_env_set, &codel_env_ms) && codel_env_set) {
+        codel_target_ms = codel_env_ms;
     }
 
     server->codel_target_ns = codel_target_ms * 1000000ULL;

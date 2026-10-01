@@ -331,8 +331,15 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
       `enableHttp2`, `enableWebSocket` and their getters); their fields are
       gone; 122 `enableTls(true)` calls are deleted. `core/085` reads
       "returned" for each on main and the throw here.
-    - #394: `getTelemetry()` loses `bytes_received`, `bytes_sent`, `errors`.
-    - #395: `start()` refuses a `CODEL_TARGET_MS` that is not 0..10000.
+    - #394, done: `getTelemetry()` has no `bytes_received`, `bytes_sent` or
+      `errors`; each was a constant 0, and nothing in the repository or in
+      laravel-spawn read them. `core/033` reads the three present on main and
+      absent here.
+    - #395, done: `start()` refuses a `CODEL_TARGET_MS` that is not a whole
+      number from 0 to 10000, before the pool branch. `core/086`: the five bad
+      values started the server on main, each throws here. Windows ZTS needed
+      `php_getenv()`: PHP's `putenv()` there sets only the process environment,
+      and the CRT's `getenv()` read "started" for all five.
     The `h3/023`, `h3/030` catch of Throwable guarded none of the twelve; both
     now print the class, which pins InvalidArgument against Runtime (locked).
     Critic A 2026-10-01: the auto-await message named a switch that does not
