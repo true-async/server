@@ -6,8 +6,9 @@ true_async
 --SKIPIF--
 <?php
 require __DIR__ . '/_h3_skipif.inc';
-if (PHP_OS_FAMILY === 'Windows') die('skip libuv on Windows lacks SO_REUSEPORT');
-$n = (int) @shell_exec('nproc 2>/dev/null');
+$n = PHP_OS_FAMILY === 'Windows'
+    ? (int) getenv('NUMBER_OF_PROCESSORS')
+    : (int) @shell_exec('nproc 2>/dev/null');
 if ($n < 2) die('skip migration-storm guard exercised under the reactor pool (>=2 cores)');
 h3_skipif(['openssl_cli' => true, 'h3client' => true]);
 ?>
