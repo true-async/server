@@ -698,9 +698,9 @@ jobs:
       # above), so we don't have to rebuild everything just to collect
       # gcda. Replaces the old standalone `coverage` job.
       # ----------------------------------------------------------------
-      # The cmocka suite reaches decoders no phpt can, so its counters go into
-      # the same report: lcov merges them per source file with the
-      # extension's. It links libphp, hence --enable-embed on this leg's PHP.
+      # The cmocka suite reaches decoders no phpt can, so its hits go into the
+      # same report (the capture below adds them to the extension's lines). It
+      # links libphp, hence --enable-embed on this leg's PHP.
       # Counter updates are atomic as in config.m4: ThreadQueue runs threads.
       - name: Run the cmocka unit suite with coverage
         if: matrix.debug == false && success()
@@ -723,16 +723,24 @@ jobs:
           mkdir -p coverage
           # Initial baseline (so files never executed still appear).
           lcov --capture --initial \
-               --directory . \
+               --directory src \
                --output-file coverage/baseline.info \
                --rc geninfo_unexecuted_blocks=1 --quiet
-          # Post-run counters of the phpt suite and the cmocka suite.
-          lcov --capture --directory . \
+          # Post-run counters of the extension, from the phpt suite.
+          lcov --capture --directory src \
                --output-file coverage/run.info \
                --rc geninfo_unexecuted_blocks=1 --quiet
           lcov --add-tracefile coverage/baseline.info \
                --add-tracefile coverage/run.info \
-               --output-file  coverage/raw.info --quiet
+               --output-file  coverage/extension.info --quiet
+          # The cmocka suite's hits, added to the extension's lines only: its
+          # build has no -O2 and its own macros, and a union of the two line
+          # tables would count lines the shipped extension does not have.
+          lcov --capture --directory tests/build \
+               --output-file coverage/unit.info \
+               --rc geninfo_unexecuted_blocks=1 --quiet
+          python3 scripts/lcov-add-hits.py \
+            coverage/extension.info coverage/unit.info -o coverage/raw.info
           lcov --extract coverage/raw.info "$PWD/src/*" \
                --output-file coverage/filtered.info --quiet
           python3 scripts/coverage-report.py \

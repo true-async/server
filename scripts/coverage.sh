@@ -73,7 +73,7 @@ ok "Build done"
 # 2. Capture initial zero-baseline so files never executed still appear.
 log "Capturing zero baseline"
 lcov --capture --initial \
-     --directory "$PROJECT_DIR" \
+     --directory "$PROJECT_DIR/src" \
      --output-file "$COV_DIR/baseline.info" \
      --rc geninfo_unexecuted_blocks=1 \
      --quiet 2>/dev/null
@@ -90,11 +90,12 @@ echo "    $PHPT_PASS"
 echo "    $PHPT_FAIL"
 
 # 4. Build and run the C unit tests with coverage unless --quick. Their own
-#    build directory, so the developer's tests/build keeps its flags; lcov
-#    merges the counters per source file with the extension's.
+#    build directory, so the developer's tests/build keeps its flags; step 5
+#    adds their hits to the extension's lines.
+UNIT_DIR="$PROJECT_DIR/tests/build-coverage"
+rm -rf "$UNIT_DIR"
 if [ "$QUICK" -eq 0 ]; then
     log "Building and running C unit tests (cmake, tests/build-coverage)"
-    UNIT_DIR="$PROJECT_DIR/tests/build-coverage"
     UNIT_FLAGS="--coverage -fprofile-update=atomic"
     if cmake -S tests -B "$UNIT_DIR" \
              -DCMAKE_C_FLAGS="$UNIT_FLAGS" -DCMAKE_CXX_FLAGS="$UNIT_FLAGS" \
@@ -110,18 +111,33 @@ else
     log "Skipping C unit tests (--quick)"
 fi
 
-# 5. Capture post-run counters and merge with baseline.
+# 5. Capture post-run counters and merge with baseline. The unit tests' hits
+#    are added to the extension's lines only: their build has its own flags
+#    and macros, and a union of the two line tables would count lines the
+#    extension does not have.
 log "Capturing run counters"
 lcov --capture \
-     --directory "$PROJECT_DIR" \
+     --directory "$PROJECT_DIR/src" \
      --output-file "$COV_DIR/run.info" \
      --rc geninfo_unexecuted_blocks=1 \
      --quiet 2>/dev/null
 
 lcov --add-tracefile "$COV_DIR/baseline.info" \
      --add-tracefile "$COV_DIR/run.info" \
-     --output-file "$RAW_INFO" \
+     --output-file "$COV_DIR/extension.info" \
      --quiet 2>/dev/null
+
+if [ -d "$UNIT_DIR" ]; then
+    lcov --capture \
+         --directory "$UNIT_DIR" \
+         --output-file "$COV_DIR/unit.info" \
+         --rc geninfo_unexecuted_blocks=1 \
+         --quiet 2>/dev/null
+    python3 "$SCRIPT_DIR/lcov-add-hits.py" \
+        "$COV_DIR/extension.info" "$COV_DIR/unit.info" -o "$RAW_INFO"
+else
+    cp "$COV_DIR/extension.info" "$RAW_INFO"
+fi
 
 # 6. Filter to project sources only — drop deps/, /usr/, system headers, tests.
 log "Filtering to src/ (drop deps/llhttp, /usr, tests/)"
