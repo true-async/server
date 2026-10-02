@@ -214,6 +214,13 @@ $ok_pass = $pass >= MIN_PASS;
 $ok_fail = $fail <= MAX_FAIL;
 echo "pass_gate=" . ($ok_pass ? 'ok' : "REGRESSION (need >=" . MIN_PASS . ")") . "\n";
 echo "fail_gate=" . ($ok_fail ? 'ok' : "REGRESSION (need <=" . MAX_FAIL . ")") . "\n";
+
+/* h2spec closes its report with a "Failures:" section naming each failed case
+ * with what it expected and what it read; a broken gate prints it. */
+if (!$ok_pass || !$ok_fail) {
+    $at = strpos($out, 'Failures:');
+    echo $at === false ? $out : substr($out, $at), "\n";
+}
 --EXPECTF--
 pass=%d
 fail=%d
