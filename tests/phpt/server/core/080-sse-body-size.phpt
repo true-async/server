@@ -22,6 +22,7 @@ use function Async\spawn;
 use function Async\delay;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../h2/_h2_skipif.inc';
 
 $log = sys_get_temp_dir() . '/php-http-080-access-' . getmypid() . '.log';
 @unlink($log);
@@ -94,8 +95,8 @@ $client = spawn(function () use ($server, $port, $log, $h2_body) {
         $received['/h1'] = strlen(dechunk($chunked));
     }
 
-    shell_exec(sprintf('curl --http2-prior-knowledge -s -o %s --max-time 3 '
-        . 'http://127.0.0.1:%d/h2 2>/dev/null', escapeshellarg($h2_body), $port));
+    h2_curl(['--http2-prior-knowledge', '-s', '-o', $h2_body, '--max-time', '3',
+        "http://127.0.0.1:$port/h2"]);
     $received['/h2'] = strlen((string) @file_get_contents($h2_body));
 
     for ($waited = 0; count(access_sizes($log)) < 2 && $waited < 3000; $waited += 20) {

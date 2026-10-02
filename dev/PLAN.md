@@ -136,7 +136,7 @@ Notes: dev/plans/S3.md
         `h1/038` made order-independent, `h1/055` skipped with a measured
         reason (`dev/plans/S3.md`). `h3/079` and `080`, added after S3.5, lost
         the false SO_REUSEPORT skip here.
-- [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
+- [~] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
       tier: T1 · role: —
@@ -415,6 +415,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     as SUM rows, counted on the socket (plaintext as written, TLS as
     ciphertext, HTTP/3 datagram payload). Edmond confirms the definition when
     this is picked up (Sage, item 24).
+40. `core/022` failed once on macOS debug (PR 408, run 36978332597, a CI-only
+    change): `start()` threw `Async\ThreadTransferException: boot failed!`
+    instead of returning false after both workers' bootloaders threw. The
+    default branch passed with the same php-src and php-async the day before.
+    Reproduce under `-j` before any code.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

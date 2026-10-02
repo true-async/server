@@ -34,6 +34,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_h2_skipif.inc';
 
 $port = tas_free_port();
 $server = new HttpServer(
@@ -79,22 +80,17 @@ spawn(function () use ($port, $server) {
     }
 
     foreach (['/buffered', '/empty', '/gzipped', '/streamed'] as $path) {
-        $out = [];
-        exec(sprintf(
-            'curl --http2-prior-knowledge -s -v --max-time 3 http://127.0.0.1:%d%s 2>&1',
-            $port, $path), $out);
-        $blob = implode("\n", $out);
+        [, $blob] = h2_curl(['--http2-prior-knowledge', '-s', '-v', '--max-time', '3',
+            "http://127.0.0.1:$port$path"], true);
 
         /* Counted off the decoded stream rather than curl's %{size_download},
          * which reports the octets on the wire and so reads 49 for the gzipped
          * body. What the assertion is about is the body the handler wrote. */
-        $body = (string) shell_exec(sprintf(
-            'curl --http2-prior-knowledge --compressed -s --max-time 3 '
-            . 'http://127.0.0.1:%d%s 2>/dev/null | wc -c',
-            $port, $path));
+        [, $body] = h2_curl(['--http2-prior-knowledge', '--compressed', '-s', '--max-time', '3',
+            "http://127.0.0.1:$port$path"]);
 
-        printf("%s body=%s trailer=%d\n",
-               $path, trim($body), (int) (strpos($blob, 'x-done: 1') !== false));
+        printf("%s body=%d trailer=%d\n",
+               $path, strlen($body), (int) (strpos($blob, 'x-done: 1') !== false));
     }
 
     $server->stop();

@@ -21,6 +21,7 @@ use function Async\spawn;
 use function Async\await;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_h2_skipif.inc';
 
 $port = tas_free_port();
 $config = (new HttpServerConfig())
@@ -40,11 +41,8 @@ $server->addHttpHandler(function ($req, $res) {
 
 $client = spawn(function () use ($port, $server) {
     usleep(30000);
-    $cmd = sprintf(
-        'curl --http2-prior-knowledge -i -s --max-time 3 http://127.0.0.1:%d/events',
-        $port
-    );
-    $raw = shell_exec($cmd) ?? '';
+    [, $raw] = h2_curl(['--http2-prior-knowledge', '-i', '-s', '--max-time', '3',
+        "http://127.0.0.1:$port/events"]);
 
     $split = preg_split("/\r\n\r\n/", $raw, 2);
     $head  = $split[0] ?? '';

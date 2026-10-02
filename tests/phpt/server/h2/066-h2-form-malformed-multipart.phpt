@@ -22,6 +22,7 @@ use function Async\spawn;
 use function Async\await;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_h2_skipif.inc';
 
 $port   = tas_free_port();
 $server = new HttpServer((new HttpServerConfig())
@@ -47,10 +48,9 @@ file_put_contents($body, "--bnd\r\nContent-Disposition: form-data; name=\"a\"\r\
 
 $client = spawn(function () use ($port, $server, $body) {
     usleep(30000);
-    $out = shell_exec(sprintf(
-        "curl --http2-prior-knowledge -sS --max-time 5 -o /dev/null -w '%%{http_code}' "
-        . "-H 'Content-Type: multipart/form-data; boundary=bnd' --data-binary @%s "
-        . "http://127.0.0.1:%d/form 2>&1", escapeshellarg($body), $port));
+    [, $out] = h2_curl(['--http2-prior-knowledge', '-sS', '--max-time', '5', '-o', h2_dev_null(),
+        '-w', '%{http_code}', '-H', 'Content-Type: multipart/form-data; boundary=bnd',
+        '--data-binary', "@$body", "http://127.0.0.1:$port/form"], true);
 
     echo 'client: ', str_contains($out, 'CANCEL') ? 'stream reset' : $out, "\n";
     $server->stop();

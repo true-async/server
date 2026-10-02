@@ -26,6 +26,7 @@ use TrueAsync\LogSeverity;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../h2/_h2_skipif.inc';
 
 $dir = __DIR__ . '/tmp-067';
 @mkdir($dir, 0700, true);
@@ -93,8 +94,8 @@ spawn(function () use ($server, $port) {
     }
 
     /* Same file over HTTP/2, whose pump counts in its own state. */
-    shell_exec(sprintf('curl --http2-prior-knowledge -s -o /dev/null --max-time 3 '
-        . 'http://127.0.0.1:%d/asset-h2 2>/dev/null', $port));
+    h2_curl(['--http2-prior-knowledge', '-s', '-o', h2_dev_null(), '--max-time', '3',
+        "http://127.0.0.1:$port/asset-h2"]);
 
     usleep(50000);
     $server->stop();
