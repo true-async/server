@@ -104,9 +104,9 @@ jobs:
           }
           C:\vcpkg\vcpkg.exe install libuv:x64-windows nghttp2:x64-windows
 
-      # The runner's curl (System32 and Git's) has no nghttp2, so 56 HTTP/2
-      # tests skipped on "curl lacks HTTP/2 support"; the curl.se build links
-      # it. h2spec feeds h2/009. h2load has no Windows build (#407).
+      # The runner's curl (System32 and Git's) has no nghttp2, and the HTTP/2
+      # tests skip without it; the curl.se build links it. h2spec feeds h2/009.
+      # h2load has no Windows build (#407).
       - name: Setup curl with HTTP/2 and h2spec
         shell: powershell
         run: |
