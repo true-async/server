@@ -22,6 +22,7 @@ use function Async\spawn;
 use function Async\await;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_h2_skipif.inc';
 
 $dir = __DIR__ . '/tmp-067';
 @mkdir($dir, 0700, true);
@@ -42,9 +43,8 @@ file_put_contents($upload, str_repeat('u', 256 * 1024));
 
 $client = spawn(function () use ($port, $server, $upload) {
     usleep(30000);
-    $out = shell_exec(sprintf(
-        "curl --http2-prior-knowledge -sS --max-time 5 -o /dev/null -F 'f=@%s' http://127.0.0.1:%d/ 2>&1",
-        $upload, $port));
+    [, $out] = h2_curl(['--http2-prior-knowledge', '-sS', '--max-time', '5', '-o', h2_dev_null(),
+        '-F', "f=@$upload", "http://127.0.0.1:$port/"], true);
 
     echo 'client: ', str_contains((string)$out, 'ENHANCE_YOUR_CALM') ? 'stream refused' : $out, "\n";
     $server->stop();

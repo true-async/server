@@ -27,6 +27,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_h2_skipif.inc';
 
 $port = tas_free_port();
 
@@ -67,9 +68,8 @@ spawn(function () use ($port, $server) {
     usleep(50000);
 
     $curl = static function (string $path) use ($port) {
-        $cmd = 'curl -sS -o /dev/null -D - --http2-prior-knowledge '
-             . '--max-time 10 ' . escapeshellarg("http://127.0.0.1:$port$path") . ' 2>/dev/null';
-        $head = (string) shell_exec($cmd);
+        [, $head] = h2_curl(['-sS', '-o', h2_dev_null(), '-D', '-', '--http2-prior-knowledge',
+            '--max-time', '10', "http://127.0.0.1:$port$path"]);
         $out  = [];
 
         foreach (preg_split('/\r?\n/', $head) as $line) {

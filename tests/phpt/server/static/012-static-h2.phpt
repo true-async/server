@@ -39,6 +39,7 @@ register_shutdown_function(function() use ($root) {
 });
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../h2/_h2_skipif.inc';
 
 $port = tas_free_port();
 $config = (new HttpServerConfig())->addListener('127.0.0.1', $port);
@@ -62,10 +63,9 @@ $client = spawn(function() use ($port, $server, $body) {
         $args = ['--http2-prior-knowledge', '-sS', '-i', '--max-time', '3'];
         foreach ($extra_args as $a) $args[] = $a;
         $args[] = "http://127.0.0.1:$port$path";
-        $cmd = 'curl ' . implode(' ', array_map('escapeshellarg', $args));
-        $out = []; $rc = 0;
-        exec($cmd . ' 2>&1', $out, $rc);
-        $resp = implode("\n", $out);
+        [$rc, $raw] = h2_curl($args, true);
+        /* Lines as exec() returned them: trailing whitespace, CR included, cut. */
+        $resp = implode("\n", array_map('rtrim', explode("\n", rtrim($raw))));
         /* Parse a curl -i response: header block ends at the blank
          * line; HTTP/2 status line is "HTTP/2 NNN". */
         $head_end = strpos($resp, "\n\n");
