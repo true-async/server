@@ -15,6 +15,29 @@
 #include "http1/http_parser.h"   /* http_request_t */
 #include "grpc/grpc.h"           /* grpc_content_type_mode */
 #include "formats/form_content_type.h"
+#include "log/trace_context.h"
+#ifdef HAVE_HTTP_COMPRESSION
+# include "compression/http_compression_response.h"
+#endif
+
+void http_request_prepare_dispatch(http_request_t *req,
+                                   zend_object *response,
+                                   http_server_config_t *config,
+                                   bool telemetry_enabled)
+{
+    /* H1/H2 also parse at headers-complete so WebSocket upgrade handlers can
+     * read the context. Do not retain the raw header strings a second time. */
+    if (telemetry_enabled && !req->has_trace) {
+        http_request_parse_trace_context(req);
+    }
+
+    if (config != NULL) {
+#ifdef HAVE_HTTP_COMPRESSION
+        http_compression_attach(response, req, config);
+#endif
+        http_response_set_default_json_flags(response, config->json_encode_flags);
+    }
+}
 
 /* {{{ http_protocol_type_to_string */
 const char* http_protocol_type_to_string(http_protocol_type_t type)

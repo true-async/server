@@ -48,6 +48,15 @@ zend_fcall_t *http_protocol_pick_handler(HashTable *handlers,
  * and read the body policy through the predicates below. */
 void http_request_classify_protocols(struct http_request_t *req);
 
+/* Shared preparation before a PHP handler or static handler sees the request
+ * and response. Use the dispatch thread's config (the worker's clone in pool
+ * mode). Trace context may already have been parsed at headers-complete for
+ * WebSocket upgrades, which bypass the normal HTTP dispatch. */
+void http_request_prepare_dispatch(struct http_request_t *req,
+                                   zend_object *response,
+                                   http_server_config_t *config,
+                                   bool telemetry_enabled);
+
 /* Body policy derived from the stamped grpc_mode and form_kind, keeping
  * transports gRPC-agnostic. must_buffer: never stream (grpc-web-text decodes
  * the whole body, and a form getter reads the whole body). size_uncapped:

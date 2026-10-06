@@ -2894,21 +2894,8 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
     http_response_install_stream_ops(Z_OBJ(ctx->response_zv),
                                      &h1_stream_ops, ctx);
 
-#ifdef HAVE_HTTP_COMPRESSION
-    /* Attach compression state (issue #8). conn->config is cached at
-     * bind time so this hot path is a single load + null-check. */
-    if (conn->config != NULL) {
-        extern void http_compression_attach(zend_object *,
-            http_request_t *, http_server_config_t *);
-        http_compression_attach(Z_OBJ(ctx->response_zv), req, conn->config);
-    }
-#endif
-    /* Wire the per-request JSON encode default — used by
-     * HttpResponse::json() when the per-call $flags arg is 0. */
-    if (conn->config != NULL) {
-        http_response_set_default_json_flags(
-            Z_OBJ(ctx->response_zv), conn->config->json_encode_flags);
-    }
+    http_request_prepare_dispatch(req, Z_OBJ(ctx->response_zv), conn->config,
+                                  conn->view->telemetry_enabled);
 
     conn->state = CONN_STATE_PROCESSING;
 

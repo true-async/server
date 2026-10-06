@@ -924,12 +924,8 @@ bool worker_dispatch_request(http_server_object *server,
      * one is encoded when worker_render_response flattens it. */
     http_server_config_t *const cfg = http_server_get_config(server);
 
-    if (cfg != NULL) {
-#ifdef HAVE_HTTP_COMPRESSION
-        http_compression_attach(Z_OBJ(ctx->response_zv), req, cfg);
-#endif
-        http_response_set_default_json_flags(Z_OBJ(ctx->response_zv), cfg->json_encode_flags);
-    }
+    http_request_prepare_dispatch(req, Z_OBJ(ctx->response_zv), cfg,
+                                  http_server_view(server)->telemetry_enabled);
 
     if (is_grpc) {
         grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_mode);

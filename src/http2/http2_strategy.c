@@ -289,21 +289,9 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     http_response_install_stream_ops(Z_OBJ(stream->response_zv),
                                      &h2_stream_ops, stream);
 
-#ifdef HAVE_HTTP_COMPRESSION
-    /* Attach compression state (issue #8). Mirror of the H1 dispatch
-     * hook — uses conn->config cached at bind time. */
-    if (self->conn->config != NULL) {
-        extern void http_compression_attach(zend_object *,
-            http_request_t *, http_server_config_t *);
-        http_compression_attach(Z_OBJ(stream->response_zv),
-                                stream->request, self->conn->config);
-    }
-#endif
-    /* Per-request JSON encode default for HttpResponse::json(). */
-    if (self->conn->config != NULL) {
-        http_response_set_default_json_flags(
-            Z_OBJ(stream->response_zv), self->conn->config->json_encode_flags);
-    }
+    http_request_prepare_dispatch(stream->request, Z_OBJ(stream->response_zv),
+                                  self->conn->config,
+                                  self->conn->view->telemetry_enabled);
 
     if (is_grpc) {
         grpc_call_init_response(Z_OBJ(stream->response_zv), grpc_mode);
