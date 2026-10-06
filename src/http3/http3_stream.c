@@ -23,6 +23,7 @@
 #include "http_response_internal.h" /* http_response_replace_stream_ops */
 #include "http3_listener.h"     /* http3_listener_stream_pool */
 #include "fiu-local.h"
+#include "core/response_delivery.h"
 
 /* Static-delivery memory accounting (http3_static_response.c). Declared here
  * rather than via the heavy http3_internal.h — teardown only needs the debit. */
@@ -143,23 +144,24 @@ static void http3_stream_release_via_request(http_request_t *req)
             return;
         }
 
-        /* Hand the release back via the worker's ordered FIFO — no busy-spin,
-         * stays behind any parked wire of this stream. The fallback only fires
-         * when no timer can be armed (stopping loop), where the FIFO is empty;
-         * it spins while the reactor's mailbox is full, which its loop drains,
-         * and stops when the reactor leaves that loop. */
-        if (!http_worker_reactor_post_release(s->req_reactor_id,
-                                              http3_reactor_consumed_apply, s)) {
-            while (!reactor_pool_post_exec(s->req_reactor_pool, s->req_reactor_id,
-                                           http3_reactor_consumed_apply, s)) {
-                if (http3_stream_slot_reactor_gone(s)) {
-                    http3_stream_slot_release_drop(s);
-                    break;
-                }
+        if (s->delivery != NULL) {
+            if (req->delivery != NULL) {
+                response_delivery_sender_abandoned(req->delivery);
+                req->delivery = NULL;
             }
+            response_delivery_request_consumed(s->delivery);
+            return;
         }
 
+        /* A preallocated control node cannot be refused because data is full.
+         * Dispatched delivery records separately pin their outstanding wires. */
+        s->request_release_control.fn = http3_reactor_consumed_apply;
+        s->request_release_control.arg = s;
+        (void)reactor_pool_post_control(s->req_reactor_pool, s->req_reactor_id,
+                                        &s->request_release_control);
         return;
+
+
     }
 
     http3_stream_pool_free(s->pool, s);
@@ -173,6 +175,10 @@ void http3_stream_release(http3_stream_t *s)
 
     if (--s->refcount > 0) {
         return;
+    }
+    if (s->delivery != NULL) {
+        response_delivery_stream_gone(s->delivery);
+        s->delivery = NULL;
     }
 
     /* Reactor mode: the worker owns the request's lifetime; the slab slot is
@@ -327,4 +333,3 @@ void http3_stream_release(http3_stream_t *s)
      * the callback fires later. */
     http_request_destroy(s->request);
 }
-

@@ -2286,7 +2286,7 @@ void http_log_emit_access(http_log_state_t *state, const http_access_rec_t *ar)
                                         .v.s = ar->url_query };
     }
 
-    attrs[n++] = (http_log_attr_t){ .key = "http.response.status_code",
+    if (ar->status != 0) attrs[n++] = (http_log_attr_t){ .key = "http.response.status_code",
                                     .type = HTTP_LOG_ATTR_I64,
                                     .v.i64 = ar->status };
 
@@ -2326,7 +2326,9 @@ void http_log_emit_access(http_log_state_t *state, const http_access_rec_t *ar)
     }
 
     char body[512];
-    int  blen = snprintf(body, sizeof body, "%s %s %d", method, path, ar->status);
+    int  blen = ar->status != 0
+        ? snprintf(body, sizeof body, "%s %s %d", method, path, ar->status)
+        : snprintf(body, sizeof body, "%s %s", method, path);
 
     if (blen < 0) {
         return;

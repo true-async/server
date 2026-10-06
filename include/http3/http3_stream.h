@@ -17,6 +17,7 @@
 #include "Zend/zend_async_API.h"   /* zend_coroutine_t, zend_async_trigger_event_t */
 #include "zend_smart_str.h"
 #include "http1/http_parser.h"     /* http_request_t */
+#include "core/reactor_pool.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -179,6 +180,8 @@ struct _http3_stream_s {
     /* Lifecycle refcount. Starts at 1 (held by nghttp3 stream_user_data).
      * Once dispatch fires, the handler coroutine bumps to 2. */
     unsigned          refcount;
+    response_delivery_t *delivery;
+    reactor_control_t request_release_control;
 
     /* Flags. Written only by the stream's reactor thread: they share one
      * storage unit, so a second writer would tear the neighbours. */

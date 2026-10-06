@@ -811,6 +811,9 @@ struct http_response_stream_ops_t {
      * below threshold. Returns NULL only on alloc failure — callers
      * must NULL-check. */
     zend_async_event_t *(*get_wait_event)(void *ctx);
+    /* Optional: whether a first nonblocking offer has handed headers to the
+     * transport. False permits rolling back an unaccepted first commit. */
+    bool (*is_started)(void *ctx);
 
     /* Protocol-owned static-file body delivery.
      *
@@ -922,7 +925,7 @@ typedef struct http_server_counters_s {
 
     /* Final response status class, bumped exactly once per served request
      * alongside total_requests (see http_server_count_request). Every
-     * request lands in one bucket, so the four sum to total_requests. */
+     * request lands in one status/no-status bucket; the five sum to total_requests. */
     uint64_t responses_2xx_total;
     uint64_t responses_3xx_total;
     uint64_t responses_4xx_total;
@@ -932,6 +935,9 @@ typedef struct http_server_counters_s {
      * Overlaps the four buckets rather than joining them: the status counted
      * above is the one the peer was told. */
     uint64_t responses_aborted_total;
+    /* A pooled request ended before any HTTP status was confirmed. The five
+     * disjoint status/no-status buckets reconcile with total_requests. */
+    uint64_t responses_undelivered_total;
 
     /* Active-connection gauge split by negotiated protocol (++ once the
      * protocol is detected / on H3 conn open, -- at conn close). Sum of
@@ -1073,6 +1079,7 @@ typedef struct http_server_counters_s {
     X(tls_bytes_ciphertext_out_total,        SUM)           \
     X(total_requests,                        SUM)           \
     X(responses_2xx_total,                   SUM)           \
+    X(responses_undelivered_total,           SUM)           \
     X(responses_3xx_total,                   SUM)           \
     X(responses_4xx_total,                   SUM)           \
     X(responses_5xx_total,                   SUM)           \

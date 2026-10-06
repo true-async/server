@@ -59,6 +59,7 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "reactor_pool_test_hooks.c " +
         "fault_hooks.c " +
         "response_wire.c " +
+        "response_delivery.c " +
         "worker_dispatch.c " +
         "worker_inbox.c " +
         "worker_registry.c " +

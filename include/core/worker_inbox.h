@@ -35,6 +35,11 @@
  */
 
 typedef struct worker_inbox_s worker_inbox_t;
+typedef struct response_delivery_owner_s response_delivery_owner_t;
+void worker_inbox_set_delivery_owner(worker_inbox_t *inbox,
+                                     response_delivery_owner_t *owner);
+response_delivery_owner_t *worker_inbox_delivery_owner(worker_inbox_t *inbox);
+void worker_inbox_cancel_pending(worker_inbox_t *inbox);
 
 /* Create a worker inbox on THIS (worker) thread. Dispatched requests run their
  * handler in `scope` (own_scope mirrors worker_dispatch_request) against

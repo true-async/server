@@ -27,6 +27,7 @@
 
 /* Forward declaration (full type in http_connection.h) */
 typedef struct _http_connection_t http_connection_t;
+typedef struct response_delivery_s response_delivery_t;
 
 /* Parser-level error codes recorded on http1_parser_t::parse_error so
  * the connection layer can build an RFC-compliant 4xx response.
@@ -185,6 +186,7 @@ struct http_request_t {
      * returns the slot to its pool. The base http_request_destroy has
      * already cleaned up every field declared in http_request_t. */
     void       (*release)(struct http_request_t *req);
+    response_delivery_t *delivery; /* pool dispatch only, handed to worker ctx */
 
     /* W3C Trace Context. Populated by http_request_parse_trace_context
      * at headers-complete or dispatch iff server has telemetry enabled and the

@@ -48,3 +48,22 @@ Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
   Why: a second runner would drive a separate server process; phpt already runs the
   server in-process.
   Rejected: Behat.
+
+- 2026-10-06 Pooled HTTP/3 delivery (#351): FULL is coroutine backpressure, not
+  a discard policy. Enqueue transfers ownership but does not count a response.
+  The reactor selects one terminal outcome at clean QUIC stream close (data and
+  FIN acknowledged), or failure. The original worker generation consumes that
+  result and its immutable request snapshot once. No confirmed status is the
+  fifth, `responses_undelivered_total`, bucket; the five sum to `total_requests`.
+  Principle: P1.2, within P2.1's existing reactor/worker exception.
+  Why: forced refusal timed out the client while recording 200 and ten bytes,
+  with zero dropped wires. A parked wire was not delivered either.
+  Rejected: keep dropping FULL but count the drop; use HttpRequest lastref as
+  completion; put failure notifications in the same full mailbox; hold the PHP
+  coroutine/response until peer ACK.
+  Cost: a persistent delivery record and copied access identity per request;
+  capacity gates per worker/reactor pair; await resources only on pressure.
+  Command slots remain bounded, but an internal producer block may allocate:
+  moodycamel try_enqueue refused such a block even below logical capacity.
+  Enqueue under an explicit slot reservation distinguishes actual allocation
+  failure from FULL. Control/completion publication allocates nothing.

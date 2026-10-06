@@ -579,6 +579,26 @@ static int rotate_dcid(h3c_t *c) {
 /* ----- main ----- */
 
 
+static void close_client(h3c_t *c)
+{
+    if (getenv("H3CLIENT_NO_CLOSE") == NULL) {
+        ngtcp2_ccerr ccerr;
+        ngtcp2_ccerr_set_application_error(&ccerr, /* H3_NO_ERROR */ 0x100, NULL, 0);
+        ngtcp2_path_storage ps2 = {0};
+        ngtcp2_path_storage_init(&ps2,
+            (struct sockaddr *)&c->local,  c->local_len,
+            (struct sockaddr *)&c->remote, c->remote_len, NULL);
+        ngtcp2_pkt_info pi2 = {0};
+        uint8_t cbuf[1280];
+        ngtcp2_ssize cn = ngtcp2_conn_write_connection_close(
+            c->qc, &ps2.path, &pi2, cbuf, sizeof(cbuf), &ccerr, now_ns());
+        if (cn > 0) {
+            (void)sendto(c->fd, cbuf, (size_t)cn, 0,
+                         (struct sockaddr *)&c->remote, c->remote_len);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr, "usage: %s <host> <port> <path> [<method> [<body-file>]]\n", argv[0]);
@@ -798,6 +818,10 @@ int main(int argc, char **argv) {
 
     unsigned long completed = 0;
     bool sent = false;
+    bool cancelled = false;
+    uint64_t request_sent_ns = 0;
+    const char *cancel_env = getenv("H3CLIENT_CANCEL_AFTER_MS");
+    unsigned long cancel_ms = cancel_env != NULL ? strtoul(cancel_env, NULL, 10) : 0;
     uint64_t deadline_ns = now_ns() + deadline_ms * 1000000ull;
 
     while (completed < request_count && now_ns() < deadline_ns) {
@@ -815,8 +839,16 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "submit_request failed\n"); return 1;
             }
             sent = true;
+            request_sent_ns = now_ns();
             c.req_body_offset = 0;  /* re-read body for next request */
             continue;
+        }
+
+        if (sent && cancel_ms > 0 && now_ns() - request_sent_ns >= cancel_ms * 1000000ull) {
+            close_client(&c);
+            fprintf(stderr, "EARLY_CLOSE\n");
+            cancelled = true;
+            break;
         }
 
         /* If the current request finished, snapshot it, reset per-request
@@ -921,9 +953,20 @@ int main(int argc, char **argv) {
             }
         }
         if (conn_done) break;
+        if (c.response_done) {
+            const char *delay_env = getenv("H3CLIENT_DELAY_FINAL_ACK_MS");
+            if (delay_env != NULL) {
+                const unsigned long delay_ms = strtoul(delay_env, NULL, 10);
+                if (delay_ms > 0 && delay_ms <= 10000) {
+                    fprintf(stderr, "ACK_WAITING\n");
+                    (void)poll(NULL, 0, (int)delay_ms);
+                    (void)ngtcp2_conn_handle_expiry(c.qc, now_ns());
+                }
+            }
+        }
     }
 
-    if (completed < request_count) {
+    if (completed < request_count && !cancelled) {
         fprintf(stderr, "h3client: timeout (completed=%lu of %lu)\n",
                 completed, request_count);
         return 1;
@@ -933,6 +976,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "COMPLETED=%lu\n", completed);
     }
 
+    /* response_done is receive EOF, not "our final delayed ACK was sent".
+     * Closing immediately can abandon an intact response without acknowledging
+     * its FIN. Service the delayed-ACK timer before graceful CONNECTION_CLOSE.
+     * NO_FINAL_ACK deliberately exercises that failure in delivery tests. */
+    if (!cancelled && getenv("H3CLIENT_NO_FINAL_ACK") == NULL) {
+        (void)poll(NULL, 0, 30);
+        (void)ngtcp2_conn_handle_expiry(c.qc, now_ns());
+        (void)drain_out(&c);
+    }
+
     /* Step 6a — emit a graceful application-error CONNECTION_CLOSE so
      * the server-side reaper has something to react to (otherwise the
      * conn would only be torn down by the 30s idle timer). Best-effort:
@@ -940,22 +993,7 @@ int main(int argc, char **argv) {
      *
      * `H3CLIENT_NO_CLOSE=1` skips the emit so test harnesses can drive
      * the server's idle-timeout path (Step 6e). */
-    if (getenv("H3CLIENT_NO_CLOSE") == NULL) {
-        ngtcp2_ccerr ccerr;
-        ngtcp2_ccerr_set_application_error(&ccerr, /* H3_NO_ERROR */ 0x100, NULL, 0);
-        ngtcp2_path_storage ps2 = {0};
-        ngtcp2_path_storage_init(&ps2,
-            (struct sockaddr *)&c.local,  c.local_len,
-            (struct sockaddr *)&c.remote, c.remote_len, NULL);
-        ngtcp2_pkt_info pi2 = {0};
-        uint8_t cbuf[1280];
-        ngtcp2_ssize cn = ngtcp2_conn_write_connection_close(
-            c.qc, &ps2.path, &pi2, cbuf, sizeof(cbuf), &ccerr, now_ns());
-        if (cn > 0) {
-            (void)sendto(c.fd, cbuf, (size_t)cn, 0,
-                         (struct sockaddr *)&c.remote, c.remote_len);
-        }
-    }
+    if (!cancelled) close_client(&c);
 
     if (c.retired_fd >= 0) { close(c.retired_fd); }
 

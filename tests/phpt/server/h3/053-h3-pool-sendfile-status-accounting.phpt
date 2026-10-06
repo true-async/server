@@ -1,5 +1,5 @@
 --TEST--
-sendFile() accounting (#5): reactor-pool ranged send is counted as 206 by the reactor
+sendFile() accounting (#5): reactor-pool ranged send reports its final 206 to the worker
 --EXTENSIONS--
 true_async_server
 true_async
@@ -109,13 +109,12 @@ spawn(function () use ($server, $port, $client_bin, $bigBody, $logPath) {
     echo 'total=',      ($t['total_requests'] === 3 ? 1 : 0), "\n";
     echo 'class_sum=',  ($classes === $t['total_requests'] ? 1 : 0), "\n";
     echo '2xx=',        ($t['responses_2xx_total'] === 3 ? 1 : 0), "\n";
-    /* The reactor is where they were counted — it must be the one reporting them. */
+    /* The reactor publishes its final status; the worker accounts it once. */
     $reactor_total = 0;
     foreach ($stats['reactors'] ?? [] as $r) { $reactor_total += $r['total_requests']; }
-    echo 'from_reactors=', ($reactor_total === 3 ? 1 : 0), "\n";
+    echo 'from_reactors=', ($reactor_total === 0 ? 1 : 0), "\n";
 
-    /* The record can only come from the reactor: the worker marshalled the send
-     * and never saw the final status. Give the sink's flush timer a tick. */
+    /* The completion snapshot lets the worker log the final reactor status. */
     usleep(400000);
     $seen = [];
     foreach (explode("\n", trim((string)@file_get_contents($logPath))) as $line) {

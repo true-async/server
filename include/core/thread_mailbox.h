@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include "core/thread_queue.h"
 
 /*
  * Reactor-integrated MPSC mailbox (issue #81): a bounded thread_mpsc_t wired to
@@ -87,6 +88,8 @@ thread_cmd_mailbox_t *thread_cmd_mailbox_create(size_t capacity, size_t batch,
 void thread_cmd_mailbox_free(thread_cmd_mailbox_t *mb);
 /* Producer side — any thread. Copies *cmd in; false if full. */
 bool thread_cmd_mailbox_post(thread_cmd_mailbox_t *mb, const reactor_cmd_t *cmd);
+thread_queue_result_t thread_cmd_mailbox_try_post(thread_cmd_mailbox_t *mb,
+                                                 const reactor_cmd_t *cmd);
 void thread_cmd_mailbox_keepalive(thread_cmd_mailbox_t *mb, bool enable);
 size_t thread_cmd_mailbox_count(const thread_cmd_mailbox_t *mb);
 

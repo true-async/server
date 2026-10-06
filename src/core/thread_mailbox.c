@@ -186,13 +186,18 @@ static void cmd_mailbox_on_signal(zend_async_event_t *event, zend_async_event_ca
 
     thread_cmd_mailbox_t *mb = *(thread_cmd_mailbox_t **) ((char *) event + event->extra_offset);
 
-    for (;;) {
+    /* One batch per callback: producers waking on capacity must not keep this
+     * callback running forever and starve QUIC ACKs/timers. */
+    {
         const size_t n = thread_cmd_mpsc_drain(mb->queue, mb->batch_buf, mb->batch);
         if (n == 0) {
-            break;
+            return;
         }
 
         mb->on_drain(mb->batch_buf, n, mb->arg);
+        if (thread_cmd_mpsc_count(mb->queue) != 0) {
+            mb->trigger->trigger(mb->trigger);
+        }
     }
 }
 
@@ -260,13 +265,15 @@ void thread_cmd_mailbox_free(thread_cmd_mailbox_t *mb)
 
 bool thread_cmd_mailbox_post(thread_cmd_mailbox_t *mb, const reactor_cmd_t *cmd)
 {
-    if (UNEXPECTED(!thread_cmd_mpsc_enqueue(mb->queue, cmd))) {
-        return false;
-    }
-
+    return thread_cmd_mailbox_try_post(mb, cmd) == THREAD_QUEUE_ACCEPTED;
+}
+thread_queue_result_t thread_cmd_mailbox_try_post(thread_cmd_mailbox_t *mb,
+                                                 const reactor_cmd_t *cmd)
+{
+    thread_queue_result_t result = thread_cmd_mpsc_try_enqueue(mb->queue, cmd);
+    if (result != THREAD_QUEUE_ACCEPTED) return result;
     mb->trigger->trigger(mb->trigger);
-
-    return true;
+    return THREAD_QUEUE_ACCEPTED;
 }
 
 size_t thread_cmd_mailbox_count(const thread_cmd_mailbox_t *mb)

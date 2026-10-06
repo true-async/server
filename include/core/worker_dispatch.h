@@ -43,6 +43,9 @@ typedef bool (*worker_response_sink_fn)(response_wire_t *rw, void *sink_arg);
  * to response_wire_free — every drop site must go through this so a new
  * owned field can't leak from a forgotten copy. */
 void response_wire_discard(response_wire_t *rw);
+/* Consume an inbox request during teardown/dispatch failure, publish its
+ * failure without trying to enqueue response data or await from a destructor. */
+void worker_dispatch_cancel_request(struct http_request_t *req);
 
 /* Take ownership of `req` (a persistent reactor-built or ZMM request, refcount
  * 1), wrap it in an HttpRequest on THIS (worker) thread, spawn the user handler

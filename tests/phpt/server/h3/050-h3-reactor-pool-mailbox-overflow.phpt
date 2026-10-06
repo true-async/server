@@ -1,5 +1,5 @@
 --TEST--
-HttpServer: reverse-mailbox overflow defers wires + slot release, body stays byte-exact (#106 follow-up)
+HttpServer: reverse-mailbox overflow suspends senders without dropping wires, body stays byte-exact (#106 follow-up)
 --EXTENSIONS--
 true_async_server
 true_async
@@ -42,12 +42,8 @@ $config = (new HttpServerConfig())
     ->addHttp3Listener('127.0.0.1', $port)
     ->setCertificate($cert)->setPrivateKey($key)
     ->setWorkers(2)
-    /* Floor the reverse mailbox at its minimum (64). A 150-chunk reply cannot
-     * fit, so most STREAM_CHUNKs and the final stream-slot release take the
-     * worker's defer/retry FIFO instead of a direct post — exercising
-     * pending_post_defer / pending_post_flush and the consumed-release-through-
-     * FIFO path. A byte-exact, in-order body proves the FIFO holds ordering
-     * under overflow and no slot leaks at teardown. */
+    /* A small mailbox exercises coroutine backpressure; each accepted wire
+     * pins the delivery until apply, independently of request-slot release. */
     ->setReactorMailboxCapacity(64);
 $server = new HttpServer($config);
 $server->addHttpHandler(function ($req, $res) use ($chunks) {

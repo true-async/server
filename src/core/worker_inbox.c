@@ -15,6 +15,7 @@
 
 #include "core/worker_inbox.h"
 #include "core/thread_mailbox.h"
+#include "core/response_delivery.h"
 
 /* Bounded so a backed-up worker backpressures the reactor (post returns false)
  * rather than growing the queue without limit. */
@@ -28,6 +29,7 @@ struct worker_inbox_s {
     worker_response_sink_fn  sink;
     void                    *sink_arg;
     bool                     own_scope;
+    response_delivery_owner_t *delivery_owner;
 };
 
 /* Runs on the worker's reactor thread when requests are queued. Each item is an
@@ -43,6 +45,10 @@ static void worker_inbox_drain(void **items, const size_t count, void *arg)
         http_request_t *const req = (http_request_t *)items[i];
         ZEND_ASSERT(req != NULL);
 
+        if (inbox->scope == NULL) {
+            worker_dispatch_cancel_request(req);
+            continue;
+        }
         worker_dispatch_request(inbox->server, inbox->scope, req,
                                 inbox->own_scope, inbox->sink, inbox->sink_arg);
     }
@@ -96,5 +102,23 @@ void worker_inbox_free(worker_inbox_t *inbox)
     }
 
     thread_mailbox_free(inbox->mb);
+    response_delivery_owner_free(inbox->delivery_owner);
     pefree(inbox, 0);
+}
+
+void worker_inbox_set_delivery_owner(worker_inbox_t *inbox,
+                                     response_delivery_owner_t *owner)
+{
+    inbox->delivery_owner = owner;
+}
+response_delivery_owner_t *worker_inbox_delivery_owner(worker_inbox_t *inbox)
+{
+    return inbox != NULL ? inbox->delivery_owner : NULL;
+}
+
+void worker_inbox_cancel_pending(worker_inbox_t *inbox)
+{
+    if (inbox == NULL) return;
+    inbox->scope = NULL;
+    thread_mailbox_drain_pending(inbox->mb);
 }

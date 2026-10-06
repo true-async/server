@@ -26,6 +26,7 @@
                                             * ngtcp2 + nghttp3 + openssl/ssl.h +
                                             * http3_connection.h + php_http_server.h */
 #include "Zend/zend_hrtime.h"              /* zend_hrtime — drain stamps */
+#include "core/response_delivery.h"
 #include "http3_listener.h"                /* listener accessors */
 #include "http3_packet.h"                  /* version_negotiation / stateless_reset */
 #include "http3_steer.h"                   /* CID steering encode */
@@ -1027,6 +1028,7 @@ void http3_connection_free(http3_connection_t *conn)
         conn->streams_head = NULL;
         while (s != NULL) {
             http3_stream_t *next = s->list_next;
+            response_delivery_finish(s->delivery, false, "connection_closed");
 
             /* Cancel before clearing s->conn: the pump is a callback FSM with
              * no scope to cancel it, and it holds the file io + a stream pin. */
@@ -1103,4 +1105,3 @@ void http3_connection_free(http3_connection_t *conn)
     OPENSSL_cleanse(conn, sizeof(*conn));
     efree(conn);
 }
-

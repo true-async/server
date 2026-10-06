@@ -1399,6 +1399,19 @@ static void http_response_stream_commit_once(zend_object *obj,
 #endif
 }
 
+static void response_rollback_unstarted(zend_object *obj, http_response_object *response)
+{
+    if (response->stream_ops->is_started == NULL
+        || response->stream_ops->is_started(response->stream_ctx)) return;
+#ifdef HAVE_HTTP_COMPRESSION
+    http_compression_reset_unstarted(obj);
+#endif
+    response->streaming = false;
+    response->headers_sent = false;
+    response->committed = false;
+    response->declared_length = -1;
+}
+
 /* {{{ proto HttpResponse::write(string $chunk): static
  *
  * Streaming response — append a chunk to the outbound queue. First
@@ -1540,6 +1553,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWrite)
         /* Nothing was queued, so the bytes reserved above are free again — the
          * handler is expected to offer the same chunk once there is room. */
         response_release_declared_length(response, ZSTR_LEN(chunk));
+        response_rollback_unstarted(Z_OBJ_P(ZEND_THIS), response);
         RETURN_FALSE;
     }
 
@@ -1854,6 +1868,7 @@ ZEND_METHOD(TrueAsync_HttpResponse, tryWriteMessage)
         /* Nothing was queued: the offer can be made again, so the bytes are
          * not spent. */
         response_release_declared_length(response, frame_len);
+        response_rollback_unstarted(Z_OBJ_P(ZEND_THIS), response);
         RETURN_FALSE;
     }
 

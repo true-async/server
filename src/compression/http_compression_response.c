@@ -800,6 +800,13 @@ static bool ws_is_alive(void *ctx_opaque)
                || w->underlying_ops->is_alive(w->underlying_ctx));
 }
 
+static bool ws_is_started(void *ctx)
+{
+    ws_ctx_t *w = ctx;
+    return w->underlying_ops->is_started == NULL
+        || w->underlying_ops->is_started(w->underlying_ctx);
+}
+
 static const http_response_stream_ops_t compressing_stream_ops = {
     .append_chunk   = ws_append_chunk,
     .sendable       = ws_sendable,
@@ -808,6 +815,7 @@ static const http_response_stream_ops_t compressing_stream_ops = {
     .mark_ended     = ws_mark_ended,
     .abort          = ws_abort,
     .get_wait_event = ws_get_wait_event,
+    .is_started = ws_is_started,
 };
 
 void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
@@ -853,4 +861,18 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     st->encoder           = enc;
     st->wrapper_ctx       = w;
     st->wrapper_installed = true;
+}
+
+void http_compression_reset_unstarted(zend_object *obj)
+{
+    http_compression_state_t *st = state_of(obj);
+    if (st == NULL || !st->wrapper_installed) return;
+    ws_ctx_t *w = st->wrapper_ctx;
+    ZEND_ASSERT(!w->first_chunk_done);
+    http_response_replace_stream_ops(obj, w->underlying_ops, w->underlying_ctx);
+    if (st->encoder != NULL) http_compression_pool_release(st->encoder);
+    st->encoder = NULL;
+    st->wrapper_ctx = NULL;
+    st->wrapper_installed = false;
+    efree(w);
 }

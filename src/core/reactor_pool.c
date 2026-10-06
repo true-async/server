@@ -16,6 +16,8 @@
 #include "Zend/zend_async_API.h"
 #include "Zend/zend_atomic.h"
 #include "core/reactor_pool.h"
+#include "core/atomic_pointer.h"
+#include "fiu-local.h"
 #include "core/reactor_cmd.h"
 #include "core/thread_mailbox.h"
 
@@ -47,8 +49,39 @@ typedef struct {
     zend_atomic_int       phase;
     thread_cmd_mailbox_t *mailbox;
     zend_atomic_int64     processed;
+    http_atomic_pointer_t controls;
+    zend_async_trigger_event_t *control_wake;
+    reactor_capacity_gate_t *capacity_gates;
     bool                  stopping;
 } reactor_ctx_t;
+static void reactor_epilogue(void);
+
+static void reactor_control_drain(reactor_ctx_t *rc)
+{
+    reactor_control_t *head = http_atomic_pointer_exchange(&rc->controls, NULL);
+    reactor_control_t *ordered = NULL;
+    while (head != NULL) {
+        reactor_control_t *next = head->next;
+        head->next = ordered;
+        ordered = head;
+        head = next;
+    }
+    while (ordered != NULL) {
+        reactor_control_t *node = ordered;
+        ordered = node->next;
+        node->fn(node->arg); /* callback may free the node */
+    }
+}
+
+static void reactor_control_signal(zend_async_event_t *event,
+                                   zend_async_event_callback_t *callback,
+                                   void *result, zend_object *exception)
+{
+    (void)callback; (void)result; (void)exception;
+    reactor_ctx_t *rc = *(reactor_ctx_t **)((char *)event + event->extra_offset);
+    reactor_control_drain(rc);
+    reactor_epilogue(); /* resets must flush even when no data post follows */
+}
 
 struct reactor_pool_s {
     zend_async_thread_pool_t *tp;
@@ -60,6 +93,11 @@ struct reactor_pool_s {
 /* See reactor_pool_set_drain_epilogue. Process-wide, set once on the parent
  * before reactors run, read on each reactor thread at drain-batch end. */
 static void (*g_drain_epilogue)(void) = NULL;
+
+static void reactor_epilogue(void)
+{
+    if (g_drain_epilogue != NULL) g_drain_epilogue();
+}
 
 void reactor_pool_set_drain_epilogue(void (*fn)(void))
 {
@@ -83,6 +121,12 @@ static void reactor_drain(reactor_cmd_t *items, const size_t count, void *arg)
 {
     reactor_ctx_t *const rc = (reactor_ctx_t *)arg;
     int64_t              drained = 0;
+
+    /* dequeue already freed the ring slots; every subscribed worker may retry.
+     * Wakes are bounded by the number of registered worker/ reactor pairs. */
+    for (reactor_capacity_gate_t *g = rc->capacity_gates; g != NULL; g = g->next) {
+        g->wake(g->arg);
+    }
 
     for (size_t i = 0; i < count; i++) {
         reactor_cmd_t *const cmd = &items[i];
@@ -145,6 +189,29 @@ static void reactor_loop_handler(zend_async_event_t *event, void *vctx)
     thread_cmd_mailbox_keepalive(mb, true);
 
     rc->mailbox = mb;                                       /* publish (plain) */
+    rc->control_wake = ZEND_ASYNC_NEW_TRIGGER_EVENT_EX(sizeof(reactor_ctx_t *));
+    if (rc->control_wake == NULL) {
+        thread_cmd_mailbox_free(mb);
+        rc->mailbox = NULL;
+        zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_DONE);
+        return;
+    }
+    *(reactor_ctx_t **)((char *)&rc->control_wake->base
+                        + rc->control_wake->base.extra_offset) = rc;
+    zend_async_event_callback_t *control_cb =
+        ZEND_ASYNC_EVENT_CALLBACK(reactor_control_signal);
+    if (control_cb == NULL
+        || !rc->control_wake->base.add_callback(&rc->control_wake->base, control_cb)) {
+        if (control_cb != NULL) {
+            ZEND_ASYNC_EVENT_CALLBACK_RELEASE(control_cb);
+        }
+        rc->control_wake->base.dispose(&rc->control_wake->base);
+        rc->control_wake = NULL;
+        thread_cmd_mailbox_free(mb);
+        rc->mailbox = NULL;
+        zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_DONE);
+        return;
+    }
     zend_atomic_int_store_ex(&rc->phase, REACTOR_PHASE_RUN); /* release        */
 
     while (!rc->stopping) {
@@ -152,6 +219,9 @@ static void reactor_loop_handler(zend_async_event_t *event, void *vctx)
     }
 
     thread_cmd_mailbox_keepalive(mb, false);
+    reactor_control_drain(rc);
+    rc->control_wake->base.dispose(&rc->control_wake->base);
+    rc->control_wake = NULL;
     thread_cmd_mailbox_free(mb);                            /* consumer-thread */
     rc->mailbox = NULL;
 
@@ -198,6 +268,7 @@ reactor_pool_t *reactor_pool_create(const int reactors, const size_t mailbox_cap
         rp->ctx[i].stopping = false;
         ZEND_ATOMIC_INT_INIT(&rp->ctx[i].phase, REACTOR_PHASE_SPAWN);
         ZEND_ATOMIC_INT64_INIT(&rp->ctx[i].processed, 0);
+        ZEND_ATOMIC_INT64_INIT(&rp->ctx[i].controls, 0);
 
         zend_async_event_t *const evt =
             tp->submit_internal(tp, reactor_loop_handler, &rp->ctx[i]);
@@ -302,26 +373,24 @@ bool reactor_pool_exec(reactor_pool_t *rp, const int idx, const reactor_exec_fn 
     return true;
 }
 
-bool reactor_pool_post_exec(reactor_pool_t *rp, const int idx,
-                            const reactor_exec_fn fn, void *arg)
+bool reactor_pool_post_exec(reactor_pool_t *rp, int idx, reactor_exec_fn fn, void *arg)
 {
-    if (UNEXPECTED(rp == NULL || idx < 0 || idx >= rp->count || fn == NULL)) {
-        return false;
-    }
-
-    reactor_ctx_t *const rc = &rp->ctx[idx];
-
-    if (UNEXPECTED(zend_atomic_int_load_ex(&rc->phase) != REACTOR_PHASE_RUN)) {
-        return false;
-    }
-
-    /* Fire-and-forget: the value rides the ring, no `done` ack, nothing to free. */
+    return reactor_pool_try_post_exec(rp, idx, fn, arg) == THREAD_QUEUE_ACCEPTED;
+}
+thread_queue_result_t reactor_pool_try_post_exec(reactor_pool_t *rp, int idx,
+                                                reactor_exec_fn fn, void *arg)
+{
+    if (!reactor_pool_is_running(rp, idx) || fn == NULL) return THREAD_QUEUE_STOPPED;
+    /* Fault seam: force FULL and model a consumer drain with a NOOP. The
+     * notifier still runs on the reactor, exercising subscribe/recheck/wake. */
+    fiu_do_on("h3/reverse/queue_full", {
+        (void)reactor_pool_post(rp, idx, NULL);
+        return THREAD_QUEUE_FULL;
+    });
+    reactor_ctx_t *rc = &rp->ctx[idx];
     reactor_cmd_t cmd = {0};
-    cmd.kind = REACTOR_CMD_POST;
-    cmd.fn   = fn;
-    cmd.arg  = arg;
-
-    return thread_cmd_mailbox_post(rc->mailbox, &cmd);
+    cmd.kind = REACTOR_CMD_POST; cmd.fn = fn; cmd.arg = arg;
+    return thread_cmd_mailbox_try_post(rc->mailbox, &cmd);
 }
 
 bool reactor_pool_is_running(const reactor_pool_t *rp, const int idx)
@@ -331,6 +400,91 @@ bool reactor_pool_is_running(const reactor_pool_t *rp, const int idx)
     }
 
     return zend_atomic_int_load_ex(&rp->ctx[idx].phase) == REACTOR_PHASE_RUN;
+}
+
+bool reactor_pool_has_capacity(const reactor_pool_t *rp, int idx)
+{
+    return reactor_pool_is_running(rp, idx)
+        && thread_cmd_mailbox_count(rp->ctx[idx].mailbox) < rp->mailbox_capacity;
+}
+
+bool reactor_pool_post_control(reactor_pool_t *rp, const int idx,
+                                reactor_control_t *node)
+{
+    if (!reactor_pool_is_running(rp, idx) || node == NULL || node->fn == NULL) {
+        return false;
+    }
+    reactor_ctx_t *rc = &rp->ctx[idx];
+    void *head = http_atomic_pointer_load(&rc->controls);
+    do {
+        node->next = head;
+    } while (!http_atomic_pointer_compare_exchange(&rc->controls, &head, node));
+    rc->control_wake->trigger(rc->control_wake);
+    return true;
+}
+
+typedef struct {
+    reactor_ctx_t *rc;
+    reactor_capacity_gate_t *gate;
+} capacity_registration_t;
+
+typedef struct {
+    reactor_control_t node;
+    reactor_exec_fn fn;
+    void *arg;
+    zend_atomic_int done;
+} control_fence_t;
+
+static void control_fence_apply(void *arg)
+{
+    control_fence_t *f = arg;
+    f->fn(f->arg);
+    zend_atomic_int_store_ex(&f->done, 1);
+}
+
+bool reactor_pool_control_exec(reactor_pool_t *rp, int idx,
+                               reactor_exec_fn fn, void *arg)
+{
+    control_fence_t f = {0};
+    f.fn = fn; f.arg = arg;
+    f.node.fn = control_fence_apply; f.node.arg = &f;
+    ZEND_ATOMIC_INT_INIT(&f.done, 0);
+    if (!reactor_pool_post_control(rp, idx, &f.node)) return false;
+    /* A posted stack node cannot be abandoned on cancellation. This cold
+     * fence waits for its acknowledgement, not for data-mailbox capacity. */
+    while (zend_atomic_int_load_ex(&f.done) == 0) reactor_pool_msleep();
+    return true;
+}
+
+static void capacity_register(void *arg)
+{
+    capacity_registration_t *r = arg;
+    r->gate->next = r->rc->capacity_gates;
+    r->rc->capacity_gates = r->gate;
+}
+
+static void capacity_unregister(void *arg)
+{
+    capacity_registration_t *r = arg;
+    reactor_capacity_gate_t **p = &r->rc->capacity_gates;
+    while (*p != NULL && *p != r->gate) p = &(*p)->next;
+    if (*p != NULL) *p = r->gate->next;
+}
+
+bool reactor_pool_capacity_register(reactor_pool_t *rp, int idx,
+                                    reactor_capacity_gate_t *gate)
+{
+    if (!reactor_pool_is_running(rp, idx) || gate == NULL) return false;
+    capacity_registration_t r = { &rp->ctx[idx], gate };
+    return reactor_pool_control_exec(rp, idx, capacity_register, &r);
+}
+
+bool reactor_pool_capacity_unregister(reactor_pool_t *rp, int idx,
+                                      reactor_capacity_gate_t *gate)
+{
+    if (!reactor_pool_is_running(rp, idx)) return true;
+    capacity_registration_t r = { &rp->ctx[idx], gate };
+    return reactor_pool_control_exec(rp, idx, capacity_unregister, &r);
 }
 
 uint64_t reactor_pool_processed(const reactor_pool_t *rp, const int idx)

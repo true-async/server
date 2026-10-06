@@ -20,9 +20,10 @@
  *   thread_mpsc_t  — many producers, one consumer (moodycamel ConcurrentQueue)
  *   thread_spsc_t  — one producer, one consumer  (moodycamel ReaderWriterQueue)
  *
- * Both are *bounded*: a capacity is fixed at creation and enqueue fails cleanly
- * when full, giving deterministic backpressure with no allocation on the hot
- * path (ties into the OOM-firewall philosophy). The bound is enforced by an
+ * Both are bounded: capacity limits live items, and a full queue refuses the
+ * offer without taking ownership. The pointer queues use allocation-free
+ * try_enqueue; command queues may acquire internal producer blocks and
+ * distinguish allocation failure from FULL. The bound is enforced by an
  * explicit atomic length counter on top of the underlying queue, which also
  * drives the empty->non-empty edge used for wakeup (see thread_mailbox.h).
  *
@@ -39,6 +40,9 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 
 typedef struct thread_mpsc_s thread_mpsc_t;
+typedef enum {
+    THREAD_QUEUE_ACCEPTED, THREAD_QUEUE_FULL, THREAD_QUEUE_ERROR, THREAD_QUEUE_STOPPED
+} thread_queue_result_t;
 
 /* Create a bounded MPSC queue holding at most `capacity` items.
  * Returns NULL on allocation failure or capacity == 0. */
@@ -77,7 +81,8 @@ size_t thread_spsc_drain(thread_spsc_t *q, void **items, size_t max);
 size_t thread_spsc_count(const thread_spsc_t *q);
 
 /* MPSC carrying reactor_cmd_t by value — same bounded/lock-free contract as
- * the void* MPSC, no per-message malloc. */
+ * the void* MPSC. Commands travel by value without an allocated envelope;
+ * internal producer-block allocation may occur below the logical bound. */
 
 typedef struct reactor_cmd_s   reactor_cmd_t;   /* core/reactor_cmd.h */
 typedef struct thread_cmd_mpsc_s thread_cmd_mpsc_t;
@@ -87,6 +92,8 @@ void               thread_cmd_mpsc_free(thread_cmd_mpsc_t *q);
 
 /* Copies *cmd into the ring. Returns false when full. */
 bool   thread_cmd_mpsc_enqueue(thread_cmd_mpsc_t *q, const reactor_cmd_t *cmd);
+thread_queue_result_t thread_cmd_mpsc_try_enqueue(thread_cmd_mpsc_t *q,
+                                                 const reactor_cmd_t *cmd);
 /* Drains up to `max` commands into `out` (an array of `max` reactor_cmd_t). */
 size_t thread_cmd_mpsc_drain(thread_cmd_mpsc_t *q, reactor_cmd_t *out, size_t max);
 size_t thread_cmd_mpsc_count(const thread_cmd_mpsc_t *q);
