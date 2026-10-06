@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 25596,
-      "hit": 21655
+      "total": 25590,
+      "hit": 21673
     },
     "functions": {
-      "total": 1822,
-      "hit": 1684
+      "total": 1823,
+      "hit": 1686
     }
   },
   "files": {
@@ -152,8 +152,8 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 1298,
-        "hit": 1086
+        "total": 1295,
+        "hit": 1083
       },
       "functions": {
         "total": 82,
@@ -202,12 +202,12 @@
     },
     "src/core/http_protocol_handlers.c": {
       "lines": {
-        "total": 91,
-        "hit": 81
+        "total": 98,
+        "hit": 88
       },
       "functions": {
-        "total": 14,
-        "hit": 13
+        "total": 15,
+        "hit": 14
       }
     },
     "src/core/http_protocol_strategy.c": {
@@ -302,8 +302,8 @@
     },
     "src/core/worker_dispatch.c": {
       "lines": {
-        "total": 412,
-        "hit": 344
+        "total": 411,
+        "hit": 343
       },
       "functions": {
         "total": 21,
@@ -442,8 +442,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 971,
-        "hit": 834
+        "total": 968,
+        "hit": 831
       },
       "functions": {
         "total": 57,
@@ -482,8 +482,8 @@
     },
     "src/http3/http3_dispatch.c": {
       "lines": {
-        "total": 453,
-        "hit": 400
+        "total": 447,
+        "hit": 395
       },
       "functions": {
         "total": 21,
@@ -503,7 +503,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 520
+        "hit": 527
       },
       "functions": {
         "total": 46,
@@ -643,7 +643,7 @@
     "src/http_request.c": {
       "lines": {
         "total": 611,
-        "hit": 524
+        "hit": 527
       },
       "functions": {
         "total": 53,
@@ -773,11 +773,11 @@
     "src/log/http_log.c": {
       "lines": {
         "total": 1120,
-        "hit": 776
+        "hit": 789
       },
       "functions": {
         "total": 81,
-        "hit": 65
+        "hit": 66
       }
     },
     "src/log/trace_context.c": {
