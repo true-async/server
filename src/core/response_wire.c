@@ -18,6 +18,7 @@
 
 #include "php.h"   /* zend_string — persistent body carrier */
 #include "core/response_wire.h"
+#include "core/response_delivery.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,7 @@ typedef struct {
 } wire_header_t;
 
 struct response_wire_s {
+    response_delivery_t *delivery;
     uint32_t reactor_id;
     int64_t  stream_id;
     void    *conn;
@@ -81,6 +83,16 @@ struct response_wire_s {
                  precompressed, conditional, delete_after_send, is_head;
     } sf;
 };
+
+void response_wire_set_delivery(response_wire_t *rw, response_delivery_t *d)
+{
+    rw->delivery = d;
+    if (d != NULL) response_delivery_wire_acquire(d);
+}
+response_delivery_t *response_wire_delivery(const response_wire_t *rw)
+{
+    return rw->delivery;
+}
 
 /* Copy `len` bytes into the arena, growing it as needed. Returns the byte
  * offset of the copy, or SIZE_MAX on overflow / allocation failure. A zero
@@ -447,5 +459,6 @@ void response_wire_free(response_wire_t *rw)
     free(rw->arena);
     free(rw->headers);
     free(rw->trailers);
+    if (rw->delivery != NULL) response_delivery_wire_release(rw->delivery);
     free(rw);
 }

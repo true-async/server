@@ -45,6 +45,7 @@ void http_compression_attach(struct _zend_object *response_obj,
 
 /* Free state attached above. Called from the response object's free_obj. */
 void http_compression_state_free(struct _zend_object *response_obj);
+void http_compression_reset_unstarted(struct _zend_object *response_obj);
 
 /* Mark this response as ineligible for compression (BREACH-sensitive
  * endpoints, handler-controlled binary blobs, etc.). Idempotent. */

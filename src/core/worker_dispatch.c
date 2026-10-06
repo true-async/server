@@ -14,6 +14,8 @@
 #endif
 
 #include "core/worker_dispatch.h"
+#include "core/response_delivery.h"
+#include "core/async_plain_event.h"
 #include "php_http_server.h"                 /* http_server_object accessors, response API */
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
 #include "core/bailout_guard.h"
@@ -27,6 +29,7 @@
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 #include "log/http_log.h"                    /* access-log emit */
+#include "fiu-local.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
 #include "compression/http_compression_response.h"  /* response encode */
@@ -40,8 +43,16 @@
  * an HttpRequest zval, taking ownership of the request's single reference. */
 extern zval *http_request_create_from_parsed(http_request_t *req);
 
+typedef struct worker_writer_waiter_s {
+    struct worker_writer_waiter_s *volatile next;
+    struct worker_writer_waiter_s *volatile prev;
+    zend_async_event_t *volatile event;
+    volatile bool probe;
+} worker_writer_waiter_t;
+
 /* Per-request worker-side dispatch state. Lives from worker_dispatch_request
- * until the handler coroutine's dispose; ecalloc/efree on the worker thread. */
+ * until the handler and all active stream operations release their references;
+ * ecalloc/efree on the worker thread. */
 typedef struct {
     http_server_object     *server;
     http_server_counters_t *counters;       /* worker's real counters */
@@ -55,9 +66,22 @@ typedef struct {
     uint64_t                start_ns;
     bool                    stamps;
 
-    /* The user handler died in a zend_bailout: dispose still renders a 500 but
-     * collects no telemetry for the request, same as H1/H2/H3. */
+    /* The user handler died in a zend_bailout: the sender tail renders a 500.
+     * Legacy handler telemetry is skipped; delivery accounting remains active. */
     bool                    handler_bailout;
+    zend_object            *handler_exception;
+    response_delivery_t    *delivery;
+    bool                    sender_done;
+    unsigned                refs;
+    bool                    disposed;
+    bool                    writer_busy;
+    zend_coroutine_t       *writer_owner;
+    unsigned                writer_depth;
+    worker_writer_waiter_t  *writer_waiters;
+    worker_writer_waiter_t  *writer_tail;
+    worker_writer_waiter_t  *idle_waiters;
+    worker_writer_waiter_t  *idle_tail;
+    response_wire_t        *render_wire; /* isolated/test dispatch without a record */
 
     /* Routing echoed from the request onto the response_wire so the reactor
      * can resolve which QUIC stream to emit on. */
@@ -85,6 +109,144 @@ typedef struct {
     zend_async_trigger_event_t *credit_wake; /* worker-owned; reactor signals it */
     uint64_t                posted_bytes;
 } worker_dispatch_ctx_t;
+static const http_response_stream_ops_t worker_stream_ops;
+static void worker_ctx_unref(worker_dispatch_ctx_t *ctx);
+
+static void writer_remove(worker_dispatch_ctx_t *ctx, worker_writer_waiter_t *w)
+{
+    worker_writer_waiter_t **head = w->probe ? &ctx->idle_waiters : &ctx->writer_waiters;
+    worker_writer_waiter_t **tail = w->probe ? &ctx->idle_tail : &ctx->writer_tail;
+    if (w->prev != NULL) w->prev->next = w->next;
+    else *head = w->next;
+    if (w->next != NULL) w->next->prev = w->prev;
+    else *tail = w->prev;
+    if (!w->probe && !ctx->writer_busy && ctx->writer_waiters != NULL)
+        async_plain_event_fire(ctx->writer_waiters->event);
+    if (!w->probe && !ctx->writer_busy && ctx->writer_waiters == NULL)
+        for (worker_writer_waiter_t *p = ctx->idle_waiters; p != NULL; p = p->next)
+            async_plain_event_fire(p->event);
+}
+
+/* The worker alone owns this FIFO. No second coroutine may open HEADERS or
+ * pass an END while the preceding sender is parked on mailbox capacity. */
+static bool writer_enter_until(worker_dispatch_ctx_t *ctx, bool nonblocking,
+                                uint64_t deadline, bool acquire)
+{
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    if (ctx->disposed) return false;
+    if (ctx->writer_busy && ctx->writer_owner == co) {
+        if (acquire) ctx->writer_depth++;
+        return true;
+    }
+    if (!ctx->writer_busy && ctx->writer_waiters == NULL) {
+        if (acquire) {
+            ctx->writer_busy = true; ctx->writer_owner = co; ctx->writer_depth = 1;
+        }
+        return true;
+    }
+    if (nonblocking || co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT) return false;
+    worker_writer_waiter_t w = { .probe = !acquire };
+    volatile bool linked = false, bailout = false, acquired = false;
+    http_bailout_state_t state;
+    http_bailout_state_save(&state);
+    zend_try {
+        w.event = async_plain_event_new();
+        if (w.event != NULL) {
+            worker_writer_waiter_t *tail = acquire ? ctx->writer_tail : ctx->idle_tail;
+            w.prev = tail;
+            if (tail == NULL) {
+                if (acquire) ctx->writer_waiters = &w;
+                else ctx->idle_waiters = &w;
+            }
+            else {
+                tail->next = &w;
+            }
+            if (acquire) ctx->writer_tail = &w;
+            else ctx->idle_tail = &w;
+            linked = true;
+            for (;;) {
+                if (ctx->disposed || EG(exception) != NULL) break;
+                if (deadline != 0 && zend_hrtime() >= deadline) break;
+                if (!ctx->writer_busy && (acquire ? ctx->writer_waiters == &w
+                                                  : ctx->writer_waiters == NULL)) {
+                    if (acquire) {
+                        ctx->writer_busy = true; ctx->writer_owner = co; ctx->writer_depth = 1;
+                    }
+                    acquired = true;
+                    break;
+                }
+                ZEND_ASYNC_WAKER_NEW(co);
+                zend_async_resume_when(co, w.event, false,
+                                       zend_async_waker_callback_resolve, NULL);
+                if (deadline != 0) {
+                    uint64_t now = zend_hrtime();
+                    zend_async_timer_event_t *timer = ZEND_ASYNC_NEW_TIMER_EVENT(
+                        now < deadline ? (deadline - now + 999999) / 1000000 : 1, false);
+                    if (timer == NULL) break;
+                    zend_async_resume_when(co, &timer->base, true,
+                                           zend_async_waker_callback_timeout, NULL);
+                }
+                if (ctx->writer_busy || (acquire ? ctx->writer_waiters != &w
+                                                 : ctx->writer_waiters != NULL)) ZEND_ASYNC_SUSPEND();
+                ZEND_ASYNC_WAKER_DESTROY(co);
+            }
+        }
+    } zend_catch {
+        http_bailout_state_restore(&state);
+        bailout = true;
+    } zend_end_try();
+    ZEND_ASYNC_WAKER_DESTROY(co);
+    if (linked) writer_remove(ctx, &w);
+    if (w.event != NULL) w.event->dispose(w.event);
+    if (bailout) zend_bailout();
+    return acquired;
+}
+
+static bool writer_enter(worker_dispatch_ctx_t *ctx, bool nonblocking)
+{
+    return writer_enter_until(ctx, nonblocking, 0, true);
+}
+
+static void writer_leave(worker_dispatch_ctx_t *ctx)
+{
+    ZEND_ASSERT(ctx->writer_busy && ctx->writer_depth != 0);
+    if (--ctx->writer_depth != 0) return;
+    ctx->writer_busy = false; ctx->writer_owner = NULL;
+    if (ctx->writer_waiters != NULL) async_plain_event_fire(ctx->writer_waiters->event);
+    else for (worker_writer_waiter_t *w = ctx->idle_waiters; w != NULL; w = w->next)
+        async_plain_event_fire(w->event);
+}
+
+static response_wire_t *worker_wire_create(worker_dispatch_ctx_t *ctx)
+{
+    response_wire_t *rw = response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+    if (rw != NULL) {
+        if (ctx->delivery != NULL) response_delivery_own_wire(ctx->delivery, rw);
+        else ctx->render_wire = rw;
+    }
+    return rw;
+}
+
+static void worker_discard_owned(worker_dispatch_ctx_t *ctx)
+{
+    if (ctx->delivery != NULL) response_delivery_discard_owned(ctx->delivery);
+    if (ctx->render_wire != NULL) {
+        response_wire_discard(ctx->render_wire);
+        ctx->render_wire = NULL;
+    }
+}
+
+static void worker_encoded_offer_refused(worker_dispatch_ctx_t *ctx)
+{
+    if (ctx->delivery != NULL && !ctx->stream_failed
+        && http_response_from_obj(Z_OBJ(ctx->response_zv))->stream_ops != &worker_stream_ops) {
+        /* The codec has consumed input. A later queue refusal cannot be
+         * retried from that encoder state or rendered as an empty gzip FULL. */
+        ctx->stream_failed = true;
+        response_delivery_cancel(ctx->delivery, "codec_post_failed");
+        response_delivery_note_drop(ctx->delivery);
+    }
+}
 
 #ifdef HAVE_HTTP_COMPRESSION
 /* Decodes a Content-Encoding request body in place before the handler, as the
@@ -117,13 +279,13 @@ static bool worker_decode_request_body(worker_dispatch_ctx_t *ctx)
 #endif
 
 /* Handler coroutine body: run the registered user handler with (request, response). */
-static void worker_dispatch_entry(void)
+static void worker_dispatch_handler(void)
 {
     const zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)co->extended_data;
     ZEND_ASSERT(ctx != NULL);
 
-    /* Synthetic 404 (no handler): dispose reports it like any other response. */
+    /* Synthetic 404 (no handler): the sender tail sends it like any other response. */
     if (ctx->skip_handler) {
         return;
     }
@@ -205,7 +367,7 @@ static void worker_dispatch_entry(void)
  * keep_content_length says whether the table's field survives the copy. The
  * reactor submits the wire as it stands, so a name dropped here cannot be put
  * back downstream. */
-static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
+static bool worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
                                   const char *cl, const size_t cl_len,
                                   const bool keep_content_length)
 {
@@ -218,14 +380,14 @@ static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
     response_wire_set_status(rw, status);
 
     if (cl_len != 0) {
-        response_wire_add_header(rw, "content-length", sizeof("content-length") - 1,
-                                 cl, cl_len);
+        if (!response_wire_add_header(rw, "content-length", sizeof("content-length") - 1,
+                                 cl, cl_len)) return false;
     }
 
     HashTable *const headers = http_response_get_headers(resp);
 
     if (headers == NULL) {
-        return;
+        return true;
     }
 
     zend_string *name;
@@ -241,8 +403,8 @@ static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
         }
 
         if (EXPECTED(Z_TYPE_P(values) == IS_STRING)) {
-            response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                     Z_STRVAL_P(values), Z_STRLEN_P(values));
+            if (!response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                     Z_STRVAL_P(values), Z_STRLEN_P(values))) return false;
         } else if (Z_TYPE_P(values) == IS_ARRAY) {
             zval *v;
             ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
@@ -250,20 +412,21 @@ static void worker_wire_copy_head(response_wire_t *rw, zend_object *resp,
                     continue;
                 }
 
-                response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                         Z_STRVAL_P(v), Z_STRLEN_P(v));
+                if (!response_wire_add_header(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                         Z_STRVAL_P(v), Z_STRLEN_P(v))) return false;
             } ZEND_HASH_FOREACH_END();
         }
     } ZEND_HASH_FOREACH_END();
+    return true;
 }
 
 /* Flatten the response trailer map onto the wire. */
-static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
+static bool worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
 {
     HashTable *const trailers = http_response_get_trailers(resp);
 
     if (trailers == NULL) {
-        return;
+        return true;
     }
 
     zend_string *name;
@@ -273,9 +436,10 @@ static void worker_wire_copy_trailers(response_wire_t *rw, zend_object *resp)
             continue;
         }
 
-        response_wire_add_trailer(rw, ZSTR_VAL(name), ZSTR_LEN(name),
-                                  Z_STRVAL_P(val), Z_STRLEN_P(val));
+        if (!response_wire_add_trailer(rw, ZSTR_VAL(name), ZSTR_LEN(name),
+                                  Z_STRVAL_P(val), Z_STRLEN_P(val))) return false;
     } ZEND_HASH_FOREACH_END();
+    return true;
 }
 
 void response_wire_discard(response_wire_t *rw)
@@ -295,8 +459,18 @@ void response_wire_discard(response_wire_t *rw)
 }
 
 /* The sink owns the wire in every outcome. */
-static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
+static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw,
+                             bool nonblocking)
 {
+    if (ctx->delivery != NULL) {
+        if (response_delivery_post(ctx->delivery, rw,
+                                    http_server_get_write_timeout_s(ctx->server) * 1000u,
+                                    nonblocking)) return true;
+        if (!response_delivery_failed(ctx->delivery)) return false;
+        ctx->stream_failed = true;
+        return false;
+    }
+    if (ctx->render_wire == rw) ctx->render_wire = NULL;
     const response_wire_kind_t kind = response_wire_kind(rw);
     bool delivered = false;
 
@@ -318,8 +492,9 @@ static bool worker_wire_post(worker_dispatch_ctx_t *ctx, response_wire_t *rw)
  * reactor signals per ack. @p bound_ms 0 takes the configured write deadline,
  * which is what bounds a peer that stops ACKing. */
 static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx,
-                                      const uint32_t bound_ms)
+                                      const uint32_t bound_ms, uint64_t deadline)
 {
+    if (ctx->disposed) return false;
     if (ctx->credit == NULL) {
         return true;
     }
@@ -327,9 +502,12 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx,
     const uint32_t timeout_ms = bound_ms != 0
         ? bound_ms
         : http_server_get_write_timeout_s(ctx->server) * 1000u;
+    if (deadline == 0 && timeout_ms != 0)
+        deadline = zend_hrtime() + (uint64_t)timeout_ms * 1000000;
 
     while (ctx->posted_bytes - stream_credit_acked(ctx->credit)
                >= WORKER_STREAM_INFLIGHT_CAP) {
+        if (deadline != 0 && zend_hrtime() >= deadline) return false;
         if (stream_credit_is_dead(ctx->credit)) {
             return false;
         }
@@ -359,15 +537,19 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx,
         zend_async_resume_when(co, &ctx->credit_wake->base, false,
                                zend_async_waker_callback_resolve, NULL);
 
-        if (timeout_ms > 0) {
-            zend_async_event_t *const timer =
-                &ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)timeout_ms, false)->base;
-            zend_async_resume_when(co, timer, true,
+        if (deadline != 0) {
+            uint64_t now = zend_hrtime();
+            zend_async_timer_event_t *timer = ZEND_ASYNC_NEW_TIMER_EVENT(
+                now < deadline ? (deadline - now + 999999) / 1000000 : 1, false);
+            if (timer == NULL) return false;
+            zend_async_resume_when(co, &timer->base, true,
                                    zend_async_waker_callback_timeout, NULL);
         }
 
         ZEND_ASYNC_SUSPEND();
         zend_async_waker_clean(co);
+
+        if (ctx->disposed || ctx->credit == NULL) return false;
 
         if (EG(exception) != NULL) {
             return false;   /* write timeout or cancelled while parked */
@@ -377,14 +559,13 @@ static bool worker_stream_wait_credit(worker_dispatch_ctx_t *ctx,
     return true;
 }
 
-static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
-                                      const bool nonblocking)
+static int worker_stream_append_impl(worker_dispatch_ctx_t *ctx, zend_string *chunk,
+                                      const bool nonblocking, volatile bool *owned)
 {
-    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
     if (UNEXPECTED(ctx->stream_ended || ctx->stream_failed)
         || (ctx->credit != NULL && stream_credit_is_dead(ctx->credit))) {
-        zend_string_release(chunk);
+        *owned = false; zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
@@ -395,17 +576,18 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
     if (nonblocking && ctx->credit != NULL
         && ctx->posted_bytes - stream_credit_acked(ctx->credit)
                >= WORKER_STREAM_INFLIGHT_CAP) {
-        zend_string_release(chunk);
+        *owned = false; zend_string_release(chunk);
         return HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
     /* first write(): open the stream; the reactor adopts one credit ref */
     if (!ctx->stream_started) {
         response_wire_t *const hw =
-            response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+            worker_wire_create(ctx);
 
-        if (UNEXPECTED(hw == NULL)) {
-            zend_string_release(chunk);
+    if (UNEXPECTED(hw == NULL)) {
+            if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+            *owned = false; zend_string_release(chunk);
             return HTTP_STREAM_APPEND_STREAM_DEAD;
         }
 
@@ -414,15 +596,27 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         response_wire_set_kind(hw, RESPONSE_WIRE_STREAM_HEADERS);
         response_wire_set_credit(hw, ctx->credit);
 
-        worker_wire_copy_head(
-            hw, Z_OBJ(ctx->response_zv), NULL, 0,
-            http_response_keeps_declared_length(Z_OBJ(ctx->response_zv)));
+        if (!worker_wire_copy_head(hw, Z_OBJ(ctx->response_zv), NULL, 0,
+            http_response_keeps_declared_length(Z_OBJ(ctx->response_zv)))) {
+            worker_discard_owned(ctx);
+            ctx->stream_failed = true;
+            if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+            *owned = false; zend_string_release(chunk);
+            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        }
 
         /* headers undeliverable → the stream never opened; don't copy and
          * post a chunk wire the reactor would only throw away */
-        if (UNEXPECTED(!worker_wire_post(ctx, hw))) {
-            zend_string_release(chunk);
-            return HTTP_STREAM_APPEND_STREAM_DEAD;
+        if (UNEXPECTED(!worker_wire_post(ctx, hw, nonblocking))) {
+            /* No header was accepted: a first nonblocking offer can discard
+             * its fresh codec and restore the uncommitted response. */
+            if (!ctx->stream_failed) {
+                stream_credit_release(ctx->credit);
+                ctx->credit = NULL;
+            }
+            *owned = false; zend_string_release(chunk);
+            return ctx->stream_failed ? HTTP_STREAM_APPEND_STREAM_DEAD
+                                      : HTTP_STREAM_APPEND_BACKPRESSURE;
         }
 
         /* Set only once the headers wire is away: this flag is what the
@@ -433,10 +627,11 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
     }
 
     response_wire_t *const cw =
-        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+        worker_wire_create(ctx);
 
     if (UNEXPECTED(cw == NULL)) {
-        zend_string_release(chunk);
+        if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+        *owned = false; zend_string_release(chunk);
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
@@ -453,12 +648,14 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
     /* A refused wire is a dropped chunk: the sink exhausted its retries and
      * worker_wire_post has already marked the stream failed. Reporting OK here
      * would tell the handler it wrote bytes the peer will never see. */
-    if (UNEXPECTED(!worker_wire_post(ctx, cw))) {
-        zend_string_release(chunk);
-        return HTTP_STREAM_APPEND_STREAM_DEAD;
+    if (UNEXPECTED(!worker_wire_post(ctx, cw, nonblocking))) {
+        if (nonblocking) worker_encoded_offer_refused(ctx);
+        *owned = false; zend_string_release(chunk);
+        return ctx->stream_failed ? HTTP_STREAM_APPEND_STREAM_DEAD
+                                  : HTTP_STREAM_APPEND_BACKPRESSURE;
     }
 
-    zend_string_release(chunk);   /* bytes copied into the wire arena */
+    *owned = false; zend_string_release(chunk);   /* bytes copied into the wire arena */
 
     ctx->posted_bytes += chunk_len;
 
@@ -466,7 +663,8 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
         return HTTP_STREAM_APPEND_OK;   /* room was checked above; never parks */
     }
 
-    if (!worker_stream_wait_credit(ctx, 0)) {
+    if (ctx->disposed) return HTTP_STREAM_APPEND_STREAM_DEAD;
+    if (!worker_stream_wait_credit(ctx, 0, 0)) {
         ctx->stream_failed = true;   /* credit timeout / cancelled while parked */
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
@@ -474,14 +672,45 @@ static int worker_stream_append_chunk(void *vctx, zend_string *chunk,
     return HTTP_STREAM_APPEND_OK;
 }
 
+static int worker_stream_append_chunk(void *arg, zend_string *chunk, bool nonblocking)
+{
+    worker_dispatch_ctx_t *ctx = arg;
+    ctx->refs++;
+    volatile bool locked = false, owned = true, bailout = false;
+    volatile int rc = HTTP_STREAM_APPEND_STREAM_DEAD;
+    http_bailout_state_t state;
+    http_bailout_state_save(&state);
+    zend_try {
+        locked = writer_enter(ctx, nonblocking);
+        if (locked) rc = worker_stream_append_impl(ctx, chunk, nonblocking, &owned);
+        else if (!ctx->disposed && !ctx->stream_failed && nonblocking)
+            rc = HTTP_STREAM_APPEND_BACKPRESSURE;
+    } zend_catch {
+        http_bailout_state_restore(&state);
+        bailout = true;
+        worker_discard_owned(ctx);
+        ctx->stream_failed = true;
+        if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+    } zend_end_try();
+    if (owned) zend_string_release(chunk);
+    if (locked) writer_leave(ctx);
+    worker_ctx_unref(ctx);
+    if (bailout) zend_bailout();
+    return rc;
+}
+
 /* sendable() advisory: true while append_chunk would not park. */
 static bool worker_stream_sendable(void *vctx)
 {
     worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
-    if (ctx->stream_ended || ctx->stream_failed) {
+    if (ctx->disposed || ctx->stream_ended || ctx->stream_failed
+        || (ctx->writer_busy && ctx->writer_owner != ZEND_ASYNC_CURRENT_COROUTINE)
+        || ctx->writer_waiters != NULL) {
         return false;
     }
+
+    if (ctx->delivery != NULL && !response_delivery_sendable(ctx->delivery)) return false;
 
     if (ctx->credit == NULL) {
         return true;
@@ -498,16 +727,15 @@ static bool worker_stream_is_alive(void *vctx)
 {
     const worker_dispatch_ctx_t *const ctx = (const worker_dispatch_ctx_t *)vctx;
 
-    if (ctx->stream_ended || ctx->stream_failed) {
+    if (ctx->disposed || ctx->stream_ended || ctx->stream_failed) {
         return false;
     }
 
     return ctx->credit == NULL || !stream_credit_is_dead(ctx->credit);
 }
 
-static void worker_stream_mark_ended(void *vctx)
+static void worker_stream_mark_ended_impl(worker_dispatch_ctx_t *ctx)
 {
-    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
 
     if (!ctx->stream_started || ctx->stream_ended) {
         return;
@@ -516,9 +744,10 @@ static void worker_stream_mark_ended(void *vctx)
     ctx->stream_ended = true;
 
     response_wire_t *const ew =
-        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+        worker_wire_create(ctx);
 
     if (UNEXPECTED(ew == NULL)) {
+        if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
         return;
     }
 
@@ -527,10 +756,35 @@ static void worker_stream_mark_ended(void *vctx)
         response_wire_set_abort_code(ew, ctx->abort_code);
     } else {
         response_wire_set_kind(ew, RESPONSE_WIRE_STREAM_END);
-        worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv));
+        if (!worker_wire_copy_trailers(ew, Z_OBJ(ctx->response_zv))) {
+            worker_discard_owned(ctx);
+            if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+            return;
+        }
     }
 
-    worker_wire_post(ctx, ew);
+    worker_wire_post(ctx, ew, false);
+}
+
+static void worker_stream_mark_ended(void *arg)
+{
+    worker_dispatch_ctx_t *ctx = arg;
+    ctx->refs++;
+    volatile bool locked = false, bailout = false;
+    http_bailout_state_t state;
+    http_bailout_state_save(&state);
+    zend_try {
+        locked = writer_enter(ctx, false);
+        if (locked) worker_stream_mark_ended_impl(ctx);
+    } zend_catch {
+        http_bailout_state_restore(&state);
+        bailout = true;
+        worker_discard_owned(ctx);
+        if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+    } zend_end_try();
+    if (locked) writer_leave(ctx);
+    worker_ctx_unref(ctx);
+    if (bailout) zend_bailout();
 }
 
 /* The terminal wire above is already the abort one when stream_failed is set,
@@ -555,11 +809,60 @@ static bool worker_stream_abort(void *vctx, const int64_t error_code)
 
 /* The credit wait the blocking path takes, offered to a non-blocking caller
  * that asked to be told when room comes back. */
-static bool worker_stream_wait_writable(void *vctx, const uint32_t timeout_ms)
+static uint32_t writer_remaining_ms(uint64_t deadline)
 {
-    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)vctx;
+    if (deadline == 0) return 0;
+    uint64_t now = zend_hrtime();
+    return now < deadline ? (uint32_t)((deadline - now + 999999) / 1000000) : 1;
+}
 
-    return worker_stream_wait_credit(ctx, timeout_ms);
+static bool worker_stream_wait_writable_impl(worker_dispatch_ctx_t *ctx, uint64_t deadline)
+{
+    if (ctx->disposed) return false;
+
+    if (ctx->delivery != NULL && !response_delivery_wait_writable(ctx->delivery,
+        writer_remaining_ms(deadline)))
+        return false;
+
+    if (deadline != 0 && zend_hrtime() >= deadline) return false;
+    return worker_stream_wait_credit(ctx, writer_remaining_ms(deadline), deadline);
+}
+
+static bool worker_stream_wait_writable(void *arg, uint32_t timeout_ms)
+{
+    worker_dispatch_ctx_t *ctx = arg;
+    ctx->refs++;
+    volatile bool result = false, bailout = false;
+    uint32_t bound = ctx->disposed ? 0 : (timeout_ms != 0 ? timeout_ms
+        : http_server_get_write_timeout_s(ctx->server) * 1000u);
+    uint64_t deadline = bound != 0 ? zend_hrtime() + (uint64_t)bound * 1000000 : 0;
+    http_bailout_state_t state;
+    http_bailout_state_save(&state);
+    zend_try {
+        while (!ctx->disposed && !ctx->stream_ended && !ctx->stream_failed) {
+            /* Readiness waits do not reserve the writer between API calls:
+             * otherwise two tryWrite/awaitWritable loops can pass a lock back
+             * and forth forever without either offering its chunk. */
+            if (!writer_enter_until(ctx, false, deadline, false)) break;
+            if (!worker_stream_wait_writable_impl(ctx, deadline)) break;
+            if (worker_stream_sendable(ctx)) { result = true; break; }
+            if (deadline != 0 && zend_hrtime() >= deadline) break;
+        }
+    }
+    zend_catch {
+        http_bailout_state_restore(&state);
+        bailout = true;
+        if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "wait_failed");
+    } zend_end_try();
+    worker_ctx_unref(ctx);
+    if (bailout) zend_bailout();
+    return result;
+}
+
+static bool worker_stream_is_started(void *vctx)
+{
+    worker_dispatch_ctx_t *ctx = vctx;
+    return ctx->stream_started || ctx->writer_busy || ctx->writer_waiters != NULL;
 }
 
 static const http_response_stream_ops_t worker_stream_ops = {
@@ -570,6 +873,7 @@ static const http_response_stream_ops_t worker_stream_ops = {
     .mark_ended     = worker_stream_mark_ended,
     .abort          = worker_stream_abort,
     .get_wait_event = NULL,   /* the wait above is the one to take */
+    .is_started     = worker_stream_is_started,
 };
 
 /* grpc-web in-body trailer frame; consumes the ref. */
@@ -595,7 +899,7 @@ static void worker_grpc_end_stream(void *vctx)
     worker_stream_mark_ended(vctx);
 }
 
-/* Trailers-Only: dispose posts the FULL wire right after this returns. */
+/* Trailers-Only: the sender tail posts the FULL wire after this returns. */
 static void worker_grpc_commit(void *vctx)
 {
     (void)vctx;
@@ -609,12 +913,13 @@ static const grpc_finish_ops_t worker_grpc_finish_ops = {
 
 /* Flatten the committed HttpResponse into a response_wire. Buffered only.
  * Returns NULL on allocation failure. */
-static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
+static response_wire_t *worker_render_response(worker_dispatch_ctx_t *ctx)
 {
+    fiu_return_on("h3/delivery/render_failed", NULL);
     zend_object *const resp = Z_OBJ(ctx->response_zv);
 
     response_wire_t *const rw =
-        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+        worker_wire_create(ctx);
 
     if (rw == NULL) {
         return NULL;
@@ -630,11 +935,15 @@ static response_wire_t *worker_render_response(const worker_dispatch_ctx_t *ctx)
     bool keep_cl;
     const size_t cl_len = http_response_wire_content_length(resp, cl, &keep_cl);
 
-    worker_wire_copy_head(rw, resp, cl, cl_len, keep_cl);
-    worker_wire_copy_trailers(rw, resp);
+    if (!worker_wire_copy_head(rw, resp, cl, cl_len, keep_cl)
+        || !worker_wire_copy_trailers(rw, resp)) {
+        worker_discard_owned(ctx);
+        return NULL;
+    }
 
     /* http_response_get_body_str returns a borrowed reference; the bytes are
-     * copied into the arena, so nothing to release. HEAD carries the headers
+     * copied into a persistent wire-owned string, so nothing to release here.
+     * HEAD carries the headers
      * but no body (RFC 9110 §9.3.2). */
     if (!ctx->is_head) {
         zend_string *const body = http_response_get_body_str(resp);
@@ -665,11 +974,11 @@ static const char *worker_req_header(const http_request_t *req, const char *name
     return v != NULL ? ZSTR_VAL(v) : NULL;
 }
 
-static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx,
+static response_wire_t *worker_render_send_file(worker_dispatch_ctx_t *ctx,
                                                 const http_send_file_request_t *sf)
 {
     response_wire_t *const rw =
-        response_wire_create(ctx->reactor_id, ctx->stream_id, ctx->conn);
+        worker_wire_create(ctx);
 
     if (rw == NULL) {
         return NULL;
@@ -720,26 +1029,19 @@ static response_wire_t *worker_render_send_file(const worker_dispatch_ctx_t *ctx
     }
 
     if (!response_wire_set_send_file(rw, &wsf)) {
-        response_wire_free(rw);
+        worker_discard_owned(ctx);
         return NULL;
     }
 
     return rw;
 }
 
-/* Coroutine dispose: commit the response (or derive a 500 from an unhandled
- * exception), render it into a response_wire, hand it to the sink, and drop the
- * per-request state. */
-static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
+/* Coroutine sender tail: commit the response (or derive a 500 from an
+ * unhandled exception), render a response_wire, and hand it to the sink.
+ * This path may suspend; disposal releases the per-request state separately. */
+static void worker_dispatch_finalize(worker_dispatch_ctx_t *ctx,
+                                      zend_coroutine_t *coroutine)
 {
-    worker_dispatch_ctx_t *const ctx = (worker_dispatch_ctx_t *)coroutine->extended_data;
-    ZEND_ASSERT(ctx != NULL);
-
-    coroutine->extended_data = NULL;
-
-    /* Un-bracket the in-flight request (--active), paired with the
-     * on_request_dispatch in worker_dispatch_request. */
-    http_server_on_request_dispose(ctx->counters);
 
     /* A thrown handler exception becomes a response (derived 500 below, or
      * a grpc-status / aborted stream) — mark it consumed on both escalation
@@ -756,14 +1058,14 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
         zend_object *const resp = Z_OBJ(ctx->response_zv);
 
         /* gRPC maps exceptions to grpc-status, not HTTP 500 */
-        if (coroutine->exception != NULL && !ctx->is_grpc
+        if (ctx->handler_exception != NULL && !ctx->is_grpc
             && !http_response_is_committed(resp)) {
             http_response_reset_to_error(resp, 500, "Internal Server Error");
         }
 
         if (ctx->is_grpc) {
             grpc_call_ensure_status(resp,
-                coroutine->exception != NULL || ctx->handler_bailout);
+                ctx->handler_exception != NULL || ctx->handler_bailout);
         } else {
             http_response_reset_after_bailout(resp, ctx->handler_bailout);
         }
@@ -776,7 +1078,7 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             grpc_call_finish(resp, &worker_grpc_finish_ops, ctx);
         } else if (http_response_is_streaming(resp)) {
             (void)http_response_finish_stream(
-                resp, http_handler_failed(coroutine, ctx->handler_bailout), -1);
+                resp, ctx->handler_exception != NULL || ctx->handler_bailout, -1);
         }
 
         /* a started stream must always get a terminal wire */
@@ -784,7 +1086,8 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             worker_stream_mark_ended(ctx);
         }
 
-        if (!ctx->stream_started) {
+        if (!ctx->stream_started && !ctx->stream_failed
+            && (ctx->delivery == NULL || !response_delivery_failed(ctx->delivery))) {
             /* sendFile() seals the response: marshal path + opts to the
              * reactor, which opens the file and runs the sendfile engine.
              * Falls through to the buffered render when absent (#105). */
@@ -802,18 +1105,20 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
             }
 
             if (rw != NULL) {
-                /* Only a sendFile the reactor actually received is accounted
-                 * there; one that never made it off this thread still has to be
-                 * reported here, or it is counted by nobody. */
+                /* Legacy sendFile accounting belongs to the reactor only after
+                 * acceptance. A live delivery record reports its final outcome
+                 * on the originating worker for every response kind. */
                 marshalled_send_file =
-                    worker_wire_post(ctx, rw) && is_send_file;   /* sink owns rw now */
+                    worker_wire_post(ctx, rw, false) && is_send_file;   /* sink owns rw now */
+            } else if (ctx->delivery != NULL) {
+                response_delivery_cancel(ctx->delivery, "render_failed");
             }
         }
 
-        /* Collect telemetry here, where the response is final — except for a
-         * marshalled sendFile: its status is only stamped once the reactor has
-         * run the engine, so the reactor's cleanup reports that one instead. */
-        if (EXPECTED(!ctx->handler_bailout) && !marshalled_send_file) {
+        /* Legacy telemetry without a delivery record: a marshalled sendFile
+         * obtains its final status in reactor cleanup. Live records defer all
+         * accounting until the transport outcome and sender snapshot are ready. */
+        if (ctx->delivery == NULL && EXPECTED(!ctx->handler_bailout) && !marshalled_send_file) {
             http_request_telemetry(Z_ISUNDEF(ctx->request_zv)
                                      ? NULL
                                      : http_request_from_zobj(Z_OBJ(ctx->request_zv)),
@@ -821,9 +1126,72 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
                                  http_server_get_log_state(ctx->server));
         }
 
-        /* ctx dies below; a late write() on a kept $response must throw, not UAF */
+        /* Detach operations before cleanup: a late write() on a retained
+         * response must throw rather than access a released context. */
         http_response_replace_stream_ops(resp, NULL, NULL);
     }
+}
+
+/* A coroutine tail, not a destructor: queue capacity may suspend this sender.
+ * Every handler outcome, including synthetic responses, reaches this tail. */
+static void worker_dispatch_entry(void)
+{
+    zend_coroutine_t *co = ZEND_ASYNC_CURRENT_COROUTINE;
+    worker_dispatch_ctx_t *ctx = co->extended_data;
+    worker_dispatch_handler();
+    if (EG(exception) != NULL) {
+        ctx->handler_exception = EG(exception);
+        GC_ADDREF(ctx->handler_exception);
+        zend_clear_exception();
+    }
+    http_bailout_state_t state;
+    http_bailout_state_save(&state);
+    volatile bool locked = false;
+    zend_try {
+        locked = writer_enter(ctx, false);
+        if (locked) worker_dispatch_finalize(ctx, co);
+        else if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "sender_cancelled");
+    } zend_catch {
+        http_bailout_state_restore(&state);
+        ctx->handler_bailout = true;
+        worker_discard_owned(ctx);
+        if (ctx->delivery != NULL) response_delivery_cancel(ctx->delivery, "render_failed");
+    } zend_end_try();
+    if (locked) writer_leave(ctx);
+    if (ctx->delivery != NULL) {
+        response_delivery_sender_done(ctx->delivery,
+            http_request_from_zobj(Z_OBJ(ctx->request_zv)), Z_OBJ(ctx->response_zv),
+            true);
+    }
+    ctx->sender_done = true;
+    if (EG(exception) != NULL) zend_clear_exception();
+}
+
+static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
+{
+    worker_dispatch_ctx_t *ctx = coroutine->extended_data;
+    coroutine->extended_data = NULL;
+    http_server_on_request_dispose(ctx->counters);
+    if (!ctx->sender_done && ctx->delivery != NULL) {
+        response_delivery_cancel(ctx->delivery, "sender_cancelled");
+        response_delivery_sender_done(ctx->delivery,
+            http_request_from_zobj(Z_OBJ(ctx->request_zv)), Z_OBJ(ctx->response_zv),
+            true);
+    }
+    if (coroutine->exception != NULL) {
+        ZEND_COROUTINE_SET_EXCEPTION_HANDLED(coroutine);
+        ZEND_ASYNC_EVENT_SET_EXC_CAUGHT(&coroutine->event);
+    }
+    ctx->disposed = true;
+    if (!Z_ISUNDEF(ctx->response_zv))
+        http_response_replace_stream_ops(Z_OBJ(ctx->response_zv), NULL, NULL);
+    for (worker_writer_waiter_t *w = ctx->writer_waiters; w != NULL; w = w->next)
+        async_plain_event_fire(w->event);
+    for (worker_writer_waiter_t *w = ctx->idle_waiters; w != NULL; w = w->next)
+        async_plain_event_fire(w->event);
+    worker_discard_owned(ctx);
+    if (ctx->handler_exception != NULL) OBJ_RELEASE(ctx->handler_exception);
+    if (ctx->delivery != NULL) response_delivery_release(ctx->delivery);
 
     if (ctx->credit != NULL) {
         if (ctx->credit_wake != NULL) {
@@ -837,11 +1205,19 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     }
 
     if (ctx->credit_wake != NULL) {
+        async_plain_event_fire(&ctx->credit_wake->base);
         ZEND_ASYNC_EVENT_SET_CLOSED(&ctx->credit_wake->base);
         ctx->credit_wake->base.dispose(&ctx->credit_wake->base);
         ctx->credit_wake = NULL;
     }
 
+    worker_ctx_unref(ctx);
+}
+
+static void worker_ctx_unref(worker_dispatch_ctx_t *ctx)
+{
+    ZEND_ASSERT(ctx->refs != 0);
+    if (--ctx->refs != 0) return;
     if (!Z_ISUNDEF(ctx->request_zv)) {
         zval_ptr_dtor(&ctx->request_zv);
         ZVAL_UNDEF(&ctx->request_zv);
@@ -855,6 +1231,19 @@ static void worker_dispatch_dispose(zend_coroutine_t *coroutine)
     efree(ctx);
 }
 
+void worker_dispatch_cancel_request(http_request_t *req)
+{
+    if (req == NULL) return;
+    response_delivery_t *d = req->delivery;
+    req->delivery = NULL;
+    if (d != NULL) {
+        response_delivery_worker_begin(d, req);
+        response_delivery_cancel(d, "dispatch_failed");
+        response_delivery_sender_done(d, req, NULL, true);
+    }
+    http_request_destroy(req);
+}
+
 bool worker_dispatch_request(http_server_object *server,
                              zend_async_scope_t *scope,
                              http_request_t *req,
@@ -863,7 +1252,7 @@ bool worker_dispatch_request(http_server_object *server,
 {
     if (UNEXPECTED(server == NULL || scope == NULL || req == NULL)) {
         if (req != NULL) {
-            http_request_destroy(req);  /* we own it; nothing else can free it */
+            worker_dispatch_cancel_request(req);
         }
 
         return false;
@@ -880,15 +1269,19 @@ bool worker_dispatch_request(http_server_object *server,
     const grpc_mode_t grpc_mode = grpc_classify(req, handlers);
     const bool is_grpc = grpc_mode != GRPC_MODE_NONE;
 
+    if (req->delivery != NULL) response_delivery_worker_begin(req->delivery, req);
+
     zval *const req_obj = http_request_create_from_parsed(req);
 
     if (UNEXPECTED(req_obj == NULL)) {
-        http_request_destroy(req);  /* nothing took the ref yet */
+        worker_dispatch_cancel_request(req);
         return false;
     }
 
     worker_dispatch_ctx_t *const ctx = ecalloc(1, sizeof(*ctx));
+    ctx->refs = 1;
     ctx->server     = server;
+    ctx->delivery   = req->delivery;
     ctx->counters   = http_server_counters(server);
     ctx->stamps     = http_server_sample_stamps_enabled(http_server_view(server));
     ctx->reactor_id = reactor_id;
@@ -950,11 +1343,18 @@ bool worker_dispatch_request(http_server_object *server,
         scope, worker_dispatch_entry, ctx, worker_dispatch_dispose, own_scope);
 
     if (UNEXPECTED(co == NULL)) {
+        if (ctx->delivery != NULL) {
+            response_delivery_cancel(ctx->delivery, "spawn_failed");
+            response_delivery_sender_done(ctx->delivery, req, Z_OBJ(ctx->response_zv), true);
+        }
         zval_ptr_dtor(&ctx->request_zv);
         zval_ptr_dtor(&ctx->response_zv);
         efree(ctx);
         return false;
     }
+
+    if (ctx->delivery != NULL) response_delivery_addref(ctx->delivery); /* coroutine ctx */
+    req->delivery = NULL; /* ctx now owns the dispatch-failure path */
 
     /* Bracket the in-flight request on the worker's counters (++active),
      * paired with on_request_dispose at coroutine dispose. */
@@ -968,3 +1368,13 @@ bool worker_dispatch_request(http_server_object *server,
 
     return true;
 }
+
+#ifdef HTTP_SERVER_TEST_HOOKS
+zend_long worker_dispatch_test_acked_body(zend_object *response)
+{
+    if (http_response_get_stream_ops(response) != &worker_stream_ops) return -1;
+    const worker_dispatch_ctx_t *const ctx = http_response_get_stream_ctx(response);
+    return ctx != NULL && ctx->credit != NULL
+        ? (zend_long)stream_credit_acked(ctx->credit) : 0;
+}
+#endif

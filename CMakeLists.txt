@@ -80,6 +80,7 @@ set(CORE_SUBSYSTEM_SOURCES
     src/core/fault_hooks.c
     # Flat response marshalling type (issue #80, D3): worker -> reactor response.
     src/core/response_wire.c
+    src/core/response_delivery.c
     # Worker-side request dispatch (issue #80, B1b/D7): request ptr -> handler -> response.
     src/core/worker_dispatch.c
     # Worker inbox (issue #80, B2): per-worker request mailbox + dispatch drain.

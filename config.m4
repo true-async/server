@@ -550,6 +550,7 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/reactor_pool_test_hooks.c
     src/core/fault_hooks.c
     src/core/response_wire.c
+    src/core/response_delivery.c
     src/core/worker_dispatch.c
     src/core/worker_inbox.c
     src/core/worker_registry.c

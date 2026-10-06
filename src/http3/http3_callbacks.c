@@ -38,6 +38,8 @@
 #include "core/bailout_guard.h"            /* zend_try around body appends */
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
+#include "core/response_delivery.h"
+#include "fiu-local.h"
 #include "http3_steer.h"                   /* CID steering encode */
 #include "core/response_wire.h"            /* response_wire_* (reverse path) */
 #include "core/stream_credit.h"            /* reverse-path flow control */
@@ -1017,6 +1019,7 @@ bool http3_stream_submit_response(http3_connection_t *c,
     http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     if (rv == 0) {
+        response_delivery_started(s->delivery, http_response_get_status(resp_obj));
         if (stats != NULL) stats->h3_response_submitted++;
         return true;
     }
@@ -1081,6 +1084,7 @@ void http3_stream_adopt_wire_trailers(http3_stream_t *s, const response_wire_t *
 bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
                                        response_wire_t *rw)
 {
+    fiu_return_on("h3/delivery/submit_failed", false);
     if (c == NULL || s == NULL || rw == NULL || c->nghttp3_conn == NULL) {
         return false;
     }
@@ -1136,6 +1140,7 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
         h3_chunk_queue_init(s);
         /* adopt the worker's credit ref; released at teardown */
         s->wire_credit = response_wire_credit(rw);
+        response_wire_set_credit(rw, NULL); /* adopted: the wire no longer owns this ref */
     } else {
         /* Adopt the worker-built persistent body — the data reader walks it
          * in place; released (flag-aware) in http3_stream_release. */
@@ -1163,6 +1168,7 @@ bool http3_stream_submit_response_wire(http3_connection_t *c, http3_stream_t *s,
     http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     if (rv == 0) {
+        response_delivery_started(s->delivery, status);
         if (stats != NULL) stats->h3_response_submitted++;
 
         if (streaming) {
@@ -1778,6 +1784,8 @@ static int h3_acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id,
     (void)conn; (void)stream_id; (void)user_data;
     http3_stream_t *const s = (http3_stream_t *)stream_user_data;
 
+    if (s != NULL) response_delivery_ack(s->delivery, datalen);
+
     if (s == NULL || s->chunk_queue == NULL) {
         return 0;
     }
@@ -2309,6 +2317,7 @@ static int acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id,
     (void)conn; (void)offset;
     http3_connection_t *const c = (http3_connection_t *)user_data;
     http3_stream_t     *s = (http3_stream_t *)stream_user_data;
+    if (s != NULL) response_delivery_ack_transport(s->delivery, datalen);
 
     if (c == NULL) {
         return 0;
@@ -2363,6 +2372,13 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags,
 
     if (c == NULL) {
         return 0;
+    }
+    if (stream_user_data != NULL) {
+        http3_stream_t *s = stream_user_data;
+        response_delivery_finish(s->delivery,
+            (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) == 0
+                && !s->local_aborted,
+            "stream_closed");
     }
 
     /* ngtcp2 never auto-extends MAX_STREAMS on close, so without this each
@@ -2478,4 +2494,3 @@ const ngtcp2_callbacks HTTP3_NGTCP2_CALLBACKS = {
     .stream_stop_sending      = stream_stop_sending_cb,
     .extend_max_remote_streams_bidi = extend_max_remote_streams_bidi_cb,
 };
-

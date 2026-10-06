@@ -603,10 +603,18 @@ static bool inbox_probe_sink(response_wire_t *rw, void *arg)
     return true;
 }
 
+static void inbox_cancel_release(http_request_t *req)
+{
+    int *const released = req->reactor_conn;
+    ++*released;
+    pefree(req, 1);
+}
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_worker_inbox_selftest, 0, 2,
                                         MAY_BE_ARRAY | MAY_BE_FALSE)
     ZEND_ARG_TYPE_INFO(0, server, IS_OBJECT, 0)
     ZEND_ARG_TYPE_INFO(0, count, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, cancelPending, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
 /* Drive the worker-inbox path: stand up a worker_inbox on this thread, post
@@ -619,10 +627,14 @@ PHP_FUNCTION(_http_server_worker_inbox_selftest)
 {
     zval     *server_zv;
     zend_long count;
+    bool cancel_pending = false;
+    int released = 0;
 
-    ZEND_PARSE_PARAMETERS_START(2, 2)
+    ZEND_PARSE_PARAMETERS_START(2, 3)
         Z_PARAM_OBJECT_OF_CLASS(server_zv, http_server_ce)
         Z_PARAM_LONG(count)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(cancel_pending)
     ZEND_PARSE_PARAMETERS_END();
 
     if (count <= 0) {
@@ -646,6 +658,17 @@ PHP_FUNCTION(_http_server_worker_inbox_selftest)
         RETURN_FALSE;
     }
 
+    /* Invalid admission must fail without allocating an inbox or accepting a
+     * request; NULL cleanup remains safe when startup never published one. */
+    if (worker_inbox_create(NULL, ZEND_ASYNC_CURRENT_SCOPE, true,
+                            inbox_probe_sink, &probe) != NULL
+        || worker_inbox_create(server, NULL, true, inbox_probe_sink, &probe) != NULL
+        || worker_inbox_post(NULL, NULL)) {
+        probe.done->dispose(probe.done);
+        RETURN_FALSE;
+    }
+    worker_inbox_free(NULL);
+
     worker_inbox_t *const inbox = worker_inbox_create(server, ZEND_ASYNC_CURRENT_SCOPE,
                                                       /*own_scope=*/true,
                                                       inbox_probe_sink, &probe);
@@ -666,10 +689,25 @@ PHP_FUNCTION(_http_server_worker_inbox_selftest)
             continue;
         }
 
+        if (cancel_pending) {
+            req->reactor_conn = &released;
+            req->release = inbox_cancel_release;
+        }
         if (!worker_inbox_post(inbox, req)) {
             http_request_destroy(req);  /* full: backpressure, we keep ownership */
             probe.expected--;
         }
+    }
+
+    if (cancel_pending) {
+        worker_inbox_cancel_pending(inbox);
+        worker_inbox_free(inbox);
+        probe.done->dispose(probe.done);
+        array_init(return_value);
+        add_assoc_long(return_value, "expected", probe.expected);
+        add_assoc_long(return_value, "received", probe.received);
+        add_assoc_long(return_value, "released", released);
+        return;
     }
 
     /* Suspend until every dispatched handler has rendered its response; a
@@ -1374,7 +1412,21 @@ PHP_FUNCTION(_http_log_flood)
     RETURN_LONG((zend_long)http_server_counters(server)->log_records_dropped_total);
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_response_acked_body, 0, 1, IS_LONG, 0)
+    ZEND_ARG_OBJ_INFO(0, response, TrueAsync\\HttpResponse, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(_http_server_response_acked_body)
+{
+    zval *response;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_OBJECT_OF_CLASS(response, http_response_ce)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG(worker_dispatch_test_acked_body(Z_OBJ_P(response)));
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
+    ZEND_FE(_http_server_response_acked_body, arginfo_response_acked_body)
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)
     ZEND_FE(_http_server_reactor_pool_exec_selftest, arginfo_reactor_pool_exec_selftest)

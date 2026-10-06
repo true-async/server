@@ -78,6 +78,7 @@ add_test(NAME ThreadQueue COMMAND test_thread_queue)
 # response; pure malloc-domain C, no PHP/Zend runtime.
 add_executable(test_response_wire
     core/test_response_wire.c
+    common/delivery_stubs.c
     ${CMAKE_SOURCE_DIR}/../src/core/response_wire.c
 )
 

@@ -59,6 +59,8 @@ typedef struct {
     void                             *wrapper_ctx;        /* ws_ctx_t — owned, freed at teardown */
     bool                              wrapper_installed;
     bool                              wrapper_first_chunk;
+    zval                              rollback_vary;
+    zval                              rollback_length;
 } http_compression_state_t;
 
 /* Cross-TU contract for response-internal accessors. */
@@ -318,6 +320,8 @@ void http_compression_state_free(zend_object *response_obj)
         efree(st->wrapper_ctx);
     }
 
+    zval_ptr_dtor(&st->rollback_vary);
+    zval_ptr_dtor(&st->rollback_length);
     efree(st);
     http_response_set_compression_slot(response_obj, NULL);
 }
@@ -580,6 +584,10 @@ static int forward_compressed(ws_ctx_t *w, zend_string *zs, const bool nonblocki
      * against a window the decoder never saw. A truncated body with a 499 is
      * recoverable; a corrupted stream is not. */
     if (UNEXPECTED(rc == HTTP_STREAM_APPEND_BACKPRESSURE)) {
+        if (w->underlying_ops->is_started != NULL
+            && !w->underlying_ops->is_started(w->underlying_ctx)) {
+            return HTTP_STREAM_APPEND_BACKPRESSURE; /* fresh codec can be discarded */
+        }
         return HTTP_STREAM_APPEND_STREAM_DEAD;
     }
 
@@ -629,6 +637,14 @@ static int ws_append_chunk(void *ctx_opaque, zend_string *chunk,
     }
 
     if (UNEXPECTED(!w->first_chunk_done)) {
+        if (nonblocking) {
+            http_compression_state_t *const st = state_of(w->response_obj);
+            HashTable *const ht = http_response_get_headers(w->response_obj);
+            zval *prior = zend_hash_str_find(ht, ZEND_STRL("vary"));
+            if (prior != NULL) ZVAL_DUP(&st->rollback_vary, prior);
+            prior = zend_hash_str_find(ht, ZEND_STRL("content-length"));
+            if (prior != NULL) ZVAL_DUP(&st->rollback_length, prior);
+        }
         /* Header mutation deferred to first chunk: by now the handler
          * has finalised setHeader/setStatusCode (committed=true was set
          * by HttpResponse::send before we got here), and we know we
@@ -800,6 +816,13 @@ static bool ws_is_alive(void *ctx_opaque)
                || w->underlying_ops->is_alive(w->underlying_ctx));
 }
 
+static bool ws_is_started(void *ctx)
+{
+    ws_ctx_t *w = ctx;
+    return w->underlying_ops->is_started == NULL
+        || w->underlying_ops->is_started(w->underlying_ctx);
+}
+
 static const http_response_stream_ops_t compressing_stream_ops = {
     .append_chunk   = ws_append_chunk,
     .sendable       = ws_sendable,
@@ -808,6 +831,7 @@ static const http_response_stream_ops_t compressing_stream_ops = {
     .mark_ended     = ws_mark_ended,
     .abort          = ws_abort,
     .get_wait_event = ws_get_wait_event,
+    .is_started = ws_is_started,
 };
 
 void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
@@ -853,4 +877,34 @@ void http_compression_maybe_install_stream_wrapper(zend_object *response_obj)
     st->encoder           = enc;
     st->wrapper_ctx       = w;
     st->wrapper_installed = true;
+}
+
+void http_compression_reset_unstarted(zend_object *obj)
+{
+    http_compression_state_t *st = state_of(obj);
+    if (st == NULL || !st->wrapper_installed) return;
+    ws_ctx_t *w = st->wrapper_ctx;
+    ZEND_ASSERT(w->underlying_ops->is_started == NULL
+        || !w->underlying_ops->is_started(w->underlying_ctx));
+    if (w->first_chunk_done) {
+        HashTable *const ht = http_response_get_headers(obj);
+        /* decide() installs a wrapper only in the absence of user encoding. */
+        zend_hash_str_del(ht, ZEND_STRL("content-encoding"));
+        if (Z_ISUNDEF(st->rollback_vary)) zend_hash_str_del(ht, ZEND_STRL("vary"));
+        else {
+            zend_hash_str_update(ht, ZEND_STRL("vary"), &st->rollback_vary);
+            ZVAL_UNDEF(&st->rollback_vary); /* ownership transferred before next allocation */
+        }
+        if (Z_ISUNDEF(st->rollback_length)) zend_hash_str_del(ht, ZEND_STRL("content-length"));
+        else {
+            zend_hash_str_update(ht, ZEND_STRL("content-length"), &st->rollback_length);
+            ZVAL_UNDEF(&st->rollback_length);
+        }
+    }
+    http_response_replace_stream_ops(obj, w->underlying_ops, w->underlying_ctx);
+    if (st->encoder != NULL) http_compression_pool_release(st->encoder);
+    st->encoder = NULL;
+    st->wrapper_ctx = NULL;
+    st->wrapper_installed = false;
+    efree(w);
 }

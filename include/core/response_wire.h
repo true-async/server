@@ -36,6 +36,9 @@
  */
 
 typedef struct response_wire_s response_wire_t;
+typedef struct response_delivery_s response_delivery_t;
+void response_wire_set_delivery(response_wire_t *rw, response_delivery_t *delivery);
+response_delivery_t *response_wire_delivery(const response_wire_t *rw);
 
 /* FULL = single-shot at dispose. Streamed responses go FIFO on one reactor
  * mailbox: one STREAM_HEADERS, N STREAM_CHUNKs, one STREAM_END (may carry

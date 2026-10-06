@@ -31,6 +31,7 @@
 #include "static/static_handler.h"         /* http_static_try_serve / count */
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
 #include "core/worker_dispatch.h"           /* response_wire_discard */
+#include "core/response_delivery.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
 #include "compression/http_compression_response.h"  /* response encode */
@@ -136,6 +137,27 @@ static const http_static_dispatch_cbs_t h3_static_dispatch_cbs = {
  * channel. The reactor keeps the stream alive via a worker-borrow ref until the
  * consumed arrives. No request-service stats here — those are the
  * worker's job (handler runs there). */
+static void h3_delivery_release_request(void *arg)
+{
+    http3_stream_release(arg);
+}
+
+static void h3_delivery_reset(void *arg)
+{
+    http3_stream_t *s = arg;
+    http3_connection_t *c = s->conn;
+    if (c == NULL || c->closed || s->peer_closed) return;
+    s->local_aborted = true;
+    s->streaming_ended = true;
+    if (c->nghttp3_conn != NULL)
+        (void)nghttp3_conn_shutdown_stream_write(c->nghttp3_conn, s->stream_id);
+    if (c->ngtcp2_conn != NULL)
+        (void)ngtcp2_conn_shutdown_stream_write(c->ngtcp2_conn, 0, s->stream_id,
+                                               NGHTTP3_H3_INTERNAL_ERROR);
+    http3_listener_mark_flush(c->listener, c);
+    http3_listener_queue_epilogue_flush(c->listener);
+}
+
 static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_t *s,
                                              const http3_reactor_ctx_t *rctx)
 {
@@ -187,6 +209,17 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
 
     s->conn = c;
 
+    response_delivery_owner_t *owner = worker_inbox_delivery_owner(inbox);
+    if (owner == NULL) return;
+    s->delivery = response_delivery_create(owner, rctx->reactor_id, s,
+                                           h3_delivery_reset, h3_delivery_release_request,
+                                           http3_reactor_apply_response);
+    if (s->delivery == NULL) {
+        h3_delivery_reset(s);
+        return;
+    }
+    s->request->delivery = s->delivery;
+
     /* Routing for the reverse path. reactor_id selects the reverse channel;
      * reactor_conn carries the raw stream pointer (kept alive by the
      * worker-borrow ref below until consumed, so it is valid when the response
@@ -204,6 +237,9 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
          * H3_REQUEST_REJECTED so the client can retry instead of hanging */
         s->refcount--;
         s->dispatched = false;
+        s->request->delivery = NULL;
+        response_delivery_abandon(s->delivery);
+        s->delivery = NULL;
 
         if (c->ngtcp2_conn != NULL) {
             (void)ngtcp2_conn_shutdown_stream_write(
@@ -317,12 +353,10 @@ static http_request_t *h3_reactor_request_from_wire(http3_connection_t *c,
  * which needs response_zv UNDEF — so dtor it here. */
 static void h3_reactor_sendfile_cleanup(http3_connection_t *c, http3_stream_t *s)
 {
-    /* Pool sendFile: the worker marshalled the send and left the delivery to
-     * us, so the reactor is the only place the final status exists. c->log_state
-     * is the OFF default here — this counts, and never touches a worker's sink.
-     * The stand-in request carries the method/URI; the worker's own request is
-     * off-limits on this thread. */
-    if (c != NULL && !Z_ISUNDEF(s->response_zv)) {
+    /* A live delivery record reports the transport outcome on its worker.
+     * Without a record, legacy sendFile telemetry uses this reactor-owned
+     * stand-in request; the worker request and log sink are off-limits here. */
+    if (s->delivery == NULL && c != NULL && !Z_ISUNDEF(s->response_zv)) {
         http_request_telemetry(s->sf_request, Z_OBJ(s->response_zv),
                                c->counters, c->log_state);
     }
@@ -347,11 +381,15 @@ static void h3_reactor_sendfile_cleanup(http3_connection_t *c, http3_stream_t *s
  * base (nghttp3) + worker-borrow refs already cover its lifetime. */
 static void h3_reactor_sendfile_on_done(void *user, int status)
 {
-    (void)status;
     h3_sendfile_user_t *const u = (h3_sendfile_user_t *)user;
     http3_connection_t *const c = u->conn;
     http3_stream_t     *const s = u->stream;
     efree(u);
+
+    if (status < 0 && s->delivery != NULL) {
+        response_delivery_finish(s->delivery, false, "sendfile_failed");
+        h3_delivery_reset(s);
+    }
 
     h3_reactor_sendfile_cleanup(c, s);
 }
@@ -405,11 +443,21 @@ void http3_reactor_apply_response(void *arg)
     }
 
     http3_stream_t *const s = (http3_stream_t *)response_wire_conn(rw);
+    response_delivery_t *d = response_wire_delivery(rw);
+    bool discard_wire = false;
+    response_delivery_addref(d); /* protects reclamation after freeing the wire */
     http3_connection_t *const c = (s != NULL) ? s->conn : NULL;
 
-    if (c == NULL || c->closed || c->nghttp3_conn == NULL) {
+    if (c == NULL || c->closed || c->nghttp3_conn == NULL
+        || (d != NULL && response_delivery_failed(d))) {
         /* stream gone: abandon credit / release chunk — unblock the producer */
+        response_delivery_note_drop(d);
         response_wire_discard(rw);
+        if (d != NULL) {
+            response_delivery_finish(d, false, "stream_closed");
+            response_delivery_maybe_release_request(d);
+            response_delivery_release(d);
+        }
         return;
     }
 
@@ -420,6 +468,11 @@ void http3_reactor_apply_response(void *arg)
             if (http3_stream_submit_response_wire(c, s, rw)) {
                 http3_listener_mark_flush(c->listener, c);
                 http3_listener_queue_epilogue_flush(c->listener);
+            } else if (d != NULL) {
+                discard_wire = true;
+                response_delivery_note_drop(d);
+                response_delivery_finish(d, false, "submit_failed");
+                h3_delivery_reset(s);
             }
             break;
 
@@ -480,6 +533,7 @@ void http3_reactor_apply_response(void *arg)
 
             s->streaming_ended = true;
             s->local_aborted   = true;
+            response_delivery_finish(d, false, "response_aborted");
 
             /* Stops nghttp3 asking the data reader for more of a body that is
              * not coming; the RESET_STREAM below is what the peer sees. Same
@@ -506,7 +560,12 @@ void http3_reactor_apply_response(void *arg)
             break;
     }
 
-    response_wire_free(rw);
+    if (discard_wire) response_wire_discard(rw);
+    else response_wire_free(rw);
+    if (d != NULL) {
+        response_delivery_maybe_release_request(d);
+        response_delivery_release(d);
+    }
 }
 
 /* Reactor-side static serving: serve files
@@ -1100,4 +1159,3 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     h3_dispose_tail(c, s);
 }
-

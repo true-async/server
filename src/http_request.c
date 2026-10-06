@@ -943,7 +943,7 @@ void http_request_fill_access_rec(const http_request_t *req,
 {
     memset(rec, 0, sizeof *rec);
 
-    if (req == NULL || response_obj == NULL) {
+    if (req == NULL) {
         return;
     }
 
@@ -958,13 +958,13 @@ void http_request_fill_access_rec(const http_request_t *req,
         rec->url_query = (q != NULL && q[1] != '\0') ? q + 1 : NULL;
     }
 
-    rec->status        = http_response_get_status(response_obj);
-    rec->response_size = http_response_get_sent_body_size(response_obj);
+    rec->status        = response_obj != NULL ? http_response_get_status(response_obj) : 0;
+    rec->response_size = response_obj != NULL ? http_response_get_sent_body_size(response_obj) : 0;
 
     /* OTel forbids error.type on a request that completed, so it is where the
      * record says the body stopped short while the status stays what the peer
      * was told. */
-    if (UNEXPECTED(http_response_is_aborted(response_obj))) {
+    if (response_obj != NULL && UNEXPECTED(http_response_is_aborted(response_obj))) {
         rec->error_type = "response_aborted";
     }
 

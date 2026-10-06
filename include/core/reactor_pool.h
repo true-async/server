@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "core/thread_queue.h"
 
 /*
  * Reactor thread pool (issue #80, design D1 — substrate).
@@ -61,6 +62,34 @@ bool reactor_pool_post(reactor_pool_t *rp, int idx, void *item);
 /* A function run on a reactor's own thread by reactor_pool_exec. */
 typedef void (*reactor_exec_fn)(void *arg);
 
+/* Intrusive, preallocated control command. Unlike data commands, this path
+ * has no mailbox capacity and allocates nothing on post. A node may be posted
+ * only once at a time; it must live through callback execution. */
+typedef struct reactor_control_s {
+    struct reactor_control_s *next;
+    reactor_exec_fn fn;
+    void *arg;
+} reactor_control_t;
+bool reactor_pool_post_control(reactor_pool_t *rp, int idx,
+                                reactor_control_t *node);
+/* Cold startup/shutdown fence: guaranteed control path, no heap allocation.
+ * Producers must still hold the pool lifetime. Never use for response writes. */
+bool reactor_pool_control_exec(reactor_pool_t *rp, int idx,
+                               reactor_exec_fn fn, void *arg);
+
+/* Register before publishing the producer; unregister after its deliveries
+ * have quiesced. The list and callbacks belong to the reactor. Used to wake
+ * coroutine senders after a bounded mailbox drain, without blocking a thread. */
+typedef struct reactor_capacity_gate_s {
+    struct reactor_capacity_gate_s *next;
+    reactor_exec_fn wake;
+    void *arg;
+} reactor_capacity_gate_t;
+bool reactor_pool_capacity_register(reactor_pool_t *rp, int idx,
+                                    reactor_capacity_gate_t *gate);
+bool reactor_pool_capacity_unregister(reactor_pool_t *rp, int idx,
+                                      reactor_capacity_gate_t *gate);
+
 /* Run fn(arg) on reactor `idx`'s own loop thread and block the caller until it
  * returns. The reactor executes it inline on its drain pass — this is how
  * transport that must be bound to the reactor's libuv loop (a uv handle, the
@@ -80,11 +109,15 @@ bool reactor_pool_exec(reactor_pool_t *rp, int idx, reactor_exec_fn fn, void *ar
  * non-running reactor, or a full mailbox (backpressure — the caller keeps `arg`
  * and decides to drop/retry). Any thread; must not race destroy(). */
 bool reactor_pool_post_exec(reactor_pool_t *rp, int idx, reactor_exec_fn fn, void *arg);
+thread_queue_result_t reactor_pool_try_post_exec(reactor_pool_t *rp, int idx,
+                                                reactor_exec_fn fn, void *arg);
 
 /* Whether reactor `idx` is in its loop and takes posts. False for a bad index,
  * before the loop starts and once it has left; a reactor that left does not
  * come back. Any thread; must not race destroy(). */
 bool reactor_pool_is_running(const reactor_pool_t *rp, int idx);
+/* Advisory only; successful enqueue remains the sole ownership boundary. */
+bool reactor_pool_has_capacity(const reactor_pool_t *rp, int idx);
 
 /* Count of items reactor `idx` has drained from its inbound. Rises as the
  * reactor services work — "alive" == "draining". Returns 0 for a bad index. */

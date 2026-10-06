@@ -306,17 +306,27 @@ void thread_cmd_mpsc_free(thread_cmd_mpsc_t *q)
 
 bool thread_cmd_mpsc_enqueue(thread_cmd_mpsc_t *q, const reactor_cmd_t *cmd)
 {
+    return thread_cmd_mpsc_try_enqueue(q, cmd) == THREAD_QUEUE_ACCEPTED;
+}
+
+thread_queue_result_t thread_cmd_mpsc_try_enqueue(thread_cmd_mpsc_t *q,
+                                                 const reactor_cmd_t *cmd)
+{
     size_t prev;
     if (!cap_reserve(q->count, q->capacity, prev)) {
-        return false;
+        return THREAD_QUEUE_FULL;
     }
 
-    if (!q->q.try_enqueue(*cmd)) {
+    /* count reserves the bounded logical slot. try_enqueue also refuses when
+     * a producer needs a new internal block (even with free logical slots),
+     * which is not observable mailbox backpressure. Let enqueue acquire that
+     * block; its false result is an actual allocation failure. */
+    if (!q->q.enqueue(*cmd)) {
         q->count.fetch_sub(1, std::memory_order_release);
-        return false;
+        return THREAD_QUEUE_ERROR;
     }
 
-    return true;
+    return THREAD_QUEUE_ACCEPTED;
 }
 
 size_t thread_cmd_mpsc_drain(thread_cmd_mpsc_t *q, reactor_cmd_t *out, const size_t max)
