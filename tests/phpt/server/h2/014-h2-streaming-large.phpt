@@ -50,11 +50,12 @@ $server->addHttpHandler(function ($req, $res) {
 
 $client = spawn(function () use ($port, $server) {
     usleep(30000);
+    $bodyFile = tempnam(sys_get_temp_dir(), 'tas-h2-');
     $cmd = sprintf(
-        'curl --http2-prior-knowledge -s --max-time 10 -o /tmp/body-087.bin '
+        'curl --http2-prior-knowledge -s --max-time 10 -o %s '
         . '-w "http=%%{http_code} size=%%{size_download}" '
         . 'http://127.0.0.1:%d/',
-        $port
+        escapeshellarg($bodyFile), $port
     );
     $out = []; exec($cmd, $out, $rc);
     $meta = implode("\n", $out);
@@ -63,10 +64,10 @@ $client = spawn(function () use ($port, $server) {
     echo "meta=$meta\n";
 
     /* Sanity — exact byte count + content hash (cheap sha1). */
-    $sha = @sha1_file('/tmp/body-087.bin');
+    $sha = @sha1_file($bodyFile);
     $expected = sha1(str_repeat('A', 12 * 4096));
     echo "hash_match=", ($sha === $expected ? 1 : 0), "\n";
-    @unlink('/tmp/body-087.bin');
+    @unlink($bodyFile);
 
     $server->stop();
 });

@@ -202,15 +202,14 @@ $out = (string)shell_exec($h2cmd);
 
 $kill();
 
-$pass   = substr_count($out, '✔');
-$fail   = substr_count($out, '×');
-$errors = preg_match_all('/^Error:/m', $out);
+require_once __DIR__ . '/_h2spec_counts.inc';
+[$pass, $fail, $errors] = h2spec_counts($out);
 
 echo "pass=$pass\n";
 echo "fail=$fail\n";
 echo "errors=$errors\n";
 
-$ok_pass = $pass >= MIN_PASS;
+$ok_pass = $pass >= MIN_PASS && $errors === 0;
 $ok_fail = $fail <= MAX_FAIL;
 echo "pass_gate=" . ($ok_pass ? 'ok' : "REGRESSION (need >=" . MIN_PASS . ")") . "\n";
 echo "fail_gate=" . ($ok_fail ? 'ok' : "REGRESSION (need <=" . MAX_FAIL . ")") . "\n";

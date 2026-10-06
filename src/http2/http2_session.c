@@ -33,6 +33,50 @@
 
 #include <string.h>
 
+#define H2_LOCAL_RESET_HISTORY 100u
+
+static void h2_note_local_reset(http2_session_t *session, uint32_t stream_id)
+{
+    if (session->local_resets == NULL) {
+        session->local_resets = ecalloc(H2_LOCAL_RESET_HISTORY, sizeof(uint32_t));
+    }
+
+    for (unsigned i = 0; i < H2_LOCAL_RESET_HISTORY; ++i) {
+        if (session->local_resets[i] == stream_id) { return; }
+    }
+
+    /* After history eviction, let nghttp2 discard old DATA and account for
+     * connection flow control; a reset may still be in flight to the peer. */
+    const uint32_t evicted = session->local_resets[session->local_reset_cursor];
+    if (evicted > session->local_reset_floor) { session->local_reset_floor = evicted; }
+
+    session->local_resets[session->local_reset_cursor] = stream_id;
+    session->local_reset_cursor = (session->local_reset_cursor + 1) % H2_LOCAL_RESET_HISTORY;
+}
+
+static bool h2_was_locally_reset(const http2_session_t *session, uint32_t stream_id)
+{
+    if (stream_id <= session->local_reset_floor) { return true; }
+
+    if (session->local_resets == NULL) { return false; }
+
+    for (unsigned i = 0; i < H2_LOCAL_RESET_HISTORY; ++i) {
+        if (session->local_resets[i] == stream_id) { return true; }
+    }
+
+    return false;
+}
+
+static int cb_on_frame_send(nghttp2_session *ng, const nghttp2_frame *frame, void *user_data)
+{
+    (void)ng;
+    if (frame->hd.type == NGHTTP2_RST_STREAM) {
+        h2_note_local_reset(user_data, (uint32_t)frame->hd.stream_id);
+    }
+
+    return 0;
+}
+
 /*
  * HTTP/2 session wrapper — transport + callbacks + response submission.
  *
@@ -233,6 +277,7 @@ static int cb_on_begin_headers(nghttp2_session *ng,
     if (session->conn != NULL
         && UNEXPECTED(http_server_should_shed_request(session->conn->server))) {
         http_server_on_request_shed(session->conn->counters, /*is_h2=*/true);
+        h2_note_local_reset(session, (uint32_t)stream_id);
         (void)nghttp2_submit_rst_stream(ng, NGHTTP2_FLAG_NONE,
                                         stream_id, NGHTTP2_REFUSED_STREAM);
         return 0;
@@ -445,6 +490,7 @@ static int h2_refuse_stream(http2_session_t *session,
         }
     }
 
+    h2_note_local_reset(session, (uint32_t)stream_id);
     (void)nghttp2_submit_rst_stream(ng, NGHTTP2_FLAG_NONE, stream_id, error_code);
     h2_session_schedule_emit(session);
 
@@ -1274,6 +1320,7 @@ static zend_async_microtask_t *h2_session_emit_mt_new(http2_session_t *session);
 
 static void install_callbacks(nghttp2_session_callbacks *cbs)
 {
+    nghttp2_session_callbacks_set_on_frame_send_callback(cbs, cb_on_frame_send);
     nghttp2_session_callbacks_set_on_begin_frame_callback(cbs, cb_on_begin_frame);
     nghttp2_session_callbacks_set_on_begin_headers_callback(cbs, cb_on_begin_headers);
     nghttp2_session_callbacks_set_on_header_callback       (cbs, cb_on_header);
@@ -1354,6 +1401,7 @@ http2_session_t *http2_session_new(http_connection_t *conn,
     session->conn                      = conn;
     session->on_request_ready          = on_request_ready;
     session->on_request_ready_user_data = user_data;
+    session->recv_preface_left = NGHTTP2_CLIENT_MAGIC_LEN;
 
     zend_hash_init(&session->streams, 16,
                    NULL, stream_table_dtor, 0);
@@ -1461,6 +1509,8 @@ void http2_session_free(http2_session_t *session)
         return;
     }
 
+    if (session->local_resets != NULL) { efree(session->local_resets); }
+
     if (session->emit_mt != NULL) {
         if (session->emit_mt_queued) {
             /* Scheduler still owns the pointer — let dtor free it. */
@@ -1489,17 +1539,10 @@ void http2_session_free(http2_session_t *session)
     efree(session);
 }
 
-int http2_session_feed(http2_session_t *session,
-                       const char *data, const size_t len,
-                       size_t *consumed_out)
+static int h2_receive_bytes(http2_session_t *session, const uint8_t *data, size_t len)
 {
-    if (session == NULL || session->ng == NULL) {
-        if (consumed_out != NULL) { *consumed_out = 0; }
-        return -1;
-    }
-
     const ssize_t n = (ssize_t)nghttp2_session_mem_recv(
-        session->ng, (const uint8_t *)data, len);
+        session->ng, data, len);
 
     if (n < 0) {
         /* RFC 9113 §3.4 — on an invalid connection preface the server
@@ -1519,11 +1562,133 @@ int http2_session_feed(http2_session_t *session,
             session->bad_preface_emit_goaway = true;
         }
 
-        if (consumed_out != NULL) { *consumed_out = 0; }
         return -1;
     }
 
-    if (consumed_out != NULL) { *consumed_out = (size_t)n; }
+    return (size_t)n == len ? 0 : -1;
+}
+
+static uint32_t h2_wire_uint31(const uint8_t *p)
+{
+    return ((uint32_t)(p[0] & 0x7fu) << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
+}
+
+/* Preserve RFC 7540 frame validation across nghttp2 releases without restoring
+ * its deprecated priority scheduler or retaining closed stream objects. */
+static int h2_receive_control(http2_session_t *session)
+{
+    const uint8_t *frame = session->recv_frame;
+    const uint32_t stream_id = h2_wire_uint31(frame + 5);
+    const uint32_t value = h2_wire_uint31(frame + HTTP2_FRAME_HEADER_BYTES);
+
+    if (frame[3] == NGHTTP2_PRIORITY && (stream_id == 0 || value == stream_id)) {
+        (void)nghttp2_submit_goaway(session->ng, NGHTTP2_FLAG_NONE,
+                                  session->last_peer_stream_id,
+                                  NGHTTP2_PROTOCOL_ERROR, NULL, 0);
+        return -1;
+    }
+
+    if (!session->recv_continuation && frame[3] == NGHTTP2_WINDOW_UPDATE && stream_id != 0 && value != 0) {
+        const int32_t window = nghttp2_session_get_stream_remote_window_size(session->ng, stream_id);
+
+        /* RFC 9113 section 6.9.1 assigns overflow of a stream window to that
+         * stream. Do not let the library turn it into a connection error. */
+        if (window >= 0 && value > (uint32_t)NGHTTP2_MAX_WINDOW_SIZE - (uint32_t)window) {
+            h2_note_local_reset(session, stream_id);
+            return nghttp2_submit_rst_stream(session->ng, NGHTTP2_FLAG_NONE,
+                                            stream_id, NGHTTP2_FLOW_CONTROL_ERROR) == 0 ? 0 : -1;
+        }
+    }
+
+    return h2_receive_bytes(session, frame, session->recv_control_bytes);
+}
+
+int http2_session_feed(http2_session_t *session,
+                       const char *data, const size_t len,
+                       size_t *consumed_out)
+{
+    if (consumed_out != NULL) { *consumed_out = 0; }
+
+    if (session == NULL || session->ng == NULL) {
+        return -1;
+    }
+
+    const uint8_t *p = (const uint8_t *)data;
+    size_t left = len;
+
+    while (left != 0) {
+        if (session->recv_preface_left != 0 || session->recv_payload_left != 0) {
+            const bool preface = session->recv_preface_left != 0;
+            const size_t remaining = preface ? session->recv_preface_left : session->recv_payload_left;
+            const size_t take = left < remaining ? left : remaining;
+
+            if (h2_receive_bytes(session, p, take) != 0) { return -1; }
+
+            if (preface) {
+                session->recv_preface_left -= (uint8_t)take;
+            } else {
+                session->recv_payload_left -= (uint32_t)take;
+            }
+
+            p += take;
+            left -= take;
+            continue;
+        }
+
+        const size_t needed = session->recv_control_bytes != 0
+            ? session->recv_control_bytes : HTTP2_FRAME_HEADER_BYTES;
+        const size_t remaining = needed - session->recv_frame_used;
+        const size_t take = left < remaining ? left : remaining;
+        memcpy(session->recv_frame + session->recv_frame_used, p, take);
+        session->recv_frame_used += (uint8_t)take;
+        p += take;
+        left -= take;
+
+        if (session->recv_frame_used != needed) { continue; }
+
+        if (session->recv_control_bytes != 0) {
+            if (h2_receive_control(session) != 0) { return -1; }
+
+            session->recv_frame_used = 0;
+            session->recv_control_bytes = 0;
+            continue;
+        }
+
+        const uint8_t *frame = session->recv_frame;
+        const uint32_t payload = ((uint32_t)frame[0] << 16) | ((uint32_t)frame[1] << 8) | frame[2];
+        const uint32_t stream_id = h2_wire_uint31(frame + 5);
+
+        /* nghttp2 may discard closed-stream DATA before on_begin_frame runs.
+         * Validate its header while the library still has no part of it. */
+        if (frame[3] == NGHTTP2_DATA && (stream_id & 1u) != 0 &&
+            stream_id <= session->last_peer_stream_id &&
+            !h2_was_locally_reset(session, stream_id) &&
+            (nghttp2_session_get_stream_user_data(session->ng, stream_id) == NULL ||
+             nghttp2_session_get_stream_remote_close(session->ng, stream_id) == 1)) {
+            (void)nghttp2_submit_goaway(session->ng, NGHTTP2_FLAG_NONE,
+                                      session->last_peer_stream_id,
+                                      NGHTTP2_STREAM_CLOSED, NULL, 0);
+            return -1;
+        }
+
+        if ((frame[3] == NGHTTP2_PRIORITY && payload == HTTP2_PRIORITY_PAYLOAD_BYTES) ||
+            (frame[3] == NGHTTP2_WINDOW_UPDATE && payload == HTTP2_WINDOW_PAYLOAD_BYTES)) {
+            session->recv_control_bytes = (uint8_t)(HTTP2_FRAME_HEADER_BYTES + payload);
+            continue;
+        }
+
+        if (h2_receive_bytes(session, frame, HTTP2_FRAME_HEADER_BYTES) != 0) { return -1; }
+
+        if (frame[3] == NGHTTP2_HEADERS || frame[3] == NGHTTP2_CONTINUATION || frame[3] == NGHTTP2_PUSH_PROMISE) {
+            session->recv_continuation = (frame[4] & NGHTTP2_FLAG_END_HEADERS) == 0;
+        }
+
+        session->recv_frame_used = 0;
+        session->recv_payload_left = payload;
+    }
+
+    if (consumed_out != NULL) { *consumed_out = len; }
     return 0;
 }
 
@@ -2112,6 +2277,7 @@ int http2_session_submit_rst_stream(http2_session_t *session,
         return -1;
     }
 
+    h2_note_local_reset(session, (uint32_t)stream_id);
     return nghttp2_submit_rst_stream(session->ng, NGHTTP2_FLAG_NONE,
                                      (int32_t)stream_id, error_code) == 0
                ? 0 : -1;
