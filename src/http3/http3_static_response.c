@@ -53,6 +53,8 @@
 #include "http3_listener.h"
 #include "http3/http3_stream.h"
 
+#include "fiu-local.h"
+
 #include <errno.h>
 #include <string.h>
 
@@ -275,6 +277,13 @@ static void h3_static_finalize(h3_static_state_t *state)
         state->window_cb = NULL;
     }
 
+    if (state->pending_req != NULL) {
+        zend_async_io_req_t *const req = state->pending_req;
+        state->pending_req = NULL;
+        state->read_in_flight = false;
+        if (req->dispose != NULL) req->dispose(req);
+    }
+
     if (state->pending_chunk != NULL) {
         /* Never pushed, so never charged to the budget — just drop it. */
         zend_string_release(state->pending_chunk);
@@ -422,7 +431,7 @@ static bool h3_static_submit_read(h3_static_state_t *state)
 /* The single decision point: finish, park, or read on. */
 static void h3_static_try_read(h3_static_state_t *state)
 {
-    if (state->busy || state->done_fired) {
+    if (state->busy || state->done_fired || state->eof_reached) {
         return;
     }
 
@@ -484,7 +493,10 @@ static void h3_static_read_dispatch(zend_async_event_t *event,
     state->read_in_flight = false;
 
     const ssize_t transferred = (ssize_t)req->transferred;
-    const bool    err = (exception != NULL || req->exception != NULL);
+    bool err = (exception != NULL || req->exception != NULL);
+    if (state->bytes_sent > 0) {
+        fiu_do_on("h3/sendfile/read_failed_after_chunk", { err = true; });
+    }
 
     if (req->exception != NULL) {
         OBJ_RELEASE(req->exception);

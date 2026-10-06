@@ -111,8 +111,9 @@ TTL and its potentially lost release queue are gone.
 - h3/082: forced FULL yields to another task on the same worker; render/submit
   failures terminate the client; retained request does not delay completion.
 - h3/083: counters stay zero while final ACK is delayed, then become one.
-- h3/084: refused nonblocking first offer is retryable; queue deadline resets
-  through control without data capacity.
+- h3/084: plain/gzip refused first offers restore headers and codec; a scheduler
+  probe and time bound verify nonblocking behavior; queue timeout has a lower
+  and upper time bound and resets through control without data capacity.
 - h3/085: concurrent plain/gzip writers and try/await loops stay ordered; peer
   closure before sender completion preserves the access identity.
 - h3/086: bailout after waiter registration retracts subscriptions and owned
@@ -123,3 +124,32 @@ TTL and its potentially lost release queue are gone.
 - core/087–088: partial initial submit and recoverable pre-start worker bailout.
 - h3/089: bailout from start after inbox publication still completes cleanup.
 - Existing overflow, sendFile, reload, stop and bailout tests cover integration.
+
+- h3/090: forced FULL independently during HEADERS, CHUNK, END, ABORT and
+  SEND_FILE; exact body/trailers, preserved file options, same-worker progress,
+  once-only outcome. ABORT waits for acknowledged prefix bytes and verifies
+  `response_aborted`, the confirmed status and exact acknowledged body size.
+- h3/091: failure of a real subsequent file read resets an incomplete transfer;
+  one failure counter and one access record, with classification based on ACK.
+- h3/092: a refused encoded chunk after stream start is a terminal failure,
+  rather than retrying an encoder state the peer never received.
+- reactor_pool/011: retiring a queued inbox releases every request exactly once
+  and invokes no handler; invalid admission and NULL cleanup are also checked.
+
+## Coverage capture
+
+The ordinary Release build and its PHPT suite remain unchanged. A separate
+optimized build enables fault injection and test hooks, runs the selected
+regressions without skips or retries, and adds its hits through
+`lcov-add-hits.py`. The production trace determines the source files, line
+coordinates and functions. Test-only entries do not expand the denominator;
+source matching is checked to prevent a silently ignored auxiliary trace.
+The one-percentage-point comparison threshold remains unchanged.
+
+## Remaining acceptance checks
+
+The audited tests do not prove every concurrency interleaving. Dedicated checks
+for cancellation while waiting in the writer FIFO or on byte credit, and late
+completion during worker-generation rotation remain to be added. A clean test
+run or high line coverage is not proof of these scenarios. The unbounded work
+in one control-drain callback is a separate architectural review item.

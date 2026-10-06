@@ -608,7 +608,8 @@ static int worker_stream_append_impl(worker_dispatch_ctx_t *ctx, zend_string *ch
         /* headers undeliverable → the stream never opened; don't copy and
          * post a chunk wire the reactor would only throw away */
         if (UNEXPECTED(!worker_wire_post(ctx, hw, nonblocking))) {
-            if (nonblocking) worker_encoded_offer_refused(ctx);
+            /* No header was accepted: a first nonblocking offer can discard
+             * its fresh codec and restore the uncommitted response. */
             if (!ctx->stream_failed) {
                 stream_credit_release(ctx->credit);
                 ctx->credit = NULL;
@@ -1367,3 +1368,13 @@ bool worker_dispatch_request(http_server_object *server,
 
     return true;
 }
+
+#ifdef HTTP_SERVER_TEST_HOOKS
+zend_long worker_dispatch_test_acked_body(zend_object *response)
+{
+    if (http_response_get_stream_ops(response) != &worker_stream_ops) return -1;
+    const worker_dispatch_ctx_t *const ctx = http_response_get_stream_ctx(response);
+    return ctx != NULL && ctx->credit != NULL
+        ? (zend_long)stream_credit_acked(ctx->credit) : 0;
+}
+#endif

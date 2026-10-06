@@ -73,12 +73,25 @@ def main() -> int:
     ap.add_argument("base", type=Path, help="tracefile whose lines are counted")
     ap.add_argument("extra", type=Path, help="tracefile whose hits are added")
     ap.add_argument("-o", "--output", type=Path, required=True)
+    ap.add_argument("--require-source", action="append", default=[],
+                    help="require hits on canonical lines of this source (suffix path)")
     args = ap.parse_args()
 
     for path in (args.base, args.extra):
         if not path.exists():
             print(f"error: {path} not found", file=sys.stderr)
             return 2
+
+    if args.require_source:
+        canonical = read_hits(args.base)
+        extra = read_hits(args.extra)
+        for source in args.require_source:
+            matches = [path for path in canonical
+                       if path == source or path.endswith("/" + source)]
+            if not any(any(extra.get(path, ({}, {}))[0].get(line, 0) > 0
+                           for line in canonical[path][0]) for path in matches):
+                print(f"error: no extra hits on canonical lines of {source}", file=sys.stderr)
+                return 2
 
     args.output.write_text(merge(args.base, args.extra))
     return 0

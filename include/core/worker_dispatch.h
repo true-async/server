@@ -61,7 +61,7 @@ void worker_dispatch_cancel_request(struct http_request_t *req);
  * `own_scope` mirrors the H3 dispatch flag: true gives each request its own
  * request_context() subtree (a child of `scope`); false runs directly in
  * `scope`. When no handler is registered a 404 is synthesised so the sink still
- * fires. Buffered responses go out as one FULL wire at dispose; a streaming
+ * fires. Buffered responses go out as one FULL wire at the sender tail; a streaming
  * response (send()/writeMessage()/SSE) is marshalled incrementally as
  * STREAM_HEADERS / STREAM_CHUNK / STREAM_END wires, paced by the per-stream
  * credit block (stream_credit.h) the reactor acknowledges against.
@@ -75,5 +75,10 @@ bool worker_dispatch_request(http_server_object *server,
                              http_request_t *req,
                              bool own_scope,
                              worker_response_sink_fn sink, void *sink_arg);
+
+#ifdef HTTP_SERVER_TEST_HOOKS
+/* ACK barrier for delivery regressions; plain native worker streams only. */
+zend_long worker_dispatch_test_acked_body(zend_object *response);
+#endif
 
 #endif /* WORKER_DISPATCH_H */

@@ -41,8 +41,10 @@ $server->addHttpHandler(function ($req, $res) use ($tmp) {
 $ended = false;
 $reloadEnded = false;
 $parent = spawn(function () use ($server, $tmp, &$ended, &$reloadEnded) {
+    $cancelled = false;
     try { $server->start(); }
-    catch (Async\AsyncCancellation $e) {}
+    catch (Async\AsyncCancellation $e) { $cancelled = true; }
+    echo 'cancellation propagated: ', $cancelled ? 'yes' : 'FAIL', "\n";
     echo 'reload unwound: ', $reloadEnded ? 'yes' : 'FAIL', "\n";
     echo 'parent waited: ', file_exists("$tmp/handler-done") ? 'yes' : 'FAIL', "\n";
     $ended = true;
@@ -72,6 +74,7 @@ spawn(function () use ($parent, $server, $port, $client, $tmp, &$ended, &$reload
 --EXPECTF--
 %Afirst cancellation: still joining
 second cancellation: still joining
-%Areload unwound: yes
+%Acancellation propagated: yes
+reload unwound: yes
 parent waited: yes
 parent completed: yes

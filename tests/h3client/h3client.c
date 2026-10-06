@@ -182,18 +182,19 @@ static int h3_stop_sending(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
-/* The peer reset the stream: the transfer FAILED, however many bytes arrived.
- * Say so — a caller that only looked at the status line and the body length
- * would otherwise read a truncated response as a complete one. */
+/* A QUIC reset is a failed transfer even if headers/body arrived already. */
+static void mark_reset(h3c_t *c, int64_t stream_id, uint64_t err)
+{
+    if (stream_id != c->stream_id) return;
+    if (!c->stream_reset) fprintf(stderr, "RESET=%llu\n", (unsigned long long)err);
+    c->stream_reset = true;
+    c->response_done = true;
+}
+
 static int h3_reset_stream(nghttp3_conn *conn, int64_t stream_id,
                            uint64_t err, void *cu, void *su) {
     (void)conn; (void)su;
-    h3c_t *c = cu;
-    if (stream_id == c->stream_id) {
-        fprintf(stderr, "RESET=%llu\n", (unsigned long long)err);
-        c->stream_reset = true;
-        c->response_done = true;
-    }
+    mark_reset(cu, stream_id, err);
     return 0;
 }
 
@@ -260,8 +261,9 @@ static int stream_close_cb(ngtcp2_conn *qc, uint32_t flags, int64_t stream_id,
 
 static int stream_reset_cb(ngtcp2_conn *qc, int64_t stream_id, uint64_t fs,
                            uint64_t err, void *user_data, void *stream_user_data) {
-    (void)qc; (void)fs; (void)err; (void)stream_user_data;
+    (void)qc; (void)fs; (void)stream_user_data;
     h3c_t *c = user_data;
+    mark_reset(c, stream_id, err);
     if (c->h3) nghttp3_conn_shutdown_stream_read(c->h3, stream_id);
     return 0;
 }
@@ -341,6 +343,7 @@ static const nghttp3_callbacks H3_CB = {
     .end_stream   = h3_end_stream,
     .reset_stream = h3_reset_stream,
     .recv_header  = h3_recv_header,
+    .recv_trailer = h3_recv_header,
 };
 
 /* Submit the GET/POST request. Called from main once nghttp3 is up.

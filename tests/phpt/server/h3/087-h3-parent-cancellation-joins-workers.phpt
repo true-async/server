@@ -40,8 +40,10 @@ $server->addHttpHandler(function ($req, $res) use ($tmp) {
 });
 $ended = false;
 $parent = spawn(function () use ($server, $tmp, &$ended) {
+    $cancelled = false;
     try { $server->start(); }
-    catch (Async\AsyncCancellation $e) {}
+    catch (Async\AsyncCancellation $e) { $cancelled = true; }
+    echo 'cancellation propagated: ', $cancelled ? 'yes' : 'FAIL', "\n";
     echo 'parent waited: ', file_exists("$tmp/handler-done") ? 'yes' : 'FAIL', "\n";
     $ended = true;
 });
@@ -65,5 +67,6 @@ spawn(function () use ($parent, $port, $client, $tmp, &$ended) {
 --EXPECTF--
 %Afirst cancellation: still joining
 second cancellation: still joining
-%Aparent waited: yes
+%Acancellation propagated: yes
+parent waited: yes
 parent completed: yes

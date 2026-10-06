@@ -715,6 +715,56 @@ jobs:
           cmake --build tests/build -j"$(nproc)"
           ctest --test-dir tests/build --output-on-failure
 
+      # Fault regressions run against a separate optimized build. Its hits are
+      # added to the production line table; test-only code is never counted.
+      # Do not install it: later lanes keep using the shipping Release module.
+      - name: Run hooked delivery regressions with coverage
+        if: matrix.debug == false && success()
+        working-directory: http-server
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y --no-install-recommends libfiu-dev
+          project_dir="$PWD"
+          aux_build="$project_dir/coverage/hooks-build"
+          mkdir -p "$aux_build"
+          (
+            cd "$aux_build"
+            PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+            CFLAGS='-g -O2' CXXFLAGS='-g -O2' \
+            "$project_dir/configure" \
+              --with-php-config=/usr/local/bin/php-config \
+              --enable-http-server --enable-http2 --enable-http3 \
+              --with-openssl --with-nghttp2=/usr/local \
+              --with-nghttp3=/usr/local --with-ngtcp2=/usr/local \
+              --enable-coverage --enable-fault-injection \
+              --enable-http-server-test-hooks --enable-tas-test-hooks
+            make -j4
+          )
+          /usr/local/bin/php "$GITHUB_WORKSPACE/php-src/run-tests.php" \
+            -n -d "extension=$aux_build/modules/true_async_server.so" \
+            -d opcache.protect_memory=0 -q -j4 --offline --no-progress \
+            --show-diff --set-timeout 120 \
+            tests/phpt/server/reactor_pool \
+            tests/phpt/server/h3/08[2-9]-*.phpt \
+            tests/phpt/server/h3/09[0-2]-*.phpt \
+            tests/phpt/server/core/083-fault-injection-hook.phpt \
+            tests/phpt/server/core/087-pool-partial-submit-shutdown.phpt \
+            tests/phpt/server/core/088-pool-worker-start-bailout.phpt \
+            | tee coverage/hooks-phpt.log
+          /usr/local/bin/php -n .github/scripts/assert_no_new_retries.php \
+            .github/scripts/retry-baseline.txt coverage/hooks-phpt.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path('coverage/hooks-phpt.log').read_text()
+          skipped = re.search(r'Tests skipped\s*:\s*(\d+)', log)
+          if skipped is None or int(skipped[1]) != 0:
+              raise SystemExit('hooked coverage tests must run without skips')
+          PY
+          lcov --capture --directory "$aux_build/src" \
+               --output-file coverage/hooks.info \
+               --rc geninfo_unexecuted_blocks=1 --quiet
+
       - name: Capture lcov + extract JSON
         if: matrix.debug == false && success()
         working-directory: http-server
@@ -741,7 +791,10 @@ jobs:
                --rc geninfo_unexecuted_blocks=1 --quiet
           python3 scripts/lcov-add-hits.py \
             coverage/extension.info coverage/unit.info -o coverage/raw.info
-          lcov --extract coverage/raw.info "$PWD/src/*" \
+          python3 scripts/lcov-add-hits.py \
+            coverage/raw.info coverage/hooks.info -o coverage/combined.info \
+            --require-source src/core/worker_dispatch.c
+          lcov --extract coverage/combined.info "$PWD/src/*" \
                --output-file coverage/filtered.info --quiet
           python3 scripts/coverage-report.py \
             coverage/filtered.info -o coverage/current.json
