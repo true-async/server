@@ -5,8 +5,8 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (!shell_exec('which curl')) die('skip curl not installed');
-if (strpos((string)shell_exec('curl --version 2>&1'), 'HTTP2') === false) die('skip curl built without HTTP/2');
+require __DIR__ . '/_h2_skipif.inc';
+h2_skipif(['curl_h2' => true]);
 ?>
 --FILE--
 <?php
@@ -44,7 +44,7 @@ $client = spawn(function () use ($port, $server) {
     file_put_contents($tmp, $body);
     $cmd  = sprintf(
         'curl --http2-prior-knowledge -s --max-time 5 --data-binary @%s -H "Expect:" http://127.0.0.1:%d/upload',
-        $tmp, $port
+        escapeshellarg($tmp), $port
     );
     $resp = shell_exec($cmd);
     @unlink($tmp);

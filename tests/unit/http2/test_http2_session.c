@@ -331,6 +331,8 @@ static void capture_on_request_ready(http_request_t *const request,
     cap->last_request   = request;
     cap->last_stream_id = stream_id;
     cap->dispatch_count++;
+    /* The capture borrows the stream's request until that stream closes. */
+    http_request_destroy(request);
 }
 
 /* A no-op nghttp2 client session is enough to encode HEADERS frames
@@ -796,6 +798,7 @@ static void set_dispatch_flag(http_request_t *req, uint32_t sid, void *ud)
     dispatch_flag_t *const f = (dispatch_flag_t *)ud;
     f->dispatched = true;
     f->stream_id  = sid;
+    http_request_destroy(req);
 }
 
 /* 200 OK with a JSON body + one header. Most common REST path. */
@@ -1573,6 +1576,172 @@ static void test_h2_terminate_null_safe(void **state)
     assert_int_equal((int)http2_session_last_ping_rtt_ns(NULL), 0);
 }
 
+static int feed_in_chunks(http2_session_t *session, const uint8_t *wire, size_t length, size_t chunk)
+{
+    for (size_t offset = 0; offset < length;) {
+        const size_t take = length - offset < chunk ? length - offset : chunk;
+        size_t consumed = 0;
+        const int rc = http2_session_feed(session, (const char *)wire + offset, take, &consumed);
+
+        if (rc != 0) { return rc; }
+
+        assert_int_equal(consumed, take);
+        offset += take;
+    }
+
+    return 0;
+}
+
+static void assert_control_reply(http2_session_t *session, uint8_t type, uint32_t stream_id, uint32_t code)
+{
+    uint8_t out[2048];
+    const ssize_t length = http2_session_drain(session, (char *)out, sizeof(out));
+    assert_true(length > 0);
+    frame_iter_t it = { .p = out, .left = (size_t)length };
+    frame_view_t frame;
+    bool found = false;
+
+    while (frame_iter_next(&it, &frame)) {
+        if (frame.type != type || frame.stream_id != stream_id) { continue; }
+
+        const size_t offset = type == NGHTTP2_GOAWAY ? 4 : 0;
+        assert_true(frame.length >= offset + 4);
+        const uint8_t *p = frame.payload + offset;
+        const uint32_t actual = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                                ((uint32_t)p[2] << 8) | p[3];
+        assert_int_equal(actual, code);
+        found = true;
+    }
+
+    assert_true(found);
+}
+
+/* Every chunk width splits the preface, frame headers and small control
+ * payloads differently. The trailing PING verifies that framing resumes. */
+static void test_control_frames_fragmented(void **state)
+{
+    (void)state;
+    uint8_t wire[H2_PREFACE_LEN + 9 + 14 + 13 + 17] = {0};
+    memcpy(wire, H2_PREFACE, H2_PREFACE_LEN);
+    size_t at = H2_PREFACE_LEN;
+    at += build_empty_settings(wire + at, 0);
+    write_frame_header(wire + at, 5, NGHTTP2_PRIORITY, 0, 1);
+    wire[at + 12] = 2;
+    at += 14;
+    write_frame_header(wire + at, 4, NGHTTP2_WINDOW_UPDATE, 0, 0);
+    wire[at + 12] = 1;
+    at += 13;
+    write_frame_header(wire + at, 8, NGHTTP2_PING, 0, 0);
+    memcpy(wire + at + 9, "12345678", 8);
+
+    for (size_t chunk = 1; chunk <= sizeof(wire); chunk++) {
+        http2_session_t *session = http2_session_new(NULL, NULL, NULL);
+        assert_non_null(session);
+        assert_int_equal(feed_in_chunks(session, wire, sizeof(wire), chunk), 0);
+        assert_control_reply(session, NGHTTP2_PING, 0, UINT32_C(0x31323334));
+        http2_session_free(session);
+    }
+}
+
+static void test_invalid_priority_fragmented(void **state)
+{
+    (void)state;
+
+    for (uint32_t stream_id = 0; stream_id <= 1; stream_id++) {
+        for (size_t chunk = 1; chunk <= 14; chunk++) {
+            http2_session_t *session = http2_session_new(NULL, NULL, NULL);
+            uint8_t hello[H2_PREFACE_LEN + 9];
+            memcpy(hello, H2_PREFACE, H2_PREFACE_LEN);
+            (void)build_empty_settings(hello + H2_PREFACE_LEN, 0);
+            assert_int_equal(feed_in_chunks(session, hello, sizeof(hello), chunk), 0);
+            uint8_t frame[14] = {0};
+            write_frame_header(frame, 5, NGHTTP2_PRIORITY, 0, stream_id);
+            frame[9] = 0x80;
+            frame[12] = (uint8_t)stream_id;
+            assert_true(feed_in_chunks(session, frame, sizeof(frame), chunk) < 0);
+            assert_control_reply(session, NGHTTP2_GOAWAY, 0, NGHTTP2_PROTOCOL_ERROR);
+            http2_session_free(session);
+        }
+    }
+}
+
+static void test_window_overflow_fragmented(void **state)
+{
+    (void)state;
+
+    for (size_t chunk = 1; chunk <= 13; chunk++) {
+        dispatch_flag_t disp = {0};
+        http2_session_t *server = http2_session_new(NULL, set_dispatch_flag, &disp);
+        wire_ring_t wire = {0};
+        client_ctx_t ctx = { .wire = &wire, .cap = NULL };
+        nghttp2_session *client = make_client_session(&ctx);
+        const int32_t sid = bootstrap_request(server, client, &wire);
+        uint8_t frame[13] = {0};
+        write_frame_header(frame, 4, NGHTTP2_WINDOW_UPDATE, 0, (uint32_t)sid);
+        memset(frame + 9, 0xff, 4);
+        frame[9] = 0x7f;
+        assert_int_equal(feed_in_chunks(server, frame, sizeof(frame), chunk), 0);
+        assert_control_reply(server, NGHTTP2_RST_STREAM, (uint32_t)sid, NGHTTP2_FLOW_CONTROL_ERROR);
+        assert_true(http2_session_want_read(server));
+        nghttp2_session_del(client);
+        http2_session_free(server);
+    }
+}
+
+static void test_local_reset_keeps_connection(void **state)
+{
+    (void)state;
+    dispatch_flag_t disp = {0};
+    http2_session_t *server = http2_session_new(NULL, set_dispatch_flag, &disp);
+    wire_ring_t wire = {0};
+    client_ctx_t ctx = { .wire = &wire, .cap = NULL };
+    nghttp2_session *client = make_client_session(&ctx);
+    const int32_t sid = bootstrap_request(server, client, &wire);
+    drain_into_client(server, client);
+    assert_int_equal(http2_session_submit_rst_stream(server, (uint32_t)sid, NGHTTP2_REFUSED_STREAM), 0);
+    assert_control_reply(server, NGHTTP2_RST_STREAM, (uint32_t)sid, NGHTTP2_REFUSED_STREAM);
+
+    for (unsigned i = 0; i < 110; ++i) {
+        const int32_t reset_sid = bootstrap_request(server, client, &wire);
+        assert_int_equal(http2_session_submit_rst_stream(server, (uint32_t)reset_sid,
+                                                       NGHTTP2_REFUSED_STREAM), 0);
+        drain_into_client(server, client);
+    }
+
+    uint8_t late_data[13] = {0};
+    write_frame_header(late_data, 4, NGHTTP2_DATA, 0, (uint32_t)sid);
+    assert_int_equal(feed_in_chunks(server, late_data, sizeof(late_data), 1), 0);
+    const int32_t next = bootstrap_request(server, client, &wire);
+    assert_true(next > sid);
+    assert_int_equal(disp.stream_id, next);
+    assert_true(http2_session_want_read(server));
+    nghttp2_session_del(client);
+    http2_session_free(server);
+}
+
+static void test_closed_stream_data_fragmented(void **state)
+{
+    (void)state;
+
+    for (size_t chunk = 1; chunk <= 13; chunk++) {
+        dispatch_flag_t disp = {0};
+        http2_session_t *server = http2_session_new(NULL, set_dispatch_flag, &disp);
+        wire_ring_t wire = {0};
+        client_ctx_t ctx = { .wire = &wire, .cap = NULL };
+        nghttp2_session *client = make_client_session(&ctx);
+        const int32_t sid = bootstrap_request(server, client, &wire);
+        assert_int_equal(nghttp2_submit_rst_stream(client, 0, sid, NGHTTP2_CANCEL), 0);
+        assert_int_equal(nghttp2_session_send(client), 0);
+        push_to_server(server, &wire);
+        uint8_t frame[13] = {0};
+        write_frame_header(frame, 4, NGHTTP2_DATA, NGHTTP2_FLAG_END_STREAM, (uint32_t)sid);
+        assert_true(feed_in_chunks(server, frame, sizeof(frame), chunk) < 0);
+        assert_control_reply(server, NGHTTP2_GOAWAY, 0, NGHTTP2_STREAM_CLOSED);
+        nghttp2_session_del(client);
+        http2_session_free(server);
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Suite harness
  * ------------------------------------------------------------------------- */
@@ -1594,6 +1763,11 @@ int main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_session_lifecycle),
+        cmocka_unit_test(test_control_frames_fragmented),
+        cmocka_unit_test(test_invalid_priority_fragmented),
+        cmocka_unit_test(test_window_overflow_fragmented),
+        cmocka_unit_test(test_closed_stream_data_fragmented),
+        cmocka_unit_test(test_local_reset_keeps_connection),
         cmocka_unit_test(test_settings_exchange),
         cmocka_unit_test(test_drain_resumes_across_calls),
         cmocka_unit_test(test_settings_flood_rejected),

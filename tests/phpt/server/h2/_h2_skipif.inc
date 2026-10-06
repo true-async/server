@@ -81,6 +81,47 @@ function h2_dev_null(): string {
     return PHP_OS_FAMILY === 'Windows' ? 'nul' : '/dev/null';
 }
 
+/* The curl that h2_skipif() checked. On Windows proc_open() with an argument
+ * array calls CreateProcess, which searches System32 before PATH, so it would
+ * start the System32 curl (no nghttp2) while cmd.exe found the one first on
+ * PATH; `where` follows PATH as cmd.exe does. */
+function h2_curl_bin(): string {
+    static $bin = null;
+    if ($bin === null) {
+        $bin = 'curl';
+        if (PHP_OS_FAMILY === 'Windows') {
+            $first = strtok((string) shell_exec('where curl 2>nul'), "\r\n");
+            if ($first !== false && $first !== '') {
+                $bin = $first;
+            }
+        }
+    }
+
+    return $bin;
+}
+
+/* Runs curl with $args and returns [exit code, stdout]; stderr is discarded,
+ * or appended to stdout with $merge_stderr. The argument array bypasses the
+ * shell on every platform: cmd.exe has no /dev/null and no single quotes,
+ * Windows escapeshellarg() turns '"' into a space (an ETag loses its quotes),
+ * and shell_exec() there reads in text mode, which turns CRLF into LF. */
+function h2_curl(array $args, bool $merge_stderr = false): array {
+    $spec = [
+        0 => ['file', h2_dev_null(), 'r'],
+        1 => ['pipe', 'w'],
+        2 => $merge_stderr ? ['redirect', 1] : ['file', h2_dev_null(), 'w'],
+    ];
+    $proc = proc_open(array_merge([h2_curl_bin()], $args), $spec, $pipes);
+    if (!is_resource($proc)) {
+        return [-1, ''];
+    }
+
+    $out = (string) stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+
+    return [proc_close($proc), $out];
+}
+
 /* Self-signed cert+key for tests that need TLS. Mirrors h3_gen_cert.
  * The prebuilt Windows OpenSSL bundles point OPENSSLDIR at a
  * "C:\Program Files\Common Files\SSL" path that's typically absent;

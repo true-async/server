@@ -20,6 +20,7 @@ use function Async\spawn;
 use function Async\await;
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/../h2/_h2_skipif.inc';
 
 function grpc_deframe_first(string $buf): string {
     $len = unpack('N', substr($buf, 1, 4))[1];
@@ -43,13 +44,10 @@ function grpc_call(int $port, array $headers): string {
     $bodyfile = tempnam(sys_get_temp_dir(), 'grpcreq');
     $outfile  = tempnam(sys_get_temp_dir(), 'grpcout');
     file_put_contents($bodyfile, $frame);
-    $h = '';
-    foreach ($headers as $hv) { $h .= '-H ' . escapeshellarg($hv) . ' '; }
-    $cmd = sprintf(
-        'curl --http2-prior-knowledge -s --max-time 3 %s --data-binary @%s -o %s http://127.0.0.1:%d/svc/M 2>/dev/null',
-        $h, escapeshellarg($bodyfile), escapeshellarg($outfile), $port
-    );
-    shell_exec($cmd);
+    $args = ['--http2-prior-knowledge', '-s', '--max-time', '3'];
+    foreach ($headers as $hv) { array_push($args, '-H', $hv); }
+    array_push($args, '--data-binary', "@$bodyfile", '-o', $outfile, "http://127.0.0.1:$port/svc/M");
+    h2_curl($args);
     $resp = file_get_contents($outfile);
     @unlink($bodyfile); @unlink($outfile);
     return grpc_deframe_first($resp);

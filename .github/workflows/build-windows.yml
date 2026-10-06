@@ -104,6 +104,24 @@ jobs:
           }
           C:\vcpkg\vcpkg.exe install libuv:x64-windows nghttp2:x64-windows
 
+      # The runner's curl (System32 and Git's) has no nghttp2, and the HTTP/2
+      # tests skip without it; the curl.se build links it. h2spec feeds h2/009.
+      # h2load has no Windows build (#407).
+      - name: Setup curl with HTTP/2 and h2spec
+        shell: powershell
+        run: |
+          $tools = "C:\h2-tools"
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          Invoke-WebRequest -Uri "https://curl.se/windows/latest.cgi?p=win64-mingw.zip" -OutFile "$tools\curl.zip"
+          Expand-Archive -Path "$tools\curl.zip" -DestinationPath $tools
+          $curlBin = (Get-ChildItem -Directory "$tools\curl-*").FullName + "\bin"
+          & "$curlBin\curl.exe" --version
+          if (-not ((& "$curlBin\curl.exe" --version) -match "nghttp2")) { throw "curl has no nghttp2" }
+          $curlBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Invoke-WebRequest -Uri "https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_windows_amd64.zip" -OutFile "$tools\h2spec.zip"
+          Expand-Archive -Path "$tools\h2spec.zip" -DestinationPath "$tools\h2spec"
+          "H2SPEC=$tools\h2spec\h2spec.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build PHP + http_server
         run: .github/scripts/windows/build.bat
 

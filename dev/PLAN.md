@@ -136,10 +136,15 @@ Notes: dev/plans/S3.md
         `h1/038` made order-independent, `h1/055` skipped with a measured
         reason (`dev/plans/S3.md`). `h3/079` and `080`, added after S3.5, lost
         the false SO_REUSEPORT skip here.
-- [ ] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
+- [~] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
       tier: T1 · role: —
+      handoff: PR #408, conformance fix #409. Local Windows h2spec: 146 pass,
+        0 fail with nghttp2 1.63.0, 1.70.0 and development 1.70.90; before the
+        fix, 1.70.0 gave 141 pass, 5 fail. C session tests: 29 of 29 with
+        nghttp2 1.59.0 and 1.70.0. Windows H2 phpt excluding subprocess gate:
+        53 pass, 0 fail, 4 dependency skips. CI confirmation pending.
 - [ ] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
         OpenSSL >= 3.5 on the runner)
       done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
@@ -415,6 +420,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     as SUM rows, counted on the socket (plaintext as written, TLS as
     ciphertext, HTTP/3 datagram payload). Edmond confirms the definition when
     this is picked up (Sage, item 24).
+40. `core/022` failed once on macOS debug (PR 408, run 36978332597, a CI-only
+    change): `start()` threw `Async\ThreadTransferException: boot failed!`
+    instead of returning false after both workers' bootloaders threw. The
+    default branch passed with the same php-src and php-async the day before.
+    Reproduce under `-j` before any code.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

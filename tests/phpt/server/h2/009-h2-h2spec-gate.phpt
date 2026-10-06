@@ -42,6 +42,7 @@ if ($h2spec === '' && is_executable($home = (string)getenv('HOME') . '/.local/bi
 }
 
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_h2_skipif.inc';
 
 $port = tas_free_port();
 // caller chain via posix or fall back to reading /proc/self/exe.
@@ -49,8 +50,8 @@ $php = PHP_BINARY;
 
 // PHP_BINARY under run-tests.php may point at phpdbg — fall back to
 // a real `php` on PATH so the spawned server actually starts.
-if (!preg_match('~/php(\d+(\.\d+)?)?$~', $php) || str_contains($php, 'phpdbg')) {
-    $alt = trim((string)shell_exec('command -v php 2>/dev/null'));
+if (!preg_match('~[/\\\\]php(\d+(\.\d+)?)?(\.exe)?$~i', $php) || str_contains($php, 'phpdbg')) {
+    $alt = PHP_OS_FAMILY === 'Windows' ? '' : trim((string)shell_exec('command -v php 2>/dev/null'));
     if ($alt !== '' && is_executable($alt)) {
         $php = $alt;
     }
@@ -58,18 +59,21 @@ if (!preg_match('~/php(\d+(\.\d+)?)?$~', $php) || str_contains($php, 'phpdbg')) 
 
 // run-tests.php copies the FILE block to a temp dir, so __DIR__ won't
 // resolve back to the project. Honour HTTP_SERVER_ROOT env var; otherwise
-// fall back to TEST_PHP_SRCDIR (set by run-tests.php) and getcwd(). The
-// matching candidate must look like a project tree (Makefile +
-// tests/bench/h2spec_server.php) so we don't accidentally pick a
-// stale sibling checkout that would link an ABI-incompatible .so.
+// fall back to TEST_PHP_SRCDIR (set by run-tests.php), getcwd() and the tree
+// this file sits in. The matching candidate must look like a project tree
+// (Makefile + tests/bench/h2spec_server.php) so we don't accidentally pick a
+// stale sibling checkout that would link an ABI-incompatible .so. A Windows
+// build has no Makefile and no modules/: the extension is linked into php.exe.
 $root = (string)getenv('HTTP_SERVER_ROOT');
 if ($root === '' || !is_file("$root/Makefile")) {
+    $root = '';
     $candidates = array_filter([
         getenv('TEST_PHP_SRCDIR') ?: null,
         getcwd() ?: null,
+        dirname(__DIR__, 4),
     ]);
     foreach ($candidates as $cand) {
-        if (is_file("$cand/Makefile")
+        if ((is_file("$cand/Makefile") || PHP_OS_FAMILY === 'Windows')
             && is_file("$cand/tests/bench/h2spec_server.php")) {
             $root = $cand;
             break;
@@ -78,24 +82,21 @@ if ($root === '' || !is_file("$root/Makefile")) {
 }
 $ext_dir = "$root/modules";
 $srv     = "$root/tests/bench/h2spec_server.php";
+$shared  = PHP_OS_FAMILY !== 'Windows';
 
-if (!is_file($srv) || !is_dir($ext_dir)) {
+if (!is_file($srv) || ($shared && !is_dir($ext_dir))) {
     echo "SKIP: project layout not found (set HTTP_SERVER_ROOT=/path/to/repo)\n";
     exit(0);
 }
 
 // Fork a fresh PHP process to host the server.
-$cmd = sprintf(
-    '%s -n -d extension_dir=%s -d extension=true_async_server %s %d',
-    escapeshellarg($php),
-    escapeshellarg($ext_dir),
-    escapeshellarg($srv),
-    $port
-);
+$cmd = $shared
+    ? [$php, '-n', '-d', "extension_dir=$ext_dir", '-d', 'extension=true_async_server', $srv, (string)$port]
+    : [$php, '-n', $srv, (string)$port];
 $descriptors = [
     0 => ['pipe', 'r'],
-    1 => ['file', '/dev/null', 'w'],
-    2 => ['file', '/tmp/h2spec_srv_phpt.log', 'w'],
+    1 => ['file', h2_dev_null(), 'w'],
+    2 => ['file', sys_get_temp_dir() . '/h2spec_srv_phpt.log', 'w'],
 ];
 /* Mask inherited fds > 2 so the spawned bench server doesn't keep
  * run-tests.php's stdout/stderr capture pipe alive. PHP's proc_open
@@ -201,18 +202,24 @@ $out = (string)shell_exec($h2cmd);
 
 $kill();
 
-$pass   = substr_count($out, '✔');
-$fail   = substr_count($out, '×');
-$errors = preg_match_all('/^Error:/m', $out);
+require_once __DIR__ . '/_h2spec_counts.inc';
+[$pass, $fail, $errors] = h2spec_counts($out);
 
 echo "pass=$pass\n";
 echo "fail=$fail\n";
 echo "errors=$errors\n";
 
-$ok_pass = $pass >= MIN_PASS;
+$ok_pass = $pass >= MIN_PASS && $errors === 0;
 $ok_fail = $fail <= MAX_FAIL;
 echo "pass_gate=" . ($ok_pass ? 'ok' : "REGRESSION (need >=" . MIN_PASS . ")") . "\n";
 echo "fail_gate=" . ($ok_fail ? 'ok' : "REGRESSION (need <=" . MAX_FAIL . ")") . "\n";
+
+/* h2spec closes its report with a "Failures:" section naming each failed case
+ * with what it expected and what it read; a broken gate prints it. */
+if (!$ok_pass || !$ok_fail) {
+    $at = strpos($out, 'Failures:');
+    echo $at === false ? $out : substr($out, $at), "\n";
+}
 --EXPECTF--
 pass=%d
 fail=%d

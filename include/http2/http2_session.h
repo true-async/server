@@ -83,6 +83,10 @@ typedef void (*http2_request_ready_cb_t)(struct http_request_t *request,
 #define HTTP2_OPT_MAX_SETTINGS      32u
 #define HTTP2_OPT_MAX_OUTBOUND_ACK  64u
 
+#define HTTP2_FRAME_HEADER_BYTES     9u
+#define HTTP2_PRIORITY_PAYLOAD_BYTES 5u
+#define HTTP2_WINDOW_PAYLOAD_BYTES   4u
+
 /* Per-stream request-body hard cap. Crossing this is
  * a stream-level error: RST_STREAM(ENHANCE_YOUR_CALM) + HttpException
  * in the handler. Sized at 10 MiB to match the HTTP/1 default
@@ -139,6 +143,19 @@ struct http2_session_t {
      * completion's re-drive would put the initial SETTINGS on the wire behind
      * the GOAWAY that just told the peer the connection is dead. */
     bool           emit_stopped;
+
+    /* Only small control frames wait for their complete payload. Other
+     * payloads pass straight to nghttp2, including fragmented DATA and HPACK. */
+    uint8_t        recv_frame[HTTP2_FRAME_HEADER_BYTES + HTTP2_PRIORITY_PAYLOAD_BYTES];
+    uint32_t       recv_payload_left;
+    uint8_t        recv_frame_used;
+    uint8_t        recv_control_bytes;
+    uint8_t        recv_preface_left;
+    bool           recv_continuation;
+    /* Recently reset streams may still have DATA in flight from the peer. */
+    uint32_t      *local_resets;
+    unsigned       local_reset_cursor;
+    uint32_t       local_reset_floor;
 
     /* Set by http2_session_emit for the duration of nghttp2_session_send;
      * NULL otherwise. */
