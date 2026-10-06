@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 25507,
-      "hit": 21562
+      "total": 25596,
+      "hit": 21655
     },
     "functions": {
-      "total": 1817,
-      "hit": 1679
+      "total": 1822,
+      "hit": 1684
     }
   },
   "files": {
@@ -422,12 +422,12 @@
     },
     "src/http2/http2_session.c": {
       "lines": {
-        "total": 837,
-        "hit": 757
+        "total": 926,
+        "hit": 847
       },
       "functions": {
-        "total": 59,
-        "hit": 57
+        "total": 64,
+        "hit": 62
       }
     },
     "src/http2/http2_static_response.c": {
@@ -503,7 +503,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 517
+        "hit": 520
       },
       "functions": {
         "total": 46,
