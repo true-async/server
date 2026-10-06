@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A full reactor mailbox no longer silently loses pooled HTTP/3 responses (#351).** The sender coroutine waits for capacity while other PHP tasks keep running. The worker records the transport's final result rather than counting an enqueue as a delivered response. A failed response with no confirmed HTTP status uses `responses_undelivered_total` and `error.type=response_undelivered`. Deterministic tests cover pressure, delayed final ACK, render/submit failure, timeout, concurrent writers and bailout during a linked wait.
+- **A full reactor mailbox no longer silently loses pooled HTTP/3 responses (#351).** The sender coroutine waits for capacity while other PHP tasks keep running. The worker records the transport's final result rather than counting an enqueue as a delivered response. A failed response with no confirmed HTTP status uses `responses_undelivered_total` and `error.type=response_undelivered`. Deterministic tests cover pressure, delayed final ACK, render/submit failure, timeout, concurrent writers and bailout during a linked wait. Cancelling the pool parent now joins worker tasks before freeing shared transport; the previous order reproduced an AddressSanitizer use-after-free in both direct cancellation and cancellation during reload.
 
 - **HTTP/2 conformance failed with nghttp2 1.70.0 (#409).** Invalid PRIORITY and closed-stream DATA now receive connection errors, and a stream WINDOW_UPDATE overflow resets that stream. h2spec passes 146 cases with 0 failures on nghttp2 1.63.0, 1.70.0 and development 1.70.90; before the fix, 1.70.0 passed 141 with 5 failures. The gate counts each failed case once and rejects incomplete reports.
 

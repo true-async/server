@@ -88,6 +88,18 @@ After the normal handler-scope drain, endpoint closure cancels remaining
 deliveries, consumes completions and waits for local subscriptions to leave.
 Gates are unregistered before logger/endpoint destruction.
 
+The parent closes reload admission, sends STOP and joins the worker tasks while
+its event loop continues to run. Cancelling the original wait is not worker
+completion. The join uses the public `Async\protect` boundary and retains the
+completion events until `pending == 0` and the current reload has released its
+reservation. A partial initial submission stops and joins the accepted tasks.
+
+The worker handler catches recoverable start bailout, then completes the clone
+destructor before the task future can resolve. An arbitrary fatal/OOM inside
+the destructor cannot be reported as successful quiescence; progress through
+that failure is not guaranteed. Shared transport must not be freed on a false
+completion acknowledgment.
+
 Cold destructor cleanup does not suspend a PHP coroutine. It detaches stack
 subscriptions, discards still worker-owned wires, then acknowledges both control
 and data fences. Detached cleanup cannot touch retired gates. Reactor-owned H3
@@ -105,4 +117,9 @@ TTL and its potentially lost release queue are gone.
   closure before sender completion preserves the access identity.
 - h3/086: bailout after waiter registration retracts subscriptions and owned
   wire; the next request still works.
+- h3/087–088: repeated parent cancellation and cancellation during reload join
+  workers before transport teardown; both reproduced an ASAN use-after-free
+  before the parent join fix.
+- core/087–088: partial initial submit and recoverable pre-start worker bailout.
+- h3/089: bailout from start after inbox publication still completes cleanup.
 - Existing overflow, sendFile, reload, stop and bailout tests cover integration.

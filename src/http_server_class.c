@@ -18,6 +18,7 @@
 #include "main/php_network.h"           /* php_socket_t, SOCK_ERR, closesocket, php_socket_errno */
 #include "Zend/zend_async_API.h"
 #include "core/bailout_guard.h"
+#include "fiu-local.h"
 #include "Zend/zend_hrtime.h"
 #include "Zend/zend_enum.h"
 #include "php_http_server.h"
@@ -2375,51 +2376,137 @@ typedef struct {
     int                          failed;      /* workers whose submission was rejected */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
     zend_async_event_callback_t  cb;          /* embedded — recovered via offsetof */
+    zend_function              *protect;
+    zval                        drain_closure;
+    bool                        bailout;
 } pool_await_state_t;
+
+static void pool_notify_quiesced(http_server_object *server, pool_await_state_t *st)
+{
+    if (st->pending == 0 && !server->reload_in_progress && st->all_done != NULL) {
+        ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
+    }
+}
+
+/* Called directly for an already protected coroutine, otherwise by Async\protect.
+ * The parent owns all_done throughout the join; cancellation retracts only its
+ * subscription. Never retire shared transport from a cancelled wait alone. */
+static void http_server_pool_drain(http_server_object *server)
+{
+    pool_await_state_t *const st = server->pool_await_state;
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    while (st->pending != 0 || server->reload_in_progress) {
+        http_bailout_state_t state;
+        http_bailout_state_save(&state);
+        zend_try {
+            ZEND_ASYNC_WAKER_NEW(co);
+            zend_async_resume_when(co, st->all_done, false,
+                                   zend_async_waker_callback_resolve, NULL);
+            if (st->pending != 0 || server->reload_in_progress) {
+                ZEND_ASYNC_SUSPEND();
+            }
+        } zend_catch {
+            http_bailout_state_restore(&state);
+            st->bailout = true;
+        } zend_end_try();
+        zend_async_waker_clean(co);
+        /* Protection defers ordinary cancellation. A forced scheduler unwind
+         * can still wake us: preserve the join condition, not the wake reason. */
+        if (EG(exception) != NULL) zend_clear_exception();
+    }
+}
+
+static ZEND_NAMED_FUNCTION(http_server_pool_drain_closure)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    http_server_pool_drain(Z_HTTP_SERVER_P(ZEND_THIS));
+    RETURN_NULL();
+}
+
+static bool http_server_pool_prepare_drain(pool_await_state_t *st, zval *this_zv)
+{
+    st->protect = zend_hash_str_find_ptr(EG(function_table),
+                                       ZEND_STRL("async\\protect"));
+    if (st->protect == NULL || ZEND_ASYNC_CURRENT_COROUTINE == NULL
+        || ZEND_ASYNC_WAKER_NEW(ZEND_ASYNC_CURRENT_COROUTINE) == NULL) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+                             "Cannot prepare worker pool shutdown", 0);
+        return false;
+    }
+
+    zend_internal_function fn = {0};
+    fn.type = ZEND_INTERNAL_FUNCTION;
+    fn.function_name = zend_string_init(ZEND_STRL("http_server_pool_drain"), 0);
+    fn.scope = http_server_ce;
+    fn.handler = http_server_pool_drain_closure;
+    zend_create_closure(&st->drain_closure, (zend_function *)&fn,
+                        http_server_ce, http_server_ce, Z_OBJ_P(this_zv));
+    zend_string_release(fn.function_name);
+    return EG(exception) == NULL;
+}
 
 static void pool_worker_handler(zend_async_event_t *event, void *vctx)
 {
     (void)event;
     pool_worker_ctx_t *wctx = (pool_worker_ctx_t *)vctx;
 
-    zval server_zv;
-    ZVAL_UNDEF(&server_zv);
-    ZEND_ASYNC_THREAD_LOAD_ZVAL_TOPLEVEL(&server_zv, &wctx->server_transit);
+    volatile zval server_slot;
+    zval *const server_zv = (zval *)&server_slot;
+    volatile bool bailout = false;
+    http_bailout_state_t state;
+    http_bailout_state_save(&state);
+    ZVAL_UNDEF(server_zv);
+    zend_try {
+        ZEND_ASYNC_THREAD_LOAD_ZVAL_TOPLEVEL(server_zv, &wctx->server_transit);
 
-    if (EXPECTED(Z_TYPE(server_zv) == IS_OBJECT)) {
-        zend_call_method_with_0_params(Z_OBJ(server_zv), NULL, NULL, "start", NULL);
-        /* Exception in worker is captured by the future state via the
-         * ext/async dispatcher — clear locally so the handler returns
-         * cleanly. Log loudly first: a silently-cleared worker exception
-         * means one whole thread's worth of accept capacity is gone for
-         * the rest of the process lifetime, and we'd otherwise have no
-         * visibility into the loss. */
-        if (UNEXPECTED(EG(exception))) {
-            zend_object  *ex      = EG(exception);
-            const char   *cls     = ZSTR_VAL(ex->ce->name);
-            zval         *msg_zv  = zend_read_property(ex->ce, ex,
-                                        "message", sizeof("message") - 1,
-                                        /*silent=*/1, NULL);
-            const char   *msg     = (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING)
-                                        ? Z_STRVAL_P(msg_zv) : "";
-            fprintf(stderr,
-                "[true-async-server] worker thread died: %s: %s\n",
-                cls, msg);
-            fflush(stderr);
-            zend_clear_exception();
+        if (EXPECTED(Z_TYPE_P(server_zv) == IS_OBJECT)) {
+            fiu_do_on("server/pool/worker_start_bailout", zend_bailout());
+            zend_call_method_with_0_params(Z_OBJ_P(server_zv), NULL, NULL, "start", NULL);
+            /* Exception in worker is captured by the future state via the
+             * ext/async dispatcher — clear locally so the handler returns
+             * cleanly. Log loudly first: a silently-cleared worker exception
+             * means one whole thread's worth of accept capacity is gone for
+             * the rest of the process lifetime, and we'd otherwise have no
+             * visibility into the loss. */
+            if (UNEXPECTED(EG(exception))) {
+                zend_object  *ex      = EG(exception);
+                const char   *cls     = ZSTR_VAL(ex->ce->name);
+                zval         *msg_zv  = zend_read_property(ex->ce, ex,
+                                            "message", sizeof("message") - 1,
+                                            /*silent=*/1, NULL);
+                const char   *msg     = (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING)
+                                            ? Z_STRVAL_P(msg_zv) : "";
+                fprintf(stderr,
+                    "[true-async-server] worker thread died: %s: %s\n",
+                    cls, msg);
+                fflush(stderr);
+                zend_clear_exception();
+            } else {
+                /* normal on reload/stop; while running points at a swallowed bailout */
+                fprintf(stderr,
+                    "[true-async-server] worker exited\n");
+                fflush(stderr);
+            }
         } else {
-            /* normal on reload/stop; while running points at a swallowed bailout */
             fprintf(stderr,
-                "[true-async-server] worker exited\n");
+                "[true-async-server] worker thread: server transfer failed\n");
             fflush(stderr);
         }
-    } else {
-        fprintf(stderr,
-            "[true-async-server] worker thread: server transfer failed\n");
-        fflush(stderr);
-    }
 
-    zval_ptr_dtor(&server_zv);
+    } zend_catch {
+        http_bailout_state_restore(&state);
+        bailout = true;
+    } zend_end_try();
+
+    /* Complete the clone destructor before the dispatcher can resolve this
+     * task. Do not catch-and-return from a bailout inside the destructor: that
+     * would falsely acknowledge quiescence with live gates/producers. */
+    zval_ptr_dtor(server_zv);
+    if (bailout) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+                             "Worker server start bailed out", 0);
+    }
     /* ctx is part of the parent's pool_worker_ctx array; freed once
      * by http_server_free when the parent server destructs. */
 }
@@ -2464,7 +2551,10 @@ static void pool_worker_done_cb(zend_async_event_t *event,
         }
     }
 
-    if (--st->pending == 0 && st->all_done != NULL) {
+    --st->pending;
+    /* A reload reservation keeps pending positive until its cleanup. It sends
+     * the final notification after releasing its replacement shells. */
+    if (st->pending == 0 && st->all_done != NULL) {
         ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
     }
 }
@@ -3543,7 +3633,8 @@ static int http_server_start_pool(http_server_object *server,
     }
 
     pool_await_state_t *st = ecalloc(1, sizeof(*st));
-    st->pending = workers;
+    st->pending = 0;
+    ZVAL_UNDEF(&st->drain_closure);
     st->all_done = create_server_wait_event();
     st->cb.callback = pool_worker_done_cb;
     st->cb.dispose  = pool_worker_cb_dispose;
@@ -3555,9 +3646,16 @@ static int http_server_start_pool(http_server_object *server,
     server->pool_await_state = st;
 
     int rc = FAILURE;
+    zend_object *shutdown_exception = NULL;
+    bool shutdown_was_graceful = false;
+    bool submitted_all = true;
+    if (!http_server_pool_prepare_drain(st, this_zv)) goto cleanup;
+    st->pending = workers;
     for (int i = 0; i < workers; i++) {
-        zend_async_event_t *worker_evt =
-            pool->submit_internal(pool, pool_worker_handler, &ctxs[i]);
+        zend_async_event_t *worker_evt = NULL;
+        if (i == 0 || !fiu_fail("server/pool/partial_submit")) {
+            worker_evt = pool->submit_internal(pool, pool_worker_handler, &ctxs[i]);
+        }
 
         if (UNEXPECTED(worker_evt == NULL)) {
             /* submit_internal failed mid-loop. Already-submitted workers
@@ -3566,6 +3664,7 @@ static int http_server_start_pool(http_server_object *server,
              * workers' callbacks fire NOTIFY on a still-valid st, then
              * fall through to the normal suspend/await path. */
             st->pending -= (workers - i);
+            submitted_all = false;
             break;
         }
 
@@ -3585,46 +3684,65 @@ static int http_server_start_pool(http_server_object *server,
     /* Suspend until all submitted workers report done. Skip the suspend
      * entirely when nothing got submitted — there is no callback to
      * notify all_done, so awaiting on it would deadlock. */
-    if (st->pending > 0) {
-        zend_coroutine_t *coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
-
-        if (UNEXPECTED(ZEND_ASYNC_WAKER_NEW(coroutine) == NULL)) {
-            zend_throw_exception(http_server_runtime_exception_ce,
-                "Failed to create waker for pool parent", 0);
-            goto cleanup;
-        }
-
-        zend_async_resume_when(coroutine, st->all_done, true,
-                               zend_async_waker_callback_resolve, NULL);
-        ZEND_ASYNC_SUSPEND();
-        /* resume_when(..., true) handed all_done to the waker; waker_clean
-         * disposes it. NULL our pointer so the cleanup dispose below is a no-op
-         * — disposing again is a use-after-free (same as server->wait_event). */
-        st->all_done = NULL;
+    if (submitted_all && st->pending > 0) {
+        zend_coroutine_t *const coroutine = ZEND_ASYNC_CURRENT_COROUTINE;
+        http_bailout_state_t state;
+        http_bailout_state_save(&state);
+        zend_try {
+            zend_async_resume_when(coroutine, st->all_done, false,
+                                   zend_async_waker_callback_resolve, NULL);
+            ZEND_ASYNC_SUSPEND();
+        } zend_catch {
+            http_bailout_state_restore(&state);
+            st->bailout = true;
+        } zend_end_try();
         zend_async_waker_clean(coroutine);
+    }
 
-        if (EG(exception)) {
-            zend_clear_exception();
-        }
+    if (EG(exception) != NULL) {
+        shutdown_exception = EG(exception);
+        shutdown_was_graceful = ZEND_ASYNC_GRACEFUL_SHUTDOWN;
+        EG(exception) = NULL;
     }
 
     /* start() answers "did this server serve": a run where every worker was
      * rejected before it reached accept() is a failure, however cleanly the
      * parent's await resolved. */
-    rc = (st->pending == 0 && st->failed == 0) ? SUCCESS : FAILURE;
+    rc = (submitted_all && st->pending == 0 && st->failed == 0) ? SUCCESS : FAILURE;
 
     if (st->failed > 0) {
         http_logf_error(&server->log_state, "server.start.failed mode=pool workers=%d",
                         st->failed);
     }
 
-    /* Workers still serving: the await was cancelled, not resolved
-     * (Async\graceful_shutdown()). Nothing in the engine stops a BUSY worker —
-     * closing the task channel only reaches one that is back at recv, and ours
-     * is inside start() — so they would outlive us and wedge the process. */
+    /* Admission closes before any cleanup wait. An in-flight reload keeps its
+     * reservation until its own cleanup and cannot submit a replacement. */
+    server->stopping = true;
+    http_server_hot_reload_down(server);
     if (st->pending > 0) {
         http_logf_info(&server->log_state, "server.stop mode=pool reason=shutdown");
         pool_ctl_command(pool_ctl, POOL_CMD_STOP);
+    }
+
+    if (st->pending != 0 || server->reload_in_progress) {
+        if (ZEND_COROUTINE_IS_PROTECTED(ZEND_ASYNC_CURRENT_COROUTINE)) {
+            http_server_pool_drain(server);
+        } else {
+            zval result;
+            ZVAL_UNDEF(&result);
+            zend_call_known_function(st->protect, NULL, NULL, &result,
+                                     1, &st->drain_closure, NULL);
+            zval_ptr_dtor(&result);
+        }
+        if (EG(exception) != NULL) {
+            if (shutdown_exception == NULL) {
+                shutdown_exception = EG(exception);
+                shutdown_was_graceful = ZEND_ASYNC_GRACEFUL_SHUTDOWN;
+                EG(exception) = NULL;
+            } else {
+                zend_clear_exception();
+            }
+        }
     }
 
 cleanup:
@@ -3653,7 +3771,9 @@ cleanup:
     /* Retire the hot-reload orchestrators before the pool machinery goes. */
     http_server_hot_reload_down(server);
 
-    /* Workers have quiesced (the suspend returned). Tear down the transport
+    ZEND_ASSERT(st->pending == 0 && !server->reload_in_progress);
+
+    /* Worker task completions, not cancellation, prove quiescence. Tear down the transport
      * reactor pool: this releases the H3 listeners the gated reactors own,
      * frees the worker registry, and stops the reactor loops. */
     http_server_reactor_pool_down(server);
@@ -3669,11 +3789,12 @@ cleanup:
         st->all_done->dispose(st->all_done);
     }
 
+    const bool bailout = st->bailout;
+    zval_ptr_dtor(&st->drain_closure);
     efree(st);
     ZEND_THREAD_POOL_DELREF(pool);
 
-    /* Drop the parent's ref. Workers cancelled out from under us (above) still
-     * hold theirs and free the channel when the last of them is gone. */
+    /* Every worker task has completed; release the parent control reference. */
     server->pool_ctl = NULL;
     pool_ctl_release(pool_ctl);
 
@@ -3695,6 +3816,18 @@ cleanup:
         stopped->dispose(stopped);
     }
 
+    if (shutdown_exception != NULL) {
+        /* graceful_shutdown historically lets start() return after stopping.
+         * Keep that contract, but consume its cancellation only after join. */
+        if (shutdown_was_graceful
+            && instanceof_function(shutdown_exception->ce,
+                    ZEND_ASYNC_GET_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION))) {
+            OBJ_RELEASE(shutdown_exception);
+        } else {
+            zend_throw_exception_internal(shutdown_exception);
+        }
+    }
+    if (bailout) zend_bailout();
     return rc;
 }
 /* }}} */
@@ -3732,14 +3865,10 @@ static bool http_server_await_stop(http_server_object *server, bool *bailout)
     http_bailout_state_save(&bailout_state);
 
     zend_try {
+        if (server->is_worker_clone) {
+            fiu_do_on("server/pool/worker_wait_bailout", zend_bailout());
+        }
         ZEND_ASYNC_SUSPEND();
-        /* The waker owns the wait_event (resume_when took ownership) and
-         * waker_clean disposes it below — drop our pointer first so a late
-         * stop() on a coroutine torn down by cancellation (not by stop())
-         * does not notify a freed event. */
-        server->wait_event = NULL;
-        zend_async_waker_clean(coroutine);
-
         if (EG(exception)) {
             zend_clear_exception();
         }
@@ -3748,6 +3877,10 @@ static bool http_server_await_stop(http_server_object *server, bool *bailout)
         bailed = true;
     } zend_end_try();
 
+    /* Retire the owning subscription on normal and bailout exits alike. The
+     * clone destructor must never notify an event left in an abandoned waker. */
+    server->wait_event = NULL;
+    zend_async_waker_clean(coroutine);
     *bailout = bailed;
     return true;
 }
@@ -4910,6 +5043,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
             pefree(fresh, 1);
             http_logf_info(&server->log_state, "reload.failed stage=transfer");
             server->reload_in_progress = false;
+            pool_notify_quiesced(server, st);
             RETURN_THROWS();
         }
     }
@@ -4930,10 +5064,6 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
          * shells; a follow-up reload() builds new ones and heals the cohort. */
         st->pending -= workers;
 
-        if (st->pending == 0 && st->all_done != NULL) {
-            ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
-        }
-
         for (int i = 0; i < workers; i++) {
             http_server_release_worker_shell(&fresh[i].server_transit);
         }
@@ -4942,6 +5072,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         http_logf_info(&server->log_state, "reload.failed duration_ms=%lu",
                        (unsigned long)(ZEND_ASYNC_NOW() - t0));
         server->reload_in_progress = false;
+        pool_notify_quiesced(server, st);
         RETURN_THROWS();
     }
 
@@ -4951,10 +5082,6 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
     if (UNEXPECTED(server->stopping)) {
         st->pending -= workers;
 
-        if (st->pending == 0 && st->all_done != NULL) {
-            ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
-        }
-
         for (int i = 0; i < workers; i++) {
             http_server_release_worker_shell(&fresh[i].server_transit);
         }
@@ -4962,6 +5089,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         pefree(fresh, 1);
         http_logf_info(&server->log_state, "reload.aborted reason=stop");
         server->reload_in_progress = false;
+        pool_notify_quiesced(server, st);
         RETURN_FALSE;
     }
 
@@ -4995,10 +5123,6 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         submitted++;
     }
 
-    if (st->pending == 0 && st->all_done != NULL) {
-        ZEND_ASYNC_CALLBACKS_NOTIFY(st->all_done, NULL, NULL);
-    }
-
     /* The old cohort has exited: its consumed shells can be released now. The
      * fresh array takes their slot on the server (http_server_free releases
      * whichever array is current at destruction). */
@@ -5021,6 +5145,7 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
     http_logf_info(&server->log_state, "reload.done workers=%d/%d duration_ms=%lu",
                    submitted, workers, (unsigned long)(ZEND_ASYNC_NOW() - t0));
     server->reload_in_progress = false;
+    pool_notify_quiesced(server, st);
     RETURN_BOOL(submitted == workers);
 }
 /* }}} */
