@@ -108,12 +108,6 @@ bool http_response_header_allowed_h2h3(const char *name, size_t len,
 	abort();
 }
 
-void http_response_set_default_json_flags(zend_object *obj, uint32_t flags)
-{
-	(void) obj; (void) flags;
-	abort();
-}
-
 void http_response_set_head(zend_object *obj, bool is_head)
 {
 	(void) obj; (void) is_head;

@@ -21,7 +21,6 @@
 #include "core/bailout_guard.h"
 #include "http3_listener.h"                /* http3_listener_server_obj */
 #include "http3/http3_stream.h"            /* http3_stream_t */
-#include "log/trace_context.h"
 #include "http_connection.h"               /* http_handler_log_bailout */
 #include "http_send_file.h"                /* http_send_file_dispatch */
 #include "http_response_internal.h"        /* http_response_has/take_send_file */
@@ -623,10 +622,6 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
     s->dispatched = true;
     s->conn = c;
 
-    if (http_server_view(server)->telemetry_enabled) {
-        http_request_parse_trace_context(s->request);
-    }
-
     http_request_addref(s->request);
 
     zval *req_obj = http_request_create_from_parsed(s->request);
@@ -656,23 +651,9 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
         grpc_call_init_response(Z_OBJ(s->response_zv), grpc_mode);
     }
 
-    /* Attach compression state and the JSON default. Server pointer comes
-     * from the listener — same pattern that http3_handler_coroutine uses
-     * for the request-sample bookkeeping. */
-    {
-        http_server_object *srv =
-            (http_server_object *)http3_listener_server_obj(c->listener);
-        http_server_config_t *cfg = http_server_get_config(srv);
-
-        if (cfg != NULL) {
-#ifdef HAVE_HTTP_COMPRESSION
-            http_compression_attach(Z_OBJ(s->response_zv),
-                                    s->request, cfg);
-#endif
-            http_response_set_default_json_flags(
-                Z_OBJ(s->response_zv), cfg->json_encode_flags);
-        }
-    }
+    http_request_prepare_dispatch(s->request, Z_OBJ(s->response_zv),
+                                  http_server_get_config(server),
+                                  http_server_view(server)->telemetry_enabled);
 
     /* Static-handler dispatch. Same policy as the H1/H2
      * sites:

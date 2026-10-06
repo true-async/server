@@ -187,7 +187,7 @@ struct http_request_t {
     void       (*release)(struct http_request_t *req);
 
     /* W3C Trace Context. Populated by http_request_parse_trace_context
-     * at on_headers_complete iff server has telemetry enabled and the
+     * at headers-complete or dispatch iff server has telemetry enabled and the
      * request carried a valid traceparent. trace_id == 16 zero bytes
      * means "absent". traceparent_raw / tracestate_raw retain the raw
      * header strings for HttpRequest::getTraceparent etc. */

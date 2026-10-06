@@ -18,6 +18,17 @@
 
 #include "php.h"
 #include "http1/http_parser.h"   /* http_request_t layout + HTTP_HEADERS_INITIAL_SIZE */
+#include <stdlib.h>
+
+/* Parser fuzzing never prepares a PHP response. Fail if it reaches dispatch
+ * instead of silently satisfying the new shared helper's response hook. */
+__attribute__((weak)) void http_response_set_default_json_flags(zend_object *obj,
+                                                                 uint32_t flags)
+{
+    (void)obj;
+    (void)flags;
+    abort();
+}
 
 /* Extension class entries (normally populated at MINIT). */
 zend_class_entry *http_exception_ce __attribute__((weak)) = NULL;

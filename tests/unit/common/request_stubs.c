@@ -1,12 +1,12 @@
 /*
- * Stubs for the request-finalize tail of http_request.c
+ * Stubs for request finalization and response preparation
  *
  * The parser targets drive bytes through the parser and stop there: nothing in
- * them finalizes a request, so the access-log tail is never reached. These
- * exist to satisfy the linker without dragging in the log rings and the
- * response object. Reaching one means the test is exercising a path this
- * target does not build, and an answer invented here would make it pass
- * anyway — so they abort instead.
+ * them finalizes or dispatches a request, so the access-log tail and response
+ * preparation are never reached. These exist to satisfy the linker without
+ * dragging in the log rings and the response object. Reaching one means the
+ * test is exercising a path this target does not build, and an answer invented
+ * here would make it pass anyway — so they abort instead.
  */
 
 #include "php.h"
@@ -31,6 +31,12 @@ bool http_response_is_aborted(zend_object *obj)
 uint64_t http_response_get_sent_body_size(zend_object *obj)
 {
 	(void) obj;
+	abort();
+}
+
+void http_response_set_default_json_flags(zend_object *obj, uint32_t flags)
+{
+	(void) obj; (void) flags;
 	abort();
 }
 
