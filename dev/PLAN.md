@@ -210,6 +210,11 @@ Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
         header narrowed to stream handles, the double finish moved to S4.2
         with its run. Remark that `writev` of 0 buffers refuses without the
         flag: rejected, nothing is lost there and nothing is refused.
+      Critic 2026-10-09 on the final commits: nothing blocks the push; under
+        valgrind the test loses nothing and leaves no descriptor open. Taken:
+        the pipe cases and the slot case assert the exception, the CHANGELOG
+        lists every refusal and says the server still counts until S4.2,
+        item 41 corrected, item 42 added (asynctest runs in no CI).
       handoff: php-async ec5aa82 on `fix/refused-write-verdict`, php-src
         a2006e85336 on `asynctest/refused-write-verdict`, not pushed.
         `test_write_refused` 7 of 8 red on c95dcf7, 8 of 8 green, 3 runs;
@@ -516,10 +521,17 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `free_cb`, and a queued one that fails dispatch is only notified, so the
     request and the buffer leak; the Windows synchronous stream path returns a
     completed request with an exception and never calls `free_cb`, which
-    leaves `tls_drain` with its ciphertext slot held. Every refusal also runs
-    `free_cb` with `EG(exception)` set, so a completion that submits again or
-    destroys does it under a pending exception. No server path reaches the
-    first two today.
+    leaves `tls_drain` with its ciphertext slot held. The refusals of
+    `libuv_io_write` and the after-allocation refusals of `libuv_io_writev`
+    throw before `free_cb` runs, so a completion that submits again or
+    destroys does it under a pending exception; the early `writev` refusals
+    release first and throw after. `ZEND_ASYNC_IO_WRITE_EX` does not state
+    who owns the buffer when it returns NULL, and cannot until the first two
+    are fixed. No server path reaches the first two today.
+42. The asynctest SAPI runs in no CI job of php-src or php-async: S4.1's
+    `test_write_refused`, `listen_pause` and `write_resubmit` guard only a
+    local Linux run, and the Windows-only refusal branches (`!fits`,
+    `async_uv_buf_set`) have no test at all (Critic on S4.1, 2026-10-09).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
