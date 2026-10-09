@@ -166,6 +166,92 @@ Notes: dev/plans/S3.md
         decided in `dev/DECISIONS.md`; USAGE.md:688 states the measured behaviour
       tier: T2 · role: Critic
 
+## S4 — Bytes on the socket (#396, item 39)  [in progress]
+
+Goal: `getStats()` and `getTelemetry()` report the bytes that crossed client
+sockets on every transport, and the counters they rest on stop counting writes
+that never left.
+Done when: in phpt, `bytes_received_total` and `bytes_sent_total` equal the bytes
+a counting relay saw for plaintext HTTP/1 (small body, large body, pipelined,
+streamed, `sendFile()`, a drained 413), WebSocket, h2c, TLS and HTTP/3;
+`resetTelemetry()` clears both; the gaps below are named in #396.
+Tests: first
+Base: 19cfc24 (server), c95dcf7 (php-async), 829cde6d4b5 (php-src)
+
+Definition, confirmed by Edmond on 2026-10-09: received is what the server read
+from a client socket; sent is what the kernel accepted in a write that
+succeeded. TLS counts ciphertext, HTTP/3 datagram payload. Not counted: the log
+sink, test hooks, the ICMP error queue, CID steering between reactors.
+Critic 2026-10-09 on the design: a write the reactor refuses at submit reaches
+  `free_cb` with no failure flag and is counted (`libuv_reactor.c:4832`, 6522);
+  an awaited write whose coroutine was cancelled completes unseen; counting at
+  a dozen server sites misses future ones; `Δbytes_sent == Δciphertext_out` is
+  a tautology, so tests need an external oracle; the cap 503 goes out as
+  plaintext on a TLS listener. All taken.
+Sage 2026-10-09: count TCP in the reactor through a sink pointer on
+  `zend_async_io_t` (ABI 0.27; `alloc_cb` and `user_data` are the precedent,
+  six ABI bumps since 2026-06-07); the refused-submit flag is a defect of its
+  own and lands first; no reads of libuv private fields; the cap 503 and
+  HTTP/3 stay counted in the server. Final.
+Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
+  partial amount; reactor-mode HTTP/3 counts into the listener slice, which
+  `getStats()` sums and `resetTelemetry()` does not clear.
+
+- [x] S4.1 php-async: a refused submit sets `ZEND_ASYNC_IO_WRITE_FAILED` before
+        the dispose runs `free_cb` (the refusal branches of `libuv_io_write`
+        and `libuv_io_writev`)
+      done: an asynctest case is red on c95dcf7 and green after
+      tier: T1 · role: Critic
+      Critic 2026-10-09 on the diff: the double finish predates the diff and
+        no run confirmed it, so the step could not close on it; the two
+        `uv_write` error flags had no test; the header promised the flag on
+        file handles, which the file path never sets. Tests added (a
+        read-only pipe makes `uv_write` refuse at once; 65536 slots), the
+        header narrowed to stream handles, the double finish moved to S4.2
+        with its run. Remark that `writev` of 0 buffers refuses without the
+        flag: rejected, nothing is lost there and nothing is refused.
+      handoff: php-async ec5aa82 on `fix/refused-write-verdict`, php-src
+        a2006e85336 on `asynctest/refused-write-verdict`, not pushed.
+        `test_write_refused` 7 of 8 red on c95dcf7, 8 of 8 green, 3 runs;
+        dropping the two `uv_write` flags fails the two pipe cases. php-async
+        phpt 1215 passed, 6 failed; the same 6 (curl 063, 064, 070, 071, 072,
+        io 082) fail with the change reverted. A write to a closed handle now
+        returns its buffer through `free_cb` (it leaked); the server never
+        writes to an io it closed, since destroy clears `conn->io` first.
+- [ ] S4.2 Server counters that count what did not happen: TLS ciphertext out
+        only for a write that succeeded; TLS ciphertext in includes drained and
+        BIO-refused bytes; no plaintext 503 on a TLS listener; `quic_bytes_sent`
+        counts what `sendmsg` accepted, connection-less replies included; the
+        GSO fallback returns the bytes sent. The double
+        `http_send_batched_finish`: a refusal inside a submit runs the
+        completion, and with it the finish, nested, then `submit_failed` runs
+        the finish again; with `destroy_pending` the nested one frees the
+        connection the outer frame still uses (`http_connection.c`, chained
+        submits in the three batched completions)
+      done: a test per item, red before and green after; the double finish
+        reproduced with a fault point that submits the chained tail with a
+        length over the reactor's cap (refused before the buffer is read),
+        then fixed; CHANGELOG names the change to the two TLS counters
+      tier: T1 · role: Critic
+- [ ] S4.3 php-src and php-async: a byte sink on `zend_async_io_t`, bumped by
+        the reactor on successful read, write, writev and sendfile completions
+        (Windows TransmitFile included); ABI 0.27, banner and version together
+      done: asynctest reads exact counts for each operation, 0 for a failed
+        write and for a NULL sink; the php-async phpt suite passes
+      tier: T2 · role: Critic
+- [ ] S4.4 Server: `bytes_received_total` and `bytes_sent_total` as SUM rows;
+        the sink set when a connection is bound; the cap 503 and the HTTP/3
+        syscalls counted in the server; keys in `getTelemetry()`
+      done: the phpt of the stage's Done when, each comparing with a relay;
+        `telemetry/009` lists the keys; a pool sums them in `getStats()`
+      tier: T2 · role: Critic
+- [ ] S4.5 PRs in order (php-async S4.1, server S4.2, php-src and php-async
+        S4.3, server S4.4), CI green on every platform; USAGE.md documents the
+        counters; the hot-path cost stated, measured or named as below the
+        resolution of wrk
+      done: all merged; #396 closed with the named gaps in its last comment
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28
@@ -416,15 +502,24 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     every build rewrites it), and assert in `sendfile_wait_writable` that the
     destination io has no other sendfile waiting, since `sendfile_waiting`
     holds one (Code Reviewer on S2, 2026-09-30).
-39. #396 — byte counters, a feature: `bytes_received_total`/`bytes_sent_total`
-    as SUM rows, counted on the socket (plaintext as written, TLS as
-    ciphertext, HTTP/3 datagram payload). Edmond confirms the definition when
-    this is picked up (Sage, item 24).
+39. #396 — byte counters: stage S4 above. Edmond confirmed the definition on
+    2026-10-09 and started it with items 26–38 and 40 still open, a departure
+    from P4.1 that is his call.
 40. `core/022` failed once on macOS debug (PR 408, run 36978332597, a CI-only
     change): `start()` threw `Async\ThreadTransferException: boot failed!`
     instead of returning false after both workers' bootloaders threw. The
     default branch passed with the same php-src and php-async the day before.
     Reproduce under `-j` before any code.
+41. php-async fire-and-forget writes that never return their buffer, found by
+    the Critic on S4.1 (2026-10-09), not reproduced: a file write whose
+    `io_file_write_dispatch` fails returns a completed request and no
+    `free_cb`, and a queued one that fails dispatch is only notified, so the
+    request and the buffer leak; the Windows synchronous stream path returns a
+    completed request with an exception and never calls `free_cb`, which
+    leaves `tls_drain` with its ciphertext slot held. Every refusal also runs
+    `free_cb` with `EG(exception)` set, so a completion that submits again or
+    destroys does it under a pending exception. No server path reaches the
+    first two today.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
