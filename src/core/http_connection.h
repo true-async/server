@@ -277,6 +277,8 @@ struct _http_connection_t {
     unsigned                 body_complete : 1;
     unsigned                 request_ready : 1;     /* set by strategy->on_request_ready */
     unsigned                 out_in_flight : 1;     /* batched send: one uv_write outstanding, pending buffer accumulates */
+    unsigned                 out_tail_submitting : 1; /* inside the submit of a coalesced tail: a completion
+                                                         that runs now is the reactor refusing it */
     unsigned                 write_failed : 1;      /* output can no longer reach the peer */
     unsigned                 drain_pending : 1;     /* decision: this conn should drain */
     unsigned                 drain_submitted : 1;   /* HTTP/2: GOAWAY already queued on this session */

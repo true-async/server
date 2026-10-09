@@ -29,6 +29,8 @@
 #include <string.h>
 #include <errno.h>
 
+#include "fiu-local.h"
+
 #ifdef PHP_WIN32
 # include <winsock2.h>
 # include <ws2tcpip.h>
@@ -709,6 +711,32 @@ zend_async_io_t *http3_listener_io(http3_listener_t *l)
 }
 
 
+#ifdef __linux__
+/* sendmsg without blocking, retried on EINTR. A fault point answers EAGAIN
+ * in its place, a datagram the socket had no room for. */
+static ssize_t http3_listener_sendmsg(const int fd, const struct msghdr *msg)
+{
+    fiu_do_on("h3/sendmsg/eagain", { errno = EAGAIN; return -1; });
+
+    ssize_t rv;
+    do {
+        rv = sendmsg(fd, msg, MSG_DONTWAIT);
+    } while (rv < 0 && errno == EINTR);
+
+    return rv;
+}
+#endif
+
+/* The send counters are kept at the syscalls, so a datagram counts once the
+ * kernel took it, whichever caller sent it: a connection's drain, its close,
+ * or a reply that has no connection (Version Negotiation, Retry, stateless
+ * reset, refusal). */
+static void http3_listener_count_sent(http3_listener_t *l, size_t bytes, uint64_t datagrams)
+{
+    l->stats.packet.quic_bytes_sent   += (uint64_t)bytes;
+    l->stats.packet.quic_packets_sent += datagrams;
+}
+
 ssize_t http3_listener_send_packet(http3_listener_t *l,
                                    const void *buf, size_t len, uint8_t ecn,
                                    const struct sockaddr *peer,
@@ -754,12 +782,10 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
             }
         }
 
-        ssize_t rv;
-        do {
-            rv = sendmsg(l->fd, &msg, MSG_DONTWAIT);
-        } while (rv < 0 && errno == EINTR);
+        const ssize_t rv = http3_listener_sendmsg(l->fd, &msg);
 
         if (rv >= 0) {
+            http3_listener_count_sent(l, (size_t)rv, 1);
             return rv;
         }
 
@@ -791,6 +817,9 @@ ssize_t http3_listener_send_packet(http3_listener_t *l,
         req->dispose(req);
     }
 
+    /* Queued, not yet accepted: the completion's status is never seen here,
+     * so a datagram libuv fails later still counts. */
+    http3_listener_count_sent(l, len, 1);
     return (ssize_t)len;
 }
 
@@ -859,12 +888,11 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
 
         msg.msg_controllen = actual_ctrl;
 
-        ssize_t rv;
-        do {
-            rv = sendmsg(l->fd, &msg, MSG_DONTWAIT);
-        } while (rv < 0 && errno == EINTR);
+        const ssize_t rv = http3_listener_sendmsg(l->fd, &msg);
 
         if (rv >= 0) {
+            const uint64_t segments = ((uint64_t)rv + segsize - 1) / segsize;
+            http3_listener_count_sent(l, (size_t)rv, segments);
             return rv;
         }
 
@@ -894,9 +922,12 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
 #endif
 
     /* Fallback: send each segment as its own datagram. Used both when
-     * GSO is unavailable and after the kernel refused it once. */
+     * GSO is unavailable and after the kernel refused it once. A segment the
+     * socket had no room for is dropped, as QUIC loss, and the rest still go;
+     * the answer is what the kernel took, -EAGAIN when it took none. */
     const uint8_t *p = buf;
     size_t remaining = total_len;
+    size_t sent = 0;
     while (remaining > 0) {
         size_t this_len = remaining > segsize ? segsize : remaining;
         ssize_t s = http3_listener_send_packet(l, p, this_len, ecn, peer, peer_len);
@@ -905,11 +936,15 @@ ssize_t http3_listener_send_gso(http3_listener_t *l,
             return s;
         }
 
+        if (s > 0) {
+            sent += (size_t)s;
+        }
+
         p += this_len;
         remaining -= this_len;
     }
 
-    return (ssize_t)total_len;
+    return sent > 0 ? (ssize_t)sent : -EAGAIN;
 }
 
 void *http3_listener_ssl_ctx(http3_listener_t *l)

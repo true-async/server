@@ -19,4 +19,11 @@
  */
 void fault_hooks_register(const int module_type);
 
+/* A write length the reactor refuses at submit: one byte over the most a
+ * single write carries (ASYNC_IO_WRITE_MAX_BYTES in php-async). The reactor
+ * checks the length before it reads the buffer, so a fault point that submits
+ * a real buffer with this length makes the submit fail at once, through the
+ * same dispose path as any other refusal. */
+#define HTTP_FAULT_REFUSED_WRITE_LEN ((size_t) 0x7ffff000u + 1)
+
 #endif /* FAULT_HOOKS_H */

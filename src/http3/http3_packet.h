@@ -61,7 +61,7 @@ typedef struct _http3_packet_stats_s {
     uint64_t quic_cid_retired;        /* remove_connection_id_cb dropped a CID */
 
     /* Write-loop / timer counters. */
-    uint64_t quic_packets_sent;       /* datagrams emitted by writev_stream */
+    uint64_t quic_packets_sent;       /* datagrams the kernel took from the listener's sends */
     uint64_t quic_bytes_sent;         /* cumulative bytes over those datagrams */
     uint64_t quic_timer_fired;        /* handle_expiry invocations */
     uint64_t quic_write_error;        /* writev_stream non-zero / negative */

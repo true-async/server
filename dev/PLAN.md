@@ -195,7 +195,8 @@ Sage 2026-10-09: count TCP in the reactor through a sink pointer on
   HTTP/3 stay counted in the server. Final.
 Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
   partial amount; reactor-mode HTTP/3 counts into the listener slice, which
-  `getStats()` sums and `resetTelemetry()` does not clear.
+  `getStats()` sums and `resetTelemetry()` does not clear; off Linux an HTTP/3
+  datagram counts when libuv queues it, since its completion is not read.
 
 - [x] S4.1 php-async: a refused submit sets `ZEND_ASYNC_IO_WRITE_FAILED` before
         the dispose runs `free_cb` (the refusal branches of `libuv_io_write`
@@ -225,7 +226,7 @@ Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
         io 082) fail with the change reverted. A write to a closed handle now
         returns its buffer through `free_cb` (it leaked); the server never
         writes to an io it closed, since destroy clears `conn->io` first.
-- [ ] S4.2 Server counters that count what did not happen: TLS ciphertext out
+- [x] S4.2 Server counters that count what did not happen: TLS ciphertext out
         only for a write that succeeded; TLS ciphertext in includes drained and
         BIO-refused bytes; no plaintext 503 on a TLS listener; `quic_bytes_sent`
         counts what `sendmsg` accepted, connection-less replies included; the
@@ -240,6 +241,25 @@ Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
         length over the reactor's cap (refused before the buffer is read),
         then fixed; CHANGELOG names the change to the two TLS counters
       tier: T1 · role: Critic
+      Critic 2026-10-09 on the diff: no blocker. Taken: HTTP/3 had a test for
+        connection-less replies only, so `h3/094` drops a datagram with EAGAIN
+        through a fault point at both `sendmsg` calls and compares with a UDP
+        relay; the plaintext cap branch got its twin (`h1/071`); the relay
+        counts what `fwrite` returned; the `h1/070` comment said valgrind
+        sees the use after free, which the connection arena hides; the TLS
+        comment called a sticky flag per-write. Named, not tested: the GSO
+        fallback's return value (no caller reads it); the BIO-refused commit
+        branch of the TLS read (the ring is drained before every read, no
+        shape reaches it); a write that fails in its completion rather than
+        at submit (same flag, no fault point in the reactor). The same nested
+        destroy on first-level submits and in `tls_drain` is item 43.
+      handoff: tls/020 (7,034 counted against 2,934 relayed before), tls/021
+        (93,858 against 12,607,587), tls/022 (94 bytes of plaintext 503),
+        h3/093 (0 against 31), h3/094 (6,512 in 14 against 6,684 in 15, old
+        counting restored by hand), h1/070 (assertion 3 of 3 with the old
+        completion): red before, green after; h1/071 holds the plaintext 503.
+        Whole phpt suite 552 passed, 29 skipped, 0 failed; cmocka 22 of 22. h1/070 discriminates only in a
+        debug build; CI runs fault injection in the debug matrix.
 - [ ] S4.3 php-src and php-async: a byte sink on `zend_async_io_t`, bumped by
         the reactor on successful read, write, writev and sendfile completions
         (Windows TransmitFile included); ABI 0.27, banner and version together
@@ -534,6 +554,14 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `test_write_refused`, `listen_pause` and `write_resubmit` guard only a
     local Linux run, and the Windows-only refusal branches (`!fits`,
     `async_uv_buf_set`) have no test at all (Critic on S4.1, 2026-10-09).
+43. A write refused at submit can destroy the connection under its submitter
+    (Critic on S4.2, 2026-10-09, not reproduced): the first-level submits of
+    `http_connection_send_batched`, `send_zstr_batched` and the first
+    `writev` run their completion nested, its finish may destroy a connection
+    with `destroy_pending` and no handler, and the submitter then reads it;
+    `tls_drain` writes `tls_cipher_inflight` and `tls_draining` after a nested
+    `tls_cipher_completion` that can destroy. The fault points
+    `h1/write_tail/refused` and `tls/cipher_write/refused` are the seam.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170

@@ -286,10 +286,6 @@ void http3_connection_drain_out(http3_connection_t *c)
                     batch_buf, batch_off, batch_ecn,                           \
                     (const struct sockaddr *)&batch_peer, batch_peer_len);     \
             }                                                                  \
-            if (stats != NULL) {                                               \
-                stats->quic_packets_sent += batch_count;                       \
-                stats->quic_bytes_sent   += (uint64_t)batch_off;               \
-            }                                                                  \
             batch_off = 0; seg_size = 0; batch_count = 0; batch_ecn = 0;       \
         }                                                                      \
     } while (0)
@@ -681,8 +677,6 @@ void http3_connection_emit_close(http3_connection_t *c)
 
     if (stats != NULL) {
         stats->quic_connection_close_sent++;
-        stats->quic_packets_sent++;
-        stats->quic_bytes_sent += (uint64_t)n;
     }
 }
 

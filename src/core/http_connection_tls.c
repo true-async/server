@@ -36,6 +36,8 @@
 #include "http_protocol_strategy.h"      /* ALPN fast-path strategy creation */
 #include "tls_layer.h"                   /* tls_session_t + tls_io_result_t */
 #include "log/http_log.h"
+#include "core/fault_hooks.h"            /* HTTP_FAULT_REFUSED_WRITE_LEN */
+#include "fiu-local.h"
 
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
@@ -198,8 +200,10 @@ bool tls_drain(http_connection_t *conn)
             if (cipher_avail > 0) {
                 /* Slot stays stable: SSL_write gated on cipher_inflight; consume after completion. */
                 conn->tls_cipher_inflight = cipher_avail;
+                size_t submit_len = cipher_avail;
+                fiu_do_on("tls/cipher_write/refused", submit_len = HTTP_FAULT_REFUSED_WRITE_LEN);
                 const zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
-                    conn->io, slot, cipher_avail, tls_cipher_completion);
+                    conn->io, slot, submit_len, tls_cipher_completion);
 
                 if (UNEXPECTED(req == NULL)) {
                     conn->tls_cipher_inflight = 0;
@@ -357,6 +361,12 @@ static void tls_fsm_io_callback_fn(
         cb->read_req = NULL;
         req->dispose(req);
 
+        /* Counted before the branches: the bytes crossed the socket whether
+         * the drain drops them or the cipher ring refuses them. */
+        if (EXPECTED(!err && bytes_read > 0)) {
+            http_server_on_tls_io(conn->counters, 0, 0, (size_t)bytes_read, 0);
+        }
+
         if (UNEXPECTED(err || bytes_read <= 0)) {
             /* The peer has stopped: a drain in progress is complete. */
             http_connection_linger_end(conn);
@@ -381,8 +391,6 @@ static void tls_fsm_io_callback_fn(
             tls_advance_state(conn);
             (void)tls_finalize_if_closing(conn);
         } else {
-            http_server_on_tls_io(conn->counters, 0, 0, (size_t)bytes_read, 0);
-
             tls_advance_state(conn);
 
             if (!tls_finalize_if_closing(conn)) {
@@ -483,9 +491,15 @@ static void tls_cipher_completion(void *data, zend_async_io_t *io)
         return;
     }
 
+    /* The flag is the write's verdict: a refused submit reaches this callback
+     * through its dispose, a failed write through its completion, and both
+     * set it first. It is never cleared, so after one failure no later write
+     * on this socket counts either: the connection is lost by then. */
+    const bool written = (io->state & ZEND_ASYNC_IO_WRITE_FAILED) == 0;
+
     if (UNEXPECTED(!tls_consume_cipher_out(conn->tls, n))) {
         conn->tls_write_error = true;
-    } else {
+    } else if (EXPECTED(written)) {
         http_server_on_tls_io(conn->counters, 0, 0, 0, n);
     }
 
@@ -637,6 +651,9 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
             return false;
         }
 
+        /* Counted before the drain and the commit, as in the completion. */
+        http_server_on_tls_io(conn->counters, 0, 0, (size_t)bytes_read, 0);
+
         if (UNEXPECTED(conn->linger_close)) {
             conn->read_buffer_len = 0;
             http_connection_linger_note_inbound(conn);
@@ -647,7 +664,6 @@ static bool tls_arm_one_shot_read(http_connection_t *conn)
             return false;
         }
 
-        http_server_on_tls_io(conn->counters, 0, 0, (size_t)bytes_read, 0);
         tls_advance_state(conn);
 
         if (tls_finalize_if_closing(conn)) {

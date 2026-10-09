@@ -2263,18 +2263,44 @@ static void http_server_accept_callback(
         return;
     }
 
+    /* Match the firing listen_event back to its row so we know whether
+     * this accept belongs to a TLS listener AND which protocol mask it
+     * carries. MAX_LISTENERS is tiny (16), the scan is effectively free. */
+    tls_context_t *conn_tls_ctx = NULL;
+    uint32_t conn_protocol_mask = server->view.protocol_mask;
+    for (size_t i = 0; i < server->listener_count; i++) {
+        if (server->listeners[i].listen_event != NULL
+            && &server->listeners[i].listen_event->base == event) {
+            conn_protocol_mask = server->listeners[i].protocol_mask;
+#ifdef HAVE_OPENSSL
+            if (server->listeners[i].tls) {
+                conn_tls_ctx = server->tls_ctx;
+            }
+#endif
+            break;
+        }
+    }
+
     /* Hard-cap safety net. Under normal operation listeners_paused will
      * already be true here (either CoDel or hysteresis flipped it), so
      * we rarely take this path. But the pause transition can race with
      * an accept already in flight — reject such strays cheaply with
      * 503 rather than spawning a connection we can't serve. */
-    if (server->max_connections > 0 &&
-        server->counters_live->active_connections >= (uint64_t)server->max_connections) {
-        const char *response = "HTTP/1.1 503 Service Unavailable\r\n"
-                               "Content-Length: 19\r\n"
-                               "Connection: close\r\n\r\n"
-                               "Service Unavailable";
-        send(client_fd, response, (int)strlen(response), MSG_NOSIGNAL);
+    bool at_cap = server->max_connections > 0
+        && server->counters_live->active_connections >= (uint64_t)server->max_connections;
+    fiu_do_on("server/accept/at_cap", at_cap = true);
+
+    if (UNEXPECTED(at_cap)) {
+        /* A TLS client would read the plaintext 503 as a broken handshake, so
+         * a TLS listener only closes: the client sees the connection end. */
+        if (conn_tls_ctx == NULL) {
+            const char *response = "HTTP/1.1 503 Service Unavailable\r\n"
+                                   "Content-Length: 19\r\n"
+                                   "Connection: close\r\n\r\n"
+                                   "Service Unavailable";
+            send(client_fd, response, (int)strlen(response), MSG_NOSIGNAL);
+        }
+
         closesocket(client_fd);
         server->counters_live->accepts_refused_at_cap_total++;
         /* Make sure listeners are paused so we stop accepting new ones. */
@@ -2305,24 +2331,6 @@ static void http_server_accept_callback(
                    && !accept_grpc)) {
         closesocket(client_fd);
         return;
-    }
-
-    /* Match the firing listen_event back to its row so we know whether
-     * this accept belongs to a TLS listener AND which protocol mask it
-     * carries. MAX_LISTENERS is tiny (16), the scan is effectively free. */
-    tls_context_t *conn_tls_ctx = NULL;
-    uint32_t conn_protocol_mask = server->view.protocol_mask;
-    for (size_t i = 0; i < server->listener_count; i++) {
-        if (server->listeners[i].listen_event != NULL
-            && &server->listeners[i].listen_event->base == event) {
-            conn_protocol_mask = server->listeners[i].protocol_mask;
-#ifdef HAVE_OPENSSL
-            if (server->listeners[i].tls) {
-                conn_tls_ctx = server->tls_ctx;
-            }
-#endif
-            break;
-        }
     }
 
     if (!http_connection_spawn(

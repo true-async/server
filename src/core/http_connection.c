@@ -31,6 +31,8 @@
 #include "http_response_internal.h"  /* http_response_take_send_file */
 #include "core/async_plain_event.h"
 #include "core/bailout_guard.h"
+#include "core/fault_hooks.h"          /* HTTP_FAULT_REFUSED_WRITE_LEN */
+#include "fiu-local.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
 #endif
@@ -1906,6 +1908,9 @@ static void out_signal_idle(http_connection_t *conn);
  * submit failure would come straight back here. */
 static void http_send_batched_finish(http_connection_t *conn)
 {
+    /* The finish may destroy the connection, so it runs once per write. */
+    ZEND_ASSERT(!conn->destroying);
+
     conn->out_in_flight = false;
     conn->out_in_flight_bytes = 0;
     http_write_timer_stop(conn);
@@ -2166,6 +2171,37 @@ void http_connection_absorb_write_verdict(http_connection_t *conn, const zend_as
     }
 }
 
+static void http_send_batched_completion_cb(void *data, zend_async_io_t *io);
+
+/* Submit the coalesced tail the completion of the previous write took off the
+ * connection. Answers whether it was submitted; a refusal has finished the
+ * write chain here, and the connection may be gone, so the caller touches it
+ * no further.
+ *
+ * A refused submit runs the tail's completion inside the call. That
+ * completion only releases the buffer: the finish is the submitter's, done
+ * once, after the call returns. A fault point swaps in a length the reactor
+ * refuses at submit. */
+static bool out_submit_tail(http_connection_t *conn, char *buf, const size_t len, const char *op)
+{
+    size_t submit_len = len;
+    fiu_do_on("h1/write_tail/refused", submit_len = HTTP_FAULT_REFUSED_WRITE_LEN);
+
+    conn->out_in_flight_bytes = len;
+    http_connection_arm_write_deadline(conn);
+    conn->out_tail_submitting = true;
+    const zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
+        conn->io, buf, submit_len, http_send_batched_completion_cb);
+    conn->out_tail_submitting = false;
+
+    if (UNEXPECTED(req == NULL)) {
+        http_send_batched_submit_failed(conn, op);
+        return false;
+    }
+
+    return true;
+}
+
 static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 {
     efree(data);
@@ -2178,21 +2214,19 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 
     http_connection_absorb_write_verdict(conn, io);
 
+    if (UNEXPECTED(conn->out_tail_submitting)) {
+        return;
+    }
+
     if (conn->out_pending_len > 0) {
         char  *next_buf = conn->out_pending_buf;
         size_t next_len = conn->out_pending_len;
         conn->out_pending_buf = NULL;
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
-        conn->out_in_flight_bytes = next_len;
-        /* out_in_flight stays true — chain continues. */
-        http_connection_arm_write_deadline(conn);
-        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
-            conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
-        if (UNEXPECTED(req == NULL)) {
-            http_send_batched_submit_failed(conn, __func__);
-        } else {
+        /* out_in_flight stays true — chain continues. */
+        if (out_submit_tail(conn, next_buf, next_len, __func__)) {
             out_signal_drain(conn);
         }
 
@@ -2204,7 +2238,9 @@ static void http_send_batched_completion_cb(void *data, zend_async_io_t *io)
 
 /* Drain pending-buf tail via the regular efree completion chain. Shared by
  * the zstr-batched completion (which can't reuse the efree cb directly —
- * its data pointer is a zstr->val, not an emalloc'd buffer). */
+ * its data pointer is a zstr->val, not an emalloc'd buffer). Answers whether
+ * a tail was taken: submitted, or refused and the chain finished, so the
+ * caller does not finish it again. */
 static bool h1_batched_drain_pending(http_connection_t *conn)
 {
     if (conn->out_pending_len == 0) {
@@ -2216,17 +2252,8 @@ static bool h1_batched_drain_pending(http_connection_t *conn)
     conn->out_pending_buf = NULL;
     conn->out_pending_len = 0;
     conn->out_pending_cap = 0;
-    conn->out_in_flight_bytes = next_len;
 
-    http_connection_arm_write_deadline(conn);
-    zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
-        conn->io, next_buf, next_len, http_send_batched_completion_cb);
-
-    if (UNEXPECTED(req == NULL)) {
-        http_send_batched_submit_failed(conn, __func__);
-        return false;
-    }
-
+    (void)out_submit_tail(conn, next_buf, next_len, __func__);
     return true;
 }
 
@@ -2350,14 +2377,8 @@ static void http_send_batched_writev_completion_cb(void *data, zend_async_io_t *
         conn->out_pending_buf = NULL;
         conn->out_pending_len = 0;
         conn->out_pending_cap = 0;
-        conn->out_in_flight_bytes = next_len;
-        http_connection_arm_write_deadline(conn);
-        zend_async_io_req_t *req = ZEND_ASYNC_IO_WRITE_EX(
-            conn->io, next_buf, next_len, http_send_batched_completion_cb);
 
-        if (UNEXPECTED(req == NULL)) {
-            http_send_batched_submit_failed(conn, __func__);
-        } else {
+        if (out_submit_tail(conn, next_buf, next_len, __func__)) {
             out_signal_drain(conn);
         }
 
