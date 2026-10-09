@@ -215,7 +215,8 @@ Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
         the pipe cases and the slot case assert the exception, the CHANGELOG
         lists every refusal and says the server still counts until S4.2,
         item 41 corrected, item 42 added (asynctest runs in no CI).
-      handoff: php-async PR #315 (a9fa3ea), open; php-src PR #40 merged
+      handoff: php-async PR #315 merged (8565e2c), CI green on all eight
+        jobs, ASan included; php-src PR #40 merged
         into true-async (f564d9a6a61) and carried to true-async-stable by
         #41 (ac5847d1571).
         `test_write_refused` 7 of 8 red on c95dcf7, 8 of 8 green, 3 runs;
