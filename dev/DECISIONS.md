@@ -2,6 +2,17 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-10-09 The server counts its own socket bytes (#396), at its own read and
+  write sites; the reactor is not changed and the TrueAsync ABI is not bumped.
+  Why: Edmond: the server is the extension and telemetry is its responsibility;
+  a general I/O layer does not carry one consumer's counters. This overrules
+  the Sage's verdict of the same day, which the model took without asking the
+  owner although it moved a responsibility across repositories.
+  Rejected: a byte sink pointer on `zend_async_io_t` bumped by the reactor
+  (ABI 0.27).
+  Cost: an awaited write that completes after its coroutine was cancelled is
+  not counted; every write goes through the server's counting wrappers, or a
+  new site is missed.
 - 2026-10-01 A config method whose value nothing reads is a tombstone: it throws
   `HttpServerRuntimeException` on any argument, naming what does the job, for one
   minor release; its getter throws too. Twelve methods (#393), `enableHttp2` and

@@ -193,8 +193,13 @@ Sage 2026-10-09: count TCP in the reactor through a sink pointer on
   six ABI bumps since 2026-06-07); the refused-submit flag is a defect of its
   own and lands first; no reads of libuv private fields; the cap 503 and
   HTTP/3 stay counted in the server. Final.
+Edmond 2026-10-09: overruled. The server is the extension and counts its own
+  bytes; no reactor change, no ABI bump (`dev/DECISIONS.md`). The model should
+  have brought the cross-repository choice to him instead of taking the Sage's
+  verdict as the end.
 Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
-  partial amount; reactor-mode HTTP/3 counts into the listener slice, which
+  partial amount; an awaited write that completes after its coroutine was
+  cancelled is not counted; reactor-mode HTTP/3 counts into the listener slice, which
   `getStats()` sums and `resetTelemetry()` does not clear; off Linux an HTTP/3
   datagram counts when libuv queues it, since its completion is not read.
 
@@ -260,23 +265,21 @@ Named gaps: a writev cancelled by a close counts 0, while sendfile counts its
         completion): red before, green after; h1/071 holds the plaintext 503.
         Whole phpt suite 552 passed, 29 skipped, 0 failed; cmocka 22 of 22. h1/070 discriminates only in a
         debug build; CI runs fault injection in the debug matrix.
-- [ ] S4.3 php-src and php-async: a byte sink on `zend_async_io_t`, bumped by
-        the reactor on successful read, write, writev and sendfile completions
-        (Windows TransmitFile included); ABI 0.27, banner and version together
-      done: asynctest reads exact counts for each operation, 0 for a failed
-        write and for a NULL sink; the php-async phpt suite passes
-      tier: T2 · role: Critic
-- [ ] S4.4 Server: `bytes_received_total` and `bytes_sent_total` as SUM rows;
-        the sink set when a connection is bound; the cap 503 and the HTTP/3
-        syscalls counted in the server; keys in `getTelemetry()`
+- [ ] S4.3 Server: `bytes_received_total` and `bytes_sent_total` as SUM rows
+        and `getTelemetry()` keys, counted at the server's own sites: the TCP
+        and TLS read completions, the awaited writes after their await, the
+        fire-and-forget completions without `WRITE_FAILED`, the TLS cipher
+        completion, sendfile's `transferred`, the cap 503's `send()`, and the
+        HTTP/3 send and receive calls; plaintext writes go through counting
+        wrappers so a new site cannot skip the counter
       done: the phpt of the stage's Done when, each comparing with a relay;
-        `telemetry/009` lists the keys; a pool sums them in `getStats()`
+        `telemetry/009` lists the keys; a pool sums them in `getStats()`;
+        `resetTelemetry()` clears them
       tier: T2 · role: Critic
-- [ ] S4.5 PRs in order (php-async S4.1, server S4.2, php-src and php-async
-        S4.3, server S4.4), CI green on every platform; USAGE.md documents the
+- [ ] S4.4 Server PR, CI green on every platform; USAGE.md documents the
         counters; the hot-path cost stated, measured or named as below the
         resolution of wrk
-      done: all merged; #396 closed with the named gaps in its last comment
+      done: merged; #396 closed with the named gaps in its last comment
       tier: T1 · role: —
 
 ## Next
