@@ -15,7 +15,11 @@ TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1
 /* The rules are copied to both worker clones, and each keeps its own
  * buckets: one request a minute per path, so of eight requests to a path
  * one or two are admitted, one per worker that took a connection, and the
- * rest are refused with 429. The workers' refusals add up in getStats(). */
+ * rest are refused with 429. The workers' refusals add up in getStats().
+ * getStats() also shows each worker that served a path admitted exactly one
+ * request, which a bucket shared by the workers fails; that check bites only
+ * when both workers take a connection, which the kernel does not promise but
+ * which happened in every run here. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -68,10 +72,51 @@ function verdict(string $label, array $counts): int
     return 8 - $admitted;
 }
 
+/* Requests served and refused per worker since $before, both from getStats(). */
+function per_worker(HttpServer $server, array $before): array
+{
+    $now = [];
+
+    foreach ($server->getStats()['workers'] as $id => $slot) {
+        $now[$id] = [$slot['total_requests'], $slot['requests_rate_limited_total']];
+    }
+
+    $delta = [];
+
+    foreach ($now as $id => [$served, $limited]) {
+        $delta[$id] = [$served - ($before[$id][0] ?? 0), $limited - ($before[$id][1] ?? 0)];
+    }
+
+    return [$now, $delta];
+}
+
+/* Each worker that served the path admitted exactly one request: its own
+ * bucket. A bucket shared by the workers admits one in all, so the second
+ * worker to take traffic admits none. */
+function each_worker_admits_one(string $label, array $delta): void
+{
+    $ok = true;
+
+    foreach ($delta as [$served, $limited]) {
+        if ($served === 0) {
+            continue;
+        }
+
+        $ok = $ok && $served - $limited === 1;
+    }
+
+    echo "$label: every worker that served admitted one: ", $ok ? 'yes' : 'no ' . json_encode($delta), "\n";
+}
+
 spawn(function () use ($server, $port) {
     delay(400);
+    [$before] = per_worker($server, []);
     $refused  = verdict('HTTP/1', eight($port, '/h1', '--http1.1'));
+    [$before, $delta] = per_worker($server, $before);
+    each_worker_admits_one('HTTP/1', $delta);
     $refused += verdict('HTTP/2', eight($port, '/h2', '--http2-prior-knowledge'));
+    [, $delta] = per_worker($server, $before);
+    each_worker_admits_one('HTTP/2', $delta);
 
     $totals = $server->getStats()['totals'];
     echo "getStats rate_limited matches: ",
@@ -84,6 +129,8 @@ echo "done\n";
 ?>
 --EXPECTF--
 %AHTTP/1 admitted 1 or 2: yes refusals: ["429 retry-after=60"]
+HTTP/1: every worker that served admitted one: yes
 HTTP/2 admitted 1 or 2: yes refusals: ["429 retry-after=60"]
+HTTP/2: every worker that served admitted one: yes
 getStats rate_limited matches: yes
 %Adone

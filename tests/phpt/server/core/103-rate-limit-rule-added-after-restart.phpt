@@ -7,8 +7,9 @@ true_async
 <?php
 /* The first run allocates buckets for rule A. B is added after stop(), and
  * the second start() must allocate buckets for it too: with only A's tables,
- * B's check read past them. A keeps its buckets across the restart, so the
- * client it refused is still refused. */
+ * B's check read past them. A keeps its buckets and counts across the
+ * restart, so the client it refused is still refused, and B's counts start
+ * at zero. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -39,7 +40,7 @@ function run(HttpServer $server, int $port, array $paths, string $label): void
         }
 
         fclose($fp);
-        echo "$label rules: ", json_encode(array_keys($server->getTelemetry()['rate_limits'])), "\n";
+        echo "$label rules: ", json_encode($server->getTelemetry()['rate_limits']), "\n";
         $server->stop();
     });
 
@@ -55,9 +56,9 @@ echo "done\n";
 --EXPECT--
 run 1 /a: 200 body=ok /a
 run 1 /a: 429 retry-after=60 body=Too Many Requests
-run 1 rules: ["a"]
+run 1 rules: {"a":{"limited":1,"evictions":0}}
 run 2 /a: 429 retry-after=60 body=Too Many Requests
 run 2 /b: 200 body=ok /b
 run 2 /b: 429 retry-after=60 body=Too Many Requests
-run 2 rules: ["a","b"]
+run 2 rules: {"a":{"limited":2,"evictions":0},"b":{"limited":1,"evictions":0}}
 done

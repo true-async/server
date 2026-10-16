@@ -117,6 +117,28 @@ target_link_libraries(test_rate_limit
 
 add_test(NAME RateLimit COMMAND test_rate_limit)
 
+# The same suite under AddressSanitizer and UBSan. The 46-byte address and
+# 16-byte IPv4 cases cannot be told apart by result from a parser buffer one
+# byte short: no text that long is a valid address, so both refuse it, and
+# only the out-of-bounds write differs. GCC and Clang only.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_executable(test_rate_limit_asan
+        core/test_rate_limit.c
+        ${CMAKE_SOURCE_DIR}/../src/core/rate_limit.c
+    )
+
+    target_include_directories(test_rate_limit_asan PRIVATE
+        ${CMAKE_SOURCE_DIR}/../include
+    )
+
+    target_compile_options(test_rate_limit_asan PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+    target_link_options(test_rate_limit_asan PRIVATE -fsanitize=address,undefined)
+    target_link_libraries(test_rate_limit_asan ${CMOCKA_LIBRARIES})
+
+    add_test(NAME RateLimitAsan COMMAND test_rate_limit_asan)
+endif()
+
 if(WIN32)
     target_link_libraries(test_rate_limit ws2_32)
     set_tests_properties(RateLimit PROPERTIES

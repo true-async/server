@@ -426,7 +426,10 @@ static void test_length_boundaries(void **state)
 	http_rl_addr_t addr;
 
 	/* 45 bytes is the longest IPv6 text (INET6_ADDRSTRLEN - 1): accepted, as
-	 * an element, in brackets and with a port; 46 never is. */
+	 * an element, in brackets and with a port; 46 never is. No text of 46
+	 * bytes is a valid address, so a parser buffer one byte short refuses it
+	 * too: only the out-of-bounds write tells, and RateLimitAsan (this suite
+	 * under ASan and UBSan) is the run that catches it. */
 	const char *const longest = "0000:0000:0000:0000:0000:ffff:255.255.255.255";
 	assert_int_equal(strlen(longest), 45);
 	assert_true(http_rl_addr_parse(longest, 45, &addr));
