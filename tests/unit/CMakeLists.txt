@@ -99,6 +99,31 @@ endif()
 
 add_test(NAME ResponseWire COMMAND test_response_wire)
 
+# Request rate limit core (#414): SipHash, client addresses and the
+# X-Forwarded-For walk, path matching, buckets and check-then-commit. Plain C
+# over caller-owned memory, no PHP/Zend runtime.
+add_executable(test_rate_limit
+    core/test_rate_limit.c
+    ${CMAKE_SOURCE_DIR}/../src/core/rate_limit.c
+)
+
+target_include_directories(test_rate_limit PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+)
+
+target_link_libraries(test_rate_limit
+    ${CMOCKA_LIBRARIES}
+)
+
+add_test(NAME RateLimit COMMAND test_rate_limit)
+
+if(WIN32)
+    target_link_libraries(test_rate_limit ws2_32)
+    set_tests_properties(RateLimit PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+endif()
+
 if(WIN32)
     set_tests_properties(ThreadQueue PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
