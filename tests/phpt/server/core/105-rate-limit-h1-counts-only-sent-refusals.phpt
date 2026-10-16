@@ -3,6 +3,10 @@ Rate limit (#414): HTTP/1 counts a refusal only when the 429 is sent; a 413 or a
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+if (!class_exists('TrueAsync\\WebSocket')) die('skip needs WebSocket support');
+?>
 --FILE--
 <?php
 /* A POST over the limit is judged when its headers end, but its answer is a

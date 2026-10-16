@@ -5,6 +5,7 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
+if (!class_exists('TrueAsync\\WebSocket')) die('skip needs WebSocket support');
 require __DIR__ . '/../h2/_h2_skipif.inc';
 h2_skipif(['curl_h2' => true]);
 ?>

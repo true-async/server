@@ -3,6 +3,10 @@ Rate limit (#414): an HTTP/1 WebSocket upgrade over the limit gets 429 Too Many 
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+if (!class_exists('TrueAsync\\WebSocket')) die('skip needs WebSocket support');
+?>
 --FILE--
 <?php
 /* The upgrade short-circuits the dispatch site, so it runs the check itself
