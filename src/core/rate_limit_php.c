@@ -774,15 +774,11 @@ bool http_rate_limits_active(const http_server_object *server)
     return set != NULL && set->tables != NULL;
 }
 
-uint32_t http_rate_limit_check(http_server_object *server, const http_request_t *req,
-                               http_server_counters_t *counters)
+/* Evaluates the server's rules for `req`; see http_rl_evaluate. */
+static uint32_t rate_limit_evaluate(http_server_object *server, http_rate_limits_t *set,
+                                    const http_request_t *req, http_rl_rule_stats_t *stats,
+                                    uint64_t *evictions)
 {
-    http_rate_limits_t *set = http_server_rate_limits(server);
-
-    if (EXPECTED(set == NULL || set->tables == NULL)) {
-        return 0;
-    }
-
     const http_server_config_t *config = http_server_get_config(server);
     const http_rl_trusted_t *trusted   = config != NULL ? &config->trusted_proxies : NULL;
 
@@ -825,13 +821,27 @@ uint32_t http_rate_limit_check(http_server_object *server, const http_request_t 
         .now_ns     = http_now_coarse_ns(),
     };
 
-    uint64_t evictions = 0;
     const uint32_t retry_after = http_rl_evaluate(set->views, set->tables, set->table_count,
-                                                  set->hash_key, &request, set->stats, &evictions);
+                                                  set->hash_key, &request, stats, evictions);
 
     if (scratch != NULL && scratch != stack_scratch) {
         efree(scratch);
     }
+
+    return retry_after;
+}
+
+uint32_t http_rate_limit_check(http_server_object *server, const http_request_t *req,
+                               http_server_counters_t *counters)
+{
+    http_rate_limits_t *set = http_server_rate_limits(server);
+
+    if (EXPECTED(set == NULL || set->tables == NULL)) {
+        return 0;
+    }
+
+    uint64_t evictions = 0;
+    const uint32_t retry_after = rate_limit_evaluate(server, set, req, set->stats, &evictions);
 
     counters->requests_rate_limit_evictions_total += evictions;
 
@@ -840,6 +850,74 @@ uint32_t http_rate_limit_check(http_server_object *server, const http_request_t 
     }
 
     return retry_after;
+}
+
+/* Rule counts of a refusal kept on the request until its 429 is sent. */
+#define RATE_LIMIT_STACK_RULES 8
+
+uint32_t http_rate_limit_check_deferred(http_server_object *server, http_request_t *req,
+                                        http_server_counters_t *counters)
+{
+    http_rate_limits_t *set = http_server_rate_limits(server);
+
+    if (EXPECTED(set == NULL || set->tables == NULL)) {
+        return 0;
+    }
+
+    http_rl_rule_stats_t  stack_stats[RATE_LIMIT_STACK_RULES];
+    http_rl_rule_stats_t *stats = set->table_count <= RATE_LIMIT_STACK_RULES
+        ? stack_stats : emalloc(sizeof(*stats) * set->table_count);
+
+    memset(stats, 0, sizeof(*stats) * set->table_count);
+
+    uint64_t evictions = 0;
+    const uint32_t retry_after = rate_limit_evaluate(server, set, req, stats, &evictions);
+
+    if (retry_after == 0) {
+        /* Admitted: final now, evictions included. */
+        counters->requests_rate_limit_evictions_total += evictions;
+
+        for (size_t i = 0; i < set->table_count; i++) {
+            set->stats[i].evictions += stats[i].evictions;
+        }
+
+        if (stats != stack_stats) {
+            efree(stats);
+        }
+
+        return 0;
+    }
+
+    /* A refusal writes no bucket, so it has no evictions to count. */
+    if (stats == stack_stats) {
+        stats = emalloc(sizeof(*stats) * set->table_count);
+        memcpy(stats, stack_stats, sizeof(*stats) * set->table_count);
+    }
+
+    req->rate_limit_pending = stats;
+    return retry_after;
+}
+
+void http_rate_limit_count_refusal(http_server_object *server, http_request_t *req,
+                                   http_server_counters_t *counters)
+{
+    http_rl_rule_stats_t *pending = req->rate_limit_pending;
+    http_rate_limits_t *set = http_server_rate_limits(server);
+
+    if (pending == NULL) {
+        return;
+    }
+
+    req->rate_limit_pending = NULL;
+
+    if (set != NULL && set->stats != NULL) {
+        for (size_t i = 0; i < set->table_count; i++) {
+            set->stats[i].refused += pending[i].refused;
+        }
+    }
+
+    counters->requests_rate_limited_total++;
+    efree(pending);
 }
 
 void http_rate_limit_refuse(zend_object *response, const uint32_t retry_after_s, const bool grpc)

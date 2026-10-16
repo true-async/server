@@ -553,14 +553,17 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     /* Rate limit verdict for a method static never serves, taken before the
      * body: a refused upload is read and dropped rather than buffered or
-     * written to disk, and the dispatch site sends the stored 429. GET and
-     * HEAD are checked at dispatch, after a static mount has had its turn. */
+     * written to disk, and the dispatch site sends the stored 429 and counts
+     * it then. GET and HEAD are checked at dispatch, after a static mount has
+     * had its turn; so is a request with an Upgrade header, which the upgrade
+     * path may answer (405, 426) before any token is spent. */
     if (parser->conn != NULL
         && UNEXPECTED(http_rate_limits_active(parser->conn->server))
-        && !http_request_method_is_get(req) && !http_request_method_is_head(req)) {
+        && !http_request_method_is_get(req) && !http_request_method_is_head(req)
+        && !zend_hash_str_exists(req->headers, "upgrade", sizeof("upgrade") - 1)) {
         req->rate_limit_checked = true;
-        req->rate_limit_retry_s =
-            http_rate_limit_check(parser->conn->server, req, parser->conn->counters);
+        req->rate_limit_retry_s = http_rate_limit_check_deferred(
+            parser->conn->server, req, parser->conn->counters);
 
         if (req->rate_limit_retry_s != 0) {
             return http1_refused_headers_complete(parser, req);
@@ -1021,6 +1024,11 @@ void http_request_free_fields(http_request_t *req)
     if (req->method) {
         zend_string_release(req->method);
         req->method = NULL;
+    }
+
+    if (req->rate_limit_pending != NULL) {
+        efree(req->rate_limit_pending);
+        req->rate_limit_pending = NULL;
     }
 
     if (req->uri) {

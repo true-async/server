@@ -70,11 +70,24 @@ void http_rate_limits_telemetry_reset(http_rate_limits_t *set);
 bool http_rate_limits_active(const http_server_object *server);
 
 /* Checks `req` against the server's rules and takes its tokens when all admit
- * it. Returns 0 when admitted, else the Retry-After in seconds; counts the
- * refusal and any evictions in `counters`. Reads the request's peer, method,
- * target and X-Forwarded-For only. */
+ * it. Returns 0 when admitted, else the Retry-After in seconds. Counts the
+ * refusal and any evictions in `counters` and the per-rule stats at once, so
+ * the caller answers a refusal with 429 straight away. Reads the request's
+ * peer, method, target and X-Forwarded-For only. */
 uint32_t http_rate_limit_check(http_server_object *server, const http_request_t *req,
                                http_server_counters_t *counters);
+
+/* The same check for a verdict sent later (HTTP/1, before the body): an
+ * admission and its evictions count at once, a refusal is kept on the request
+ * (req->rate_limit_pending) and counts only through
+ * http_rate_limit_count_refusal, where its 429 is sent. A request answered
+ * otherwise (413) frees it uncounted with the request. */
+uint32_t http_rate_limit_check_deferred(http_server_object *server, http_request_t *req,
+                                        http_server_counters_t *counters);
+
+/* Counts the refusal kept by http_rate_limit_check_deferred; no-op without one. */
+void http_rate_limit_count_refusal(http_server_object *server, http_request_t *req,
+                                   http_server_counters_t *counters);
 
 /* Turns a fresh response into the refusal: 429, Retry-After and a short body;
  * or, for a gRPC call (`grpc`), status 200 with the trailers grpc-status 8,

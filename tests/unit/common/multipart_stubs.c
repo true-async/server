@@ -65,6 +65,13 @@ uint32_t http_rate_limit_check(http_server_object *server, const http_request_t 
     return 0;
 }
 
+uint32_t http_rate_limit_check_deferred(http_server_object *server, http_request_t *req,
+                                        http_server_counters_t *counters)
+{
+    (void)server; (void)req; (void)counters;
+    return 0;
+}
+
 /* Logging is fired via http_logf_* macros that gate on log_state->severity;
  * tests pass a zero-initialized state (severity == HTTP_LOG_OFF) so the
  * macro short-circuits and this body is never actually entered. The
