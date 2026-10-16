@@ -596,10 +596,15 @@ $server->addRateLimit((new RateLimit(requests: 120, perSeconds: 60))->name('read
   it passes on (`StaticOnMissing::NEXT`, or a method it does not serve) is.
   Under the reactor pool HTTP/3 static files are served on the reactor
   thread before any rule. On HTTP/1 a request whose method is not GET or
-  HEAD, and that carries no Upgrade header, is judged when its headers end,
-  so the body of a refused upload is read and dropped, never buffered or
-  written to disk; it still counts against `setMaxBodySize()`, and past it
-  the answer is 413, which is not counted as a refusal. HTTP/2 and HTTP/3
+  HEAD is judged when its headers end, so the body of a refused upload is
+  read and dropped, never buffered or written to disk; it still counts
+  against `setMaxBodySize()`, and past it the answer is 413, which is not
+  counted as a refusal. A declared `Content-Length` past the limit is
+  answered 413 before the verdict and spends no token. In a build with
+  WebSocket support a request carrying an `Upgrade` header takes no verdict
+  there: the upgrade path answers it (a valid upgrade is checked on that
+  path, anything else gets 405, 426 or 400 uncounted), and its body is
+  dropped unread. HTTP/2 and HTTP/3
   judge a request once its body handling has started: a refused HTTP/2
   multipart upload may have parts on disk, and an HTTP/3 body is buffered,
   before the 429 is sent.

@@ -271,9 +271,10 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     const bool has_static_mount =
         http_static_handler_count(self->conn->server) > 0;
 
-    /* No handler, mount or gRPC handler takes the request, and it is dropped
-     * unanswered; it still counts against the rate limit, and once refused it
-     * is answered 429 on the path below. */
+    /* No handler, mount or gRPC handler takes the request. It counts against
+     * the rate limit, and once refused it is answered 429 on the path below.
+     * An admitted one is still dropped unanswered: an existing gap, not
+     * intent. */
     if (self->conn->handler == NULL && !has_static_mount && !is_grpc
         && rate_limit_retry == 0) {
         rate_limit_retry = http_rate_limit_check(self->conn->server, stream->request,

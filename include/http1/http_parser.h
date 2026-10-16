@@ -80,6 +80,9 @@ typedef enum {
 /* Forward declaration for multipart processor */
 struct mp_processor_t;
 
+/* Per-rule rate limit counts (core/rate_limit.h) */
+struct http_rl_rule_stats_s;
+
 /* Parsed HTTP request (logical-request struct).
  *
  * Field order: 8-byte pointers first, then size_t, then 1-byte fields
@@ -305,10 +308,10 @@ struct http_request_t {
     /* Retry-After of a rate limit refusal taken before the body, in seconds;
      * 0 when the request was admitted or not checked yet. */
     uint32_t     rate_limit_retry_s;
-    /* Per-rule counts of that refusal (an emalloc'd http_rl_rule_stats_t
-     * array), counted when its 429 is sent and freed with the request
+    /* Per-rule counts of that refusal (an emalloc'd array, one entry per
+     * rule), counted when its 429 is sent and freed with the request
      * otherwise; NULL when there is none. */
-    void        *rate_limit_pending;
+    struct http_rl_rule_stats_s *rate_limit_pending;
     /* Why the form was refused, for the message of every getter that throws;
      * a string literal, so it is valid on any thread. NULL while it has not. */
     const char  *form_refused_reason;

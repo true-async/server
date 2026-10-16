@@ -868,7 +868,9 @@ uint32_t http_rate_limit_check(http_server_object *server, const http_request_t 
 	return retry_after;
 }
 
-/* Rule counts of a refusal kept on the request until its 429 is sent. */
+/* Up to this many rules, the deferred check gathers its per-rule counts on
+ * the stack; more take a heap array. A refusal keeps them on the request
+ * either way, copied to the heap if they were on the stack. */
 #define RATE_LIMIT_STACK_RULES 8
 
 uint32_t http_rate_limit_check_deferred(http_server_object *server, http_request_t *req,

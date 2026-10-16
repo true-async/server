@@ -213,7 +213,7 @@ typedef struct
 } http_rl_request_t;
 
 /* What one rule did, accumulated across calls. */
-typedef struct
+typedef struct http_rl_rule_stats_s
 {
 	uint64_t refused;	/* requests this rule refused */
 	uint64_t evictions; /* buckets a new key took from another */
