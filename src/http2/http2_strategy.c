@@ -234,7 +234,8 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         return;
     }
 
-    /* Retry-After of a refusal taken before the static path, 0 otherwise. */
+    /* Retry-After of a refusal taken before the static path (an extended
+     * CONNECT, or a request nothing would take), 0 otherwise. */
     uint32_t rate_limit_retry = 0;
 
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
@@ -270,9 +271,17 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     const bool has_static_mount =
         http_static_handler_count(self->conn->server) > 0;
 
+    /* No handler, mount or gRPC handler takes the request, and it is dropped
+     * unanswered; it still counts against the rate limit, and once refused it
+     * is answered 429 on the path below. */
     if (self->conn->handler == NULL && !has_static_mount && !is_grpc
         && rate_limit_retry == 0) {
-        return;
+        rate_limit_retry = http_rate_limit_check(self->conn->server, stream->request,
+                                                 self->conn->counters);
+
+        if (EXPECTED(rate_limit_retry == 0)) {
+            return;
+        }
     }
 
     /* OOM-bailout protection for this read-path is provided by the
