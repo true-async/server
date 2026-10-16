@@ -14,6 +14,7 @@
 #include "static/static_handler.h"
 #include "http_send_file.h"
 #include "grpc_call.h"
+#include "core/rate_limit_php.h"
 
 #include <stdlib.h>
 
@@ -29,6 +30,12 @@ int h2_stream_send_static_response(void *ctx, zend_object *response_obj, zend_as
 {
 	(void) ctx; (void) response_obj; (void) file_io; (void) body_offset;
 	(void) body_length; (void) head_only; (void) on_done; (void) user;
+	abort();
+}
+
+void http_rate_limit_refuse(zend_object *response, uint32_t retry_after_s, bool grpc)
+{
+	(void) response; (void) retry_after_s; (void) grpc;
 	abort();
 }
 
