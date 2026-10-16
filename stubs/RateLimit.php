@@ -50,10 +50,12 @@ final class RateLimit
     /**
      * Limits the rule to these path prefixes; replaces any earlier list. A
      * prefix starts with `/` and does not end with one, except `/` itself,
-     * which means every path. `/api` covers `/api` and `/api/...`, not
-     * `/apix`. The path is matched decoded (`%77` is `w`) and normalised (`//`
-     * collapsed, `.` and `..` resolved); a target with a malformed `%`
-     * sequence matches every prefix. Up to 32 prefixes. Default: every path.
+     * which means every path: with `/` in the list the other prefixes are
+     * dropped, as if paths() had not been called. `/api` covers `/api` and
+     * `/api/...`, not `/apix`. The path is matched decoded (`%77` is `w`) and
+     * normalised (`//` collapsed, `.` and `..` resolved); a target with a
+     * malformed `%` sequence matches every prefix. Up to 32 prefixes.
+     * Default: every path.
      *
      * @throws HttpServerInvalidArgumentException
      * @throws HttpServerRuntimeException once the rule is added to a server

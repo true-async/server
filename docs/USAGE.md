@@ -571,7 +571,8 @@ $server->addRateLimit((new RateLimit(requests: 120, perSeconds: 60))->name('read
 ```
 
 - **Matching.** `paths()` takes prefixes: `/api` covers `/api` and
-  `/api/...`, not `/apix`; `/` is every path. The path is matched with `%XX`
+  `/api/...`, not `/apix`; `/` is every path, so `paths('/', '/api')` is the
+  same as no `paths()` call and the other prefixes are dropped. The path is matched with `%XX`
   decoded and with `//`, `.` and `..` resolved, so `/api/%77orks` and
   `//api/./works` are `/api/works`; a target with a malformed `%` sequence
   matches every rule's paths. `methods()` upper-cases its tokens, and HEAD is
@@ -594,10 +595,14 @@ $server->addRateLimit((new RateLimit(requests: 120, perSeconds: 60))->name('read
 - **What is counted.** A file a static mount serves is not counted; a request
   it passes on (`StaticOnMissing::NEXT`, or a method it does not serve) is.
   Under the reactor pool HTTP/3 static files are served on the reactor
-  thread before any rule. A request whose method is not GET or HEAD is
-  refused when its headers end, so the body of a refused upload is read and
-  dropped, never buffered or written to disk; it still counts against
-  `setMaxBodySize()`, and past it the answer is 413.
+  thread before any rule. On HTTP/1 a request whose method is not GET or
+  HEAD, and that carries no Upgrade header, is judged when its headers end,
+  so the body of a refused upload is read and dropped, never buffered or
+  written to disk; it still counts against `setMaxBodySize()`, and past it
+  the answer is 413, which is not counted as a refusal. HTTP/2 and HTTP/3
+  judge a request once its body handling has started: a refused HTTP/2
+  multipart upload may have parts on disk, and an HTTP/3 body is buffered,
+  before the 429 is sent.
 - **Protocols.** HTTP/1, HTTP/2 and HTTP/3 answer 429. A refused WebSocket
   upgrade over HTTP/1 gets 429 and the connection closes, as on every refused
   upgrade; over HTTP/2 a refused extended CONNECT gets 429 on its stream. A

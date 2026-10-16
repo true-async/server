@@ -1,5 +1,5 @@
 /* This is a generated file, edit RateLimit.php.stub.php instead.
- * Stub hash: 604420188565a8b036dca3cd51ac94ccb2de330e */
+ * Stub hash: ed45c062306f6683d4e979b3279cc69092d6d48c */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_RateLimit___construct, 0, 0, 2)
 	ZEND_ARG_TYPE_INFO(0, requests, IS_LONG, 0)
