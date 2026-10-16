@@ -116,7 +116,7 @@ function hpack_status_and_values(string $block): array
 function connect_retry_after(array $values, int $content_length): string
 {
     foreach ($values as $value) {
-        if (ctype_digit($value) && (int) $value !== $content_length) {
+        if (preg_match('/^\d+$/D', $value) === 1 && (int) $value !== $content_length) {
             return (string) rl_wait((int) $value);
         }
     }
