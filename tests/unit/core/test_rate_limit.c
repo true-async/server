@@ -21,6 +21,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifdef _WIN32
 # include <winsock2.h>
@@ -398,6 +399,38 @@ static void test_element_grammar(void **state)
     }
 }
 
+static void test_length_boundaries(void **state)
+{
+    (void)state;
+    http_rl_addr_t addr;
+
+    /* 45 bytes is the longest IPv6 text (INET6_ADDRSTRLEN - 1): accepted, as
+     * an element, in brackets and with a port; 46 never is. */
+    const char *const longest = "0000:0000:0000:0000:0000:ffff:255.255.255.255";
+    assert_int_equal(strlen(longest), 45);
+    assert_true(http_rl_addr_parse(longest, 45, &addr));
+    assert_addr_equal(&addr, &(http_rl_addr_t){ HTTP_RL_FAMILY_V4, { 255, 255, 255, 255 } });
+
+    char bracketed[64];
+    snprintf(bracketed, sizeof(bracketed), "[%s]:65535", longest);
+    assert_true(http_rl_addr_parse(bracketed, strlen(bracketed), &addr));
+
+    const char *const too_long = "00000:0000:0000:0000:0000:ffff:255.255.255.255";
+    assert_int_equal(strlen(too_long), 46);
+    assert_false(http_rl_addr_parse(too_long, 46, &addr));
+
+    /* The longest IPv4 text, 15 bytes, and one more. */
+    assert_true(http_rl_addr_parse("255.255.255.255", 15, &addr));
+    assert_false(http_rl_addr_parse("255.255.255.2550", 16, &addr));
+
+    /* A path prefix of HTTP_RL_MAX_PATH_LEN bytes is valid; one more is not. */
+    char prefix[HTTP_RL_MAX_PATH_LEN + 2];
+    prefix[0] = '/';
+    memset(prefix + 1, 'p', sizeof(prefix) - 1);
+    assert_true(http_rl_prefix_valid(prefix, HTTP_RL_MAX_PATH_LEN));
+    assert_false(http_rl_prefix_valid(prefix, HTTP_RL_MAX_PATH_LEN + 1));
+}
+
 static void test_cidr_parse_and_format(void **state)
 {
     (void)state;
@@ -762,6 +795,7 @@ int main(void)
         cmocka_unit_test(test_probe_wraps_at_the_end_of_the_table),
         cmocka_unit_test(test_unmapping_only_touches_v4_mapped),
         cmocka_unit_test(test_element_grammar),
+        cmocka_unit_test(test_length_boundaries),
         cmocka_unit_test(test_cidr_parse_and_format),
         cmocka_unit_test(test_forwarded_walk),
         cmocka_unit_test(test_unix_peer),

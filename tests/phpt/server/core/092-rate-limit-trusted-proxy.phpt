@@ -54,6 +54,9 @@ spawn(function () use ($server, $port) {
     echo "via proxy, client A again: ", from('127.0.0.1', $port, '203.0.113.1'), "\n";
     echo "via proxy, client B: ", from('127.0.0.1', $port, '203.0.113.2'), "\n";
     echo "client A behind two trusted hops: ", from('127.0.0.1', $port, '203.0.113.1, 10.1.2.3'), "\n";
+    /* A client-written address on the left is not the client: the walk goes
+     * from the right, so this is client A again, not 198.51.100.99. */
+    echo "client A with a forged address before it: ", from('127.0.0.1', $port, '198.51.100.99, 203.0.113.1'), "\n";
     echo "client C with a port: ", from('127.0.0.1', $port, '198.51.100.7:4711'), "\n";
     echo "unknown element, keyed as the proxy: ", from('127.0.0.1', $port, 'unknown'), "\n";
     echo "the proxy itself again: ", from('127.0.0.1', $port, null), "\n";
@@ -72,6 +75,7 @@ via proxy, client A: 200 body=peer 127.0.0.1
 via proxy, client A again: 429 retry-after=60 body=Too Many Requests
 via proxy, client B: 200 body=peer 127.0.0.1
 client A behind two trusted hops: 429 retry-after=60 body=Too Many Requests
+client A with a forged address before it: 429 retry-after=60 body=Too Many Requests
 client C with a port: 200 body=peer 127.0.0.1
 unknown element, keyed as the proxy: 200 body=peer 127.0.0.1
 the proxy itself again: 429 retry-after=60 body=Too Many Requests

@@ -10,6 +10,7 @@ h3_skipif(['openssl_cli' => true, 'h3client' => true]);
 ?>
 --ENV--
 TRUE_ASYNC_SERVER_REACTOR_POOL=1
+TRUE_ASYNC_SERVER_SHARED_LISTEN_FD=1
 PHP_HTTP3_DISABLE_RETRY=1
 --FILE--
 <?php
@@ -27,6 +28,7 @@ use function Async\delay;
 
 require __DIR__ . '/../h3/_h3_skipif.inc';
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_rate_limit.inc';
 
 $tmp = __DIR__ . '/tmp-100';
 @mkdir($tmp, 0700, true);
@@ -70,7 +72,7 @@ function h3(string $bin, int $port, string $path, string $method = 'GET', ?strin
     preg_match('/^HDR retry-after: (\d+)$/m', $out, $retry);
 
     return ($status[1] ?? '?') . (isset($grpc[1]) ? " grpc-status=$grpc[1]" : '')
-         . (isset($retry[1]) ? " retry-after=$retry[1]" : '');
+         . (isset($retry[1]) ? ' retry-after=' . rl_wait((int) $retry[1]) : '');
 }
 
 spawn(function () use ($server, $port, $client_bin, $frame) {
@@ -85,7 +87,9 @@ spawn(function () use ($server, $port, $client_bin, $frame) {
     ksort($counts);
     $admitted = $counts['200'] ?? 0;
     echo "GET admitted 1 or 2: ", ($admitted >= 1 && $admitted <= 2) ? 'yes' : "no ($admitted)", "\n";
-    echo "GET refused: ", $counts['429 retry-after=60'] ?? 0, " of ", 6 - $admitted, "\n";
+    unset($counts['200']);
+    echo "GET refusals: ", json_encode($counts), " count matches: ",
+         array_sum($counts) === 6 - $admitted ? 'yes' : 'no', "\n";
 
     $grpc = [];
 
@@ -96,7 +100,9 @@ spawn(function () use ($server, $port, $client_bin, $frame) {
     $counts = array_count_values($grpc);
     $ok = $counts['200 grpc-status=0'] ?? 0;
     echo "gRPC admitted 1 or 2: ", ($ok >= 1 && $ok <= 2) ? 'yes' : "no ($ok)", "\n";
-    echo "gRPC refused: ", $counts['200 grpc-status=8'] ?? 0, " of ", 6 - $ok, "\n";
+    unset($counts['200 grpc-status=0']);
+    echo "gRPC refusals: ", json_encode($counts), " count matches: ",
+         array_sum($counts) === 6 - $ok ? 'yes' : 'no', "\n";
 
     $refused = 12 - ($admitted + $ok);
     delay(100);
@@ -110,8 +116,8 @@ echo "done\n";
 ?>
 --EXPECTF--
 %AGET admitted 1 or 2: yes
-GET refused: %d of %d
+GET refusals: {"429 retry-after=60":%d} count matches: yes
 gRPC admitted 1 or 2: yes
-gRPC refused: %d of %d
+gRPC refusals: {"200 grpc-status=8":%d} count matches: yes
 rate_limited_total matches: yes
 %Adone

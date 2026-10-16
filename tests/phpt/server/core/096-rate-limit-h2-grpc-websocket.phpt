@@ -27,6 +27,7 @@ use function Async\delay;
 
 require_once __DIR__ . '/../_free_port.inc';
 require_once __DIR__ . '/../h2/_h2_client.inc';
+require_once __DIR__ . '/_rate_limit.inc';
 
 $port = tas_free_port();
 $server = new HttpServer((new HttpServerConfig())
@@ -51,6 +52,77 @@ $server->addWebSocketHandler(function (WebSocket $ws) use (&$runs) {
     while ($ws->recv() !== null) {}
 });
 
+/* The :status and the plain (not Huffman-coded) values of an HPACK block,
+ * enough to read a short answer: nghttp2 sends "429" and "60" as plain
+ * strings, as Huffman would not make them shorter. */
+function hpack_status_and_values(string $block): array
+{
+    $int = function (int $prefix) use ($block, &$pos): int {
+        $max = (1 << $prefix) - 1;
+        $v = ord($block[$pos++]) & $max;
+        if ($v < $max) return $v;
+        for ($m = 0; ; $m += 7) {
+            $b = ord($block[$pos++]);
+            $v += ($b & 0x7f) << $m;
+            if (!($b & 0x80)) return $v;
+        }
+    };
+    $string = function () use ($block, &$pos, $int): ?string {
+        $huffman = (ord($block[$pos]) & 0x80) !== 0;
+        $len = $int(7);
+        $raw = substr($block, $pos, $len);
+        $pos += $len;
+        return $huffman ? null : $raw;
+    };
+
+    $static_status = [8 => '200', 9 => '204', 10 => '206', 11 => '304', 12 => '400', 13 => '404', 14 => '500'];
+    $status = null;
+    $values = [];
+    $pos = 0;
+
+    while ($pos < strlen($block)) {
+        $b = ord($block[$pos]);
+
+        if ($b & 0x80) {                          /* indexed field */
+            $index = $int(7);
+            $status ??= $static_status[$index] ?? null;
+            continue;
+        }
+
+        if (($b & 0xe0) === 0x20) {               /* table size update */
+            $int(5);
+            continue;
+        }
+
+        $index = ($b & 0x40) ? $int(6) : $int(4);
+        if ($index === 0) {
+            $string();                            /* literal name */
+        }
+        $value = $string();
+
+        if ($index === 8 && $value !== null) {
+            $status ??= $value;
+        } elseif ($value !== null) {
+            $values[] = $value;
+        }
+    }
+
+    return [$status, $values];
+}
+
+/* The Retry-After among a refused CONNECT's plain values: the one made of
+ * digits alone other than the Content-Length; the date has letters. */
+function connect_retry_after(array $values, int $content_length): string
+{
+    foreach ($values as $value) {
+        if (ctype_digit($value) && (int) $value !== $content_length) {
+            return (string) rl_wait((int) $value);
+        }
+    }
+
+    return 'missing';
+}
+
 function curl_lines(string $args, array $want): string
 {
     $out = shell_exec("curl -s -i --max-time 3 $args 2>&1") ?? '';
@@ -58,9 +130,19 @@ function curl_lines(string $args, array $want): string
 
     foreach (preg_split('/\r?\n/', $out) as $line) {
         foreach ($want as $prefix) {
-            if (stripos($line, $prefix) === 0) {
-                $found[] = strtolower(trim($line));
+            if (stripos($line, $prefix) !== 0) {
+                continue;
             }
+
+            $line = strtolower(trim($line));
+
+            if (preg_match('/^retry-after: (\d+)$/', $line, $m)) {
+                $line = 'retry-after: ' . rl_wait((int) $m[1]);
+            } elseif (preg_match('/^grpc-retry-pushback-ms: (\d+)$/', $line, $m)) {
+                $line = 'grpc-retry-pushback-ms: ' . rl_wait(intdiv((int) $m[1], 1000)) * 1000;
+            }
+
+            $found[] = $line;
         }
     }
 
@@ -93,6 +175,9 @@ $client = spawn(function () use ($port, $server, &$runs) {
     foreach ([1, 2] as $i) {
         $sid = $cli->sendRequest('CONNECT', '/ws', 'localhost', [':protocol' => 'websocket'], null, false);
         $headers = false;
+        $status = null;
+        $values = [];
+        $first_200 = false;
         $body = '';
         $ended = false;
         $deadline = microtime(true) + 3;
@@ -111,6 +196,9 @@ $client = spawn(function () use ($port, $server, &$runs) {
 
             if ($type === H2_FRAME_HEADERS) {
                 $headers = true;
+                /* 0x88 is the static-table index of :status 200. */
+                $first_200 = ord($payload[0]) === 0x88;
+                [$status, $values] = hpack_status_and_values($payload);
                 $ended = (bool)($flags & H2_FLAG_END_STREAM);
                 if ($i === 1 || $ended) break;
             }
@@ -121,8 +209,10 @@ $client = spawn(function () use ($port, $server, &$runs) {
             }
         }
 
-        echo "CONNECT #$i: headers=", $headers ? 'yes' : 'no', " ended=", $ended ? 'yes' : 'no',
-             " body=", trim($body), "\n";
+        echo "CONNECT #$i: headers=", $headers ? 'yes' : 'no', " status=", $status ?? '?',
+             " indexed-200=", !empty($first_200) ? 'yes' : 'no',
+             $i === 2 ? ' retry-after=' . connect_retry_after($values, strlen($body)) : '',
+             " ended=", $ended ? 'yes' : 'no', " body=", trim($body), "\n";
     }
 
     $cli->close();
@@ -143,8 +233,8 @@ h2c GET #2: http/2 429 | retry-after: 60
 gRPC #1: http/2 200
 gRPC #2: http/2 200 | grpc-status: 8 | grpc-message: rate limit exceeded | grpc-retry-pushback-ms: 60000
 gRPC-Web over HTTP/1: http/1.1 429 too many requests | retry-after: 60
-CONNECT #1: headers=yes ended=no body=
-CONNECT #2: headers=yes ended=yes body=Too Many Requests
+CONNECT #1: headers=yes status=200 indexed-200=yes ended=no body=
+CONNECT #2: headers=yes status=429 indexed-200=no retry-after=60 ended=yes body=Too Many Requests
 handlers run: http=1 grpc=1 ws=1
 rate_limited_total=4
 done
