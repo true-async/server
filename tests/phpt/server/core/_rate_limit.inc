@@ -62,9 +62,9 @@ function rl_full_waits(): array
 
 /* A Retry-After value as the test expects it. Under valgrind (run-tests -m
  * sets ZEND_DONT_UNLOAD_MODULES) a request takes long enough for the wait to
- * drop a few seconds below the full one, so a value up to 15 s under a full
- * wait reads as the smallest such wait there; any other run compares it
- * exactly. */
+ * drop a few seconds below the full one, so a value up to 15 s (at most half
+ * the wait) under a full wait reads as that wait there; any other run
+ * compares it exactly. */
 function rl_wait(int $seconds): int
 {
     if (getenv('ZEND_DONT_UNLOAD_MODULES') === false) {
@@ -72,7 +72,7 @@ function rl_wait(int $seconds): int
     }
 
     foreach (rl_full_waits() as $full) {
-        if ($seconds <= $full && $seconds >= $full - 15) {
+        if ($seconds <= $full && $seconds >= $full - min(15, intdiv($full, 2))) {
             return $full;
         }
     }
