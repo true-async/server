@@ -521,7 +521,9 @@ struct http_rate_limits_s {
     size_t                 total_keys;
     bool                   any_paths;      /* some rule matches on the path */
 
-    /* Serving instance only, from http_rate_limits_prepare. */
+    /* Serving instance only, from http_rate_limits_prepare: table_count
+     * entries, one per rule that existed at the last start(). */
+    size_t                 table_count;
     http_rl_table_t       *tables;
     http_rl_rule_stats_t  *stats;
     uint8_t                hash_key[16];
@@ -601,7 +603,7 @@ void http_rate_limits_free(http_rate_limits_t *set)
     }
 
     if (set->tables != NULL) {
-        for (size_t i = 0; i < set->count; i++) {
+        for (size_t i = 0; i < set->table_count; i++) {
             pefree(set->tables[i].slots, 1);
         }
 
@@ -680,18 +682,29 @@ http_rate_limits_t *http_rate_limits_load(const void *transit_ptr)
 
 void http_rate_limits_prepare(http_rate_limits_t *set)
 {
-    if (set == NULL || set->tables != NULL || set->count == 0) {
+    if (set == NULL || set->count == 0 || set->table_count == set->count) {
         return;
     }
 
-    /* Persistent: 1.5 MiB a rule by default is the server's own state, not a
-     * request's, and must not count against memory_limit. */
-    set->tables = pecalloc(set->count, sizeof(*set->tables), 1);
-    set->stats  = pecalloc(set->count, sizeof(*set->stats), 1);
+    /* A rule added between stop() and the next start() gets its buckets here;
+     * the rules of the earlier run keep theirs, and the hash key they were
+     * keyed with. Persistent: 1.5 MiB a rule by default is the server's own
+     * state, not a request's, and must not count against memory_limit. */
+    const size_t first_new = set->table_count;
 
-    for (size_t i = 0; i < set->count; i++) {
+    set->tables = perealloc(set->tables, sizeof(*set->tables) * set->count, 1);
+    set->stats  = perealloc(set->stats, sizeof(*set->stats) * set->count, 1);
+    memset(set->stats + first_new, 0, sizeof(*set->stats) * (set->count - first_new));
+
+    for (size_t i = first_new; i < set->count; i++) {
         set->tables[i].max_keys = set->rules[i]->rule.max_keys;
         set->tables[i].slots    = pecalloc(set->tables[i].max_keys, sizeof(http_rl_slot_t), 1);
+    }
+
+    set->table_count = set->count;
+
+    if (first_new > 0) {
+        return;
     }
 
     /* A key the clients cannot learn keeps them from steering their buckets
@@ -735,9 +748,9 @@ void http_rate_limits_telemetry(const http_rate_limits_t *set, zval *telemetry)
         zval entry;
         array_init_size(&entry, 2);
         add_assoc_long(&entry, "limited",
-                       set->stats != NULL ? (zend_long)set->stats[i].refused : 0);
+                       i < set->table_count ? (zend_long)set->stats[i].refused : 0);
         add_assoc_long(&entry, "evictions",
-                       set->stats != NULL ? (zend_long)set->stats[i].evictions : 0);
+                       i < set->table_count ? (zend_long)set->stats[i].evictions : 0);
         add_assoc_zval_ex(&rules, set->rules[i]->name, set->rules[i]->name_len, &entry);
     }
 
@@ -747,7 +760,7 @@ void http_rate_limits_telemetry(const http_rate_limits_t *set, zval *telemetry)
 void http_rate_limits_telemetry_reset(http_rate_limits_t *set)
 {
     if (set != NULL && set->stats != NULL) {
-        memset(set->stats, 0, sizeof(*set->stats) * set->count);
+        memset(set->stats, 0, sizeof(*set->stats) * set->table_count);
     }
 }
 /* }}} */
@@ -813,7 +826,7 @@ uint32_t http_rate_limit_check(http_server_object *server, const http_request_t 
     };
 
     uint64_t evictions = 0;
-    const uint32_t retry_after = http_rl_evaluate(set->views, set->tables, set->count,
+    const uint32_t retry_after = http_rl_evaluate(set->views, set->tables, set->table_count,
                                                   set->hash_key, &request, set->stats, &evictions);
 
     if (scratch != NULL && scratch != stack_scratch) {
