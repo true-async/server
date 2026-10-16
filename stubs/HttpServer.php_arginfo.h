@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServer.php.stub.php instead.
- * Stub hash: 45deba1e91629fc49737fecc7e980ed577a8dcfb */
+ * Stub hash: c6186e1431462a27e28c807375024258732fbd6b */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServer___construct, 0, 0, 1)
 	ZEND_ARG_OBJ_INFO(0, config, TrueAsync\\HttpServerConfig, 0)
@@ -16,6 +16,10 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_addStaticHandler, 0, 1, IS_STATIC, 0)
 	ZEND_ARG_OBJ_INFO(0, handler, TrueAsync\\StaticHandler, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServer_addRateLimit, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_OBJ_INFO(0, rule, TrueAsync\\RateLimit, 0)
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServer_addWebSocketHandler arginfo_class_TrueAsync_HttpServer_addHttpHandler
@@ -83,6 +87,7 @@ ZEND_METHOD(TrueAsync_HttpServer, isHttp2);
 ZEND_METHOD(TrueAsync_HttpServer, isHttp3);
 ZEND_METHOD(TrueAsync_HttpServer, addHttpHandler);
 ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler);
+ZEND_METHOD(TrueAsync_HttpServer, addRateLimit);
 ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler);
 ZEND_METHOD(TrueAsync_HttpServer, enableRooms);
 ZEND_METHOD(TrueAsync_HttpServer, publish);
@@ -110,6 +115,7 @@ static const zend_function_entry class_TrueAsync_HttpServer_methods[] = {
 	ZEND_ME(TrueAsync_HttpServer, isHttp3, arginfo_class_TrueAsync_HttpServer_isHttp3, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(TrueAsync_HttpServer, addHttpHandler, arginfo_class_TrueAsync_HttpServer_addHttpHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addStaticHandler, arginfo_class_TrueAsync_HttpServer_addStaticHandler, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServer, addRateLimit, arginfo_class_TrueAsync_HttpServer_addRateLimit, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, addWebSocketHandler, arginfo_class_TrueAsync_HttpServer_addWebSocketHandler, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, enableRooms, arginfo_class_TrueAsync_HttpServer_enableRooms, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServer, publish, arginfo_class_TrueAsync_HttpServer_publish, ZEND_ACC_PUBLIC)

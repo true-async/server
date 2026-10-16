@@ -64,6 +64,8 @@ if (PHP_TRUE_ASYNC_SERVER == "yes") {
         "worker_inbox.c " +
         "worker_registry.c " +
         "stats_registry.c " +
+        "rate_limit.c " +
+        "rate_limit_php.c " +
         "http_connection.c " +
         "http_connection_tls.c " +
         "http_protocol_handlers.c " +

@@ -26,6 +26,8 @@
 #include "core/http_protocol_strategy.h"
 #include "core/http_protocol_handlers.h"
 #include "http1/http_parser.h"
+#include "core/rate_limit_php.h"
+#include "php_http_server.h"
 
 #include <string.h>
 
@@ -107,6 +109,25 @@ static bool ws_reject_upgrade(http_connection_t *conn, http_request_t *req,
     return true;
 }
 
+/* The rate limit refused the upgrade: 429 with Retry-After, and the
+ * connection goes as on every refused upgrade. The refusal is a response the
+ * telemetry counts and the access log records, which the other refusals on
+ * this path are not; a throwaway response object carries its status there. */
+static bool ws_reject_rate_limited(http_connection_t *conn, http_request_t *req,
+                                   const uint32_t retry_after)
+{
+    zval response;
+    object_init_ex(&response, http_response_ce);
+    http_response_static_set_status(Z_OBJ(response), 429);
+    http_request_telemetry(req, Z_OBJ(response), conn->counters, conn->log_state);
+    zval_ptr_dtor(&response);
+
+    char header[48];
+    snprintf(header, sizeof(header), "Retry-After: %u\r\n", retry_after);
+
+    return ws_reject_upgrade(conn, req, 429, header);
+}
+
 bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
 {
     /* Cheapest probe first — no Upgrade header → not our concern. */
@@ -139,6 +160,13 @@ bool ws_dispatch_try_upgrade(http_connection_t *conn, http_request_t *req)
         }
 
         return ws_reject_upgrade(conn, req, status, extra);
+    }
+
+    /* A valid upgrade counts against the rate limit like any request. */
+    const uint32_t retry_after = http_rate_limit_check(conn->server, req, conn->counters);
+
+    if (UNEXPECTED(retry_after != 0)) {
+        return ws_reject_rate_limited(conn, req, retry_after);
     }
 
     /* Accept path — pre-compute Sec-WebSocket-Accept now (pure CPU,
@@ -225,6 +253,7 @@ static zend_string *build_error_response(int status, const char *extra_header)
         case 403: reason = "Forbidden";          break;
         case 405: reason = "Method Not Allowed"; break;
         case 426: reason = "Upgrade Required";   break;
+        case 429: reason = "Too Many Requests";  break;
         case 500: reason = "Internal Server Error"; break;
         default:  reason = (status >= 500) ? "Internal Server Error"
                                            : "Bad Request";

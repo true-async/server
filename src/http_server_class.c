@@ -52,6 +52,7 @@
 #endif
 #include "static/static_handler.h"
 #include "static/http_static_cache.h"
+#include "core/rate_limit_php.h"
 #ifdef HAVE_HTTP_SERVER_HTTP3
 # include "http3/http3_listener.h"
 # include "http3/http3_steer.h"
@@ -635,6 +636,12 @@ struct http_server_object {
      * path addrefs once more into the worker's emalloc array. NULL
      * outside the worker-pool fan-out. */
     void                    *transit_static_mounts;
+
+    /* Request rate limit rules and, on a serving instance, their buckets
+     * (core/rate_limit_php.h). NULL without rules. The transit copy lives in
+     * a worker shell only, like transit_static_mounts. */
+    http_rate_limits_t      *rate_limits;
+    void                    *transit_rate_limits;
 
     /* Built-in static file mounts (issue #13). Each entry references a
      * locked TrueAsync\StaticHandler PHP object whose embedded
@@ -1521,6 +1528,11 @@ http_server_config_t *http_server_get_config(http_server_object *server)
     return http_server_config_from_obj(Z_OBJ(server->config));
 }
 
+struct http_rate_limits_s *http_server_rate_limits(const http_server_object *server)
+{
+    return server != NULL ? server->rate_limits : NULL;
+}
+
 void *http_server_get_topic_hub(http_server_object *server)
 {
     return server != NULL ? server->topic_hub : NULL;
@@ -1954,6 +1966,31 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
      * (H3 lands in PR #3.) start() preflight uses static_handler_count
      * separately. */
     server->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1 | HTTP_PROTO_MASK_HTTP2;
+
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServer::addRateLimit(RateLimit $rule): static */
+ZEND_METHOD(TrueAsync_HttpServer, addRateLimit)
+{
+    zval *rule_zv = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_OBJECT_OF_CLASS(rule_zv, http_rate_limit_ce)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (server->running) {
+        zend_throw_exception(http_server_runtime_exception_ce,
+            "Cannot add a rate limit while server is running", 0);
+        RETURN_THROWS();
+    }
+
+    if (!http_rate_limits_add(&server->rate_limits, Z_OBJ_P(rule_zv))) {
+        RETURN_THROWS();
+    }
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
@@ -4017,6 +4054,10 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
      * lands in the worker's own slot. */
     http_server_stats_up(server);
 
+    /* Buckets belong to the instance that serves; before any listener, so no
+     * request arrives ahead of them. A pool parent never gets here. */
+    http_rate_limits_prepare(server->rate_limits);
+
     /* Get config values - call PHP methods */
     zval retval;
 
@@ -4675,6 +4716,7 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
         http_logf_info(&server->log_state,
                        "server.start backlog=%d max_connections=%d",
                        server->backlog, server->max_connections);
+        http_rate_limits_log_start(server->rate_limits, cfg, &server->log_state);
     }
 
     server->starting = false;
@@ -5625,6 +5667,10 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
     add_assoc_long(return_value, "active_requests", (zend_long)server->counters_live->active_requests);
     add_assoc_long(return_value, "max_inflight_requests", (zend_long)server->max_inflight_requests);
     add_assoc_long(return_value, "requests_shed_total", (zend_long)server->counters_live->requests_shed_total);
+    add_assoc_long(return_value, "requests_rate_limited_total",
+                   (zend_long)server->counters_live->requests_rate_limited_total);
+    add_assoc_long(return_value, "requests_rate_limit_evictions_total",
+                   (zend_long)server->counters_live->requests_rate_limit_evictions_total);
 
     /* Backpressure telemetry. All durations exposed in milliseconds
      * (float) so PHP callers can graph without extra conversion. */
@@ -5734,6 +5780,9 @@ ZEND_METHOD(TrueAsync_HttpServer, getTelemetry)
                    (zend_long)server->counters_live->h2_data_sent_bytes_total);
     add_assoc_long(return_value, "h2_ping_rtt_ns",
                    (zend_long)server->counters_live->h2_ping_rtt_ns);
+
+    /* Per rule, this instance: name => [limited, evictions]. */
+    http_rate_limits_telemetry(server->rate_limits, return_value);
 }
 /* }}} */
 
@@ -5775,6 +5824,9 @@ ZEND_METHOD(TrueAsync_HttpServer, resetTelemetry)
     server->counters_live->parse_errors_431_total         = 0;
     server->counters_live->parse_errors_503_total         = 0;
     server->counters_live->requests_shed_total            = 0;
+    server->counters_live->requests_rate_limited_total         = 0;
+    server->counters_live->requests_rate_limit_evictions_total = 0;
+    http_rate_limits_telemetry_reset(server->rate_limits);
     server->counters_live->h2_streams_refused_total       = 0;
 
     /* Drain counters. drain_epoch_current / drain_last_fired_ns are
@@ -6438,6 +6490,11 @@ static void http_server_free(zend_object *obj)
     server->static_handler_count    = 0;
     server->static_handler_capacity = 0;
 
+    http_rate_limits_free(server->rate_limits);
+    server->rate_limits = NULL;
+    http_rate_limits_transit_release(server->transit_rate_limits);
+    server->transit_rate_limits = NULL;
+
     /* Open file cache — persistent allocations, must be freed
      * before the request-context arenas drop. */
     if (server->static_cache != NULL) {
@@ -6583,6 +6640,7 @@ static void http_server_release_worker_shell(zval *transit)
 
     http_server_transit_static_release(
         (http_server_transit_static_t *) shell->transit_static_mounts);
+    http_rate_limits_transit_release(shell->transit_rate_limits);
 
     pefree(shell, 1);
 }
@@ -6686,6 +6744,10 @@ static zend_object *http_server_transfer_obj(
 
             dst_shell->transit_static_mounts = st_transit;
         }
+
+        /* Rate limit rules: frozen snapshots, shared by reference like the
+         * mounts. Each clone allocates its own buckets when it serves. */
+        dst_shell->transit_rate_limits = http_rate_limits_transit_create(src->rate_limits);
 
         /* The set must exist before the shell can reference it: the worker
          * threads loaded from this shell have no other way to reach it. */
@@ -6827,6 +6889,8 @@ static zend_object *http_server_transfer_obj(
          * dispatcher actually routes H1 traffic on the worker. */
         dst_obj->view.protocol_mask |= HTTP_PROTO_MASK_HTTP1;
     }
+
+    dst_obj->rate_limits = http_rate_limits_load(src_shell->transit_rate_limits);
 
     /* The clone takes its own reference to the listening sockets — see the
      * TRANSFER side above. Its start() acquires duplicates from the set. */

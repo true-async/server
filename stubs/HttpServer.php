@@ -66,6 +66,21 @@ final class HttpServer
     public function addStaticHandler(StaticHandler $handler): static {}
 
     /**
+     * Add a request rate limit rule (#414).
+     *
+     * A request over the limit of any rule it matches is answered
+     * `429 Too Many Requests` with `Retry-After`, and no handler runs; see
+     * {@see RateLimit}. A request a static mount serves is not counted. The
+     * rule is locked when added, so later setter calls on it throw.
+     *
+     * @throws HttpServerInvalidArgumentException when the rule's name is taken
+     *         or the server's rules would hold more than 2097152 buckets
+     * @throws HttpServerRuntimeException while the server is running
+     * @return static
+     */
+    public function addRateLimit(RateLimit $rule): static {}
+
+    /**
      * Add WebSocket handler (TODO)
      *
      * @param callable $handler WebSocket handler callback

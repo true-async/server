@@ -219,6 +219,9 @@ struct http_request_t {
     bool         body_paused    : 1;
     /* W3C Trace Context present (see trace_id/span_id/trace_flags above). */
     bool         has_trace      : 1;
+    /* The rate limit verdict was taken at headers-complete and is final:
+     * rate_limit_retry_s holds it, and dispatch does not check again. */
+    bool         rate_limit_checked : 1;
     /* Allocation domain of reactor-produced fields (method/uri/headers + the
      * headers HashTable + the struct block). false = ZMM (worker-built,
      * default), true = persistent malloc (reactor-built) → those frees go
@@ -296,6 +299,9 @@ struct http_request_t {
      * max_input_nesting_level, or malformed); 0 while it has not. Only the
      * form getters throw with it: the body itself is whole. */
     uint16_t     form_refused_status;
+    /* Retry-After of a rate limit refusal taken before the body, in seconds;
+     * 0 when the request was admitted or not checked yet. */
+    uint32_t     rate_limit_retry_s;
     /* Why the form was refused, for the message of every getter that throws;
      * a string literal, so it is valid on any thread. NULL while it has not. */
     const char  *form_refused_reason;
@@ -354,6 +360,7 @@ typedef struct http1_parser_t {
     size_t            total_headers_size;    /* Total size of all headers (DDoS) */
     size_t            chunk_extensions_size; /* Chunk-extension bytes of this request */
     size_t            max_body_size;         /* Configurable body size limit */
+    size_t            refused_body_bytes;    /* Body bytes dropped for a rate-limited request */
 
     /* Smuggling-defense state (RFC 9112 §6.3). Tracked across all
      * save_current_header calls within one request so on_headers_complete

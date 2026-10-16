@@ -32,6 +32,7 @@
 #include "core/response_wire.h"             /* response_wire_* (reverse path) */
 #include "core/worker_dispatch.h"           /* response_wire_discard */
 #include "core/response_delivery.h"
+#include "core/rate_limit_php.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
 #include "compression/http_compression_response.h"  /* response encode */
@@ -733,6 +734,16 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
         }
 
         if (static_rc == HTTP_STATIC_HANDLED) {
+            s->skip_handler = true;
+        }
+    }
+
+    /* A request static did not serve counts against the rate limit. */
+    if (!s->skip_handler) {
+        const uint32_t retry_after = http_rate_limit_check(server, s->request, c->counters);
+
+        if (UNEXPECTED(retry_after != 0)) {
+            http_rate_limit_refuse(Z_OBJ(s->response_zv), retry_after, s->is_grpc);
             s->skip_handler = true;
         }
     }

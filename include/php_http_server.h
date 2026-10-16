@@ -68,6 +68,7 @@ static zend_always_inline bool http_path_is_cwd_independent(const char *path, si
 /* Module entry declaration lives in the flat root header so php-src's
  * static-build codegen (genif.sh) can discover it; see the comment there. */
 #include "php_true_async_server.h"
+#include "core/rate_limit.h"          /* http_rl_trusted_t */
 
 #define PHP_HTTP_SERVER_VERSION "0.16.0"
 
@@ -275,6 +276,11 @@ struct _http_server_config_t {
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
     bool     stats_enabled;           /* issue #5: opt-in getStats() aggregate */
+
+    /* setTrustedProxies(): peers whose X-Forwarded-For names the client
+     * a rate limit counts. Plain data, copied by value through the frozen
+     * snapshot; count 0 and unix_trusted false when unset. */
+    http_rl_trusted_t trusted_proxies;
 
     /* WebSocket knobs: message/frame caps + ping
      * cadence + pong deadline. See HttpServerConfig::setWs* setters. */
@@ -600,6 +606,9 @@ http_server_object *http_server_object_from_zend(zend_object *obj);
  * pointer is non-owning and stays valid for the server's lifetime —
  * the config object's zval is held inside http_server_object. */
 http_server_config_t *http_server_get_config         (http_server_object *server);
+/* The server's rate limit rules and buckets, NULL when it has none
+ * (core/rate_limit_php.h). */
+struct http_rate_limits_s *http_server_rate_limits(const http_server_object *server);
 
 /* This server's room hub (room_hub_t*, void so this header need not pull in
  * room/room_hub.h). Non-owning. NULL until something asks for one — start(), or
@@ -1014,6 +1023,12 @@ typedef struct http_server_counters_s {
     uint64_t parse_errors_431_total;
     uint64_t parse_errors_503_total;
 
+    /* Request rate limit. rate_limited counts requests refused (each is also a
+     * response: 429, or a gRPC 200 with grpc-status 8); evictions counts
+     * buckets a new client took from another when its four slots were full. */
+    uint64_t requests_rate_limited_total;
+    uint64_t requests_rate_limit_evictions_total;
+
     /* Connection drain. The two events count sweeps, the two connections count
      * what the sweeps closed, and force_closed counts a deadline that ran out
      * with the connection still open. */
@@ -1114,6 +1129,8 @@ typedef struct http_server_counters_s {
     X(parse_errors_414_total,                SUM)            \
     X(parse_errors_431_total,                SUM)            \
     X(parse_errors_503_total,                SUM)            \
+    X(requests_rate_limited_total,           SUM)            \
+    X(requests_rate_limit_evictions_total,   SUM)            \
     X(drain_events_reactive_total,           SUM)            \
     X(drain_events_cooldown_blocked_total,   SUM)            \
     X(connections_drained_reactive_total,    SUM)            \
@@ -1604,6 +1621,10 @@ zend_string   *http_response_get_body_str(zend_object *obj);
  * single-writer (no PHP handler ever ran on the response). */
 void http_response_static_set_status   (zend_object *obj, int status_code);
 void http_response_static_set_header   (zend_object *obj,
+                                        const char *name, size_t name_len,
+                                        const char *value, size_t value_len);
+/* Sets a trailer, replacing one of the same name. `name` is lower case. */
+void http_response_static_set_trailer  (zend_object *obj,
                                         const char *name, size_t name_len,
                                         const char *value, size_t value_len);
 void http_response_static_set_body_str (zend_object *obj, zend_string *body);

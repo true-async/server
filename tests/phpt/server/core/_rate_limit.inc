@@ -1,0 +1,99 @@
+<?php
+/* Raw HTTP/1.1 helpers for the rate limit tests (core/089 onward).
+ *
+ * The tests watch the wire: a refusal must keep the connection, and a request
+ * pipelined behind it must still be answered, which a client library would
+ * hide. */
+
+require_once __DIR__ . '/../_read_exact.inc';
+
+/* One response off $fp: ['status' => int, 'headers' => [lower-case name =>
+ * value], 'body' => string], or null when the peer closed first. Reads a body
+ * framed by Content-Length or chunked; HEAD responses pass $head. */
+function rl_read_response($fp, bool $head = false): ?array
+{
+    $head_block = '';
+
+    while (!str_contains($head_block, "\r\n\r\n")) {
+        $line = fgets($fp);
+
+        if ($line === false) {
+            return null;
+        }
+
+        $head_block .= $line;
+    }
+
+    $lines  = explode("\r\n", rtrim($head_block, "\r\n"));
+    $status = (int) explode(' ', array_shift($lines), 3)[1];
+    $headers = [];
+
+    foreach ($lines as $line) {
+        [$name, $value] = explode(':', $line, 2);
+        $headers[strtolower($name)] = trim($value);
+    }
+
+    $body = '';
+
+    if (!$head && isset($headers['content-length'])) {
+        $body = tas_read_exact($fp, (int) $headers['content-length']);
+    } elseif (!$head && ($headers['transfer-encoding'] ?? '') === 'chunked') {
+        while (($size_line = fgets($fp)) !== false) {
+            $size = hexdec(trim($size_line));
+
+            if ($size === 0) {
+                fgets($fp);
+                break;
+            }
+
+            $body .= tas_read_exact($fp, $size);
+            fgets($fp);
+        }
+    }
+
+    return ['status' => $status, 'headers' => $headers, 'body' => $body];
+}
+
+/* "429 retry-after=30 body=Too Many Requests" or "200 body=..." for one line
+ * of expected output. */
+function rl_describe(?array $response): string
+{
+    if ($response === null) {
+        return 'closed';
+    }
+
+    $out = (string) $response['status'];
+
+    if (isset($response['headers']['retry-after'])) {
+        $out .= ' retry-after=' . $response['headers']['retry-after'];
+    }
+
+    return $out . ' body=' . trim($response['body']);
+}
+
+/* A keep-alive connection to 127.0.0.1:$port, with a read timeout. */
+function rl_connect(int $port, string $host = '127.0.0.1')
+{
+    $target = str_contains($host, ':') ? "tcp://[$host]:$port" : "tcp://$host:$port";
+    $fp = stream_socket_client($target, $errno, $errstr, 2);
+
+    if ($fp === false) {
+        throw new RuntimeException("connect $target: $errstr");
+    }
+
+    stream_set_timeout($fp, 5);
+    return $fp;
+}
+
+/* Sends one GET on $fp and reads its response. */
+function rl_get($fp, string $path = '/', array $headers = []): ?array
+{
+    $extra = '';
+
+    foreach ($headers as $name => $value) {
+        $extra .= "$name: $value\r\n";
+    }
+
+    fwrite($fp, "GET $path HTTP/1.1\r\nHost: t\r\n$extra\r\n");
+    return rl_read_response($fp);
+}

@@ -555,6 +555,8 @@ if test "$PHP_HTTP_SERVER" != "no"; then
     src/core/worker_inbox.c
     src/core/worker_registry.c
     src/core/stats_registry.c
+    src/core/rate_limit.c
+    src/core/rate_limit_php.c
     src/http1/http_parser.c
     src/http1/http1_stream.c
     src/http1/http1_sendfile.c

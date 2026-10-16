@@ -125,6 +125,7 @@ struct _http_server_shared_config_t {
     bool                    http3_pacing;
     bool                    request_scope;
     bool                    stats_enabled;   /* issue #5: opt-in getStats() */
+    http_rl_trusted_t       trusted_proxies; /* plain data, copied by value */
     bool                    telemetry_enabled; /* issue #169: request timings and W3C trace context */
 
     /* Logging (issue #5): sink specs flattened to persistent strings so each
@@ -2139,6 +2140,85 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled)
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 
+/* {{{ proto HttpServerConfig::setTrustedProxies(array $proxies): static
+ * Peers whose X-Forwarded-For names the client a rate limit counts.
+ * The whole list is validated before any of it replaces the old one. */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setTrustedProxies)
+{
+    HashTable *proxies;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY_HT(proxies)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    if (zend_hash_num_elements(proxies) > HTTP_RL_MAX_TRUSTED) {
+        zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+            "setTrustedProxies(): at most %u entries", HTTP_RL_MAX_TRUSTED);
+        return;
+    }
+
+    http_rl_trusted_t trusted;
+    memset(&trusted, 0, sizeof(trusted));
+
+    zval *entry;
+    ZEND_HASH_FOREACH_VAL(proxies, entry) {
+        if (Z_TYPE_P(entry) != IS_STRING) {
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "setTrustedProxies(): each entry must be a string, %s given",
+                zend_zval_type_name(entry));
+            return;
+        }
+
+        if (zend_string_equals_literal(Z_STR_P(entry), "unix")) {
+            trusted.unix_trusted = true;
+            continue;
+        }
+
+        if (!http_rl_cidr_parse(Z_STRVAL_P(entry), Z_STRLEN_P(entry),
+                                &trusted.entries[trusted.count])) {
+            zend_throw_exception_ex(http_server_invalid_argument_exception_ce, 0,
+                "setTrustedProxies(): \"%s\" is not an IPv4 or IPv6 address or "
+                "block, or \"unix\"", Z_STRVAL_P(entry));
+            return;
+        }
+
+        trusted.count++;
+    } ZEND_HASH_FOREACH_END();
+
+    config->trusted_proxies = trusted;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::getTrustedProxies(): array */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getTrustedProxies)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    const http_rl_trusted_t *const trusted = &config->trusted_proxies;
+
+    array_init(return_value);
+
+    for (unsigned i = 0; i < trusted->count; i++) {
+        char text[64];
+        const size_t len = http_rl_cidr_format(&trusted->entries[i], text, sizeof(text));
+
+        add_next_index_stringl(return_value, text, len);
+    }
+
+    if (trusted->unix_trusted) {
+        add_next_index_stringl(return_value, "unix", 4);
+    }
+}
+/* }}} */
+
 ZEND_METHOD(TrueAsync_HttpServerConfig, isStatsEnabled)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -3143,6 +3223,7 @@ static zend_object *http_server_config_create(zend_class_entry *ce)
     config->listeners = NULL;
     config->listener_count = 0;
     config->listener_capacity = 0;
+    memset(&config->trusted_proxies, 0, sizeof(config->trusted_proxies));
     config->backlog = 0;
     config->max_connections = 0;
     config->read_timeout_s = 0;
@@ -3358,6 +3439,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_pacing                 = src->http3_pacing;
     shared->request_scope                = src->request_scope;
     shared->stats_enabled                = src->stats_enabled;
+    shared->trusted_proxies              = src->trusted_proxies;
     shared->telemetry_enabled            = src->telemetry_enabled;
 
     shared->body_streaming_enabled     = src->body_streaming_enabled;
@@ -3593,6 +3675,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_pacing                 = src->http3_pacing;
     dst->request_scope                = src->request_scope;
     dst->stats_enabled                = src->stats_enabled;
+    dst->trusted_proxies              = src->trusted_proxies;
     dst->telemetry_enabled            = src->telemetry_enabled;
 
     dst->body_streaming_enabled     = src->body_streaming_enabled;
