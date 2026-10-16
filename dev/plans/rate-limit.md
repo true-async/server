@@ -156,3 +156,18 @@ header value with a comma (Digest, repeated headers), falls back to the peer key
 | 9 | trusted proxies on a locked config; effect on getRemoteAddress | set before `new HttpServer`, frozen with the shared config; limiter key only |
 | 10 | "unread past 64 KiB" undefined at headers-complete | gone: the skip-handler path drains or lingers as any response does |
 | A | grpc_classify, cookie trim, Digest commas, per-worker memory, pecalloc | taken |
+
+## Critic round 3 on PR 1 (2026-10-16)
+
+The four sites, their flags, pipelining after a small refused POST, header joining, the arithmetic, config freezing
+and the rule copy to workers were checked and hold. All findings accepted; PR 1 reads with these answers.
+
+| # | Remark | Answer |
+|---|---|---|
+| 1 | on H1 the check at dispatch runs after the whole body is buffered or written to disk | for methods static never serves (not GET or HEAD) the verdict is taken in on_headers_complete next to the admission shed (http_parser.c:418-423) and stored on the request; a refused request skips the multipart open and the body buffer, on_body counts and drops the bytes, and the dispatch site sends the stored 429 without a second check. GET and HEAD keep the check after `http_static_try_serve` |
+| 2 | H2 extended CONNECT has no validation step and no response object | the check runs in `http2_strategy_dispatch` before the WebSocket branch (:240); a refused CONNECT takes the normal path and gets a 429 HEADERS with END_STREAM (a non-2xx rejects extended CONNECT, RFC 8441) |
+| 3 | gRPC status and H1 | gRPC on H2, H3 and the worker: `:status 200`, trailers-only with `grpc-status: 8`, `grpc-message` and `grpc-retry-pushback-ms`, set through `http_response_ensure_grpc_status`; such a refusal counts as 2xx. H1 (grpc-web included) always gets a plain 429 |
+| 4 | body streaming: the request is released while llhttp still feeds its body (suspected use-after-free) | answered by 1: a refused streaming upload never reaches dispatch; a phpt covers a chunked POST refused mid-body and a pipelined GET after it, and any existing skip path that shows the fault is fixed in this PR |
+| 5 | `//` and dot segments reach a route without matching a prefix | a rule matches when the decoded path or its normalised form (`//` collapsed, `.` and `..` resolved) matches |
+| A | malformed `%` vs methods, 404 order, Unix detection by family, ipv6Prefix placement, method case, addRateLimit while running, tables only on serving instances, WebSocket telemetry, the start() log | only the path condition counts as met; the check runs before the no-handler 404 and only when static did not handle the request; AF_UNIX by `ss_family`, `peer_len == 0` its own never-trusted key; `ipv6Prefix` is a rule setter; methods are upper-cased; `addRateLimit` while running throws; tables are allocated by the instance that serves; the H1 WebSocket reject calls `http_request_telemetry`; start() logs only "Unix listener without `unix` trusted" |
+| T | test gaps | added: XFF from an untrusted peer ignored; setWorkers(2) enforcing rules; setTrustedProxies after `new HttpServer` and addRateLimit while running throw; H2 CONNECT refused; gRPC on each transport and grpc-web over H1; refused multipart POST with no body buffered and keep-alive kept; body streaming refused mid-body; two rules where one refuses, through the server |
