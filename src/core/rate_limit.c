@@ -112,7 +112,8 @@ void http_rl_addr_from_sockaddr(const void *sa, const size_t sa_len, http_rl_add
 {
     memset(out, 0, sizeof(*out));
 
-    if (sa == NULL || sa_len < sizeof(sa_family_t)) {
+    /* Winsock has no sa_family_t; the member's own size is portable. */
+    if (sa == NULL || sa_len < sizeof(((const struct sockaddr *)sa)->sa_family)) {
         return;
     }
 
