@@ -668,8 +668,22 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      * Mirrors http2_strategy.c. */
     const bool has_static_mount = http_static_handler_count(server) > 0;
 
-    if ((fcall == NULL && !has_static_mount) || scope == NULL) {
+    if (scope == NULL) {
         return;
+    }
+
+    /* Retry-After of a refusal taken here, 0 otherwise. A request no
+     * handler, mount or gRPC handler takes still counts against the rate
+     * limit, and once refused it is answered 429 below; an admitted one is
+     * dropped unanswered, as before (an existing gap, not intent). */
+    uint32_t rate_limit_retry = 0;
+
+    if (fcall == NULL && !has_static_mount) {
+        rate_limit_retry = http_rate_limit_check(server, s->request, c->counters);
+
+        if (EXPECTED(rate_limit_retry == 0)) {
+            return;
+        }
     }
 
     /* Mark dispatched + addref — guards against post-dispatch UAF. The
@@ -724,7 +738,10 @@ void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
      *                 or 4xx). Set skip_handler so the coroutine entry
      *                 skips the user handler; dispose still commits.
      *   PASSTHROUGH — no mount matched; fall through to the handler. */
-    if (UNEXPECTED(has_static_mount)) {
+    if (UNEXPECTED(rate_limit_retry != 0)) {
+        http_rate_limit_refuse(Z_OBJ(s->response_zv), rate_limit_retry, s->is_grpc);
+        s->skip_handler = true;
+    } else if (UNEXPECTED(has_static_mount)) {
         const http_static_result_t static_rc =
             http_static_try_serve(server, s->request, Z_OBJ(s->response_zv),
                                   c->counters, &h3_static_dispatch_cbs, s);
