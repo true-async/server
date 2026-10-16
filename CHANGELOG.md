@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A request rate limit inside the server (#414).** `HttpServer::addRateLimit(new RateLimit($requests, $perSeconds))` keeps a token bucket per client address, and a request over the limit of any rule it matches is answered `429 Too Many Requests` with `Retry-After` before any handler runs; before, an application had to count requests in its handler or in front of the server. Rules filter by path prefix (`paths()`, matched decoded and with dot segments resolved) and method (`methods()`); a request takes a token from every rule it matches only when all of them admit it. `HttpServerConfig::setTrustedProxies()` names proxies whose `X-Forwarded-For` gives the client; the header of any other peer is ignored. A refused POST or PUT is refused when its headers end, so its body is dropped as it arrives instead of buffered or written to disk: a refused 20,000-byte multipart upload left 0 temporary files mid-upload where an admitted one had 1 (`core/090`). gRPC calls over HTTP/2 and HTTP/3 get `grpc-status: 8`, a refused WebSocket upgrade or extended CONNECT gets 429, and static files a mount serves are not counted. `getTelemetry()` and `getStats()` gain `requests_rate_limited_total` and `requests_rate_limit_evictions_total`. Each rule keeps 65,536 buckets of 24 bytes per server instance by default, so a client spread over `setWorkers(N)` workers may get N times the limit. Evidence: `core/089` to `core/102` and the cmocka suite `RateLimit` (SipHash against the reference vectors, the X-Forwarded-For walk, path matching, check-then-commit).
+
 ### Security
 
 - **One chunked HTTP/1 request could make the server read without end through its chunk extensions (#386).** Extension names and values are not body bytes, and no limit counted them: with `setMaxBodySize(1 MiB)` a request carrying 20 MiB of extension in one chunk header was read whole and answered 200. Extensions are now capped at 16 KiB per request, names and values together, and a request past the cap is answered 413, the cap and status Node chose for CVE-2024-22019 (`h1/069`).

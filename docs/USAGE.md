@@ -551,6 +551,81 @@ See [docs/RECOMMENDATIONS.md](RECOMMENDATIONS.md) for tuning guidance.
 
 ---
 
+## 6.5. Request rate limits
+
+A rule is a token bucket per client: `requests` tokens refill every
+`perSeconds` seconds, and the bucket holds `burst` of them (default
+`requests`). A request over the limit of any rule it matches is answered
+`429 Too Many Requests` with `Retry-After` in seconds, and the handler does
+not run.
+
+```php
+use TrueAsync\RateLimit;
+
+$config->setTrustedProxies(['127.0.0.1', '::1', '10.0.0.0/8', 'unix']);
+$server = new HttpServer($config);
+
+$server->addRateLimit((new RateLimit(requests: 600, perSeconds: 60))->name('ip'));
+$server->addRateLimit((new RateLimit(requests: 120, perSeconds: 60))->name('reads')
+    ->paths('/api/works', '/api/search')->methods('GET', 'HEAD'));
+```
+
+- **Matching.** `paths()` takes prefixes: `/api` covers `/api` and
+  `/api/...`, not `/apix`; `/` is every path. The path is matched with `%XX`
+  decoded and with `//`, `.` and `..` resolved, so `/api/%77orks` and
+  `//api/./works` are `/api/works`; a target with a malformed `%` sequence
+  matches every rule's paths. `methods()` upper-cases its tokens, and HEAD is
+  its own method. A request is checked against every rule it matches first,
+  and takes a token from each only when all of them admit it; a refusal
+  reports the longest wait.
+- **The client.** The socket peer, with an IPv4 client of a dual-stack
+  listener (`::ffff:a.b.c.d`) keyed as its IPv4 address. IPv6 clients are
+  keyed by their /64; `ipv6Prefix(48..128)` changes that per rule. From a
+  peer listed in `setTrustedProxies()` the client is read from
+  `X-Forwarded-For`, from the right: trusted hops are skipped, the first other
+  address is the client, and an element that is not an address (`unknown`,
+  an obfuscated name) leaves the last trusted hop as the client. The header of
+  any other peer is ignored. `getRemoteAddress()` and the access log keep the
+  socket peer.
+- **Unix sockets.** A Unix-socket peer has no address: unless `unix` is
+  trusted, every client of a Unix listener is the one key `unix`, and
+  `start()` logs a warning saying so. Trust `unix` when a proxy on the same
+  host forwards to it.
+- **What is counted.** A file a static mount serves is not counted; a request
+  it passes on (`StaticOnMissing::NEXT`, or a method it does not serve) is.
+  Under the reactor pool HTTP/3 static files are served on the reactor
+  thread before any rule. A request whose method is not GET or HEAD is
+  refused when its headers end, so the body of a refused upload is read and
+  dropped, never buffered or written to disk; it still counts against
+  `setMaxBodySize()`, and past it the answer is 413.
+- **Protocols.** HTTP/1, HTTP/2 and HTTP/3 answer 429. A refused WebSocket
+  upgrade over HTTP/1 gets 429 and the connection closes, as on every refused
+  upgrade; over HTTP/2 a refused extended CONNECT gets 429 on its stream. A
+  gRPC call over HTTP/2 or HTTP/3 keeps its `200` and ends with
+  `grpc-status: 8` (RESOURCE_EXHAUSTED), `grpc-message` and
+  `grpc-retry-pushback-ms`; over HTTP/1, gRPC-Web included, it gets the
+  plain 429.
+- **Memory and workers.** Each rule keeps `maxKeys()` buckets per server
+  instance (default 65536, 24 bytes each, 1.5 MiB); a server's rules hold at
+  most 2097152 in all. When a new client finds its four candidate buckets
+  taken, it takes one whose bucket has refilled, else the one idle longest,
+  and the client it displaced starts again with a full bucket. Every worker of
+  `setWorkers(N)` keeps its own buckets, so a client spread over N workers may
+  get up to N times the limit; under load the HTTP/3 reactor pool may route
+  one client's requests to several workers.
+- **Telemetry.** `requests_rate_limited_total` and
+  `requests_rate_limit_evictions_total` in `getTelemetry()` and `getStats()`,
+  and per rule, by `name()` (default `rule1`, `rule2`, ...),
+  `getTelemetry()['rate_limits']`. A refusal is a response: it counts in
+  `total_requests` and `responses_4xx_total`, or `responses_2xx_total` for a
+  gRPC call.
+
+A rule is locked once added: its setters throw, as `addRateLimit()` does
+while the server runs and `setTrustedProxies()` does once the config is
+handed to `new HttpServer()`.
+
+---
+
 ## 7. Observability
 
 ### Metrics — `getStats()`
