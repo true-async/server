@@ -43,8 +43,10 @@ $client = spawn(function () use ($port, $server) {
     file_put_contents($frame, "\x00" . pack('N', 4) . 'ping');
     $base = "http://127.0.0.1:$port";
 
-    $grpc = shell_exec("curl -s -i --max-time 3 --http2-prior-knowledge -H 'content-type: application/grpc' "
-        . "-H 'te: trailers' --data-binary @$frame $base/svc.Greeter/Ping 2>&1") ?? '';
+    /* escapeshellarg: cmd.exe takes single quotes literally. */
+    $grpc = shell_exec('curl -s -i --max-time 3 --http2-prior-knowledge -H '
+        . escapeshellarg('content-type: application/grpc') . ' -H ' . escapeshellarg('te: trailers')
+        . ' --data-binary ' . escapeshellarg("@$frame") . " $base/svc.Greeter/Ping 2>&1") ?? '';
     @unlink($frame);
     echo "gRPC: ", preg_match('/^HTTP\/2 (\d+)/m', $grpc, $m) ? $m[1] : 'none', "\n";
 

@@ -160,14 +160,17 @@ $client = spawn(function () use ($port, $server, &$runs) {
 
     $frame = tempnam(sys_get_temp_dir(), 'rl096');
     file_put_contents($frame, "\x00" . pack('N', 4) . 'ping');
-    $grpc = "--http2-prior-knowledge -H 'content-type: application/grpc' -H 'te: trailers' "
-          . "--data-binary @$frame $base/svc.Greeter/Ping";
+    /* escapeshellarg: cmd.exe takes single quotes literally. */
+    $grpc = '--http2-prior-knowledge -H ' . escapeshellarg('content-type: application/grpc')
+          . ' -H ' . escapeshellarg('te: trailers') . ' --data-binary ' . escapeshellarg("@$frame")
+          . " $base/svc.Greeter/Ping";
     $want = ['HTTP/', 'grpc-status', 'grpc-message', 'grpc-retry-pushback-ms', 'retry-after'];
 
     echo "gRPC #1: ", curl_lines($grpc, $want), "\n";
     echo "gRPC #2: ", curl_lines($grpc, $want), "\n";
-    echo "gRPC-Web over HTTP/1: ", curl_lines("--http1.1 -H 'content-type: application/grpc-web+proto' "
-        . "--data-binary @$frame $base/svc.Greeter/Ping", $want), "\n";
+    $grpc_web = '--http1.1 -H ' . escapeshellarg('content-type: application/grpc-web+proto')
+              . ' --data-binary ' . escapeshellarg("@$frame") . " $base/svc.Greeter/Ping";
+    echo "gRPC-Web over HTTP/1: ", curl_lines($grpc_web, $want), "\n";
     @unlink($frame);
 
     /* Extended CONNECT: the first opens a WebSocket, the second is refused. */

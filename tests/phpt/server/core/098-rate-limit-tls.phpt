@@ -54,7 +54,7 @@ $client = spawn(function () use ($port, $server, &$handled) {
     $url = "https://127.0.0.1:$port/";
     $out = shell_exec(sprintf(
         'curl -sk --http1.1 -m 5 -D - -w "transfer %%{http_code} new_connections=%%{num_connects}\n" %s 2>&1',
-        str_repeat("-o /dev/null $url ", 4)));
+        str_repeat('-o ' . (PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null') . " $url ", 4)));
 
     foreach (preg_split('/\r?\n/', trim($out)) as $line) {
         if (str_starts_with($line, 'transfer') || stripos($line, 'retry-after') === 0) {
