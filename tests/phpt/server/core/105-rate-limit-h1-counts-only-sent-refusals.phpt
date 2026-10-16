@@ -8,8 +8,9 @@ true_async
 /* A POST over the limit is judged when its headers end, but its answer is a
  * 413 when the body breaks setMaxBodySize(), declared or chunked, and a POST
  * carrying Upgrade: websocket is answered 405 by the upgrade path. None of
- * those is a 429, so none counts as rate limited, and the 405 spends no
- * token: the POST after two of them is still admitted. */
+ * those is a 429, so none counts as rate limited, and neither the 405 nor a
+ * 413 for a declared length spends a token: the POST after them is still
+ * admitted. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -55,6 +56,10 @@ spawn(function () use ($server, $port) {
              . "Content-Length: 0\r\n\r\n";
     $post = "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi";
 
+    /* The client's first request: a declared body past the limit is answered
+     * 413 before any verdict, so the POST below still has the token. */
+    echo "first request, declared body past the limit: ", status_of($port,
+        "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 4096\r\n\r\n"), "\n";
     echo "upgrade POST #1: ", status_of($port, $upgrade), "\n";
     echo "upgrade POST #2: ", status_of($port, $upgrade), "\n";
     echo "POST: ", status_of($port, $post), "\n";
@@ -75,6 +80,7 @@ spawn(function () use ($server, $port) {
 $server->start();
 echo "done\n";
 --EXPECT--
+first request, declared body past the limit: 413
 upgrade POST #1: 405
 upgrade POST #2: 405
 POST: 200

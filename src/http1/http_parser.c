@@ -407,16 +407,14 @@ static void http1_request_body_upgrade(http_request_t *req)
     req->body_streaming = true;
 }
 
-/* The rest of on_headers_complete for a request the rate limit refused. The
- * body limit still holds, so a refused upload cannot keep the connection
- * reading for ever; the body itself is counted and dropped by on_body, and
- * the request is dispatched once it is complete, as a buffered one is. */
-static int http1_refused_headers_complete(http1_parser_t *parser, http_request_t *req)
+/* The rest of on_headers_complete for a request whose body nothing will read:
+ * one the rate limit refused, or one the upgrade path claims. The body limit
+ * still holds, so such a body cannot keep the connection reading for ever;
+ * on_body counts and drops it, and the request is dispatched once it is
+ * complete, as a buffered one is. */
+static int http1_drop_body_headers_complete(http1_parser_t *parser, http_request_t *req)
 {
-    if (req->content_length > parser->max_body_size) {
-        parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
-        return -1;  /* 413 Payload Too Large */
-    }
+    req->body_dropped = true;
 
     if (parser->conn->view != NULL && parser->conn->view->telemetry_enabled) {
         http_request_parse_trace_context(req);
@@ -554,19 +552,32 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     /* Rate limit verdict for a method static never serves, taken before the
      * body: a refused upload is read and dropped rather than buffered or
      * written to disk, and the dispatch site sends the stored 429 and counts
-     * it then. GET and HEAD are checked at dispatch, after a static mount has
-     * had its turn; so is a request with an Upgrade header, which the upgrade
-     * path may answer (405, 426) before any token is spent. */
+     * it then. A declared body past the limit is answered 413 first, so it
+     * spends no token. GET and HEAD are checked at dispatch, after a static
+     * mount has had its turn. */
     if (parser->conn != NULL
         && UNEXPECTED(http_rate_limits_active(parser->conn->server))
-        && !http_request_method_is_get(req) && !http_request_method_is_head(req)
-        && !zend_hash_str_exists(req->headers, "upgrade", sizeof("upgrade") - 1)) {
+        && !http_request_method_is_get(req) && !http_request_method_is_head(req)) {
+        if (req->content_length > parser->max_body_size) {
+            parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+            return -1;  /* 413 Payload Too Large */
+        }
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+        /* The upgrade path claims every request with an Upgrade header and
+         * answers it without the body (405, 426, 400, or a 101 whose check
+         * runs there): the body is dropped and no verdict is taken. */
+        if (zend_hash_str_exists(req->headers, "upgrade", sizeof("upgrade") - 1)) {
+            return http1_drop_body_headers_complete(parser, req);
+        }
+#endif
+
         req->rate_limit_checked = true;
         req->rate_limit_retry_s = http_rate_limit_check_deferred(
             parser->conn->server, req, parser->conn->counters);
 
         if (req->rate_limit_retry_s != 0) {
-            return http1_refused_headers_complete(parser, req);
+            return http1_drop_body_headers_complete(parser, req);
         }
     }
 
@@ -687,8 +698,9 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
         return 0;
     }
 
-    /* Refused by the rate limit: counted against the body limit, dropped. */
-    if (UNEXPECTED(req->rate_limit_retry_s != 0)) {
+    /* Nothing will read it (see http1_drop_body_headers_complete): counted
+     * against the body limit, dropped. */
+    if (UNEXPECTED(req->body_dropped)) {
         if (length > parser->max_body_size - parser->refused_body_bytes) {
             parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
             return -1;  /* 413 Payload Too Large */

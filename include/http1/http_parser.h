@@ -222,6 +222,9 @@ struct http_request_t {
     /* The rate limit verdict was taken at headers-complete and is final:
      * rate_limit_retry_s holds it, and dispatch does not check again. */
     bool         rate_limit_checked : 1;
+    /* No one will read the body (a rate limit refusal, or a request the
+     * upgrade path claims): on_body counts it against the limit and drops it. */
+    bool         body_dropped : 1;
     /* Allocation domain of reactor-produced fields (method/uri/headers + the
      * headers HashTable + the struct block). false = ZMM (worker-built,
      * default), true = persistent malloc (reactor-built) → those frees go
