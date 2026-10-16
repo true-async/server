@@ -1,121 +1,126 @@
 # Request rate limit: design
 
 A configurable request rate limit inside the server: a request over its limit is answered `429 Too Many Requests`
-with `Retry-After` by C, before PHP. Asked for by the fiction library on IFCastle (EdmondDantes/lib, plan S26.20):
-a limiter in PHP pays routing and a PHP call for every refused request, and a database-backed counter costs 44 ms a
-request there (measured 2026-10-16). The owner wants the key configurable: the client address, a session cookie or
-an auth token.
+with `Retry-After`, and the PHP handler does not run. Asked for by the fiction library on IFCastle
+(EdmondDantes/lib, Fog after S26.20): the owner wants it in the server, configurable, and keyable by the client
+address, a session cookie or an auth token.
 
-Revision 2, after Critic round 1 (table at the end).
+Revision 3, after Critic rounds 1 and 2 (tables at the end). Two PRs:
 
-## PHP API
+- **PR 1**: rules keyed by the client address, trusted proxies, refusal through the skip-handler path at all four
+  dispatch sites, telemetry, tests.
+- **PR 2**: cookie and header keys, with the pairing check (a client-chosen key always under a peer rule).
 
-Rules are value objects added to the server before `start()`; `addRateLimit` validates and locks the rule (later
-setters on it throw, as `http_static_handler_lock`), and the server freezes its rules with the rest of the config.
+## PR 1
+
+### PHP API
+
+Rules are value objects added to the server; `addRateLimit` validates the rule and locks it (later setters throw, as
+`http_static_handler_lock`), and the rules travel to worker clones with the static mounts (http_server_class.c:6683,
+6817-6821). Trusted proxies are config, set before `new HttpServer($config)` locks it (http_server_class.c:1860) and
+frozen with the shared config (http_server_config.c:3316, populate_from_shared :3555, release :3484).
 
 ```php
-$server->addRateLimit((new RateLimit(requests: 600, perSeconds: 60))       // per client address, all paths
-    ->name('ip'));
-$server->addRateLimit((new RateLimit(requests: 120, perSeconds: 60))
-    ->name('session')
-    ->paths('/api/works', '/api/search')         // decoded path prefixes, segment-bounded
-    ->methods('GET', 'HEAD')
-    ->keyByCookie('lib_session'));               // or keyByHeader('authorization'); default keyByPeer()
-$config->setTrustedProxies(['10.0.0.0/8', '::1']); // X-Forwarded-For from these peers names the client
+$config->setTrustedProxies(['127.0.0.1', '::1', '10.0.0.0/8', 'unix']);
+$server = new HttpServer($config);
+$server->addRateLimit((new RateLimit(requests: 600, perSeconds: 60))->name('ip'));
+$server->addRateLimit((new RateLimit(requests: 120, perSeconds: 60))->name('reads')
+    ->paths('/api/works', '/api/search')->methods('GET', 'HEAD'));
 ```
 
-- `RateLimit(int $requests, int $perSeconds)`: token bucket, `requests` per `perSeconds`; `burst(int)` sets the
-  bucket size, default `requests`. Validated: requests and burst 1..10^6, perSeconds 1..86400, and the bucket time
-  `perSeconds·burst/requests` at most 2^62 ns (B4).
-- `paths(string ...$prefixes)`: up to 32 prefixes starting with `/`; a prefix matches the decoded path when equal
-  to it or followed by `/`. `methods(string ...)`: tokens. Default: every path and method.
-- `excludeStatic(bool = true)`: requests served by a static handler are not counted. Default true.
-- `maxKeys(int)`: 1024..2^20, default 65536. The sum over all rules of a server is at most 2^21 slots (48 MiB).
-- `name(string)`: shown in telemetry; default `rule<N>`.
+- `RateLimit(int $requests, int $perSeconds)`: token bucket; `burst(int)` sets the bucket size, default `requests`.
+  Validated: requests and burst 1..10^6, perSeconds 1..86400, bucket time `perSeconds·burst/requests` at most
+  2^62 ns.
+- `paths(string ...)`: up to 32 prefixes; each starts with `/` and has no trailing `/` except `/` itself, which means
+  every path. P matches a path that equals P or starts with P followed by `/`. `methods(string ...)`: tokens; HEAD is
+  its own method. Default: every path and method.
+- `maxKeys(int)`: 1024..2^20, default 65536; the sum over a server's rules is at most 2^21 slots (48 MiB per worker).
+- `name(string)`: for telemetry; default `rule<N>`.
+- `setTrustedProxies(list)`: up to 64 entries, each an IPv4 or IPv6 CIDR or the word `unix`. The trusted address
+  changes only the limiter's key: `getRemoteAddress()` and the access log keep the peer.
 
-## Keys
+### The client address
 
-- `keyByPeer()` (default): the client address. An IPv4-mapped or -compatible IPv6 address is un-mapped to its 4
-  bytes first (B3); IPv6 is keyed by its /64, `ipv6Prefix(48..128)` changes it. The address family and length are
-  part of the hashed key. A peer on a Unix socket has no address: rules keyed by peer do not apply to it (a local
-  socket carries a local proxy, which names the client with X-Forwarded-For when trusted).
-- With `setTrustedProxies(list of CIDR)` (at most 64 entries): when the peer is inside one of them, the client
-  address is the rightmost address of `X-Forwarded-For` that is not itself trusted; a malformed header, or none,
-  keeps the peer. Without the list the header is ignored.
-- `keyByCookie(string $name)`: the first cookie of that name in the `cookie` header, split on `;` with spaces
-  trimmed, as the app reads it. A value that contains `%`, `"`, or is empty or longer than 512 bytes is not used: the
-  request falls back to the peer key of the same rule. The app URL-decodes cookie values, so an encoded value would
-  give one session many keys (B1).
-- `keyByHeader(string $name)`: the header value as stored; a value that holds a comma (the server joins repeated
-  headers with `, `, http_request.c:1298-1325), is empty or longer than 512 bytes falls back to the peer key (I9).
-- **A cookie or header key shapes clients that cooperate.** A client can send a new invented value on every request
-  and get a new bucket each time. Such a rule is therefore always paired with a peer-keyed rule over the same paths;
-  `start()` refuses a server whose cookie or header rule has no peer-keyed rule covering its paths and methods (B1).
+1. The peer: an IPv4-mapped IPv6 address (`::ffff:0:0/96`) is un-mapped to its 4 bytes; nothing else is rewritten
+   (`::1` stays `::1`). Trusted CIDR entries given in mapped form are normalised the same way.
+2. A peer inside the trusted list (or a Unix-socket peer with `unix` in the list): `X-Forwarded-For` (repeated
+   headers arrive joined with `, `, http_request.c:1310) is walked from the right. Each element is trimmed of spaces
+   and tabs and parsed as `a.b.c.d`, `a.b.c.d:port`, `[v6]`, `[v6]:port` or a bare v6 address, then un-mapped as in
+   step 1. A trusted element is skipped; the first element that is not trusted is the client. When the walk reaches
+   an element that does not parse (`unknown`, `_obf…`, empty), or the header is absent or holds only trusted
+   elements, the client is the last trusted hop. Elements left of the stop are never parsed.
+3. A Unix-socket peer without `unix` in the trusted list, or with it but no usable header, is keyed as the single
+   address `unix`, so a peer rule still limits it (one shared bucket), and `start()` logs that once.
+4. IPv6 clients are keyed by their /64; `ipv6Prefix(48..128)` changes it. Family and length are part of the hashed
+   key.
 
-## Evaluation
+### Matching and evaluation
 
-All rules whose path and method match are checked first; tokens are taken from every one of them only if all pass
-(I1). A refusal names the rule with the longest wait, and `Retry-After` is that wait. The path is the
-percent-decoded path of the request target up to `?` (an absolute-form target loses its scheme and authority);
-a malformed `%` sequence is refused with 400 before the limiter, as the router would refuse it (B2).
+The path is the request target up to `?` (an absolute-form target loses scheme and authority), percent-decoded for
+matching only. A target with a malformed `%` sequence matches every rule that has paths, so it is limited by all of
+them; its response is not changed. All matching rules are checked first; tokens are taken from every one only if all
+pass. A refusal reports the longest wait among the refusing rules as `Retry-After`.
 
-## Algorithm and memory
+### Algorithm and memory
 
-Token bucket per key, the arithmetic of `ws_publish_allowed` (ws_session.c:877-915): credit in nanoseconds,
-`cost = perSeconds·1e9 / requests`, `cap = cost·burst` (validated below 2^62), `credit = min(cap, credit + now -
-stamp)` computed without overflow, clock `http_now_coarse_ns()`. `Retry-After = ceil((cost - credit) / 1e9)`, at
-least 1.
+Token bucket per key with the arithmetic of `ws_publish_allowed` (ws_session.c:877-915): credit in nanoseconds,
+`cost = perSeconds·1e9 / requests`, `cap = cost·burst`, `credit = min(cap, credit + (now - stamp))` with the
+difference clamped to `cap` before the add, clock `http_now_coarse_ns()`. `Retry-After = ceil((cost - credit) /
+1e9)`, at least 1.
 
-Each rule owns one table per server instance, allocated with `pemalloc` when the server starts (each worker thread
-has its own server instance): `maxKeys` slots of `{uint64 tag; uint64 credit_ns; uint64 stamp_ns}`. A key hashes
-with SipHash-2-4 under a random key per server to 64 bits, forced odd so 0 marks a free slot; 4-way probing from
-`hash mod maxKeys`. When all 4 slots hold other keys, the one whose bucket is full again takes the new key, else the
-one with the oldest stamp; that key starts again from a full bucket, so a takeover only ever gives the evicted key
-more tokens. `requests_rate_limit_evictions_total` counts takeovers.
+One table per rule per server instance (each worker clone has its own), `pecalloc`'d at start: `maxKeys` slots of
+`{uint64 tag; uint64 credit_ns; uint64 stamp_ns}`. Keys hash with SipHash-2-4 under a random key per server to 64
+bits forced odd (0 marks a free slot); 4-way probing from `hash mod maxKeys`. When the 4 slots hold other keys, the
+one whose bucket is full again is taken, else the oldest stamp; a takeover only gives the evicted key more tokens.
+No locks (P2.1). With `setWorkers(N)` a key can get up to N times the limit; H3 reactor mode may spread one
+connection over workers under load (http3_dispatch.c:164-191). USAGE.md states both.
 
-No locks: one table per server instance (P2.1). With `setWorkers(N)` each worker has its own tables, so a key gets
-up to N times the limit when its requests land on different workers; H3 in reactor mode may spread one connection's
-requests over workers under load (http3_dispatch.c:164-191). USAGE.md states both.
+### Where it runs
 
-## Where it runs
+The check runs where each site decides whether PHP runs, after the request and response objects exist: H1
+(http_connection.c:2897-2943), H2 (http2_strategy.c:292-340), H3 local (http3_dispatch.c:713-751), worker side of
+H3 reactor mode (worker_dispatch.c:1320-1339). A refusal sets the 429 status, `Retry-After` and a short body on the
+response object and sets the site's existing skip flag (`ctx->skip_php_handler`, `stream->skip_handler`,
+`s->skip_handler`, `ctx->skip_handler`). The dispose path then sends it with the existing framing, keep-alive,
+linger, telemetry and access log; the refused request costs its objects and one coroutine that runs no PHP. A
+path without the coroutine is added per protocol only if a measurement asks for it, H2 first.
 
-- H1 (http_connection.c:2864), H2 (http2_strategy.c:212), H3 local (http3_dispatch.c:627) and the worker side of
-  H3 reactor mode (worker_dispatch.c:1247): the check runs before the request and response objects and the
-  coroutine are created, and a refusal finalises the stream without a coroutine, the way the static HARD_ZERO path
-  does (http_connection.c:2923, http3_dispatch.c:614-623). If that path cannot carry a 429 on some protocol, the
-  check moves into `http_request_prepare_dispatch` for that protocol and the cost is measured and written down (I2).
-- H1 keeps the connection; a refused request whose body is still unread past 64 KiB gets `Connection: close`.
-- gRPC (`content-type: application/grpc*`): HTTP 200 with trailers-only `grpc-status: 8` (RESOURCE_EXHAUSTED) and
-  `grpc-message`, on every transport (I4).
-- WebSocket upgrade (http_connection.c:179) and H2 CONNECT (http2_strategy.c:240): their own check after the 426/400
-  validation and their own 429 emitter with the right reason phrase and Retry-After; the H1 upgrade reject closes the
-  connection as every upgrade reject does (I3).
-- Static files: counted only by rules with `excludeStatic(false)`; H3 reactor mode serves static on the reactor
-  thread, where no rule is checked, so such rules do not cover reactor-served static files (I6).
+- Static files: the check runs after `http_static_try_serve`, so a request static served is not counted, and one
+  it passed through (`on_missing: Next`, non-GET) is. H3 reactor mode serves static on the reactor thread before any
+  rule; USAGE.md says so.
+- gRPC: when `grpc_classify` (grpc.c:57-68) says gRPC or grpc-web, the refusal is trailers-only `grpc-status: 8`
+  (RESOURCE_EXHAUSTED) with `grpc-message`, through the gRPC response helpers.
+- WebSocket upgrade (http_connection.c:179) and H2 CONNECT (http2_strategy.c:240) bypass the sites above: they get
+  the same check after their 426/400 validation and answer 429 with the right reason and `Retry-After`; the H1
+  upgrade reject closes the connection as every upgrade reject does (ws_dispatch.c:84-107; the 429 reason phrase is
+  added to build_error_response, :222-231).
 
-## Observability
+### Observability
 
-Counters in the X-macro table (php_http_server.h:1057, its static assert) and `getTelemetry()`
-(http_server_class.c:5615), reset with the others (:5777): `requests_rate_limited_total`,
-`requests_rate_limit_evictions_total`. A refused request counts in `total_requests` and `responses_4xx_total`
-like any 429.
+`requests_rate_limited_total` and `requests_rate_limit_evictions_total` in the X-macro table (php_http_server.h:1057
+and its static assert), `getTelemetry()` (http_server_class.c:5615), the reset (:5777) and the contract test
+(telemetry/009). A 429 counts in `total_requests` and `responses_4xx_total`.
 
-## Out of scope
+### Tests (PR 1)
 
-- PROXY protocol; `Forwarded` (RFC 7239).
-- Limits per account resolved in PHP; exact limits across worker threads.
+- cmocka `tests/unit/core/test_rate_limit.c`: bucket and Retry-After at the validated bounds, refill, burst,
+  probing and takeover, odd tags; un-mapping (`::ffff:a.b.c.d` yes, `::1` no); X-Forwarded-For walk (ports, `[v6]`,
+  `unknown`, `_obf`, empty elements, tabs, all trusted, garbage left of the stop); prefix matching (`/`, `/api`,
+  `/api/worksheet`, decoded `%77`, malformed `%`); check-then-commit over two rules; SipHash test vectors.
+- phpt `tests/phpt/server/core/0xx-rate-limit-*.phpt`: validation; H1 and TLS H1 429 + Retry-After with the handler
+  not run and the connection kept, a pipelined request after a refused POST; recovery after the window; IPv4 on a
+  `[::]` listener keyed per address; a trusted proxy with X-Forwarded-For; a Unix listener with and without `unix`;
+  path and method filters; static excluded and `on_missing: Next` counted; H2; H3 local and reactor; gRPC status 8;
+  WebSocket 429 reason and Retry-After; telemetry counters.
 
-## Tests
+## PR 2: cookie and header keys
 
-- cmocka `tests/unit/core/test_rate_limit.c`: bucket and Retry-After at the validated bounds (overflow), refill,
-  burst, probing and takeover, free-slot tag, address un-mapping and /64, X-Forwarded-For rightmost untrusted,
-  cookie parsing (first wins, `%` and `"` refused, H2 cookie crumbs), header with a comma, percent-decoded path and
-  segment-bounded prefixes, check-then-commit over two rules, SipHash test vectors.
-- phpt `tests/phpt/server/core/0xx-rate-limit-*.phpt`: validation and the start-time pairing check; H1 and TLS H1
-  over the limit: 429 + Retry-After, handler not run, connection kept, a pipelined request after a refused POST;
-  recovery; cookie and header keys with fallback; `/api/%77orks` limited; IPv4 on a `[::]` listener keyed per
-  address; Unix listener; trusted proxy; H2; H3 local and reactor (static excluded); gRPC status 8; WebSocket 429
-  reason and Retry-After; telemetry counters.
+`keyByCookie(string $name)` and `keyByHeader(string $name)` on a rule. A client can invent a new value per request,
+so a cookie or header rule must be covered by peer rules: for every prefix p of the rule (or "every path") and every
+method m (or "every method"), some peer-keyed rule R has R's paths empty or a prefix q with p equal to q or under q
+by segments, and R's methods empty or containing m. `addRateLimit` refuses an uncovered rule. The cookie value is the
+first cookie of that name, split on `;` and trimmed as the app does; a missing, empty or over-512-byte value, or a
+header value with a comma (Digest, repeated headers), falls back to the peer key. Its own Critic pass before code.
 
 ## Critic round 1 (2026-10-16)
 
@@ -135,3 +140,19 @@ like any 429.
 | I8 | no total memory bound, allocator unnamed | pemalloc, 2^20 per rule, 2^21 slots per server |
 | I9 | repeated headers are joined, "first value" false | a value with a comma falls back to the peer |
 | A | static assets, unread POST body, /48 holders, free-slot sentinel, telemetry, tests | excludeStatic default, Connection: close past 64 KiB, documented, odd tags, counters named, tests added |
+
+## Critic round 2 (2026-10-16)
+
+| # | Remark | Answer |
+|---|---|---|
+| 1 | HARD_ZERO needs the objects and is deferred; no object-free refusal exists on H1, H3 or the worker | refusal through the existing skip-handler path at all four sites; a no-coroutine path only on measurement |
+| 2 | un-mapping IPv4-compatible addresses turns `::1` into 0.0.0.1 | only `::ffff:0:0/96` is un-mapped, before the trust match, for peers, XFF elements and CIDR entries |
+| 3 | an exempt Unix peer leaves peer rules empty and B1 open | `unix` can be trusted; otherwise a Unix peer is the single key `unix` |
+| 4 | XFF grammar and "malformed" undefined | walk from the right, ports and brackets parsed, the last trusted hop on an unparsable element |
+| 5 | "static not counted" needs the static result | the check runs after `http_static_try_serve` |
+| 6 | the router does not refuse a malformed `%`; refusing it changes responses | such a target matches every path-scoped rule; responses unchanged |
+| 7 | prefixes `/` and `/api/` | no trailing `/` except `/` itself, which means every path |
+| 8 | the pairing check is ambiguous | defined per prefix and method over the union of peer rules; moved to PR 2 |
+| 9 | trusted proxies on a locked config; effect on getRemoteAddress | set before `new HttpServer`, frozen with the shared config; limiter key only |
+| 10 | "unread past 64 KiB" undefined at headers-complete | gone: the skip-handler path drains or lingers as any response does |
+| A | grpc_classify, cookie trim, Digest commas, per-worker memory, pecalloc | taken |
