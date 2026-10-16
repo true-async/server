@@ -71,7 +71,10 @@ function h2_skipif(array $req = []): void {
  * and cmd.exe; output goes into the array, console stays clean. */
 function h2_have_cli(string $cmd): bool {
     $rc = 0; $out = [];
-    @exec(escapeshellarg($cmd) . ' --version 2>&1', $out, $rc);
+    /* OpenSSL 3.0 rejects --version as an invalid command and exits 1;
+     * `openssl version` answers on every release. */
+    $probe = $cmd === 'openssl' ? ' version' : ' --version';
+    @exec(escapeshellarg($cmd) . $probe . ' 2>&1', $out, $rc);
     return $rc === 0;
 }
 
