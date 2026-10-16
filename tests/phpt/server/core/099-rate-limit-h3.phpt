@@ -25,6 +25,7 @@ use function Async\delay;
 
 require __DIR__ . '/../h3/_h3_skipif.inc';
 require_once __DIR__ . '/../_free_port.inc';
+require_once __DIR__ . '/_rate_limit.inc';
 
 $tmp = __DIR__ . '/tmp-099';
 @mkdir($tmp, 0700, true);
@@ -58,7 +59,7 @@ $client_bin = __DIR__ . '/../../../h3client/h3client';
 
 function h3(string $bin, int $port, string $path, string $method = 'GET', ?string $body = null, ?string $header = null): string
 {
-    $env = 'H3CLIENT_DEADLINE_MS=4000 H3CLIENT_PRINT_HEADERS=1 '
+    $env = 'H3CLIENT_DEADLINE_MS=' . (getenv('ZEND_DONT_UNLOAD_MODULES') !== false ? 30000 : 4000) . ' H3CLIENT_PRINT_HEADERS=1 '
          . ($header !== null ? 'H3CLIENT_HEADER=' . escapeshellarg($header) . ' ' : '');
     $out = shell_exec(sprintf('%s%s 127.0.0.1 %d %s %s %s 2>&1 >/dev/null', $env,
         escapeshellarg($bin), $port, escapeshellarg($path), $method,
@@ -66,16 +67,24 @@ function h3(string $bin, int $port, string $path, string $method = 'GET', ?strin
     $found = [];
 
     foreach (explode("\n", $out) as $line) {
-        if (preg_match('/^(STATUS=\d+|HDR (retry-after|grpc-status|grpc-message|grpc-retry-pushback-ms): .*)$/', $line)) {
-            $found[] = $line;
+        if (!preg_match('/^(STATUS=\d+|HDR (retry-after|grpc-status|grpc-message|grpc-retry-pushback-ms): .*)$/', $line)) {
+            continue;
         }
+
+        if (preg_match('/^HDR retry-after: (\d+)$/', $line, $m)) {
+            $line = 'HDR retry-after: ' . rl_wait((int) $m[1]);
+        } elseif (preg_match('/^HDR grpc-retry-pushback-ms: (\d+)$/', $line, $m)) {
+            $line = 'HDR grpc-retry-pushback-ms: ' . rl_wait(intdiv((int) $m[1], 1000)) * 1000;
+        }
+
+        $found[] = $line;
     }
 
     return implode(' | ', $found);
 }
 
 spawn(function () use ($server, $port, $client_bin, $frame, &$runs) {
-    delay(300);
+    delay(getenv('ZEND_DONT_UNLOAD_MODULES') !== false ? 3000 : 300);
     echo "GET #1: ", h3($client_bin, $port, '/h3'), "\n";
     echo "GET #2: ", h3($client_bin, $port, '/h3'), "\n";
     echo "gRPC #1: ", h3($client_bin, $port, '/svc.Greeter/Ping', 'POST', $frame, 'content-type: application/grpc'), "\n";

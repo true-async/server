@@ -54,16 +54,17 @@ function rl_read_response($fp, bool $head = false): ?array
     return ['status' => $status, 'headers' => $headers, 'body' => $body];
 }
 
-/* The full waits the rules of these tests give, for rl_wait(). */
+/* The full waits the rules of these tests give, for rl_wait(), ascending. */
 function rl_full_waits(): array
 {
-    return [60, 30, 3600];
+    return [15, 30, 60, 3600];
 }
 
 /* A Retry-After value as the test expects it. Under valgrind (run-tests -m
  * sets ZEND_DONT_UNLOAD_MODULES) a request takes long enough for the wait to
  * drop a few seconds below the full one, so a value up to 15 s under a full
- * wait reads as that wait there; any other run compares it exactly. */
+ * wait reads as the smallest such wait there; any other run compares it
+ * exactly. */
 function rl_wait(int $seconds): int
 {
     if (getenv('ZEND_DONT_UNLOAD_MODULES') === false) {

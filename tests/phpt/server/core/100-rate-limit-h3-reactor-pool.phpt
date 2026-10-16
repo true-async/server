@@ -61,7 +61,7 @@ $client_bin = __DIR__ . '/../../../h3client/h3client';
 
 function h3(string $bin, int $port, string $path, string $method = 'GET', ?string $body = null, ?string $header = null): string
 {
-    $env = 'H3CLIENT_DEADLINE_MS=4000 H3CLIENT_PRINT_HEADERS=1 '
+    $env = 'H3CLIENT_DEADLINE_MS=' . (getenv('ZEND_DONT_UNLOAD_MODULES') !== false ? 30000 : 4000) . ' H3CLIENT_PRINT_HEADERS=1 '
          . ($header !== null ? 'H3CLIENT_HEADER=' . escapeshellarg($header) . ' ' : '');
     $out = shell_exec(sprintf('%s%s 127.0.0.1 %d %s %s %s 2>&1 >/dev/null', $env,
         escapeshellarg($bin), $port, escapeshellarg($path), $method,
@@ -76,7 +76,7 @@ function h3(string $bin, int $port, string $path, string $method = 'GET', ?strin
 }
 
 spawn(function () use ($server, $port, $client_bin, $frame) {
-    delay(600);
+    delay(getenv('ZEND_DONT_UNLOAD_MODULES') !== false ? 5000 : 600);
     $seen = [];
 
     for ($i = 0; $i < 6; $i++) {
