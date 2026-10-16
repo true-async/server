@@ -22,6 +22,7 @@
 #include "core/rate_limit_php.h"
 #include "http1/http_parser.h"     /* http_request_t */
 #include "log/http_log.h"
+#include "grpc/grpc.h"         /* GRPC_STATUS_RESOURCE_EXHAUSTED */
 
 #include <string.h>
 
@@ -925,8 +926,8 @@ void http_rate_limit_refuse(zend_object *response, const uint32_t retry_after_s,
     char value[24];
 
     if (grpc) {
-        /* RESOURCE_EXHAUSTED; the response keeps its 200, as gRPC requires. */
-        http_response_ensure_grpc_status(response, 8);
+        /* The response keeps its 200, as gRPC requires. */
+        http_response_ensure_grpc_status(response, GRPC_STATUS_RESOURCE_EXHAUSTED);
         http_response_static_set_trailer(response, "grpc-message", sizeof("grpc-message") - 1,
                                          "rate limit exceeded", sizeof("rate limit exceeded") - 1);
 
