@@ -80,6 +80,9 @@ typedef enum {
 /* Forward declaration for multipart processor */
 struct mp_processor_t;
 
+/* Per-rule rate limit counts (core/rate_limit.h) */
+struct http_rl_rule_stats_s;
+
 /* Parsed HTTP request (logical-request struct).
  *
  * Field order: 8-byte pointers first, then size_t, then 1-byte fields
@@ -219,6 +222,12 @@ struct http_request_t {
     bool         body_paused    : 1;
     /* W3C Trace Context present (see trace_id/span_id/trace_flags above). */
     bool         has_trace      : 1;
+    /* The rate limit verdict was taken at headers-complete and is final:
+     * rate_limit_retry_s holds it, and dispatch does not check again. */
+    bool         rate_limit_checked : 1;
+    /* No one will read the body (a rate limit refusal, or a request the
+     * upgrade path claims): on_body counts it against the limit and drops it. */
+    bool         body_dropped : 1;
     /* Allocation domain of reactor-produced fields (method/uri/headers + the
      * headers HashTable + the struct block). false = ZMM (worker-built,
      * default), true = persistent malloc (reactor-built) → those frees go
@@ -296,6 +305,13 @@ struct http_request_t {
      * max_input_nesting_level, or malformed); 0 while it has not. Only the
      * form getters throw with it: the body itself is whole. */
     uint16_t     form_refused_status;
+    /* Retry-After of a rate limit refusal taken before the body, in seconds;
+     * 0 when the request was admitted or not checked yet. */
+    uint32_t     rate_limit_retry_s;
+    /* Per-rule counts of that refusal (an emalloc'd array, one entry per
+     * rule), counted when its 429 is sent and freed with the request
+     * otherwise; NULL when there is none. */
+    struct http_rl_rule_stats_s *rate_limit_pending;
     /* Why the form was refused, for the message of every getter that throws;
      * a string literal, so it is valid on any thread. NULL while it has not. */
     const char  *form_refused_reason;
@@ -354,6 +370,7 @@ typedef struct http1_parser_t {
     size_t            total_headers_size;    /* Total size of all headers (DDoS) */
     size_t            chunk_extensions_size; /* Chunk-extension bytes of this request */
     size_t            max_body_size;         /* Configurable body size limit */
+    size_t            refused_body_bytes;    /* Body bytes dropped for a rate-limited request */
 
     /* Smuggling-defense state (RFC 9112 §6.3). Tracked across all
      * save_current_header calls within one request so on_headers_complete

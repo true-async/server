@@ -44,6 +44,7 @@
 #include "static/static_handler.h"
 #include "http_send_file.h"
 #include "http_response_internal.h"
+#include "core/rate_limit_php.h"
 
 #include <string.h>
 
@@ -233,16 +234,27 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         return;
     }
 
+    /* Retry-After of a refusal taken before the static path (an extended
+     * CONNECT, or a request nothing would take), 0 otherwise. */
+    uint32_t rate_limit_retry = 0;
+
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
     /* RFC 8441 Extended CONNECT → WebSocket. Detected before the normal
      * request / static / handler-null checks below (a WS-only server has
-     * no conn->handler). Routes to the registered WS handler. */
+     * no conn->handler). Routes to the registered WS handler, unless the rate
+     * limit refuses it: then it takes the normal path, and a non-2xx answer
+     * rejects the CONNECT (RFC 8441 §5). */
     if (h2_request_is_ws_connect(stream->request)
         && http_protocol_has_handler(
                http_server_get_protocol_handlers(self->conn->server),
                HTTP_PROTOCOL_WEBSOCKET)) {
-        http2_ws_dispatch(self, stream);
-        return;
+        rate_limit_retry = http_rate_limit_check(self->conn->server, stream->request,
+                                                 self->conn->counters);
+
+        if (EXPECTED(rate_limit_retry == 0)) {
+            http2_ws_dispatch(self, stream);
+            return;
+        }
     }
 #endif
 
@@ -259,8 +271,18 @@ static void http2_strategy_dispatch(struct http_request_t *request,
     const bool has_static_mount =
         http_static_handler_count(self->conn->server) > 0;
 
-    if (self->conn->handler == NULL && !has_static_mount && !is_grpc) {
-        return;
+    /* No handler, mount or gRPC handler takes the request. It counts against
+     * the rate limit, and once refused it is answered 429 on the path below.
+     * An admitted one is still dropped unanswered: an existing gap, not
+     * intent. */
+    if (self->conn->handler == NULL && !has_static_mount && !is_grpc
+        && rate_limit_retry == 0) {
+        rate_limit_retry = http_rate_limit_check(self->conn->server, stream->request,
+                                                 self->conn->counters);
+
+        if (EXPECTED(rate_limit_retry == 0)) {
+            return;
+        }
     }
 
     /* OOM-bailout protection for this read-path is provided by the
@@ -308,7 +330,10 @@ static void http2_strategy_dispatch(struct http_request_t *request,
      *                 handler; dispose still runs the regular
      *                 buffered-commit path so the wire frames go out.
      *   PASSTHROUGH — no mount matched; spawn the user handler. */
-    if (UNEXPECTED(has_static_mount)) {
+    if (UNEXPECTED(rate_limit_retry != 0)) {
+        http_rate_limit_refuse(Z_OBJ(stream->response_zv), rate_limit_retry, false);
+        stream->skip_handler = true;
+    } else if (UNEXPECTED(has_static_mount)) {
         const http_static_result_t static_rc =
             http_static_try_serve(self->conn->server, stream->request,
                                   Z_OBJ(stream->response_zv),
@@ -320,6 +345,17 @@ static void http2_strategy_dispatch(struct http_request_t *request,
         }
 
         if (static_rc == HTTP_STATIC_HANDLED) {
+            stream->skip_handler = true;
+        }
+    }
+
+    /* A request static did not serve counts against the rate limit. */
+    if (!stream->skip_handler) {
+        rate_limit_retry = http_rate_limit_check(self->conn->server, stream->request,
+                                                 self->conn->counters);
+
+        if (UNEXPECTED(rate_limit_retry != 0)) {
+            http_rate_limit_refuse(Z_OBJ(stream->response_zv), rate_limit_retry, is_grpc);
             stream->skip_handler = true;
         }
     }

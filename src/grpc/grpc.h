@@ -26,6 +26,7 @@ struct http_request_t;
 #define GRPC_STATUS_INVALID_ARGUMENT      3
 #define GRPC_STATUS_DEADLINE_EXCEEDED     4
 #define GRPC_STATUS_NOT_FOUND             5
+#define GRPC_STATUS_RESOURCE_EXHAUSTED    8
 #define GRPC_STATUS_UNIMPLEMENTED        12
 #define GRPC_STATUS_INTERNAL             13
 #define GRPC_STATUS_UNAVAILABLE          14

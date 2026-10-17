@@ -44,6 +44,7 @@ $expected = [
     'tls_ktls_tx_total', 'tls_ktls_rx_total',
     'parse_errors_4xx_total', 'parse_errors_400_total', 'parse_errors_413_total',
     'parse_errors_414_total', 'parse_errors_431_total', 'parse_errors_503_total',
+    'requests_rate_limited_total', 'requests_rate_limit_evictions_total',
     'drain_events_reactive_total', 'drain_events_cooldown_blocked_total',
     'connections_drained_reactive_total', 'connections_drained_proactive_total',
     'connections_force_closed_total',

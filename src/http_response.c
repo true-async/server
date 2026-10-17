@@ -754,6 +754,19 @@ void http_response_ensure_grpc_status(zend_object *obj, int status)
                          sizeof("grpc-status") - 1, &v);
 }
 
+void http_response_static_set_trailer(zend_object *obj,
+                                      const char *name, const size_t name_len,
+                                      const char *value, const size_t value_len)
+{
+    http_response_object *response = http_response_from_obj(obj);
+
+    ensure_trailers_table(response);
+
+    zval v;
+    ZVAL_STRINGL(&v, value, value_len);
+    zend_hash_str_update(response->trailers, name, name_len, &v);
+}
+
 /* {{{ proto HttpResponse::setTrailer(string $name, string $value): static */
 ZEND_METHOD(TrueAsync_HttpResponse, setTrailer)
 {

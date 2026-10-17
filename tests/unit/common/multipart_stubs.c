@@ -6,6 +6,7 @@
 #include "php.h"
 #include "Zend/zend_string.h"
 #include "log/http_log.h"
+#include "core/rate_limit_php.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -47,6 +48,28 @@ bool http_server_should_shed_request(const http_server_object *server)
 {
     (void)server;
     return false;
+}
+
+/* Rate limit stubs. The parser tests run without a server, so no rule is
+ * active and nothing is refused. */
+bool http_rate_limits_active(const http_server_object *server)
+{
+    (void)server;
+    return false;
+}
+
+uint32_t http_rate_limit_check(http_server_object *server, const http_request_t *req,
+                               http_server_counters_t *counters)
+{
+    (void)server; (void)req; (void)counters;
+    return 0;
+}
+
+uint32_t http_rate_limit_check_deferred(http_server_object *server, http_request_t *req,
+                                        http_server_counters_t *counters)
+{
+    (void)server; (void)req; (void)counters;
+    return 0;
 }
 
 /* Logging is fired via http_logf_* macros that gate on log_state->severity;

@@ -99,6 +99,53 @@ endif()
 
 add_test(NAME ResponseWire COMMAND test_response_wire)
 
+# Request rate limit core (#414): SipHash, client addresses and the
+# X-Forwarded-For walk, path matching, buckets and check-then-commit. Plain C
+# over caller-owned memory, no PHP/Zend runtime.
+add_executable(test_rate_limit
+    core/test_rate_limit.c
+    ${CMAKE_SOURCE_DIR}/../src/core/rate_limit.c
+)
+
+target_include_directories(test_rate_limit PRIVATE
+    ${CMAKE_SOURCE_DIR}/../include
+)
+
+target_link_libraries(test_rate_limit
+    ${CMOCKA_LIBRARIES}
+)
+
+add_test(NAME RateLimit COMMAND test_rate_limit)
+
+# The same suite under AddressSanitizer and UBSan. The 46-byte address and
+# 16-byte IPv4 cases cannot be told apart by result from a parser buffer one
+# byte short: no text that long is a valid address, so both refuse it, and
+# only the out-of-bounds write differs. GCC and Clang only.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_executable(test_rate_limit_asan
+        core/test_rate_limit.c
+        ${CMAKE_SOURCE_DIR}/../src/core/rate_limit.c
+    )
+
+    target_include_directories(test_rate_limit_asan PRIVATE
+        ${CMAKE_SOURCE_DIR}/../include
+    )
+
+    target_compile_options(test_rate_limit_asan PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+    target_link_options(test_rate_limit_asan PRIVATE -fsanitize=address,undefined)
+    target_link_libraries(test_rate_limit_asan ${CMOCKA_LIBRARIES})
+
+    add_test(NAME RateLimitAsan COMMAND test_rate_limit_asan)
+endif()
+
+if(WIN32)
+    target_link_libraries(test_rate_limit ws2_32)
+    set_tests_properties(RateLimit PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMOCKA_DLL_DIR}"
+    )
+endif()
+
 if(WIN32)
     set_tests_properties(ThreadQueue PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${PHP_DLL_DIR};PATH=path_list_prepend:${CMOCKA_DLL_DIR}"

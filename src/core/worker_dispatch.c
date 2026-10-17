@@ -29,6 +29,7 @@
 #include "grpc/grpc_call.h"                  /* call lifecycle policy (init/status/finish) */
 #include "Zend/zend_hrtime.h"                /* zend_hrtime — request-service sampling */
 #include "log/http_log.h"                    /* access-log emit */
+#include "core/rate_limit_php.h"
 #include "fiu-local.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
@@ -1324,12 +1325,22 @@ bool worker_dispatch_request(http_server_object *server,
         grpc_call_init_response(Z_OBJ(ctx->response_zv), grpc_mode);
     }
 
+    /* The reactor served static files before the request crossed; what
+     * arrives here counts against the rate limit. */
+    const uint32_t retry_after = http_rate_limit_check(server, req, ctx->counters);
+
+    if (UNEXPECTED(retry_after != 0)) {
+        http_rate_limit_refuse(Z_OBJ(ctx->response_zv), retry_after,
+                               is_grpc && ctx->protocol != HTTP_PROTOCOL_HTTP1);
+        ctx->skip_handler = true;
+    }
+
     /* No handler registered: synthesise a 404 so the sink still fires with a
      * response instead of leaving the stream hanging. */
     zend_fcall_t *const fcall =
         http_protocol_pick_handler(handlers, ctx->protocol, is_grpc);
 
-    if (fcall == NULL) {
+    if (fcall == NULL && !ctx->skip_handler) {
         http_response_static_set_status(Z_OBJ(ctx->response_zv), 404);
         http_response_static_set_header(Z_OBJ(ctx->response_zv),
             "content-type", 12, "text/plain; charset=utf-8", 25);

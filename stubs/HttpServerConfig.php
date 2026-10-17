@@ -753,6 +753,31 @@ final class HttpServerConfig
      */
     public function setStatsEnabled(bool $enabled): static {}
 
+    /**
+     * Proxies whose `X-Forwarded-For` names the client a rate limit counts
+     * (#414). Each entry is an IPv4 or IPv6 address, optionally with a `/bits`
+     * prefix, or the word `unix` for Unix-socket peers; up to 64 entries.
+     * Replaces any earlier list.
+     *
+     * Only the rate limiter reads it: `HttpRequest::getRemoteAddress()` and
+     * the access log keep the socket peer. From a trusted peer the header is
+     * read from the right: trusted hops are skipped and the first other
+     * address is the client; an element that is not an address, or a header
+     * of trusted hops only, leaves the last trusted hop as the client.
+     *
+     * @param list<string> $proxies
+     * @throws HttpServerInvalidArgumentException on an entry that is neither
+     * @return static
+     */
+    public function setTrustedProxies(array $proxies): static {}
+
+    /**
+     * The trusted proxies, normalised: `a.b.c.d/bits`, `v6/bits`, `unix`.
+     *
+     * @return list<string>
+     */
+    public function getTrustedProxies(): array {}
+
     /** @return bool */
     public function isStatsEnabled(): bool {}
 

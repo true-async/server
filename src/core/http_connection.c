@@ -31,6 +31,7 @@
 #include "http_response_internal.h"  /* http_response_take_send_file */
 #include "core/async_plain_event.h"
 #include "core/bailout_guard.h"
+#include "core/rate_limit_php.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
 #endif
@@ -2899,14 +2900,19 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
 
     conn->state = CONN_STATE_PROCESSING;
 
-    /* Static handler dispatch (issue #13). When any mount is
-     * configured, give the C handler the first chance to claim the
-     * request: it resolves the URL, opens + reads the file, and
-     * populates ctx->response_zv. Falls through to the PHP handler on
-     * PASSTHROUGH (no mount matched, non-GET method, on_missing: Next,
-     * ...). The static handler is protocol-agnostic — H1 supplies the
-     * lifecycle callbacks via http_static_dispatch_cbs_t. */
-    if (UNEXPECTED(http_static_handler_count(conn->server) > 0)) {
+    if (UNEXPECTED(req->rate_limit_retry_s != 0)) {
+        /* Refused before its body was read; nothing else may answer it. */
+        http_rate_limit_count_refusal(conn->server, req, conn->counters);
+        http_rate_limit_refuse(Z_OBJ(ctx->response_zv), req->rate_limit_retry_s, false);
+        ctx->skip_php_handler = true;
+    } else if (UNEXPECTED(http_static_handler_count(conn->server) > 0)) {
+        /* Static handler dispatch (issue #13). When any mount is
+         * configured, give the C handler the first chance to claim the
+         * request: it resolves the URL, opens + reads the file, and
+         * populates ctx->response_zv. Falls through to the PHP handler on
+         * PASSTHROUGH (no mount matched, non-GET method, on_missing: Next,
+         * ...). The static handler is protocol-agnostic — H1 supplies the
+         * lifecycle callbacks via http_static_dispatch_cbs_t. */
         extern const http_static_dispatch_cbs_t h1_static_dispatch_cbs;
         const http_static_result_t static_rc =
             http_static_try_serve(conn->server, req, Z_OBJ(ctx->response_zv),
@@ -2925,6 +2931,18 @@ static void http_connection_dispatch_request(http_connection_t *conn, http_reque
         }
 
         if (static_rc == HTTP_STATIC_HANDLED) {
+            ctx->skip_php_handler = true;
+        }
+    }
+
+    /* A request static did not serve counts against the rate limit, here
+     * unless headers-complete already took the verdict. HTTP/1 answers a
+     * gRPC-Web call with a plain 429 too. */
+    if (!ctx->skip_php_handler && !req->rate_limit_checked) {
+        const uint32_t retry_after = http_rate_limit_check(conn->server, req, conn->counters);
+
+        if (UNEXPECTED(retry_after != 0)) {
+            http_rate_limit_refuse(Z_OBJ(ctx->response_zv), retry_after, false);
             ctx->skip_php_handler = true;
         }
     }

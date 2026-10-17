@@ -26,6 +26,7 @@
 #include "core/fault_hooks.h"
 #include "log/http_log.h"
 #include "static/static_handler.h"
+#include "core/rate_limit_php.h"
 #include "http_send_file.h"
 #include "room/room_hub.h"
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
@@ -217,6 +218,7 @@ PHP_MINIT_FUNCTION(http_server)
 	http_response_class_register();
 	http_send_file_options_class_register();
 	http_static_handler_class_register();
+	http_rate_limit_class_register();
 	http_server_class_register();
 
 	/* Test-only C hooks; a no-op unless built with HTTP_SERVER_TEST_HOOKS. */

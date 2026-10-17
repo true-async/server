@@ -24,6 +24,7 @@
 #include "core/http_protocol_handlers.h"   /* http_request_classify_protocols */
 #include "formats/form_content_type.h"
 #include "http_request_form.h"
+#include "core/rate_limit_php.h"
 
 #include <string.h>
 #ifndef PHP_WIN32
@@ -112,6 +113,7 @@ static int on_message_begin(llhttp_t* llhttp_parser)
     parser->body_offset = 0;
     parser->total_headers_size = 0;
     parser->chunk_extensions_size = 0;
+    parser->refused_body_bytes = 0;
     parser->parse_error = HTTP_PARSE_OK;
 
     /* Smuggling-defense state (RFC 9112 §6.3) */
@@ -405,6 +407,22 @@ static void http1_request_body_upgrade(http_request_t *req)
     req->body_streaming = true;
 }
 
+/* The rest of on_headers_complete for a request whose body nothing will read:
+ * one the rate limit refused, or one the upgrade path claims. The body limit
+ * still holds, so such a body cannot keep the connection reading for ever;
+ * on_body counts and drops it, and the request is dispatched once it is
+ * complete, as a buffered one is. */
+static int http1_drop_body_headers_complete(http1_parser_t *parser, http_request_t *req)
+{
+    req->body_dropped = true;
+
+    if (parser->conn->view != NULL && parser->conn->view->telemetry_enabled) {
+        http_request_parse_trace_context(req);
+    }
+
+    return 0;
+}
+
 static int on_headers_complete(llhttp_t* llhttp_parser)
 {
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
@@ -531,6 +549,38 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
 
     http_request_classify_protocols(req);
 
+    /* Rate limit verdict for a method static never serves, taken before the
+     * body: a refused upload is read and dropped rather than buffered or
+     * written to disk, and the dispatch site sends the stored 429 and counts
+     * it then. A declared body past the limit is answered 413 first, so it
+     * spends no token. GET and HEAD are checked at dispatch, after a static
+     * mount has had its turn. */
+    if (parser->conn != NULL
+        && UNEXPECTED(http_rate_limits_active(parser->conn->server))
+        && !http_request_method_is_get(req) && !http_request_method_is_head(req)) {
+        if (req->content_length > parser->max_body_size) {
+            parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+            return -1;  /* 413 Payload Too Large */
+        }
+
+#ifdef HAVE_HTTP_SERVER_WEBSOCKET
+        /* The upgrade path claims every request with an Upgrade header and
+         * answers it without the body (405, 426, 400, or a 101 whose check
+         * runs there): the body is dropped and no verdict is taken. */
+        if (zend_hash_str_exists(req->headers, "upgrade", sizeof("upgrade") - 1)) {
+            return http1_drop_body_headers_complete(parser, req);
+        }
+#endif
+
+        req->rate_limit_checked = true;
+        req->rate_limit_retry_s = http_rate_limit_check_deferred(
+            parser->conn->server, req, parser->conn->counters);
+
+        if (req->rate_limit_retry_s != 0) {
+            return http1_drop_body_headers_complete(parser, req);
+        }
+    }
+
     /* Parts are written to disk while the body arrives; the form is built
      * from the processor when a getter asks for it. */
     if (req->form_kind == HTTP_FORM_MULTIPART) {
@@ -645,6 +695,18 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
     /* Dispatch failed at on_headers_complete and severed parser->request
      * (see on_message_complete). Drop the chunk — the conn is going down. */
     if (UNEXPECTED(req == NULL)) {
+        return 0;
+    }
+
+    /* Nothing will read it (see http1_drop_body_headers_complete): counted
+     * against the body limit, dropped. */
+    if (UNEXPECTED(req->body_dropped)) {
+        if (length > parser->max_body_size - parser->refused_body_bytes) {
+            parser->parse_error = HTTP_PARSE_ERR_BODY_TOO_LARGE;
+            return -1;  /* 413 Payload Too Large */
+        }
+
+        parser->refused_body_bytes += length;
         return 0;
     }
 
@@ -976,6 +1038,11 @@ void http_request_free_fields(http_request_t *req)
         req->method = NULL;
     }
 
+    if (req->rate_limit_pending != NULL) {
+        efree(req->rate_limit_pending);
+        req->rate_limit_pending = NULL;
+    }
+
     if (req->uri) {
         zend_string_release(req->uri);
         req->uri = NULL;
@@ -1189,6 +1256,7 @@ void http_parser_reset_for_reuse(http1_parser_t *parser)
     parser->body_offset = 0;
     parser->total_headers_size = 0;
     parser->chunk_extensions_size = 0;
+    parser->refused_body_bytes = 0;
     parser->parse_error = HTTP_PARSE_OK;
 
 #ifdef HAVE_LLHTTP

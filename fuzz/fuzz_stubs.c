@@ -208,3 +208,20 @@ __attribute__((weak)) void http_response_replace_stream_ops(
 {
     (void)obj; (void)ops; (void)ctx;
 }
+
+/* Real impls in http_request.c (not linked here). on_headers_complete asks
+ * them for the rate limit verdict only when the parser has a connection;
+ * fuzz parsers run without one. Mirror of the src/http_request.c logic. */
+__attribute__((weak)) bool http_request_method_is_get(const http_request_t *req)
+{
+    return req != NULL && req->method != NULL &&
+           ZSTR_LEN(req->method) == 3 &&
+           memcmp(ZSTR_VAL(req->method), "GET", 3) == 0;
+}
+
+__attribute__((weak)) bool http_request_method_is_head(const http_request_t *req)
+{
+    return req != NULL && req->method != NULL &&
+           ZSTR_LEN(req->method) == 4 &&
+           memcmp(ZSTR_VAL(req->method), "HEAD", 4) == 0;
+}
