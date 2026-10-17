@@ -32,7 +32,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 use function Async\await;
 
-$tmp = __DIR__ . '/tmp-042';
+$tmp = __DIR__ . '/tmp-042-newcid';
 @mkdir($tmp, 0700, true);
 $cert = $tmp . '/cert.pem';
 $key  = $tmp . '/key.pem';
