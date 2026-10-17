@@ -23,7 +23,7 @@ use function Async\await;
 
 require __DIR__ . '/_h3_skipif.inc';
 
-$tmp = __DIR__ . '/tmp-049';
+$tmp = __DIR__ . '/tmp-049-upload';
 @mkdir($tmp, 0700, true);
 $cert = $tmp . '/cert.pem';
 $key  = $tmp . '/key.pem';

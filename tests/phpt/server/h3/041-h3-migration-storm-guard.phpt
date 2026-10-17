@@ -47,7 +47,7 @@ use function Async\spawn;
 
 require __DIR__ . '/_h3_skipif.inc';
 
-$tmp = __DIR__ . '/tmp-041';
+$tmp = __DIR__ . '/tmp-041-migration';
 @mkdir($tmp, 0700, true);
 $cert = $tmp . '/cert.pem';
 $key  = $tmp . '/key.pem';
