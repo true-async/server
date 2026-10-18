@@ -77,7 +77,7 @@ echo "done\n";
 connect=405
 asterisk_get=400
 asterisk_opts=200
-http12=400
+http12=200
 get_has_date=1
 head_status=200
 head_has_cl10=1

@@ -127,6 +127,26 @@ static int on_message_begin(llhttp_t* llhttp_parser)
     return 0;
 }
 
+static int on_version_complete(llhttp_t *llhttp_parser)
+{
+    http1_parser_t *parser = (http1_parser_t *)llhttp_parser->data;
+
+    /* The grammar still requires HTTP/DIGIT.DIGIT. Only the supported
+     * version whitelist is relaxed; reject other major versions here. */
+    if (llhttp_parser->http_major != 1) {
+        parser->parse_error = HTTP_PARSE_ERR_INVALID_HTTP_VERSION;
+        return -1;
+    }
+
+    /* RFC 9110 section 6.2: use our highest supported minor version for
+     * a higher minor in the same major. Normalize before llhttp decides
+     * framing/keepalive and before our HTTP/1.1 Host validation. */
+    if (llhttp_parser->http_minor > 1) {
+        llhttp_parser->http_minor = 1;
+    }
+    return 0;
+}
+
 static int on_url(llhttp_t* llhttp_parser, const char* at, size_t length)
 {
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
@@ -171,6 +191,10 @@ static int on_header_field(llhttp_t* llhttp_parser, const char* at, size_t lengt
     if (parser->in_header_value) {
         /* Save previous complete header (also resets builders to NULL) */
         save_current_header(parser);
+
+        if (UNEXPECTED(parser->parse_error != HTTP_PARSE_OK)) {
+            return -1;
+        }
 
         /* Reset state flag */
         parser->in_header_value = false;
@@ -264,6 +288,16 @@ static void save_current_header(http1_parser_t *parser)
     }
 
     parser->header_count++;
+
+    /* llhttp sends trailer fields through the same callbacks as initial
+     * headers. We do not expose trailers: validate their syntax and limits,
+     * then discard them without changing headers or framing metadata
+     * (RFC 9110 section 6.5). */
+    if (parser->parser.flags & F_TRAILING) {
+        smart_str_free(&parser->header_name_builder);
+        smart_str_free(&parser->header_value_builder);
+        return;
+    }
 
     /* Finalize strings */
     smart_str_0(&parser->header_name_builder);
@@ -467,10 +501,8 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
         return -1;
     }
 
-    /* RFC 9112 §2.5: only HTTP/1.0 and HTTP/1.1 are accepted on this
-     * parser. Anything else (HTTP/0.9, 1.2+, 2.0 sneaked through llhttp
-     * lenient mode) is rejected with 400 so we never enter the keepalive
-     * defaults branch with an unknown semantic. */
+    /* Only supported semantics reach this point. Higher minor versions
+     * were normalized to 1.1 in on_version_complete. */
     if (UNEXPECTED(llhttp_parser->http_major != 1 ||
                    (llhttp_parser->http_minor != 0 && llhttp_parser->http_minor != 1))) {
         parser->parse_error = HTTP_PARSE_ERR_INVALID_HTTP_VERSION;
@@ -845,6 +877,16 @@ static int on_message_complete(llhttp_t* llhttp_parser)
         return HPE_PAUSED;
     }
 
+    /* No headers-complete callback follows trailers. Consume the last field
+     * here and reject any limit error before dispatch or a successful EOF. */
+    if (parser->in_header_value) {
+        save_current_header(parser);
+        parser->in_header_value = false;
+    }
+    if (UNEXPECTED(parser->parse_error != HTTP_PARSE_OK)) {
+        return -1;
+    }
+
     /* Streaming: signal EOF to readBody() consumer; no req->body
      * accumulator to finalize. */
     if (req->body_streaming) {
@@ -903,6 +945,7 @@ http1_parser_t* http_parser_create(size_t max_body_size)
     /* Initialize llhttp settings */
     llhttp_settings_init(&parser->settings);
     parser->settings.on_message_begin = on_message_begin;
+    parser->settings.on_version_complete = on_version_complete;
     parser->settings.on_url = on_url;
     parser->settings.on_header_field = on_header_field;
     parser->settings.on_header_value = on_header_value;
@@ -914,6 +957,7 @@ http1_parser_t* http_parser_create(size_t max_body_size)
 
     /* Initialize parser */
     llhttp_init(&parser->parser, HTTP_REQUEST, &parser->settings);
+    llhttp_set_lenient_version(&parser->parser, 1);
     parser->parser.data = parser;
 #endif
 
@@ -956,12 +1000,7 @@ int http_parser_execute(http1_parser_t *parser, const char *data, size_t len, si
         /* Parse error. If a callback already set parse_error (oversized
          * URI/header/body, bad header) we keep that classification —
          * llhttp surfaces those as HPE_USER. Anything else is an
-         * llhttp-detected framing/syntax error → 400 Bad Request.
-         * Note: llhttp reports HPE_INVALID_VERSION for BOTH a valid-but-
-         * unsupported version (HTTP/1.2) and a malformed version string
-         * (missing minor, leading zeros, whitespace) — they are
-         * indistinguishable here, and Http11Probe wants 400 for the
-         * malformed majority, so we keep the generic 400. */
+         * llhttp-detected framing/syntax error → 400 Bad Request. */
         if (parser->parse_error == HTTP_PARSE_OK) {
             parser->parse_error = HTTP_PARSE_ERR_MALFORMED;
         }
@@ -1262,6 +1301,7 @@ void http_parser_reset_for_reuse(http1_parser_t *parser)
 #ifdef HAVE_LLHTTP
     /* Reinitialize llhttp parser */
     llhttp_init(&parser->parser, HTTP_REQUEST, &parser->settings);
+    llhttp_set_lenient_version(&parser->parser, 1);
     parser->parser.data = parser;
 #endif
 }
