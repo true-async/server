@@ -24,7 +24,7 @@ $config = (new HttpServerConfig())
 
 $server = new HttpServer($config);
 const PROBE_ETAG     = '"probe-static"';
-const PROBE_LASTMOD  = 'Wed, 21 Oct 2026 07:28:00 GMT';
+const PROBE_LASTMOD  = 'Wed, 21 Oct 2015 07:28:00 GMT';
 const PROBE_ALLOW    = 'GET, HEAD, POST, OPTIONS';
 
 $server->addHttpHandler(function ($req, $res) {
@@ -42,18 +42,34 @@ $server->addHttpHandler(function ($req, $res) {
         return;
     }
 
-    /* Conditional requests → 304 (CAP-ETAG-304 / INM-* / LAST-MODIFIED-304).
-     * If-None-Match matches our ETag (or "*"), or If-Modified-Since is at
-     * or after our Last-Modified → not modified. */
+    /* RFC 9110 §13.1.2/3: INM takes precedence over IMS, even on a
+     * non-match. Weak comparison applies to the parsed entity-tag list. */
     $inm = $req->getHeader('if-none-match');
     $ims = $req->getHeader('if-modified-since');
-    $not_modified =
-        ($inm !== null && (trim($inm) === '*' || str_contains($inm, PROBE_ETAG)))
-        || ($ims !== null && ($t = strtotime($ims)) !== false
-            && $t >= strtotime(PROBE_LASTMOD));
+    $condition_failed = false;
+    if ($inm !== null) {
+        $value = trim($inm, " \t");
+        if ($value === '*') {
+            $condition_failed = true;
+        } elseif (preg_match('/^(?:[ \t]*(?:W\/)?"[\x21\x23-\x7E\x80-\xFF]*"[ \t]*,)*[ \t]*(?:W\/)?"[\x21\x23-\x7E\x80-\xFF]*"[ \t]*$/D', $value)) {
+            preg_match_all('/(?:W\/)?"([\x21\x23-\x7E\x80-\xFF]*)"/', $value, $tags);
+            $condition_failed = in_array(substr(PROBE_ETAG, 1, -1), $tags[1], true);
+        }
+    } elseif ($ims !== null && ($method === 'GET' || $method === 'HEAD')) {
+        /* HTTP-date accepts IMF-fixdate and the two obsolete HTTP forms,
+         * but never strtotime's relative expressions (e.g. "tomorrow").
+         * A future valid IMS still uses the RFC's lastmod <= IMS rule. */
+        $http_date = '/^(?:[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT|[A-Z][a-z]+, [0-9]{2}-[A-Z][a-z]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT|[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})$/D';
+        if (preg_match($http_date, $ims)) {
+            $parts = date_parse($ims);
+            $timestamp = strtotime($ims . (str_ends_with($ims, 'GMT') ? '' : ' GMT'));
+            $condition_failed = $parts['warning_count'] === 0 && $parts['error_count'] === 0
+                && $timestamp !== false && $timestamp >= strtotime(PROBE_LASTMOD);
+        }
+    }
 
-    if ($not_modified) {
-        $res->setStatusCode(304)
+    if ($condition_failed) {
+        $res->setStatusCode($method === 'GET' || $method === 'HEAD' ? 304 : 412)
             ->setHeader('ETag', PROBE_ETAG)
             ->setHeader('Last-Modified', PROBE_LASTMOD)
             ->setBody('');

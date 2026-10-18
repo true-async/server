@@ -148,6 +148,12 @@ static void test_empty_header_value(void **state) {
     assert_non_null(header);
     assert_string_equal(Z_STRVAL_P(header), "");
 
+    header = zend_hash_str_find(req->headers, "x-empty-space", sizeof("x-empty-space") - 1);
+    assert_non_null(header);
+    assert_string_equal(Z_STRVAL_P(header), "");
+    assert_int_equal(zend_hash_num_elements(req->headers), 3);
+    http_request_destroy(req);
+    http_parser_clear_request(ctx);
     http_parser_destroy(ctx);
 }
 
@@ -1535,9 +1541,9 @@ static void test_invalid_http_version_20(void **state) {
 }
 
 /*
- * Test: HTTP/1.7 (made-up minor) rejected.
+ * Test: a higher HTTP/1 minor uses supported HTTP/1.1 semantics.
  */
-static void test_invalid_http_version_17(void **state) {
+static void test_higher_http_minor_17(void **state) {
     (void) state;
 
     const char *request_data =
@@ -1549,8 +1555,14 @@ static void test_invalid_http_version_17(void **state) {
     assert_non_null(ctx);
 
     int result = http_parser_execute(ctx, request_data, strlen(request_data), NULL);
-    assert_true(result < 0);
-    assert_int_equal(http_parse_error_to_status(ctx->parse_error), 400);
+    assert_int_equal(result, 0);
+    assert_true(http_parser_is_complete(ctx));
+    http_request_t *req = http_parser_get_request(ctx);
+    assert_int_equal(req->http_major, 1);
+    assert_int_equal(req->http_minor, 1);
+    assert_true(req->keep_alive);
+    http_request_destroy(req);
+    http_parser_clear_request(ctx);
 
     http_parser_destroy(ctx);
 }
@@ -1662,8 +1674,85 @@ static void test_chunk_extensions_add_up_across_chunks(void **state) {
     http_parser_destroy(ctx);
 }
 
+
+/* Trailers are discarded, never merged into authentication, routing or framing
+ * headers. Exercise every byte boundary because llhttp callbacks can split. */
+static void test_trailers_do_not_change_headers(void **state) {
+    (void) state;
+    const char *wire =
+        "POST / HTTP/1.1\r\nHost: original\r\n"
+        "Authorization: Bearer original\r\nContent-Type: text/plain\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n"
+        "Host: trailer\r\nAuthorization: Bearer trailer\r\n"
+        "Content-Type: application/json\r\n"
+        "X-Last: discarded\r\n\r\n";
+    size_t len = strlen(wire);
+    for (size_t split = 1; split < len; split++) {
+        http1_parser_t *ctx = http_parser_create(10 * 1024 * 1024);
+        assert_non_null(ctx);
+        assert_int_equal(http_parser_execute(ctx, wire, split, NULL), 0);
+        assert_int_equal(http_parser_execute(ctx, wire + split, len - split, NULL), 0);
+        assert_true(http_parser_is_complete(ctx));
+        http_request_t *req = http_parser_get_request(ctx);
+        assert_int_equal(zend_hash_num_elements(req->headers), 4);
+        zval *host = zend_hash_str_find(req->headers, "host", 4);
+        zval *auth = zend_hash_str_find(req->headers, "authorization", 13);
+        zval *ct = zend_hash_str_find(req->headers, "content-type", 12);
+        assert_non_null(host);
+        assert_non_null(auth);
+        assert_non_null(ct);
+        assert_string_equal(Z_STRVAL_P(host), "original");
+        assert_string_equal(Z_STRVAL_P(auth), "Bearer original");
+        assert_string_equal(Z_STRVAL_P(ct), "text/plain");
+        assert_int_equal(req->content_length, 0);
+        assert_true(req->chunked);
+        assert_non_null(req->body);
+        assert_string_equal(ZSTR_VAL(req->body), "x");
+        http_request_destroy(req);
+        http_parser_clear_request(ctx);
+        http_parser_destroy(ctx);
+    }
+}
+
+/* Count the final field too: it has no following on_header_field callback. */
+static void test_trailer_count_limit_at_message_end(void **state) {
+    (void) state;
+    const char *fields[] = { "X-Trailer: discarded\r\n", "X-Empty:\r\n" };
+    for (size_t kind = 0; kind < sizeof(fields) / sizeof(fields[0]); kind++) {
+        for (size_t extra = 0; extra <= 1; extra++) {
+            smart_str wire = {0};
+            smart_str_appends(&wire,
+                "POST / HTTP/1.1\r\nHost: original\r\n"
+                "Transfer-Encoding: chunked\r\n\r\n0\r\n");
+            for (size_t i = 0; i < HTTP_MAX_HEADER_COUNT - 2 + extra; i++) {
+                smart_str_appends(&wire, fields[kind]);
+            }
+            smart_str_appends(&wire, "\r\n");
+            smart_str_0(&wire);
+            http1_parser_t *ctx = http_parser_create(10 * 1024 * 1024);
+            assert_non_null(ctx);
+            int result = http_parser_execute(ctx, ZSTR_VAL(wire.s), ZSTR_LEN(wire.s), NULL);
+            if (extra == 0) {
+                assert_int_equal(result, 0);
+                assert_true(http_parser_is_complete(ctx));
+                assert_int_equal(zend_hash_num_elements(ctx->request->headers), 2);
+                http_request_destroy(ctx->request);
+                http_parser_clear_request(ctx);
+            } else {
+                assert_int_equal(result, -1);
+                assert_int_equal(ctx->parse_error, HTTP_PARSE_ERR_TOO_MANY_HEADERS);
+                assert_false(http_parser_is_complete(ctx));
+            }
+            http_parser_destroy(ctx);
+            smart_str_free(&wire);
+        }
+    }
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
+        cmocka_unit_test(test_trailers_do_not_change_headers),
+        cmocka_unit_test(test_trailer_count_limit_at_message_end),
         /* RFC Compliance */
         cmocka_unit_test(test_uri_percent_encoding),
         cmocka_unit_test(test_header_case_insensitive),
@@ -1694,7 +1783,7 @@ int main(void) {
         cmocka_unit_test(test_cl_empty_value),
         cmocka_unit_test(test_invalid_http_version_09),
         cmocka_unit_test(test_invalid_http_version_20),
-        cmocka_unit_test(test_invalid_http_version_17),
+        cmocka_unit_test(test_higher_http_minor_17),
         cmocka_unit_test(test_valid_http_version_10),
 
         /* TE.TE Obfuscation (HTTP Smuggling) */

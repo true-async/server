@@ -333,8 +333,71 @@ static int group_teardown(void **state) {
 /*
  * Main test suite
  */
+
+/* The lenient-version flag must not relax request syntax or H1 framing. */
+static void test_higher_minor_preserves_validation(void **state) {
+    (void) state;
+    const char *bad[] = {
+        "GET / HTTP/1.\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.12\r\nHost: x\r\n\r\n",
+        "GET / HTTP/01.2\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.02\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.x\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.2 \r\nHost: x\r\n\r\n",
+        "GET / HTTP/2.0\r\nHost: x\r\n\r\n",
+        "GET / HTTP/0.9\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.2\r\n\r\n",
+        "POST / HTTP/1.2\r\nHost: x\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        http1_parser_t *ctx = http_parser_create(1024);
+        assert_non_null(ctx);
+        int result = 0;
+        for (size_t j = 0; j < strlen(bad[i]) && result == 0; j++) {
+            result = http_parser_execute(ctx, bad[i] + j, 1, NULL);
+        }
+        assert_int_equal(result, -1);
+        assert_int_equal(http_parse_error_to_status(ctx->parse_error), 400);
+        assert_false(http_parser_is_complete(ctx));
+        http_parser_destroy(ctx);
+    }
+}
+
+static void test_higher_minor_pipeline_and_reset(void **state) {
+    (void) state;
+    const char *wire = "GET /first HTTP/1.2\r\nHost: x\r\n\r\n"
+        "GET /second HTTP/1.9\r\nHost: x\r\n\r\n";
+    size_t first_len = strlen("GET /first HTTP/1.2\r\nHost: x\r\n\r\n");
+    http1_parser_t *ctx = http_parser_create(1024);
+    assert_non_null(ctx);
+    size_t consumed = 0;
+    assert_int_equal(http_parser_execute(ctx, wire, strlen(wire), &consumed), 0);
+    assert_int_equal(consumed, first_len);
+    http_request_t *req = http_parser_get_request(ctx);
+    assert_true(req->complete);
+    assert_int_equal(req->http_minor, 1);
+    assert_true(req->keep_alive);
+    assert_string_equal(ZSTR_VAL(req->uri), "/first");
+    http_request_destroy(req);
+    http_parser_clear_request(ctx);
+    http_parser_reset_for_reuse(ctx);
+    for (size_t i = consumed; i < strlen(wire); i++) {
+        assert_int_equal(http_parser_execute(ctx, wire + i, 1, NULL), 0);
+    }
+    req = http_parser_get_request(ctx);
+    assert_true(req->complete);
+    assert_int_equal(req->http_minor, 1);
+    assert_true(req->keep_alive);
+    assert_string_equal(ZSTR_VAL(req->uri), "/second");
+    http_request_destroy(req);
+    http_parser_clear_request(ctx);
+    http_parser_destroy(ctx);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
+        cmocka_unit_test(test_higher_minor_preserves_validation),
+        cmocka_unit_test(test_higher_minor_pipeline_and_reset),
         cmocka_unit_test(test_no_body),
         cmocka_unit_test(test_no_headers),
         cmocka_unit_test(test_uri_max_size),
