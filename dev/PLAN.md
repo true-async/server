@@ -438,6 +438,10 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 44. A cancelled `reload()` leaves the command at RELOAD and drops the fresh
     shells, so the remaining workers retire and `start()` can end with no
     workers (Critic on #419). Reproduce before any code.
+45. `h3/091` (sendFile pump failure under the reactor pool) fails on about a
+    quarter of runs on main: the client times out with no RESET. Measured
+    2026-10-19 with the test hooks build, alternating builds: 10 of 39 on main,
+    12 of 40 with #422's fix. Failed PR 423's Linux debug leg once.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
