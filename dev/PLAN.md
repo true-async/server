@@ -280,16 +280,26 @@ H3_NO_ERROR and a live handler is cancelled; in reactor mode the reactor answers
 the status itself; queued and `body_h3_uncredited` bytes are credited; H3 dispose
 takes the HttpException code 400-599 as H1 and H2 do, for every exception.
 
-- [ ] S6.1 Red tests, and the old tests that assert the reset moved to the answer
+- [x] S6.1 Red tests, and the old tests that assert the reset moved to the answer
       done: the new H2 and H3 tests fail on 44db002 and the guards pass; `h2/061`,
       `h2/066`, `h2/067`, `h2/068` expect the status and NO_ERROR (Edmond,
       2026-10-19: change the tests that do not match)
       tier: T1 · role: —
-- [ ] S6.2 HTTP/2: the five-case refusal, the NO_ERROR reset, connection credit
+      handoff: on 44db002, one run each: 061, 066-068, 074-078, 080, 081 and
+        h3 104-108 fail for the stated reason, guard 079 passes. 081 shows the
+        credit loss: 256 of 300 refused streams answered, then GOAWAY. 075 uses
+        403 (the raw client reads no Huffman-coded 401). 076 leaks 528 bytes in
+        php-async's libuv reactor on a client cancel mid-sendFile, also without
+        #412. Found: the reactor pool ignores setMaxBodySize() (a reactor thread
+        never runs start(), so the cap is the compiled 16 MiB); 106 sends 17 MiB
+        until S6.3 fixes it. Commit 6bf821a.
+- [~] S6.2 HTTP/2: the five-case refusal, the NO_ERROR reset, connection credit
       done: the H2 tests of S6.1 pass 10 of 10; the h2 phpt directory passes
       tier: T2 · role: Critic
-- [ ] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code
-      done: the H3 tests of S6.1 pass 10 of 10; the h3 phpt directory passes
+- [ ] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code;
+        the reactor threads take setMaxBodySize() through the reactor context
+      done: the H3 tests of S6.1 pass 10 of 10, 106 with a body just past a
+        64 KiB cap; the h3 phpt directory passes
       tier: T2 · role: Critic
 - [ ] S6.4 Docs, CHANGELOG, PR, CI green on every platform
       done: setMaxBodySize docs and USAGE.md describe the answer; PR merged;
