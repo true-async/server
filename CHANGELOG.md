@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A worker pool's `start()` could wait forever after `reload()` and `Async\graceful_shutdown()` (#419).** `reload()` released each retired worker's task future as soon as the pool reported the old threads gone, and a task completion still on its way to the parent was lost with it, so `start()` never saw the last workers finish. It keeps such futures until they resolve now. Evidence: `core/113` (4 workers, 30 reloads, then shutdown) hung on 17 of 20 runs before and on 0 of 50 after; `core/057` hung on about 1 of 30 parallel runs before and on 0 of 90 after.
 - HTTP/1 request trailers are validated and discarded separately from initial headers. They no longer change authentication, routing or content metadata, and an error in the final trailer stops body completion and pipelined dispatch.
 - Correctly formed HTTP/1.2 through HTTP/1.9 requests use HTTP/1.1 semantics, including Host validation, framing and keepalive. Malformed versions and other major versions are still rejected.
 - The weekly Http11Probe job pins the tool and validates its complete test inventory instead of requiring a fixed score. The probe fixture now respects conditional request precedence and method semantics; the report retains the documented `413` verdict mismatch for oversized chunk extensions.

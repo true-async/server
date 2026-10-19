@@ -591,9 +591,16 @@ struct http_server_object {
      * shell of the parent HttpServer zval (one transfer per worker —
      * snapshot deep-copy is not safe under concurrent LOAD). Lifetime
      * is the parent server's: alloced in start_pool, freed in
-     * http_server_free. NULL outside pool mode. */
+     * http_server_free; reload() replaces it with a fresh array per
+     * rotation. NULL outside pool mode. */
     void                    *pool_worker_ctx;
     int                      pool_worker_ctx_count;
+
+    /* Cohorts reload() replaced while a completion of their tasks was still on
+     * its way to this thread (a pool_retired_cohort_t chain). Their shells are
+     * released; their done_event futures stay subscribed until they resolve.
+     * Freed by the next reload() once resolved, and by start_pool's cleanup. */
+    void                    *pool_retired;
 
     /* The built-in worker pool handle (issue #93 hot reload). Retained on the
      * parent so HttpServer::reload() can drive ThreadPool::reload() — swap the
@@ -2406,7 +2413,84 @@ typedef struct {
     zend_async_event_t *done_event;       /* completion future from submit_internal — owned here */
 } pool_worker_ctx_t;
 
+/* A cohort reload() replaced with some of its task futures still unresolved. */
+typedef struct pool_retired_cohort_s {
+    struct pool_retired_cohort_s *next;
+    pool_worker_ctx_t            *ctxs;   /* shells released; done_event NULL once released */
+    int                           count;
+} pool_retired_cohort_t;
+
 static void http_server_release_worker_shell(zval *transit);
+
+/* Releases the futures of `ctxs` that have resolved and returns how many have
+ * not. A resolved future has already run pool_worker_done_cb; releasing one that
+ * has not would drop its completion and leave pool_await_state->pending above
+ * zero for good. */
+static int pool_cohort_release_resolved(pool_worker_ctx_t *ctxs, const int count)
+{
+    int unresolved = 0;
+
+    for (int i = 0; i < count; i++) {
+        zend_async_event_t *const ev = ctxs[i].done_event;
+
+        if (ev == NULL) {
+            continue;
+        }
+
+        if (!ZEND_ASYNC_EVENT_IS_CLOSED(ev)) {
+            unresolved++;
+            continue;
+        }
+
+        ctxs[i].done_event = NULL;
+        ZEND_ASYNC_EVENT_RELEASE(ev);
+    }
+
+    return unresolved;
+}
+
+/* Frees every retired cohort whose futures have all resolved. */
+static void pool_retired_sweep(http_server_object *server)
+{
+    pool_retired_cohort_t **link = (pool_retired_cohort_t **) &server->pool_retired;
+
+    while (*link != NULL) {
+        pool_retired_cohort_t *const cohort = *link;
+
+        if (pool_cohort_release_resolved(cohort->ctxs, cohort->count) > 0) {
+            link = &cohort->next;
+            continue;
+        }
+
+        *link = cohort->next;
+        pefree(cohort->ctxs, 1);
+        pefree(cohort, 1);
+    }
+}
+
+/* Frees every retired cohort, resolved or not. For start_pool's cleanup only:
+ * after its drain pending is zero, so every future has resolved, and the
+ * pool_await_state their callback points into is still alive. */
+static void pool_retired_release_all(http_server_object *server)
+{
+    pool_retired_cohort_t *cohort = server->pool_retired;
+
+    server->pool_retired = NULL;
+
+    while (cohort != NULL) {
+        pool_retired_cohort_t *const next = cohort->next;
+
+        for (int i = 0; i < cohort->count; i++) {
+            if (cohort->ctxs[i].done_event != NULL) {
+                ZEND_ASYNC_EVENT_RELEASE(cohort->ctxs[i].done_event);
+            }
+        }
+
+        pefree(cohort->ctxs, 1);
+        pefree(cohort, 1);
+        cohort = next;
+    }
+}
 
 typedef struct {
     int                          pending;     /* workers not yet done */
@@ -2544,8 +2628,9 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
         zend_throw_exception(http_server_runtime_exception_ce,
                              "Worker server start bailed out", 0);
     }
-    /* ctx is part of the parent's pool_worker_ctx array; freed once
-     * by http_server_free when the parent server destructs. */
+    /* ctx is part of a cohort array the parent owns and frees (reload(),
+     * start_pool's cleanup, http_server_free); nothing here reads it after the
+     * LOAD above. */
 }
 
 /* No-op: st->cb is embedded in pool_await_state and shared, so a disposed
@@ -3798,6 +3883,8 @@ cleanup:
             ZEND_ASYNC_EVENT_RELEASE(ev);
         }
     }
+
+    pool_retired_release_all(server);
 
     server->running = false;
     server->stopping = false;
@@ -5059,6 +5146,8 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
         RETURN_FALSE; /* a stop() is draining the cohort — no new one */
     }
 
+    pool_retired_sweep(server);
+
     server->reload_in_progress = true;
 
     const int workers = server->pool_worker_ctx_count;
@@ -5171,21 +5260,33 @@ ZEND_METHOD(TrueAsync_HttpServer, reload)
     pool_worker_ctx_t *old_ctxs = server->pool_worker_ctx;
 
     for (int i = 0; i < workers; i++) {
-        /* Dispose the retired cohort's completion futures per rotation, so they
-         * don't accumulate on the parent reactor across reloads. */
-        if (old_ctxs[i].done_event != NULL) {
-            ZEND_ASYNC_EVENT_RELEASE(old_ctxs[i].done_event);
-            old_ctxs[i].done_event = NULL;
-        }
-
         http_server_release_worker_shell(&old_ctxs[i].server_transit);
+        ZVAL_UNDEF(&old_ctxs[i].server_transit);
     }
 
-    pefree(old_ctxs, 1);
+    /* Dispose the retired cohort's completion futures per rotation, so they
+     * don't accumulate on the parent reactor across reloads. Only resolved ones:
+     * worker_pool->reload() returns once every old worker has posted its exit
+     * token, and it takes buffered tokens without a reactor tick, so a task's
+     * completion can still be on its way here. Releasing that future would drop
+     * the completion with it; its cohort waits on pool_retired instead. */
+    const int retired = pool_cohort_release_resolved(old_ctxs, workers);
+
+    if (retired == 0) {
+        pefree(old_ctxs, 1);
+    } else {
+        pool_retired_cohort_t *const cohort = pemalloc(sizeof(*cohort), 1);
+
+        cohort->next = server->pool_retired;
+        cohort->ctxs = old_ctxs;
+        cohort->count = workers;
+        server->pool_retired = cohort;
+    }
+
     server->pool_worker_ctx = fresh;
 
-    http_logf_info(&server->log_state, "reload.done workers=%d/%d duration_ms=%lu",
-                   submitted, workers, (unsigned long)(ZEND_ASYNC_NOW() - t0));
+    http_logf_info(&server->log_state, "reload.done workers=%d/%d retired=%d duration_ms=%lu",
+                   submitted, workers, retired, (unsigned long)(ZEND_ASYNC_NOW() - t0));
     server->reload_in_progress = false;
     pool_notify_quiesced(server, st);
     RETURN_BOOL(submitted == workers);
@@ -6451,6 +6552,9 @@ static void http_server_free(zend_object *obj)
         server->pool_worker_ctx = NULL;
         server->pool_worker_ctx_count = 0;
     }
+
+    /* start_pool's cleanup empties it while pool_await_state is alive. */
+    ZEND_ASSERT(server->pool_retired == NULL);
 
     /* Destroy protocol handlers */
     http_protocol_handlers_destroy(&server->protocol_handlers);
