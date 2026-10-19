@@ -12,7 +12,8 @@ h2_skipif(['curl_h2' => true]);
 <?php
 /* HTTP/2 feeds a multipart body to its parser frame by frame, as HTTP/1 does,
  * so a body the parser rejects refuses the stream and the handler reads no
- * form. Whether the handler has started by then depends on when the frames
+ * form. The client reads 400 and the stream is then reset with NO_ERROR
+ * (#412). Whether the handler has started by then depends on when the frames
  * land: dispatch happens at the end of the headers. A CR not followed by LF
  * after a boundary is such a body. */
 
@@ -50,9 +51,9 @@ $client = spawn(function () use ($port, $server, $body) {
     usleep(30000);
     [, $out] = h2_curl(['--http2-prior-knowledge', '-sS', '--max-time', '5', '-o', h2_dev_null(),
         '-w', '%{http_code}', '-H', 'Content-Type: multipart/form-data; boundary=bnd',
-        '--data-binary', "@$body", "http://127.0.0.1:$port/form"], true);
+        '--data-binary', "@$body", "http://127.0.0.1:$port/form"]);
 
-    echo 'client: ', str_contains($out, 'CANCEL') ? 'stream reset' : $out, "\n";
+    echo 'client: ', $out, "\n";
     $server->stop();
 });
 
@@ -63,5 +64,5 @@ await($client);
 echo 'handler read a form: ', str_starts_with((string)$seen, 'form') ? $seen : 'no', "\n";
 ?>
 --EXPECT--
-client: stream reset
+client: 400
 handler read a form: no

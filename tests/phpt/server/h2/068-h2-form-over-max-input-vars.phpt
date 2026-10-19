@@ -13,9 +13,9 @@ max_input_vars=5
 --FILE--
 <?php
 /* The multipart processor counts fields against max_input_vars and refuses
- * the body on the one past it, so the stream is reset while the body arrives
- * and the handler reads no form. It used to keep the first fields and drop
- * the rest without a word. */
+ * the body on the one past it, so the client reads 400 and the stream is reset
+ * with NO_ERROR while the body arrives (#412), and the handler reads no form.
+ * It used to keep the first fields and drop the rest without a word. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -52,9 +52,9 @@ $client = spawn(function () use ($port, $server, $body) {
     usleep(30000);
     [, $out] = h2_curl(['--http2-prior-knowledge', '-sS', '--max-time', '5', '-o', h2_dev_null(),
         '-w', '%{http_code}', '-H', 'Content-Type: multipart/form-data; boundary=bnd',
-        '--data-binary', "@$body", "http://127.0.0.1:$port/form"], true);
+        '--data-binary', "@$body", "http://127.0.0.1:$port/form"]);
 
-    echo 'client: ', str_contains($out, 'CANCEL') ? 'stream reset' : $out, "\n";
+    echo 'client: ', $out, "\n";
     $server->stop();
 });
 
@@ -65,5 +65,5 @@ await($client);
 echo 'handler read a form: ', str_starts_with((string)$seen, 'form') ? $seen : 'no', "\n";
 ?>
 --EXPECT--
-client: stream reset
+client: 400
 handler read a form: no
