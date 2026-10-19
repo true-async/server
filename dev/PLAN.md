@@ -425,6 +425,16 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     instead of returning false after both workers' bootloaders threw. The
     default branch passed with the same php-src and php-async the day before.
     Reproduce under `-j` before any code.
+41. #419 — `start()` hung after `reload()` and `graceful_shutdown()`: done.
+    `reload()` released futures whose completion was still on its way, so
+    `pending` never reached zero (`core/057` on macOS after #418). The Critic
+    and the Sage chose deferred release over decrementing `pending` by hand.
+    `core/113`: 17 of 20 runs hang before, 0 of 50 after.
+42. `reload()` itself can wait forever for one old worker, with back-to-back
+    reloads: a worker that joins the wake channel after the RELOAD broadcast,
+    or a wake dropped before `running = true`. Not confirmed; per-worker
+    tagged prints first, php-async side included. Also: a cancelled
+    `reload()` leaves the command at RELOAD and drops the fresh shells.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
