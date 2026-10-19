@@ -166,7 +166,7 @@ Notes: dev/plans/S3.md
         decided in `dev/DECISIONS.md`; USAGE.md:688 states the measured behaviour
       tier: T2 · role: Critic
 
-## S5 — HTTP/3 output queued outside a tick waits for an unrelated event (#424, item 45)  [in progress]
+## S5 — HTTP/3 output queued outside a tick waits for an unrelated event (#424, item 45)  [done]
 
 Goal: a RESET_STREAM or other output queued outside a UDP poll tick or a reactor
 mailbox drain leaves within one loop pass, in pool and in-thread mode, and the poll
@@ -227,8 +227,73 @@ epilogue (an eventfd write per pooled response batch) and a direct drain at
         fails 3 of 3. Uncovered, named: the window wake after a submit
         failure, a mark made during `flush_dirty`, exactly 10 datagrams then
         EAGAIN, a wake still pending at dispose.
-- [ ] S5.3 PR, CI green on every platform, CHANGELOG entry
+- [x] S5.3 PR, CI green on every platform, CHANGELOG entry
       done: PR merged, #424 closed
+      tier: T1 · role: —
+      handoff: PR 425 merged by Edmond's word on 2026-10-19 as 44db002, every
+        check green including `WINDOWS_X64_ZTS_RELEASE`; #424 closed by the merge.
+
+## S6 — A refused request body answers with its status on HTTP/2 and HTTP/3 (#412, item 46)  [in progress]
+
+Goal: a body refused by the transport (over `setMaxBodySize()`, a multipart form
+over `max_input_vars` or malformed, out of memory) reaches an HTTP/2 or HTTP/3
+client as its 413, 400 or 500 when no response is decided yet, and never cuts a
+response that is; the upload then stops with RST_STREAM(NO_ERROR) or
+STOP_SENDING(H3_NO_ERROR).
+Done when: the red tests below fail on 44db002 and pass after; the full phpt and
+cmocka suites pass; CI green on every platform.
+Tests: first
+Base: 44db002 (server)
+
+Reproduced on d7fd1bb: `h2/074` (32 KiB body, 16 KiB cap, handler parked in
+`awaitBody()`) reads status 0 and RST_STREAM 11; on HTTP/3 the client reads
+RESET 267 (H3_REQUEST_REJECTED) and no status, and a handler that catches the 413
+and answers 200 is lost too. Cause: `h2_refuse_stream` submits the RST at once,
+nghttp2 marks the stream CLOSING and refuses the response HEADERS H2 dispose builds
+from the exception code; `h3_reject_request_stream` resets both sides; H3 dispose
+answers 500 for every exception.
+
+Other servers, read in their sources on 2026-10-19: nginx answers 413 on HTTP/2
+and sends RST_STREAM(NO_ERROR) when the response is out and the request is not
+(`ngx_http_v2_close_stream`); Go's x/net/http2 sends RST_STREAM(NO_ERROR) after a
+complete response to an unfinished request (RFC 9113 §8.1); nginx's HTTP/3 closes
+the read side with STOP_SENDING H3_NO_ERROR (`stream_close_code`); h2o answers 413
+on HTTP/3 and stops the read side with 0x10e. Both nginx and Go reset after every
+early response; here the reset follows a refusal only (Sage).
+
+Design, by three Critic rounds and the Sage on 2026-10-19. On HTTP/2, in order:
+WebSocket and gRPC keep today's error RST (gRPC's answer is a grpc-status, a
+separate issue); a decided response whose handler is gone (disposed and committed,
+or a static or sendFile FSM, new bit `static_owned`) is not cut: RST(NO_ERROR) now
+if the local side is closed, else after the frame carrying END_STREAM; a streamed
+response a live handler is still writing keeps the error RST; a committed buffered
+response of a live handler is treated as decided; an uncommitted one is answered:
+the handler is cancelled with HttpException(status), latch `refusal_cancelled`
+instead of nulling the coroutine, and dispose writes the status (`skip_handler`
+streams are not cancelled); no handler and no response keeps the error RST. DATA
+on a refused stream is dropped with connection credit only, and the queued
+uncredited bytes are credited at refusal (a loss today). `cb_on_stream_close`
+labels a close 413/400/500 only when it is the server's own error RST; any other
+error close is a peer reset, 499. HTTP/3: a streamed response in progress keeps
+STOP_SENDING + RESET_STREAM; otherwise the read side alone is shut with
+H3_NO_ERROR and a live handler is cancelled; in reactor mode the reactor answers
+the status itself; queued and `body_h3_uncredited` bytes are credited; H3 dispose
+takes the HttpException code 400-599 as H1 and H2 do, for every exception.
+
+- [ ] S6.1 Red tests, and the old tests that assert the reset moved to the answer
+      done: the new H2 and H3 tests fail on 44db002 and the guards pass; `h2/061`,
+      `h2/066`, `h2/067`, `h2/068` expect the status and NO_ERROR (Edmond,
+      2026-10-19: change the tests that do not match)
+      tier: T1 · role: —
+- [ ] S6.2 HTTP/2: the five-case refusal, the NO_ERROR reset, connection credit
+      done: the H2 tests of S6.1 pass 10 of 10; the h2 phpt directory passes
+      tier: T2 · role: Critic
+- [ ] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code
+      done: the H3 tests of S6.1 pass 10 of 10; the h3 phpt directory passes
+      tier: T2 · role: Critic
+- [ ] S6.4 Docs, CHANGELOG, PR, CI green on every platform
+      done: setMaxBodySize docs and USAGE.md describe the answer; PR merged;
+        #412 closed; the gRPC refusal has its own issue
       tier: T1 · role: —
 
 ## Next
@@ -506,7 +571,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 45. `h3/091` (sendFile pump failure under the reactor pool) fails on about a
     quarter of runs on main: the client times out with no RESET. Measured
     2026-10-19 with the test hooks build, alternating builds: 10 of 39 on main,
-    12 of 40 with #422's fix. Failed PR 423's Linux debug leg once. Stage S5.
+    12 of 40 with #422's fix. Failed PR 423's Linux debug leg once. Stage S5,
+    done: PR 425 (44db002).
+46. #412 — a refused HTTP/2 or HTTP/3 body reaches the client as a reset with
+    no status. Stage S6. #413 (a query string past `max_input_vars`) waits for
+    it: its refusal happens after the handler started too.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
