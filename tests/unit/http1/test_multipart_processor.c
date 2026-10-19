@@ -609,8 +609,11 @@ static void test_path_traversal(void **state) {
     mp_file_info_t* files = mp_processor_get_files(proc, &file_count);
     assert_int_equal(file_count, 1);
 
-    assert_int_equal(files[0].error, MP_UPLOAD_ERR_INVALID_NAME);
-    assert_null(files[0].tmp_path);  /* No file should be created */
+    /* PHP's answer (php_ap_basename): keep the part after the last separator
+     * and save the file under the generated temporary name. */
+    assert_int_equal(files[0].error, MP_UPLOAD_ERR_OK);
+    assert_string_equal(files[0].client_filename, "passwd");
+    assert_non_null(files[0].tmp_path);
 
     mp_processor_destroy(proc);
 }

@@ -22,11 +22,13 @@ function build_request(string $disp, string $type = 'application/octet-stream', 
          . "Content-Length: " . strlen($part) . "\r\n\r\n" . $part;
 }
 
-/* MP_UPLOAD_ERR_INVALID_NAME (=101) via path-traversal in filename */
+/* MP_UPLOAD_ERR_INVALID_NAME (=101) via overlong filename (> 4096). A name with
+ * path components is not an error: multipart/027. */
+$long = str_repeat('a', 5000);
 $req = TrueAsync\http_parse_request(build_request(
-    'form-data; name="x"; filename="../etc/passwd"'));
+    "form-data; name=\"x\"; filename=\"$long\""));
 $f = $req->getFile('x');
-echo "traversal:err=", $f->getError(),
+echo "long-name:err=", $f->getError(),
      " size=", var_export($f->getSize(), true),
      " valid=", $f->isValid() ? 1 : 0,
      " ready=", $f->isReady() ? 1 : 0, "\n";
@@ -36,19 +38,6 @@ echo "getStream: ", $s === null ? 'null' : 'resource', "\n";
 
 try { $f->moveTo('/tmp/x'); echo "moveTo: NO_THROW\n"; }
 catch (\RuntimeException $e) { echo "moveTo: ", $e->getMessage(), "\n"; }
-
-/* MP_UPLOAD_ERR_INVALID_NAME via absolute path */
-$req = TrueAsync\http_parse_request(build_request(
-    'form-data; name="y"; filename="/abs/path"'));
-$f = $req->getFile('y');
-echo "abs-path:err=", $f->getError(), "\n";
-
-/* MP_UPLOAD_ERR_INVALID_NAME via overlong filename (> 4096) */
-$long = str_repeat('a', 5000);
-$req = TrueAsync\http_parse_request(build_request(
-    "form-data; name=\"z\"; filename=\"$long\""));
-$f = $req->getFile('z');
-echo "long-name:err=", $f->getError(), "\n";
 
 /* MP_UPLOAD_ERR_NO_FILE via filename="" (RFC 7578 §4.2 — empty filename
  * is the way browsers signal "no file selected" for <input type=file>) */
@@ -79,11 +68,9 @@ echo "no-charset:cs=", var_export($f->getClientCharset(), true), "\n";
 echo "done\n";
 ?>
 --EXPECTF--
-traversal:err=101 size=NULL valid=0 ready=0
+long-name:err=101 size=NULL valid=0 ready=0
 getStream: null
 moveTo: Cannot move file: upload error 101
-abs-path:err=101
-long-name:err=101
 empty-name:err=4 ready=0
 charset:err=0 ct=text/plain cs='utf-8'
 no-charset:cs=NULL
