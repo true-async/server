@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 27584,
-      "hit": 23692
+      "total": 27588,
+      "hit": 23698
     },
     "functions": {
-      "total": 1971,
-      "hit": 1847
+      "total": 1972,
+      "hit": 1848
     }
   },
   "files": {
@@ -533,7 +533,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 667,
-        "hit": 536
+        "hit": 531
       },
       "functions": {
         "total": 46,
@@ -553,7 +553,7 @@
     "src/http3/http3_static_response.c": {
       "lines": {
         "total": 247,
-        "hit": 187
+        "hit": 184
       },
       "functions": {
         "total": 17,
@@ -772,12 +772,12 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 2802,
-        "hit": 2213
+        "total": 2806,
+        "hit": 2227
       },
       "functions": {
-        "total": 148,
-        "hit": 135
+        "total": 149,
+        "hit": 136
       }
     },
     "src/http_server_config.c": {
