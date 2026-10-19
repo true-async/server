@@ -166,6 +166,57 @@ Notes: dev/plans/S3.md
         decided in `dev/DECISIONS.md`; USAGE.md:688 states the measured behaviour
       tier: T2 · role: Critic
 
+## S5 — HTTP/3 output queued outside a tick waits for an unrelated event (#424, item 45)  [in progress]
+
+Goal: a RESET_STREAM or other output queued outside a UDP poll tick or a reactor
+mailbox drain leaves within one loop pass, in pool and in-thread mode, and the poll
+tick and the mailbox drain pay no extra syscall for it.
+Done when: the red tests below fail 10 of 10 on main and pass 10 of 10 after the
+fix; `h3/091` passes 30 of 30 under the pool and in a pool=0 copy.
+Tests: first
+Base: d7fd1bb (server)
+
+Cause: `http3_listener_queue_epilogue_flush` only links the listener into a
+per-thread list, walked by `http3_reactor_steer_flush_epilogue` at the end of a
+reactor mailbox drain, and registered only in pool mode. A caller outside any tick
+or drain (a file-read completion in `h3_static_fail`, `$res->abort()` from a
+handler coroutine in pool=0, `h3_static_window_dispatch`) leaves the output to the
+next client packet; once the client has ACKed everything none comes. Measured on
+main: `h3/091` 10 of 39 runs time out; a handler doing `write(); delay(300);
+abort(); delay(3500)` in pool=0 times out 3 of 3.
+
+Design, by two Critic passes and two Sage passes on 2026-10-19, approved by Edmond:
+`request_flush` (the renamed queue call) is scope-aware. A per-thread depth counter
+is raised by the poll callback and by the reactor drain and control signal through
+an enter/exit pair the reactor core takes as callbacks. Inside a scope the call
+links the listener as today, and every scope end walks the whole per-thread list
+after lowering the depth. Outside any scope it fires a per-thread `uv_async` whose
+callback walks the same list. Each scope has one exit. The poll callback's
+`n <= 0 → goto tick_done` exit flushes too. Rejected: a trigger replacing the
+epilogue (an eventfd write per pooled response batch) and a direct drain at
+`h3_static_read_dispatch` (`h3_static_fail` is also reached from inside a drain).
+
+- [x] S5.1 Red tests
+      done: `abort()` after ACK in pool=0 fails 10 of 10 on main; a fault point
+        that parks the read failure on a timer owned by the pump state until the
+        body is ACKed fails 10 of 10 in both modes; the pool=1 `abort()` copy and
+        the handler-throws pair (`h3/093`, `h3/094` here, renumbered past the
+        byte-counter branch) pass on main as guards
+      tier: T1 · role: —
+      handoff: on d7fd1bb, 10 runs each: `h3/095` (abort, pool=0) 10 of 10 time
+        out; `h3/099`/`h3/100` (fault point `h3/sendfile/read_failed_after_ack`,
+        300 ms park, pool=0/pool=1) 10 of 10 time out with the fault hit once;
+        guards `h3/096` (abort, pool), `h3/097`/`h3/098` (throw) 10 of 10 pass.
+- [ ] S5.2 Scope-aware `request_flush` with a per-thread wake
+      done: S5.1 green 10 of 10; `h3/091` 30 of 30 pool and pool=0; the H3 and
+        core phpt suites pass; a wake counter reads 0 after a plain request in
+        both modes; uncovered and named: the window wake, a mark made during
+        `flush_dirty`, exactly 10 datagrams then EAGAIN
+      tier: T2 · role: Critic
+- [ ] S5.3 PR, CI green on every platform, CHANGELOG entry
+      done: PR merged, #424 closed
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28
@@ -441,7 +492,7 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
 45. `h3/091` (sendFile pump failure under the reactor pool) fails on about a
     quarter of runs on main: the client times out with no RESET. Measured
     2026-10-19 with the test hooks build, alternating builds: 10 of 39 on main,
-    12 of 40 with #422's fix. Failed PR 423's Linux debug leg once.
+    12 of 40 with #422's fix. Failed PR 423's Linux debug leg once. Stage S5.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
