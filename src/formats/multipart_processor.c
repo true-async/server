@@ -228,33 +228,21 @@ static void parse_content_type(mp_processor_t* proc, const char* value)
     }
 }
 
-/* Helper: Check for path traversal or NUL injection in a candidate
- * filename. The function uses C-string scanning (strstr, strlen) and
- * therefore relies on `filename` being NUL-clean — see the invariant
- * note in on_part_begin. The audit (S-06, 2026-04-26) raised the
- * concern that an embedded NUL would let `..` slip past strstr; today
- * the upstream parser truncates at NUL so it can't happen, but this
- * helper is the right place to enforce it explicitly. */
-static bool has_path_traversal_or_nul(const char* filename, size_t len)
+/* The part of a client filename after its last '/' or '\', as PHP's
+ * php_ap_basename (main/rfc1867.c) takes it: RFC 7578 §4.2 asks the receiver
+ * to drop path information. A name ending in a separator yields "". The file
+ * is saved under a generated temporary name, so the client name never
+ * reaches a path. */
+static const char* client_filename_basename(const char* filename)
 {
-    if (!filename) return false;
+    const char* last = strrchr(filename, '/');
+    const char* const backslash = strrchr(filename, '\\');
 
-    /* NUL injection — strlen would lie, so callers can't rely on
-     * downstream C-string predicates. Reject upfront. */
-    if (memchr(filename, '\0', len) != NULL) return true;
+    if (backslash != NULL && (last == NULL || backslash > last)) {
+        last = backslash;
+    }
 
-    /* Check for .. sequences */
-    if (strstr(filename, "..") != NULL) return true;
-
-    /* Check for absolute paths */
-    if (filename[0] == '/') return true;
-
-    if (filename[0] == '\\') return true;
-
-    /* Check for Windows drive letters */
-    if (len >= 2 && filename[1] == ':') return true;
-
-    return false;
+    return last != NULL ? last + 1 : filename;
 }
 
 /* True when @p add more bytes on top of @p have pass @p limit; 0 is no limit.
@@ -438,10 +426,9 @@ static int on_headers_complete(multipart_parser_t* parser)
 
         /* Filename validation. Invariant from parse_content_disposition:
          * proc->filename is C-string-walked and therefore truncated at
-         * the first NUL — embedded NULs cannot reach here today. The
-         * NUL check inside has_path_traversal_or_nul is defense-in-
-         * depth: if any future change makes filename a length-prefixed
-         * blob (e.g. proper RFC 5987 decoding), it stays robust. */
+         * the first NUL — embedded NULs cannot reach here today. If a
+         * future change makes filename a length-prefixed blob (e.g. proper
+         * RFC 5987 decoding), the strlen and strrchr below must change too. */
         size_t filename_len = strlen(proc->filename);
 
         if (filename_len > MP_MAX_FILENAME_LEN) {
@@ -449,9 +436,13 @@ static int on_headers_complete(multipart_parser_t* parser)
             return 0;  /* Continue but mark as error */
         }
 
-        if (has_path_traversal_or_nul(proc->filename, filename_len)) {
-            proc->current_error = MP_UPLOAD_ERR_INVALID_NAME;
-            return 0;
+        const char* const base = client_filename_basename(proc->filename);
+
+        if (base != proc->filename) {
+            char* const stripped = MP_STRDUP(base);
+
+            MP_FREE(proc->filename);
+            proc->filename = stripped;
         }
 
         /* Generate temp file path */

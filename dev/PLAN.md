@@ -435,6 +435,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     or a wake dropped before `running = true`. Not confirmed; per-worker
     tagged prints first, php-async side included. Also: a cancelled
     `reload()` leaves the command at RELOAD and drops the fresh shells.
+43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
+    behave as PHP. The name is cut after the last `/` or `\`
+    (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
+    saved; `multipart/027` holds eight names to php-cgi's `$_FILES`. A name
+    over 4096 bytes still gets 101, which PHP does not define.
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
