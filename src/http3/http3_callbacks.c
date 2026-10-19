@@ -201,17 +201,85 @@ static void h3_store_header_value(http_request_t *req,
 
 static void http3_finalize_request_body(http3_stream_t *s);
 
+/* nghttp3's consumed count excludes DATA payload (deferred-consume contract)
+ * — the application extends the windows itself. */
+static void h3_extend_body_window(http3_connection_t *c, const int64_t stream_id,
+                                  const size_t len)
+{
+    if (c != NULL && c->ngtcp2_conn != NULL && !c->closed) {
+        ngtcp2_conn_extend_max_stream_offset((ngtcp2_conn *)c->ngtcp2_conn,
+                                             stream_id, len);
+        ngtcp2_conn_extend_max_offset((ngtcp2_conn *)c->ngtcp2_conn, len);
+    }
+}
+
+typedef enum {
+    H3_REFUSAL_RESET,     /* nothing to protect: STOP_SENDING + RESET_STREAM */
+    H3_REFUSAL_CUT,       /* a handler is writing a streamed response: reset, and cancel it */
+    H3_REFUSAL_FINISH,    /* a response is decided: stop the upload, deliver it whole */
+    H3_REFUSAL_ANSWER,    /* a handler holds an undecided one: the status is the answer */
+    H3_REFUSAL_REACTOR,   /* reactor mode, before dispatch: the reactor answers */
+} h3_refusal_t;
+
+/* What a refusal does to the stream, by what the stream has already got.
+ * Mirrors h2_judge_refusal. A gRPC stream keeps the reset, its answer being
+ * a grpc-status, a separate question. A response a live handler is still
+ * writing is the one case a decided answer cannot be told from a broken one,
+ * so it is cut as before. */
+static h3_refusal_t h3_judge_refusal(const http3_connection_t *c,
+                                     const http3_stream_t *s)
+{
+    if (s->is_grpc) {
+        return H3_REFUSAL_RESET;
+    }
+
+    if (s->static_owned || (s->coroutine == NULL && s->response_decided)) {
+        return H3_REFUSAL_FINISH;
+    }
+
+    if (!s->dispatched) {
+        return http3_listener_reactor_ctx(c->listener) != NULL
+            ? H3_REFUSAL_REACTOR : H3_REFUSAL_RESET;
+    }
+
+    if (Z_ISUNDEF(s->response_zv)) {
+        return H3_REFUSAL_RESET;
+    }
+
+    zend_object *const response = Z_OBJ(s->response_zv);
+    const bool committed = http_response_is_committed(response);
+
+    if (s->coroutine == NULL) {
+        return committed ? H3_REFUSAL_FINISH : H3_REFUSAL_RESET;
+    }
+
+    if (!committed) {
+        return H3_REFUSAL_ANSWER;
+    }
+
+    return http_response_is_streaming(response) && !s->streaming_ended
+        ? H3_REFUSAL_CUT : H3_REFUSAL_FINISH;
+}
+
 /* RFC 9114 §4.1.2 — stream-level rejection. Trips when the peer
- * exceeds our HTTP3_MAX_HEADERS_BYTES / HTTP3_MAX_BODY_BYTES caps.
- * Earlier code returned NGHTTP3_ERR_CALLBACK_FAILURE which closes the
- * whole QUIC connection; that's hostile to other multiplexed streams.
- * Instead we mark the stream rejected, ask both nghttp3 and ngtcp2 to
- * shut its read side, and let the caller return 0. Subsequent
- * recv_header/recv_data callbacks short-circuit on s->rejected; the
- * STOP_SENDING + RESET_STREAM frames carry NGHTTP3_H3_REQUEST_REJECTED
- * so the peer learns this specific stream was the problem. */
-static void h3_reject_request_stream(http3_connection_t *c,
-                                     http3_stream_t *s, int64_t stream_id)
+ * exceeds our HTTP3_MAX_HEADERS_BYTES / HTTP3_MAX_BODY_BYTES caps, or
+ * the body cannot be buffered. Earlier code returned
+ * NGHTTP3_ERR_CALLBACK_FAILURE which closes the whole QUIC connection;
+ * that's hostile to other multiplexed streams. Instead we mark the stream
+ * rejected, ask nghttp3 and ngtcp2 to shut its read side, and let the caller
+ * return 0. Subsequent recv_header/recv_data callbacks short-circuit on
+ * s->rejected.
+ *
+ * `status` is the HTTP status the refusal would have carried on HTTP/1;
+ * 0 is a refusal that is no body's (an oversized header section), which
+ * always resets. A reset (STOP_SENDING + RESET_STREAM with
+ * H3_REQUEST_REJECTED) would also cut off the response the stream is owed,
+ * so it is the last resort (h3_judge_refusal): a decided response is left
+ * whole and only the read side stops (STOP_SENDING with H3_NO_ERROR); an
+ * undecided one is answered with the status, by cancelling the handler with
+ * it, or by the reactor itself when no handler exists yet. */
+static void h3_reject_request_stream(http3_connection_t *c, http3_stream_t *s,
+                                     int64_t stream_id, const uint16_t status)
 {
     ZEND_ASSERT(s != NULL);
 
@@ -220,21 +288,71 @@ static void h3_reject_request_stream(http3_connection_t *c,
 
     if (c == NULL) return;
 
+    http_request_t *const req = s->request;
+    const h3_refusal_t refusal = status != 0
+        ? h3_judge_refusal(c, s) : H3_REFUSAL_RESET;
+
+    req->refused_status = status;
+
+    /* The window the dropped bytes hold goes back to the connection, or each
+     * refused stream would eat it for good: the chunks queued and not yet read
+     * will never be, and the credit the reader has drained is still waiting
+     * for its coalescing threshold. */
+    if (req->body_streaming) {
+        const size_t credit = http_body_stream_discard(req) + req->body_h3_uncredited;
+
+        req->body_h3_uncredited = 0;
+
+        if (credit > 0) {
+            h3_extend_body_window(c, stream_id, credit);
+        }
+    }
+
+    /* The bytes held so far are a prefix of a body nobody will read. The slot
+     * can live on until the peer answers STOP_SENDING, and a reactor's buffer
+     * can hold up to HTTP3_MAX_BODY_BYTES. */
+    if (s->body_pstr != NULL) {
+        zend_string_release(s->body_pstr);
+        s->body_pstr = NULL;
+        s->body_pstr_cap = 0;
+    }
+
+    smart_str_free(&s->body_buf);
+
     if (c->nghttp3_conn != NULL) {
         (void)nghttp3_conn_shutdown_stream_read(
             (nghttp3_conn *)c->nghttp3_conn, stream_id);
     }
 
     if (c->ngtcp2_conn != NULL) {
+        const bool reset = refusal == H3_REFUSAL_RESET || refusal == H3_REFUSAL_CUT;
+
         /* STOP_SENDING — tell peer we won't read more on this stream. */
         (void)ngtcp2_conn_shutdown_stream_read(
             (ngtcp2_conn *)c->ngtcp2_conn, 0, stream_id,
-            NGHTTP3_H3_REQUEST_REJECTED);
+            reset ? NGHTTP3_H3_REQUEST_REJECTED : NGHTTP3_H3_NO_ERROR);
+
         /* RESET_STREAM — abort our write side so the peer's response
-         * loop wakes (no half-open stream waiting for HEADERS). */
-        (void)ngtcp2_conn_shutdown_stream_write(
-            (ngtcp2_conn *)c->ngtcp2_conn, 0, stream_id,
-            NGHTTP3_H3_REQUEST_REJECTED);
+         * loop wakes (no half-open stream waiting for HEADERS). The write
+         * side of a stream that keeps its answer stays open. */
+        if (reset) {
+            (void)ngtcp2_conn_shutdown_stream_write(
+                (ngtcp2_conn *)c->ngtcp2_conn, 0, stream_id,
+                NGHTTP3_H3_REQUEST_REJECTED);
+        }
+    }
+
+    /* The handler's coroutine stays in s->coroutine: dispose clears it and
+     * writes the status from the exception. A skip_handler stream already
+     * holds its answer and has no handler to tell. */
+    if ((refusal == H3_REFUSAL_CUT || refusal == H3_REFUSAL_ANSWER)
+        && !s->skip_handler && http_exception_ce != NULL) {
+        ZEND_ASYNC_CANCEL(s->coroutine, http_stream_exception_new(status), true);
+    }
+
+    if (refusal == H3_REFUSAL_REACTOR) {
+        http3_reactor_answer_refusal(c, s, status);
+        return;
     }
 
     /* If a handler was already dispatched (reject after END_HEADERS — e.g.
@@ -326,7 +444,7 @@ static int h3_recv_header_cb(nghttp3_conn *conn, int64_t stream_id,
 
         if (stats != NULL) stats->h3_request_oversized++;
         /* RFC 9114: reject this stream, don't kill the connection. */
-        h3_reject_request_stream(c, s, stream_id);
+        h3_reject_request_stream(c, s, stream_id, 0);
         return 0;
     }
 
@@ -532,18 +650,6 @@ static int h3_end_headers_cb(nghttp3_conn *conn, int64_t stream_id,
     return 0;
 }
 
-/* nghttp3's consumed count excludes DATA payload (deferred-consume contract)
- * — the application extends the windows itself. */
-static void h3_extend_body_window(http3_connection_t *c, const int64_t stream_id,
-                                  const size_t len)
-{
-    if (c != NULL && c->ngtcp2_conn != NULL && !c->closed) {
-        ngtcp2_conn_extend_max_stream_offset((ngtcp2_conn *)c->ngtcp2_conn,
-                                             stream_id, len);
-        ngtcp2_conn_extend_max_offset((ngtcp2_conn *)c->ngtcp2_conn, len);
-    }
-}
-
 static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
                            const uint8_t *data, size_t datalen,
                            void *conn_user_data, void *stream_user_data)
@@ -578,9 +684,8 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
                 ? http3_listener_packet_stats(c->listener) : NULL;
 
             if (stats != NULL) stats->h3_request_oversized++;
-            req->refused_status = 413;
             h3_extend_body_window(c, stream_id, datalen);
-            h3_reject_request_stream(c, s, stream_id);
+            h3_reject_request_stream(c, s, stream_id, 413);
             return 0;
         }
 
@@ -592,7 +697,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
 
         if (UNEXPECTED(!pushed)) {
             h3_extend_body_window(c, stream_id, datalen);
-            h3_reject_request_stream(c, s, stream_id);
+            h3_reject_request_stream(c, s, stream_id, 500);
         }
 
         return 0;
@@ -605,9 +710,12 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
      * HTTP3_MAX_BODY_BYTES: the buffered body sits in memory, and the
      * pre-size below trusts the peer's Content-Length up to this cap
      * (CODING_STANDARDS 1.5). The global is 0 on a thread that never ran
-     * HttpServer::start(), a reactor thread among them, which then holds
-     * the compiled cap alone. */
-    const size_t configured_cap = HTTP_SERVER_G(parser_pool).max_body_size;
+     * HttpServer::start(), a reactor thread among them: it reads the value
+     * the parent put in the reactor context instead. */
+    const http3_reactor_ctx_t *const rctx = c != NULL
+        ? http3_listener_reactor_ctx(c->listener) : NULL;
+    const size_t configured_cap = rctx != NULL
+        ? rctx->max_body_size : HTTP_SERVER_G(parser_pool).max_body_size;
     const size_t body_cap = configured_cap != 0 && configured_cap < HTTP3_MAX_BODY_BYTES
         ? configured_cap
         : HTTP3_MAX_BODY_BYTES;
@@ -618,10 +726,9 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
             ? http3_listener_packet_stats(c->listener) : NULL;
 
         if (stats != NULL) stats->h3_request_oversized++;
-        s->request->refused_status = 413;
         h3_extend_body_window(c, stream_id, datalen);
         /* RFC 9114: reject this stream, don't kill the connection. */
-        h3_reject_request_stream(c, s, stream_id);
+        h3_reject_request_stream(c, s, stream_id, 413);
         return 0;
     }
 
@@ -630,9 +737,8 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
          * crosses to a worker thread and finalize hands it over uncopied. */
         h3_body_pbuf_append(s, data, datalen, body_cap);
     } else if (UNEXPECTED(!h3_body_buf_append(s, data, datalen, body_cap))) {
-        s->request->refused_status = 500;
         h3_extend_body_window(c, stream_id, datalen);
-        h3_reject_request_stream(c, s, stream_id);
+        h3_reject_request_stream(c, s, stream_id, 500);
         return 0;
     }
 
@@ -1608,6 +1714,19 @@ static void http3_finalize_request_body(http3_stream_t *s)
 {
     http_request_t *const req = s->request;
     ZEND_ASSERT(req != NULL);
+
+    /* A refused body is incomplete for good: handing the truncated bytes out as
+     * the body would make it look whole. Reads throw refused_status; the queue
+     * ends in error, as on HTTP/2, so a parked reader wakes to it. */
+    if (req->refused_status != 0) {
+        if (req->body_streaming) {
+            http_body_stream_error(req);
+        }
+
+        http_request_wake_body_waiters(req);
+
+        return;
+    }
 
     /* Streaming: close the queue (parked consumer sees EOF) and fire
      * body_event — awaitBody() waits on that, not the queue's data event. */

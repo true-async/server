@@ -50,6 +50,7 @@ extern zval *http_request_create_from_parsed(http_request_t *req);
 static void h3_handler_coroutine_entry(void);
 static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine);
 static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s);
+static void h3_dispose_tail_in_callback(http3_connection_t *c, http3_stream_t *s);
 
 /* Lifecycle trace (temporary, gated by H3_TRACE). Microsecond timestamp +
  * stream id at each stage, to see where a request's time goes under load. */
@@ -82,6 +83,10 @@ static void h3_static_on_hard_zero_armed(void *user)
     }
 
     s->refcount++;
+
+    /* The FSM answers without a handler, so the response is decided from here:
+     * a refused request body must not cut it. */
+    s->static_owned = true;
 }
 
 static void h3_static_on_static_done(void *user, const int status)
@@ -614,15 +619,39 @@ static bool http3_reactor_try_static(http3_connection_t *c, http3_stream_t *s,
 
     /* HANDLED: inline body / 4xx. Take a serving ref (mirrors the local
      * coroutine ref) so the slab survives the dispose_tail release until
-     * nghttp3 closes the stream, then submit + drain. */
+     * nghttp3 closes the stream, then submit. Runs inside h3_end_stream_cb, so
+     * the output waits for the read path's flush. */
     s->refcount++;
 
     if (!c->closed && c->nghttp3_conn != NULL) {
         (void)http3_stream_submit_response(c, s, false);
     }
 
-    h3_dispose_tail(c, s);
+    h3_dispose_tail_in_callback(c, s);
     return true;
+}
+
+void http3_reactor_answer_refusal(http3_connection_t *c, http3_stream_t *s,
+                                  const uint16_t status)
+{
+    object_init_ex(&s->response_zv, http_response_ce);
+    http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
+    http_response_set_head(Z_OBJ(s->response_zv),
+                           http_request_method_is_head(s->request));
+    http_response_reset_to_error(Z_OBJ(s->response_zv), status,
+                                 http_stream_refusal_message(status));
+    s->response_decided = true;
+
+    /* The HANDLED shape of http3_reactor_try_static: a serving ref keeps the
+     * slab alive past the tail's release until nghttp3 closes the stream. The
+     * caller is h3_recv_data_cb, so the output waits for the read path's flush. */
+    s->refcount++;
+
+    if (!c->closed && c->nghttp3_conn != NULL) {
+        (void)http3_stream_submit_response(c, s, false);
+    }
+
+    h3_dispose_tail_in_callback(c, s);
 }
 
 void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s)
@@ -930,7 +959,9 @@ static void h3_handler_coroutine_entry(void)
  * (GOAWAY) check, push queued output, and release the coroutine's stream
  * ref. Runs at the end of the normal dispose, and — deferred — from the
  * sendFile pump's on_done once the file has finished streaming. */
-static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
+/* The half of the tail that leaves the transport alone: telemetry, then the
+ * PHP objects. */
+static void h3_dispose_release_objects(http3_stream_t *s)
 {
     /* Where every embedded-H3 completion converges — handler, sendFile (after
      * the engine stamped its status), static — with both zvals still live. On
@@ -954,6 +985,11 @@ static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
         zval_ptr_dtor(&s->response_zv);
         ZVAL_UNDEF(&s->response_zv);
     }
+}
+
+static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
+{
+    h3_dispose_release_objects(s);
 
     /* Graceful drain check at the response-commit point — matches H1/H2.
      * Proactive age / reactive epoch → HTTP/3 GOAWAY via nghttp3_conn_shutdown
@@ -989,6 +1025,25 @@ static void h3_dispose_tail(http3_connection_t *c, http3_stream_t *s)
 
     /* Coroutine's reference. After this, only nghttp3's stream_user_data
      * may be holding the stream alive. */
+    http3_stream_release(s);
+}
+
+/* The tail for a stream answered from inside an ngtcp2 or nghttp3 callback, the
+ * read path's. ngtcp2 forbids writing packets from its callbacks, so the drain
+ * and the GOAWAY check of h3_dispose_tail wait: the read path marks the
+ * connection and the listener flushes it once the datagram is processed. The
+ * graceful drain check is not made for this response; the next one makes it. */
+static void h3_dispose_tail_in_callback(http3_connection_t *c, http3_stream_t *s)
+{
+    h3_dispose_release_objects(s);
+
+    if (c != NULL && !c->closed) {
+        http3_listener_mark_flush(c->listener, c);
+        /* Inside a poll tick or a reactor drain this only links the listener;
+         * from anywhere else it wakes the loop for the flush. */
+        http3_listener_request_flush(c->listener);
+    }
+
     http3_stream_release(s);
 }
 
@@ -1113,20 +1168,22 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                                           s->handler_bailout);
     }
 
-    /* If the handler threw and never committed a response, derive a
-     * 500 from the exception so the peer gets *something*. Mirrors
-     * the H2 dispose path's exception → status policy in spirit, but
-     * trimmed: we don't rewrite arbitrary 4xx/5xx codes from the
-     * exception code field — keep the policy minimal. */
+    /* If the handler threw and never committed, derive a response from the
+     * exception (code → status, message → body). Same policy as the H2 dispose
+     * path and the HTTP/1 one in http_handler_coroutine_dispose, so an
+     * HttpException behaves alike on every protocol. */
     if (coroutine->exception != NULL && !s->is_grpc && !Z_ISUNDEF(s->response_zv)
         && !http_response_is_committed(Z_OBJ(s->response_zv))) {
-        http_response_reset_to_error(Z_OBJ(s->response_zv), 500,
-                                     "Internal Server Error");
+        http_response_reset_from_exception(Z_OBJ(s->response_zv), coroutine->exception);
     }
 
     if (!Z_ISUNDEF(s->response_zv)
         && !http_response_is_committed(Z_OBJ(s->response_zv))) {
         http_response_set_committed(Z_OBJ(s->response_zv));
+    }
+
+    if (!Z_ISUNDEF(s->response_zv)) {
+        s->response_decided = true;
     }
 
     /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */

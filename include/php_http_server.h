@@ -1476,6 +1476,21 @@ extern zend_class_entry *http_server_protocol_exception_ce;
 extern zend_class_entry *http_server_timeout_exception_ce;
 extern zend_class_entry *http_exception_ce;
 
+/* HttpException a multiplexed stream's handler is cancelled with (HTTP/2 and
+ * HTTP/3): the refusal's HTTP status, or 499 when `refused_status` is 0 and the
+ * peer reset the stream. Shared so both transports word it the same. */
+zend_object *http_stream_exception_new(uint16_t refused_status);
+
+/* The message of that exception, also the body of an answer written without a
+ * handler. Static storage. */
+const char *http_stream_refusal_message(uint16_t refused_status);
+
+/* Turn an uncommitted response into the answer a handler's exception stands
+ * for, the one policy of every protocol's dispose path: Throwable::$code is the
+ * status when it is 400-599 and 500 otherwise, Throwable::$message the reason
+ * and the body. */
+void http_response_reset_from_exception(zend_object *response, zend_object *exc);
+
 /* Config class entry */
 extern zend_class_entry *http_server_config_ce;
 

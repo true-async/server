@@ -8,6 +8,9 @@
  *     require __DIR__ . '/_h3_refused_body.inc';
  *     echo 'STATUS=', h3_refused_status('104', $handler, ['body_bytes' => 200 * 1024]), "\n";
  *
+ * A fourth argument, passed by reference, receives the length of the response
+ * body the client read, null when it read no response.
+ *
  * Options:
  *   max_body    setMaxBodySize() value, none when absent;
  *   method      request method, POST when absent;
@@ -26,7 +29,8 @@ require_once __DIR__ . '/_h3_skipif.inc';
 require_once __DIR__ . '/../_free_port.inc';
 
 /* @return int|null the status of the response, null when the client read none */
-function h3_refused_status(string $tag, \Closure $handler, array $opt = []): ?int
+function h3_refused_status(string $tag, \Closure $handler, array $opt = [],
+                           ?int &$body_len = null): ?int
 {
     $tmp = __DIR__ . "/tmp-$tag-" . getmypid();
     mkdir($tmp, 0700);
@@ -70,7 +74,7 @@ function h3_refused_status(string $tag, \Closure $handler, array $opt = []): ?in
 
     $status = null;
 
-    spawn(function () use ($server, $port, $args, $opt, &$status) {
+    spawn(function () use ($server, $port, $args, $opt, $tmp, &$status, &$body_len) {
         delay(600);
 
         $env = 'H3CLIENT_DEADLINE_MS=4000';
@@ -78,11 +82,16 @@ function h3_refused_status(string $tag, \Closure $handler, array $opt = []): ?in
             $env .= ' H3CLIENT_HEADER=' . escapeshellarg($opt['header']);
         }
 
-        $out = (string) shell_exec(sprintf('%s %s ' . $args . ' 2>&1',
-            $env, escapeshellarg(__DIR__ . '/../../../h3client/h3client'), $port));
+        /* The body goes to stdout and the status line to stderr: apart, so that
+         * the body's length is known whatever it holds. */
+        shell_exec(sprintf('%s %s ' . $args, $env,
+            escapeshellarg(__DIR__ . '/../../../h3client/h3client'), $port)
+            . ' >' . escapeshellarg("$tmp/out") . ' 2>' . escapeshellarg("$tmp/err"));
+        $out = (string) file_get_contents("$tmp/err");
 
         if (preg_match('/^STATUS=(\d+)$/m', $out, $m)) {
             $status = (int) $m[1];
+            $body_len = (int) filesize("$tmp/out");
         } else {
             echo "client diagnostic: ", $out, "\n";
         }

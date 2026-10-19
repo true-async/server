@@ -311,6 +311,38 @@ static bool http_request_body_refused(const http_request_t *req)
     return true;
 }
 
+const char *http_stream_refusal_message(const uint16_t refused_status)
+{
+    switch (refused_status) {
+        case 0:   return "stream reset by peer";
+        case 413: return "request body exceeds the configured limit";
+        case 400: return "the request form was refused";
+        default:  return "request body could not be buffered";
+    }
+}
+
+/* HttpException a stream's handler is cancelled with. `refused_status` is the
+ * status of a refusal of ours, as it would have been on HTTP/1; 0 is the peer
+ * resetting the stream, 499 (nginx's "client closed request"), so a handler
+ * that catches it can tell whose decision ended the stream. */
+zend_object *http_stream_exception_new(const uint16_t refused_status)
+{
+    zval exc_zv, message_zv, code_zv;
+    object_init_ex(&exc_zv, http_exception_ce);
+    zend_object *exc = Z_OBJ(exc_zv);
+
+    ZVAL_STRING(&message_zv, http_stream_refusal_message(refused_status));
+    zend_update_property_ex(http_exception_ce, exc,
+                            ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
+    zval_ptr_dtor(&message_zv);
+
+    ZVAL_LONG(&code_zv, refused_status != 0 ? (zend_long)refused_status : 499);
+    zend_update_property_ex(http_exception_ce, exc,
+                            ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
+
+    return exc;
+}
+
 ZEND_METHOD(TrueAsync_HttpRequest, getBody)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);

@@ -214,6 +214,11 @@ struct http2_stream_t {
      * it is decided and the refusal must not cut it. */
     bool                 static_owned         : 1;
 
+    /* Dispose has committed the response and handed it to delivery. The
+     * response object may be gone by the time a refusal comes (a sendFile that
+     * has finished drops it), and the answer is no less decided for that. */
+    bool                 response_decided     : 1;
+
     /* The transport refused this stream on the server's own account — the body
      * outgrew setMaxBodySize, or buffering it ran the process out of memory.
      * The reset is ours, so it is not a peer reset to count; the handler is

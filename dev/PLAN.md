@@ -311,12 +311,30 @@ takes the HttpException code 400-599 as H1 and H2 do, for every exception.
         directories 84 of 84, the 21 other HTTP/2 phpt pass. `h2_judge_refusal`
         sorts RESET / FINISH / ANSWER; on_frame_send sends RST(NO_ERROR) after
         END_STREAM on a `body_refused` stream.
-- [~] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code;
+- [x] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code;
         the reactor threads take setMaxBodySize() through the reactor context
       done: the H3 tests of S6.1 pass 10 of 10, 106 with a body just past a
         64 KiB cap; the h3 phpt directory passes
       tier: T2 · role: Critic
-- [ ] S6.4 Docs, CHANGELOG, PR, CI green on every platform
+      Critic 2026-10-19 round 1, unsound, all taken: H3 dispose dropped the
+        response before a late refusal judged it, so an early answer was cut
+        (new bit `response_decided`, H2 too: a late upload after a finished
+        sendFile got RST 11); the reactor answer wrote packets from inside
+        ngtcp2's read callback (a tail that marks the connection for flush; the
+        HANDLED path of `http3_reactor_try_static` had the same fault); refused
+        body buffers freed at refusal; a refused H3 body is not finalised as
+        complete; one helper `http_response_reset_from_exception` for the
+        H1, H2 and H3 dispose. Round 2, sound with remarks: the in-callback
+        tail also calls `http3_listener_request_flush`. Left open, not from
+        this diff: a static or sendFile `on_done` runs the full tail, with
+        `drain_out`, from nghttp3's stream_close inside `ngtcp2_conn_read_pkt`
+        on every finished H3 transfer.
+      handoff: 104-109 and h2/082-083 pass 10 of 10 (082 passes on the base
+        too, a guard; 083 and 109 are red on the base). Full phpt 629 passed,
+        2 skipped, 0 failed; cmocka 24 of 24 after unit stubs for the new
+        response calls. Reactor threads read `max_body_size` from
+        `http3_reactor_ctx_t`.
+- [~] S6.4 Docs, CHANGELOG, PR, CI green on every platform
       done: setMaxBodySize docs and USAGE.md describe the answer; PR merged;
         #412 closed; the gRPC refusal has its own issue
       tier: T1 · role: —

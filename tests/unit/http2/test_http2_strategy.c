@@ -73,6 +73,9 @@ bool http_response_finish_stream(zend_object *o, bool failed, int64_t error_code
 void http_response_reset_to_error(zend_object *o, int s, const char *m) {
     (void)o; (void)s; (void)m;
 }
+void http_response_reset_from_exception(zend_object *o, zend_object *e) {
+    (void)o; (void)e;
+}
 void http_response_set_protocol_version(zend_object *o, const char *v) {
     (void)o; (void)v;
 }

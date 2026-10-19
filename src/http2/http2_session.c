@@ -474,35 +474,6 @@ static void http2_request_body_upgrade(http_request_t *req)
     req->body_streaming = true;
 }
 
-/* HttpException a stream's handler is cancelled with. `refused_status` is the
- * status of a refusal of ours, as it would have been on HTTP/1; 0 is the peer
- * resetting the stream, 499 (nginx's "client closed request"), so a handler
- * that catches it can tell whose decision ended the stream. */
-static zend_object *h2_stream_exception_new(const uint16_t refused_status)
-{
-    zval exc_zv, message_zv, code_zv;
-    object_init_ex(&exc_zv, http_exception_ce);
-    zend_object *exc = Z_OBJ(exc_zv);
-
-    ZVAL_STRING(&message_zv,
-                refused_status == 413
-                    ? "request body exceeds the configured limit"
-                    : (refused_status == 400
-                           ? "the request form was refused"
-                           : (refused_status != 0
-                                  ? "request body could not be buffered"
-                                  : "stream reset by peer")));
-    zend_update_property_ex(http_exception_ce, exc,
-                            ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
-    zval_ptr_dtor(&message_zv);
-
-    ZVAL_LONG(&code_zv, refused_status != 0 ? (zend_long)refused_status : 499);
-    zend_update_property_ex(http_exception_ce, exc,
-                            ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
-
-    return exc;
-}
-
 typedef enum {
     H2_REFUSAL_RESET,    /* nothing to protect: the error RST_STREAM */
     H2_REFUSAL_FINISH,   /* a response is decided: deliver it, then RST_STREAM(NO_ERROR) */
@@ -520,7 +491,7 @@ static h2_refusal_t h2_judge_refusal(const http2_stream_t *stream)
         return H2_REFUSAL_RESET;
     }
 
-    if (stream->static_owned) {
+    if (stream->static_owned || (stream->coroutine == NULL && stream->response_decided)) {
         return H2_REFUSAL_FINISH;
     }
 
@@ -621,7 +592,7 @@ static int h2_refuse_stream(http2_session_t *session,
          * its answer and has no handler to tell. */
         if (!stream->skip_handler && http_exception_ce != NULL) {
             ZEND_ASYNC_CANCEL((zend_coroutine_t *)stream->coroutine,
-                              h2_stream_exception_new(status), true);
+                              http_stream_exception_new(status), true);
         }
 
         return 0;
@@ -1171,7 +1142,7 @@ static int cb_on_stream_close(nghttp2_session *ng,
             stream->request->coroutine = NULL;
         }
 
-        ZEND_ASYNC_CANCEL(co, h2_stream_exception_new(refused_status), true);
+        ZEND_ASYNC_CANCEL(co, http_stream_exception_new(refused_status), true);
     }
 
     stream_table_remove(session, (uint32_t)stream_id);

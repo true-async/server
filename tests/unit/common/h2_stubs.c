@@ -41,3 +41,9 @@ void http_response_replace_stream_ops(zend_object *obj,
 	(void) obj; (void) ops; (void) ctx;
 	abort();
 }
+
+bool http_response_is_committed(zend_object *obj)
+{
+	(void) obj;
+	abort();
+}
