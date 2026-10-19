@@ -156,7 +156,7 @@ static void h3_delivery_reset(void *arg)
         (void)ngtcp2_conn_shutdown_stream_write(c->ngtcp2_conn, 0, s->stream_id,
                                                NGHTTP3_H3_INTERNAL_ERROR);
     http3_listener_mark_flush(c->listener, c);
-    http3_listener_queue_epilogue_flush(c->listener);
+    http3_listener_request_flush(c->listener);
 }
 
 static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_t *s,
@@ -247,7 +247,7 @@ static void http3_stream_dispatch_to_worker(http3_connection_t *c, http3_stream_
                 (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
                 NGHTTP3_H3_REQUEST_REJECTED);
             http3_listener_mark_flush(c->listener, c);
-            http3_listener_queue_epilogue_flush(c->listener);
+            http3_listener_request_flush(c->listener);
         }
 
         return;
@@ -462,13 +462,13 @@ void http3_reactor_apply_response(void *arg)
         return;
     }
 
-    /* mark dirty + flush once in the drain epilogue, not per wire */
+    /* mark dirty + flush once at the drain's end, not per wire */
     switch (response_wire_kind(rw)) {
         case RESPONSE_WIRE_FULL:
         case RESPONSE_WIRE_STREAM_HEADERS:
             if (http3_stream_submit_response_wire(c, s, rw)) {
                 http3_listener_mark_flush(c->listener, c);
-                http3_listener_queue_epilogue_flush(c->listener);
+                http3_listener_request_flush(c->listener);
             } else if (d != NULL) {
                 discard_wire = true;
                 response_delivery_note_drop(d);
@@ -496,7 +496,7 @@ void http3_reactor_apply_response(void *arg)
             (void)nghttp3_conn_resume_stream(
                 (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
             http3_listener_mark_flush(c->listener, c);
-            http3_listener_queue_epilogue_flush(c->listener);
+            http3_listener_request_flush(c->listener);
             break;
         }
 
@@ -511,7 +511,7 @@ void http3_reactor_apply_response(void *arg)
             (void)nghttp3_conn_resume_stream(
                 (nghttp3_conn *)c->nghttp3_conn, s->stream_id);
             http3_listener_mark_flush(c->listener, c);
-            http3_listener_queue_epilogue_flush(c->listener);
+            http3_listener_request_flush(c->listener);
             break;
 
         case RESPONSE_WIRE_STREAM_ABORT:
@@ -553,7 +553,7 @@ void http3_reactor_apply_response(void *arg)
             }
 
             http3_listener_mark_flush(c->listener, c);
-            http3_listener_queue_epilogue_flush(c->listener);
+            http3_listener_request_flush(c->listener);
             break;
 
         case RESPONSE_WIRE_SEND_FILE:

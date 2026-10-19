@@ -114,6 +114,14 @@ struct h3_static_state_s {
     h3_static_state_t           *throttled_prev;
     h3_static_state_t           *throttled_next;
     bool                         in_throttled_list;
+
+#ifdef FIU_ENABLE
+    /* Fault point h3/sendfile/read_failed_after_ack: a read failure parked
+     * until the peer has ACKed what was sent, then failed from this timer.
+     * Owned here, disposed by finalize if the stream ends first. */
+    zend_async_timer_event_t    *fault_timer;
+    zend_async_event_callback_t *fault_cb;
+#endif
 };
 
 ZEND_TLS h3_static_state_t *h3_static_throttled_head = NULL;
@@ -248,6 +256,86 @@ static void h3_static_cb_dispose(zend_async_event_callback_t *cb,
     efree(cb);
 }
 
+#ifdef FIU_ENABLE
+/* Loopback ACKs a chunk within a few milliseconds; after this long the peer
+ * owes no packet, which is the moment the fault is meant to hit. */
+#define H3_STATIC_FAULT_ACK_WAIT_MS 300
+
+static void h3_static_fault_cleanup(h3_static_state_t *state)
+{
+    zend_async_timer_event_t *const timer = state->fault_timer;
+
+    if (timer == NULL) {
+        return;
+    }
+
+    if (state->fault_cb != NULL) {
+        (void)timer->base.del_callback(&timer->base, state->fault_cb);
+        state->fault_cb = NULL;
+    }
+
+    state->fault_timer = NULL;
+
+    if (timer->base.dispose != NULL) {
+        timer->base.dispose(&timer->base);
+    }
+}
+
+static void h3_static_fault_dispatch(zend_async_event_t *event,
+                                     zend_async_event_callback_t *callback,
+                                     void *result,
+                                     zend_object *exception)
+{
+    (void)event; (void)result; (void)exception;
+    h3_static_state_t *const state = ((h3_static_cb_t *)callback)->state;
+
+    h3_static_fault_cleanup(state);
+    state->read_in_flight = false;
+    h3_static_fail(state);
+}
+
+/* Parks the failure on a timer. read_in_flight stays set meanwhile, so an ACK
+ * wake does not submit another read. False: no timer, fail at once. */
+static bool h3_static_fault_park(h3_static_state_t *state)
+{
+    zend_async_timer_event_t *const timer =
+        ZEND_ASYNC_NEW_TIMER_EVENT((zend_ulong)H3_STATIC_FAULT_ACK_WAIT_MS, false);
+
+    if (UNEXPECTED(timer == NULL)) {
+        zend_clear_exception();
+        return false;
+    }
+
+    h3_static_cb_t *const cb = (h3_static_cb_t *)ZEND_ASYNC_EVENT_CALLBACK_EX(
+        h3_static_fault_dispatch, sizeof(h3_static_cb_t));
+
+    if (UNEXPECTED(cb == NULL)) {
+        timer->base.dispose(&timer->base);
+        return false;
+    }
+
+    cb->base.dispose = h3_static_cb_dispose;
+    cb->state = state;
+
+    if (UNEXPECTED(!timer->base.add_callback(&timer->base, &cb->base))) {
+        efree(cb);
+        timer->base.dispose(&timer->base);
+        return false;
+    }
+
+    state->fault_timer = timer;
+    state->fault_cb = &cb->base;
+
+    if (UNEXPECTED(!timer->base.start(&timer->base))) {
+        h3_static_fault_cleanup(state);
+        return false;
+    }
+
+    state->read_in_flight = true;
+    return true;
+}
+#endif
+
 static void h3_static_finalize(h3_static_state_t *state)
 {
     if (state->done_fired) {
@@ -258,6 +346,10 @@ static void h3_static_finalize(h3_static_state_t *state)
     state->done_fired = true;
 
     h3_static_throttle_unlink(state);
+
+#ifdef FIU_ENABLE
+    h3_static_fault_cleanup(state);
+#endif
 
     if (state->stream != NULL && state->stream->static_body_state == state) {
         state->stream->static_body_state = NULL;
@@ -340,7 +432,7 @@ static void h3_static_fail(h3_static_state_t *state)
                 (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
                 NGHTTP3_H3_INTERNAL_ERROR);
             http3_listener_mark_flush(c->listener, c);
-            http3_listener_queue_epilogue_flush(c->listener);
+            http3_listener_request_flush(c->listener);
             return;   /* close_cb → h3_static_stream_closed → finalize */
         }
     }
@@ -494,8 +586,12 @@ static void h3_static_read_dispatch(zend_async_event_t *event,
 
     const ssize_t transferred = (ssize_t)req->transferred;
     bool err = (exception != NULL || req->exception != NULL);
+#ifdef FIU_ENABLE
+    bool err_after_ack = false;
+#endif
     if (state->bytes_sent > 0) {
         fiu_do_on("h3/sendfile/read_failed_after_chunk", { err = true; });
+        fiu_do_on("h3/sendfile/read_failed_after_ack", { err_after_ack = true; });
     }
 
     if (req->exception != NULL) {
@@ -521,6 +617,18 @@ static void h3_static_read_dispatch(zend_async_event_t *event,
         h3_static_fail(state);
         return;
     }
+
+#ifdef FIU_ENABLE
+    if (UNEXPECTED(err_after_ack)) {
+        zend_string_release(chunk);
+
+        if (!h3_static_fault_park(state)) {
+            h3_static_fail(state);
+        }
+
+        return;
+    }
+#endif
 
     /* Shrink to the bytes actually read — the alloc was sized for the request. */
     ZSTR_LEN(chunk) = (size_t)transferred;

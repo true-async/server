@@ -108,7 +108,6 @@ void http3_steer_group_publish(http3_steer_group_t *group, int reactor_id,
 void http3_steer_group_free(http3_steer_group_t *group);
 
 /* Put a listener into steering mode against its endpoint's group. */
-void http3_listener_queue_epilogue_flush(http3_listener_t *l);
 void http3_listener_set_steer(http3_listener_t *listener, http3_steer_group_t *group);
 
 /* If `listener` steers and `data` is a short-header datagram whose DCID decodes
@@ -231,9 +230,19 @@ http3_stream_pool_t *http3_listener_stream_pool(http3_listener_t *listener);
 void http3_listener_mark_flush(http3_listener_t *listener, http3_connection_t *conn);
 void http3_listener_flush_dirty(http3_listener_t *listener);
 
-/* Reactor drain-batch epilogue: flush every listener that took a forwarded
- * (steered) datagram this batch exactly once. Register with
- * reactor_pool_set_drain_epilogue before reactors start. */
-void http3_reactor_steer_flush_epilogue(void);
+/* Ask for flush_dirty on `listener` once its marks are all in: at the exit of
+ * the enclosing flush scope, or, outside any scope, on the next loop pass
+ * through a per-thread wake. Idempotent until the flush runs; a no-op on a
+ * closed listener. Owner thread only. Never drains in place, so it is safe from
+ * inside an ngtcp2 callback or a drain. */
+void http3_listener_request_flush(http3_listener_t *listener);
+
+/* A flush scope brackets work that may mark output on this thread: a UDP poll
+ * tick, a reactor mailbox drain or control signal. Requests made inside it are
+ * flushed by the outermost exit, together and without a syscall. Scopes nest;
+ * each enter is paired with exactly one exit on the same thread. The reactor
+ * pool takes the pair through reactor_pool_set_drain_scope. */
+void http3_flush_scope_enter(void);
+void http3_flush_scope_exit(void);
 
 #endif /* HTTP3_LISTENER_H */

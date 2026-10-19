@@ -123,14 +123,14 @@ bool reactor_pool_has_capacity(const reactor_pool_t *rp, int idx);
  * reactor services work — "alive" == "draining". Returns 0 for a bad index. */
 uint64_t reactor_pool_processed(const reactor_pool_t *rp, int idx);
 
-/* Optional epilogue run on the reactor thread at the END of every mailbox drain
- * batch, after all commands in the batch have run. Lets a consumer coalesce
- * per-command side effects into one action per drain — the H3 steering path uses
- * it to flush forwarded datagrams once per batch instead of once per datagram,
- * matching the recvmmsg tick's single deferred flush. Process-wide, set once on
- * the parent before reactors start; fn runs on each reactor thread, so it must
- * key its state per-thread. NULL clears it. */
-void reactor_pool_set_drain_epilogue(void (*fn)(void));
+/* Optional scope around every mailbox drain batch and control signal on the
+ * reactor thread: enter runs before the first command, exit after the last.
+ * Lets a consumer coalesce per-command side effects into one action per drain
+ * and tell work inside a drain from work outside one — H3 queues output inside
+ * and flushes it at exit, matching the recvmmsg tick's single deferred flush.
+ * Process-wide, set once on the parent before reactors start; both run on each
+ * reactor thread, so they must key their state per-thread. NULL clears both. */
+void reactor_pool_set_drain_scope(void (*enter)(void), void (*exit)(void));
 
 /* Signal every reactor to stop (via the channel), wait for the loops to leave,
  * and release the pool. Parent-thread only; call once, after producers quiesce.
