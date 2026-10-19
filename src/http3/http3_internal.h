@@ -145,6 +145,11 @@ bool http3_connection_init_h3(http3_connection_t *c);
 typedef struct _http3_stream_s http3_stream_t;  /* defined in include/http3/http3_stream.h */
 void http3_stream_dispatch(http3_connection_t *c, http3_stream_t *s);
 
+/* Reactor mode: answer a refused request body with `status` on the transport
+ * thread, in place of a handler that will never run, and retire the stream. */
+void http3_reactor_answer_refusal(http3_connection_t *c, http3_stream_t *s,
+                                  uint16_t status);
+
 
 /* ===== Symbols defined in http3_callbacks.c, used from http3_dispatch.c ===== */
 

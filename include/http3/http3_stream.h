@@ -198,6 +198,15 @@ struct _http3_stream_s {
 
     bool              skip_handler        : 1;   /* static FSM answered; dispose still commits */
 
+    /* A static or sendFile FSM, not a handler coroutine, owns the response: it
+     * is decided, and a refused request body must not cut it. */
+    bool              static_owned        : 1;
+
+    /* Dispose has committed the response and handed it to delivery. The
+     * response object is gone once the tail has run, and the answer is no less
+     * decided for that: a refused request body must not cut it. */
+    bool              response_decided    : 1;
+
     /* Handler died in a zend_bailout: dispose runs, but the request gets no
      * telemetry — post-bailout state is not trustworthy enough to report. */
     bool              handler_bailout     : 1;

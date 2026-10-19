@@ -3289,27 +3289,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     if (coroutine->exception != NULL
         && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {
-        zval rv;
-        zend_object *exc = coroutine->exception;
-
-        zval *code_zv = zend_read_property_ex(exc->ce, exc, ZSTR_KNOWN(ZEND_STR_CODE), 1, &rv);
-        const zend_long code = (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG)
-                                 ? Z_LVAL_P(code_zv) : 0;
-        const int status = (code >= 400 && code <= 599) ? (int)code : 500;
-
-        const char *reason = "Internal Server Error";
-        zval *msg_zv = zend_read_property_ex(exc->ce, exc, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
-
-        if (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING && Z_STRLEN_P(msg_zv) > 0) {
-            reason = Z_STRVAL_P(msg_zv);
-        } else if (status != 500) {
-            /* Use a sensible default for non-default statuses without
-             * a message. Falling through with "Internal Server Error"
-             * for a 414 would be confusing. */
-            reason = "";
-        }
-
-        http_response_reset_to_error(Z_OBJ(ctx->response_zv), status, reason);
+        http_response_reset_from_exception(Z_OBJ(ctx->response_zv), coroutine->exception);
     }
 
     if (!http_response_is_committed(Z_OBJ(ctx->response_zv))) {

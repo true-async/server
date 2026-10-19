@@ -1,5 +1,5 @@
 --TEST--
-HTTP/2: a body past setMaxBodySize is refused with RST_STREAM, not left hanging
+HTTP/2: a body past setMaxBodySize is answered 413, then the stream is reset with NO_ERROR, not left hanging
 --EXTENSIONS--
 true_async_server
 true_async
@@ -10,17 +10,19 @@ h2_skipif();
 ?>
 --FILE--
 <?php
-/* setMaxBodySize is documented to end an over-large HTTP/2 body with a stream
- * reset (src/http_server_config.c, setMaxBodySize). It did not: the check in
+/* setMaxBodySize ends an over-large HTTP/2 body with a 413 response followed
+ * by RST_STREAM(NO_ERROR) (#412, RFC 9113 §8.1), so the client reads the
+ * status instead of a bare stream error. Before that the check in
  * cb_on_data_chunk_recv answered NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE, and
  * that callback's contract has no such meaning — nghttp2.h documents
  * NGHTTP2_ERR_PAUSE and nothing else, so the refusal was swallowed. Nothing
  * reached the wire, the handler stayed parked in awaitBody(), and the peer
  * waited for a stream that would never be answered or reset.
  *
- * Four 8 KiB frames against a 16 KiB cap: the third one passes the cap while
- * the total is still inside the 65535-byte initial window, so what ends the
- * stream is the cap and not flow control. */
+ * The loop below stops at the first RST_STREAM, which follows the 413
+ * response. Four 8 KiB frames against a 16 KiB cap: the third one passes the
+ * cap while the total is still inside the 65535-byte initial window, so what
+ * ends the stream is the cap and not flow control. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -116,7 +118,7 @@ echo "caught_code=$caught_code\n";
 echo "caught_msg=$caught_msg\n";
 echo "done\n";
 --EXPECT--
-reset_code=11
+reset_code=0
 finished=0
 caught_code=413
 caught_msg=request body exceeds the configured limit

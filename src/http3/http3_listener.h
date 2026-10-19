@@ -51,6 +51,7 @@ typedef struct {
     uint32_t           socket_buffer_bytes;  /* config scalars resolved on the parent */
     uint32_t           peer_budget;
     uint32_t           max_conns;
+    size_t             max_body_size;        /* setMaxBodySize(); 0 = compiled cap only */
 
     /* Static mounts served on the reactor itself (no PHP, no worker round-trip).
      * Borrowed array of const http_static_handler_t* from the owning server —

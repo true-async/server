@@ -469,6 +469,31 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
     response->committed = true;
 }
 
+void http_response_reset_from_exception(zend_object *response, zend_object *exc)
+{
+    zval rv;
+
+    const zval *const code_zv = zend_read_property_ex(exc->ce, exc,
+                                                      ZSTR_KNOWN(ZEND_STR_CODE), 1, &rv);
+    const zend_long code = (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG)
+                             ? Z_LVAL_P(code_zv) : 0;
+    const int status = (code >= 400 && code <= 599) ? (int)code : 500;
+
+    const char *reason = "Internal Server Error";
+    const zval *const msg_zv = zend_read_property_ex(exc->ce, exc,
+                                                     ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
+
+    if (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING && Z_STRLEN_P(msg_zv) > 0) {
+        reason = Z_STRVAL_P(msg_zv);
+    } else if (status != 500) {
+        /* A sensible default for a deliberate status without a message:
+         * "Internal Server Error" next to a 414 would be confusing. */
+        reason = "";
+    }
+
+    http_response_reset_to_error(response, status, reason);
+}
+
 /* Manual digit-by-digit decimal format. ~15× faster than snprintf("%PRIu64")
  * on hot paths (no parse-format-string, no locale lookup). Buffer must be
  * at least 21 bytes (20 digits + NUL). Returns bytes written (excluding NUL). */

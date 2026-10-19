@@ -14,7 +14,7 @@ upload_tmp_dir={PWD}/tmp-067
 <?php
 /* A file part is written to disk while it arrives. A refusal in the middle
  * of it (here: past setMaxBodySize) must delete that unfinished file too, not
- * only the parts already complete. */
+ * only the parts already complete. The client reads 413 (#412). */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -44,9 +44,9 @@ file_put_contents($upload, str_repeat('u', 256 * 1024));
 $client = spawn(function () use ($port, $server, $upload) {
     usleep(30000);
     [, $out] = h2_curl(['--http2-prior-knowledge', '-sS', '--max-time', '5', '-o', h2_dev_null(),
-        '-F', "f=@$upload", "http://127.0.0.1:$port/"], true);
+        '-w', '%{http_code}', '-F', "f=@$upload", "http://127.0.0.1:$port/"]);
 
-    echo 'client: ', str_contains((string)$out, 'ENHANCE_YOUR_CALM') ? 'stream refused' : $out, "\n";
+    echo 'client: ', $out, "\n";
     $server->stop();
 });
 
@@ -64,5 +64,5 @@ foreach ($left as $name) {
 @rmdir($dir);
 ?>
 --EXPECT--
-client: stream refused
+client: 413
 files left: 0

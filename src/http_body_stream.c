@@ -132,8 +132,11 @@ zend_string *http_body_stream_pop(http_request_t *req)
     return data;
 }
 
-void http_body_stream_dispose(http_request_t *req)
+size_t http_body_stream_discard(http_request_t *req)
 {
+    ZEND_ASSERT(req->body_bytes_queued >= req->body_precredited);
+
+    const size_t uncredited = req->body_bytes_queued - req->body_precredited;
     http_body_chunk_t *node = req->body_queue_head;
 
     while (node != NULL) {
@@ -146,6 +149,14 @@ void http_body_stream_dispose(http_request_t *req)
     req->body_queue_head = NULL;
     req->body_queue_tail = NULL;
     req->body_bytes_queued = 0;
+    req->body_precredited = 0;
+
+    return uncredited;
+}
+
+void http_body_stream_dispose(http_request_t *req)
+{
+    (void)http_body_stream_discard(req);
 
     if (req->body_data_event != NULL) {
         if (req->body_data_event->dispose != NULL) {

@@ -209,6 +209,28 @@ __attribute__((weak)) void http_response_replace_stream_ops(
     (void)obj; (void)ops; (void)ctx;
 }
 
+/* Real impls in http_response_server_api.c and http_request.c (not linked
+ * here). h2_judge_refusal and the handler cancel reach them only for a stream
+ * with a handler coroutine and a response object; fuzz inputs dispatch no
+ * request, so they never run. Linker only. */
+__attribute__((weak)) bool http_response_is_committed(zend_object *obj)
+{
+    (void)obj;
+    return false;
+}
+
+__attribute__((weak)) bool http_response_is_streaming(zend_object *obj)
+{
+    (void)obj;
+    return false;
+}
+
+__attribute__((weak)) zend_object *http_stream_exception_new(uint16_t refused_status)
+{
+    (void)refused_status;
+    return NULL;
+}
+
 /* Real impls in http_request.c (not linked here). on_headers_complete asks
  * them for the rate limit verdict only when the parser has a connection;
  * fuzz parsers run without one. Mirror of the src/http_request.c logic. */

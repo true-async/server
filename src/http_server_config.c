@@ -1427,10 +1427,11 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, getH2StaticBudgetMax)
 
 /* proto HttpServerConfig::setMaxBodySize(int $bytes): static
  *
- * Upper bound for a single request body on both H1 parser and H2
- * session paths. H1 enforces at parse time (413 + connection close),
- * H2 enforces at DATA-frame accumulation (stream RST_STREAM). Value
- * is mirrored into the global parser pool at server start.
+ * Upper bound for a single request body on H1, H2 and H3. H1 enforces at
+ * parse time (413 + connection close); H2 and H3 at DATA accumulation, where
+ * the refusal answers 413 and then stops the upload with NO_ERROR (#412).
+ * Value is mirrored into the global parser pool at server start and into the
+ * HTTP/3 reactor context.
  *
  * Default: 10 MiB. Valid: 1024 .. 16 GiB. */
 ZEND_METHOD(TrueAsync_HttpServerConfig, setMaxBodySize)

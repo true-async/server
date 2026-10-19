@@ -3174,6 +3174,7 @@ static size_t http_server_reactor_h3_spawn(http_server_object *server, const int
         server->reactor_h3_ctx[r].socket_buffer_bytes = socket_buffer_bytes;
         server->reactor_h3_ctx[r].peer_budget         = peer_budget;
         server->reactor_h3_ctx[r].max_conns           = max_conns > 0 ? (uint32_t)max_conns : 0;
+        server->reactor_h3_ctx[r].max_body_size       = cfg->max_body_size;
         server->reactor_h3_ctx[r].static_mounts       = (const void *)mounts;
         server->reactor_h3_ctx[r].static_mount_count  = mount_count;
         server->reactor_h3_ctx[r].static_cache        =

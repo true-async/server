@@ -198,6 +198,27 @@ struct http2_stream_t {
 
     bool                 is_websocket         : 1;   /* Extended-CONNECT WebSocket (RFC 8441) */
 
+    /* The refusal left the upload open on purpose: the answer (or the response
+     * already decided) is still on its way out, and the stream ends with
+     * RST_STREAM(NO_ERROR) after its END_STREAM. Later DATA is dropped with
+     * connection credit only. */
+    bool                 body_refused         : 1;
+
+    /* h2_refuse_stream sent the error RST_STREAM of a refusal. Its close comes
+     * back through cb_on_stream_close carrying the code we chose: our own reset,
+     * labelled with refused_status and not counted as a peer's. Every other
+     * abnormal close of the stream is the peer's. */
+    bool                 refusal_reset_sent   : 1;
+
+    /* A static or sendFile FSM, not a handler coroutine, owns the response:
+     * it is decided and the refusal must not cut it. */
+    bool                 static_owned         : 1;
+
+    /* Dispose has committed the response and handed it to delivery. The
+     * response object may be gone by the time a refusal comes (a sendFile that
+     * has finished drops it), and the answer is no less decided for that. */
+    bool                 response_decided     : 1;
+
     /* The transport refused this stream on the server's own account — the body
      * outgrew setMaxBodySize, or buffering it ran the process out of memory.
      * The reset is ours, so it is not a peer reset to count; the handler is

@@ -479,6 +479,12 @@ class H2TestClient
         return [$status, $body, $trailers, $ended];
     }
 
+    /* :status of a HEADERS payload read with readFrame(). */
+    public static function statusOf(string $payload): int
+    {
+        return self::parseStatusFromHpackBlock($payload);
+    }
+
     /**
      * Pull the status code out of an HPACK-encoded HEADERS payload.
      * Accepts the three shapes nghttp2 emits for :status:
