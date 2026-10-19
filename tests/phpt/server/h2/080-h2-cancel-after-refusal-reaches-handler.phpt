@@ -10,13 +10,13 @@ h2_skipif();
 ?>
 --FILE--
 <?php
-/* The handler catches the refusal (HttpException 413) and goes on writing a
- * streamed response, a chunk every 50 ms. Once the 413 is delivered the client
- * resets the stream with CANCEL, and the handler must hear that as its own
- * second HttpException, code 499 (client gone). Answering the refusal with a
- * status (#412) must not leave the stream in a state where the later cancel is
- * lost or the handler is told the wrong code. The handler codes already read
- * 413,499 before #412; the status line is what the fix changes. */
+/* The handler catches the refusal (HttpException 413) and answers itself with
+ * a streamed 200, a chunk every 50 ms. Since #412 that response reaches the
+ * client: the refusal no longer resets the stream while no response is
+ * decided. Once the first chunk arrives the client resets the stream with
+ * CANCEL, and the handler must hear that as a second HttpException, code 499
+ * (client gone), not as the refusal again. Before #412 the stream was reset
+ * at the refusal and the client read no status. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -75,8 +75,28 @@ $client = spawn(function () use ($port, $server) {
         $cli->sendRawFrame(H2_FRAME_DATA, 0, $sid, str_repeat('a', CHUNK));
     }
 
-    [$status] = $cli->collectResponse($sid);
+    /* The handler's own HEADERS, then its first chunk. */
+    $status = 0;
+    $chunk  = false;
+    while (!$chunk && ($fr = $cli->readFrame()) !== null) {
+        [$type, $flags, $fsid, $payload] = $fr;
+        if ($type === H2_FRAME_SETTINGS && ($flags & H2_FLAG_ACK) === 0) {
+            $cli->sendSettingsAck();
+            continue;
+        }
+        if ($fsid !== $sid) {
+            continue;
+        }
+        if ($type === H2_FRAME_HEADERS) {
+            $status = H2TestClient::statusOf($payload);
+        } elseif ($type === H2_FRAME_DATA) {
+            $chunk = true;
+        } elseif ($type === H2_FRAME_RST_STREAM) {
+            break;
+        }
+    }
     echo "status=$status\n";
+    echo "first chunk: ", (int)$chunk, "\n";
 
     $cli->sendRstStream($sid, CANCEL);
     delay(500);
@@ -90,6 +110,7 @@ await($client);
 echo "handler codes: ", implode(',', $codes), "\n";
 echo "done\n";
 --EXPECT--
-status=413
+status=200
+first chunk: 1
 handler codes: 413,499
 done

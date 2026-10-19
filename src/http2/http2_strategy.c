@@ -151,6 +151,10 @@ static void h2_static_on_hard_zero_armed(void *user)
     conn->handler_refcount++;
     http_server_on_request_dispatch(conn->counters);
 
+    /* The FSM answers without a handler, so the response is decided from here:
+     * a refused request body must not cut it. */
+    stream->static_owned = true;
+
     /* Pin the stream itself so cb_on_stream_close + the static FSM
      * close hook can fire after the dispatch frame returns. Released
      * in h2_static_on_static_done. */

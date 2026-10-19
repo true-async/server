@@ -69,9 +69,26 @@ static bool h2_was_locally_reset(const http2_session_t *session, uint32_t stream
 
 static int cb_on_frame_send(nghttp2_session *ng, const nghttp2_frame *frame, void *user_data)
 {
-    (void)ng;
     if (frame->hd.type == NGHTTP2_RST_STREAM) {
         h2_note_local_reset(user_data, (uint32_t)frame->hd.stream_id);
+        return 0;
+    }
+
+    if ((frame->hd.flags & NGHTTP2_FLAG_END_STREAM) == 0) {
+        return 0;
+    }
+
+    /* The response of a refused upload is out: stop the upload with NO_ERROR
+     * (RFC 9113 §8.1), which nghttp2 does not send by itself. Called before
+     * nghttp2 closes the local side, so only the remote side is read. A peer
+     * that has ended its request needs no reset. */
+    const http2_stream_t *const stream = (const http2_stream_t *)
+        nghttp2_session_get_stream_user_data(ng, frame->hd.stream_id);
+
+    if (stream != NULL && stream->body_refused
+        && nghttp2_session_get_stream_remote_close(ng, frame->hd.stream_id) == 0) {
+        (void)http2_session_submit_rst_stream(user_data, (uint32_t)frame->hd.stream_id,
+                                              NGHTTP2_NO_ERROR);
     }
 
     return 0;
@@ -445,13 +462,85 @@ static void http2_request_body_upgrade(http_request_t *req)
         stream->request_body_buf.s = NULL;
 
         /* the buffered branch already consumed these bytes — pop must not
-         * credit them a second time */
-        req->body_precredited += ZSTR_LEN(initial);
-        http_body_stream_push(req, initial);
+         * credit them a second time. A failed push drops them with nothing
+         * left to credit, and must not count them as queued. */
+        if (http_body_stream_push(req, initial)) {
+            req->body_precredited += ZSTR_LEN(initial);
+        }
+
         zend_string_release(initial);
     }
 
     req->body_streaming = true;
+}
+
+/* HttpException a stream's handler is cancelled with. `refused_status` is the
+ * status of a refusal of ours, as it would have been on HTTP/1; 0 is the peer
+ * resetting the stream, 499 (nginx's "client closed request"), so a handler
+ * that catches it can tell whose decision ended the stream. */
+static zend_object *h2_stream_exception_new(const uint16_t refused_status)
+{
+    zval exc_zv, message_zv, code_zv;
+    object_init_ex(&exc_zv, http_exception_ce);
+    zend_object *exc = Z_OBJ(exc_zv);
+
+    ZVAL_STRING(&message_zv,
+                refused_status == 413
+                    ? "request body exceeds the configured limit"
+                    : (refused_status == 400
+                           ? "the request form was refused"
+                           : (refused_status != 0
+                                  ? "request body could not be buffered"
+                                  : "stream reset by peer")));
+    zend_update_property_ex(http_exception_ce, exc,
+                            ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
+    zval_ptr_dtor(&message_zv);
+
+    ZVAL_LONG(&code_zv, refused_status != 0 ? (zend_long)refused_status : 499);
+    zend_update_property_ex(http_exception_ce, exc,
+                            ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
+
+    return exc;
+}
+
+typedef enum {
+    H2_REFUSAL_RESET,    /* nothing to protect: the error RST_STREAM */
+    H2_REFUSAL_FINISH,   /* a response is decided: deliver it, then RST_STREAM(NO_ERROR) */
+    H2_REFUSAL_ANSWER,   /* none is: the refusal's status is the answer */
+} h2_refusal_t;
+
+/* What a refusal does to the stream, by what the stream has already got.
+ * WebSocket and gRPC keep the error reset: a gRPC refusal already ends in a
+ * grpc-status, a separate question. A response a live handler is still
+ * writing is the one case a decided answer cannot be told from a broken one,
+ * so it is cut as before. */
+static h2_refusal_t h2_judge_refusal(const http2_stream_t *stream)
+{
+    if (stream->is_websocket || stream->is_grpc) {
+        return H2_REFUSAL_RESET;
+    }
+
+    if (stream->static_owned) {
+        return H2_REFUSAL_FINISH;
+    }
+
+    if (Z_ISUNDEF(stream->response_zv)) {
+        return H2_REFUSAL_RESET;
+    }
+
+    zend_object *const response = Z_OBJ(stream->response_zv);
+    const bool committed = http_response_is_committed(response);
+
+    if (stream->coroutine == NULL) {
+        return committed ? H2_REFUSAL_FINISH : H2_REFUSAL_RESET;
+    }
+
+    if (!committed) {
+        return H2_REFUSAL_ANSWER;
+    }
+
+    return http_response_is_streaming(response) && !stream->streaming_ended
+        ? H2_REFUSAL_RESET : H2_REFUSAL_FINISH;
 }
 
 /* Refuses one stream on the server's own account and lets the connection carry
@@ -462,16 +551,27 @@ static void http2_request_body_upgrade(http_request_t *req)
  * submitted by hand, the way the admission reject in cb_on_begin_headers does
  * it, and 0 keeps the sibling streams alive.
  *
+ * An error RST_STREAM at once would also stop nghttp2 from sending any
+ * response on the stream, the status a refusal owes included. So it is the
+ * last resort (h2_judge_refusal): a decided response is left whole and the
+ * stream ends with RST_STREAM(NO_ERROR) after its END_STREAM, and an undecided
+ * one is answered with the status, by cancelling the handler with it.
+ *
  * `status` is the HTTP status the refusal would have carried on HTTP/1, and it
- * reaches the handler parked in awaitBody() through cb_on_stream_close. */
+ * reaches the handler parked in awaitBody() through its exception. */
 static int h2_refuse_stream(http2_session_t *session,
                             nghttp2_session *ng,
                             http2_stream_t *stream,
                             const int32_t stream_id,
                             const uint32_t error_code,
-                            const uint16_t status)
+                            const uint16_t status,
+                            const size_t uncredited_len)
 {
+    size_t credit_len = uncredited_len;
+    h2_refusal_t refusal = H2_REFUSAL_RESET;
+
     if (stream != NULL) {
+        refusal = h2_judge_refusal(stream);
         stream->refused_status = status;
 
         /* The body stops here and stays incomplete: every later read of it,
@@ -484,10 +584,51 @@ static int h2_refuse_stream(http2_session_t *session,
              * than on body_event: end the queue in error to wake it. */
             if (stream->request->body_streaming) {
                 http_body_stream_error(stream->request);
+
+                /* The chunks queued and not yet read will never be. */
+                credit_len += http_body_stream_discard(stream->request);
             }
 
             http_request_wake_body_waiters(stream->request);
         }
+    }
+
+    /* The window the dropped bytes hold goes back to the connection, or each
+     * refused stream would eat it for good: nghttp2 does not return the
+     * unconsumed bytes of a stream it closes. The stream's own window is of no
+     * use any more. */
+    if (credit_len > 0) {
+        (void)nghttp2_session_consume_connection(ng, credit_len);
+    }
+
+    if (refusal != H2_REFUSAL_RESET) {
+        stream->body_refused = true;
+
+        if (refusal == H2_REFUSAL_FINISH) {
+            /* Local side already closed: no END_STREAM is left to wait for. */
+            if (nghttp2_session_get_stream_local_close(ng, stream_id) == 1) {
+                (void)http2_session_submit_rst_stream(session, (uint32_t)stream_id,
+                                                      NGHTTP2_NO_ERROR);
+                h2_session_schedule_emit(session);
+            }
+
+            return 0;
+        }
+
+        /* The handler's coroutine stays in stream->coroutine: dispose clears it
+         * and writes the status from the exception, then the RST follows the
+         * END_STREAM of that response. A skip_handler stream already holds
+         * its answer and has no handler to tell. */
+        if (!stream->skip_handler && http_exception_ce != NULL) {
+            ZEND_ASYNC_CANCEL((zend_coroutine_t *)stream->coroutine,
+                              h2_stream_exception_new(status), true);
+        }
+
+        return 0;
+    }
+
+    if (stream != NULL) {
+        stream->refusal_reset_sent = true;
     }
 
     h2_note_local_reset(session, (uint32_t)stream_id);
@@ -522,7 +663,7 @@ static int h2_feed_multipart(http2_session_t *session,
 
     if (processor->bytes_fed > body_cap || len > body_cap - processor->bytes_fed) {
         return h2_refuse_stream(session, ng, stream, stream_id,
-                                NGHTTP2_ENHANCE_YOUR_CALM, 413);
+                                NGHTTP2_ENHANCE_YOUR_CALM, 413, len);
     }
 
     /* Field values are accumulated with emalloc, so memory_limit can bail
@@ -541,14 +682,14 @@ static int h2_feed_multipart(http2_session_t *session,
 
     if (UNEXPECTED(oom)) {
         return h2_refuse_stream(session, ng, stream, stream_id,
-                                NGHTTP2_INTERNAL_ERROR, 500);
+                                NGHTTP2_INTERNAL_ERROR, 500, len);
     }
 
     /* Too many fields or a malformed body: the server declines the
      * request, which CANCEL says without blaming the peer for a protocol
      * violation. */
     if (UNEXPECTED(processed < 0)) {
-        return h2_refuse_stream(session, ng, stream, stream_id, NGHTTP2_CANCEL, 400);
+        return h2_refuse_stream(session, ng, stream, stream_id, NGHTTP2_CANCEL, 400, len);
     }
 
     (void)nghttp2_session_consume(ng, stream_id, len);
@@ -581,6 +722,15 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
         http_server_on_h2_data_recv(session->conn->counters, len);
     }
 
+    /* The upload is being stopped (h2_refuse_stream) and nothing reads it:
+     * drop the bytes. Only the connection window is credited, so siblings
+     * keep theirs; the stream's own window may run dry, which is how the peer
+     * is told to stop until the RST_STREAM(NO_ERROR) lands. */
+    if (stream->body_refused) {
+        (void)nghttp2_session_consume_connection(ng, len);
+        return 0;
+    }
+
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
     /* WebSocket-over-H2 (RFC 8441): inbound DATA is WS frame bytes, not a
      * request body. Feed wslay (it drains synchronously into the recv
@@ -602,7 +752,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
          * on_stream_close wakes any recv()-suspended handler. */
         if (UNEXPECTED(ws_rc != 0)) {
             return h2_refuse_stream(session, ng, stream, stream_id,
-                                    NGHTTP2_INTERNAL_ERROR, 500);
+                                    NGHTTP2_INTERNAL_ERROR, 500, 0);
         }
         return 0;
     }
@@ -623,7 +773,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
                 && req->body_bytes_consumed + req->body_bytes_queued + len
                        > body_cap)) {
             return h2_refuse_stream(session, ng, stream, stream_id,
-                                    NGHTTP2_ENHANCE_YOUR_CALM, 413);
+                                    NGHTTP2_ENHANCE_YOUR_CALM, 413, len);
         }
 
         zend_string *chunk = zend_string_init((const char *)data, len, 0);
@@ -632,7 +782,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 
         if (UNEXPECTED(!ok)) {
             return h2_refuse_stream(session, ng, stream, stream_id,
-                                    NGHTTP2_INTERNAL_ERROR, 500);
+                                    NGHTTP2_INTERNAL_ERROR, 500, len);
         }
 
         return 0;
@@ -651,7 +801,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
     if (SIZE_MAX - current < len ||
         current + len > body_cap) {
         return h2_refuse_stream(session, ng, stream, stream_id,
-                                NGHTTP2_ENHANCE_YOUR_CALM, 413);
+                                NGHTTP2_ENHANCE_YOUR_CALM, 413, len);
     }
 
     /* First chunk + known Content-Length: pre-size the smart_str in one
@@ -687,7 +837,7 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
 
     if (UNEXPECTED(oom)) {
         return h2_refuse_stream(session, ng, stream, stream_id,
-                                NGHTTP2_INTERNAL_ERROR, 500);
+                                NGHTTP2_INTERNAL_ERROR, 500, len);
     }
 
     /* Buffered branch: handler will read the full body via $request->body
@@ -707,6 +857,12 @@ static void finalize_request_body(http2_stream_t *stream)
     http_request_t *req = stream->request;
 
     if (req == NULL) {
+        return;
+    }
+
+    /* A refused body is incomplete for good: handing the truncated bytes out as
+     * the body would make it look whole. Reads throw refused_status. */
+    if (stream->body_refused) {
         return;
     }
 
@@ -947,10 +1103,14 @@ static int cb_on_stream_close(nghttp2_session *ng,
     const bool locally_aborted = stream != NULL && stream->local_aborted;
 
     /* A refusal the transport issued — body over the cap, or no memory to hold
-     * it — is our reset and not the peer's, so it is not counted as one. The
-     * cancel below still has to run: the handler is parked in awaitBody() with
-     * nothing else coming. */
-    const uint16_t refused_status = (stream != NULL) ? stream->refused_status : 0;
+     * it — whose error reset is the one closing the stream is our reset and not
+     * the peer's, so it is not counted as one. The cancel below still has to
+     * run: the handler is parked in awaitBody() with nothing else coming. Any
+     * other abnormal close is the peer's, a refusal answered or not: the peer
+     * can still cancel a stream whose refusal was answered. */
+    const uint16_t refused_status =
+        (stream != NULL && error_code != NGHTTP2_NO_ERROR && stream->refusal_reset_sent)
+            ? stream->refused_status : 0;
 
     /* Peer-initiated reset visibility (RST_STREAM with a non-NO_ERROR
      * code). NO_ERROR is a clean END_STREAM on both sides, not a reset. */
@@ -998,6 +1158,10 @@ static int cb_on_stream_close(nghttp2_session *ng,
         error_code != NGHTTP2_NO_ERROR && http_exception_ce != NULL) {
         zend_coroutine_t *co = (zend_coroutine_t *)stream->coroutine;
 
+        /* A peer reset arriving before the handler has run on the refusal's
+         * cancel replaces that cancel: the handler sees this one, 499, and the
+         * 413 never reaches it. */
+
         /* Break back-pointers FIRST — dispose's own invariant, kept in
          * sync so a re-entry (e.g. dispose's commit path triggers
          * another on_stream_close) can't double-cancel. */
@@ -1007,32 +1171,7 @@ static int cb_on_stream_close(nghttp2_session *ng,
             stream->request->coroutine = NULL;
         }
 
-        zval exc_zv, message_zv, code_zv;
-        object_init_ex(&exc_zv, http_exception_ce);
-        zend_object *exc = Z_OBJ(exc_zv);
-
-        ZVAL_STRING(&message_zv,
-                    refused_status == 413
-                        ? "request body exceeds the configured limit"
-                        : (refused_status == 400
-                               ? "the request form was refused"
-                               : (refused_status != 0
-                                      ? "request body could not be buffered"
-                                      : "stream reset by peer")));
-        zend_update_property_ex(http_exception_ce, exc,
-                                ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
-        zval_ptr_dtor(&message_zv);
-
-        /* 499 — nginx convention for "client closed request". Gives
-         * user handlers a distinguishable status if they catch the
-         * HttpException and want to branch on peer-reset specifically. A
-         * refusal of ours carries the status it would have had on HTTP/1
-         * instead, so the handler can tell whose decision ended the stream. */
-        ZVAL_LONG(&code_zv, refused_status != 0 ? (zend_long)refused_status : 499);
-        zend_update_property_ex(http_exception_ce, exc,
-                                ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
-
-        ZEND_ASYNC_CANCEL(co, exc, true);
+        ZEND_ASYNC_CANCEL(co, h2_stream_exception_new(refused_status), true);
     }
 
     stream_table_remove(session, (uint32_t)stream_id);

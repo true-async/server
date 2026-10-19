@@ -293,10 +293,25 @@ takes the HttpException code 400-599 as H1 and H2 do, for every exception.
         #412. Found: the reactor pool ignores setMaxBodySize() (a reactor thread
         never runs start(), so the cap is the compiled 16 MiB); 106 sends 17 MiB
         until S6.3 fixes it. Commit 6bf821a.
-- [~] S6.2 HTTP/2: the five-case refusal, the NO_ERROR reset, connection credit
+- [x] S6.2 HTTP/2: the five-case refusal, the NO_ERROR reset, connection credit
       done: the H2 tests of S6.1 pass 10 of 10; the h2 phpt directory passes
       tier: T2 · role: Critic
-- [ ] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code;
+      Critic 2026-10-19 on the diff, sound with remarks, all taken: the DATA
+        chunk that trips a refusal is credited to the connection too; our own
+        error reset is a per-stream bit `refusal_reset_sent`, not
+        `h2_was_locally_reset` (an RST(NO_ERROR) queued behind output, and the
+        eviction floor, mislabelled a peer reset as 413); a peer reset before
+        the cancelled handler runs replaces the 413 with 499, accepted and
+        commented; `body_precredited` rose before a push that can fail (H2 and
+        H3 upgrade); a refused body is not finalised as complete. The latch
+        `refusal_cancelled` is gone: with the bit it was never read.
+        `h2/080` expected 413 where the design gives the handler's own 200;
+        rewritten, red on the base build, green after.
+      handoff: 10 runs each: 061, 066-068, 074-081 pass 10 of 10. h2 and grpc
+        directories 84 of 84, the 21 other HTTP/2 phpt pass. `h2_judge_refusal`
+        sorts RESET / FINISH / ANSWER; on_frame_send sends RST(NO_ERROR) after
+        END_STREAM on a `body_refused` stream.
+- [~] S6.3 HTTP/3: read-side stop, cancel, reactor answer, credit, dispose code;
         the reactor threads take setMaxBodySize() through the reactor context
       done: the H3 tests of S6.1 pass 10 of 10, 106 with a body just past a
         64 KiB cap; the h3 phpt directory passes

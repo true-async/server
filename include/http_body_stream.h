@@ -44,6 +44,11 @@ void http_body_stream_error(http_request_t *req);
  * Side effect: returns flow-control credit to the transport. */
 zend_string *http_body_stream_pop(http_request_t *req);
 
+/* Drop every queued chunk and answer the bytes whose flow-control credit the
+ * transport has not granted yet (queued, minus the pre-credited prefix). The
+ * caller grants it: nothing will pop these chunks again. */
+size_t http_body_stream_discard(http_request_t *req);
+
 /* Free the queue (releases all pending chunk refs) and dispose
  * body_data_event. Called from http_request_destroy. */
 void http_body_stream_dispose(http_request_t *req);

@@ -471,9 +471,12 @@ static void http3_request_body_upgrade(http_request_t *req)
         s->body_buf.s = NULL;
 
         /* the buffered branch already extended the window for these bytes —
-         * pop must not credit them a second time */
-        req->body_precredited += ZSTR_LEN(initial);
-        http_body_stream_push(req, initial);
+         * pop must not credit them a second time. A failed push drops them
+         * with nothing left to credit, and must not count them as queued. */
+        if (http_body_stream_push(req, initial)) {
+            req->body_precredited += ZSTR_LEN(initial);
+        }
+
         zend_string_release(initial);
     }
 
