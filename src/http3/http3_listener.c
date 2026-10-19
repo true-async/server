@@ -120,9 +120,9 @@ struct _http3_listener_s {
     /* Deferred-output dirty-list head, linked through
      * conn->dirty_next. The read path marks conns here instead of
      * draining per datagram; http3_listener_flush_dirty drains the list
-     * once per recvmmsg tick. Always empty between ticks — populated and
-     * fully drained within a single poll-cb wakeup, so no conn freed by a
-     * coroutine/timer between ticks can dangle on it. */
+     * once per recvmmsg tick. Output marked outside a tick stays here until
+     * the flush that http3_listener_request_flush schedules; a conn freed
+     * meanwhile leaves the list through http3_listener_unmark_flush. */
     http3_connection_t        *dirty_head;
 
     /* SSL_CTX* shared with the TCP/TLS path. Non-owning — the server
@@ -150,13 +150,13 @@ struct _http3_listener_s {
      * the listener. NULL = no steering (single reactor / single-thread). */
     http3_steer_group_t *steer;
 
-    /* Drain-batch deferred-flush link. A forwarded datagram marks its
-     * owner listener here instead of flushing per packet; the reactor drain
-     * epilogue flushes the whole batch once, mirroring the recvmmsg tick's
-     * single deferred flush. in_steer_flush guards double-linking. Touched only
-     * on this listener's own reactor thread (feed_fn / epilogue / destroy). */
-    http3_listener_t          *steer_flush_next;
-    bool                       in_steer_flush;
+    /* Link in this thread's list of listeners with a flush requested
+     * (http3_listener_request_flush). in_flush_list guards double-linking.
+     * Touched only on this listener's own thread. */
+    http3_listener_t          *flush_next;
+    bool                       in_flush_list;
+    /* This listener counts in tls_flush_wake_users. */
+    bool                       holds_flush_wake;
 
     /* 32-byte HMAC-SHA256 key used to derive stateless-reset
      * tokens (RFC 9000 §10.3). Generated once at spawn from OpenSSL's
@@ -338,10 +338,18 @@ static void http3_listener_recv_cb(zend_async_event_t *event,
 
     update_peer_cache(listener, (const struct sockaddr *)&req->addr, req->addr_len);
 
-    /* Legacy libuv path has no cmsg access — ECN unavailable. */
+    /* Legacy libuv path has no cmsg access — ECN unavailable. The scope exit
+     * flushes what the datagram marked, as the recvmmsg tick does. */
+    http3_flush_scope_enter();
     http3_connection_dispatch(listener,
                               (const uint8_t *)req->buf, (size_t)req->transferred, 0,
                               (const struct sockaddr *)&req->addr, req->addr_len);
+
+    if (!listener->closed) {
+        http3_listener_request_flush(listener);
+    }
+
+    http3_flush_scope_exit();
 }
 #endif /* !__linux__ */
 
@@ -519,6 +527,9 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
     const uint64_t wd_t0 = (uint64_t)zend_hrtime();
     unsigned wd_datagrams = 0;
 
+    /* Every exit below goes through tick_done, which leaves the scope. */
+    http3_flush_scope_enter();
+
     /* Drain the kernel error queue — but only when there is reason to
      * believe something is pending. Most sockets never see ICMP errors,
      * and the unconditional recvmsg(MSG_ERRQUEUE) costs ~10% throughput
@@ -575,7 +586,7 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                 listener->stats.datagrams_errored++;
             }
 
-            goto tick_done;
+            break;
         }
 
         for (int i = 0; i < n; ++i) {
@@ -656,7 +667,7 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
                  * re-check before touching it again. Teardown tick — bail
                  * without recording a (meaningless) latency sample. */
                 if (listener->closed) {
-                    return;
+                    goto tick_done;
                 }
             }
         }
@@ -668,20 +679,25 @@ static void http3_listener_poll_cb(zend_async_event_t *event,
         }
     }
 
+tick_done:
     /* Flush all connections touched this tick exactly once. Coalesces the
      * output of a multi-datagram burst into one drain (one GSO sendmsg)
-     * per conn instead of one per inbound datagram. The listener-closed
-     * bail-out above returns early and skips this — that path is teardown,
-     * where conns are reaped by listener destroy, not flushed. */
-    http3_listener_flush_dirty(listener);
+     * per conn instead of one per inbound datagram. That includes a tick
+     * whose last recvmmsg found the queue empty: the datagrams of the batches
+     * before it still owe their output. The scope exit then flushes any other
+     * listener of this thread that this tick asked for. A closed listener is
+     * teardown, where conns are reaped by listener destroy, not flushed. */
+    if (EXPECTED(!listener->closed)) {
+        http3_listener_flush_dirty(listener);
+    }
 
-    /* Watchdog tail. The EAGAIN/error early-exit jumps here PAST the flush,
-     * preserving the pre-existing behaviour where a tick that ends on an
-     * empty recvmmsg skips flush_dirty (any conns dirtied this tick drain on
-     * the next wakeup). Only the latency sample is taken here. */
-tick_done:
-    if (UNEXPECTED(poll_disarmed) && !listener->closed
-        && listener->poll_event != NULL) {
+    http3_flush_scope_exit();
+
+    if (listener->closed) {
+        return;   /* teardown: no latency sample */
+    }
+
+    if (UNEXPECTED(poll_disarmed) && listener->poll_event != NULL) {
         zend_async_event_t *const pe = &listener->poll_event->base;
         /* stop() first: libuv stopped the handle behind the event's back, so
          * loop_ref_count still reads as running and start() alone is a no-op. */
@@ -1006,29 +1022,40 @@ void http3_listener_set_steer(http3_listener_t *l, http3_steer_group_t *g)
     }
 }
 
-/* Per-reactor-thread list of listeners that took a forwarded datagram in the
- * current mailbox drain batch. Built by http3_steer_feed_fn, drained once by
- * http3_reactor_steer_flush_epilogue at batch end. Thread-local: each reactor
- * has its own, no locking, and a listener only ever appears on its owner
- * reactor. ZEND_TLS expands to static + the compiler's TLS keyword
- * (__declspec(thread) on MSVC, __thread on GCC/Clang). */
-ZEND_TLS http3_listener_t *tls_steer_flush_head = NULL;
+/* Deferred flush across listeners, per thread.
+ *
+ * Output that a connection produces is marked dirty (mark_flush) and sent by
+ * http3_listener_flush_dirty, never drained in place: a drain from inside an
+ * ngtcp2 callback, or from a pump that a drain re-entered, would re-enter
+ * ngtcp2_conn_writev_stream. Who calls flush_dirty depends on where the mark
+ * was made:
+ *  - inside a flush scope (a UDP poll tick, a reactor mailbox drain or control
+ *    signal), the scope's exit flushes, after every datagram or command of the
+ *    batch has run, so a burst still leaves in one drain per connection;
+ *  - outside any scope (a file-read completion, a timer, a handler coroutine,
+ *    a trigger callback), a per-thread uv_async wakes the loop and its
+ *    callback flushes on the next pass. The peer may owe no packet at that
+ *    moment, so nothing else would.
+ * The scopes are where the traffic is, so the hot path pays one TLS link per
+ * listener and no syscall; only work outside a scope pays an eventfd write.
+ *
+ * All of it is thread-local: a listener only ever runs on its owner thread. */
+ZEND_TLS http3_listener_t *tls_flush_head = NULL;
+ZEND_TLS uint32_t tls_flush_scope_depth = 0;
+ZEND_TLS zend_async_trigger_event_t *tls_flush_wake = NULL;
+/* Listeners on this thread; the wake lives while there is one. */
+ZEND_TLS uint32_t tls_flush_wake_users = 0;
+ZEND_TLS bool tls_flush_wake_running = false;
 
-/* Reactor drain epilogue (registered via reactor_pool_set_drain_epilogue):
- * flush every listener that took a forwarded datagram this batch, exactly once.
- * This coalesces a burst of steered datagrams into one flush_dirty per listener
- * — the same single deferred flush the recvmmsg tick does — instead of flushing
- * per forwarded packet, which split a connection's output across separate sends
- * and perturbed ACK / path-validation timing under rapid migration. */
-void http3_reactor_steer_flush_epilogue(void)
+static void http3_flush_requested(void)
 {
-    http3_listener_t *l = tls_steer_flush_head;
-    tls_steer_flush_head = NULL;
+    http3_listener_t *l = tls_flush_head;
+    tls_flush_head = NULL;
 
     while (l != NULL) {
-        http3_listener_t *const next = l->steer_flush_next;
-        l->steer_flush_next = NULL;
-        l->in_steer_flush   = false;
+        http3_listener_t *const next = l->flush_next;
+        l->flush_next    = NULL;
+        l->in_flush_list = false;
 
         http3_listener_flush_dirty(l);
 
@@ -1036,21 +1063,111 @@ void http3_reactor_steer_flush_epilogue(void)
     }
 }
 
-/* Runs ON THE OWNER reactor (via reactor_pool_post_exec): re-resolve the
- * owner's listener from the group and feed the forwarded datagram into it as if
- * it had arrived on the owner's own socket. Marks the conn dirty (in dispatch)
- * and queues the listener for the drain-batch epilogue, so a burst of forwarded
- * datagrams flushes once — like a recvmmsg tick — not once per packet. */
-/* Queue this listener for the drain-batch epilogue flush. Idempotent. */
-void http3_listener_queue_epilogue_flush(http3_listener_t *l)
+void http3_flush_scope_enter(void)
 {
-    if (!l->in_steer_flush) {
-        l->in_steer_flush   = true;
-        l->steer_flush_next = tls_steer_flush_head;
-        tls_steer_flush_head = l;
+    tls_flush_scope_depth++;
+}
+
+/* The depth drops before the walk: a request made while it flushes (a stream
+ * freed by the flush kicks a parked pump, which fails and resets) finds no
+ * scope around it and wakes the loop, instead of linking into a list this walk
+ * has already taken. */
+void http3_flush_scope_exit(void)
+{
+    ZEND_ASSERT(tls_flush_scope_depth > 0);
+
+    if (--tls_flush_scope_depth == 0) {
+        http3_flush_requested();
     }
 }
 
+void http3_listener_request_flush(http3_listener_t *l)
+{
+    /* closed: destroy has unlinked us and is freeing the conns, whose teardown
+     * can fail a pump of a sibling conn; linking now would leave a freed
+     * listener on the list. */
+    if (l->in_flush_list || l->closed) {
+        return;   /* in_flush_list: a scope exit or a pending wake flushes us */
+    }
+
+    l->in_flush_list = true;
+    l->flush_next    = tls_flush_head;
+    tls_flush_head   = l;
+
+    if (tls_flush_scope_depth == 0 && tls_flush_wake != NULL) {
+        l->stats.packet.quic_flush_wakes++;
+        tls_flush_wake->trigger(tls_flush_wake);
+    }
+}
+
+static void http3_flush_wake_cb(zend_async_event_t *event,
+                                zend_async_event_callback_t *callback,
+                                void *result, zend_object *exception)
+{
+    (void)event; (void)callback; (void)result; (void)exception;
+
+    tls_flush_wake_running = true;
+    http3_flush_scope_enter();
+    http3_flush_scope_exit();
+    tls_flush_wake_running = false;
+}
+
+/* Counts a listener in on its owner thread, creating the wake for the first
+ * one. Unref'd and never started: it must not keep the loop alive. */
+static bool http3_flush_wake_acquire(http3_listener_t *l)
+{
+    if (tls_flush_wake == NULL) {
+        zend_async_trigger_event_t *const wake = ZEND_ASYNC_NEW_TRIGGER_EVENT();
+
+        if (wake == NULL) {
+            return false;
+        }
+
+        zend_async_event_callback_t *const cb = ZEND_ASYNC_EVENT_CALLBACK(http3_flush_wake_cb);
+
+        if (cb == NULL || !wake->base.add_callback(&wake->base, cb)) {
+            if (cb != NULL) {
+                ZEND_ASYNC_EVENT_CALLBACK_RELEASE(cb);
+            }
+
+            wake->base.dispose(&wake->base);
+            return false;
+        }
+
+        tls_flush_wake = wake;
+    }
+
+    tls_flush_wake_users++;
+    l->holds_flush_wake = true;
+    return true;
+}
+
+/* Disposing the wake frees its callbacks, so it must not happen inside its own
+ * callback. A flush never destroys a listener: destroy comes from server stop
+ * and spawn failures, both outside the wake. */
+static void http3_flush_wake_release(http3_listener_t *l)
+{
+    if (!l->holds_flush_wake) {
+        return;
+    }
+
+    l->holds_flush_wake = false;
+    ZEND_ASSERT(tls_flush_wake_users > 0 && !tls_flush_wake_running);
+
+    if (--tls_flush_wake_users == 0) {
+        zend_async_trigger_event_t *const wake = tls_flush_wake;
+        tls_flush_wake = NULL;
+        wake->base.dispose(&wake->base);
+    }
+}
+
+/* Runs ON THE OWNER reactor (via reactor_pool_post_exec): re-resolve the
+ * owner's listener from the group and feed the forwarded datagram into it as if
+ * it had arrived on the owner's own socket. Marks the conn dirty (in dispatch)
+ * and requests a flush, which the drain's scope exit performs, so a burst of
+ * forwarded datagrams flushes once — like a recvmmsg tick — not once per packet.
+ * Flushing per forwarded packet split a connection's output across separate
+ * sends and perturbed ACK / path-validation timing under rapid migration. */
 static void http3_steer_feed_fn(void *arg)
 {
     http3_steer_msg_t *const m = (http3_steer_msg_t *)arg;
@@ -1062,7 +1179,7 @@ static void http3_steer_feed_fn(void *arg)
         http3_connection_dispatch(target, m->data, m->datalen, m->ecn,
                                   (struct sockaddr *)&m->peer, m->peer_len);
 
-        http3_listener_queue_epilogue_flush(target);
+        http3_listener_request_flush(target);
     }
 
     pefree(m, 1);
@@ -1150,8 +1267,10 @@ void http3_listener_track_connection(http3_listener_t *l,
     l->conn_count++;
 }
 
-/* Mark a connection as having pending output for this tick. Idempotent:
- * a conn touched by several datagrams in one tick is linked once. */
+/* Mark a connection as having pending output, to be drained by the next
+ * flush_dirty of this listener. Idempotent: a conn touched by several datagrams
+ * in one tick is linked once. Marking alone schedules nothing; a caller outside
+ * a poll tick also calls http3_listener_request_flush. */
 void http3_listener_mark_flush(http3_listener_t *l, http3_connection_t *conn)
 {
     if (conn->in_dirty) {
@@ -1163,8 +1282,9 @@ void http3_listener_mark_flush(http3_listener_t *l, http3_connection_t *conn)
     l->dirty_head    = conn;
 }
 
-/* Drain every connection marked this tick, exactly once, and clear the
- * list. Runs at the end of the poll-cb after the recvmmsg batch. */
+/* Drain every connection marked since the last flush, exactly once, and clear
+ * the list. Runs at the end of the poll-cb after the recvmmsg batch, and for a
+ * requested flush at the end of a reactor drain or from the per-thread wake. */
 void http3_listener_flush_dirty(http3_listener_t *l)
 {
     http3_connection_t *conn = l->dirty_head;
@@ -1459,6 +1579,11 @@ http3_listener_t *http3_listener_spawn(const char *host, int port,
     listener->server_obj  = server_obj;
     listener->reactor_ctx = reactor_ctx;
     listener->stream_pool = http3_stream_pool_create();
+
+    if (!http3_flush_wake_acquire(listener)) {
+        http3_listener_destroy(listener);
+        return NULL;
+    }
 
 #ifdef __linux__
     /* Raw-fd path: socket() + setsockopt + bind() + uv_poll_t. We need
@@ -1848,24 +1973,26 @@ void http3_listener_destroy(http3_listener_t *listener)
         listener->steer = NULL;
     }
 
-    /* Drop ourselves from this reactor's pending steer-flush list (same thread)
-     * so the drain epilogue never flushes a listener we are freeing — covers a
+    /* Drop ourselves from this thread's flush list (same thread) so a scope
+     * exit or the wake never flushes a listener we are freeing — covers a
      * teardown command landing in the same batch as a forward to us. */
-    if (listener->in_steer_flush) {
-        http3_listener_t **pp = &tls_steer_flush_head;
+    if (listener->in_flush_list) {
+        http3_listener_t **pp = &tls_flush_head;
 
         while (*pp != NULL) {
             if (*pp == listener) {
-                *pp = listener->steer_flush_next;
+                *pp = listener->flush_next;
                 break;
             }
 
-            pp = &(*pp)->steer_flush_next;
+            pp = &(*pp)->flush_next;
         }
 
-        listener->in_steer_flush   = false;
-        listener->steer_flush_next = NULL;
+        listener->in_flush_list = false;
+        listener->flush_next    = NULL;
     }
+
+    http3_flush_wake_release(listener);
 
     /* 1. Sever the callback's back-pointer to our listener data BEFORE
      *    touching the io. Any recv_cb invocation that the reactor has

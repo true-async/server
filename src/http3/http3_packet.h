@@ -64,6 +64,7 @@ typedef struct _http3_packet_stats_s {
     uint64_t quic_packets_sent;       /* datagrams emitted by writev_stream */
     uint64_t quic_bytes_sent;         /* cumulative bytes over those datagrams */
     uint64_t quic_timer_fired;        /* handle_expiry invocations */
+    uint64_t quic_flush_wakes;        /* output queued outside a tick woke the loop */
     uint64_t quic_write_error;        /* writev_stream non-zero / negative */
 
     /* Handshake / ALPN counters. */
@@ -189,6 +190,7 @@ typedef struct _http3_packet_stats_s {
     X(quic_packets_sent,            SUM)        \
     X(quic_bytes_sent,              SUM)        \
     X(quic_timer_fired,             SUM)        \
+    X(quic_flush_wakes,             SUM)        \
     X(quic_write_error,             SUM)        \
     X(quic_handshake_completed,     SUM)        \
     X(quic_alpn_mismatch,           SUM)        \

@@ -207,12 +207,26 @@ epilogue (an eventfd write per pooled response batch) and a direct drain at
         out; `h3/099`/`h3/100` (fault point `h3/sendfile/read_failed_after_ack`,
         300 ms park, pool=0/pool=1) 10 of 10 time out with the fault hit once;
         guards `h3/096` (abort, pool), `h3/097`/`h3/098` (throw) 10 of 10 pass.
-- [ ] S5.2 Scope-aware `request_flush` with a per-thread wake
+- [x] S5.2 Scope-aware `request_flush` with a per-thread wake
       done: S5.1 green 10 of 10; `h3/091` 30 of 30 pool and pool=0; the H3 and
         core phpt suites pass; a wake counter reads 0 after a plain request in
         both modes; uncovered and named: the window wake, a mark made during
         `flush_dirty`, exactly 10 datagrams then EAGAIN
       tier: T2 · role: Critic
+      Critic 2026-10-19 on the diff, sound with remarks, all taken: the scope
+        pair is installed before the reactors start and each drain calls the
+        exit its enter returned; two flush comments named only the poll tick;
+        101/102 read the counter once more after teardown; `h3/103` restarts a
+        server on one thread. The non-Linux receive path now flushes per
+        datagram, untested: the H3 phpt skip on Windows.
+      handoff: 10 runs each after the fix: `h3/095`-`h3/100` 10 of 10 pass;
+        `h3/091` 30 of 30; a pool=0 copy of 091 got its reset 30 of 30 (10 of
+        12 before). Full phpt 613 passed, 2 skipped, 0 failed; cmocka 24 of 24.
+        Mutants: no scope around the reactor drain gives 1-3 wakes per normal
+        response, `h3/102` fails; a wake left set after dispose, `h3/103`
+        fails 3 of 3. Uncovered, named: the window wake after a submit
+        failure, a mark made during `flush_dirty`, exactly 10 datagrams then
+        EAGAIN, a wake still pending at dispose.
 - [ ] S5.3 PR, CI green on every platform, CHANGELOG entry
       done: PR merged, #424 closed
       tier: T1 · role: —

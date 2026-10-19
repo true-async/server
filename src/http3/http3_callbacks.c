@@ -1526,7 +1526,7 @@ static bool h3_stream_abort(void *ctx, const int64_t error_code)
     /* Queued rather than drained: abort is also called from inside a drain,
      * and h3_static_fail takes the same route for the same reason. */
     http3_listener_mark_flush(c->listener, c);
-    http3_listener_queue_epilogue_flush(c->listener);
+    http3_listener_request_flush(c->listener);
     return true;
 }
 

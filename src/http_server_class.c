@@ -3314,6 +3314,15 @@ static void http_server_reactor_pool_up(http_server_object *server, const int wo
     const http_server_config_t *const cfg = http_server_get_config(server);
     const size_t mailbox_cap = cfg != NULL ? (size_t)cfg->reactor_mailbox_capacity : 0;
 
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    /* H3 output marked inside a reactor drain (response wires, forwarded
+     * datagrams) is flushed once at the drain's end, not per command, so a
+     * burst sends like a recvmmsg tick instead of fragmenting a connection's
+     * output. Installed before the reactors start, so no drain sees half of
+     * the pair. */
+    reactor_pool_set_drain_scope(http3_flush_scope_enter, http3_flush_scope_exit);
+#endif
+
     server->reactor_pool = reactor_pool_create(reactors, mailbox_cap);
 
     if (server->reactor_pool == NULL) {
@@ -3341,14 +3350,9 @@ static void http_server_reactor_pool_up(http_server_object *server, const int wo
      * SO_REUSEPORT onto another reactor routes back to its owner. Active only
      * with >1 reactor (the id is one byte, so cap at 256). */
     const int real_reactors = reactor_pool_count(server->reactor_pool);
-    reactor_pool_set_drain_epilogue(http3_reactor_steer_flush_epilogue);
 
     if (http3_steer_init()) {
         http3_steer_set_active(real_reactors > 1 && real_reactors <= 256);
-        /* Flush forwarded datagrams once per reactor drain batch (not per
-         * packet), so a burst of steered datagrams under rapid migration sends
-         * like a recvmmsg tick instead of fragmenting a connection's output. */
-        reactor_pool_set_drain_epilogue(http3_reactor_steer_flush_epilogue);
     }
 
     /* Spawn the H3 listeners ON the reactor threads now. From here the workers

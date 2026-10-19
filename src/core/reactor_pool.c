@@ -54,7 +54,8 @@ typedef struct {
     reactor_capacity_gate_t *capacity_gates;
     bool                  stopping;
 } reactor_ctx_t;
-static void reactor_epilogue(void);
+typedef void (*reactor_scope_exit_fn)(void);
+static reactor_scope_exit_fn reactor_scope_enter(void);
 
 static void reactor_control_drain(reactor_ctx_t *rc)
 {
@@ -79,8 +80,9 @@ static void reactor_control_signal(zend_async_event_t *event,
 {
     (void)callback; (void)result; (void)exception;
     reactor_ctx_t *rc = *(reactor_ctx_t **)((char *)event + event->extra_offset);
+    const reactor_scope_exit_fn scope_exit = reactor_scope_enter();
     reactor_control_drain(rc);
-    reactor_epilogue(); /* resets must flush even when no data post follows */
+    if (scope_exit != NULL) scope_exit(); /* resets must flush even when no data post follows */
 }
 
 struct reactor_pool_s {
@@ -90,18 +92,28 @@ struct reactor_pool_s {
     size_t                    mailbox_capacity; /* per-reactor inbound depth */
 };
 
-/* See reactor_pool_set_drain_epilogue. Process-wide, set once on the parent
- * before reactors run, read on each reactor thread at drain-batch end. */
-static void (*g_drain_epilogue)(void) = NULL;
+/* See reactor_pool_set_drain_scope. Process-wide, set once on the parent
+ * before reactors run, read on each reactor thread around every drain batch. */
+static void (*g_drain_scope_enter)(void) = NULL;
+static void (*g_drain_scope_exit)(void) = NULL;
 
-static void reactor_epilogue(void)
+/* Runs the enter and returns the exit to pair with it, NULL when there is no
+ * scope: the exit runs only where its enter ran, whatever the globals do in
+ * between. */
+static reactor_scope_exit_fn reactor_scope_enter(void)
 {
-    if (g_drain_epilogue != NULL) g_drain_epilogue();
+    if (g_drain_scope_enter == NULL || g_drain_scope_exit == NULL) {
+        return NULL;
+    }
+
+    g_drain_scope_enter();
+    return g_drain_scope_exit;
 }
 
-void reactor_pool_set_drain_epilogue(void (*fn)(void))
+void reactor_pool_set_drain_scope(void (*enter)(void), void (*exit)(void))
 {
-    g_drain_epilogue = fn;
+    g_drain_scope_enter = enter;
+    g_drain_scope_exit  = exit;
 }
 
 static void reactor_pool_msleep(void)
@@ -121,6 +133,8 @@ static void reactor_drain(reactor_cmd_t *items, const size_t count, void *arg)
 {
     reactor_ctx_t *const rc = (reactor_ctx_t *)arg;
     int64_t              drained = 0;
+
+    const reactor_scope_exit_fn scope_exit = reactor_scope_enter();
 
     /* dequeue already freed the ring slots; every subscribed worker may retry.
      * Wakes are bounded by the number of registered worker/ reactor pairs. */
@@ -155,10 +169,10 @@ static void reactor_drain(reactor_cmd_t *items, const size_t count, void *arg)
         drained++;
     }
 
-    /* Batch epilogue: coalesce any per-command deferred work (H3 steer flush)
-     * into one pass now that every command in this drain has run. */
-    if (g_drain_epilogue != NULL) {
-        g_drain_epilogue();
+    /* Coalesce any per-command deferred work (H3 flush) into one pass now that
+     * every command in this drain has run. */
+    if (scope_exit != NULL) {
+        scope_exit();
     }
 
     if (drained != 0) {

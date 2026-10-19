@@ -432,7 +432,7 @@ static void h3_static_fail(h3_static_state_t *state)
                 (ngtcp2_conn *)c->ngtcp2_conn, 0, s->stream_id,
                 NGHTTP3_H3_INTERNAL_ERROR);
             http3_listener_mark_flush(c->listener, c);
-            http3_listener_queue_epilogue_flush(c->listener);
+            http3_listener_request_flush(c->listener);
             return;   /* close_cb → h3_static_stream_closed → finalize */
         }
     }

@@ -59,8 +59,10 @@ apply starts the pump; pump failure remains a delivery failure.
 
 The reactor chooses one outcome. Cancellation requested before that choice
 excludes normal completion. Connection teardown finishes records for which
-ngtcp2 emits no stream-close callback. Control callbacks run the transport flush
-epilogue too: a reset does not need a later data post to reach the socket.
+ngtcp2 emits no stream-close callback. Control callbacks end with the transport
+flush too, and output queued outside any drain (a sendFile pump failure, a
+timer) wakes the reactor loop: a reset does not need a later data post or a
+client packet to reach the socket.
 
 Publication requires the terminal outcome, the ready access snapshot and zero
 wire objects. Early peer closure cannot expose an unfinished snapshot. The
