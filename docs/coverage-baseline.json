@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 27588,
-      "hit": 23698
+      "total": 27638,
+      "hit": 23730
     },
     "functions": {
-      "total": 1972,
-      "hit": 1848
+      "total": 1978,
+      "hit": 1854
     }
   },
   "files": {
@@ -252,12 +252,12 @@
     },
     "src/core/reactor_pool.c": {
       "lines": {
-        "total": 234,
-        "hit": 203
+        "total": 239,
+        "hit": 208
       },
       "functions": {
-        "total": 23,
-        "hit": 23
+        "total": 24,
+        "hit": 24
       }
     },
     "src/core/reactor_pool_test_hooks.c": {
@@ -532,12 +532,12 @@
     },
     "src/http3/http3_listener.c": {
       "lines": {
-        "total": 667,
-        "hit": 531
+        "total": 712,
+        "hit": 562
       },
       "functions": {
-        "total": 46,
-        "hit": 45
+        "total": 51,
+        "hit": 50
       }
     },
     "src/http3/http3_packet.c": {
@@ -552,8 +552,8 @@
     },
     "src/http3/http3_static_response.c": {
       "lines": {
-        "total": 247,
-        "hit": 184
+        "total": 248,
+        "hit": 188
       },
       "functions": {
         "total": 17,
@@ -772,8 +772,8 @@
     },
     "src/http_server_class.c": {
       "lines": {
-        "total": 2806,
-        "hit": 2227
+        "total": 2805,
+        "hit": 2219
       },
       "functions": {
         "total": 149,
