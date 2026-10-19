@@ -855,17 +855,11 @@ static void http_server_pool_retire_entry(void)
     http_server_do_stop(server, reason);   /* logs server.stop reason=... */
 }
 
-/* Worker thread. Both commands mean "retire"; only reload() submits a
- * replacement afterwards. */
-static void http_server_pool_ctl_wake(zend_async_event_t *event,
-                                      zend_async_event_callback_t *callback,
-                                      void *result, zend_object *exception)
+/* Worker thread. Queues the retire coroutine when a command is published and
+ * this running worker has not queued one yet. Both commands mean "retire";
+ * only reload() submits a replacement afterwards. */
+static void http_server_pool_retire_queue(http_server_object *server)
 {
-    (void)callback; (void)result; (void)exception;
-
-    http_server_object *const server =
-        *(http_server_object **) ((char *) event + event->extra_offset);
-
     if (server->pool_retire_queued || !server->running || server->stopping
         || pool_ctl_current(server->pool_ctl) == POOL_CMD_NONE) {
         return;
@@ -881,6 +875,16 @@ static void http_server_pool_ctl_wake(zend_async_event_t *event,
         co->extended_data  = server;
         ZEND_ASYNC_ENQUEUE_COROUTINE(co);
     }
+}
+
+static void http_server_pool_ctl_wake(zend_async_event_t *event,
+                                      zend_async_event_callback_t *callback,
+                                      void *result, zend_object *exception)
+{
+    (void)callback; (void)result; (void)exception;
+
+    http_server_pool_retire_queue(
+        *(http_server_object **) ((char *) event + event->extra_offset));
 }
 
 /* Worker-clone thread only: the wakeup is a libuv handle on this thread's
@@ -4840,6 +4844,14 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
      * do_stop below unpublished it, and run them after the stop. */
     if (!server->stopping) {
         http_server_worker_inbox_up(server);
+    }
+
+    /* A command published before this worker joined the control channel rang
+     * none of its slots, and a wake that came before `running` was set was
+     * dropped: nothing else would retire this worker, and reload() waits for
+     * its exit. The retire coroutine runs once await_stop suspends. */
+    if (server->pool_ctl_slot >= 0) {
+        http_server_pool_retire_queue(server);
     }
 
     bool bailout = false;
