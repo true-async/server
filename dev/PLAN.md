@@ -430,11 +430,18 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `pending` never reached zero (`core/057` on macOS after #418). The Critic
     and the Sage chose deferred release over decrementing `pending` by hand.
     `core/113`: 17 of 20 runs hang before, 0 of 50 after.
-42. `reload()` itself can wait forever for one old worker, with back-to-back
-    reloads: a worker that joins the wake channel after the RELOAD broadcast,
-    or a wake dropped before `running = true`. Not confirmed; per-worker
-    tagged prints first, php-async side included. Also: a cancelled
-    `reload()` leaves the command at RELOAD and drops the fresh shells.
+42. #422 — `reload()` waited forever for a worker that joined the control
+    channel after the RELOAD broadcast: done. Tagged prints showed the parent
+    ring slots 0 and 1 and the third worker join slot 2 with RELOAD already
+    set. A pool worker checks the command again before `await_stop`.
+    `core/114`: 9 of 20 runs hang before, 0 of 50 after.
+44. A cancelled `reload()` leaves the command at RELOAD and drops the fresh
+    shells, so the remaining workers retire and `start()` can end with no
+    workers (Critic on #419). Reproduce before any code.
+45. `h3/091` (sendFile pump failure under the reactor pool) fails on about a
+    quarter of runs on main: the client times out with no RESET. Measured
+    2026-10-19 with the test hooks build, alternating builds: 10 of 39 on main,
+    12 of 40 with #422's fix. Failed PR 423's Linux debug leg once.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
