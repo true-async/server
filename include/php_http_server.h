@@ -70,7 +70,7 @@ static zend_always_inline bool http_path_is_cwd_independent(const char *path, si
 #include "php_true_async_server.h"
 #include "core/rate_limit.h"          /* http_rl_trusted_t */
 
-#define PHP_HTTP_SERVER_VERSION "0.16.0"
+#define PHP_HTTP_SERVER_VERSION "0.17.0"
 
 /*
  * ==========================================================================

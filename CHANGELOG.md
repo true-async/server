@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-20
+
 ### Added
 
 - **A request rate limit inside the server (#414).** `HttpServer::addRateLimit(new RateLimit($requests, $perSeconds))` keeps a token bucket per client address, and a request over the limit of any rule it matches is answered `429 Too Many Requests` with `Retry-After` before any handler runs; before, an application had to count requests in its handler or in front of the server. Rules filter by path prefix (`paths()`, matched decoded and with dot segments resolved) and method (`methods()`); a request takes a token from every rule it matches only when all of them admit it. `HttpServerConfig::setTrustedProxies()` names proxies whose `X-Forwarded-For` gives the client; the header of any other peer is ignored. On HTTP/1 a refused POST or PUT is refused when its headers end, so its body is dropped as it arrives instead of buffered or written to disk: a refused 20,000-byte multipart upload left 0 temporary files mid-upload where an admitted one had 1 (`core/090`); HTTP/2 and HTTP/3 refuse after their body handling has started. A refusal is counted only when its 429 is sent: a body past `setMaxBodySize()` gets 413 instead and is not counted, and a declared `Content-Length` past it is answered 413 before any token is taken. In a WebSocket build a request carrying `Upgrade` is left to the upgrade path, takes no token unless it is a valid upgrade, and has its body dropped unread. gRPC calls over HTTP/2 and HTTP/3 get `grpc-status: 8`, a refused WebSocket upgrade or extended CONNECT gets 429, and static files a mount serves are not counted. `getTelemetry()` and `getStats()` gain `requests_rate_limited_total` and `requests_rate_limit_evictions_total`. Each rule keeps 65,536 buckets of 24 bytes per server instance by default, so a client spread over `setWorkers(N)` workers may get N times the limit. Evidence: `core/089` to `core/111` (`core/091` needs IPv6, `core/109` a WebSocket build) and the cmocka suites `RateLimit` and `RateLimitAsan` (SipHash against the reference vectors, the X-Forwarded-For walk, path matching, length bounds, check-then-commit).
@@ -1530,7 +1532,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/true-async/server/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/true-async/server/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/true-async/server/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/true-async/server/compare/v0.13.0...v0.14.0
