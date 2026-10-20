@@ -315,6 +315,10 @@ struct http_request_t {
     /* Why the form was refused, for the message of every getter that throws;
      * a string literal, so it is valid on any thread. NULL while it has not. */
     const char  *form_refused_reason;
+    /* Why the query string was refused (400: over max_input_vars or
+     * max_input_nesting_level), for the message of every query getter that
+     * throws; a string literal. NULL while it has not. The path is unaffected. */
+    const char  *query_refused_reason;
 };
 
 /* Single chunk node in the streaming body queue (linked list).

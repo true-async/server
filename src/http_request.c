@@ -805,14 +805,40 @@ static void http_request_ensure_uri_parsed(http_request_t *req)
 
     if (qslen > 0) {
         /* Percent-decoding, '+' as space, PHP array notation, the input
-         * filter, max_input_vars and arg_separator.input, as PHP populates
-         * $_GET. */
-        http_form_vars_decode(Z_ARRVAL(arr), q + 1, qslen,
-                              ZSTR_VAL(PG(arg_separator).input),
-                              PG(max_input_vars), PG(max_input_nesting_level));
+         * filter and arg_separator.input, as PHP populates $_GET. A query
+         * past max_input_vars or max_input_nesting_level is refused, as a
+         * form body is (#413): $_GET keeps what fits and warns, which a
+         * handler cannot see. */
+        switch (http_form_vars_decode(Z_ARRVAL(arr), q + 1, qslen,
+                                      ZSTR_VAL(PG(arg_separator).input),
+                                      PG(max_input_vars), PG(max_input_nesting_level))) {
+            case HTTP_FORM_VARS_TOO_MANY:
+                req->query_refused_reason = "more fields than max_input_vars";
+                break;
+            case HTTP_FORM_VARS_TOO_DEEP:
+                req->query_refused_reason = "a name nested deeper than max_input_nesting_level";
+                break;
+            default:
+                break;
+        }
     }
 
     req->query_params = Z_ARR(arr);
+}
+
+/* Parses the URI on first use; false, with HttpException 400 thrown, when the
+ * query string was refused. Every query getter throws it again. */
+static bool http_request_query_ready(http_request_t *req)
+{
+    http_request_ensure_uri_parsed(req);
+
+    if (UNEXPECTED(req->query_refused_reason != NULL)) {
+        zend_throw_exception_ex(http_exception_ce, 400, "the query string was refused: %s",
+                                req->query_refused_reason);
+        return false;
+    }
+
+    return true;
 }
 
 ZEND_METHOD(TrueAsync_HttpRequest, getPath)
@@ -829,7 +855,10 @@ ZEND_METHOD(TrueAsync_HttpRequest, getQuery)
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
     ZEND_PARSE_PARAMETERS_NONE();
 
-    http_request_ensure_uri_parsed(intern->request);
+    if (!http_request_query_ready(intern->request)) {
+        RETURN_THROWS();
+    }
+
     http_request_retval_ht(return_value, intern->request->query_params);
 }
 
@@ -845,7 +874,9 @@ ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam)
         Z_PARAM_ZVAL(default_value)
     ZEND_PARSE_PARAMETERS_END();
 
-    http_request_ensure_uri_parsed(intern->request);
+    if (!http_request_query_ready(intern->request)) {
+        RETURN_THROWS();
+    }
 
     zval *val = zend_hash_find(intern->request->query_params, name);
 

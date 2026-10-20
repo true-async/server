@@ -644,8 +644,20 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     in-thread without `--ENV--`; readMessage's wait loop threw RuntimeException
     0; no test of a handler's own status), all taken. `grpc/020`-`025` red on
     the base, 10 of 10 after; full phpt 635 passed, 2 skipped.
+48a. #413 — a query string past `max_input_vars` was cut silently. Edmond,
+    2026-10-20: refuse with 400 as a form body is. `getQuery()` and
+    `getQueryParam()` throw HttpException 400 on every call, `getPath()` is
+    unaffected; nesting past `max_input_nesting_level` is refused the same way.
+    `h1/074` red before (200 with three of four pairs), green after;
+    `http1parser/017`, `018` expected the cut and now expect the refusal. T1.
 49. #329 — the accept split on the shared listen fd. Edmond, 2026-10-20:
     possibly a Linux trait rather than a bug. Check before any code.
+    Traced 2026-10-20 (comment on #329): epoll registers a shared fd with
+    `add_wait_queue`, which puts the entry at the head of the socket's wait
+    queue, so the worker registered last is woken first and wins `accept4`.
+    3 workers, 32 sequential connections, 5 runs: shared fd [32], [30,2],
+    [29,3], [31,1], [32]; SO_REUSEPORT [13,11,8] to [16,9,7]. Linux uses
+    SO_REUSEPORT by default. Waiting on Edmond: close as a kernel trait.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
