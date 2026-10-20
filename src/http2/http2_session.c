@@ -448,8 +448,10 @@ static void http2_request_body_upgrade(http_request_t *req)
      * into req->body) before the handler's first read — there is nothing
      * left to stream and nobody will ever signal EOF on the queue, so
      * flipping body_streaming here would park the reader forever. Stay
-     * buffered; callers fall back to the req->body cursor path. */
-    if (req->body_streaming || req->complete) {
+     * buffered; callers fall back to the req->body cursor path. A refused
+     * request stays as it is too: the reads throw, and a queue that nothing
+     * will end is no place to park them. */
+    if (req->body_streaming || req->complete || req->refused_status != 0) {
         return;
     }
 
@@ -481,13 +483,14 @@ typedef enum {
 } h2_refusal_t;
 
 /* What a refusal does to the stream, by what the stream has already got.
- * WebSocket and gRPC keep the error reset: a gRPC refusal already ends in a
- * grpc-status, a separate question. A response a live handler is still
+ * WebSocket keeps the error reset: its frames have no status to carry one. A
+ * gRPC call is judged like any stream, its answer being a grpc-status
+ * (grpc_call_ensure_refusal_status). A response a live handler is still
  * writing is the one case a decided answer cannot be told from a broken one,
  * so it is cut as before. */
 static h2_refusal_t h2_judge_refusal(const http2_stream_t *stream)
 {
-    if (stream->is_websocket || stream->is_grpc) {
+    if (stream->is_websocket) {
         return H2_REFUSAL_RESET;
     }
 

@@ -643,9 +643,14 @@ static void http2_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
     if (stream->is_grpc && !Z_ISUNDEF(stream->response_zv)) {
-        grpc_call_ensure_status(Z_OBJ(stream->response_zv),
-                                coroutine->exception != NULL
-                                    || stream->handler_bailout);
+        if (stream->request != NULL && stream->request->refused_status != 0) {
+            grpc_call_ensure_refusal_status(Z_OBJ(stream->response_zv),
+                                            stream->request->refused_status);
+        } else {
+            grpc_call_ensure_status(Z_OBJ(stream->response_zv),
+                                    coroutine->exception != NULL
+                                        || stream->handler_bailout);
+        }
     }
 
     /* sendFile() handoff (issue #13). Take the descriptor before

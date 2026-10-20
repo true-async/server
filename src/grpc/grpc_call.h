@@ -39,6 +39,14 @@ void grpc_call_init_response(zend_object *response_obj, int grpc_mode);
  * fail to reach it: a thrown exception and a zend_bailout. */
 void grpc_call_ensure_status(zend_object *response_obj, bool failed);
 
+/* The call's body was refused (@p refused_status, as http_stream_exception_new
+ * takes it): grpc-status RESOURCE_EXHAUSTED for 413, as gRPC answers an
+ * over-size message, INTERNAL for the rest, whether the handler failed or not.
+ * A status the handler set stays, and then so does its message; the
+ * response's own 200 is never touched. */
+void grpc_call_ensure_refusal_status(zend_object *response_obj,
+                                     uint16_t refused_status);
+
 /* Dispose-time delivery: grpc-web → in-body trailer frame + end; streaming
  * → end_stream; zero-message → Trailers-Only commit. */
 void grpc_call_finish(zend_object *response_obj,

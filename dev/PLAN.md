@@ -635,7 +635,17 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     same condition failed 9 h3 tests without the deferral and none with it;
     full phpt 629 passed, 2 skipped. T1, no Critic.
 48. #426 — a refused gRPC request body resets the stream with no
-    `grpc-status`. Reproduce before any code.
+    `grpc-status`. Done: reproduced (curl read ENHANCE_YOUR_CALM, no status);
+    gRPC goes through #412's judgement, dispose sets grpc-status 8 (13 for a
+    500) and grpc-message unless the handler set a status, the reactor answers
+    trailers-only by `grpc_mode`, `readMessage()` throws a refusal. Critic on
+    the design (unsound: the reactor had no gRPC flag and its trailers never
+    left; a caught refusal parked readMessage) and on the diff (022 ran
+    in-thread without `--ENV--`; readMessage's wait loop threw RuntimeException
+    0; no test of a handler's own status), all taken. `grpc/020`-`025` red on
+    the base, 10 of 10 after; full phpt 635 passed, 2 skipped.
+49. #329 — the accept split on the shared listen fd. Edmond, 2026-10-20:
+    possibly a Linux trait rather than a bug. Check before any code.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is

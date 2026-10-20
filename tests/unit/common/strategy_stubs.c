@@ -45,6 +45,12 @@ void grpc_call_ensure_status(zend_object *response_obj, bool had_exception)
 	abort();
 }
 
+void grpc_call_ensure_refusal_status(zend_object *response_obj, uint16_t refused_status)
+{
+	(void) response_obj; (void) refused_status;
+	abort();
+}
+
 void grpc_call_finish(zend_object *response_obj, const grpc_finish_ops_t *ops, void *ctx)
 {
 	(void) response_obj; (void) ops; (void) ctx;
