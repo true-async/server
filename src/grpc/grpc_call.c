@@ -44,6 +44,29 @@ void grpc_call_ensure_status(zend_object *response_obj, bool failed)
         failed ? GRPC_STATUS_INTERNAL : GRPC_STATUS_OK);
 }
 
+void grpc_call_ensure_refusal_status(zend_object *response_obj,
+                                     const uint16_t refused_status)
+{
+    const HashTable *const trailers = http_response_get_trailers(response_obj);
+    const bool handler_set_status = trailers != NULL
+        && zend_hash_str_exists(trailers, "grpc-status", sizeof("grpc-status") - 1);
+
+    http_response_ensure_grpc_status(response_obj,
+        refused_status == 413 ? GRPC_STATUS_RESOURCE_EXHAUSTED : GRPC_STATUS_INTERNAL);
+
+    if (handler_set_status) {
+        return;
+    }
+
+    /* The refusal messages are printable ASCII without '%', which is what
+     * grpc-message takes unencoded; no percent-encoding is needed. */
+    const char *const message = http_stream_refusal_message(refused_status);
+
+    http_response_static_set_trailer(response_obj, "grpc-message",
+                                     sizeof("grpc-message") - 1,
+                                     message, strlen(message));
+}
+
 void grpc_call_finish(zend_object *response_obj,
                       const grpc_finish_ops_t *ops, void *ctx)
 {

@@ -222,17 +222,13 @@ typedef enum {
 } h3_refusal_t;
 
 /* What a refusal does to the stream, by what the stream has already got.
- * Mirrors h2_judge_refusal. A gRPC stream keeps the reset, its answer being
- * a grpc-status, a separate question. A response a live handler is still
- * writing is the one case a decided answer cannot be told from a broken one,
- * so it is cut as before. */
+ * Mirrors h2_judge_refusal. A gRPC call is judged like any stream, its answer
+ * being a grpc-status (grpc_call_ensure_refusal_status). A response a live
+ * handler is still writing is the one case a decided answer cannot be told
+ * from a broken one, so it is cut as before. */
 static h3_refusal_t h3_judge_refusal(const http3_connection_t *c,
                                      const http3_stream_t *s)
 {
-    if (s->is_grpc) {
-        return H3_REFUSAL_RESET;
-    }
-
     if (s->static_owned || (s->coroutine == NULL && s->response_decided)) {
         return H3_REFUSAL_FINISH;
     }
@@ -576,8 +572,9 @@ static void http3_request_body_upgrade(http_request_t *req)
 {
     /* Request already complete: body finalized into req->body, no EOF will
      * ever reach the streaming queue — upgrading now would park the reader
-     * forever. Stay buffered (see http2_request_body_upgrade). */
-    if (req->body_streaming || req->complete) {
+     * forever. Stay buffered (see http2_request_body_upgrade); so does a
+     * refused request. */
+    if (req->body_streaming || req->complete || req->refused_status != 0) {
         return;
     }
 

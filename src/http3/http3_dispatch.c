@@ -638,8 +638,23 @@ void http3_reactor_answer_refusal(http3_connection_t *c, http3_stream_t *s,
     http_response_set_protocol_version(Z_OBJ(s->response_zv), "3.0");
     http_response_set_head(Z_OBJ(s->response_zv),
                            http_request_method_is_head(s->request));
-    http_response_reset_to_error(Z_OBJ(s->response_zv), status,
-                                 http_stream_refusal_message(status));
+
+    /* No worker has seen the request, so s->is_grpc is not set yet; the
+     * mode stamped at headers-complete tells. The call is answered as a
+     * gRPC one is without a message: a Trailers-Only 200 whose headers carry
+     * the status (the trailers promoted, as grpc_call_finish does). */
+    if (s->request->grpc_mode != GRPC_MODE_NONE) {
+        zend_object *const response = Z_OBJ(s->response_zv);
+
+        grpc_call_init_response(response, s->request->grpc_mode);
+        grpc_call_ensure_refusal_status(response, status);
+        http_response_promote_trailers_to_headers(response);
+        http_response_set_committed(response);
+    } else {
+        http_response_reset_to_error(Z_OBJ(s->response_zv), status,
+                                     http_stream_refusal_message(status));
+    }
+
     s->response_decided = true;
 
     /* The HANDLED shape of http3_reactor_try_static: a serving ref keeps the
@@ -1188,8 +1203,13 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
 
     /* gRPC outcome → grpc-status trailer (policy in src/grpc/grpc_call.c). */
     if (s->is_grpc && !Z_ISUNDEF(s->response_zv)) {
-        grpc_call_ensure_status(Z_OBJ(s->response_zv),
-                                coroutine->exception != NULL || s->handler_bailout);
+        if (s->request != NULL && s->request->refused_status != 0) {
+            grpc_call_ensure_refusal_status(Z_OBJ(s->response_zv),
+                                            s->request->refused_status);
+        } else {
+            grpc_call_ensure_status(Z_OBJ(s->response_zv),
+                                    coroutine->exception != NULL || s->handler_bailout);
+        }
     }
 
     /* Streaming-vs-buffered decision (mirror of H2 dispose).

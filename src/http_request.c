@@ -384,6 +384,13 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
         RETURN_NULL();
     }
 
+    /* A refused body is incomplete: a read after the handler caught the
+     * refusal must throw it again, not park on a body that will not come or
+     * answer null as if the client had half-closed. */
+    if (http_request_body_refused(req)) {
+        RETURN_THROWS();
+    }
+
     zend_string *msg = NULL;
     bool         compressed = false;
     int          rc;
@@ -464,6 +471,12 @@ ZEND_METHOD(TrueAsync_HttpRequest, readMessage)
             }
 
             if (req->body_eof) {
+                /* A refusal that lands while this call waits ends the queue in
+                 * error; it throws its status, as the call would have at entry. */
+                if (UNEXPECTED(http_request_body_refused(req))) {
+                    RETURN_THROWS();
+                }
+
                 if (UNEXPECTED(req->body_error)) {
                     zend_throw_exception(http_server_runtime_exception_ce,
                         "gRPC request body stream error", 0);
