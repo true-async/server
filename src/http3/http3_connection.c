@@ -808,10 +808,12 @@ bool http3_connection_dispatch(
      * pkt_info that read_pkt actually consumes today. ngtcp2 masks to
      * the 2 ECN bits internally; we pass the full TOS byte through. */
     ngtcp2_pkt_info pi = { .ecn = ecn };
+    conn->in_read_pkt = true;
     int pkt_rv = ngtcp2_conn_read_pkt(
         (ngtcp2_conn *)conn->ngtcp2_conn,
         &ps.path, &pi,
         data, datalen, http3_ts_now());
+    conn->in_read_pkt = false;
 
     if (UNEXPECTED(pkt_rv != 0)) {
         http_log_state_t *st = conn->log_state;
