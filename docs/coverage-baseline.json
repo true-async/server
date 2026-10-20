@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 27757,
-      "hit": 23852
+      "total": 27778,
+      "hit": 23872
     },
     "functions": {
-      "total": 1987,
-      "hit": 1863
+      "total": 1988,
+      "hit": 1864
     }
   },
   "files": {
@@ -402,12 +402,12 @@
     },
     "src/grpc/grpc_call.c": {
       "lines": {
-        "total": 34,
-        "hit": 34
+        "total": 42,
+        "hit": 42
       },
       "functions": {
-        "total": 3,
-        "hit": 3
+        "total": 4,
+        "hit": 4
       }
     },
     "src/http1/http1_format.c": {
@@ -472,8 +472,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 975,
-        "hit": 840
+        "total": 977,
+        "hit": 842
       },
       "functions": {
         "total": 57,
@@ -492,8 +492,8 @@
     },
     "src/http3/http3_callbacks.c": {
       "lines": {
-        "total": 1014,
-        "hit": 881
+        "total": 1013,
+        "hit": 880
       },
       "functions": {
         "total": 57,
@@ -512,8 +512,8 @@
     },
     "src/http3/http3_dispatch.c": {
       "lines": {
-        "total": 530,
-        "hit": 482
+        "total": 538,
+        "hit": 490
       },
       "functions": {
         "total": 26,
@@ -523,7 +523,7 @@
     "src/http3/http3_io.c": {
       "lines": {
         "total": 281,
-        "hit": 252
+        "hit": 253
       },
       "functions": {
         "total": 8,
@@ -533,7 +533,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 712,
-        "hit": 562
+        "hit": 570
       },
       "functions": {
         "total": 51,
@@ -672,8 +672,8 @@
     },
     "src/http_request.c": {
       "lines": {
-        "total": 626,
-        "hit": 564
+        "total": 630,
+        "hit": 567
       },
       "functions": {
         "total": 55,
@@ -773,7 +773,7 @@
     "src/http_server_class.c": {
       "lines": {
         "total": 2806,
-        "hit": 2227
+        "hit": 2218
       },
       "functions": {
         "total": 149,
