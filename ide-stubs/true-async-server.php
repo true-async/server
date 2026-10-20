@@ -2349,7 +2349,14 @@ final class HttpRequest
      * Get all query parameters as an associative array.
      * Supports PHP array notation: foo[bar], foo[]
      *
+     * A query string over a limit is refused rather than cut, as a form body
+     * is: more pairs than max_input_vars, or a name nested deeper than
+     * max_input_nesting_level, makes this and getQueryParam() throw
+     * {@see HttpException} 400 on every call, and uncaught it answers the
+     * request with 400. $_GET keeps what fits instead. getPath() still works.
+     *
      * @return array<string, mixed>
+     * @throws HttpException 400 when the query string was refused.
      */
     public function getQuery(): array {}
 
@@ -2359,6 +2366,7 @@ final class HttpRequest
      * @param string $name  Parameter name
      * @param mixed  $default  Value to return when the parameter is absent (default: null)
      * @return mixed
+     * @throws HttpException 400 when the query string was refused (see getQuery()).
      */
     public function getQueryParam(string $name, mixed $default = null): mixed {}
 
