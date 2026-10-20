@@ -225,6 +225,22 @@ void http3_connection_drain_out(http3_connection_t *c)
         return;
     }
 
+    /* Called back from inside ngtcp2_conn_read_pkt (a stream close that
+     * finishes a static or sendFile response, a refusal answered in place):
+     * ngtcp2 forbids writev_stream there. The read path flushes the
+     * connection once the datagram is processed; inside a poll tick or a
+     * reactor drain the request below only links the listener. */
+    if (c->in_read_pkt) {
+        http3_listener_mark_flush(c->listener, c);
+        http3_listener_request_flush(c->listener);
+        return;
+    }
+
+    /* The debug build's check that nothing below writes from a callback;
+     * h3 tests that finish a static or sendFile response trip it without
+     * the return above. */
+    ZEND_ASSERT(!c->in_read_pkt);
+
     http3_packet_stats_t *const stats = http3_listener_packet_stats(c->listener);
 
     /* Loop until ngtcp2 has nothing to emit. writev_stream returns the
@@ -662,6 +678,9 @@ void http3_connection_emit_close(http3_connection_t *c)
         (const struct sockaddr *)&c->peer,    c->peer_len,
         NULL);
     ngtcp2_pkt_info pi = {0};
+
+    /* ngtcp2 forbids writing from its callbacks; no caller closes from one. */
+    ZEND_ASSERT(!c->in_read_pkt);
 
     uint8_t buf[1280];
     ngtcp2_ssize n = ngtcp2_conn_write_connection_close(

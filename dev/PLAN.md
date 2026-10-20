@@ -629,6 +629,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     dispose tail, `drain_out` included, from nghttp3's stream_close inside
     `ngtcp2_conn_read_pkt`; ngtcp2 forbids writing from its callbacks. Found by
     the Critic on #427. Edmond, 2026-10-20: its own issue, fixed next.
+    Done: `in_read_pkt` is set around `ngtcp2_conn_read_pkt`, and
+    `http3_connection_drain_out` called while it is set marks the connection
+    for the read path's flush instead of writing. A debug assertion of the
+    same condition failed 9 h3 tests without the deferral and none with it;
+    full phpt 629 passed, 2 skipped. T1, no Critic.
 48. #426 — a refused gRPC request body resets the stream with no
     `grpc-status`. Reproduce before any code.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:

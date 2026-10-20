@@ -162,6 +162,12 @@ struct _http3_connection_s {
      * callback from re-entering a dying conn. */
     bool closed;
 
+    /* Set while ngtcp2_conn_read_pkt runs. ngtcp2 and nghttp3 call back into
+     * the server from inside it, and ngtcp2 forbids writing packets from its
+     * callbacks: http3_connection_drain_out leaves the output to the read
+     * path's flush while this is set. */
+    bool in_read_pkt;
+
     /* Set once http3_connection_emit_close has been called so teardown
      * does not emit a second CONNECTION_CLOSE on the same conn. */
     bool sent_connection_close;
