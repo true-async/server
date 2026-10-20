@@ -657,7 +657,12 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     queue, so the worker registered last is woken first and wins `accept4`.
     3 workers, 32 sequential connections, 5 runs: shared fd [32], [30,2],
     [29,3], [31,1], [32]; SO_REUSEPORT [13,11,8] to [16,9,7]. Linux uses
-    SO_REUSEPORT by default. Waiting on Edmond: close as a kernel trait.
+    SO_REUSEPORT by default. Edmond, 2026-10-20: closed as not planned, a
+    kernel trait; reopen on a measurement from macOS or Windows.
+50. Release 0.17.0 (asked for by Edmond, 2026-10-20): every open defect closed
+    (#412, #413, #424, #426, #428 merged; #329 closed). Version bump, CHANGELOG
+    section, IDE stubs checked against the stubs (31 docblocks changed since
+    0.16.0, all match), tag `v0.17.0` with notes. `~/releases` not touched.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
