@@ -233,7 +233,7 @@ epilogue (an eventfd write per pooled response batch) and a direct drain at
       handoff: PR 425 merged by Edmond's word on 2026-10-19 as 44db002, every
         check green including `WINDOWS_X64_ZTS_RELEASE`; #424 closed by the merge.
 
-## S6 — A refused request body answers with its status on HTTP/2 and HTTP/3 (#412, item 46)  [in progress]
+## S6 — A refused request body answers with its status on HTTP/2 and HTTP/3 (#412, item 46)  [done]
 
 Goal: a body refused by the transport (over `setMaxBodySize()`, a multipart form
 over `max_input_vars` or malformed, out of memory) reaches an HTTP/2 or HTTP/3
@@ -334,10 +334,16 @@ takes the HttpException code 400-599 as H1 and H2 do, for every exception.
         2 skipped, 0 failed; cmocka 24 of 24 after unit stubs for the new
         response calls. Reactor threads read `max_body_size` from
         `http3_reactor_ctx_t`.
-- [~] S6.4 Docs, CHANGELOG, PR, CI green on every platform
+- [x] S6.4 Docs, CHANGELOG, PR, CI green on every platform
       done: setMaxBodySize docs and USAGE.md describe the answer; PR merged;
         #412 closed; the gRPC refusal has its own issue
       tier: T1 · role: —
+      handoff: PR 427 merged as f1932f7, all 8 checks green after a second run
+        (the first failed `Fuzz embedded` at link: three stubs added to
+        `fuzz/fuzz_stubs.c`). USAGE.md has no body-limit section; the stub
+        docblocks of setMaxBodySize and getPost carry the change. #412 closed;
+        gRPC split out as #426; the Critic's pre-existing H3 `on_done` finding
+        is #428 (item 47).
 
 ## Next
 
@@ -618,7 +624,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     done: PR 425 (44db002).
 46. #412 — a refused HTTP/2 or HTTP/3 body reaches the client as a reset with
     no status. Stage S6. #413 (a query string past `max_input_vars`) waits for
-    it: its refusal happens after the handler started too.
+    it: its refusal happens after the handler started too. Done: PR 427.
+47. #428 — on HTTP/3 a finished static or `sendFile()` transfer runs the full
+    dispose tail, `drain_out` included, from nghttp3's stream_close inside
+    `ngtcp2_conn_read_pkt`; ngtcp2 forbids writing from its callbacks. Found by
+    the Critic on #427. Edmond, 2026-10-20: its own issue, fixed next.
+48. #426 — a refused gRPC request body resets the stream with no
+    `grpc-status`. Reproduce before any code.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
