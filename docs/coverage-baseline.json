@@ -1,12 +1,12 @@
 {
   "totals": {
     "lines": {
-      "total": 27899,
-      "hit": 23989
+      "total": 27929,
+      "hit": 24014
     },
     "functions": {
-      "total": 1998,
-      "hit": 1874
+      "total": 2000,
+      "hit": 1876
     }
   },
   "files": {
@@ -152,8 +152,8 @@
     },
     "src/core/http_connection.c": {
       "lines": {
-        "total": 1294,
-        "hit": 1086
+        "total": 1296,
+        "hit": 1088
       },
       "functions": {
         "total": 82,
@@ -323,7 +323,7 @@
     "src/core/thread_queue.cc": {
       "lines": {
         "total": 122,
-        "hit": 98
+        "hit": 99
       },
       "functions": {
         "total": 30,
@@ -342,8 +342,8 @@
     },
     "src/core/worker_dispatch.c": {
       "lines": {
-        "total": 696,
-        "hit": 601
+        "total": 698,
+        "hit": 603
       },
       "functions": {
         "total": 36,
@@ -482,8 +482,8 @@
     },
     "src/http2/http2_strategy.c": {
       "lines": {
-        "total": 981,
-        "hit": 843
+        "total": 983,
+        "hit": 845
       },
       "functions": {
         "total": 57,
@@ -522,8 +522,8 @@
     },
     "src/http3/http3_dispatch.c": {
       "lines": {
-        "total": 540,
-        "hit": 490
+        "total": 542,
+        "hit": 492
       },
       "functions": {
         "total": 26,
@@ -543,7 +543,7 @@
     "src/http3/http3_listener.c": {
       "lines": {
         "total": 712,
-        "hit": 569
+        "hit": 563
       },
       "functions": {
         "total": 51,
@@ -732,12 +732,12 @@
     },
     "src/http_response_server_api.c": {
       "lines": {
-        "total": 281,
-        "hit": 255
+        "total": 314,
+        "hit": 288
       },
       "functions": {
-        "total": 44,
-        "hit": 39
+        "total": 46,
+        "hit": 41
       }
     },
     "src/http_rfc5987.c": {
@@ -952,8 +952,8 @@
     },
     "src/websocket/ws_dispatch.c": {
       "lines": {
-        "total": 230,
-        "hit": 199
+        "total": 219,
+        "hit": 188
       },
       "functions": {
         "total": 10,
