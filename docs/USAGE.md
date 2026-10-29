@@ -771,9 +771,11 @@ $server->start();                  // returns at the same moment
 
 ### Caveats
 
-- **`SO_REUSEPORT` is Linux/BSD-only.** On Windows libuv falls back to
-  a single accept thread; workers > 1 will compile but provide no
-  parallelism.
+- **`SO_REUSEPORT` is Linux/BSD-only.** On Windows every worker accepts
+  from its own duplicate of one shared socket, and connections spread
+  unevenly: under light load one worker may take them all. CPU-bound
+  handlers still scale, 2.8 times the throughput on 4 workers in our
+  measurement (#375).
 - **No worker init hook.** State that's expensive to build (preloaded
   fixtures, opcache warm-up) lives in your handler closure's by-value
   captures; transfer_obj clones it once per worker. If you need an

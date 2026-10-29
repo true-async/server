@@ -158,13 +158,17 @@ Notes: dev/plans/S3.md
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
-- [ ] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
+- [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
         23 (`dev/plans/S3.md`, S3.5)
       done: the cause found (shared socket, one AcceptEx at a time, or the
         reactor) with the failing run named; the pool spreads or the limit is
         decided in `dev/DECISIONS.md`; USAGE.md:688 states the measured behaviour
       tier: T2 · role: Critic
+      handoff: not a defect; #375 closed as not planned on 2026-10-06. Under CPU
+        load the pool scales: 12.88 / 21.45 / 36.13 req/s and 1.00 / 1.99 / 3.90
+        cores for 1 / 2 / 4 workers. The uneven accept split stays, recorded in
+        `dev/DECISIONS.md`; the cause was not looked for.
 
 ## S5 — HTTP/3 output queued outside a tick waits for an unrelated event (#424, item 45)  [done]
 
