@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`getQueryParam()` finds a numeric name (#433).** `getQuery()` keys `?5=five` under the integer 5, as `$_GET` does, and `getQueryParam('5')` searched string keys only, so it returned `null`; it now finds the value (`http1parser/020`).
+
 ## [0.17.0] - 2026-10-20
 
 ### Added
