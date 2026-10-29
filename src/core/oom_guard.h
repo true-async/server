@@ -13,6 +13,7 @@
 #include "zend_alloc.h"
 #include "zend_globals.h"
 #include "zend_globals_macros.h"
+#include "zend_exceptions.h"
 #include "log/http_log.h"
 
 /* A request body is buffered with fallible allocations (femalloc,
@@ -33,6 +34,47 @@
  * allocation past the limit queues the error again. An error already pending
  * when the scope began belongs to the code that caused it and is left in
  * place. */
+/* Clears EG(delayed_oom), pending or already reported. zend_mm_oom_info_dtor()
+ * does the same, but it is not exported. */
+static zend_always_inline void http_oom_drop(void)
+{
+    zend_oom_info *const oom = &EG(delayed_oom);
+
+    if (oom->message != NULL) {
+        zend_string_release(oom->message);
+        oom->message = NULL;
+    }
+
+    if (oom->filename != NULL) {
+        zend_string_release(oom->filename);
+        oom->filename = NULL;
+    }
+
+    oom->lineno = 0;
+    oom->state  = ZEND_OOM_STATE_NONE;
+}
+
+/* After a user handler returns: true when it passed memory_limit. The engine
+ * has then reported the fatal error and unwound the handler with an exit,
+ * which leaves the same engine state as the bailout a fatal error caused
+ * before php-src 3584a98bda0, and the frames that held the memory are gone.
+ * Clears the exit and the error state, so the caller treats the handler as
+ * bailed out (500, one request) instead of php-async ending the worker for a
+ * memory-limit error left pending in the coroutine. */
+static zend_always_inline bool http_oom_take_handler_fatal(void)
+{
+    if (EXPECTED(!ZEND_HAS_OOM())) {
+        return false;
+    }
+
+    if (EG(exception) != NULL && zend_is_unwind_exit(EG(exception))) {
+        zend_clear_exception();
+    }
+
+    http_oom_drop();
+    return true;
+}
+
 typedef struct {
     bool pending_before;
 } http_oom_scope_t;
@@ -57,24 +99,11 @@ static zend_always_inline bool http_oom_scope_end(const http_oom_scope_t *scope,
         return false;
     }
 
-    zend_oom_info *const oom = &EG(delayed_oom);
+    const zend_oom_info *const oom = &EG(delayed_oom);
 
     http_logf_warn(log, "request body refused: %s",
                    oom->message != NULL ? ZSTR_VAL(oom->message) : "memory_limit exhausted");
-
-    /* zend_mm_oom_info_dtor() does the same, but it is not exported. */
-    if (oom->message != NULL) {
-        zend_string_release(oom->message);
-        oom->message = NULL;
-    }
-
-    if (oom->filename != NULL) {
-        zend_string_release(oom->filename);
-        oom->filename = NULL;
-    }
-
-    oom->lineno = 0;
-    oom->state  = ZEND_OOM_STATE_NONE;
+    http_oom_drop();
     return true;
 }
 
