@@ -19,6 +19,7 @@
 #include "php_http_server.h"                 /* http_server_object accessors, response API */
 #include "core/http_connection.h"            /* http_request_handler_coroutine_new */
 #include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #include "core/http_protocol_handlers.h"     /* http_protocol_get_handler */
 #include "http1/http_parser.h"               /* http_request_t, http_request_destroy */
 #include "zend_exceptions.h"                 /* zend_clear_exception */
@@ -334,6 +335,12 @@ static void worker_dispatch_handler(void)
         http_bailout_state_restore(&bailout_state);
         bailout = true;
     } zend_end_try();
+
+    /* A handler past memory_limit is unwound with an exit, not a bailout
+     * (core/oom_guard.h); it fails this request alone, as a bailout does. */
+    if (!bailout && UNEXPECTED(http_oom_take_handler_fatal())) {
+        bailout = true;
+    }
 
     if (UNEXPECTED(bailout)) {
         ctx->handler_bailout = true;

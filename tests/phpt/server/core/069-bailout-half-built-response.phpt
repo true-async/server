@@ -15,11 +15,11 @@ log_errors=0
 --FILE--
 <?php
 /* The handler writes a status and part of a body, then exhausts memory_limit,
- * which is an E_ERROR and therefore a zend_bailout. The firewall in each
- * handler entry catches the longjmp and records it, but only HTTP/1 read that
- * record on the buffered path: HTTP/2 committed the response object as the
- * handler had left it, so the peer got a complete 200 over a body that stops
- * where the handler died.
+ * which is an E_ERROR: the engine unwinds the handler with an exit (on PHP
+ * before 8.6, a zend_bailout). The firewall in each handler entry records
+ * either as a bailout, but only HTTP/1 read that record on the buffered
+ * path: HTTP/2 committed the response object as the handler had left it, so
+ * the peer got a complete 200 over a body that stops where the handler died.
  *
  * Both protocols must answer 500 here. The body is asserted too — a 500 whose
  * body is still 'half-built' would mean the status was rewritten over a body

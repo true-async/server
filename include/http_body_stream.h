@@ -32,6 +32,14 @@
  * Returns false on alloc failure (req->body_error is set). */
 bool http_body_stream_push(http_request_t *req, zend_string *data);
 
+/* Push a copy of `len` bytes. The copy is a fallible allocation: past
+ * memory_limit it answers false, logs the refusal to `log` (NULL: nowhere)
+ * and drops the delayed error (core/oom_guard.h), and the caller refuses the
+ * request as on any other false. */
+struct http_log_state;
+bool http_body_stream_push_bytes(http_request_t *req, const char *data, size_t len,
+                                 struct http_log_state *log);
+
 /* Mark end-of-stream. Idempotent. Fires body_data_event so a parked
  * readBody() wakes and returns null. */
 void http_body_stream_close(http_request_t *req);

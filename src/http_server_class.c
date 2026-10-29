@@ -577,6 +577,9 @@ struct http_server_object {
      * (issue #74). Belongs to one run: start() clears it with each new
      * server_scope, or a restarted server skips its drain. */
     bool                     scope_drained;
+    /* Set by http_server_teardown. A pool worker tears its clone down before
+     * its task completes, whether or not the object is freed then. */
+    bool                     torn_down;
     /* Set in transfer_obj LOAD when this object was constructed by the
      * built-in worker pool (issue #11) — start() skips re-spawning the
      * pool and runs the standalone event loop. */
@@ -1884,10 +1887,29 @@ ZEND_METHOD(TrueAsync_HttpServer, __construct)
 }
 /* }}} */
 
+static void http_server_teardown(http_server_object *server);
+
+/* Throws when the object was torn down while still referenced (a pool
+ * worker's clone after its run): its config and handlers are gone. */
+static bool http_server_refuse_torn_down(const http_server_object *server)
+{
+    if (EXPECTED(!server->torn_down)) {
+        return false;
+    }
+
+    zend_throw_exception(http_server_runtime_exception_ce,
+        "Server is torn down: its pool worker has finished", 0);
+    return true;
+}
+
 /* {{{ proto HttpServer::addHttpHandler(callable $handler): static */
 ZEND_METHOD(TrueAsync_HttpServer, addHttpHandler)
 {
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
 
     if (server->running) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -1919,6 +1941,10 @@ ZEND_METHOD(TrueAsync_HttpServer, addStaticHandler)
     ZEND_PARSE_PARAMETERS_END();
 
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
 
     if (server->running) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -1993,6 +2019,10 @@ ZEND_METHOD(TrueAsync_HttpServer, addRateLimit)
 
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
+
     if (server->running) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot add a rate limit while server is running", 0);
@@ -2011,6 +2041,10 @@ ZEND_METHOD(TrueAsync_HttpServer, addRateLimit)
 ZEND_METHOD(TrueAsync_HttpServer, addWebSocketHandler)
 {
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
 
     if (server->running) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -2035,6 +2069,10 @@ ZEND_METHOD(TrueAsync_HttpServer, addHttp2Handler)
 {
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
+
     if (server->running) {
         zend_throw_exception(http_server_runtime_exception_ce,
             "Cannot add handler while server is running", 0);
@@ -2056,6 +2094,10 @@ ZEND_METHOD(TrueAsync_HttpServer, addHttp2Handler)
 ZEND_METHOD(TrueAsync_HttpServer, addGrpcHandler)
 {
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
 
     if (server->running) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -2624,9 +2666,22 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
         bailout = true;
     } zend_end_try();
 
-    /* Complete the clone destructor before the dispatcher can resolve this
-     * task. Do not catch-and-return from a bailout inside the destructor: that
-     * would falsely acknowledge quiescence with live gates/producers. */
+    /* Tear the clone down before the dispatcher can resolve this task: the
+     * parent destroys the reactor pool once every task is done, and the
+     * clone's delivery owner still points at it. Do not catch-and-return from
+     * a bailout inside the teardown: that would acknowledge quiescence with
+     * live gates/producers.
+     *
+     * The release below does not always free the clone: a bailout skips
+     * zend_call_function's unpin of $this, and a handler that captured the
+     * server makes a cycle. A clone that lives on to request shutdown would
+     * keep this thread's loop running with an armed listener, and request
+     * shutdown waits for that loop. On a clean exit the run has released
+     * nearly everything already. */
+    if (Z_TYPE_P(server_zv) == IS_OBJECT) {
+        http_server_teardown(Z_HTTP_SERVER_P(server_zv));
+    }
+
     zval_ptr_dtor(server_zv);
     if (bailout) {
         zend_throw_exception(http_server_runtime_exception_ce,
@@ -4815,6 +4870,11 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
         http_rate_limits_log_start(server->rate_limits, cfg, &server->log_state);
     }
 
+    /* The listeners are armed and `running` is not set yet. */
+    if (server->is_worker_clone) {
+        fiu_do_on("server/pool/worker_bound_bailout", zend_bailout());
+    }
+
     server->starting = false;
     server->running = true;
     current_server = server;
@@ -4944,6 +5004,10 @@ ZEND_METHOD(TrueAsync_HttpServer, start)
     ZEND_PARSE_PARAMETERS_NONE();
 
     http_server_object *const server = Z_HTTP_SERVER_P(ZEND_THIS);
+
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
 
     /* stop() has cleared `running`, and the run it ended is still draining the
      * scope a handler calling this runs in: a second run would release that
@@ -6112,6 +6176,10 @@ ZEND_METHOD(TrueAsync_HttpServer, getConfig)
 
     http_server_object *server = Z_HTTP_SERVER_P(ZEND_THIS);
 
+    if (http_server_refuse_torn_down(server)) {
+        return;
+    }
+
     RETURN_ZVAL(&server->config, 1, 0);
 }
 /* }}} */
@@ -6405,52 +6473,58 @@ static HashTable *http_server_get_gc(zend_object *obj, zval **table, int *n)
 typedef struct http_server_transit_static http_server_transit_static_t;
 static void http_server_transit_static_release(http_server_transit_static_t *t);
 
-static void http_server_free(zend_object *obj)
+/* Everything http_server_free does short of freeing the wrapper: stops the
+ * run, closes the transport, drains and releases the scope, frees the C-side
+ * resources. A second call is a no-op; the flag is set first, so a bailout
+ * part-way through leaks the rest instead of letting the free handler free it
+ * twice. It runs from the free handler, or earlier from a pool worker once its
+ * start() returns or bails out, on the coroutine the run was on, so the drain
+ * and the delivery owner close can still suspend. The object may outlive it:
+ * its fields are left empty, not dangling; start(), getConfig() and the add*
+ * methods refuse it, the others read the empty state. Nothing may allocate
+ * into a torn-down object: the free handler will not run this again. */
+static void http_server_teardown(http_server_object *server)
 {
-    struct http_server_php *php = http_server_php_from_obj(obj);
-    http_server_object *server = php->server;
-
-    /* The wrapper is going away. Live conns still hold refs on the
-     * C-state; we no longer need to NULL their back-pointers because
-     * the C-state outlives this call until the last conn releases.
-     * The libuv shutdown drain that fires post-wrapper-free now sees
-     * a valid (still-refcounted) C-state. The C-state's own teardown
-     * (listeners, scope, config, TLS ctx) still happens HERE — that's
-     * the user-facing "destroy the server" semantic and shouldn't
-     * wait on conn lifetimes. */
-
-    /* Stop server if running */
-    if (server->running) {
-        server->stopping = true;
-
-        /* Stop the deadline watchdog before tearing down listeners —
-         * a tick firing during shutdown could try to force-close a
-         * conn whose io has already been disposed. */
-        http_server_deadline_tick_stop(server);
-        http_server_pool_ctl_leave(server);
-
-        for (size_t i = 0; i < server->listener_count; i++) {
-            http_server_listener_release(&server->listeners[i]);
-        }
-
-#ifdef HAVE_HTTP_SERVER_HTTP3
-        for (size_t i = 0; i < server->http3_listener_count; i++) {
-            if (server->http3_listeners[i]) {
-                http3_listener_destroy(server->http3_listeners[i]);
-                server->http3_listeners[i] = NULL;
-            }
-        }
-
-        server->http3_listener_count = 0;
-#endif
-
-        server->running = false;
+    if (server->torn_down) {
+        return;
     }
 
-    /* Worker clone: leave the control channel and drop our ref (#117). The
-     * parent's ref is dropped in start_pool, so when a cohort outlives a
-     * cancelled parent the last worker to go frees the channel. */
+    server->torn_down = true;
+
+    if (server->running) {
+        server->stopping = true;
+    }
+
+    /* Stop the deadline watchdog before tearing down listeners — a tick firing
+     * during shutdown could try to force-close a conn whose io has already
+     * been disposed. A worker clone also leaves the control channel here, so
+     * the parent holds no wakeup into a loop that is about to close; the
+     * channel ref itself is dropped below (#117). */
+    http_server_deadline_tick_stop(server);
     http_server_pool_ctl_leave(server);
+
+    /* Not under `running`: start() binds the listeners before it sets it, and
+     * a bailout in between leaves them armed. A released slot is a no-op. */
+    for (size_t i = 0; i < server->listener_count; i++) {
+        http_server_listener_release(&server->listeners[i]);
+    }
+
+#ifdef HAVE_HTTP_SERVER_HTTP3
+    for (size_t i = 0; i < server->http3_listener_count; i++) {
+        if (server->http3_listeners[i]) {
+            http3_listener_destroy(server->http3_listeners[i]);
+            server->http3_listeners[i] = NULL;
+        }
+    }
+
+    server->http3_listener_count = 0;
+#endif
+
+    server->running = false;
+
+    /* Worker clone: drop our channel ref (#117). The parent's ref is dropped in
+     * start_pool, so when a cohort outlives a cancelled parent the last worker
+     * to go frees the channel. */
     pool_ctl_release(server->pool_ctl);
     server->pool_ctl = NULL;
 
@@ -6528,6 +6602,9 @@ static void http_server_free(zend_object *obj)
     response_delivery_owner_close(worker_inbox_delivery_owner(server->worker_inbox));
     http_log_server_stop(&server->log_state);
     zval_ptr_dtor(&server->config);
+    /* http_server_get_config tests the type: left IS_OBJECT, the freed config
+     * would reach every reader of an object that outlives its teardown. */
+    ZVAL_UNDEF(&server->config);
 
     /* Reactor pool. Normally torn down in the start_pool cleanup path; this is
      * the defensive catch-all if the server is freed without a clean pool
@@ -6573,8 +6650,10 @@ static void http_server_free(zend_object *obj)
     /* start_pool's cleanup empties it while pool_await_state is alive. */
     ZEND_ASSERT(server->pool_retired == NULL);
 
-    /* Destroy protocol handlers */
+    /* Destroy protocol handlers; an empty table again, for get_gc on an object
+     * that outlives its teardown. */
     http_protocol_handlers_destroy(&server->protocol_handlers);
+    http_protocol_handlers_init(&server->protocol_handlers);
 
     /* Release static handler refs (issue #13). Each entry in
      * static_handler_mounts is a refcounted persistent shared snapshot;
@@ -6622,6 +6701,19 @@ static void http_server_free(zend_object *obj)
         http_static_cache_destroy(server->static_cache);
         server->static_cache = NULL;
     }
+}
+
+static void http_server_free(zend_object *obj)
+{
+    struct http_server_php *php = http_server_php_from_obj(obj);
+    http_server_object *server = php->server;
+
+    /* Live conns still hold refs on the C-state, which outlives this call
+     * until the last of them releases; the libuv shutdown drain that fires
+     * after the wrapper is gone sees a valid C-state. The listeners, scope,
+     * config and TLS ctx go in this call, not with the last conn: that is the
+     * user-facing "destroy the server" semantic. */
+    http_server_teardown(server);
 
     /* Destroy the std object — the PHP-side resources die with the
      * wrapper. The C-state stays alive until the last conn releases. */
@@ -6780,6 +6872,11 @@ static zend_object *http_server_transfer_obj(
 
     if (kind == ZEND_OBJECT_TRANSFER) {
         http_server_object *src = http_server_from_obj(object);
+
+        if (src->torn_down) {
+            ctx->error = "Cannot transfer HttpServer: it is torn down";
+            return NULL;
+        }
 
         /* The pool parent is exempt: it owns no live listeners — `running` only
          * means it awaits its workers — and reload() re-transfers fresh shells
