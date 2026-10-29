@@ -22,6 +22,7 @@
 
 #include "core/http_connection.h"
 #include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #include "core/http_connection_internal.h"  /* http_connection_tls_fsm_send_plaintext_atomic */
 #include "core/http_protocol_strategy.h"
 #include "core/http_protocol_handlers.h"
@@ -367,6 +368,12 @@ static void ws_handler_coroutine_entry(void)
     }
 
     zend_end_try();
+
+    /* A handler past memory_limit is unwound with an exit, not a bailout
+     * (core/oom_guard.h); it fails this request alone, as a bailout does. */
+    if (!ctx->handler_bailout && UNEXPECTED(http_oom_take_handler_fatal())) {
+        ctx->handler_bailout = 1;
+    }
 
     if (UNEXPECTED(ctx->handler_bailout)) {
         const http_request_t *const req = ctx->req;

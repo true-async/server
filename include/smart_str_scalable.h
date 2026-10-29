@@ -31,11 +31,16 @@
  * Use when the final size is unknown (chunked H1 request body,
  * streaming response write). When the size IS known, a single
  * smart_str_alloc(buf, size, 0) up front is still the right call.
+ *
+ * `fallible`: past memory_limit answer false instead of growing, with a
+ * delayed memory-limit error queued (core/oom_guard.h). Not fallible, it
+ * always answers true.
  */
-static zend_always_inline void
+static zend_always_inline bool
 http_smart_str_append_scalable(smart_str *buf,
                                const char *data,
-                               const size_t len)
+                               const size_t len,
+                               const bool fallible)
 {
     const size_t cur   = buf->s != NULL ? ZSTR_LEN(buf->s) : 0;
     const size_t alloc = buf->s != NULL ? buf->a : 0;
@@ -55,13 +60,15 @@ http_smart_str_append_scalable(smart_str *buf,
             reserve *= 2u;
         }
         /* smart_str_alloc grows str->a to at least cur + delta. Compute
-         * delta so final capacity hits `reserve`. */
-        if (reserve > cur) {
-            (void)smart_str_alloc(buf, reserve - cur, 0);
+         * delta so final capacity hits `reserve`. A fallible reserve that
+         * would pass memory_limit refuses the append even when the exact
+         * size would fit: the refusal has already queued the error. */
+        if (reserve > cur && smart_str_falloc(buf, reserve - cur, 0, fallible) == (size_t)-1) {
+            return false;
         }
     }
 
-    smart_str_appendl(buf, data, len);
+    return smart_str_fappendl_ex(buf, data, len, 0, fallible);
 }
 
 #endif /* HTTP_SERVER_SMART_STR_SCALABLE_H */

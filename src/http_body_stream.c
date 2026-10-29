@@ -12,6 +12,7 @@
 #include "Zend/zend_string.h"
 #include "Zend/zend_alloc.h"
 #include "core/async_plain_event.h"
+#include "core/oom_guard.h"
 
 #ifdef HAVE_HTTP2
 #include <nghttp2/nghttp2.h>
@@ -61,6 +62,33 @@ bool http_body_stream_push(http_request_t *req, zend_string *data)
 
     fire_data_event(req);
     return true;
+}
+
+bool http_body_stream_push_bytes(http_request_t *req, const char *data, const size_t len,
+                                 http_log_state_t *log)
+{
+    http_oom_scope_t oom_scope;
+    http_oom_scope_begin(&oom_scope);
+
+    zend_string *const chunk = zend_string_falloc(len, 0, true);
+
+    if (chunk != NULL) {
+        memcpy(ZSTR_VAL(chunk), data, len);
+        ZSTR_VAL(chunk)[len] = '\0';
+    }
+
+    if (UNEXPECTED(http_oom_scope_end(&oom_scope, log) || chunk == NULL)) {
+        if (chunk != NULL) {
+            zend_string_release(chunk);
+        }
+
+        return false;
+    }
+
+    const bool pushed = http_body_stream_push(req, chunk);
+
+    zend_string_release(chunk);
+    return pushed;
 }
 
 void http_body_stream_close(http_request_t *req)

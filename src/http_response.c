@@ -927,8 +927,8 @@ ZEND_METHOD(TrueAsync_HttpResponse, appendBody)
      * flips to doubling above 2 MiB so a handler appending a 256 MiB body
      * doesn't take 40 k mremap calls. See smart_str_scalable.h. */
     response_clear_body_view(response);
-    http_smart_str_append_scalable(&response->body,
-                                   ZSTR_VAL(data), ZSTR_LEN(data));
+    (void)http_smart_str_append_scalable(&response->body,
+                                         ZSTR_VAL(data), ZSTR_LEN(data), false);
 
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }

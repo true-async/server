@@ -31,6 +31,7 @@
 #include "http_response_internal.h"  /* http_response_take_send_file */
 #include "core/async_plain_event.h"
 #include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #include "core/rate_limit_php.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
@@ -3184,6 +3185,12 @@ void http_handler_coroutine_entry(void)
     }
 
     zend_end_try();
+
+    /* A handler past memory_limit is unwound with an exit, not a bailout
+     * (core/oom_guard.h); it fails this request alone, as a bailout does. */
+    if (!ctx->handler_bailout && UNEXPECTED(http_oom_take_handler_fatal())) {
+        ctx->handler_bailout = true;
+    }
 
     if (UNEXPECTED(ctx->handler_bailout)) {
         const char *m = (req && req->method) ? ZSTR_VAL(req->method) : "?";

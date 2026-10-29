@@ -16,7 +16,7 @@
 #include "Zend/zend_hrtime.h"
 #include "php_http_server.h"
 #include "core/http_connection.h"
-#include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #include "core/http_protocol_handlers.h"  /* http_protocol_has_handler (RFC 8441 gate) */
 #ifdef HAVE_HTTP_SERVER_WEBSOCKET
 # include "websocket/ws_session.h"  /* ws_session_feed (RFC 8441 inbound DATA) */
@@ -476,6 +476,12 @@ static void http2_request_body_upgrade(http_request_t *req)
     req->body_streaming = true;
 }
 
+/* Where a refused body is logged; NULL logs nowhere. */
+static http_log_state_t *h2_log_state(const http2_session_t *session)
+{
+    return session->conn != NULL ? session->conn->log_state : NULL;
+}
+
 typedef enum {
     H2_REFUSAL_RESET,    /* nothing to protect: the error RST_STREAM */
     H2_REFUSAL_FINISH,   /* a response is decided: deliver it, then RST_STREAM(NO_ERROR) */
@@ -640,21 +646,17 @@ static int h2_feed_multipart(http2_session_t *session,
                                 NGHTTP2_ENHANCE_YOUR_CALM, 413, len);
     }
 
-    /* Field values are accumulated with emalloc, so memory_limit can bail
-     * out mid-feed; see the buffered branch of cb_on_data_chunk_recv. */
-    volatile ssize_t processed = 0;
-    volatile bool    oom       = false;
-    http_bailout_state_t bailout_state;
-    http_bailout_state_save(&bailout_state);
+    /* Field values are accumulated with fallible allocations; see the
+     * buffered branch of cb_on_data_chunk_recv. */
+    http_oom_scope_t oom_scope;
+    http_oom_scope_begin(&oom_scope);
 
-    zend_try {
-        processed = mp_processor_feed(processor, (const char *)data, len);
-    } zend_catch {
-        http_bailout_state_restore(&bailout_state);
-        oom = true;
-    } zend_end_try();
+    const ssize_t processed = mp_processor_feed(processor, (const char *)data, len);
 
-    if (UNEXPECTED(oom)) {
+    /* With a memory-limit error pending before the feed, a refused
+     * allocation leaves no new one: the failure is still memory. */
+    if (UNEXPECTED(http_oom_scope_end(&oom_scope, h2_log_state(session))
+                   || (processed < 0 && ZEND_HAS_OOM()))) {
         return h2_refuse_stream(session, ng, stream, stream_id,
                                 NGHTTP2_INTERNAL_ERROR, 500, len);
     }
@@ -750,11 +752,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
                                     NGHTTP2_ENHANCE_YOUR_CALM, 413, len);
         }
 
-        zend_string *chunk = zend_string_init((const char *)data, len, 0);
-        const bool ok = http_body_stream_push(req, chunk);
-        zend_string_release(chunk);
-
-        if (UNEXPECTED(!ok)) {
+        if (UNEXPECTED(!http_body_stream_push_bytes(req, (const char *)data, len,
+                                                    h2_log_state(session)))) {
             return h2_refuse_stream(session, ng, stream, stream_id,
                                     NGHTTP2_INTERNAL_ERROR, 500, len);
         }
@@ -785,31 +784,26 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
      * concurrent uploads because mmap_sem serialises them. With the
      * one-shot reserve the hot path is pure memcpy.
      *
-     * Both the pre-size and the append can bailout if memory_limit is
-     * tighter than setMaxBodySize. Catch the bailout and refuse this
-     * stream alone with RST_STREAM(INTERNAL_ERROR); other streams on
-     * the same connection survive. Without the guard the longjmp
-     * escapes into nghttp2's C frames and the scheduler crashes at
-     * shutdown. */
-    volatile bool oom = false;
-    http_bailout_state_t bailout_state;
-    http_bailout_state_save(&bailout_state);
+     * Both the pre-size and the append are fallible: memory_limit may be
+     * tighter than setMaxBodySize, and past it this stream alone is
+     * refused with RST_STREAM(INTERNAL_ERROR) while other streams on the
+     * same connection survive (core/oom_guard.h). */
+    http_oom_scope_t oom_scope;
+    http_oom_scope_begin(&oom_scope);
 
-    zend_try {
-        if (current == 0 && stream->request != NULL
-            && stream->request->content_length > 0
-            && stream->request->content_length <= body_cap) {
-            (void)smart_str_alloc(&stream->request_body_buf,
-                                  stream->request->content_length, 0);
-        }
+    bool stored = true;
 
-        smart_str_appendl(&stream->request_body_buf, (const char *)data, len);
-    } zend_catch {
-        http_bailout_state_restore(&bailout_state);
-        oom = true;
-    } zend_end_try();
+    if (current == 0 && stream->request != NULL
+        && stream->request->content_length > 0
+        && stream->request->content_length <= body_cap) {
+        stored = smart_str_falloc(&stream->request_body_buf,
+                                  stream->request->content_length, 0, true) != (size_t)-1;
+    }
 
-    if (UNEXPECTED(oom)) {
+    stored = stored && smart_str_fappendl_ex(&stream->request_body_buf,
+                                             (const char *)data, len, 0, true);
+
+    if (UNEXPECTED(http_oom_scope_end(&oom_scope, h2_log_state(session)) || !stored)) {
         return h2_refuse_stream(session, ng, stream, stream_id,
                                 NGHTTP2_INTERNAL_ERROR, 500, len);
     }

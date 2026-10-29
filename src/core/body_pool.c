@@ -14,7 +14,6 @@
  * mmap_lock. */
 
 #include "body_pool.h"
-#include "bailout_guard.h"
 #include "php.h"
 #include "zend_string.h"
 
@@ -76,21 +75,10 @@ zend_string *body_pool_acquire(const size_t len)
     } else {
         /* Allocate a fresh slot via zend_mm. emalloc honours memory_limit
          * and goes through zend_mm_alloc_huge for sizes >= ZEND_MM_CHUNK_SIZE,
-         * which is exactly one mmap. The zend_try guard catches the longjmp
-         * raised on OOM so we can fall back to the caller's normal path. */
-        const size_t alloc_size = _ZSTR_STRUCT_SIZE(bucket->capacity);
-        zend_string *new_zstr = NULL;
-        http_bailout_state_t bailout_state;
-        http_bailout_state_save(&bailout_state);
-
-        zend_try {
-            new_zstr = (zend_string *)emalloc(alloc_size);
-        } zend_catch {
-            http_bailout_state_restore(&bailout_state);
-            new_zstr = NULL;
-        } zend_end_try();
-        if (new_zstr == NULL) return NULL;
-        zstr = new_zstr;
+         * which is exactly one mmap. Fallible: past memory_limit it answers
+         * NULL and the caller refuses the body (core/oom_guard.h). */
+        zstr = (zend_string *)femalloc(_ZSTR_STRUCT_SIZE(bucket->capacity), true);
+        if (zstr == NULL) return NULL;
     }
 
     /* IS_STR_INTERNED makes PHP refcount ops no-ops; lifecycle is owned
