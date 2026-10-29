@@ -19,6 +19,7 @@
 #include "Zend/zend_hrtime.h"              /* enqueue_ns / start_ns / end_ns */
 #include "core/http_protocol_handlers.h"   /* http_protocol_get_handler */
 #include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #include "http3_listener.h"                /* http3_listener_server_obj */
 #include "http3/http3_stream.h"            /* http3_stream_t */
 #include "http_connection.h"               /* http_handler_log_bailout */
@@ -940,6 +941,12 @@ static void h3_handler_coroutine_entry(void)
     }
 
     zend_end_try();
+
+    /* A handler past memory_limit is unwound with an exit, not a bailout
+     * (core/oom_guard.h); it fails this request alone, as a bailout does. */
+    if (!bailout && UNEXPECTED(http_oom_take_handler_fatal())) {
+        bailout = true;
+    }
 
     if (UNEXPECTED(bailout)) {
         H3T(s->stream_id, "3b.handler_BAILOUT");

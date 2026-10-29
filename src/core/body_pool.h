@@ -24,6 +24,9 @@
 #define BODY_POOL_SLOTS_PER_CLASS 32
 
 bool         body_pool_owns(const zend_string *zstr);
+/* NULL when `len` fits no class, or when a fresh slot would pass
+ * memory_limit: then a delayed memory-limit error is queued, which the
+ * caller drops with core/oom_guard.h. */
 zend_string *body_pool_acquire(size_t len);
 void         body_pool_release(zend_string *zstr);
 

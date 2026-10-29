@@ -38,6 +38,7 @@
 #include "grpc/grpc_call.h"      /* gRPC call lifecycle policy */
 #include "core/http_protocol_handlers.h"  /* http_protocol_get_handler */
 #include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #ifdef HAVE_HTTP_COMPRESSION
 #include "compression/http_compression_request.h"   /* request body decode */
 #endif
@@ -530,6 +531,12 @@ static void http2_handler_coroutine_entry(void)
     }
 
     zend_end_try();
+
+    /* A handler past memory_limit is unwound with an exit, not a bailout
+     * (core/oom_guard.h); it fails this request alone, as a bailout does. */
+    if (!bailout && UNEXPECTED(http_oom_take_handler_fatal())) {
+        bailout = true;
+    }
 
     if (UNEXPECTED(bailout)) {
         const char *m = (stream->request && stream->request->method)
@@ -2254,6 +2261,12 @@ static void ws_h2_handler_entry(void)
     }
 
     zend_end_try();
+
+    /* A handler past memory_limit is unwound with an exit, not a bailout
+     * (core/oom_guard.h); it fails this request alone, as a bailout does. */
+    if (!ctx->handler_bailout && UNEXPECTED(http_oom_take_handler_fatal())) {
+        ctx->handler_bailout = 1;
+    }
 
     if (UNEXPECTED(ctx->handler_bailout)) {
         const http_request_t *const req = ctx->stream->request;

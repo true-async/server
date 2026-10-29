@@ -7,29 +7,33 @@ true_async
 memory_limit=32M
 --FILE--
 <?php
-/* Reproducer for PLAN_HTTP2 Step 10 follow-up #1 (Fix A).
- *
- * memory_limit is 32 MiB but setMaxBodySize is 128 MiB, and we declare
- * a Content-Length of 100 MiB. zend_string_alloc(100 MiB) in
- * on_headers_complete exceeds Zend MM's budget and triggers a PHP
- * OOM bailout. The fix wraps that alloc in zend_try/zend_catch so the
- * longjmp is caught inside the reactor callback; the parser sets
- * HTTP_PARSE_ERR_OUT_OF_MEMORY, the connection layer emits a 503,
- * and — crucially — the scheduler survives to handle the NEXT request
- * on a fresh connection. */
+/* memory_limit is 32 MiB but setMaxBodySize is 128 MiB, and we declare
+ * a Content-Length of 100 MiB. The pre-allocation in on_headers_complete
+ * is fallible: past memory_limit it fails instead of bailing out or, past
+ * the hard limit, ending the process. The parser sets
+ * HTTP_PARSE_ERR_OUT_OF_MEMORY, the connection layer emits a 503, the
+ * delayed memory-limit error is dropped and logged as a warning, and the
+ * scheduler handles the NEXT request on a fresh connection. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
+use TrueAsync\LogSeverity;
 use function Async\spawn;
 use function Async\await;
 
 require_once __DIR__ . '/../_free_port.inc';
 
 $port = tas_free_port();
+$logfile = sys_get_temp_dir() . "/php-http-server-core-019-" . getmypid() . ".log";
+@unlink($logfile);
+$logfh = fopen($logfile, "w+b");
+
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
     ->setMaxBodySize(128 * 1024 * 1024)  /* allow big bodies in principle */
     ->setReadTimeout(5)
-    ->setWriteTimeout(5);
+    ->setWriteTimeout(5)
+    ->setLogSeverity(LogSeverity::WARN)
+    ->setLogStream($logfh);
 
 $server = new HttpServer($config);
 
@@ -90,10 +94,16 @@ $client = spawn(function () use ($port, $server) {
 
 $server->start();
 await($client);
+
+fflush($logfh);
+fclose($logfh);
+$log = file_get_contents($logfile);
+@unlink($logfile);
+echo "logged: ", (int)preg_match('/request body refused: Allowed memory size of \d+ bytes exhausted/', $log), "\n";
 echo "done\n";
 --EXPECTF--
-Fatal error: Allowed memory size of %d bytes exhausted%a
 oom_pass_status: HTTP/1.1 503 Service Unavailable
 survive_pass_status: HTTP/1.1 200%a
 parse_errors_4xx_total=1
+logged: 1
 done
