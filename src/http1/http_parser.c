@@ -18,7 +18,7 @@
 #include "http_known_strings.h"
 #include "core/http_connection.h"   /* for http_connection_t::server layout */
 #include "core/body_pool.h"
-#include "core/bailout_guard.h"
+#include "core/oom_guard.h"
 #include "log/trace_context.h"
 #include "http_body_stream.h"
 #include "core/http_protocol_handlers.h"   /* http_request_classify_protocols */
@@ -457,6 +457,13 @@ static int http1_drop_body_headers_complete(http1_parser_t *parser, http_request
     return 0;
 }
 
+/* Where a refused body is logged; a parser without a connection (the
+ * http_parse_request() test hook) logs nowhere. */
+static http_log_state_t *parser_log_state(const http1_parser_t *parser)
+{
+    return parser->conn != NULL ? parser->conn->log_state : NULL;
+}
+
 static int on_headers_complete(llhttp_t* llhttp_parser)
 {
     http1_parser_t *parser = (http1_parser_t*)llhttp_parser->data;
@@ -655,13 +662,11 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
             return -1;  /* 413 Payload Too Large */
         }
 
-        /* Pre-allocate exact size for body. Guard against emalloc OOM
-         * (Content-Length can be up to setMaxBodySize; memory_limit may
-         * be tighter). On bailout we synthesise a parse error so the
-         * connection layer emits 503 and closes cleanly — without this
-         * the longjmp escapes the reactor callback and takes the
-         * scheduler down with it. Same pattern below for chunked. */
-        /* body_pool slots are IS_STR_INTERNED — opaque to PHP's refcount,
+        /* Pre-allocate exact size for body. Content-Length can be up to
+         * setMaxBodySize and memory_limit may be tighter: the allocation is
+         * fallible, and past the limit the request is answered 503 and the
+         * connection closed instead of the worker ending (core/oom_guard.h).
+         * body_pool slots are IS_STR_INTERNED — opaque to PHP's refcount,
          * lifecycle owned here. Fine for getBody (RETURN_STR_COPY hands
          * out a view) and readBody (it hands out a copy), but the upgrade
          * to streaming transfers ownership to PHP and a pool slot would
@@ -669,26 +674,22 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
          * transferred. */
         const bool can_pool = (parser->conn == NULL || parser->conn->view == NULL
                                || !parser->conn->view->body_streaming_enabled);
-        volatile bool oom = false;
-        http_bailout_state_t bailout_state;
-        http_bailout_state_save(&bailout_state);
+        http_oom_scope_t oom_scope;
+        http_oom_scope_begin(&oom_scope);
 
-        zend_try {
-            req->body = can_pool ? body_pool_acquire(req->content_length) : NULL;
-            if (req->body == NULL) {
-                req->body = zend_string_alloc(req->content_length, 0);
-            }
-            parser->body_offset = 0;
-        } zend_catch {
-            http_bailout_state_restore(&bailout_state);
-            oom = true;
-        } zend_end_try();
+        req->body = can_pool ? body_pool_acquire(req->content_length) : NULL;
+        if (req->body == NULL) {
+            req->body = zend_string_falloc(req->content_length, 0, true);
+        }
+        parser->body_offset = 0;
 
-        if (UNEXPECTED(oom)) {
+        if (UNEXPECTED(http_oom_scope_end(&oom_scope, parser_log_state(parser))
+                       || req->body == NULL)) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
         }
     }
+
     /* For chunked or unknown length, we'll allocate in on_body if needed */
 
     if (parser->conn != NULL && parser->conn->view != NULL
@@ -752,22 +753,14 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
             return -1;  /* 413 Payload Too Large */
         }
 
-        /* A field value grows with emalloc up to the body limit, so
-         * memory_limit can bail out mid-feed; see the body pre-allocation
-         * in on_headers_complete for why the bailout must not escape. */
-        volatile ssize_t processed = 0;
-        volatile bool    oom       = false;
-        http_bailout_state_t bailout_state;
-        http_bailout_state_save(&bailout_state);
+        /* A field value grows up to the body limit with fallible
+         * allocations; see the body pre-allocation in on_headers_complete. */
+        http_oom_scope_t oom_scope;
+        http_oom_scope_begin(&oom_scope);
 
-        zend_try {
-            processed = mp_processor_feed(processor, at, length);
-        } zend_catch {
-            http_bailout_state_restore(&bailout_state);
-            oom = true;
-        } zend_end_try();
+        const ssize_t processed = mp_processor_feed(processor, at, length);
 
-        if (UNEXPECTED(oom)) {
+        if (UNEXPECTED(http_oom_scope_end(&oom_scope, parser_log_state(parser)))) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
         }
@@ -834,29 +827,22 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
             return -1;  /* Body too large */
         }
 
-        /* Allocate 8KB buffer on first chunk if not allocated yet.
-         * Both the first-chunk alloc and the append are OOM-guarded —
-         * see on_headers_complete for the rationale. */
-        volatile bool oom = false;
-        http_bailout_state_t bailout_state;
-        http_bailout_state_save(&bailout_state);
+        /* Allocate 8KB buffer on first chunk if not allocated yet. Both
+         * the first-chunk alloc and the append are fallible — see
+         * on_headers_complete for the rationale. Size unknown up front
+         * (chunked or no Content-Length), so we can't pre-reserve the full
+         * body. Scalable-grow switches to doubling once past Zend MM's
+         * 2 MiB huge-alloc threshold to cap mremap syscalls at O(log N).
+         * See smart_str_scalable.h. */
+        http_oom_scope_t oom_scope;
+        http_oom_scope_begin(&oom_scope);
 
-        zend_try {
-            if (!parser->body_builder.s) {
-                smart_str_alloc(&parser->body_builder, HTTP_DEFAULT_BODY_BUFFER, 0);
-            }
+        bool stored = parser->body_builder.s != NULL
+                      || smart_str_falloc(&parser->body_builder, HTTP_DEFAULT_BODY_BUFFER, 0, true)
+                             != (size_t)-1;
+        stored = stored && http_smart_str_append_scalable(&parser->body_builder, at, length, true);
 
-            /* Size unknown up front (chunked or no Content-Length), so we
-             * can't pre-reserve the full body. Scalable-grow switches to
-             * doubling once past Zend MM's 2 MiB huge-alloc threshold to
-             * cap mremap syscalls at O(log N). See smart_str_scalable.h. */
-            http_smart_str_append_scalable(&parser->body_builder, at, length);
-        } zend_catch {
-            http_bailout_state_restore(&bailout_state);
-            oom = true;
-        } zend_end_try();
-
-        if (UNEXPECTED(oom)) {
+        if (UNEXPECTED(http_oom_scope_end(&oom_scope, parser_log_state(parser)) || !stored)) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
         }

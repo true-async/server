@@ -35,7 +35,7 @@
                                             * http3_connection.h + php_http_server.h */
 #include "Zend/zend_hrtime.h"              /* zend_hrtime — request timing */
 #include "core/http_protocol_handlers.h"   /* http_protocol_get_handler */
-#include "core/bailout_guard.h"            /* zend_try around body appends */
+#include "core/oom_guard.h"               /* fallible body appends */
 #include "http3_listener.h"                /* http3_listener_server_obj etc. */
 #include "http3_packet.h"                  /* http3_packet_compute_sr_token */
 #include "core/response_delivery.h"
@@ -539,31 +539,27 @@ static void h3_body_pbuf_append(http3_stream_t *s, const uint8_t *data,
 }
 
 /* Request-heap body builder for a worker's own streams. Returns false when
- * memory_limit is tighter than body_cap and the allocation bailed out: the
- * caller refuses this stream alone, and the longjmp never crosses the
- * nghttp3 and ngtcp2 frames below (http2_session.c guards its append the
- * same way). The one-shot pre-size from Content-Length saves the doubling
- * reallocations of a large upload. */
+ * memory_limit is tighter than body_cap: the allocations are fallible, and
+ * the caller refuses this stream alone instead of the worker ending at the
+ * hard limit (core/oom_guard.h). The one-shot pre-size from Content-Length
+ * saves the doubling reallocations of a large upload. */
 static bool h3_body_buf_append(http3_stream_t *s, const uint8_t *data,
-                               const size_t len, const size_t body_cap)
+                               const size_t len, const size_t body_cap,
+                               http_log_state_t *log)
 {
-    volatile bool oom = false;
-    http_bailout_state_t bailout_state;
-    http_bailout_state_save(&bailout_state);
+    http_oom_scope_t oom_scope;
+    http_oom_scope_begin(&oom_scope);
 
-    zend_try {
-        if (s->body_buf.s == NULL && s->request->content_length > 0
-            && s->request->content_length <= body_cap) {
-            (void)smart_str_alloc(&s->body_buf, s->request->content_length, 0);
-        }
+    bool stored = true;
 
-        smart_str_appendl(&s->body_buf, (const char *)data, len);
-    } zend_catch {
-        http_bailout_state_restore(&bailout_state);
-        oom = true;
-    } zend_end_try();
+    if (s->body_buf.s == NULL && s->request->content_length > 0
+        && s->request->content_length <= body_cap) {
+        stored = smart_str_falloc(&s->body_buf, s->request->content_length, 0, true) != (size_t)-1;
+    }
 
-    return !oom;
+    stored = stored && smart_str_fappendl_ex(&s->body_buf, (const char *)data, len, 0, true);
+
+    return !http_oom_scope_end(&oom_scope, log) && stored;
 }
 
 /* "Buffered → stream" upgrade: splice buffered bytes into the queue, flip
@@ -733,7 +729,7 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
         /* Reactor mode: build persistent from the first byte — the body
          * crosses to a worker thread and finalize hands it over uncopied. */
         h3_body_pbuf_append(s, data, datalen, body_cap);
-    } else if (UNEXPECTED(!h3_body_buf_append(s, data, datalen, body_cap))) {
+    } else if (UNEXPECTED(!h3_body_buf_append(s, data, datalen, body_cap, c->log_state))) {
         h3_extend_body_window(c, stream_id, datalen);
         h3_reject_request_stream(c, s, stream_id, 500);
         return 0;

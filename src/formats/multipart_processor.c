@@ -26,10 +26,11 @@
 
 /* PHP's request allocator in every build: the processor runs on the worker
  * thread that owns the request, and what an upload costs counts against
- * memory_limit like the rest of the request. */
-#define MP_MALLOC(size)       emalloc(size)
-#define MP_CALLOC(n, size)    ecalloc(n, size)
-#define MP_REALLOC(ptr, size) erealloc(ptr, size)
+ * memory_limit like the rest of the request. Fallible: past memory_limit an
+ * allocation answers NULL and the feed fails, and the caller tells that from
+ * a malformed body by the delayed error it queued (core/oom_guard.h). */
+#define MP_MALLOC(size)       femalloc(size, true)
+#define MP_REALLOC(ptr, size) ferealloc(ptr, size, true)
 #define MP_FREE(ptr)          efree(ptr)
 #define MP_STRDUP(s)          estrdup(s)
 #define MP_STRNDUP(s, n)      estrndup(s, n)
@@ -169,6 +170,9 @@ static char *decode_rfc5987_value(const char *src, const size_t src_len)
 
     const size_t enc_len = (size_t)(end - p);
     char *out = MP_MALLOC(enc_len + 1);
+
+    if (!out) return NULL;
+
     const size_t dec_len = http_rfc5987_decode(out, p, enc_len);
     out[dec_len] = '\0';
     return out;
@@ -667,10 +671,15 @@ static int on_part_end(multipart_parser_t* parser)
              * block in place, and keeps all of it. */
             const size_t fitted = proc->field_value_len + 1;
 
-            if (proc->field_value_cap - fitted >= MP_FIT_SLACK) {
-                info->value = MP_MALLOC(fitted);
-                memcpy(info->value, proc->field_value, fitted);
+            char *const copy = proc->field_value_cap - fitted >= MP_FIT_SLACK
+                                   ? MP_MALLOC(fitted)
+                                   : NULL;
+
+            /* Without room for the copy the value keeps its own buffer. */
+            if (copy != NULL) {
+                memcpy(copy, proc->field_value, fitted);
                 MP_FREE(proc->field_value);
+                info->value = copy;
             } else {
                 info->value = proc->field_value;
             }
@@ -718,7 +727,7 @@ static int on_body_end(multipart_parser_t* parser)
 
 mp_processor_t* mp_processor_create(const char* boundary, const mp_config_t* config)
 {
-    mp_processor_t* proc = MP_CALLOC(1, sizeof(mp_processor_t));
+    mp_processor_t* proc = ecalloc(1, sizeof(mp_processor_t));
 
     if (!proc) return NULL;
 
