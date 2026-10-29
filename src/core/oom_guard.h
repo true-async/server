@@ -26,10 +26,13 @@
  * as a fatal UnwindExit in whichever coroutine runs PHP code next, and which
  * php-async answers by shutting the scheduler down.
  *
- * The scope drops that error when the refused allocation queued it: the
- * allocation did not happen, so usage is still under memory_limit and no
- * code is owed the fatal. An error already pending when the scope began
- * belongs to the code that caused it and is left in place. */
+ * The scope drops that error when an allocation inside it queued it: the
+ * refused allocation did not happen, so no code is owed the fatal. A small
+ * non-fallible allocation in the scope (a strdup, the bookkeeping node of a
+ * huge block) may have passed memory_limit by its own size; the next
+ * allocation past the limit queues the error again. An error already pending
+ * when the scope began belongs to the code that caused it and is left in
+ * place. */
 typedef struct {
     bool pending_before;
 } http_oom_scope_t;

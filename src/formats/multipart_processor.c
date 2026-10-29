@@ -671,12 +671,17 @@ static int on_part_end(multipart_parser_t* parser)
              * block in place, and keeps all of it. */
             const size_t fitted = proc->field_value_len + 1;
 
-            char *const copy = proc->field_value_cap - fitted >= MP_FIT_SLACK
-                                   ? MP_MALLOC(fitted)
-                                   : NULL;
+            if (proc->field_value_cap - fitted >= MP_FIT_SLACK) {
+                char *const copy = MP_MALLOC(fitted);
 
-            /* Without room for the copy the value keeps its own buffer. */
-            if (copy != NULL) {
+                if (!copy) {
+                    if (info->name) {
+                        MP_FREE(info->name);
+                    }
+
+                    return -1;
+                }
+
                 memcpy(copy, proc->field_value, fitted);
                 MP_FREE(proc->field_value);
                 info->value = copy;

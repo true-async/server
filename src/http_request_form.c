@@ -24,6 +24,7 @@
 #include "http_request_form.h"
 #include "formats/form_content_type.h"
 #include "formats/multipart_processor.h"
+#include "core/oom_guard.h"
 
 #include <string.h>
 
@@ -173,11 +174,23 @@ static bool http_request_form_parse_buffered(http_request_t *req)
 		const size_t slice =
 			remaining < HTTP_REQUEST_FORM_FEED_SLICE ? remaining : HTTP_REQUEST_FORM_FEED_SLICE;
 
-		if (mp_processor_feed(parsing, next, slice) < 0) {
-			const char *const reason = http_request_form_refusal_reason(parsing);
+		/* Fallible allocations, as on the transports' feed: a form past
+		 * memory_limit is refused with 503, and the delayed error the
+		 * refusal queued is dropped before the handler runs PHP code. */
+		http_oom_scope_t oom_scope;
+		http_oom_scope_begin(&oom_scope);
+
+		const ssize_t processed = mp_processor_feed(parsing, next, slice);
+		const bool out_of_memory = http_oom_scope_end(&oom_scope, NULL)
+								   || (processed < 0 && ZEND_HAS_OOM());
+
+		if (processed < 0 || out_of_memory) {
+			const char *const reason = out_of_memory
+										   ? "the form does not fit in memory_limit"
+										   : http_request_form_refusal_reason(parsing);
 
 			http_request_form_discard(parsing);
-			return http_request_form_refuse(req, 400, reason);
+			return http_request_form_refuse(req, out_of_memory ? 503 : 400, reason);
 		}
 
 		next += slice;

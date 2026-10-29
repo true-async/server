@@ -760,7 +760,10 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
 
         const ssize_t processed = mp_processor_feed(processor, at, length);
 
-        if (UNEXPECTED(http_oom_scope_end(&oom_scope, parser_log_state(parser)))) {
+        /* With a memory-limit error pending before the feed, a refused
+         * allocation leaves no new one: the failure is still memory. */
+        if (UNEXPECTED(http_oom_scope_end(&oom_scope, parser_log_state(parser))
+                       || (processed < 0 && ZEND_HAS_OOM()))) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
         }
@@ -784,11 +787,7 @@ static int on_body(llhttp_t* llhttp_parser, const char* at, size_t length)
             return -1;
         }
 
-        zend_string *chunk = zend_string_init(at, length, 0);
-        const bool ok = http_body_stream_push(req, chunk);
-        zend_string_release(chunk);
-
-        if (UNEXPECTED(!ok)) {
+        if (UNEXPECTED(!http_body_stream_push_bytes(req, at, length, parser_log_state(parser)))) {
             parser->parse_error = HTTP_PARSE_ERR_OUT_OF_MEMORY;
             return -1;
         }

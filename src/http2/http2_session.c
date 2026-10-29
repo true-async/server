@@ -653,7 +653,10 @@ static int h2_feed_multipart(http2_session_t *session,
 
     const ssize_t processed = mp_processor_feed(processor, (const char *)data, len);
 
-    if (UNEXPECTED(http_oom_scope_end(&oom_scope, h2_log_state(session)))) {
+    /* With a memory-limit error pending before the feed, a refused
+     * allocation leaves no new one: the failure is still memory. */
+    if (UNEXPECTED(http_oom_scope_end(&oom_scope, h2_log_state(session))
+                   || (processed < 0 && ZEND_HAS_OOM()))) {
         return h2_refuse_stream(session, ng, stream, stream_id,
                                 NGHTTP2_INTERNAL_ERROR, 500, len);
     }
@@ -749,11 +752,8 @@ static int cb_on_data_chunk_recv(nghttp2_session *ng,
                                     NGHTTP2_ENHANCE_YOUR_CALM, 413, len);
         }
 
-        zend_string *chunk = zend_string_init((const char *)data, len, 0);
-        const bool ok = http_body_stream_push(req, chunk);
-        zend_string_release(chunk);
-
-        if (UNEXPECTED(!ok)) {
+        if (UNEXPECTED(!http_body_stream_push_bytes(req, (const char *)data, len,
+                                                    h2_log_state(session)))) {
             return h2_refuse_stream(session, ng, stream, stream_id,
                                     NGHTTP2_INTERNAL_ERROR, 500, len);
         }

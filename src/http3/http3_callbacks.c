@@ -682,13 +682,8 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
             return 0;
         }
 
-        zend_string *const chunk =
-            zend_string_init((const char *)data, datalen, 0);
-        const bool pushed = http_body_stream_push(req, chunk);
-
-        zend_string_release(chunk);
-
-        if (UNEXPECTED(!pushed)) {
+        if (UNEXPECTED(!http_body_stream_push_bytes(req, (const char *)data, datalen,
+                                                    c != NULL ? c->log_state : NULL))) {
             h3_extend_body_window(c, stream_id, datalen);
             h3_reject_request_stream(c, s, stream_id, 500);
         }
@@ -729,7 +724,8 @@ static int h3_recv_data_cb(nghttp3_conn *conn, int64_t stream_id,
         /* Reactor mode: build persistent from the first byte — the body
          * crosses to a worker thread and finalize hands it over uncopied. */
         h3_body_pbuf_append(s, data, datalen, body_cap);
-    } else if (UNEXPECTED(!h3_body_buf_append(s, data, datalen, body_cap, c->log_state))) {
+    } else if (UNEXPECTED(!h3_body_buf_append(s, data, datalen, body_cap,
+                                                     c != NULL ? c->log_state : NULL))) {
         h3_extend_body_window(c, stream_id, datalen);
         h3_reject_request_stream(c, s, stream_id, 500);
         return 0;

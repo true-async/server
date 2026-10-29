@@ -21,16 +21,25 @@ function parse_with_headroom(string $raw): mixed
     return $request;
 }
 
+/* The refusal is memory's: under the full limit the same request parses. */
+function refused_for_memory(string $raw): string
+{
+    $refused = parse_with_headroom($raw) === false;
+    $parsed  = \TrueAsync\http_parse_request($raw) instanceof \TrueAsync\HttpRequest;
+    return $refused && $parsed ? 'refused for memory' : "refused=$refused parsed=$parsed";
+}
+
 $mib = str_repeat('x', 1 << 20);
 
 /* Chunked: past 2 MiB the buffer reserves 4 MiB, then doubles */
 $raw = "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
      . str_repeat(dechex(strlen($mib)) . "\r\n" . $mib . "\r\n", 6) . "0\r\n\r\n";
-var_dump(parse_with_headroom($raw));
+echo refused_for_memory($raw), "\n";
 
 /* Content-Length: one pre-allocation of the whole declared body */
-$raw = "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: " . (9 << 20) . "\r\n\r\n" . $mib;
-var_dump(parse_with_headroom($raw));
+$raw = "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: " . (9 << 20) . "\r\n\r\n"
+     . str_repeat($mib, 9);
+echo refused_for_memory($raw), "\n";
 
 /* Multipart: a field value doubles past the limit while it is fed */
 $body = "--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"
@@ -38,7 +47,7 @@ $body = "--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"
 $raw  = "POST / HTTP/1.1\r\nHost: t\r\nContent-Type: multipart/form-data; boundary=b\r\n"
       . "Content-Length: " . strlen($body) . "\r\n\r\n" . $body;
 unset($body);
-var_dump(parse_with_headroom($raw));
+echo refused_for_memory($raw), "\n";
 unset($raw);
 
 /* The same small request parses, and PHP code runs on: no fatal is pending */
@@ -49,8 +58,8 @@ var_dump($ok->getBody());
 echo "done\n";
 ?>
 --EXPECT--
-bool(false)
-bool(false)
-bool(false)
+refused for memory
+refused for memory
+refused for memory
 string(2) "ok"
 done
