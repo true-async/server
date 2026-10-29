@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An uncaught exception other than `HttpException` no longer shows its text to the client or sets the status (#441).** A handler's exception became the response: its message the body and the reason phrase, its code the status when it was 400 to 599. So a PDO error sent its SQL and bound values to whoever made the request, and an HTTP client's exception carrying an upstream's 404 turned into this server's 404; the text was logged nowhere. Now only `TrueAsync\HttpException` and its subclasses choose the status and the text. Any other exception is answered 500 `Internal Server Error`, on HTTP/1, HTTP/2, HTTP/3, the reactor pool and a WebSocket handshake, and its class, message, file and line are reported as an `E_WARNING` (the PHP error log, and the output where `display_errors` is on), which gRPC failures now get too. The warning bypasses a user error handler, which could otherwise throw it back into the dispose path, and has control characters replaced; a cancellation is not reported. A handler that threw `new RuntimeException('Not found', 404)` to set the status gets 500 and a warning naming the class: throw `HttpException` instead. In the reactor pool an `HttpException` now sets the status as it does elsewhere; it was always 500 there. Evidence: `h1/076` answered 404 with the SQL in the status line and the body before, and answers 500 with the SQL only in the warning after.
+
 ## [0.18.0] - 2026-10-29
 
 ### Added

@@ -99,7 +99,8 @@ $server->start();
 await($client);
 echo "done\n";
 ?>
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: handler failed mid-body (in %s:%d) in Unknown on line 0
 status=200
 body=alphabeta
 ended=0

@@ -413,26 +413,8 @@ int ws_handler_consume_exception(zend_coroutine_t *coroutine)
         return 0;
     }
 
-    zval rv;
-    zval *const msg_zv = zend_read_property_ex(exc->ce, exc,
-                             ZSTR_KNOWN(ZEND_STR_MESSAGE), /*silent=*/1, &rv);
-    zval *const file_zv = zend_read_property_ex(exc->ce, exc,
-                             ZSTR_KNOWN(ZEND_STR_FILE), /*silent=*/1, &rv);
-    zval *const line_zv = zend_read_property_ex(exc->ce, exc,
-                             ZSTR_KNOWN(ZEND_STR_LINE), /*silent=*/1, &rv);
-    zval *const code_zv = zend_read_property_ex(exc->ce, exc,
-                              ZSTR_KNOWN(ZEND_STR_CODE), /*silent=*/1, &rv);
-
-    zend_error(E_WARNING,
-        "[true-async-server] uncaught exception in websocket handler: %s: %s (in %s:%d)",
-        ZSTR_VAL(exc->ce->name),
-        (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING) ? Z_STRVAL_P(msg_zv) : "",
-        (file_zv != NULL && Z_TYPE_P(file_zv) == IS_STRING) ? Z_STRVAL_P(file_zv) : "?",
-        (line_zv != NULL && Z_TYPE_P(line_zv) == IS_LONG) ? (int)Z_LVAL_P(line_zv) : 0);
-
-    const zend_long code = (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG)
-                             ? Z_LVAL_P(code_zv) : 0;
-    return (code >= 400 && code <= 599) ? (int)code : 500;
+    http_handler_log_uncaught("websocket", exc);
+    return http_handler_exception_status(exc);
 }
 
 /* CLOSE 1011 (RFC 6455 §7.4.1), no reason payload — the exception text is for

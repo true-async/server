@@ -1486,10 +1486,19 @@ zend_object *http_stream_exception_new(uint16_t refused_status);
 const char *http_stream_refusal_message(uint16_t refused_status);
 
 /* Turn an uncommitted response into the answer a handler's exception stands
- * for, the one policy of every protocol's dispose path: Throwable::$code is the
- * status when it is 400-599 and 500 otherwise, Throwable::$message the reason
- * and the body. */
+ * for, the one policy of every protocol's dispose path: an HttpException's code
+ * is the status when it is 400-599 and 500 otherwise, its message the reason and
+ * the body. Any other Throwable is answered 500 "Internal Server Error": its text
+ * may hold SQL or paths, and its code may be another service's status. */
 void http_response_reset_from_exception(zend_object *response, zend_object *exc);
+/* The status an uncaught handler exception answers with: an HttpException's
+ * code when it is 400..599, otherwise 500. */
+int http_handler_exception_status(const zend_object *exc);
+/* An E_WARNING naming an uncaught handler exception's class, message, file and
+ * line; `where` names the handler kind ("http", "grpc", "websocket"). It does
+ * not go through a user error handler. An HttpException is a deliberate answer
+ * and a cancellation is not a failure: neither is logged. */
+void http_handler_log_uncaught(const char *where, zend_object *exc);
 
 /* Config class entry */
 extern zend_class_entry *http_server_config_ce;

@@ -329,7 +329,7 @@ spawn(function () use ($port, $server) {
 
 $server->start();
 ?>
---EXPECT--
+--EXPECTF--
 buffered: HTTP/1.1 204 No Content
 buffered content-length: <absent>
 buffered body: ""
@@ -353,7 +353,9 @@ HEAD /streamhead content-length: 9
 HEAD /streamhead transfer-encoding: <absent>
 HEAD /streamheadbare content-length: <absent>
 HEAD /streamheadbare transfer-encoding: <absent>
-HEAD after throw: HTTP/1.1 500 db down
+
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: db down (in %s:%d) in Unknown on line 0
+HEAD after throw: HTTP/1.1 500 Internal Server Error
 HEAD message: HTTP/1.1 200 OK
 next after HEAD message: HTTP/1.1 200 OK "root"
 streamed: TrueAsync\HttpServerRuntimeException: write(): status 204 carries no body — the message ends at the header block

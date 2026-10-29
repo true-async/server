@@ -275,7 +275,8 @@ status for the same reason `write()` does.
 A `HEAD` is the one case where the drop is silent: the chunk is accepted and the
 bytes go nowhere, while the response stays uncommitted, so `setHeader()` and
 `setStatusCode()` go on working and an uncaught exception still becomes the
-status. What changes is the length — the server states none, because a count
+status: an `HttpException`'s code, or 500 for any other exception, whose text
+goes to the log rather than to the client. What changes is the length — the server states none, because a count
 taken from a buffer nobody filled claims the `GET` body is empty. Set a
 `Content-Length` if the client should learn the size a `GET` would report.
 
@@ -370,7 +371,7 @@ fourth is an error:
 
 | State when `abort()` is called | What happens |
 |---|---|
-| never started streaming — buffered, or a `HEAD` | nothing; the handler's own exception still becomes the status |
+| never started streaming — buffered, or a `HEAD` | nothing; the handler's own exception still becomes the status (an `HttpException`'s code, otherwise 500) |
 | started, nothing on the wire yet — `sseStart()` with no event | finished cleanly: the client gets the empty `200` the transport commits for it |
 | started, and bytes have reached the client | the stream is failed as above |
 | `end()` already called | throws — the client has been told the body is whole |

@@ -75,8 +75,10 @@ await($client);
 
 echo "Done\n";
 ?>
---EXPECT--
+--EXPECTF--
 fopen: refused
+
+Warning: [true-async-server] uncaught exception in http handler: TrueAsync\HttpServerRuntimeException: sendFile(): path is outside open_basedir: %s (in %s:%d) in Unknown on line 0
 status: 500
 binary leaked: no
 Done
