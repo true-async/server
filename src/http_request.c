@@ -878,7 +878,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam)
         RETURN_THROWS();
     }
 
-    zval *val = zend_hash_find(intern->request->query_params, name);
+    zval *val = zend_symtable_find(intern->request->query_params, name);
 
     if (val) {
         RETURN_COPY(val);
