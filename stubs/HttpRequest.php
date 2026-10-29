@@ -58,6 +58,32 @@ final class HttpRequest
     public function getQueryParam(string $name, mixed $default = null): mixed {}
 
     /**
+     * Cookies of the request, keyed and decoded as PHP fills $_COOKIE, so the
+     * array can be handed to a framework that reads $_COOKIE:
+     *
+     * - `%XX` in a value is decoded and `+` stays `+` (rawurldecode());
+     *   names are taken as sent;
+     * - spaces and dots in a name become `_`, and `name[key]` builds an array;
+     * - of two cookies with the same plain name the first one sent wins:
+     *   a browser sends the cookie with the more specific path first.
+     *
+     * A header with more cookies than max_input_vars keeps the first
+     * max_input_vars of them; the request is not refused. The Cookie header
+     * as sent is getHeader('cookie').
+     *
+     * @return array<string, string|array>
+     */
+    public function getCookies(): array {}
+
+    /**
+     * One cookie from getCookies(), looked up by its key as stored there:
+     * a cookie sent as `a.b` is read as `a_b`.
+     *
+     * @param mixed $default Returned when there is no such cookie.
+     */
+    public function getCookie(string $name, mixed $default = null): mixed {}
+
+    /**
      * Get HTTP version string (e.g., "1.1")
      */
     public function getHttpVersion(): string {}

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`HttpRequest::getCookies()` and `getCookie($name, $default)` decode the Cookie header as PHP fills `$_COOKIE` (#434).** Before, a handler had only the raw `getHeader('cookie')` and parsed it itself; laravel-spawn's parser skipped percent-decoding, so encrypted Laravel cookies containing `%3D` failed to decrypt. Values are `rawurldecode()`d (`+` stays `+`), names keep PHP's mangling and bracket arrays, the first of two plain duplicates wins, and past `max_input_vars` the first cookies are kept instead of the request being refused. Evidence: 51 of 52 headers decode to the same array as php-cgi's `$_COOKIE`, and the HTTP parser refuses the 52nd, which carries a vertical tab (`http1parser/021` holds five of them), and the cmocka suite `FormVars` covers the limits.
+
 ## [0.17.0] - 2026-10-20
 
 ### Added

@@ -6,7 +6,8 @@
   +----------------------------------------------------------------------+
 */
 
-/* Query and form variables keyed the way PHP keys $_GET and $_POST.
+/* Query, form and cookie variables keyed the way PHP keys $_GET, $_POST and
+ * $_COOKIE.
  *
  * A name's base has its spaces and dots turned into `_`; `name[]` appends,
  * `name[key]` and `name[a][b]` nest, and a numeric key becomes an integer key.
@@ -56,5 +57,16 @@ bool http_form_vars_filter(const char *name, char **value, size_t value_len, siz
 http_form_vars_result_t http_form_vars_decode(HashTable *target, const char *data, size_t data_len,
 											  const char *separators, zend_long max_vars,
 											  zend_long max_depth);
+
+/* Decodes a Cookie header into `target` as PHP fills $_COOKIE: pairs end at
+ * `;`, whitespace before a name is skipped, a pair with an empty name is
+ * skipped uncounted, the name is not percent-decoded, the value is decoded
+ * with `+` kept as `+`, and the first of two cookies with the same plain name
+ * wins. Bracket names nest as in http_form_vars_register. Past `max_vars`
+ * pairs decoding stops (TOO_MANY), keeping what was stored; a name deeper than
+ * `max_depth` is dropped alone (TOO_DEEP). */
+http_form_vars_result_t http_form_vars_decode_cookies(HashTable *target, const char *data,
+													  size_t data_len, zend_long max_vars,
+													  zend_long max_depth);
 
 #endif

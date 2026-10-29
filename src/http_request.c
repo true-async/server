@@ -58,6 +58,9 @@ typedef struct {
     zval            headers_cache;   /* IS_UNDEF until cached */
     zend_string    *body_cache;      /* NULL until cached (persistent body only) */
 
+    /* The decoded Cookie header, built by the first cookie getter. */
+    zval            cookies_cache;   /* IS_UNDEF until built */
+
     zend_object     std;
 } http_request_object;
 
@@ -89,6 +92,7 @@ static zend_object* http_request_create_object(zend_class_entry *ce)
     intern->request = NULL;
     ZVAL_UNDEF(&intern->headers_cache);
     intern->body_cache = NULL;
+    ZVAL_UNDEF(&intern->cookies_cache);
 
     return &intern->std;
 }
@@ -107,6 +111,7 @@ static void http_request_free_object(zend_object *object)
     }
 
     zval_ptr_dtor(&intern->headers_cache);
+    zval_ptr_dtor(&intern->cookies_cache);
 
     if (intern->body_cache != NULL) {
         zend_string_release(intern->body_cache);
@@ -882,6 +887,64 @@ ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam)
 
     if (val) {
         RETURN_COPY(val);
+    }
+
+    if (default_value) {
+        RETURN_COPY(default_value);
+    }
+
+    RETURN_NULL();
+}
+
+/* The cookies of the request, decoded on first use and kept for the object's
+ * lifetime: the Cookie header is final when the handler starts, trailers do
+ * not change it. A header past max_input_vars keeps its first cookies, as
+ * $_COOKIE does: refusing it would refuse every later request of a browser
+ * that a sibling subdomain filled with cookies. */
+static HashTable *http_request_cookies(http_request_object *intern)
+{
+    if (Z_ISUNDEF(intern->cookies_cache)) {
+        const zval *const header = zend_hash_str_find(intern->request->headers, "cookie",
+                                                      sizeof("cookie") - 1);
+
+        array_init(&intern->cookies_cache);
+
+        if (header != NULL && Z_TYPE_P(header) == IS_STRING) {
+            (void) http_form_vars_decode_cookies(Z_ARRVAL(intern->cookies_cache),
+                                                 Z_STRVAL_P(header), Z_STRLEN_P(header),
+                                                 PG(max_input_vars),
+                                                 PG(max_input_nesting_level));
+        }
+    }
+
+    return Z_ARRVAL(intern->cookies_cache);
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getCookies)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    http_request_cookies(intern);
+    RETURN_COPY(&intern->cookies_cache);
+}
+
+ZEND_METHOD(TrueAsync_HttpRequest, getCookie)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    zend_string *name;
+    zval        *default_value = NULL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(default_value)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval *const value = zend_symtable_find(http_request_cookies(intern), name);
+
+    if (value) {
+        RETURN_COPY(value);
     }
 
     if (default_value) {

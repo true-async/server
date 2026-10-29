@@ -19,6 +19,10 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_getQ
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_MIXED, 0, "null")
 ZEND_END_ARG_INFO()
 
+#define arginfo_class_TrueAsync_HttpRequest_getCookies arginfo_class_TrueAsync_HttpRequest_getQuery
+
+#define arginfo_class_TrueAsync_HttpRequest_getCookie arginfo_class_TrueAsync_HttpRequest_getQueryParam
+
 #define arginfo_class_TrueAsync_HttpRequest_getHttpVersion arginfo_class_TrueAsync_HttpRequest_getMethod
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_getRemoteAddress, 0, 0, IS_STRING, 1)
@@ -88,6 +92,8 @@ ZEND_METHOD(TrueAsync_HttpRequest, getUri);
 ZEND_METHOD(TrueAsync_HttpRequest, getPath);
 ZEND_METHOD(TrueAsync_HttpRequest, getQuery);
 ZEND_METHOD(TrueAsync_HttpRequest, getQueryParam);
+ZEND_METHOD(TrueAsync_HttpRequest, getCookies);
+ZEND_METHOD(TrueAsync_HttpRequest, getCookie);
 ZEND_METHOD(TrueAsync_HttpRequest, getHttpVersion);
 ZEND_METHOD(TrueAsync_HttpRequest, getRemoteAddress);
 ZEND_METHOD(TrueAsync_HttpRequest, getRemotePort);
@@ -120,6 +126,8 @@ static const zend_function_entry class_TrueAsync_HttpRequest_methods[] = {
 	ZEND_ME(TrueAsync_HttpRequest, getPath, arginfo_class_TrueAsync_HttpRequest_getPath, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getQuery, arginfo_class_TrueAsync_HttpRequest_getQuery, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getQueryParam, arginfo_class_TrueAsync_HttpRequest_getQueryParam, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpRequest, getCookies, arginfo_class_TrueAsync_HttpRequest_getCookies, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpRequest, getCookie, arginfo_class_TrueAsync_HttpRequest_getCookie, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getHttpVersion, arginfo_class_TrueAsync_HttpRequest_getHttpVersion, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getRemoteAddress, arginfo_class_TrueAsync_HttpRequest_getRemoteAddress, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getRemotePort, arginfo_class_TrueAsync_HttpRequest_getRemotePort, ZEND_ACC_PUBLIC)

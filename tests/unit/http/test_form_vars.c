@@ -1,7 +1,7 @@
-/* Unit tests for keying query and form variables by PHP's name rules. The
- * phpt http1parser/014 compares whole arrays with parse_str(); these hold the
- * edges parse_str() cannot be asked about: the limits, a name cut at NUL, and
- * a value that must keep every byte. */
+/* Unit tests for keying query, form and cookie variables by PHP's name rules.
+ * The phpt http1parser/014 compares whole arrays with parse_str() and 021
+ * with php-cgi's $_COOKIE; these hold the edges neither can be asked about:
+ * the limits, a name cut at NUL, and a value that must keep every byte. */
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
@@ -239,6 +239,132 @@ static void test_register_takes_the_value(void **state)
 	zend_array_destroy(table);
 }
 
+static HashTable *cookies_with(const char *data, const zend_long max_vars, const zend_long max_depth,
+							   http_form_vars_result_t *result)
+{
+	HashTable *const target = zend_new_array(0);
+
+	*result = http_form_vars_decode_cookies(target, data, strlen(data), max_vars, max_depth);
+	return target;
+}
+
+static HashTable *cookies(const char *data)
+{
+	http_form_vars_result_t result;
+	HashTable *const target = cookies_with(data, VARS, DEPTH, &result);
+
+	assert_int_equal(result, HTTP_FORM_VARS_OK);
+	return target;
+}
+
+static void test_cookie_empty_and_blank_input(void **state)
+{
+	(void)state;
+	const char *const inputs[] = {"", ";", " ; \t;", "=x", " =x; =y"};
+
+	for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+		HashTable *const table = cookies(inputs[i]);
+
+		assert_int_equal(zend_hash_num_elements(table), 0);
+		zend_array_destroy(table);
+	}
+}
+
+/* rawurldecode(): '+' stays, a malformed or cut escape stays as written, and
+ * %00 keeps its byte. The name is not decoded. */
+static void test_cookie_raw_decoding(void **state)
+{
+	(void)state;
+	HashTable *const table = cookies("v=a+b%2Bc%3D; bad=%zz%4; nul=x%00y; %61=1");
+	const zval *const nul = at(table, "nul");
+
+	assert_string_at(table, "v", "a+b+c=");
+	assert_string_at(table, "bad", "%zz%4");
+	assert_int_equal(Z_STRLEN_P(nul), 3);
+	assert_memory_equal(Z_STRVAL_P(nul), "x\0y", 3);
+	assert_string_at(table, "%61", "1");
+	assert_null(zend_hash_str_find(table, "a", 1));
+	zend_array_destroy(table);
+}
+
+/* Pairs end at ';' alone; whitespace before a name is skipped, after a value
+ * it is kept, and '&' is part of a value. */
+static void test_cookie_separators_and_whitespace(void **state)
+{
+	(void)state;
+	HashTable *const table = cookies("a=1 ;\tb=2&c=3;\r\n d; e=");
+
+	assert_string_at(table, "a", "1 ");
+	assert_string_at(table, "b", "2&c=3");
+	assert_string_at(table, "d", "");
+	assert_string_at(table, "e", "");
+	assert_int_equal(zend_hash_num_elements(table), 4);
+	zend_array_destroy(table);
+}
+
+/* The first plain cookie of a name wins; a bracket name still turns an
+ * earlier plain value into an array, as php_register_variable_ex does. */
+static void test_cookie_first_plain_name_wins(void **state)
+{
+	(void)state;
+	HashTable *const plain = cookies("s=first; s=second; 5=a; 5=b; x.y=1; x_y=2");
+
+	assert_string_at(plain, "s", "first");
+	assert_string_at(plain, "5", "a");
+	assert_string_at(plain, "x_y", "1");
+	zend_array_destroy(plain);
+
+	HashTable *const bracket = cookies("s=plain; s[k]=nested; t[k]=nested; t=plain");
+
+	assert_string_at(Z_ARRVAL_P(at(bracket, "s")), "k", "nested");
+	assert_string_at(Z_ARRVAL_P(at(bracket, "t")), "k", "nested");
+	zend_array_destroy(bracket);
+}
+
+/* Empty names are not counted; past the limit the first cookies stay. */
+static void test_cookie_count_limit(void **state)
+{
+	(void)state;
+	http_form_vars_result_t result;
+
+	HashTable *const at_limit = cookies_with("=x; a=1; ; b=2; c=3", 3, DEPTH, &result);
+	assert_int_equal(result, HTTP_FORM_VARS_OK);
+	assert_int_equal(zend_hash_num_elements(at_limit), 3);
+	zend_array_destroy(at_limit);
+
+	HashTable *const past = cookies_with("a=1; b=2; c=3; d=4", 3, DEPTH, &result);
+	assert_int_equal(result, HTTP_FORM_VARS_TOO_MANY);
+	assert_int_equal(zend_hash_num_elements(past), 3);
+	assert_null(zend_hash_str_find(past, "d", 1));
+	zend_array_destroy(past);
+}
+
+static void test_cookie_depth_limit(void **state)
+{
+	(void)state;
+	http_form_vars_result_t result;
+
+	HashTable *const table = cookies_with("x=1; d[1][2][3][4]=v; y=2", VARS, 3, &result);
+	assert_int_equal(result, HTTP_FORM_VARS_TOO_DEEP);
+	assert_string_at(table, "x", "1");
+	assert_string_at(table, "y", "2");
+	assert_null(zend_hash_str_find(table, "d", 1));
+	zend_array_destroy(table);
+}
+
+static void test_cookie_forbidden_prefix_keys(void **state)
+{
+	(void)state;
+	HashTable *const table = cookies("a[__Host-x]=1; a[ok]=2; __Host-id=3; ..Secure-z=4");
+	HashTable *const a = Z_ARRVAL_P(at(table, "a"));
+
+	assert_int_equal(zend_hash_num_elements(a), 1);
+	assert_string_at(a, "ok", "2");
+	assert_string_at(table, "__Host-id", "3");
+	assert_null(zend_hash_str_find(table, "__Secure-z", sizeof("__Secure-z") - 1));
+	zend_array_destroy(table);
+}
+
 static int suite_setup(void **state)
 {
 	(void)state;
@@ -269,6 +395,13 @@ int main(void)
 		cmocka_unit_test(test_count_limit),
 		cmocka_unit_test(test_forbidden_cookie_prefix_keys),
 		cmocka_unit_test(test_register_takes_the_value),
+		cmocka_unit_test(test_cookie_empty_and_blank_input),
+		cmocka_unit_test(test_cookie_raw_decoding),
+		cmocka_unit_test(test_cookie_separators_and_whitespace),
+		cmocka_unit_test(test_cookie_first_plain_name_wins),
+		cmocka_unit_test(test_cookie_count_limit),
+		cmocka_unit_test(test_cookie_depth_limit),
+		cmocka_unit_test(test_cookie_forbidden_prefix_keys),
 	};
 
 	return cmocka_run_group_tests(tests, suite_setup, suite_teardown);
