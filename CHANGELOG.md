@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`HttpRequest::getCookies()` and `getCookie($name, $default)` decode the Cookie header as PHP fills `$_COOKIE` (#434).** Before, a handler had only the raw `getHeader('cookie')` and parsed it itself; laravel-spawn's parser skipped percent-decoding, so encrypted Laravel cookies containing `%3D` failed to decrypt. Values are `rawurldecode()`d (`+` stays `+`), names keep PHP's mangling and bracket arrays, the first of two plain duplicates wins, and past `max_input_vars` the first cookies are kept instead of the request being refused. Evidence: 51 of 52 headers decode to the same array as php-cgi's `$_COOKIE`, and the HTTP parser refuses the 52nd, which carries a vertical tab (`http1parser/021` holds five of them), and the cmocka suite `FormVars` covers the limits.
+
 ### Fixed
 
 - **A handler past `memory_limit` ended the worker on PHP 8.6 instead of failing its own request (#437).** The engine unwinds such a handler with an exit and leaves the error pending, and php-async ends the scheduler for a memory-limit error pending when a coroutine finishes; with the server's listeners still open that shutdown hit an assertion in debug builds and SIGSEGV in release. Each handler entry (HTTP/1, HTTP/2, HTTP/3, WebSocket) now treats the unwound handler as the bailout it was before PHP 8.6: the exit and the error are cleared and the request is answered 500 while the worker serves on. Evidence: `core/069` and `grpc/019` fail with the assertion at php-async `scheduler.c:2059` before and pass after.

@@ -8,9 +8,10 @@
 
 /* The name rules follow php_register_variable_ex in main/php_variables.c,
  * case for case; the reason it is not called is in http_form_vars.h. Percent
- * decoding is php_url_decode: here it decodes values, not paths, so the
- * CODING_STANDARDS 13c.3 objection to it (it lets %00 and \ through) does not
- * apply, and $_POST decodes with it too. */
+ * decoding is php_url_decode, and php_raw_url_decode for cookie values, as in
+ * php_default_treat_data: here they decode values, not paths, so the
+ * CODING_STANDARDS 13c.3 objection to them (they let %00 and \ through) does
+ * not apply, and $_POST and $_COOKIE decode with them too. */
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -118,9 +119,13 @@ static void store(HashTable *table, const char *key, const size_t key_len, const
 	}
 }
 
-http_form_vars_result_t http_form_vars_register(HashTable *target, const char *name,
-												size_t name_len, zval *value,
-												const zend_long max_depth)
+/* `keep_first`: a plain top-level name already in `target` keeps its value,
+ * the rule php_register_variable_ex applies to $_COOKIE alone. A browser
+ * sends the cookie with the longest path first, and a less specific one of
+ * the same name must not replace it. */
+static http_form_vars_result_t register_variable(HashTable *target, const char *name,
+												 size_t name_len, zval *value,
+												 const zend_long max_depth, const bool keep_first)
 {
 	while (name_len > 0 && *name == ' ') {
 		name++;
@@ -211,7 +216,8 @@ http_form_vars_result_t http_form_vars_register(HashTable *target, const char *n
 		}
 	}
 
-	if (!append && is_forbidden_key(key, key_len, name, name_len)) {
+	if ((!append && is_forbidden_key(key, key_len, name, name_len)) ||
+		(keep_first && table == target && zend_symtable_str_exists(table, key, key_len))) {
 		zval_ptr_dtor_nogc(value);
 	} else {
 		store(table, key, key_len, append, value);
@@ -219,6 +225,13 @@ http_form_vars_result_t http_form_vars_register(HashTable *target, const char *n
 
 	free_alloca(buffer, use_heap);
 	return HTTP_FORM_VARS_OK;
+}
+
+http_form_vars_result_t http_form_vars_register(HashTable *target, const char *name,
+												const size_t name_len, zval *value,
+												const zend_long max_depth)
+{
+	return register_variable(target, name, name_len, value, max_depth, false);
 }
 
 bool http_form_vars_filter(const char *name, char **value, const size_t value_len,
@@ -256,7 +269,7 @@ static http_form_vars_result_t decode_pair(HashTable *target, const char *pair,
 		zval stored;
 
 		ZVAL_STRINGL_FAST(&stored, value, filtered_len);
-		result = http_form_vars_register(target, name, decoded_name_len, &stored, max_depth);
+		result = register_variable(target, name, decoded_name_len, &stored, max_depth, false);
 	}
 
 	efree(value);
@@ -294,6 +307,80 @@ http_form_vars_result_t http_form_vars_decode(HashTable *target, const char *dat
 		}
 
 		pair = pair_end + 1;
+	}
+
+	return result;
+}
+
+/* One `name=value` cookie pair, as php_default_treat_data reads it under
+ * PARSE_COOKIE: the name is taken as sent, the value is decoded by
+ * php_raw_url_decode, which leaves `+` alone. */
+static http_form_vars_result_t decode_cookie(HashTable *target, const char *name,
+											 const size_t name_len, const char *raw_value,
+											 const size_t raw_value_len, const zend_long max_depth)
+{
+	char *const name_copy = estrndup(name, name_len);
+	char *value = estrndup(raw_value, raw_value_len);
+	const size_t value_len = php_raw_url_decode(value, raw_value_len);
+	size_t filtered_len;
+	http_form_vars_result_t result = HTTP_FORM_VARS_OK;
+
+	if (http_form_vars_filter(name_copy, &value, value_len, &filtered_len)) {
+		zval stored;
+
+		ZVAL_STRINGL_FAST(&stored, value, filtered_len);
+		result = register_variable(target, name_copy, name_len, &stored, max_depth, true);
+	}
+
+	efree(value);
+	efree(name_copy);
+	return result;
+}
+
+http_form_vars_result_t http_form_vars_decode_cookies(HashTable *target, const char *data,
+													  const size_t data_len,
+													  const zend_long max_vars,
+													  const zend_long max_depth)
+{
+	const char *const end = data + data_len;
+	const char *pair = data;
+	zend_long count = 0;
+	http_form_vars_result_t result = HTTP_FORM_VARS_OK;
+
+	for (; pair < end; pair++) {
+		const char *pair_end = memchr(pair, ';', (size_t)(end - pair));
+
+		if (pair_end == NULL) {
+			pair_end = end;
+		}
+
+		/* "; " joins the cookies of one header and the Cookie headers of
+		 * one request, so whitespace before a name is not part of it. */
+		while (pair < pair_end && is_c_space(*pair)) {
+			pair++;
+		}
+
+		const char *const equals = memchr(pair, '=', (size_t)(pair_end - pair));
+
+		/* An empty name is skipped before it is counted, as PHP skips it. */
+		if (pair == pair_end || pair == equals) {
+			pair = pair_end;
+			continue;
+		}
+
+		if (++count > max_vars) {
+			return HTTP_FORM_VARS_TOO_MANY;
+		}
+
+		const char *const raw_value = equals != NULL ? equals + 1 : pair_end;
+		const size_t name_len = (size_t)((equals != NULL ? equals : pair_end) - pair);
+
+		if (decode_cookie(target, pair, name_len, raw_value, (size_t)(pair_end - raw_value),
+						  max_depth) == HTTP_FORM_VARS_TOO_DEEP) {
+			result = HTTP_FORM_VARS_TOO_DEEP;
+		}
+
+		pair = pair_end;
 	}
 
 	return result;
