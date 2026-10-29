@@ -6711,7 +6711,7 @@ static void http_server_free(zend_object *obj)
     /* Live conns still hold refs on the C-state, which outlives this call
      * until the last of them releases; the libuv shutdown drain that fires
      * after the wrapper is gone sees a valid C-state. The listeners, scope,
-     * config and TLS ctx go now, not with the last conn: that is the
+     * config and TLS ctx go in this call, not with the last conn: that is the
      * user-facing "destroy the server" semantic. */
     http_server_teardown(server);
 
