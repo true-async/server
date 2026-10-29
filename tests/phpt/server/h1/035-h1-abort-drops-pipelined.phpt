@@ -83,7 +83,8 @@ $server->start();
 
 echo "handled: ", implode(',', $seen), "\n";
 ?>
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: handler failed mid-body (in %s:%d) in Unknown on line 0
 status lines: 1
 second body: 0
 terminator: 0

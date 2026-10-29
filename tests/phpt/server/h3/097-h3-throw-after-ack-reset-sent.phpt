@@ -19,5 +19,6 @@ require __DIR__ . '/_h3_reset_after_ack.inc';
 
 h3_reset_after_ack_run('097', 'throw');
 ?>
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: handler failed after the peer ACKed its body (in %s:%d) in Unknown on line 0
 peer: reset in time

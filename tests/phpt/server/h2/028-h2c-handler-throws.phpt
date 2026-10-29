@@ -50,7 +50,8 @@ $client = spawn(function() use ($port, $server) {
 $server->start();
 await($client);
 echo "reached end\n";
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: boom (in %s:%d) in Unknown on line 0
 curl_rc=0
 http_code=500
 reached end

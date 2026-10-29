@@ -69,7 +69,8 @@ spawn(function () use ($port, $server) {
 
 $server->start();
 ?>
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: nothing was written before this (in %s:%d) in Unknown on line 0
 status: HTTP/1.1 200 OK
 terminator: 1
 body: ""

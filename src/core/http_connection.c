@@ -3276,11 +3276,10 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                                       ctx->handler_bailout);
 
     /* If the handler threw / was cancelled and the response isn't
-     * already committed, derive the response from the exception:
-     * Throwable::$code becomes the HTTP status (if it's a valid 4xx
-     * /5xx), Throwable::$message becomes the reason / body. Default
-     * 500 + "Internal Server Error" for malformed codes or vanilla
-     * exceptions without a deliberate HTTP code.
+     * already committed, derive the response from the exception: an
+     * HttpException's code becomes the HTTP status (if it's a valid 4xx
+     * /5xx) and its message the reason / body; anything else is 500
+     * "Internal Server Error", its text logged instead.
      *
      * This is what the parse-error cancellation path relies on
      * (cancellation exception is HttpException with code/message
@@ -3293,6 +3292,10 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
      * nothing but reads better next to the branch that needs it. */
     const bool handler_failed =
         http_handler_failed(coroutine, ctx->handler_bailout);
+
+    if (coroutine->exception != NULL && !ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+        http_handler_log_uncaught("http", coroutine->exception);
+    }
 
     if (coroutine->exception != NULL
         && !http_response_is_committed(Z_OBJ(ctx->response_zv))) {

@@ -28,7 +28,7 @@ $server = new HttpServer($config);
  * Throwable::$code carries the status when it is a valid 4xx/5xx. */
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
     if (str_contains((string)$req->getUri(), 'forbidden')) {
-        throw new \RuntimeException('nope', 403);
+        throw new \TrueAsync\HttpException('nope', 403);
     }
     throw new \RuntimeException('boom from handler');
 });
@@ -96,8 +96,6 @@ echo "Done\n";
 Warning: [true-async-server] uncaught exception in websocket handler: RuntimeException: boom from handler (in %s:%d) in Unknown on line 0
 
 Warning: [true-async-server] uncaught exception in websocket handler: RuntimeException: boom from handler (in %s:%d) in Unknown on line 0
-
-Warning: [true-async-server] uncaught exception in websocket handler: RuntimeException: nope (in %s:%d) in Unknown on line 0
 ws #1:      HTTP/1.1 500 Internal Server Error
 ws #2:      HTTP/1.1 500 Internal Server Error
 ws code=403:HTTP/1.1 403 Forbidden

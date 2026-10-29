@@ -11,10 +11,11 @@ sockets
  * behind it is read as header fields — and, past a blank line, as a second
  * response the server never sent.
  *
- * Handler data reaches that field by two routes. An uncaught exception's
- * message becomes the reason phrase of the 500 the dispose path synthesises, so
- * `throw new RuntimeException("bad path: $path")` puts request data on the
- * status line; and setReasonPhrase() takes whatever it is given.
+ * Handler data reaches that field by two routes. An uncaught HttpException's
+ * message becomes the reason phrase of the response the dispose path
+ * synthesises, so `throw new HttpException("bad path: $path", 400)` puts
+ * request data on the status line; and setReasonPhrase() takes whatever it is
+ * given.
  *
  * RFC 9112 §4 allows HTAB, SP, VCHAR and obs-text there. Everything else
  * becomes a space, which keeps a UTF-8 message readable — obs-text is
@@ -24,6 +25,7 @@ sockets
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
+use TrueAsync\HttpException;
 use function Async\spawn;
 
 require_once __DIR__ . '/../_free_port.inc';
@@ -53,7 +55,7 @@ $server->addHttpHandler(function ($req, $res) use ($payload, $setter_payload) {
         return;
     }
 
-    throw new \RuntimeException($payload);
+    throw new HttpException($payload, 500);
 });
 
 spawn(function () use ($port, $server) {

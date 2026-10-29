@@ -77,7 +77,8 @@ spawn(function () use ($server, $port, $probe) {
 $server->start();
 echo "Done\n";
 ?>
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in http handler: RuntimeException: handler failed mid-body (in %s:%d) in Unknown on line 0
 status: 200
 outcome: RESET(err=258)
 body arrived: yes

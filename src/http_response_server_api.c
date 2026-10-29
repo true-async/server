@@ -469,15 +469,54 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
     response->committed = true;
 }
 
-void http_response_reset_from_exception(zend_object *response, zend_object *exc)
+void http_handler_log_uncaught(const char *where, zend_object *exc)
 {
-    zval rv;
+    if (instanceof_function(exc->ce, http_exception_ce)) {
+        return;
+    }
 
-    const zval *const code_zv = zend_read_property_ex(exc->ce, exc,
+    zval rv;
+    const zval *const msg_zv = zend_read_property_ex(exc->ce, exc,
+                                                     ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv);
+    const zval *const file_zv = zend_read_property_ex(exc->ce, exc,
+                                                      ZSTR_KNOWN(ZEND_STR_FILE), 1, &rv);
+    const zval *const line_zv = zend_read_property_ex(exc->ce, exc,
+                                                      ZSTR_KNOWN(ZEND_STR_LINE), 1, &rv);
+
+    zend_error(E_WARNING,
+        "[true-async-server] uncaught exception in %s handler: %s: %s (in %s:%d)",
+        where, ZSTR_VAL(exc->ce->name),
+        (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING) ? Z_STRVAL_P(msg_zv) : "",
+        (file_zv != NULL && Z_TYPE_P(file_zv) == IS_STRING) ? Z_STRVAL_P(file_zv) : "?",
+        (line_zv != NULL && Z_TYPE_P(line_zv) == IS_LONG) ? (int)Z_LVAL_P(line_zv) : 0);
+}
+
+int http_handler_exception_status(const zend_object *exc)
+{
+    if (!instanceof_function(exc->ce, http_exception_ce)) {
+        return 500;
+    }
+
+    zval rv;
+    const zval *const code_zv = zend_read_property_ex(exc->ce, (zend_object *)exc,
                                                       ZSTR_KNOWN(ZEND_STR_CODE), 1, &rv);
     const zend_long code = (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG)
                              ? Z_LVAL_P(code_zv) : 0;
-    const int status = (code >= 400 && code <= 599) ? (int)code : 500;
+
+    return (code >= 400 && code <= 599) ? (int)code : 500;
+}
+
+void http_response_reset_from_exception(zend_object *response, zend_object *exc)
+{
+    /* Any other Throwable is a failure, not an answer: its text and code
+     * belong to the log (http_handler_log_uncaught), not to the client. */
+    if (!instanceof_function(exc->ce, http_exception_ce)) {
+        http_response_reset_to_error(response, 500, "Internal Server Error");
+        return;
+    }
+
+    zval rv;
+    const int status = http_handler_exception_status(exc);
 
     const char *reason = "Internal Server Error";
     const zval *const msg_zv = zend_read_property_ex(exc->ce, exc,

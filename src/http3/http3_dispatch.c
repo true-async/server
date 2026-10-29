@@ -1190,6 +1190,11 @@ static void h3_handler_coroutine_dispose(zend_coroutine_t *coroutine)
                                           s->handler_bailout);
     }
 
+    /* gRPC answers with grpc-status alone, so the log is its only record. */
+    if (coroutine->exception != NULL && !ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+        http_handler_log_uncaught(s->is_grpc ? "grpc" : "http", coroutine->exception);
+    }
+
     /* If the handler threw and never committed, derive a response from the
      * exception (code → status, message → body). Same policy as the H2 dispose
      * path and the HTTP/1 one in http_handler_coroutine_dispose, so an

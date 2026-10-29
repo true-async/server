@@ -76,7 +76,8 @@ $server->start();
 await($client);
 echo "Done\n";
 ?>
---EXPECT--
+--EXPECTF--
+Warning: [true-async-server] uncaught exception in grpc handler: RuntimeException: handler failed after one message (in %s:%d) in Unknown on line 0
 saw_status_200=1
 saw_grpc_status=1
 message=partial

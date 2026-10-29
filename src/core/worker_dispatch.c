@@ -1062,13 +1062,17 @@ static void worker_dispatch_finalize(worker_dispatch_ctx_t *ctx,
 
     bool marshalled_send_file = false;
 
+    if (ctx->handler_exception != NULL && !ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+        http_handler_log_uncaught(ctx->is_grpc ? "grpc" : "http", ctx->handler_exception);
+    }
+
     if (!Z_ISUNDEF(ctx->response_zv)) {
         zend_object *const resp = Z_OBJ(ctx->response_zv);
 
-        /* gRPC maps exceptions to grpc-status, not HTTP 500 */
+        /* gRPC maps exceptions to grpc-status, not an HTTP status */
         if (ctx->handler_exception != NULL && !ctx->is_grpc
             && !http_response_is_committed(resp)) {
-            http_response_reset_to_error(resp, 500, "Internal Server Error");
+            http_response_reset_from_exception(resp, ctx->handler_exception);
         }
 
         if (ctx->is_grpc) {
