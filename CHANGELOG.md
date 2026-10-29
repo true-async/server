@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-29
+
 ### Added
 
 - **`HttpRequest::getCookies()` and `getCookie($name, $default)` decode the Cookie header as PHP fills `$_COOKIE` (#434).** Before, a handler had only the raw `getHeader('cookie')` and parsed it itself; laravel-spawn's parser skipped percent-decoding, so encrypted Laravel cookies containing `%3D` failed to decrypt. Values are `rawurldecode()`d (`+` stays `+`), names keep PHP's mangling and bracket arrays, the first of two plain duplicates wins, and past `max_input_vars` the first cookies are kept instead of the request being refused. Evidence: 51 of 52 headers decode to the same array as php-cgi's `$_COOKIE`, and the HTTP parser refuses the 52nd, which carries a vertical tab (`http1parser/021` holds five of them), and the cmocka suite `FormVars` covers the limits.
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A handler past `memory_limit` ended the worker on PHP 8.6 instead of failing its own request (#437).** The engine unwinds such a handler with an exit and leaves the error pending, and php-async ends the scheduler for a memory-limit error pending when a coroutine finishes; with the server's listeners still open that shutdown hit an assertion in debug builds and SIGSEGV in release. Each handler entry (HTTP/1, HTTP/2, HTTP/3, WebSocket) now treats the unwound handler as the bailout it was before PHP 8.6: the exit and the error are cleared and the request is answered 500 while the worker serves on. Evidence: `core/069` and `grpc/019` fail with the assertion at php-async `scheduler.c:2059` before and pass after.
 - **A request body past `memory_limit` ended the worker process on PHP 8.6 (#437).** Since php-src 3584a98bda0 an allocation past `memory_limit` no longer bails out: it succeeds and queues a delayed fatal, and one past the hard limit (twice `memory_limit` by default) calls `_exit(137)`. The server buffered bodies with `emalloc` and waited for a bailout that no longer came, so a client sending a body larger than `memory_limit` grew the buffer to the hard limit and the worker exited with every connection on it. Bodies are now buffered, streamed and parsed as forms with fallible allocations on HTTP/1 (Content-Length, chunked, multipart), HTTP/2 and HTTP/3: the request is refused as before (503, or RST_STREAM on HTTP/2 and HTTP/3; a form parsed by `getPost()` throws `HttpException` 503), the delayed error its refusal queued is dropped, and the engine's message is logged as a warning. Evidence: `core/019` exits with Termsig=9 before and answers 503 then 200 after; `http1parser/023` dies with "Allowed memory size" before and refuses all three bodies after, each of which parses under the full limit; `h1/075`, a streamed upload the handler does not read, dies with "Allowed memory size" before and serves the next connection after.
+- **A pool worker whose `start()` failed with a fatal error kept the process from exiting on PHP 8.6.** php-src now holds a reference to `$this` for the length of a method call and a fatal error skips its release, so the worker's copy of the server outlived its run: its listener kept the worker thread's event loop alive and the process hung at shutdown, and had the listener been closed, the late free would have read the reactor pool the parent had already destroyed. The worker now tears its copy down when `start()` returns or fails, where the copy used to be freed; a torn-down server refuses `start()`, `getConfig()`, the `add*` methods and transfer to another thread. Evidence: `h3/089` timed out on every Linux CI run before and passes after; `core/115` and `core/116` (a failure after the listeners are bound) cover a TCP pool, and `core/116` times out without the fix.
 - **`getQueryParam()` finds a numeric name (#433).** `getQuery()` keys `?5=five` under the integer 5, as `$_GET` does, and `getQueryParam('5')` searched string keys only, so it returned `null`; it now finds the value (`http1parser/020`).
 
 ## [0.17.0] - 2026-10-20
@@ -1542,7 +1545,8 @@ on the [TrueAsync](https://github.com/true-async) event loop.
   and Windows, quick start), `docs/` (coding standards, contributor
   recommendations, llhttp upstream notes), Apache 2.0 `LICENSE`.
 
-[Unreleased]: https://github.com/true-async/server/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/true-async/server/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/true-async/server/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/true-async/server/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/true-async/server/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/true-async/server/compare/v0.14.0...v0.15.0

@@ -663,6 +663,12 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     (#412, #413, #424, #426, #428 merged; #329 closed). Version bump, CHANGELOG
     section, IDE stubs checked against the stubs (31 docblocks changed since
     0.16.0, all match), tag `v0.17.0` with notes. `~/releases` not touched.
+51. Release 0.18.0 (asked for by Edmond, 2026-10-29): every open defect closed
+    (#433, #434, #437 merged as #435, #436, #438). #439, three recovery gaps
+    after a second fatal error that review of #438 found, stays open until it
+    is reproduced. Version bump, CHANGELOG section, IDE stubs checked against
+    the stubs (getCookies/getCookie added to both, text identical), tag
+    `v0.18.0` with notes.
 43. #339 — a client filename with path components: done. Edmond, 2026-10-19:
     behave as PHP. The name is cut after the last `/` or `\`
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
