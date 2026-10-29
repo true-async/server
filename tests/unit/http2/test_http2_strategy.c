@@ -76,6 +76,9 @@ void http_response_reset_to_error(zend_object *o, int s, const char *m) {
 void http_response_reset_from_exception(zend_object *o, zend_object *e) {
     (void)o; (void)e;
 }
+void http_handler_log_uncaught(const char *where, zend_object *e) {
+    (void)where; (void)e;
+}
 void http_response_set_protocol_version(zend_object *o, const char *v) {
     (void)o; (void)v;
 }
