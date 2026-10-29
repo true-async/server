@@ -1062,7 +1062,7 @@ static void worker_dispatch_finalize(worker_dispatch_ctx_t *ctx,
 
     bool marshalled_send_file = false;
 
-    if (ctx->handler_exception != NULL && !ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+    if (ctx->handler_exception != NULL) {
         http_handler_log_uncaught(ctx->is_grpc ? "grpc" : "http", ctx->handler_exception);
     }
 

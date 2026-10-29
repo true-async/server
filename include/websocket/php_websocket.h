@@ -170,9 +170,10 @@ bool http2_ws_accept(struct http2_stream_t *stream, websocket_object *w,
  * and both must consume its exception or it is rethrown at finalize and kills
  * the worker thread (#119).
  *
- * consume_exception marks the exception handled, logs it, and returns the
- * status to answer a not-yet-committed upgrade with (Throwable::$code when it
- * is a 4xx/5xx, else 500). 0 = the handler exited cleanly.
+ * consume_exception marks the exception handled, logs it unless it is an
+ * HttpException, and returns the status to answer a not-yet-committed upgrade
+ * with (an HttpException's code when it is a 4xx/5xx, else 500). 0 = the
+ * handler exited cleanly.
  *
  * close_internal_error sends CLOSE 1011 on an already-committed session.
  * Non-suspending — callable from dispose.

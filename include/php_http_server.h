@@ -1495,8 +1495,9 @@ void http_response_reset_from_exception(zend_object *response, zend_object *exc)
  * code when it is 400..599, otherwise 500. */
 int http_handler_exception_status(const zend_object *exc);
 /* An E_WARNING naming an uncaught handler exception's class, message, file and
- * line; `where` names the handler kind ("http", "websocket"). An HttpException
- * is a deliberate answer and is not logged. */
+ * line; `where` names the handler kind ("http", "grpc", "websocket"). It does
+ * not go through a user error handler. An HttpException is a deliberate answer
+ * and a cancellation is not a failure: neither is logged. */
 void http_handler_log_uncaught(const char *where, zend_object *exc);
 
 /* Config class entry */

@@ -25,7 +25,7 @@ $server = new HttpServer($config);
 
 /* Throws before touching $ws — the 101 has not been sent yet, so the upgrade
  * must be refused with a status rather than completed and then closed.
- * Throwable::$code carries the status when it is a valid 4xx/5xx. */
+ * An HttpException's code carries the status when it is a valid 4xx/5xx. */
 $server->addWebSocketHandler(function (WebSocket $ws, HttpRequest $req) {
     if (str_contains((string)$req->getUri(), 'forbidden')) {
         throw new \TrueAsync\HttpException('nope', 403);

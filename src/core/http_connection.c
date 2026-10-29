@@ -3293,7 +3293,7 @@ void http_handler_coroutine_dispose(zend_coroutine_t *coroutine)
     const bool handler_failed =
         http_handler_failed(coroutine, ctx->handler_bailout);
 
-    if (coroutine->exception != NULL && !ZEND_COROUTINE_IS_CANCELLED(coroutine)) {
+    if (coroutine->exception != NULL) {
         http_handler_log_uncaught("http", coroutine->exception);
     }
 

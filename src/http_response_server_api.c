@@ -471,7 +471,8 @@ void http_response_reset_to_error(zend_object *obj, int status_code, const char 
 
 void http_handler_log_uncaught(const char *where, zend_object *exc)
 {
-    if (instanceof_function(exc->ce, http_exception_ce)) {
+    if (instanceof_function(exc->ce, http_exception_ce)
+        || instanceof_function(exc->ce, ZEND_ASYNC_GET_CE(ZEND_ASYNC_EXCEPTION_CANCELLATION))) {
         return;
     }
 
@@ -483,12 +484,40 @@ void http_handler_log_uncaught(const char *where, zend_object *exc)
     const zval *const line_zv = zend_read_property_ex(exc->ce, exc,
                                                       ZSTR_KNOWN(ZEND_STR_LINE), 1, &rv);
 
+    /* The text may carry request data: a CR or LF in it would start a forged
+     * line in the log. */
+    zend_string *const msg = (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING)
+        ? zend_string_init(Z_STRVAL_P(msg_zv), Z_STRLEN_P(msg_zv), 0)
+        : ZSTR_EMPTY_ALLOC();
+
+    for (size_t i = 0; i < ZSTR_LEN(msg); i++) {
+        const unsigned char c = (unsigned char)ZSTR_VAL(msg)[i];
+
+        if ((c < 0x20 && c != '\t') || c == 0x7F) {
+            ZSTR_VAL(msg)[i] = ' ';
+        }
+    }
+
+    /* Past the user's error handler and any EH_THROW window: this runs inside
+     * the coroutine's finalize, where an exception they throw (a framework turns
+     * every warning into an ErrorException) would be left pending and stop the
+     * worker from spawning the next request. */
+    zval user_handler;
+    ZVAL_COPY_VALUE(&user_handler, &EG(user_error_handler));
+    ZVAL_UNDEF(&EG(user_error_handler));
+
+    zend_error_handling saved_handling;
+    zend_replace_error_handling(EH_NORMAL, NULL, &saved_handling);
+
     zend_error(E_WARNING,
         "[true-async-server] uncaught exception in %s handler: %s: %s (in %s:%d)",
-        where, ZSTR_VAL(exc->ce->name),
-        (msg_zv != NULL && Z_TYPE_P(msg_zv) == IS_STRING) ? Z_STRVAL_P(msg_zv) : "",
+        where, ZSTR_VAL(exc->ce->name), ZSTR_VAL(msg),
         (file_zv != NULL && Z_TYPE_P(file_zv) == IS_STRING) ? Z_STRVAL_P(file_zv) : "?",
         (line_zv != NULL && Z_TYPE_P(line_zv) == IS_LONG) ? (int)Z_LVAL_P(line_zv) : 0);
+
+    zend_restore_error_handling(&saved_handling);
+    ZVAL_COPY_VALUE(&EG(user_error_handler), &user_handler);
+    zend_string_release(msg);
 }
 
 int http_handler_exception_status(const zend_object *exc)
