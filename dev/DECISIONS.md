@@ -2,6 +2,13 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-10-06 A Windows worker pool keeps one reactor per worker, each on its own
+  duplicate of the shared socket, although connections spread unevenly: under a
+  light `Async\delay(200)` load worker 0 accepted none of 30 (#375).
+  Why: under CPU load every worker works; 512 connections, 32 clients, 30000
+  SHA-256 rounds per request gave 12.88 / 21.45 / 36.13 req/s and 1.00 / 1.99 /
+  3.90 cores for 1 / 2 / 4 workers (Windows Release ZTS, 3 runs each, median).
+  The cause of the uneven split was not looked for. Edmond.
 - 2026-10-01 A config method whose value nothing reads is a tombstone: it throws
   `HttpServerRuntimeException` on any argument, naming what does the job, for one
   minor release; its getter throws too. Twelve methods (#393), `enableHttp2` and
