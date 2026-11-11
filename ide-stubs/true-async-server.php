@@ -2465,6 +2465,16 @@ final class HttpRequest
     public function getRemotePort(): ?int {}
 
     /**
+     * True when the request arrived over TLS: an HTTPS listener on HTTP/1.1
+     * or HTTP/2, and every HTTP/3 request — the shape of `$_SERVER['HTTPS']`.
+     *
+     * This is the transport of the connection. It does NOT read
+     * X-Forwarded-Proto or Forwarded: behind a TLS-terminating proxy it is
+     * false, and trusting those headers is the application's decision.
+     */
+    public function isSecure(): bool {}
+
+    /**
      * Form fields of an application/x-www-form-urlencoded or multipart/form-data body.
      *
      * Keys follow PHP's rules for $_POST: name[] appends, user[name] and

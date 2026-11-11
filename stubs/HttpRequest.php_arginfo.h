@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpRequest.php.stub.php instead.
- * Stub hash: 31247d2a50b2b5c6d3fce7e41f0eec0f0ad0dcb4 */
+ * Stub hash: f93466809ce437db829654c215b767db382edeb6 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpRequest___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -31,6 +31,9 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_getRemotePort, 0, 0, IS_LONG, 1)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_isSecure, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_hasHeader, 0, 1, _IS_BOOL, 0)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
 ZEND_END_ARG_INFO()
@@ -47,10 +50,9 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpRequest_getBody arginfo_class_TrueAsync_HttpRequest_getMethod
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpRequest_hasBody, 0, 0, _IS_BOOL, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_TrueAsync_HttpRequest_hasBody arginfo_class_TrueAsync_HttpRequest_isSecure
 
-#define arginfo_class_TrueAsync_HttpRequest_isKeepAlive arginfo_class_TrueAsync_HttpRequest_hasBody
+#define arginfo_class_TrueAsync_HttpRequest_isKeepAlive arginfo_class_TrueAsync_HttpRequest_isSecure
 
 #define arginfo_class_TrueAsync_HttpRequest_getPost arginfo_class_TrueAsync_HttpRequest_getQuery
 
@@ -97,6 +99,7 @@ ZEND_METHOD(TrueAsync_HttpRequest, getCookie);
 ZEND_METHOD(TrueAsync_HttpRequest, getHttpVersion);
 ZEND_METHOD(TrueAsync_HttpRequest, getRemoteAddress);
 ZEND_METHOD(TrueAsync_HttpRequest, getRemotePort);
+ZEND_METHOD(TrueAsync_HttpRequest, isSecure);
 ZEND_METHOD(TrueAsync_HttpRequest, hasHeader);
 ZEND_METHOD(TrueAsync_HttpRequest, getHeader);
 ZEND_METHOD(TrueAsync_HttpRequest, getHeaderLine);
@@ -131,6 +134,7 @@ static const zend_function_entry class_TrueAsync_HttpRequest_methods[] = {
 	ZEND_ME(TrueAsync_HttpRequest, getHttpVersion, arginfo_class_TrueAsync_HttpRequest_getHttpVersion, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getRemoteAddress, arginfo_class_TrueAsync_HttpRequest_getRemoteAddress, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getRemotePort, arginfo_class_TrueAsync_HttpRequest_getRemotePort, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpRequest, isSecure, arginfo_class_TrueAsync_HttpRequest_isSecure, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, hasHeader, arginfo_class_TrueAsync_HttpRequest_hasHeader, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getHeader, arginfo_class_TrueAsync_HttpRequest_getHeader, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpRequest, getHeaderLine, arginfo_class_TrueAsync_HttpRequest_getHeaderLine, ZEND_ACC_PUBLIC)

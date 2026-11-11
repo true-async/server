@@ -110,6 +110,16 @@ final class HttpRequest
     public function getRemotePort(): ?int {}
 
     /**
+     * True when the request arrived over TLS: an HTTPS listener on HTTP/1.1
+     * or HTTP/2, and every HTTP/3 request.
+     *
+     * This is the transport of the connection. It does NOT read
+     * X-Forwarded-Proto or Forwarded: behind a TLS-terminating proxy it is
+     * false, and trusting those headers is the application's decision.
+     */
+    public function isSecure(): bool {}
+
+    /**
      * Check if header exists (case-insensitive)
      */
     public function hasHeader(string $name): bool {}

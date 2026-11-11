@@ -480,6 +480,19 @@ void http_connection_retire(http_connection_t *conn);
 zend_string *http_connection_remote_address(const http_connection_t *conn);
 uint16_t     http_connection_remote_port(const http_connection_t *conn);
 
+/* True when the connection's bytes go through a TLS session. A plaintext
+ * listener, a build without OpenSSL and a NULL conn read false. Inline so
+ * that a unit test linking the parsers alone needs no connection TU. */
+static zend_always_inline bool http_connection_is_tls(const http_connection_t *conn)
+{
+#ifdef HAVE_OPENSSL
+    return conn != NULL && conn->tls != NULL;
+#else
+    (void)conn;
+    return false;
+#endif
+}
+
 /* Teardown a connection that just went idle (handler_refcount == 0 and
  * destroy_pending), but defer the actual http_connection_destroy to a
  * microtask running at the top of the next loop iteration. Use this

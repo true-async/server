@@ -678,6 +678,13 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
     saved; `multipart/027` holds eight names to php-cgi's `$_FILES`. A name
     over 4096 bytes still gets 101, which PHP does not define.
+52. #444 — `HttpRequest::isSecure()`: code and tests on `bug/request-is-secure`,
+    PR not opened. The TLS flag is copied onto the request beside the peer
+    (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
+    stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
+    reader for it. `tls/020`, `h3/110`, `h3/111`; each fails with its
+    assignment removed. Full phpt 595 of 649 passed, 54 skipped, 2026-11-11.
+    YanGusik/laravel-spawn sets `HTTPS` from it (`bug/https-server-var`).
 
 - [ ] **Drop the streaming exemption in laravel-spawn.** `TrueAsyncServer::streamContent`
   calls `setNoCompression()` on every `StreamedResponse` as the workaround for #170
