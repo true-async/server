@@ -7,9 +7,9 @@ true_async
 memory_limit=32M
 --FILE--
 <?php
-/* #446: after a fatal error in a parent coroutine, the pool parent suspended
- * again in its drain and called Async\protect, which the engine refuses once
- * memory is exhausted: a second fatal, then uv_loop_close() failed with EBUSY.
+/* #446: after a fatal error in a parent coroutine the pool parent must not
+ * suspend in its drain or call Async\protect, which the engine refuses once
+ * memory is exhausted: that gives a second fatal and an EBUSY uv_loop_close().
  * A request is in flight on a worker for 600 ms when the fatal hits, so a
  * parent that does not wait for its workers exits before their "worker exited"
  * lines and the join line. */

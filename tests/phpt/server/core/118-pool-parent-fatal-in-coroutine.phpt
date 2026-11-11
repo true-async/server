@@ -6,8 +6,8 @@ true_async
 --FILE--
 <?php
 /* #446: an E_ERROR that is not memory exhaustion, raised while start() runs
- * on the main coroutine. The parent used to suspend again in its drain after
- * the bailout: a segfault on release, an assertion on a debug build. */
+ * on the main coroutine. A parent that suspends again in its drain after the
+ * bailout segfaults on release and fails an assertion on a debug build. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\delay;
