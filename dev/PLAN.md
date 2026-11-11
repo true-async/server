@@ -349,6 +349,79 @@ takes the HttpException code 400-599 as H1 and H2 do, for every exception.
         gRPC split out as #426; the Critic's pre-existing H3 `on_done` finding
         is #428 (item 47).
 
+## S7 — A fatal error in the pool parent breaks process exit (#446, #439 item 3)  [in progress]
+
+Goal: in pool mode a fatal error in any parent coroutine (memory_limit or any
+E_ERROR, inside or outside an `HttpServer` method) ends the process with that
+one fatal: no second fatal, no leftover libuv handle, no crash, no assertion on
+a debug build; the workers are joined before anything they use is freed.
+Done when: the red tests below fail on 7b4c290 and pass after, on the release
+image and on a debug PHP build; the full phpt and cmocka suites pass; CI green
+on every platform.
+Tests: first
+Base: 7b4c290 (server)
+
+Reproduced on 7b4c290 (2026-11-11, 3 of 3, release image and debug build of
+php-src `true-async` + php-async `main`): A, OOM in a parent coroutine: second
+fatal `Couldn't execute method Async\protect`, `uv_loop_close failed (EBUSY)`;
+B, E_ERROR at the top of `reload()` (fault point): segfault in `jump_fcontext`,
+debug assertion `scheduler.c:2059`. Cause in #446: `http_server_pool_drain`
+re-suspends after the bailout, and under OOM the `Async\protect` call fails.
+
+Design by the Sage, 2026-11-11 (asked for by Edmond), from code reading; the
+points marked (unverified) get a red run before code. After any bailout the
+parent never suspends or calls PHP again: STOP, `pool->close()`, block the
+thread until `pool->ref_count == 1` (as `reactor_pool_destroy()` waits), run the
+whole cleanup with a no-wait log stop, re-raise. Rejected: not waiting (the
+free handler frees the reactor pool before the module shutdown joins threads),
+driving the reactor by hand, a handler counter (blind to dropped tasks), a
+php-async change. #439 items 1 and 2 (worker side) stay in #439.
+
+- [x] S7.1 Red tests
+      done: `core/117` (A), `core/118` (B from PHP, a duplicate function
+      declared by eval, start() on main and in a spawned coroutine), `core/119`
+      (fatal while reload() rotates), `core/120` (fatal while workers boot)
+      fail on 7b4c290 with the whole output compared; the log-sink and
+      hot-reload variants show whether those paths re-suspend (unverified)
+      tier: T1 · role: —
+      result, 2026-11-11: five tests, B split in two (one process has one
+      fatal): `core/118` start() on main, `core/119` start() spawned and the
+      fatal on main; reload is `core/120`, boot is `core/121`. On 7b4c290,
+      3 of 3 runs each on the release image: 117 a second fatal
+      `Async\protect` and `uv_loop_close failed (EBUSY)`; 118 and 120 a
+      segfault; 119 EBUSY; on the debug build 117 to 120 hit the assertion
+      `scheduler.c:2059`. `core/121` does not crash on either build (3 of 3):
+      it fails only on the missing join line and guards the join. The
+      log-sink, signal and hot-reload variants of 118 crash the same way in
+      the drain, which hides those paths; they are run again after step 1 of
+      S7.2.
+- [x] S7.2 Parent bailout: no re-suspend, thread join, full cleanup, re-raise;
+      reload() guarded; no-wait log stop; protect only when the engine takes calls
+      done: S7.1 tests pass 10 of 10 on release and debug; full phpt and ctest pass
+      tier: T2 · role: Critic
+      result, 2026-11-11: done as designed, plus four Critic findings, each
+      with a test red before it: a bailout while reload() submits the fresh
+      cohort left a future on the freed wait state (`core/124`, EBUSY; the
+      fresh array is now published before the submits); a bailout between the
+      pool's creation and the guarded run left the threads unjoined
+      (`core/125`; no hang seen, the join line is the guard); the join is
+      bounded and exits with 255 (`core/126`); the file watcher under
+      exhausted memory raised a second fatal and hung (`core/127`): the watch
+      coroutine drives the C iterator and closes the watcher in C on a
+      bailout. Tests `core/117` to `core/127` pass 10 of 10 on release and
+      debug (124 and 125 on the fault-injection debug build only). Full phpt:
+      release 604 passed, 0 failed, 56 skipped of 660; debug 507 passed,
+      0 failed, 153 skipped of 660; cmocka 24 of 24. Left: php-async warns
+      "1 deferred coroutines were not executed" for any coroutine waiting at a
+      memory fatal, without this server too (its shutdown cancels and queues a
+      coroutine the bailout then unwinds); `core/127` allows the line. Not
+      taken: the no-wait log stop drops the log thread's last reference right
+      after queueing the close (the Critic's guess, unverified, the same path
+      as before for a stop outside a coroutine).
+- [ ] S7.3 CHANGELOG, `dev/DECISIONS.md`, `docs/REACTOR_RESPONSE_DELIVERY.md`, PR, CI
+      done: PR merged with CI green on every platform
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28
@@ -678,8 +751,7 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
     saved; `multipart/027` holds eight names to php-cgi's `$_FILES`. A name
     over 4096 bytes still gets 101, which PHP does not define.
-52. #444 — `HttpRequest::isSecure()`: code and tests on `bug/request-is-secure`,
-    PR not opened. The TLS flag is copied onto the request beside the peer
+52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
     reader for it. `tls/020`, `h3/110`, `h3/111`; each fails with its

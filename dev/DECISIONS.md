@@ -2,6 +2,20 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-11-11 After a bailout the pool parent joins its worker threads by blocking
+  its thread (1 ms polls until the pool's reference count is 1) and never
+  suspends or calls PHP again (#446).
+  Why: the scheduler unwinds each coroutine once and never resumes it, and under
+  exhausted memory the engine refuses every call; the request-shutdown free of
+  the server releases the reactor pool and the worker shells before module
+  shutdown joins the threads. Sage.
+  Rejected: not waiting (a booting worker reads freed memory); driving the
+  reactor by hand; counting live handlers (blind to tasks the closed pool
+  drops); a php-async change.
+  The wait is bounded: past `setShutdownTimeout()` plus 10 s the process ends
+  with `_exit(255)`, the status of a fatal error. Why: a thread blocked on the
+  parent (a bootloader receiving from it) never leaves, and freeing under it is
+  no option (Critic, S7).
 - 2026-10-06 A Windows worker pool keeps one reactor per worker, each on its own
   duplicate of the shared socket, although connections spread unevenly: under a
   light `Async\delay(200)` load worker 0 accepted none of 30 (#375).

@@ -132,6 +132,10 @@ uint64_t reactor_pool_processed(const reactor_pool_t *rp, int idx);
  * reactor thread, so they must key their state per-thread. NULL clears both. */
 void reactor_pool_set_drain_scope(void (*enter)(void), void (*exit)(void));
 
+/* Blocks the calling thread for 1 ms without the event loop: the step of a
+ * poll on a flag another thread sets. */
+void reactor_pool_msleep(void);
+
 /* Signal every reactor to stop (via the channel), wait for the loops to leave,
  * and release the pool. Parent-thread only; call once, after producers quiesce.
  * Passing NULL is a no-op. */

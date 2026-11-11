@@ -116,7 +116,7 @@ void reactor_pool_set_drain_scope(void (*enter)(void), void (*exit)(void))
     g_drain_scope_exit  = exit;
 }
 
-static void reactor_pool_msleep(void)
+void reactor_pool_msleep(void)
 {
 #ifdef PHP_WIN32
     Sleep(1);
