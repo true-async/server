@@ -3701,7 +3701,7 @@ static void http_server_pool_join_threads(http_server_object *server,
 {
     server->stopping = true;
     pool_ctl_command(server->pool_ctl, POOL_CMD_STOP);
-    pool->close(pool);
+    (pool->close)(pool); /* parenthesised: win32_compat.h defines close(fd) */
 
     const http_server_config_t *const cfg = http_server_get_config(server);
     const uint64_t bound_ms = (cfg != NULL ? (uint64_t)cfg->shutdown_timeout_s * 1000 : 0)

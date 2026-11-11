@@ -49,7 +49,12 @@ spawn(function () use ($port) {
     }
 
     echo "up\n";
-    exec("curl -s --max-time 5 http://127.0.0.1:$port/slow >/dev/null 2>&1 &");
+    $curl = "curl -s --max-time 5 http://127.0.0.1:$port/slow";
+    if (PHP_OS_FAMILY === 'Windows') {
+        pclose(popen("start /B $curl >NUL 2>&1", 'r'));
+    } else {
+        exec("$curl >/dev/null 2>&1 &");
+    }
     delay(100);
     echo "in flight\n";
     $s = str_repeat('x', 64 * 1024 * 1024);
