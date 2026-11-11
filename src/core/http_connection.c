@@ -308,18 +308,6 @@ uint16_t http_connection_remote_port(const http_connection_t *conn)
 }
 /* }}} */
 
-/* {{{ http_connection_is_tls */
-bool http_connection_is_tls(const http_connection_t *conn)
-{
-#ifdef HAVE_OPENSSL
-    return conn != NULL && conn->tls != NULL;
-#else
-    (void)conn;
-    return false;
-#endif
-}
-/* }}} */
-
 /* {{{ deferred-teardown microtask — destroy from inside nghttp2 callbacks
  * would free the session mid-send (UAF); microtask runs after stack unwinds. */
 typedef struct {
