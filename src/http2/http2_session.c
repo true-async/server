@@ -311,6 +311,7 @@ static int cb_on_begin_headers(nghttp2_session *ng,
     if (session->conn != NULL) {
         stream->request->peer     = session->conn->peer;
         stream->request->peer_len = session->conn->peer_len;
+        stream->request->secure   = http_connection_is_tls(session->conn);
     }
 
     stream_table_register(session, stream);

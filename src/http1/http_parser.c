@@ -540,6 +540,7 @@ static int on_headers_complete(llhttp_t* llhttp_parser)
     if (parser->conn != NULL) {
         req->peer     = parser->conn->peer;
         req->peer_len = parser->conn->peer_len;
+        req->secure   = http_connection_is_tls(parser->conn);
     }
 
     /* Get method. Common methods resolve to a process-wide interned

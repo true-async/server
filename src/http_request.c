@@ -1198,6 +1198,14 @@ ZEND_METHOD(TrueAsync_HttpRequest, getRemotePort)
     RETURN_LONG((zend_long)port);
 }
 
+ZEND_METHOD(TrueAsync_HttpRequest, isSecure)
+{
+    http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    RETURN_BOOL(intern->request->secure);
+}
+
 ZEND_METHOD(TrueAsync_HttpRequest, getTraceId)
 {
     http_request_object *intern = Z_HTTP_REQUEST_P(ZEND_THIS);

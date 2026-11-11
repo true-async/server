@@ -58,6 +58,7 @@ http3_stream_t *http3_stream_new(http3_connection_t *conn, int64_t stream_id)
      * reaches the pool worker and the send-file engine. */
     s->request->peer     = conn->peer;
     s->request->peer_len = conn->peer_len;
+    s->request->secure   = true;   /* QUIC carries TLS 1.3 */
 
     /* Taken here, not at dispose: teardown NULLs conn while the stream is
      * still finishing. */

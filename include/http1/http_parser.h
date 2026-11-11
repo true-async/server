@@ -233,6 +233,10 @@ struct http_request_t {
      * default), true = persistent malloc (reactor-built) → those frees go
      * through pefree, flag-aware. Body/worker-derived fields stay ZMM. */
     bool         persistent     : 1;
+    /* Arrived over TLS: an HTTPS listener (H1, H2) or QUIC (H3). Copied
+     * with the peer, for the same reason: the pool worker has no
+     * connection to ask. */
+    bool         secure         : 1;
 
     zend_string *traceparent_raw;
     zend_string *tracestate_raw;
