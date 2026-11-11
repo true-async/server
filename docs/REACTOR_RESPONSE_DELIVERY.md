@@ -102,7 +102,10 @@ closes the thread pool and blocks its thread, with no event loop and no PHP,
 until the pool's reference count falls to the one the pool object holds. Each
 worker thread holds one reference from before its spawn until its last act.
 Only then are the reactor pool, the worker shells and the registry freed, and
-the fatal raised again.
+the fatal raised again. A thread still running after `setShutdownTimeout()` plus 10
+seconds, such as a bootloader waiting on the parent, ends the process with
+exit status 255: freeing under it is not safe, and waiting longer would turn
+the fatal into a hang.
 
 The worker handler catches recoverable start bailout, then completes the clone
 destructor before the task future can resolve. An arbitrary fatal/OOM inside
