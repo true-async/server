@@ -377,13 +377,24 @@ free handler frees the reactor pool before the module shutdown joins threads),
 driving the reactor by hand, a handler counter (blind to dropped tasks), a
 php-async change. #439 items 1 and 2 (worker side) stay in #439.
 
-- [ ] S7.1 Red tests
+- [x] S7.1 Red tests
       done: `core/117` (A), `core/118` (B from PHP, a duplicate function
       declared by eval, start() on main and in a spawned coroutine), `core/119`
       (fatal while reload() rotates), `core/120` (fatal while workers boot)
       fail on 7b4c290 with the whole output compared; the log-sink and
       hot-reload variants show whether those paths re-suspend (unverified)
       tier: T1 · role: —
+      result, 2026-11-11: five tests, B split in two (one process has one
+      fatal): `core/118` start() on main, `core/119` start() spawned and the
+      fatal on main; reload is `core/120`, boot is `core/121`. On 7b4c290,
+      3 of 3 runs each on the release image: 117 a second fatal
+      `Async\protect` and `uv_loop_close failed (EBUSY)`; 118 and 120 a
+      segfault; 119 EBUSY; on the debug build 117 to 120 hit the assertion
+      `scheduler.c:2059`. `core/121` does not crash on either build (3 of 3):
+      it fails only on the missing join line and guards the join. The
+      log-sink, signal and hot-reload variants of 118 crash the same way in
+      the drain, which hides those paths; they are run again after step 1 of
+      S7.2.
 - [ ] S7.2 Parent bailout: no re-suspend, thread join, full cleanup, re-raise;
       reload() guarded; no-wait log stop; protect only when the engine takes calls
       done: S7.1 tests pass 10 of 10 on release and debug; full phpt and ctest pass
