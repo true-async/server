@@ -3708,8 +3708,15 @@ static void http_server_pool_join_threads(http_server_object *server,
                               + POOL_JOIN_MARGIN_MS;
     const int threads = zend_atomic_int_load_ex(&pool->ref_count) - 1;
 
-    for (uint64_t waited_ms = 1; zend_atomic_int_load_ex(&pool->ref_count) > 1; waited_ms++) {
+    /* Clock time, not sleep count: a 1 ms sleep lasts longer on some
+     * platforms (several ms on macOS). */
+    const zend_hrtime_t start_ns = zend_hrtime();
+    uint64_t reported_periods = 0; /* 5 s periods already reported */
+
+    while (zend_atomic_int_load_ex(&pool->ref_count) > 1) {
         reactor_pool_msleep();
+
+        const uint64_t waited_ms = (uint64_t)((zend_hrtime() - start_ns) / 1000000);
 
         if (waited_ms >= bound_ms) {
             fprintf(stderr,
@@ -3720,7 +3727,8 @@ static void http_server_pool_join_threads(http_server_object *server,
             _exit(255);
         }
 
-        if (waited_ms % 5000 == 0) {
+        if (waited_ms / 5000 > reported_periods) {
+            reported_periods = waited_ms / 5000;
             fprintf(stderr,
                 "[true-async-server] pool parent: fatal error, waiting for %d worker thread(s)\n",
                 zend_atomic_int_load_ex(&pool->ref_count) - 1);
