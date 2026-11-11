@@ -60,4 +60,4 @@ reloading
 
 Fatal error: Cannot redeclare function tas_dup() %s
 [true-async-server] worker exited
-[true-async-server] pool parent: fatal error, %d worker thread(s) joined
+[true-async-server] pool parent: fatal error, worker threads joined

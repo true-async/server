@@ -70,4 +70,4 @@ in flight
 Fatal error: Allowed memory size of 33554432 bytes exhausted %s in %s on line %d
 [true-async-server] worker exited
 [true-async-server] worker exited
-[true-async-server] pool parent: fatal error, 2 worker thread(s) joined
+[true-async-server] pool parent: fatal error, worker threads joined

@@ -46,5 +46,5 @@ echo "start returned\n";
 Fatal error: Cannot redeclare function tas_dup\(\) [^\n]*
 \[true-async-server\] worker exited
 \[true-async-server\] worker exited
-\[true-async-server\] pool parent: fatal error, 2 worker thread\(s\) joined
+\[true-async-server\] pool parent: fatal error, worker threads joined
 (\d{4}-\d\d-\d\dT[\d:.]+Z INFO server\.[a-z]+ mode=pool[^\n]*\n?)*$

@@ -70,6 +70,6 @@ in flight
 Fatal error: Allowed memory size of 33554432 bytes exhausted [^\n]*
 \[true-async-server\] worker exited
 \[true-async-server\] worker exited
-\[true-async-server\] pool parent: fatal error, 2 worker thread\(s\) joined(
+\[true-async-server\] pool parent: fatal error, worker threads joined(
 
 Warning: 1 deferred coroutines were not executed in Unknown on line 0)?$

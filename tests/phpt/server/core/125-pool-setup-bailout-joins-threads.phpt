@@ -31,4 +31,4 @@ $server->start();
 echo "start returned\n";
 ?>
 --EXPECT--
-[true-async-server] pool parent: fatal error, 2 worker thread(s) joined
+[true-async-server] pool parent: fatal error, worker threads joined

@@ -3706,8 +3706,6 @@ static void http_server_pool_join_threads(http_server_object *server,
     const http_server_config_t *const cfg = http_server_get_config(server);
     const uint64_t bound_ms = (cfg != NULL ? (uint64_t)cfg->shutdown_timeout_s * 1000 : 0)
                               + POOL_JOIN_MARGIN_MS;
-    const int threads = zend_atomic_int_load_ex(&pool->ref_count) - 1;
-
     /* Clock time, not sleep count: a 1 ms sleep lasts longer on some
      * platforms (several ms on macOS). */
     const zend_hrtime_t start_ns = zend_hrtime();
@@ -3736,8 +3734,7 @@ static void http_server_pool_join_threads(http_server_object *server,
         }
     }
 
-    fprintf(stderr,
-        "[true-async-server] pool parent: fatal error, %d worker thread(s) joined\n", threads);
+    fprintf(stderr, "[true-async-server] pool parent: fatal error, worker threads joined\n");
     fflush(stderr);
 }
 
