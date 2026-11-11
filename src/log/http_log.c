@@ -2553,7 +2553,7 @@ static bool http_log_sink_start(http_log_sink_t *sink,
 /* Stop one sink: hand it to the log thread, which drains what the producers
  * left and tears the transport down, then wait (bounded) for it to report back.
  * Producers must have quiesced — the caller is the server's stop path. */
-static void http_log_sink_stop(http_log_sink_t *sink)
+static void http_log_sink_stop(http_log_sink_t *sink, const bool wait)
 {
     /* The formatter ud is ours regardless of the transport's fate — the
      * formatter only runs inside emit, never from an in-flight write. */
@@ -2582,7 +2582,7 @@ static void http_log_sink_stop(http_log_sink_t *sink)
 
     zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
     zend_async_trigger_event_t *const done =
-        co != NULL ? ZEND_ASYNC_NEW_TRIGGER_EVENT() : NULL;
+        wait && co != NULL ? ZEND_ASYNC_NEW_TRIGGER_EVENT() : NULL;
 
     cb->stop_event = done != NULL ? &done->base : NULL;
 
@@ -2693,7 +2693,7 @@ void http_log_server_start(http_log_state_t *state,
     http_log_server_start_sinks(state, &spec, 1);
 }
 
-void http_log_server_stop(http_log_state_t *state)
+static void http_log_server_stop_sinks(http_log_state_t *state, const bool wait)
 {
     if (state == NULL) {
         return;
@@ -2705,8 +2705,18 @@ void http_log_server_stop(http_log_state_t *state)
     /* Each sink hands itself to the log thread and waits (bounded) for the
      * final drain — see http_log_sink_stop. */
     for (uint8_t i = 0; i < state->sink_count; i++) {
-        http_log_sink_stop(&state->sinks[i]);
+        http_log_sink_stop(&state->sinks[i], wait);
     }
 
     state->sink_count = 0;
+}
+
+void http_log_server_stop(http_log_state_t *state)
+{
+    http_log_server_stop_sinks(state, true);
+}
+
+void http_log_server_stop_nowait(http_log_state_t *state)
+{
+    http_log_server_stop_sinks(state, false);
 }

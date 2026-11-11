@@ -3,6 +3,11 @@ HttpServer pool: memory exhausted in a parent coroutine ends the process with on
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+exec('curl --version 2>&1', $out, $rc);
+if ($rc !== 0) die('skip curl CLI not available');
+?>
 --INI--
 memory_limit=32M
 --FILE--
@@ -12,7 +17,9 @@ memory_limit=32M
  * memory is exhausted: that gives a second fatal and an EBUSY uv_loop_close().
  * A request is in flight on a worker for 600 ms when the fatal hits, so a
  * parent that does not wait for its workers exits before their "worker exited"
- * lines and the join line. */
+ * lines and the join line. The slow request comes from a curl process: a
+ * parent coroutine waiting on it could not be unwound once memory is
+ * exhausted, and the engine would warn about it. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\delay;
@@ -42,7 +49,7 @@ spawn(function () use ($port) {
     }
 
     echo "up\n";
-    spawn(fn () => @file_get_contents("http://127.0.0.1:$port/slow"));
+    exec("curl -s --max-time 5 http://127.0.0.1:$port/slow >/dev/null 2>&1 &");
     delay(100);
     echo "in flight\n";
     $s = str_repeat('x', 64 * 1024 * 1024);

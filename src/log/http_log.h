@@ -326,6 +326,11 @@ void http_log_server_start(http_log_state_t *state,
 /* Idempotent; safe on a never-started state. */
 void http_log_server_stop(http_log_state_t *state);
 
+/* As http_log_server_stop, but hands each sink to the log thread without
+ * waiting for its final drain: it never suspends, so it is the one to call
+ * after a bailout. Lines still queued may be lost. */
+void http_log_server_stop_nowait(http_log_state_t *state);
+
 /* Single gate behind every level macro: UNEXPECTED-wrapped so the disabled
  * path is one branch and skips body formatting entirely. The state argument
  * is read once into a local — multiple macro arg evaluations are forbidden. */
