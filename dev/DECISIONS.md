@@ -12,6 +12,10 @@ Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
   Rejected: not waiting (a booting worker reads freed memory); driving the
   reactor by hand; counting live handlers (blind to tasks the closed pool
   drops); a php-async change.
+  The wait is bounded: past `setShutdownTimeout()` plus 10 s the process ends
+  with `_exit(255)`, the status of a fatal error. Why: a thread blocked on the
+  parent (a bootloader receiving from it) never leaves, and freeing under it is
+  no option (Critic, S7).
 - 2026-10-06 A Windows worker pool keeps one reactor per worker, each on its own
   duplicate of the shared socket, although connections spread unevenly: under a
   light `Async\delay(200)` load worker 0 accepted none of 30 (#375).

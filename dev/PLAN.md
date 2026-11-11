@@ -395,10 +395,29 @@ php-async change. #439 items 1 and 2 (worker side) stay in #439.
       log-sink, signal and hot-reload variants of 118 crash the same way in
       the drain, which hides those paths; they are run again after step 1 of
       S7.2.
-- [ ] S7.2 Parent bailout: no re-suspend, thread join, full cleanup, re-raise;
+- [x] S7.2 Parent bailout: no re-suspend, thread join, full cleanup, re-raise;
       reload() guarded; no-wait log stop; protect only when the engine takes calls
       done: S7.1 tests pass 10 of 10 on release and debug; full phpt and ctest pass
       tier: T2 · role: Critic
+      result, 2026-11-11: done as designed, plus four Critic findings, each
+      with a test red before it: a bailout while reload() submits the fresh
+      cohort left a future on the freed wait state (`core/124`, EBUSY; the
+      fresh array is now published before the submits); a bailout between the
+      pool's creation and the guarded run left the threads unjoined
+      (`core/125`; no hang seen, the join line is the guard); the join is
+      bounded and exits with 255 (`core/126`); the file watcher under
+      exhausted memory raised a second fatal and hung (`core/127`): the watch
+      coroutine drives the C iterator and closes the watcher in C on a
+      bailout. Tests `core/117` to `core/127` pass 10 of 10 on release and
+      debug (124 and 125 on the fault-injection debug build only). Full phpt:
+      release 604 passed, 0 failed, 56 skipped of 660; debug 507 passed,
+      0 failed, 153 skipped of 660; cmocka 24 of 24. Left: php-async warns
+      "1 deferred coroutines were not executed" for any coroutine waiting at a
+      memory fatal, without this server too (its shutdown cancels and queues a
+      coroutine the bailout then unwinds); `core/127` allows the line. Not
+      taken: the no-wait log stop drops the log thread's last reference right
+      after queueing the close (the Critic's guess, unverified, the same path
+      as before for a stop outside a coroutine).
 - [ ] S7.3 CHANGELOG, `dev/DECISIONS.md`, `docs/REACTOR_RESPONSE_DELIVERY.md`, PR, CI
       done: PR merged with CI green on every platform
       tier: T1 · role: —
