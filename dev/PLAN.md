@@ -349,7 +349,7 @@ takes the HttpException code 400-599 as H1 and H2 do, for every exception.
         gRPC split out as #426; the Critic's pre-existing H3 `on_done` finding
         is #428 (item 47).
 
-## S7 — A fatal error in the pool parent breaks process exit (#446, #439 item 3)  [in progress]
+## S7 — A fatal error in the pool parent breaks process exit (#446, #439 item 3)  [done]
 
 Goal: in pool mode a fatal error in any parent coroutine (memory_limit or any
 E_ERROR, inside or outside an `HttpServer` method) ends the process with that
@@ -418,9 +418,17 @@ php-async change. #439 items 1 and 2 (worker side) stay in #439.
       taken: the no-wait log stop drops the log thread's last reference right
       after queueing the close (the Critic's guess, unverified, the same path
       as before for a stop outside a coroutine).
-- [ ] S7.3 CHANGELOG, `dev/DECISIONS.md`, `docs/REACTOR_RESPONSE_DELIVERY.md`, PR, CI
+- [x] S7.3 CHANGELOG, `dev/DECISIONS.md`, `docs/REACTOR_RESPONSE_DELIVERY.md`, PR, CI
       done: PR merged with CI green on every platform
       tier: T1 · role: —
+      result, 2026-11-11: PR 447 merged as 2dd90b4, CI green on Linux, macOS
+      and Windows. CI found three faults the local runs did not: close() is a
+      macro on Windows; a 1 ms sleep lasts several ms on macOS and Windows,
+      so the join bound now reads the clock; the join line's thread count
+      raced. The "deferred coroutines were not executed" warning was
+      php-async's (true-async/php-async#319, fixed by PR 320, merged as
+      160f004); `core/127` no longer allows it, and fails 3 of 3 against a
+      php-async without that fix.
 
 ## Next
 
