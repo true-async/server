@@ -149,7 +149,7 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         CI run 43083329005 (main 2dd90b4): 156 of 660 skipped, 0 failed; none
         for curl without HTTP/2 or h2spec; `h2/020`, `021`, `062` keep the
         justified h2load skip (no Windows build, #407).
-- [~] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
+- [x] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
         OpenSSL >= 3.5 on the runner)
       done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; a curl
         `--http3-only` test passes there; failures as in S3.5
@@ -159,6 +159,13 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         libraries and a Debug CRT; a cache keyed on ngtcp2 alone outlives an
         SDK OpenSSL move; S3.13 also needs 43 certificate commands fixed.
         All taken (`dev/plans/S3.md`).
+      handoff: `build_h3_deps.bat` builds nghttp3 1.15.0 and ngtcp2 1.22.1
+        static against the SDK's OpenSSL 4.0.3; `--enable-http3`, and the job
+        fails without `HAVE_HTTP_SERVER_HTTP3`. Windows CI run 43218837274: 142
+        of 666 skipped (152 before), 0 failed, none for HTTP/3 missing; `h3/112`
+        (curl `--http3-only` GET, 70000-byte POST, HEAD) passes. `*.bat -text`
+        keeps the CRLF cmd needs. 82 tests still skip on h3client, 23 on
+        aioquic: S3.13.
 - [x] S3.9 Port the six tests whose POSIX mechanism is only their setup
         (`dev/plans/S3.md`)
       done: the six run and pass on Windows CI, or a step names why one cannot
@@ -168,6 +175,13 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         `039` are not setup problems: the Windows AF_UNIX listener is broken
         (S3.12). Found on the way: `core/128` and `132` now accept the worker's
         bailout warning after "start returned" (run 43201891206).
+- [ ] S3.13 Port `tests/h3client/h3client.c` to Winsock, build it in the
+        Windows job and find it prebuilt in `_h3_skipif.inc`; make the 43 h3
+        phpt whose inline certificate command writes `2>/dev/null` run under
+        cmd (`dev/plans/S3.md`, S3.8 plan item 5)
+      done: no phpt skips on Windows CI for "h3client harness is POSIX-only";
+        failures as in S3.5
+      tier: T2 · role: Critic
 - [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
