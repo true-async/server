@@ -43,9 +43,11 @@ $server = new HttpServer((new HttpServerConfig())
     ->setCertificate($cert)->setPrivateKey($key)
     ->setReadTimeout(5)->setWriteTimeout(5));
 $server->addHttpHandler(function ($req, $res) {
+    /* HTTP/3 may start the handler after the headers: wait for the body. */
+    $len = strlen($req->awaitBody()->getBody());
     $res->setStatusCode(200)
         ->setHeader('content-type', 'text/plain')
-        ->setBody($req->getMethod() . ' ' . $req->getUri() . ' ' . strlen((string) $req->getBody()));
+        ->setBody($req->getMethod() . ' ' . $req->getUri() . ' ' . $len);
 });
 
 $client = spawn(function () use ($server, $port, $tmp) {
