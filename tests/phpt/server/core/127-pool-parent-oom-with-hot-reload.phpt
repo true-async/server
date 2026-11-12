@@ -15,10 +15,7 @@ memory_limit=32M
 /* #446: under exhausted memory the watcher's close() cannot be called, and
  * the watch coroutine is unwound inside its iterator. It closes the watch in
  * C and drops the iterator and the watcher, or their loop handles fail the
- * debug assertion that the loop is stopped. php-async warns about the watch
- * coroutine its shutdown cancelled and queued after the bailout had unwound
- * it; it does so for any coroutine waiting at a memory fatal, with or without
- * this server, so the line is optional here. */
+ * debug assertion that the loop is stopped. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\delay;
@@ -70,6 +67,4 @@ in flight
 Fatal error: Allowed memory size of 33554432 bytes exhausted [^\n]*
 \[true-async-server\] worker exited
 \[true-async-server\] worker exited
-\[true-async-server\] pool parent: fatal error, worker threads joined(
-
-Warning: 1 deferred coroutines were not executed in Unknown on line 0)?$
+\[true-async-server\] pool parent: fatal error, worker threads joined$

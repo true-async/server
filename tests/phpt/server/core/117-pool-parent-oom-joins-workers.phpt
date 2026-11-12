@@ -17,9 +17,8 @@ memory_limit=32M
  * memory is exhausted: that gives a second fatal and an EBUSY uv_loop_close().
  * A request is in flight on a worker for 600 ms when the fatal hits, so a
  * parent that does not wait for its workers exits before their "worker exited"
- * lines and the join line. The slow request comes from a curl process: a
- * parent coroutine waiting on it could not be unwound once memory is
- * exhausted, and the engine would warn about it. */
+ * lines and the join line. The slow request comes from a curl process, so
+ * the output holds only the server's lines. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\delay;
