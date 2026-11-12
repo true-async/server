@@ -2213,13 +2213,6 @@ static zend_async_event_t *create_server_wait_event(void)
     return event;
 }
 
-/* False once the engine refuses every call (memory exhausted, or the request is
- * no longer active): a zend_call_* then fails with a fatal of its own. */
-static zend_always_inline bool http_server_engine_takes_calls(void)
-{
-    return EG(active) && !ZEND_HAS_OOM();
-}
-
 /* Suspends `co` until `scope` completes or `grace_ms` passes. The timer and the
  * subscription belong to the coroutine's waker, so a bailout out of the wait
  * leaves nothing armed once the waker is cleaned. */
@@ -2238,7 +2231,7 @@ static void http_server_scope_await_completion(zend_async_scope_t *scope, zend_c
     zend_async_waker_clean(co);
 
     if (EG(exception)) {
-        zend_clear_exception(); /* grace expired */
+        zend_clear_exception(); /* the grace window expired, or start() was cancelled */
     }
 }
 
@@ -2260,8 +2253,13 @@ static void http_server_drain_scope(http_server_object *server)
      * cannot await — leave scope_drained unset so a later call may retry. */
     zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
 
-    if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT || false == ZEND_ASYNC_ON
-        || server->after_bailout) {
+    if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT || false == ZEND_ASYNC_ON) {
+        return;
+    }
+
+    /* After a bailout the teardown neither suspends nor calls PHP; the scope is
+     * left undrained and its release cancels the handlers. */
+    if (server->after_bailout) {
         return;
     }
 
@@ -2510,7 +2508,7 @@ static void pool_retired_release_all(http_server_object *server)
 typedef struct {
     int                          pending;     /* workers not yet done */
     int                          failed;      /* workers whose submission was rejected */
-    int                          fatal;       /* of those, workers that ran and were ended by a fatal error */
+    int                          fatal;       /* of those, workers ended by a fatal error */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
     zend_async_event_callback_t  cb;          /* embedded — recovered via offsetof */
     zend_function              *protect;
@@ -2519,6 +2517,13 @@ typedef struct {
     bool                        shutdown_was_graceful;
     bool                        bailout;
 } pool_await_state_t;
+
+/* False once the engine refuses every call (memory exhausted, or the request is
+ * no longer active): a zend_call_* then fails with a fatal of its own. */
+static zend_always_inline bool http_server_engine_takes_calls(void)
+{
+    return EG(active) && !ZEND_HAS_OOM();
+}
 
 static void pool_notify_quiesced(http_server_object *server, pool_await_state_t *st)
 {
@@ -2712,12 +2717,12 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     if (UNEXPECTED(exception != NULL)) {
         st->failed++;
 
-        /* A worker that ran until a fatal error ended it rejects its own task;
-         * the fatal itself is already printed by the worker thread. */
+        /* The fatal itself is already printed by the worker thread. */
         zval *code_zv = zend_read_property(exception->ce, exception, "code", sizeof("code") - 1,
                                            /*silent=*/1, NULL);
 
-        if (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG && Z_LVAL_P(code_zv) == POOL_WORKER_FATAL_CODE) {
+        if (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG
+            && Z_LVAL_P(code_zv) == POOL_WORKER_FATAL_CODE) {
             st->fatal++;
             fprintf(stderr, "[true-async-server] worker ended by a fatal error\n");
             fflush(stderr);

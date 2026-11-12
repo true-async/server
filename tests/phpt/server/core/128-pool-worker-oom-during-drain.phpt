@@ -11,8 +11,8 @@ memory_limit=32M
  * worker drains its scope with a grace window. A coroutine the handler spawned
  * exhausts memory inside that window, which the handler's bailout firewall does
  * not cover, so the bailout leaves the worker's start(). The teardown after it
- * may not call PHP: a Scope method called there under exhausted memory raises a
- * second fatal, which skips the rest of the teardown and the task's completion,
+ * may not call PHP: a PHP call there under exhausted memory raises a second
+ * fatal, which skips the rest of the teardown and the task's completion,
  * and the parent then waits for that worker forever. The handler the
  * stop() cancels is the next coroutine to run PHP, so the delayed memory error
  * is raised in it and its firewall logs it: that warning is allowed, in any
