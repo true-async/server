@@ -137,7 +137,7 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         `h1/038` made order-independent, `h1/055` skipped with a measured
         reason (`dev/plans/S3.md`). `h3/079` and `080`, added after S3.5, lost
         the false SO_REUSEPORT skip here.
-- [~] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
+- [x] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
       tier: T1 · role: —
@@ -145,7 +145,10 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         0 fail with nghttp2 1.63.0, 1.70.0 and development 1.70.90; before the
         fix, 1.70.0 gave 141 pass, 5 fail. C session tests: 29 of 29 with
         nghttp2 1.59.0 and 1.70.0. Windows H2 phpt excluding subprocess gate:
-        53 pass, 0 fail, 4 dependency skips. CI confirmation pending.
+        53 pass, 0 fail, 4 dependency skips. Confirmed 2026-11-12 on Windows
+        CI run 43083329005 (main 2dd90b4): 156 of 660 skipped, 0 failed; none
+        for curl without HTTP/2 or h2spec; `h2/020`, `021`, `062` keep the
+        justified h2load skip (no Windows build, #407).
 - [ ] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
         OpenSSL >= 3.5 on the runner)
       done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
