@@ -187,9 +187,10 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
       done: choice and reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
       Sage 2026-11-12: one AcceptEx stays the default; 32 only for a listener
-        declared never to pause (no cap, no CoDel). Final; Edmond agreed.
-      handoff: `dev/DECISIONS.md` 2026-11-12; the change and its evidence are
-        S3.14.
+        declared never to pause (no cap, no CoDel). Edmond agreed, then
+        reversed it after the S3.14 measurement: one AcceptEx everywhere.
+      handoff: `dev/DECISIONS.md` 2026-11-12: one AcceptEx on every Windows
+        TCP listener, as now; nothing to change in the code.
 - [ ] S3.12 The AF_UNIX listener on Windows served no request. It binds only a
         `\\.\pipe\` name; one connect from a child process that opens the pipe
         as a file leaves `accept_errors_total` at 1 and the handler uncalled
@@ -202,7 +203,7 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
       done: `core/038` and `039` run on Windows CI and pass, or Windows refuses
         `addUnixListener()` with a stated reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
-- [~] S3.14 Implement the S3.10 decision: php-async takes a never-pauses flag
+- [x] S3.14 Implement the S3.10 decision: php-async takes a never-pauses flag
         at listen time (php-src `ZEND_ASYNC_LISTEN_F_NO_PAUSE`) and posts libuv's 32
         AcceptEx for it; the server passes it when neither a cap nor CoDel is
         set
@@ -220,6 +221,11 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         pool worker now resets up to 32 posted accepts; ignore the bit on
         AF_UNIX. All taken; the asynctest is dropped and the mode is proved by
         the measurement (`dev/plans/S3.md`).
+      handoff: dropped. The Windows measurement (`dev/BENCHMARKS.md`
+        2026-11-12) showed 32 AcceptEx faster only with one worker and every
+        connection on one worker with several; Edmond chose one AcceptEx
+        everywhere. The code stays unmerged on `feature/listen-no-pause` in
+        php-src, php-async and the server.
 - [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
         23 (`dev/plans/S3.md`, S3.5)

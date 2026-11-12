@@ -2,25 +2,19 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
-- 2026-11-12 A Windows TCP listener keeps one AcceptEx at a time by default; it
-  posts libuv's 32 only when its creator declares at listen time that it never
-  pauses, and the server declares that when neither a connection cap nor CoDel
-  is set (S3.10). A listener so declared that is stopped anyway switches to one
-  AcceptEx at that stop, and its order is not guaranteed for the next 32
-  accepts.
-  Why: a pause held up to 32 completed accepts, libuv hands them over newest
-  first (`pending_accepts` in `src/win/tcp.c`, 1.52.1), so an older client
-  waited past its timeout (`h1/064`), and a paused worker strands what it holds
-  from the workers sharing its socket. Without a cap or CoDel the server never
-  pauses, yet one AcceptEx costs it 3.5 times on a 1000-connect burst
-  (`dev/BENCHMARKS.md` 2026-09-30). The default stays the safe mode, so a
-  listener whose creator says nothing keeps the pause order. Sage, final;
-  Edmond agreed.
-  Rejected: one AcceptEx always (every Windows user pays for a pause most never
-  enable); 32 with held connections reordered or closed (holds connections past
-  the cap, or drops them as #305 did, and reaches into libuv's private fields).
-  Dropped: the #307 reason that one AcceptEx gives pool workers an even share;
-  the uneven split of S3.11 was measured with one already in place.
+- 2026-11-12 Every Windows TCP listener keeps one AcceptEx at a time, as
+  php-async #307 made it (S3.10, S3.14). Edmond, final: one mode everywhere,
+  simpler than a rule that picks one.
+  Why: a Windows agent's measurement of 2026-11-12 (`dev/BENCHMARKS.md`) found
+  libuv's 32 faster only with one worker: a 1000-connect burst took 126-148
+  ms against 569-1051 ms with one AcceptEx. With 2 workers one AcceptEx took
+  94-111 ms against 130-142, with 4 workers 86-99 against 135-146, and with 32
+  the last worker took 1000 of 1000 connections in 14 of 14 runs. One
+  AcceptEx also keeps a paused listener's queue in arrival order (`h1/064`).
+  Rejected: 32 for a listener that never pauses (the first decision of this
+  day, implemented on `feature/listen-no-pause` in php-src, php-async and the
+  server and not merged); 32 for a single uncapped worker only (faster for
+  that case, one more rule to keep).
 - 2026-11-12 A pool worker ended by a fatal error tears its server down without
   calling PHP or suspending, and the drain waits for and cancels the server scope
   through the C scope API, not through Scope methods (#439).

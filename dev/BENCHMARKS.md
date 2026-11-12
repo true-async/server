@@ -3,6 +3,41 @@
 One entry per measurement, newest first. An entry names the machine, the build and
 the scenario, because a number without them cannot be compared with the next one.
 
+## 2026-11-12 — one AcceptEx against libuv's 32, with 1, 2 and 4 workers (S3.14)
+
+Measured by an agent on Edmond's Windows machine; its report and scripts are
+there (`E:\s314\report\REPORT.md`, `tables.md`, `many.patch`), not in a
+repository, and the figures below are as it relayed them. Builds as the Windows
+CI job builds them, Release ZTS: php-src `390ab29`, php-async `3499dd7`,
+server `263df72`, libuv 1.53.0 from vcpkg; **many** is the same tree with the
+`uv_tcp_simultaneous_accepts(..., 0)` block of `libuv_listen_start` removed.
+Machine: the i7-11700K of the 2026-09-30 entry, Windows build 26300 (26200
+then). Server: one TCP listener, backlog 1024, handler answers `ok`, stats on;
+**capped** sets `setMaxConnections(100000)`, never reached. Load: 5 Python
+client processes of 200 connects each, released together, `GET /` HTTP/1.0,
+read to EOF; time from the first connect to the last response. 7 rounds, each
+running one, many, one capped for 1, 2 and 4 workers. 70 runs, every response
+a 200, no refused connect.
+
+1000 connects, ms, min … max of 7:
+
+| workers | one, uncapped | many, uncapped | one, capped |
+|---|---|---|---|
+| 1 | 569 … 1051 | 126 … 148 | 569 … 1075 |
+| 2 | 94 … 111 | 130 … 142 | 98 … 107 |
+| 4 | 86 … 99 | 135 … 146 | 88 … 104 |
+
+**32 AcceptEx win only with one worker; with several they are slower and send
+every connection to one worker**: the last worker took 1000 of 1000 in 14 of 14
+many runs. One AcceptEx split 456-557 per worker with 2 workers; with 4, some
+worker got fewer than 40 requests in 4 of 7 uncapped and 6 of 7 capped runs. A
+cap that is never reached costs nothing measurable. One AcceptEx with one
+worker has a slow mode 480-500 ms longer, in which all five clients finish
+together: 3 of 14 runs at 1000 connects, 1 of 7 at 2000; not explained. 2000
+connects, one, uncapped, 1 worker: 1606 … 2104 ms (1620 … 2127 on 2026-09-30).
+The 1000-connect range of 2026-09-30 (578 … 595) was not reproduced: six runs
+gave 569 … 577 and one 1051.
+
 ## 2026-09-30 — what one AcceptEx at a time (php-async #307) costs a connect storm
 
 Builds: php-src `440f9b1`, php-async `1521d69` (after), and the same tree with the

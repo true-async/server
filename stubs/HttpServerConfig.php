@@ -279,15 +279,15 @@ final class HttpServerConfig
      * 100 ms, the listen socket is stopped until existing work drains.
      *
      * Guidance:
-     *   - Fast handlers (<5 ms):  leave at default (5)
+     *   - Fast handlers (<5 ms):  5 ms
      *   - Typical web handlers:   10 – 20 ms
      *   - Slow handlers (DB, IO): 50 – 100 ms
-     *   - 0 disables CoDel entirely (hard cap via setMaxConnections still
-     *     applies if configured).
+     *   - 0, the default, disables CoDel (the hard cap of setMaxConnections
+     *     still applies if configured).
      *
-     * See docs/BACKPRESSURE.md for the full mechanism.
+     * See "Timeouts and admission control" in docs/USAGE.md for the mechanism.
      *
-     * @param int $ms Target in milliseconds (0–10000). Default: 5.
+     * @param int $ms Target in milliseconds (0–10000). Default: 0 (off).
      * @return static
      */
     public function setBackpressureTargetMs(int $ms): static {}
