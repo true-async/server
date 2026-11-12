@@ -577,6 +577,9 @@ struct http_server_object {
      * (issue #74). Belongs to one run: start() clears it with each new
      * server_scope, or a restarted server skips its drain. */
     bool                     scope_drained;
+    /* Set before a pool worker tears its clone down after a bailout: the
+     * teardown then neither suspends nor calls PHP. */
+    bool                     after_bailout;
     /* Set by http_server_teardown. A pool worker tears its clone down before
      * its task completes, whether or not the object is freed then. */
     bool                     torn_down;
@@ -2210,110 +2213,74 @@ static zend_async_event_t *create_server_wait_event(void)
     return event;
 }
 
-/* Build an Async\Timeout awaitable for `ms` — the cancellation token
- * Scope::awaitCompletion() expects. Returns false (out left UNDEF) on failure. */
-static bool http_server_make_timeout(const zend_ulong ms, zval *out)
+/* Suspends `co` until `scope` completes or `grace_ms` passes. The timer and the
+ * subscription belong to the coroutine's waker, so a bailout out of the wait
+ * leaves nothing armed once the waker is cleaned. */
+static void http_server_scope_await_completion(zend_async_scope_t *scope, zend_coroutine_t *co,
+                                               const zend_ulong grace_ms)
 {
-    zval fname, arg;
-    ZVAL_STRINGL(&fname, "Async\\timeout", sizeof("Async\\timeout") - 1);
-    ZVAL_LONG(&arg, (zend_long) ms);
-    ZVAL_UNDEF(out);
+    if (zend_async_waker_new_with_timeout(co, grace_ms, NULL) == NULL) {
+        zend_clear_exception();
+        return;
+    }
 
-    const bool ok = call_user_function(NULL, NULL, &fname, out, 1, &arg) == SUCCESS
-                 && EG(exception) == NULL
-                 && Z_TYPE_P(out) == IS_OBJECT;
+    if (zend_async_resume_when(co, &scope->event, false, zend_async_waker_callback_resolve, NULL)) {
+        ZEND_ASYNC_SUSPEND();
+    }
 
-    zval_ptr_dtor(&fname);
+    zend_async_waker_clean(co);
 
-    if (false == ok) {
-        zval_ptr_dtor(out);
-        ZVAL_UNDEF(out);
+    if (EG(exception)) {
+        zend_clear_exception(); /* the grace window expired, or start() was cancelled */
+    }
+}
+
+/* Graceful-shutdown drain (issue #74): empty server_scope before it is
+ * disposed. Runs on the start() coroutine after stop() wakes it — not inside
+ * stop(), which may be called from a handler that lives in server_scope. Waits
+ * for the scope within the grace window, then cancels it and awaits the
+ * cancellation, all through the C scope API: no PHP frame holds the Scope
+ * object, so a bailout inside the wait leaves no reference to it behind. */
+static void http_server_drain_scope(http_server_object *server)
+{
+    zend_async_scope_t *const scope = server->server_scope;
+
+    if (scope == NULL || server->scope_drained) {
+        return;
+    }
+
+    /* Need a real coroutine to suspend on. In scheduler/teardown context we
+     * cannot await — leave scope_drained unset so a later call may retry. */
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT || false == ZEND_ASYNC_ON) {
+        return;
+    }
+
+    /* After a bailout the teardown neither suspends nor calls PHP; the scope is
+     * left undrained and its release cancels the handlers. */
+    if (server->after_bailout) {
+        return;
+    }
+
+    const zend_ulong grace_ms = (zend_ulong) server->shutdown_timeout_s * 1000u;
+
+    if (grace_ms > 0 && false == ZEND_ASYNC_SCOPE_IS_COMPLETED(scope)) {
+        http_server_scope_await_completion(scope, co, grace_ms);
+    }
+
+    /* server_scope is non-dispose-safely (see start()), so the cancel hard-
+     * terminates the handlers rather than zombifying them. */
+    if (false == ZEND_ASYNC_SCOPE_IS_COMPLETED(scope)) {
+        ZEND_ASYNC_SCOPE_CANCEL(scope, NULL, false, ZEND_ASYNC_SCOPE_IS_DISPOSE_SAFELY(scope));
+        ZEND_ASYNC_SCOPE_AWAIT_AFTER_CANCELLATION(scope, co, NULL, NULL, NULL);
 
         if (EG(exception)) {
             zend_clear_exception();
         }
     }
 
-    return ok;
-}
-
-/* Async\Scope::isFinished() on the live scope object. */
-static bool http_server_scope_is_finished(zend_object *scope_object)
-{
-    zval retval;
-    ZVAL_UNDEF(&retval);
-    zend_call_method_with_0_params(scope_object, scope_object->ce, NULL, "isFinished", &retval);
-
-    const bool finished = (Z_TYPE(retval) == IS_TRUE);
-    zval_ptr_dtor(&retval);
-    return finished;
-}
-
-/* Call a no-arg, void Scope method, swallowing any exception — a cancellation
- * thrown during shutdown is expected, not an error. */
-static void http_server_scope_call(zend_object *scope_object, const char *method)
-{
-    zval retval;
-    ZVAL_UNDEF(&retval);
-    zend_call_method_with_0_params(scope_object, scope_object->ce, NULL, method, &retval);
-    zval_ptr_dtor(&retval);
-
-    if (EG(exception)) {
-        zend_clear_exception();
-    }
-}
-
-/* Graceful-shutdown drain (issue #74): empty server_scope before it is
- * disposed. Runs on the start() coroutine after stop() wakes it — not inside
- * stop(), which may be called from a handler that lives in server_scope. Uses
- * the Scope's own API (awaitCompletion within the grace window, then cancel +
- * awaitAfterCancellation); these own the scope lifetime, so nothing dangles. */
-static void http_server_drain_scope(http_server_object *server)
-{
-    if (server->scope_object == NULL || server->server_scope == NULL || server->scope_drained) {
-        return;
-    }
-
-    /* Need a real coroutine to suspend on. In scheduler/teardown context we
-     * cannot await — leave scope_drained unset so a later call may retry. */
-    if (ZEND_ASYNC_CURRENT_COROUTINE == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT
-        || false == ZEND_ASYNC_ON) {
-        return;
-    }
-
-    zend_object *scope_object = server->scope_object;
-    GC_ADDREF(scope_object); /* hold the Scope object across the method calls */
-
-    /* Phase 1: let handlers finish on their own, bounded by the grace window. */
-    const zend_ulong grace_ms = (zend_ulong) server->shutdown_timeout_s * 1000u;
-
-    if (grace_ms > 0 && false == http_server_scope_is_finished(scope_object)) {
-        zval timeout;
-
-        if (http_server_make_timeout(grace_ms, &timeout)) {
-            zval retval;
-            ZVAL_UNDEF(&retval);
-            zend_call_method_with_1_params(scope_object, scope_object->ce, NULL,
-                                           "awaitCompletion", &retval, &timeout);
-            zval_ptr_dtor(&retval);
-            zval_ptr_dtor(&timeout);
-
-            if (EG(exception)) {
-                zend_clear_exception(); /* grace expired, or completed during the wait */
-            }
-        }
-    }
-
-    /* Phase 2: cancel whatever is still parked, then await the cancellation.
-     * server_scope is non-dispose-safely (see start()), so cancel() hard-
-     * terminates the handlers rather than zombifying them. */
-    if (false == http_server_scope_is_finished(scope_object)) {
-        http_server_scope_call(scope_object, "cancel");
-        http_server_scope_call(scope_object, "awaitAfterCancellation");
-    }
-
     server->scope_drained = true;
-    OBJ_RELEASE(scope_object);
 }
 
 /* Accept callback — fired once per accepted connection by the reactor.
@@ -2541,6 +2508,7 @@ static void pool_retired_release_all(http_server_object *server)
 typedef struct {
     int                          pending;     /* workers not yet done */
     int                          failed;      /* workers whose submission was rejected */
+    int                          fatal;       /* of those, workers ended by a fatal error */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
     zend_async_event_callback_t  cb;          /* embedded — recovered via offsetof */
     zend_function              *protect;
@@ -2630,6 +2598,11 @@ static bool http_server_pool_prepare_drain(pool_await_state_t *st, zval *this_zv
     return EG(exception) == NULL;
 }
 
+/* Code of the exception pool_worker_handler rejects its task with when a fatal
+ * error ended the worker's run, so the parent tells it from a worker that never
+ * started. */
+#define POOL_WORKER_FATAL_CODE 0x7a5f
+
 static void pool_worker_handler(zend_async_event_t *event, void *vctx)
 {
     (void)event;
@@ -2683,6 +2656,13 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
         bailout = true;
     } zend_end_try();
 
+    /* A bailout out of a suspended start() leaves its waker's events armed,
+     * the drain's grace timer among them, and that timer keeps the worker's
+     * loop alive past its end. */
+    if (bailout && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
+        zend_async_waker_clean(ZEND_ASYNC_CURRENT_COROUTINE);
+    }
+
     /* Tear the clone down before the dispatcher can resolve this task: the
      * parent destroys the reactor pool once every task is done, and the
      * clone's delivery owner still points at it. Do not catch-and-return from
@@ -2696,13 +2676,14 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
      * shutdown waits for that loop. On a clean exit the run has released
      * nearly everything already. */
     if (Z_TYPE_P(server_zv) == IS_OBJECT) {
+        Z_HTTP_SERVER_P(server_zv)->after_bailout = bailout;
         http_server_teardown(Z_HTTP_SERVER_P(server_zv));
     }
 
     zval_ptr_dtor(server_zv);
     if (bailout) {
         zend_throw_exception(http_server_runtime_exception_ce,
-                             "Worker server start bailed out", 0);
+                             "Worker ended by a fatal error", POOL_WORKER_FATAL_CODE);
     }
     /* ctx is part of a cohort array the parent owns and frees (reload(),
      * start_pool's cleanup, http_server_free); nothing here reads it after the
@@ -2727,17 +2708,27 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     pool_await_state_t *st = (pool_await_state_t *)
         ((char *)cb - offsetof(pool_await_state_t, cb));
 
-    /* A rejected submission means pool_worker_handler never ran: the pool failed
-     * the task before any worker could take it (a bootloader that threw, a shell
-     * that would not transfer). The worker-side report in pool_worker_handler
-     * cannot cover this — there is no worker — so the count is what keeps start()
-     * from reporting a server that never accepted a connection as started. */
+    /* A rejected submission means either that pool_worker_handler never ran (the
+     * pool failed the task before any worker could take it: a bootloader that
+     * threw, a shell that would not transfer) or that it ran and a fatal error
+     * ended it (POOL_WORKER_FATAL_CODE). The worker-side report cannot cover the
+     * first — there is no worker — so the count is what keeps start() from
+     * reporting a server that never accepted a connection as started. */
     if (UNEXPECTED(exception != NULL)) {
         st->failed++;
 
-        /* One line per run: N workers of the same pool fail for the same reason,
-         * and the reason itself is already printed by the worker thread. */
-        if (st->failed == 1) {
+        /* The fatal itself is already printed by the worker thread. */
+        zval *code_zv = zend_read_property(exception->ce, exception, "code", sizeof("code") - 1,
+                                           /*silent=*/1, NULL);
+
+        if (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG
+            && Z_LVAL_P(code_zv) == POOL_WORKER_FATAL_CODE) {
+            st->fatal++;
+            fprintf(stderr, "[true-async-server] worker ended by a fatal error\n");
+            fflush(stderr);
+        } else if (st->failed - st->fatal == 1) {
+            /* One line per run: N workers of the same pool fail for the same
+             * reason, and the reason itself is already printed by the worker. */
             zval *msg_zv = zend_read_property(exception->ce, exception,
                                               "message", sizeof("message") - 1,
                                               /*silent=*/1, NULL);
@@ -3520,7 +3511,7 @@ static void http_server_worker_inbox_retire(http_server_object *server)
         return;
     }
 
-    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_coroutine_t *const co = server->after_bailout ? NULL : ZEND_ASYNC_CURRENT_COROUTINE;
 
     /* start() woken by a handler's stop() while the pool's retire is still
      * fencing: returning now would let start() free the server under it. */
@@ -3804,8 +3795,8 @@ static int http_server_pool_serve(http_server_object *server, zval *this_zv,
     const int rc = (submitted_all && st->pending == 0 && st->failed == 0) ? SUCCESS : FAILURE;
 
     if (st->failed > 0) {
-        http_logf_error(&server->log_state, "server.start.failed mode=pool workers=%d",
-                        st->failed);
+        http_logf_error(&server->log_state, "server.start.failed mode=pool workers=%d fatal=%d",
+                        st->failed, st->fatal);
     }
 
     /* Admission closes before any cleanup wait. An in-flight reload keeps its

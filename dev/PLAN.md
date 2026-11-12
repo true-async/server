@@ -91,6 +91,7 @@ Done when: every Windows CI skip has a reason or an open plan item, and S3.1,
 S3.2 and S3.4 are closed with evidence.
 Base: 05c871c (server), 1521d69 (php-async)
 Notes: dev/plans/S3.md
+Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
 
 - [x] S3.1 `multipart/009` fails on Windows (items 37 and 18)
       done: a local command reproduces the NULL `getSize()` at a stated rate;
@@ -430,6 +431,78 @@ php-async change. #439 items 1 and 2 (worker side) stay in #439.
       160f004); `core/127` no longer allows it, and fails 3 of 3 against a
       php-async without that fix.
 
+## S8 — A fatal error during a pool worker's teardown (#439 items 1 and 2)  [in progress]
+
+Goal: a fatal error in a pool worker while its server tears down ends that worker
+with that one fatal: the teardown still releases the scope object, the TLS context,
+the room hub and the listen set, the handler coroutines left in the scope are
+cancelled, and the worker thread exits.
+Done when: the red tests below fail on 3538b24 and pass after on a debug build; the
+full phpt and cmocka suites pass; CI green on every platform.
+Tests: first
+Base: 3538b24 (server), 160f004 (php-async)
+
+- [x] S8.1 Red tests
+      done: a handler's fatal while the worker teardown is suspended (in the
+        drain's `awaitCompletion`, in `http_server_worker_inbox_retire`, in
+        `response_delivery_owner_close`) gives a stated symptom on 3538b24 (a
+        debug leak report, a hang or an exit code), one test per item; a symptom
+        that cannot be reached from PHP is recorded as having no seam
+      tier: T1 · role: —
+      result, 2026-11-12: on 3538b24 with php-async 160f004, debug ZTS build,
+      libuv 1.52.1, 3 of 3 runs each. A handler's own fatal never reaches the
+      teardown: the request firewall catches it. A coroutine the handler
+      spawned is not covered, and its bailout leaves the worker's start()
+      inside the drain; the teardown that follows runs to its end (gdb: room
+      hub, listen set and stats slot released), so item 1 alone is not
+      reproduced. `core/128`: memory exhausted in that coroutine; the
+      teardown's drain calls `Scope::isFinished` under exhausted memory, a
+      second fatal leaves `pool_worker_handler` past its catch, the task
+      never completes and the parent waits in `uv_run` forever (items 1 and
+      2 together). `core/129`: a handler's fatal during the drain leaves the
+      drain's `Async\Timeout` timer open, `uv_loop_close` EBUSY. Cause, in
+      php-async: a fatal marks every live object destructed, and the Timeout
+      closes its timer only in `dtor_obj`; three lines of PHP show it
+      without the server (`tests/bailout/018` in php-async). Also seen: the
+      parent prints "worker did not start" for a worker that ran, and the
+      process exits 0 after a worker's fatal.
+- [x] S8.2 The teardown runs to its end after a bailout; the drain cancels the
+        scope through the C scope API; php-async closes a live Timeout's timer
+        from `free_obj`
+      done: S8.1 tests pass 10 of 10 on the debug build; full phpt and ctest pass
+      tier: T2 · role: Critic
+      Critic 2026-11-12 on the diff: the thread pool's OOM exit closed the whole
+        pool, the next reload() returned false (taken: only that worker leaves,
+        the last one closes; `core/130`); the Scope pin of zend_call_function
+        survived the bailout, cancellation fell to request shutdown (taken, by
+        the Sage's verdict: C-API drain; it exposed php-async unwinding a
+        coroutine still queued, SIGSEGV 6 of 6, fixed in php-async;
+        `core/132`, `bailout/019`); a non-memory fatal in the drain (`core/131`,
+        clean already); owner close and log stop may suspend after a bailout
+        (not reproduced with a log sink, 2 of 2; not taken); a pending OOM at
+        the loop top and drain re-entry (not taken: speculative, and gone
+        with the C-API drain). Sage on the parent's report: "worker did not
+        start" for a worker a fatal ended is fixed here, start() stays false,
+        the exit status is item 53.
+      result, 2026-11-12: php-async 1c78920 (Timeout `free_obj`), 0eeb275 and
+        a515ebb (a worker that passed memory_limit leaves the thread pool by
+        its bailout path; only the last one closes the pool), 9384c78
+        (bailout unwinding dequeues); server: no PHP call and no sleep in a
+        teardown after a bailout, the unwound coroutine's waker cleaned,
+        C-API drain, "worker ended by a fatal error". `core/128` to `132` pass
+        10 of 10 on the debug build; full phpt 534 passed, 0 failed, 131
+        skipped of 665; php-async 1134 passed, 1 failed (IPv6 socket, the
+        sandbox has no IPv6), 195 skipped of 1333. ctest not run here: the
+        debug PHP has no embed library, and no unit target builds
+        `http_server_class.c`; CI runs it. Hand mutants: 8 of 10 killed.
+        Survivors: `inbox_retire` sleeping after a bailout (the inbox exists
+        only with the reactor pool, off in this build); the last worker leaving
+        on memory_limit not closing the pool (no test drives the last worker
+        out with tasks queued).
+- [ ] S8.3 CHANGELOG, PR, CI
+      done: PR merged with CI green on every platform; #439 closed
+      tier: T1 · role: —
+
 ## Next
 
 ### Order of the open defects, 2026-09-28
@@ -759,6 +832,19 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     (`php_ap_basename`, static in `main/rfc1867.c`, so copied) and the file is
     saved; `multipart/027` holds eight names to php-cgi's `$_FILES`. A name
     over 4096 bytes still gets 101, which PHP does not define.
+53. A fatal error in a pool worker leaves the process exit status 0 (S8, Sage):
+    decide whether it should be 255, and whether `start()` stays false for a
+    pool that kept serving or was reloaded. Edmond decides.
+54. A worker whose `start()` throws (not a bailout: a bind that fails with
+    "address already in use") is printed as "worker thread died", its task
+    resolves, and `start()` returns true with exit 0, 3 of 3 (Sage, S8). A
+    silent success; no test. Fix after S8.
+55. Requests sent right after `reload()` are refused: 3 to 6 of 20 fail with no
+    fatal anywhere, 4 runs (S8, a control run). Reproduce before any code.
+56. php-async: a WeakReference to a freed `Async\Scope` is not cleared and a
+    WeakMap keeps its entry; `scope_object_free()` returns before
+    `zend_object_std_dtor()` once `scope_destroy()` detached the scope
+    (`scope.c:1467`), 3 of 3 (Sage, S8).
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
