@@ -91,6 +91,7 @@ Done when: every Windows CI skip has a reason or an open plan item, and S3.1,
 S3.2 and S3.4 are closed with evidence.
 Base: 05c871c (server), 1521d69 (php-async)
 Notes: dev/plans/S3.md
+Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
 
 - [x] S3.1 `multipart/009` fails on Windows (items 37 and 18)
       done: a local command reproduces the NULL `getSize()` at a stated rate;
@@ -429,6 +430,32 @@ php-async change. #439 items 1 and 2 (worker side) stay in #439.
       php-async's (true-async/php-async#319, fixed by PR 320, merged as
       160f004); `core/127` no longer allows it, and fails 3 of 3 against a
       php-async without that fix.
+
+## S8 — A fatal error during a pool worker's teardown (#439 items 1 and 2)  [in progress]
+
+Goal: a fatal error in a pool worker while its server tears down ends that worker
+with that one fatal: the teardown still releases the scope object, the TLS context,
+the room hub and the listen set, the handler coroutines left in the scope are
+cancelled, and the worker thread exits.
+Done when: the red tests below fail on 3538b24 and pass after on a debug build; the
+full phpt and cmocka suites pass; CI green on every platform.
+Tests: first
+Base: 3538b24 (server), 160f004 (php-async)
+
+- [ ] S8.1 Red tests
+      done: a handler's fatal while the worker teardown is suspended (in the
+        drain's `awaitCompletion`, in `http_server_worker_inbox_retire`, in
+        `response_delivery_owner_close`) gives a stated symptom on 3538b24 (a
+        debug leak report, a hang or an exit code), one test per item; a symptom
+        that cannot be reached from PHP is recorded as having no seam
+      tier: T1 · role: —
+- [ ] S8.2 The teardown runs to its end after a bailout; the drain cancels the
+        scope through the C scope API
+      done: S8.1 tests pass 10 of 10 on the debug build; full phpt and ctest pass
+      tier: T2 · role: Critic
+- [ ] S8.3 CHANGELOG, PR, CI
+      done: PR merged with CI green on every platform; #439 closed
+      tier: T1 · role: —
 
 ## Next
 
