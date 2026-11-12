@@ -202,18 +202,24 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
       done: `core/038` and `039` run on Windows CI and pass, or Windows refuses
         `addUnixListener()` with a stated reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
-- [ ] S3.14 Implement the S3.10 decision: php-async takes a never-pauses flag
-        at listen time (refused after `uv_listen`) and posts libuv's 32
+- [~] S3.14 Implement the S3.10 decision: php-async takes a never-pauses flag
+        at listen time (php-src `ZEND_ASYNC_LISTEN_F_NO_PAUSE`) and posts libuv's 32
         AcceptEx for it; the server passes it when neither a cap nor CoDel is
         set
       done: on Windows, a 1000-connect burst with no cap is back to the
         "before" range of `dev/BENCHMARKS.md` and a capped one stays in the
         "after" range, 7 runs each, with 1, 2 and 4 workers and accepts per
         worker; `h1/062`-`064` pass, plus a capped several-worker variant whose
-        resume order is FIFO; php-async asynctest covers a declared listener
-        stopped anyway, delivery after start() and the refusal after listen;
-        10 Windows CI runs of the h1 group green
+        resume order is FIFO; a paused uncapped server answers all 40
+        clients after the resume on Windows CI; a reload during a burst counts
+        its resets; 10 Windows CI runs of the h1 group green
       tier: T2 · role: Critic
+      Critic 2026-11-12: neither planned test could fail (the asynctest runs
+        only on Linux, where the flag does nothing); gate on the effective
+        CoDel target, which `CODEL_TARGET_MS` overrides; retiring a Windows
+        pool worker now resets up to 32 posted accepts; ignore the bit on
+        AF_UNIX. All taken; the asynctest is dropped and the mode is proved by
+        the measurement (`dev/plans/S3.md`).
 - [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
         23 (`dev/plans/S3.md`, S3.5)
