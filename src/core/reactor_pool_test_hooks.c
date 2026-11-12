@@ -47,6 +47,8 @@ extern zval *http_request_create_from_parsed(http_request_t *req);
 
 /* Defined in src/http_server_class.c; snapshots the per-worker stats slab. */
 extern int http_server_stats_slab_snapshot(uint64_t *out, int max);
+/* Defined in src/http_server_class.c; pauses or resumes the listeners. */
+extern void http_server_test_set_listeners_paused(http_server_object *server, bool paused);
 
 #ifdef PHP_WIN32
 # include <windows.h>
@@ -1425,7 +1427,30 @@ PHP_FUNCTION(_http_server_response_acked_body)
     RETURN_LONG(worker_dispatch_test_acked_body(Z_OBJ_P(response)));
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_pause_listeners, 0, 2, IS_VOID, 0)
+    ZEND_ARG_OBJ_INFO(0, server, TrueAsync\\HttpServer, 0)
+    ZEND_ARG_TYPE_INFO(0, paused, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+/* _http_server_pause_listeners(HttpServer $server, bool $paused): void */
+PHP_FUNCTION(_http_server_pause_listeners)
+{
+    zval *server_zv;
+    bool paused;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_OBJECT(server_zv)
+        Z_PARAM_BOOL(paused)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_object *const server = http_server_object_from_zend(Z_OBJ_P(server_zv));
+
+    if (server != NULL) {
+        http_server_test_set_listeners_paused(server, paused);
+    }
+}
+
 static const zend_function_entry reactor_pool_test_functions[] = {
+    ZEND_FE(_http_server_pause_listeners, arginfo_pause_listeners)
     ZEND_FE(_http_server_response_acked_body, arginfo_response_acked_body)
     ZEND_FE(_http_server_reactor_pool_selftest, arginfo_reactor_pool_selftest)
     ZEND_FE(_http_server_persistent_request_selftest, arginfo_persistent_request_selftest)

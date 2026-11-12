@@ -3598,6 +3598,18 @@ static void http_server_stats_down(http_server_object *server)
 }
 
 #ifdef HTTP_SERVER_TEST_HOOKS
+/* Test-only: pause or resume the listeners as the cap and CoDel do, without
+ * draining, so a test can hold connections back on a listener the server
+ * itself would never pause. */
+void http_server_test_set_listeners_paused(http_server_object *server, const bool paused)
+{
+    if (paused) {
+        http_server_pause_listeners(server, /*drain_connections=*/false);
+    } else {
+        http_server_resume_listeners(server);
+    }
+}
+
 /* Test-only: snapshot each active slab slot's total_requests into out[] (up to
  * max), returning the active-slot count. Proves pool workers bump their own
  * slot rather than an embedded counter. Any thread (lock-free read). */
@@ -4711,6 +4723,16 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
 
             unsigned int listen_flags = 0;
             zend_async_listen_event_t *listen_event = NULL;
+
+#ifdef ZEND_ASYNC_LISTEN_F_NO_PAUSE
+            /* Only the connection cap and CoDel pause a listener, so without
+             * either the reactor may accept ahead (libuv's 32 AcceptEx on
+             * Windows instead of one; dev/DECISIONS.md 2026-11-12). The CoDel
+             * target is the effective one, CODEL_TARGET_MS included. */
+            if (server->max_connections == 0 && server->codel_target_ns == 0) {
+                listen_flags |= ZEND_ASYNC_LISTEN_F_NO_PAUSE;
+            }
+#endif
 
             /* Two strategies for several threads on one host:port. Where the
              * kernel load-balances SO_REUSEPORT (Linux, FreeBSD) each thread
