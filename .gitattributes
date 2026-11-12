@@ -21,3 +21,6 @@
 # - config.w32 (Windows build)
 # - LICENSE
 # - README.md
+
+# cmd.exe misparses a batch file with LF line ends: keep the CRLF bytes as committed
+*.bat -text
