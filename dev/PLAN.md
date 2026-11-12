@@ -149,11 +149,16 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         CI run 43083329005 (main 2dd90b4): 156 of 660 skipped, 0 failed; none
         for curl without HTTP/2 or h2spec; `h2/020`, `021`, `062` keep the
         justified h2load skip (no Windows build, #407).
-- [ ] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
+- [~] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
         OpenSSL >= 3.5 on the runner)
-      done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
-        in S3.5
+      done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; a curl
+        `--http3-only` test passes there; failures as in S3.5
       tier: T2 · role: Critic
+      Critic 2026-11-12: the 11 runnable tests complete no handshake, so a
+        green job proved nothing; 11, not 12; MSVC defaults give `_static`
+        libraries and a Debug CRT; a cache keyed on ngtcp2 alone outlives an
+        SDK OpenSSL move; S3.13 also needs 43 certificate commands fixed.
+        All taken (`dev/plans/S3.md`).
 - [x] S3.9 Port the six tests whose POSIX mechanism is only their setup
         (`dev/plans/S3.md`)
       done: the six run and pass on Windows CI, or a step names why one cannot

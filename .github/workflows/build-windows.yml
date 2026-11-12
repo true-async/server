@@ -6,7 +6,8 @@ name: Windows x64 Build & Test
 # extension enabled. Avoids the phpize/shared-extension dance.
 #
 # Skipped vs. Linux CI:
-#   - HTTP/3 (no prebuilt ngtcp2/nghttp3 on the PHP SDK).
+#   - HTTP/3 tests that need the h3client or aioquic harness (POSIX-only);
+#     nghttp3 and ngtcp2 are built by build_h3_deps.bat.
 #   - io_uring (Linux-only).
 #
 # libuv and nghttp2 come from vcpkg, get copied into the SDK

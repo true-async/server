@@ -35,6 +35,10 @@ xcopy /E /I /H /Y "C:\vcpkg\installed\x64-windows\include\nghttp2" "%DEPS_DIR%\i
 copy "C:\vcpkg\installed\x64-windows\lib\nghttp2.lib" "%DEPS_DIR%\lib\nghttp2.lib"
 copy "C:\vcpkg\installed\x64-windows\bin\nghttp2.dll" "%DEPS_DIR%\bin\nghttp2.dll"
 
+rem HTTP/3: nghttp3 and ngtcp2, built against the deps tree's OpenSSL.
+cmd /c %~dp0build_h3_deps.bat %DEPS_DIR%
+if %errorlevel% neq 0 exit /b 3
+
 cmd /c buildconf.bat --force
 if %errorlevel% neq 0 exit /b 3
 
@@ -60,6 +64,7 @@ cmd /c configure.bat ^
     --enable-async ^
     --enable-true-async-server ^
     --enable-http2 ^
+    --enable-http3 ^
     --enable-http-server-test-hooks ^
     --enable-tas-test-hooks ^
     --enable-sockets ^
@@ -68,6 +73,14 @@ cmd /c configure.bat ^
     --disable-test-ini
 if %errorlevel% neq 0 exit /b 3
 @echo off
+
+rem config.w32 turns HTTP/3 off with only a warning when a dependency is
+rem missing; the job asked for it, so a build without it fails here.
+findstr /c:"HAVE_HTTP_SERVER_HTTP3" main\config.w32.h
+if %errorlevel% neq 0 (
+    echo HTTP/3 was requested but configure left it out
+    exit /b 3
+)
 
 rem configure answers "Unknown option" only for a name it has never seen, so a
 rem flag that is recognised and still leaves the extension out looks like
