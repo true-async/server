@@ -2,6 +2,23 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-11-12 A pool worker ended by a fatal error tears its server down without
+  calling PHP or suspending, and the drain waits for and cancels the server scope
+  through the C scope API, not through Scope methods (#439).
+  Why: a bailout out of `Scope::awaitCompletion()` skips the `$this` pin of
+  `zend_call_function()`, so the Scope object outlived the teardown and its
+  handlers were cancelled only at request shutdown; under exhausted memory the
+  methods raise a second fatal. With the pin gone the teardown disposes the
+  scope during php-async's bailout unwinding, which needed php-async to take a
+  coroutine queued during the unwinding off the queue (php-async 9384c78).
+  Sage, final: the Critic's remark stands; a workaround in the server was
+  rejected (a scope kept past the teardown leaves the handlers alive when the
+  bailout is raised on start() itself).
+- 2026-11-12 The pool parent tells a worker ended by a fatal error from one that
+  never started (exception code `POOL_WORKER_FATAL_CODE`); `start()` still
+  answers false for either (core/088, 115, 116). Sage, final. Whether a
+  worker's fatal changes the process exit status, and whether `start()` stays
+  false for a pool that kept serving, are left to their own issue.
 - 2026-11-11 After a bailout the pool parent joins its worker threads by blocking
   its thread (1 ms polls until the pool's reference count is 1) and never
   suspends or calls PHP again (#446).
