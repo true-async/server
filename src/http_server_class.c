@@ -2759,7 +2759,7 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     if (UNEXPECTED(exception != NULL)) {
         st->failed++;
 
-        /* A worker that ran and was ended by a fatal error rejects its own task;
+        /* A worker that ran until a fatal error ended it rejects its own task;
          * the fatal itself is already printed by the worker thread. */
         zval *code_zv = zend_read_property(exception->ce, exception, "code", sizeof("code") - 1,
                                            /*silent=*/1, NULL);
