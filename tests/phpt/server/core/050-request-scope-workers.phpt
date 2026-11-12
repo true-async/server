@@ -5,8 +5,6 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (PHP_OS_FAMILY === 'Windows') die('skip POSIX-only test (worker fan-out + SIGKILL teardown)');
-if (!extension_loaded('posix')) die('skip posix extension not available');
 exec('curl --version 2>&1', $out, $rc);
 if ($rc !== 0) die('skip curl CLI not available');
 ?>

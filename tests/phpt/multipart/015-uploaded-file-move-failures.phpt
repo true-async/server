@@ -2,8 +2,6 @@
 Multipart: UploadedFile::moveTo() — copy-fallback failure + mkdir failure
 --EXTENSIONS--
 true_async_server
---SKIPIF--
-<?php if (PHP_OS_FAMILY === 'Windows') die("skip POSIX-only paths"); ?>
 --FILE--
 <?php
 /* Exercises uploaded_file.c moveTo failure tails:
@@ -12,9 +10,8 @@ true_async_server
  *   - L300-309: rename fails, copy_file fails too →
  *               "Failed to move file"
  *
- * Uses /proc/1 (always exists, never writable by user) for the unwritable
- * parent + /dev/full/x (existing non-dir parent so stat OK but write to
- * a path *inside* it errors). */
+ * A regular file stands in for a directory: nothing can be created below
+ * it, on POSIX and on Windows alike. */
 
 /* Holds onto the HttpRequest so the tmp file isn't reaped at scope exit. */
 function parse_simple_upload(string $content = 'hello'): array {
@@ -41,19 +38,22 @@ function expect_runtime(string $label, callable $fn): void
     }
 }
 
-/* CASE 1: parent dir doesn't exist AND can't be mkdir'd
- * (/proc is virtualfs, mkdir always denied). */
+$plain = sys_get_temp_dir() . '/upl-plain-' . getmypid() . '-' . bin2hex(random_bytes(4));
+file_put_contents($plain, 'not a directory');
+
+/* CASE 1: the parent does not exist and mkdir fails, since the path
+ * runs through a regular file. */
 [$req1, $f1] = parse_simple_upload();
 expect_runtime('mkdir-fail',
-    fn() => $f1->moveTo('/proc/nonexistent-dir-' . bin2hex(random_bytes(4)) . '/x.txt'));
+    fn() => $f1->moveTo($plain . '/sub/x.txt'));
 
-/* CASE 2: parent "dir" actually exists but isn't a directory; rename
- * fails (ENOTDIR), copy fallback fopen() fails too →
- * "Failed to move file". /dev/null is a char device existing on every
- * POSIX box. */
+/* CASE 2: the parent exists but is a regular file, so stat succeeds,
+ * rename fails and the copy fallback's fopen fails too: "Failed to move
+ * file". */
 [$req2, $f2] = parse_simple_upload();
 expect_runtime('move-fail',
-    fn() => $f2->moveTo('/dev/null/inside-char-device.txt'));
+    fn() => $f2->moveTo($plain . '/inside-file.txt'));
+@unlink($plain);
 
 /* CASE 3: control — successful move (sanity check that the above
  * triggered the failure tails, not some earlier validation). */
@@ -67,6 +67,6 @@ echo "done\n";
 ?>
 --EXPECTF--
 mkdir-fail: Cannot create directory
-move-fail: %s
+move-fail: Failed to move file
 control: control-body
 done

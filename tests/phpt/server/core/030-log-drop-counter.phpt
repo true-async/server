@@ -5,7 +5,6 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (PHP_OS_FAMILY === 'Windows') die('skip stream_socket_pair(STREAM_PF_UNIX) is POSIX-only');
 if (!function_exists('_http_log_flood')) {
     die('skip built without --enable-http-server-test-hooks');
 }
@@ -32,8 +31,10 @@ require_once __DIR__ . '/../_free_port.inc';
 
 $port = tas_free_port();
 
-/* Deliberately keep $reader alive but never read from it. */
-[$reader, $writer] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+/* Deliberately keep $reader alive but never read from it. Windows has no
+ * AF_UNIX pair; PHP builds its pair there from loopback TCP. */
+$domain = PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX;
+[$reader, $writer] = stream_socket_pair($domain, STREAM_SOCK_STREAM, 0);
 
 $config = (new HttpServerConfig())
     ->addListener('127.0.0.1', $port)
