@@ -56,6 +56,5 @@ stopping
 Fatal error: Cannot redeclare function tas_dup() %s
 
 Warning: [true-async-server] zend_bailout in h1 handler: %s
-%A[true-async-server] --- end C backtrace ---
-[true-async-server] worker exited
+%A[true-async-server] worker exited
 start returned
