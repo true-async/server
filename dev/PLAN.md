@@ -442,15 +442,33 @@ full phpt and cmocka suites pass; CI green on every platform.
 Tests: first
 Base: 3538b24 (server), 160f004 (php-async)
 
-- [ ] S8.1 Red tests
+- [x] S8.1 Red tests
       done: a handler's fatal while the worker teardown is suspended (in the
         drain's `awaitCompletion`, in `http_server_worker_inbox_retire`, in
         `response_delivery_owner_close`) gives a stated symptom on 3538b24 (a
         debug leak report, a hang or an exit code), one test per item; a symptom
         that cannot be reached from PHP is recorded as having no seam
       tier: T1 · role: —
+      result, 2026-11-12: on 3538b24 with php-async 160f004, debug ZTS build,
+      libuv 1.52.1, 3 of 3 runs each. A handler's own fatal never reaches the
+      teardown: the request firewall catches it. A coroutine the handler
+      spawned is not covered, and its bailout leaves the worker's start()
+      inside the drain; the teardown that follows runs to its end (gdb: room
+      hub, listen set and stats slot released), so item 1 alone is not
+      reproduced. `core/128`: memory exhausted in that coroutine; the
+      teardown's drain calls `Scope::isFinished` under exhausted memory, a
+      second fatal leaves `pool_worker_handler` past its catch, the task
+      never completes and the parent waits in `uv_run` forever (items 1 and
+      2 together). `core/129`: a handler's fatal during the drain leaves the
+      drain's `Async\Timeout` timer open, `uv_loop_close` EBUSY. Cause, in
+      php-async: a fatal marks every live object destructed, and the Timeout
+      closes its timer only in `dtor_obj`; three lines of PHP show it
+      without the server (`tests/bailout/018` in php-async). Also seen: the
+      parent prints "worker did not start" for a worker that ran, and the
+      process exits 0 after a worker's fatal.
 - [ ] S8.2 The teardown runs to its end after a bailout; the drain cancels the
-        scope through the C scope API
+        scope through the C scope API; php-async closes a live Timeout's timer
+        from `free_obj`
       done: S8.1 tests pass 10 of 10 on the debug build; full phpt and ctest pass
       tier: T2 · role: Critic
 - [ ] S8.3 CHANGELOG, PR, CI
