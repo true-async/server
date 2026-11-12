@@ -577,9 +577,6 @@ struct http_server_object {
      * (issue #74). Belongs to one run: start() clears it with each new
      * server_scope, or a restarted server skips its drain. */
     bool                     scope_drained;
-    /* The Scope object the drain holds across its method calls; NULL outside
-     * them. A bailout inside one leaves it set, and the teardown drops it. */
-    zend_object             *drain_pin;
     /* Set before a pool worker tears its clone down after a bailout: the
      * teardown then neither suspends nor calls PHP. */
     bool                     after_bailout;
@@ -2216,34 +2213,6 @@ static zend_async_event_t *create_server_wait_event(void)
     return event;
 }
 
-/* Build an Async\Timeout awaitable for `ms` — the cancellation token
- * Scope::awaitCompletion() expects. Returns false (out left UNDEF) on failure. */
-static bool http_server_make_timeout(const zend_ulong ms, zval *out)
-{
-    zval fname, arg;
-    ZVAL_STRINGL(&fname, "Async\\timeout", sizeof("Async\\timeout") - 1);
-    ZVAL_LONG(&arg, (zend_long) ms);
-    ZVAL_UNDEF(out);
-
-    const bool ok = call_user_function(NULL, NULL, &fname, out, 1, &arg) == SUCCESS
-                 && EG(exception) == NULL
-                 && Z_TYPE_P(out) == IS_OBJECT;
-
-    zval_ptr_dtor(&fname);
-
-    if (false == ok) {
-        zval_ptr_dtor(out);
-        ZVAL_UNDEF(out);
-
-        if (EG(exception)) {
-            zend_clear_exception();
-        }
-    }
-
-    return ok;
-}
-
-/* Async\Scope::isFinished() on the live scope object. */
 /* False once the engine refuses every call (memory exhausted, or the request is
  * no longer active): a zend_call_* then fails with a fatal of its own. */
 static zend_always_inline bool http_server_engine_takes_calls(void)
@@ -2251,85 +2220,69 @@ static zend_always_inline bool http_server_engine_takes_calls(void)
     return EG(active) && !ZEND_HAS_OOM();
 }
 
-static bool http_server_scope_is_finished(zend_object *scope_object)
+/* Suspends `co` until `scope` completes or `grace_ms` passes. The timer and the
+ * subscription belong to the coroutine's waker, so a bailout out of the wait
+ * leaves nothing armed once the waker is cleaned. */
+static void http_server_scope_await_completion(zend_async_scope_t *scope, zend_coroutine_t *co,
+                                               const zend_ulong grace_ms)
 {
-    zval retval;
-    ZVAL_UNDEF(&retval);
-    zend_call_method_with_0_params(scope_object, scope_object->ce, NULL, "isFinished", &retval);
+    if (zend_async_waker_new_with_timeout(co, grace_ms, NULL) == NULL) {
+        zend_clear_exception();
+        return;
+    }
 
-    const bool finished = (Z_TYPE(retval) == IS_TRUE);
-    zval_ptr_dtor(&retval);
-    return finished;
-}
+    if (zend_async_resume_when(co, &scope->event, false, zend_async_waker_callback_resolve, NULL)) {
+        ZEND_ASYNC_SUSPEND();
+    }
 
-/* Call a no-arg, void Scope method, swallowing any exception — a cancellation
- * thrown during shutdown is expected, not an error. */
-static void http_server_scope_call(zend_object *scope_object, const char *method)
-{
-    zval retval;
-    ZVAL_UNDEF(&retval);
-    zend_call_method_with_0_params(scope_object, scope_object->ce, NULL, method, &retval);
-    zval_ptr_dtor(&retval);
+    zend_async_waker_clean(co);
 
     if (EG(exception)) {
-        zend_clear_exception();
+        zend_clear_exception(); /* grace expired */
     }
 }
 
 /* Graceful-shutdown drain (issue #74): empty server_scope before it is
  * disposed. Runs on the start() coroutine after stop() wakes it — not inside
- * stop(), which may be called from a handler that lives in server_scope. Uses
- * the Scope's own API (awaitCompletion within the grace window, then cancel +
- * awaitAfterCancellation); these own the scope lifetime, so nothing dangles. */
+ * stop(), which may be called from a handler that lives in server_scope. Waits
+ * for the scope within the grace window, then cancels it and awaits the
+ * cancellation, all through the C scope API: no PHP frame holds the Scope
+ * object, so a bailout inside the wait leaves no reference to it behind. */
 static void http_server_drain_scope(http_server_object *server)
 {
-    if (server->scope_object == NULL || server->server_scope == NULL || server->scope_drained) {
+    zend_async_scope_t *const scope = server->server_scope;
+
+    if (scope == NULL || server->scope_drained) {
         return;
     }
 
     /* Need a real coroutine to suspend on. In scheduler/teardown context we
      * cannot await — leave scope_drained unset so a later call may retry. */
-    if (ZEND_ASYNC_CURRENT_COROUTINE == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT
-        || false == ZEND_ASYNC_ON || server->after_bailout
-        || !http_server_engine_takes_calls()) {
+    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+
+    if (co == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT || false == ZEND_ASYNC_ON
+        || server->after_bailout) {
         return;
     }
 
-    zend_object *scope_object = server->scope_object;
-    GC_ADDREF(scope_object); /* hold the Scope object across the method calls */
-    server->drain_pin = scope_object;
-
-    /* Phase 1: let handlers finish on their own, bounded by the grace window. */
     const zend_ulong grace_ms = (zend_ulong) server->shutdown_timeout_s * 1000u;
 
-    if (grace_ms > 0 && false == http_server_scope_is_finished(scope_object)) {
-        zval timeout;
+    if (grace_ms > 0 && false == ZEND_ASYNC_SCOPE_IS_COMPLETED(scope)) {
+        http_server_scope_await_completion(scope, co, grace_ms);
+    }
 
-        if (http_server_make_timeout(grace_ms, &timeout)) {
-            zval retval;
-            ZVAL_UNDEF(&retval);
-            zend_call_method_with_1_params(scope_object, scope_object->ce, NULL,
-                                           "awaitCompletion", &retval, &timeout);
-            zval_ptr_dtor(&retval);
-            zval_ptr_dtor(&timeout);
+    /* server_scope is non-dispose-safely (see start()), so the cancel hard-
+     * terminates the handlers rather than zombifying them. */
+    if (false == ZEND_ASYNC_SCOPE_IS_COMPLETED(scope)) {
+        ZEND_ASYNC_SCOPE_CANCEL(scope, NULL, false, ZEND_ASYNC_SCOPE_IS_DISPOSE_SAFELY(scope));
+        ZEND_ASYNC_SCOPE_AWAIT_AFTER_CANCELLATION(scope, co, NULL, NULL, NULL);
 
-            if (EG(exception)) {
-                zend_clear_exception(); /* grace expired, or completed during the wait */
-            }
+        if (EG(exception)) {
+            zend_clear_exception();
         }
     }
 
-    /* Phase 2: cancel whatever is still parked, then await the cancellation.
-     * server_scope is non-dispose-safely (see start()), so cancel() hard-
-     * terminates the handlers rather than zombifying them. */
-    if (false == http_server_scope_is_finished(scope_object)) {
-        http_server_scope_call(scope_object, "cancel");
-        http_server_scope_call(scope_object, "awaitAfterCancellation");
-    }
-
     server->scope_drained = true;
-    server->drain_pin = NULL;
-    OBJ_RELEASE(scope_object);
 }
 
 /* Accept callback — fired once per accepted connection by the reactor.
@@ -6846,12 +6799,6 @@ static void http_server_teardown(http_server_object *server)
      * stops blocking, and scope_dispose runs cleanly — cancelling any
      * still-alive handler coroutines and freeing the struct. */
     server->server_scope = NULL;
-
-    if (server->drain_pin != NULL) {
-        zend_object *drain_pin = server->drain_pin;
-        server->drain_pin = NULL;
-        OBJ_RELEASE(drain_pin);
-    }
 
     if (server->scope_object) {
         zend_object *scope_object = server->scope_object;
