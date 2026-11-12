@@ -154,13 +154,20 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
       done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
         in S3.5
       tier: T2 · role: Critic
-- [ ] S3.9 Port the six tests whose POSIX mechanism is only their setup
+- [~] S3.9 Port the six tests whose POSIX mechanism is only their setup
         (`dev/plans/S3.md`)
-      done: the six run and pass on Windows CI
+      done: the six run and pass on Windows CI, or a step names why one cannot
       tier: T1 · role: —
 - [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
+      tier: T2 · role: Critic
+- [ ] S3.12 An AF_UNIX listener with `setWorkers(2)` on Windows: each worker
+        binds the named pipe itself and the second fails with "address already
+        in use" and that worker thread dies (`core/039`; Windows CI run
+        43201891206). The shared-fd path is POSIX-only (`http_server_class.c`).
+      done: `core/039` runs on Windows CI and passes, or the limit is refused
+        at start() with a stated reason and recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
 - [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
