@@ -21,8 +21,8 @@ on:
   workflow_dispatch:
 
 env:
-  PHP_SRC_BRANCH: true-async
-  PHP_ASYNC_BRANCH: main
+  PHP_SRC_BRANCH: feature/listen-no-pause
+  PHP_ASYNC_BRANCH: feature/listen-no-pause
 
 jobs:
   windows:
