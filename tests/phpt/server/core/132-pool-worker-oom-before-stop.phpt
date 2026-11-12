@@ -62,4 +62,4 @@ echo "start returned\n";
 ^(?=.*\n\[true-async-server\] worker ended by a fatal error\n)up
 (?:\[true-async-server\] worker exited\n)?
 ?Fatal error: Allowed memory size of 33554432 bytes exhausted [^\n]*
-(?:(?:|Warning: \[true-async-server\] zend_bailout in h1 handler: [^\n]*Allowed memory size[^\n]*|\[true-async-server\] --- (?:end )?C backtrace[^\n]*|\/[^\n]*\]|\[true-async-server\] worker ended by a fatal error|\[true-async-server\] worker exited|stopping)\n)*start returned(?:\n(?:|\[true-async-server\] --- (?:end )?C backtrace[^\n]*|\/[^\n]*\]|\[true-async-server\] worker ended by a fatal error))*$
+(?:(?:|Warning: \[true-async-server\] zend_bailout in h1 handler: [^\n]*Allowed memory size[^\n]*|\[true-async-server\] --- (?:end )?C backtrace[^\n]*|\/[^\n]*\]|\d+ +\S+ +0x[0-9a-f]+ [^\n]*|\[true-async-server\] worker ended by a fatal error|\[true-async-server\] worker exited|stopping)\n)*start returned(?:\n(?:|\[true-async-server\] --- (?:end )?C backtrace[^\n]*|\/[^\n]*\]|\d+ +\S+ +0x[0-9a-f]+ [^\n]*|\[true-async-server\] worker ended by a fatal error))*$
