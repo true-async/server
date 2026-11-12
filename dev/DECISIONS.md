@@ -2,6 +2,19 @@
 
 Architectural decisions, newest first. Workflow rules live in `dev/WORKFLOW.md`.
 
+- 2026-11-12 Every Windows TCP listener keeps one AcceptEx at a time, as
+  php-async #307 made it (S3.10, S3.14). Edmond, final: one mode everywhere,
+  simpler than a rule that picks one.
+  Why: a Windows agent's measurement of 2026-11-12 (`dev/BENCHMARKS.md`) found
+  libuv's 32 faster only with one worker: a 1000-connect burst took 126-148
+  ms against 569-1051 ms with one AcceptEx. With 2 workers one AcceptEx took
+  94-111 ms against 130-142, with 4 workers 86-99 against 135-146, and with 32
+  the last worker took 1000 of 1000 connections in 14 of 14 runs. One
+  AcceptEx also keeps a paused listener's queue in arrival order (`h1/064`).
+  Rejected: 32 for a listener that never pauses (the first decision of this
+  day, implemented on `feature/listen-no-pause` in php-src, php-async and the
+  server and not merged); 32 for a single uncapped worker only (faster for
+  that case, one more rule to keep).
 - 2026-11-12 A pool worker ended by a fatal error tears its server down without
   calling PHP or suspending, and the drain waits for and cancels the server scope
   through the C scope API, not through Scope methods (#439).

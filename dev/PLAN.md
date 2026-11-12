@@ -137,7 +137,7 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         `h1/038` made order-independent, `h1/055` skipped with a measured
         reason (`dev/plans/S3.md`). `h3/079` and `080`, added after S3.5, lost
         the false SO_REUSEPORT skip here.
-- [~] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
+- [x] S3.7 A curl with HTTP/2, h2load and h2spec on the Windows runner
       done: no test of those groups skips on Windows CI for its listed reason;
         failures as in S3.5
       tier: T1 · role: —
@@ -145,20 +145,87 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         0 fail with nghttp2 1.63.0, 1.70.0 and development 1.70.90; before the
         fix, 1.70.0 gave 141 pass, 5 fail. C session tests: 29 of 29 with
         nghttp2 1.59.0 and 1.70.0. Windows H2 phpt excluding subprocess gate:
-        53 pass, 0 fail, 4 dependency skips. CI confirmation pending.
-- [ ] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
+        53 pass, 0 fail, 4 dependency skips. Confirmed 2026-11-12 on Windows
+        CI run 43083329005 (main 2dd90b4): 156 of 660 skipped, 0 failed; none
+        for curl without HTTP/2 or h2spec; `h2/020`, `021`, `062` keep the
+        justified h2load skip (no Windows build, #407).
+- [x] S3.8 HTTP/3 in the Windows job (`--enable-http3`, ngtcp2, nghttp3,
         OpenSSL >= 3.5 on the runner)
-      done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
-        in S3.5
+      done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; a curl
+        `--http3-only` test passes there; failures as in S3.5
       tier: T2 · role: Critic
-- [ ] S3.9 Port the six tests whose POSIX mechanism is only their setup
+      Critic 2026-11-12: the 11 runnable tests complete no handshake, so a
+        green job proved nothing; 11, not 12; MSVC defaults give `_static`
+        libraries and a Debug CRT; a cache keyed on ngtcp2 alone outlives an
+        SDK OpenSSL move; S3.13 also needs 43 certificate commands fixed.
+        All taken (`dev/plans/S3.md`).
+      handoff: `build_h3_deps.bat` builds nghttp3 1.15.0 and ngtcp2 1.22.1
+        static against the SDK's OpenSSL 4.0.3; `--enable-http3`, and the job
+        fails without `HAVE_HTTP_SERVER_HTTP3`. Windows CI run 43218837274: 142
+        of 666 skipped (152 before), 0 failed, none for HTTP/3 missing; `h3/112`
+        (curl `--http3-only` GET, 70000-byte POST, HEAD) passes. `*.bat -text`
+        keeps the CRLF cmd needs. 82 tests still skip on h3client, 23 on
+        aioquic: S3.13.
+- [x] S3.9 Port the six tests whose POSIX mechanism is only their setup
         (`dev/plans/S3.md`)
-      done: the six run and pass on Windows CI
+      done: the six run and pass on Windows CI, or a step names why one cannot
       tier: T1 · role: —
-- [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
+      handoff: `core/030`, `core/050`, `multipart/015`, `static/025` pass on
+        Windows CI runs 43201891206, 43204309691 and 43207246934. `core/038` and
+        `039` are not setup problems: the Windows AF_UNIX listener is broken
+        (S3.12). Found on the way: `core/128` and `132` now accept the worker's
+        bailout warning after "start returned" (run 43201891206).
+- [ ] S3.13 Port `tests/h3client/h3client.c` to Winsock, build it in the
+        Windows job and find it prebuilt in `_h3_skipif.inc`; make the 43 h3
+        phpt whose inline certificate command writes `2>/dev/null` run under
+        cmd (`dev/plans/S3.md`, S3.8 plan item 5)
+      done: no phpt skips on Windows CI for "h3client harness is POSIX-only";
+        failures as in S3.5
+      tier: T2 · role: Critic
+- [x] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
+      Sage 2026-11-12: one AcceptEx stays the default; 32 only for a listener
+        declared never to pause (no cap, no CoDel). Edmond agreed, then
+        reversed it after the S3.14 measurement: one AcceptEx everywhere.
+      handoff: `dev/DECISIONS.md` 2026-11-12: one AcceptEx on every Windows
+        TCP listener, as now; nothing to change in the code.
+- [ ] S3.12 The AF_UNIX listener on Windows served no request. It binds only a
+        `\\.\pipe\` name; one connect from a child process that opens the pipe
+        as a file leaves `accept_errors_total` at 1 and the handler uncalled
+        (run 43207246934; that child's write then failed with EINVAL). With
+        `setWorkers(2)` each worker binds the pipe itself and the second dies
+        with "address already in use" (run 43201891206): the shared-fd path is
+        POSIX-only (`http_server_class.c`). PHP has no `unix://` on Windows and
+        curl's `--unix-socket` speaks AF_UNIX, so a test client is a child
+        process.
+      done: `core/038` and `039` run on Windows CI and pass, or Windows refuses
+        `addUnixListener()` with a stated reason recorded in `dev/DECISIONS.md`
+      tier: T2 · role: Critic
+- [x] S3.14 Implement the S3.10 decision: php-async takes a never-pauses flag
+        at listen time (php-src `ZEND_ASYNC_LISTEN_F_NO_PAUSE`) and posts libuv's 32
+        AcceptEx for it; the server passes it when neither a cap nor CoDel is
+        set
+      done: on Windows, a 1000-connect burst with no cap is back to the
+        "before" range of `dev/BENCHMARKS.md` and a capped one stays in the
+        "after" range, 7 runs each, with 1, 2 and 4 workers and accepts per
+        worker; `h1/062`-`064` pass, plus a capped several-worker variant whose
+        resume order is FIFO; a paused uncapped server answers all 40
+        clients after the resume on Windows CI; a reload during a burst counts
+        its resets; 10 Windows CI runs of the h1 group green
+      tier: T2 · role: Critic
+      Critic 2026-11-12: neither planned test could fail (the asynctest runs
+        only on Linux, where the flag does nothing); gate on the effective
+        CoDel target, which `CODEL_TARGET_MS` overrides; retiring a Windows
+        pool worker now resets up to 32 posted accepts; ignore the bit on
+        AF_UNIX. All taken; the asynctest is dropped and the mode is proved by
+        the measurement (`dev/plans/S3.md`).
+      handoff: dropped. The Windows measurement (`dev/BENCHMARKS.md`
+        2026-11-12) showed 32 AcceptEx faster only with one worker and every
+        connection on one worker with several; Edmond chose one AcceptEx
+        everywhere. The code stays unmerged on `feature/listen-no-pause` in
+        php-src, php-async and the server.
 - [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
         23 (`dev/plans/S3.md`, S3.5)
@@ -431,7 +498,7 @@ php-async change. #439 items 1 and 2 (worker side) stay in #439.
       160f004); `core/127` no longer allows it, and fails 3 of 3 against a
       php-async without that fix.
 
-## S8 — A fatal error during a pool worker's teardown (#439 items 1 and 2)  [in progress]
+## S8 — A fatal error during a pool worker's teardown (#439 items 1 and 2)  [done]
 
 Goal: a fatal error in a pool worker while its server tears down ends that worker
 with that one fatal: the teardown still releases the scope object, the TLS context,
@@ -499,9 +566,14 @@ Base: 3538b24 (server), 160f004 (php-async)
         only with the reactor pool, off in this build); the last worker leaving
         on memory_limit not closing the pool (no test drives the last worker
         out with tasks queued).
-- [ ] S8.3 CHANGELOG, PR, CI
+- [x] S8.3 CHANGELOG, PR, CI
       done: PR merged with CI green on every platform; #439 closed
       tier: T1 · role: —
+      result, 2026-11-12: php-async PR 321 merged as 3499dd7, server PR 449
+        merged as 9ae841d with all 8 checks green against it; #439 closed. CI
+        found two test faults the local runs could not: Windows prints no C
+        backtrace (`core/129`), macOS prints its frames in another format
+        (`core/128`, `core/132`).
 
 ## Next
 
@@ -845,6 +917,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     WeakMap keeps its entry; `scope_object_free()` returns before
     `zend_object_std_dtor()` once `scope_destroy()` detached the scope
     (`scope.c:1467`), 3 of 3 (Sage, S8).
+57. `tls/003` failed on Windows CI run 43165258917 (main b9cb2ad, 2026-11-12):
+    "s_client still running after 10 s", then `tls13: yes`, so s_client left
+    only when the watchdog stopped the server, after the HTTP/1.0 answer was
+    due. Among the 40 Windows runs since 2026-10-20, 32 are green and the
+    other 7 red ones were not checked for it; cause not looked for.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no

@@ -92,8 +92,16 @@ spawn(function () use ($server, $port) {
         }
     }
 
+    /* On a shared listen fd no spread is promised (#240): the default outside
+     * Linux and FreeBSD, and Linux CI's second run through the env. The
+     * condition is the one of websocket/_ws_spread_skipif.inc. */
+    $shared_fd = !((PHP_OS_FAMILY === 'Linux' || PHP_OS_FAMILY === 'BSD')
+                   && getenv('TRUE_ASYNC_SERVER_SHARED_LISTEN_FD') !== '1');
+
     if ($spread === 'none' && $one_acceptor) {
         $spread = strtolower(PHP_OS_FAMILY) . '-none';
+    } elseif ($spread === 'none' && $shared_fd) {
+        $spread = 'shared-fd-none';
     }
 
     $w = array_values($stats['workers']);
@@ -145,7 +153,7 @@ $server->start();
 --EXPECTF--
 gauge_total=1
 gauge_summed=1
-gauge_spread=%rproven|darwin-none|windows-none%r
+gauge_spread=%rproven|darwin-none|windows-none|shared-fd-none%r
 replies_400=1
 errors_total=1
 errors_summed=1

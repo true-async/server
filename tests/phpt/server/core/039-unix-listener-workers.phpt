@@ -5,7 +5,7 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (PHP_OS_FAMILY === 'Windows') die('skip POSIX-only test (AF_UNIX shared fd)');
+if (PHP_OS_FAMILY === 'Windows') die('skip a Windows pool binds its named pipe once per worker, and the second bind fails (S3.12)');
 if (!extension_loaded('posix')) die('skip posix extension not available');
 exec('curl --version 2>&1', $out, $rc);
 if ($rc !== 0) die('skip curl CLI not available');

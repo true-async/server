@@ -5,7 +5,7 @@ true_async_server
 true_async
 --SKIPIF--
 <?php
-if (stripos(PHP_OS, 'WIN') === 0) die('skip POSIX-only test (AF_UNIX path semantics)');
+if (PHP_OS_FAMILY === 'Windows') die('skip a Windows named-pipe listener fails every accept (S3.12)');
 ?>
 --FILE--
 <?php
