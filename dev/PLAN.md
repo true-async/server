@@ -853,6 +853,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     WeakMap keeps its entry; `scope_object_free()` returns before
     `zend_object_std_dtor()` once `scope_destroy()` detached the scope
     (`scope.c:1467`), 3 of 3 (Sage, S8).
+57. `tls/003` failed on Windows CI run 43165258917 (main b9cb2ad, 2026-11-12):
+    "s_client still running after 10 s", then `tls13: yes`, so s_client left
+    only when the watchdog stopped the server, after the HTTP/1.0 answer was
+    due. Among the 40 Windows runs since 2026-10-20, 32 are green and the
+    other 7 red ones were not checked for it; cause not looked for.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
