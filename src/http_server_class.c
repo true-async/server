@@ -577,6 +577,12 @@ struct http_server_object {
      * (issue #74). Belongs to one run: start() clears it with each new
      * server_scope, or a restarted server skips its drain. */
     bool                     scope_drained;
+    /* The Scope object the drain holds across its method calls; NULL outside
+     * them. A bailout inside one leaves it set, and the teardown drops it. */
+    zend_object             *drain_pin;
+    /* Set before a pool worker tears its clone down after a bailout: the
+     * teardown then neither suspends nor calls PHP. */
+    bool                     after_bailout;
     /* Set by http_server_teardown. A pool worker tears its clone down before
      * its task completes, whether or not the object is freed then. */
     bool                     torn_down;
@@ -2238,6 +2244,13 @@ static bool http_server_make_timeout(const zend_ulong ms, zval *out)
 }
 
 /* Async\Scope::isFinished() on the live scope object. */
+/* False once the engine refuses every call (memory exhausted, or the request is
+ * no longer active): a zend_call_* then fails with a fatal of its own. */
+static zend_always_inline bool http_server_engine_takes_calls(void)
+{
+    return EG(active) && !ZEND_HAS_OOM();
+}
+
 static bool http_server_scope_is_finished(zend_object *scope_object)
 {
     zval retval;
@@ -2277,12 +2290,14 @@ static void http_server_drain_scope(http_server_object *server)
     /* Need a real coroutine to suspend on. In scheduler/teardown context we
      * cannot await — leave scope_drained unset so a later call may retry. */
     if (ZEND_ASYNC_CURRENT_COROUTINE == NULL || ZEND_ASYNC_IS_SCHEDULER_CONTEXT
-        || false == ZEND_ASYNC_ON) {
+        || false == ZEND_ASYNC_ON || server->after_bailout
+        || !http_server_engine_takes_calls()) {
         return;
     }
 
     zend_object *scope_object = server->scope_object;
     GC_ADDREF(scope_object); /* hold the Scope object across the method calls */
+    server->drain_pin = scope_object;
 
     /* Phase 1: let handlers finish on their own, bounded by the grace window. */
     const zend_ulong grace_ms = (zend_ulong) server->shutdown_timeout_s * 1000u;
@@ -2313,6 +2328,7 @@ static void http_server_drain_scope(http_server_object *server)
     }
 
     server->scope_drained = true;
+    server->drain_pin = NULL;
     OBJ_RELEASE(scope_object);
 }
 
@@ -2550,13 +2566,6 @@ typedef struct {
     bool                        bailout;
 } pool_await_state_t;
 
-/* False once the engine refuses every call (memory exhausted, or the request is
- * no longer active): a zend_call_* then fails with a fatal of its own. */
-static zend_always_inline bool http_server_engine_takes_calls(void)
-{
-    return EG(active) && !ZEND_HAS_OOM();
-}
-
 static void pool_notify_quiesced(http_server_object *server, pool_await_state_t *st)
 {
     if (st->pending == 0 && !server->reload_in_progress && st->all_done != NULL) {
@@ -2683,6 +2692,13 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
         bailout = true;
     } zend_end_try();
 
+    /* A bailout out of a suspended start() leaves its waker's events armed,
+     * the drain's grace timer among them, and that timer keeps the worker's
+     * loop alive past its end. */
+    if (bailout && ZEND_ASYNC_CURRENT_COROUTINE != NULL) {
+        zend_async_waker_clean(ZEND_ASYNC_CURRENT_COROUTINE);
+    }
+
     /* Tear the clone down before the dispatcher can resolve this task: the
      * parent destroys the reactor pool once every task is done, and the
      * clone's delivery owner still points at it. Do not catch-and-return from
@@ -2696,6 +2712,7 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
      * shutdown waits for that loop. On a clean exit the run has released
      * nearly everything already. */
     if (Z_TYPE_P(server_zv) == IS_OBJECT) {
+        Z_HTTP_SERVER_P(server_zv)->after_bailout = bailout;
         http_server_teardown(Z_HTTP_SERVER_P(server_zv));
     }
 
@@ -3520,7 +3537,7 @@ static void http_server_worker_inbox_retire(http_server_object *server)
         return;
     }
 
-    zend_coroutine_t *const co = ZEND_ASYNC_CURRENT_COROUTINE;
+    zend_coroutine_t *const co = server->after_bailout ? NULL : ZEND_ASYNC_CURRENT_COROUTINE;
 
     /* start() woken by a handler's stop() while the pool's retire is still
      * fencing: returning now would let start() free the server under it. */
@@ -6813,6 +6830,12 @@ static void http_server_teardown(http_server_object *server)
      * stops blocking, and scope_dispose runs cleanly — cancelling any
      * still-alive handler coroutines and freeing the struct. */
     server->server_scope = NULL;
+
+    if (server->drain_pin != NULL) {
+        zend_object *drain_pin = server->drain_pin;
+        server->drain_pin = NULL;
+        OBJ_RELEASE(drain_pin);
+    }
 
     if (server->scope_object) {
         zend_object *scope_object = server->scope_object;

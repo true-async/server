@@ -13,7 +13,10 @@ memory_limit=32M
  * not cover, so the bailout leaves the worker's start(). The teardown after it
  * may not call PHP: a Scope method called there under exhausted memory raised a
  * second fatal, which skipped the rest of the teardown and the task's
- * completion, and the parent waited for that worker forever. */
+ * completion, and the parent waited for that worker forever. The handler the
+ * stop() cancels is the next coroutine to run PHP, so the delayed memory error
+ * is raised in it and its firewall logs it: that warning is allowed, in any
+ * order with the parent's lines, and nothing else is. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\delay;
@@ -59,11 +62,10 @@ spawn(function () use ($server, $port) {
 $server->start();
 echo "start returned\n";
 ?>
---EXPECTF--
-up
+--EXPECTREGEX--
+^up
 stopping
-[true-async-server] worker exited
+\[true-async-server\] worker exited
 
-Fatal error: Allowed memory size of 33554432 bytes exhausted %s in %s on line %d
-[true-async-server] worker did not start: TrueAsync\HttpServerRuntimeException: Worker server start bailed out
-start returned
+Fatal error: Allowed memory size of 33554432 bytes exhausted [^\n]*
+(?:(?:|Warning: \[true-async-server\] zend_bailout in h1 handler: [^\n]*Allowed memory size[^\n]*|\[true-async-server\] --- (?:end )?C backtrace[^\n]*|\/[^\n]*\]|\[true-async-server\] worker did not start: TrueAsync\\HttpServerRuntimeException: Worker server start bailed out)\n)*start returned(?:\n(?:|\[true-async-server\] --- (?:end )?C backtrace[^\n]*|\/[^\n]*\]|\[true-async-server\] worker did not start: TrueAsync\\HttpServerRuntimeException: Worker server start bailed out))*$
