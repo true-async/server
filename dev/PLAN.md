@@ -154,20 +154,30 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
       done: no HTTP/3 test skips on Windows CI for HTTP/3 missing; failures as
         in S3.5
       tier: T2 · role: Critic
-- [~] S3.9 Port the six tests whose POSIX mechanism is only their setup
+- [x] S3.9 Port the six tests whose POSIX mechanism is only their setup
         (`dev/plans/S3.md`)
       done: the six run and pass on Windows CI, or a step names why one cannot
       tier: T1 · role: —
+      handoff: `core/030`, `core/050`, `multipart/015`, `static/025` pass on
+        Windows CI runs 43201891206, 43204309691 and 43207246934. `core/038` and
+        `039` are not setup problems: the Windows AF_UNIX listener is broken
+        (S3.12). Found on the way: `core/128` and `132` now accept the worker's
+        bailout warning after "start returned" (run 43201891206).
 - [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
-- [ ] S3.12 An AF_UNIX listener with `setWorkers(2)` on Windows: each worker
-        binds the named pipe itself and the second fails with "address already
-        in use" and that worker thread dies (`core/039`; Windows CI run
-        43201891206). The shared-fd path is POSIX-only (`http_server_class.c`).
-      done: `core/039` runs on Windows CI and passes, or the limit is refused
-        at start() with a stated reason and recorded in `dev/DECISIONS.md`
+- [ ] S3.12 The AF_UNIX listener on Windows served no request. It binds only a
+        `\\.\pipe\` name; one connect from a child process that opens the pipe
+        as a file leaves `accept_errors_total` at 1 and the handler uncalled
+        (run 43207246934; that child's write then failed with EINVAL). With
+        `setWorkers(2)` each worker binds the pipe itself and the second dies
+        with "address already in use" (run 43201891206): the shared-fd path is
+        POSIX-only (`http_server_class.c`). PHP has no `unix://` on Windows and
+        curl's `--unix-socket` speaks AF_UNIX, so a test client is a child
+        process.
+      done: `core/038` and `039` run on Windows CI and pass, or Windows refuses
+        `addUnixListener()` with a stated reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
 - [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in

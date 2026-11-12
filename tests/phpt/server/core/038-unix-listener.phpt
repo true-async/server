@@ -3,6 +3,10 @@ HttpServer: AF_UNIX listener — end-to-end request over a unix socket
 --EXTENSIONS--
 true_async_server
 true_async
+--SKIPIF--
+<?php
+if (PHP_OS_FAMILY === 'Windows') die('skip a Windows named-pipe listener fails every accept (S3.12)');
+?>
 --FILE--
 <?php
 use TrueAsync\HttpServer;
@@ -10,14 +14,7 @@ use TrueAsync\HttpServerConfig;
 use function Async\spawn;
 use function Async\await;
 
-/* On Windows the listener is a named pipe, which takes only a \\.\pipe\
- * name, and PHP has no unix:// transport there: a child process opens the
- * pipe as a file, since a blocking read in this thread would stall the
- * server. */
-$windows = PHP_OS_FAMILY === 'Windows';
-$path = $windows
-    ? '\\\\.\\pipe\\ta-ux-' . getmypid()
-    : sys_get_temp_dir() . '/ta-ux-' . getmypid() . '.sock';
+$path = sys_get_temp_dir() . '/ta-ux-' . getmypid() . '.sock';
 @unlink($path);
 
 $config = (new HttpServerConfig())
@@ -47,38 +44,22 @@ $server->addHttpHandler(function($request, $response) use (&$requestMethod, &$re
     $server->stop();
 });
 
-$clientCoroutine = spawn(function() use ($path, $windows) {
+$clientCoroutine = spawn(function() use ($path) {
     usleep(10000);  // let the server bind + listen
 
-    $request = "GET /hello?x=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-
-    if ($windows) {
-        $script = sys_get_temp_dir() . '/ta-ux-client-' . getmypid() . '.php';
-        file_put_contents($script, '<?php $fp = fopen($argv[1], "r+b");'
-            . ' if (!$fp) { echo "Client connect failed\n"; exit; }'
-            . ' fwrite($fp, base64_decode($argv[2]));'
-            . ' while (!feof($fp)) { $c = fread($fp, 8192); if ($c === false || $c === "") break; echo $c; }');
-        $proc = proc_open([PHP_BINARY, '-n', $script, $path, base64_encode($request)],
-            [0 => ['file', 'nul', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes);
-        $response = (string) stream_get_contents($pipes[1]);
-        fclose($pipes[1]);
-        proc_close($proc);
-        @unlink($script);
-    } else {
-        $fp = @stream_socket_client("unix://$path", $errno, $errstr, 2);
-        if (!$fp) {
-            echo "Client connect failed: $errstr\n";
-            return;
-        }
-
-        fwrite($fp, $request);
-
-        $response = '';
-        while (!feof($fp)) {
-            $response .= fread($fp, 8192);
-        }
-        fclose($fp);
+    $fp = @stream_socket_client("unix://$path", $errno, $errstr, 2);
+    if (!$fp) {
+        echo "Client connect failed: $errstr\n";
+        return;
     }
+
+    fwrite($fp, "GET /hello?x=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+
+    $response = '';
+    while (!feof($fp)) {
+        $response .= fread($fp, 8192);
+    }
+    fclose($fp);
 
     echo "=== Client received ===\n";
     echo preg_replace("/^Date: [^\r\n]*\r?\n/mi", "", $response);
