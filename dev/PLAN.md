@@ -431,7 +431,7 @@ php-async change. #439 items 1 and 2 (worker side) stay in #439.
       160f004); `core/127` no longer allows it, and fails 3 of 3 against a
       php-async without that fix.
 
-## S8 — A fatal error during a pool worker's teardown (#439 items 1 and 2)  [in progress]
+## S8 — A fatal error during a pool worker's teardown (#439 items 1 and 2)  [done]
 
 Goal: a fatal error in a pool worker while its server tears down ends that worker
 with that one fatal: the teardown still releases the scope object, the TLS context,
@@ -499,9 +499,14 @@ Base: 3538b24 (server), 160f004 (php-async)
         only with the reactor pool, off in this build); the last worker leaving
         on memory_limit not closing the pool (no test drives the last worker
         out with tasks queued).
-- [ ] S8.3 CHANGELOG, PR, CI
+- [x] S8.3 CHANGELOG, PR, CI
       done: PR merged with CI green on every platform; #439 closed
       tier: T1 · role: —
+      result, 2026-11-12: php-async PR 321 merged as 3499dd7, server PR 449
+        merged as 9ae841d with all 8 checks green against it; #439 closed. CI
+        found two test faults the local runs could not: Windows prints no C
+        backtrace (`core/129`), macOS prints its frames in another format
+        (`core/128`, `core/132`).
 
 ## Next
 
