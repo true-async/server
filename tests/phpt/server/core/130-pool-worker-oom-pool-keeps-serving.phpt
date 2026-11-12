@@ -66,9 +66,9 @@ $server->start();
 echo "start returned\n";
 ?>
 --EXPECTREGEX--
-^up
+^(?=.*\n\[true-async-server\] worker ended by a fatal error\n)up
 
 Fatal error: Allowed memory size of 33554432 bytes exhausted [^\n]*
-(?:(?:|\[true-async-server\] worker did not start: TrueAsync\\HttpServerRuntimeException: Worker server start bailed out|\[true-async-server\] worker exited)\n)*reload: (?:\[true-async-server\] worker exited\n)*true
+(?:(?:|\[true-async-server\] worker ended by a fatal error|\[true-async-server\] worker exited)\n)*reload: (?:\[true-async-server\] worker exited\n)*true
 (?:\[true-async-server\] worker exited\n)*served after reload
 (?:\[true-async-server\] worker exited\n)*start returned$

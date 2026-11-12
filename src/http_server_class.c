@@ -2557,6 +2557,7 @@ static void pool_retired_release_all(http_server_object *server)
 typedef struct {
     int                          pending;     /* workers not yet done */
     int                          failed;      /* workers whose submission was rejected */
+    int                          fatal;       /* of those, workers that ran and were ended by a fatal error */
     zend_async_event_t          *all_done;    /* fires when pending == 0 */
     zend_async_event_callback_t  cb;          /* embedded — recovered via offsetof */
     zend_function              *protect;
@@ -2639,6 +2640,11 @@ static bool http_server_pool_prepare_drain(pool_await_state_t *st, zval *this_zv
     return EG(exception) == NULL;
 }
 
+/* Code of the exception pool_worker_handler rejects its task with when a fatal
+ * error ended the worker's run, so the parent tells it from a worker that never
+ * started. */
+#define POOL_WORKER_FATAL_CODE 0x7a5f
+
 static void pool_worker_handler(zend_async_event_t *event, void *vctx)
 {
     (void)event;
@@ -2719,7 +2725,7 @@ static void pool_worker_handler(zend_async_event_t *event, void *vctx)
     zval_ptr_dtor(server_zv);
     if (bailout) {
         zend_throw_exception(http_server_runtime_exception_ce,
-                             "Worker server start bailed out", 0);
+                             "Worker ended by a fatal error", POOL_WORKER_FATAL_CODE);
     }
     /* ctx is part of a cohort array the parent owns and frees (reload(),
      * start_pool's cleanup, http_server_free); nothing here reads it after the
@@ -2744,17 +2750,27 @@ static void pool_worker_done_cb(zend_async_event_t *event,
     pool_await_state_t *st = (pool_await_state_t *)
         ((char *)cb - offsetof(pool_await_state_t, cb));
 
-    /* A rejected submission means pool_worker_handler never ran: the pool failed
-     * the task before any worker could take it (a bootloader that threw, a shell
-     * that would not transfer). The worker-side report in pool_worker_handler
-     * cannot cover this — there is no worker — so the count is what keeps start()
-     * from reporting a server that never accepted a connection as started. */
+    /* A rejected submission means either that pool_worker_handler never ran (the
+     * pool failed the task before any worker could take it: a bootloader that
+     * threw, a shell that would not transfer) or that it ran and a fatal error
+     * ended it (POOL_WORKER_FATAL_CODE). The worker-side report cannot cover the
+     * first — there is no worker — so the count is what keeps start() from
+     * reporting a server that never accepted a connection as started. */
     if (UNEXPECTED(exception != NULL)) {
         st->failed++;
 
-        /* One line per run: N workers of the same pool fail for the same reason,
-         * and the reason itself is already printed by the worker thread. */
-        if (st->failed == 1) {
+        /* A worker that ran and was ended by a fatal error rejects its own task;
+         * the fatal itself is already printed by the worker thread. */
+        zval *code_zv = zend_read_property(exception->ce, exception, "code", sizeof("code") - 1,
+                                           /*silent=*/1, NULL);
+
+        if (code_zv != NULL && Z_TYPE_P(code_zv) == IS_LONG && Z_LVAL_P(code_zv) == POOL_WORKER_FATAL_CODE) {
+            st->fatal++;
+            fprintf(stderr, "[true-async-server] worker ended by a fatal error\n");
+            fflush(stderr);
+        } else if (st->failed - st->fatal == 1) {
+            /* One line per run: N workers of the same pool fail for the same
+             * reason, and the reason itself is already printed by the worker. */
             zval *msg_zv = zend_read_property(exception->ce, exception,
                                               "message", sizeof("message") - 1,
                                               /*silent=*/1, NULL);
@@ -3821,8 +3837,8 @@ static int http_server_pool_serve(http_server_object *server, zval *this_zv,
     const int rc = (submitted_all && st->pending == 0 && st->failed == 0) ? SUCCESS : FAILURE;
 
     if (st->failed > 0) {
-        http_logf_error(&server->log_state, "server.start.failed mode=pool workers=%d",
-                        st->failed);
+        http_logf_error(&server->log_state, "server.start.failed mode=pool workers=%d fatal=%d",
+                        st->failed, st->fatal);
     }
 
     /* Admission closes before any cleanup wait. An in-flight reload keeps its

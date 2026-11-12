@@ -54,9 +54,9 @@ $server->start();
 echo "start returned\n";
 ?>
 --EXPECTREGEX--
-^up
+^(?=.*\n\[true-async-server\] worker ended by a fatal error\n)up
 stopping
 \[true-async-server\] worker exited
 
 Fatal error: Cannot redeclare function tas_dup\(\) [^\n]*
-(?:(?:|\[true-async-server\] worker did not start: TrueAsync\\HttpServerRuntimeException: Worker server start bailed out)\n)*start returned(?:\n(?:|\[true-async-server\] worker did not start: TrueAsync\\HttpServerRuntimeException: Worker server start bailed out))*$
+(?:(?:|\[true-async-server\] worker ended by a fatal error)\n)*start returned(?:\n(?:|\[true-async-server\] worker ended by a fatal error))*$
