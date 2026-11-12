@@ -182,10 +182,14 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
       done: no phpt skips on Windows CI for "h3client harness is POSIX-only";
         failures as in S3.5
       tier: T2 · role: Critic
-- [ ] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
+- [x] S3.10 Decide whether php-async keeps one AcceptEx at a time on Windows,
         at 3.5 times the time for a 1000-connect burst (S3.4)
       done: choice and reason recorded in `dev/DECISIONS.md`
       tier: T2 · role: Critic
+      Sage 2026-11-12: one AcceptEx stays the default; 32 only for a listener
+        declared never to pause (no cap, no CoDel). Final; Edmond agreed.
+      handoff: `dev/DECISIONS.md` 2026-11-12; the change and its evidence are
+        S3.14.
 - [ ] S3.12 The AF_UNIX listener on Windows served no request. It binds only a
         `\\.\pipe\` name; one connect from a child process that opens the pipe
         as a file leaves `accept_errors_total` at 1 and the handler uncalled
@@ -197,6 +201,18 @@ Order after S8 (Edmond, 2026-11-12): S3.7 closed by a record, S3.9, S3.8, S3.10.
         process.
       done: `core/038` and `039` run on Windows CI and pass, or Windows refuses
         `addUnixListener()` with a stated reason recorded in `dev/DECISIONS.md`
+      tier: T2 · role: Critic
+- [ ] S3.14 Implement the S3.10 decision: php-async takes a never-pauses flag
+        at listen time (refused after `uv_listen`) and posts libuv's 32
+        AcceptEx for it; the server passes it when neither a cap nor CoDel is
+        set
+      done: on Windows, a 1000-connect burst with no cap is back to the
+        "before" range of `dev/BENCHMARKS.md` and a capped one stays in the
+        "after" range, 7 runs each, with 1, 2 and 4 workers and accepts per
+        worker; `h1/062`-`064` pass, plus a capped several-worker variant whose
+        resume order is FIFO; php-async asynctest covers a declared listener
+        stopped anyway, delivery after start() and the refusal after listen;
+        10 Windows CI runs of the h1 group green
       tier: T2 · role: Critic
 - [x] S3.11 (#375) A Windows worker pool serves from one worker: worker 0 accepted
         nothing in 30 of 30 runs, the worker started last took every request in
