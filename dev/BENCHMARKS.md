@@ -5,9 +5,8 @@ the scenario, because a number without them cannot be compared with the next one
 
 ## 2026-11-12 — one AcceptEx against libuv's 32, with 1, 2 and 4 workers (S3.14)
 
-Measured by an agent on Edmond's Windows machine; its report and scripts are
-there (`E:\s314\report\REPORT.md`, `tables.md`, `many.patch`), not in a
-repository, and the figures below are as it relayed them. Builds as the Windows
+Measured by an agent on Edmond's Windows machine; report, per-run tables and
+scripts in `dev/plans/S3.14-windows-report/`. Builds as the Windows
 CI job builds them, Release ZTS: php-src `390ab29`, php-async `3499dd7`,
 server `263df72`, libuv 1.53.0 from vcpkg; **many** is the same tree with the
 `uv_tcp_simultaneous_accepts(..., 0)` block of `libuv_listen_start` removed.
