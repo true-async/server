@@ -7,9 +7,9 @@ true_async
 <?php
 /* The handler's bailout firewall answers the request and the worker goes on
  * draining. The drain's grace window is an Async\Timeout created before the
- * fatal, and a fatal error marks every live object destructed: the Timeout
- * closed its libuv timer only in its destructor, so the worker's loop closed
- * with EBUSY and a leftover timer. */
+ * fatal, and a fatal error marks every live object destructed, so no
+ * destructor closes its libuv timer; a timer left open fails the worker's
+ * uv_loop_close() with EBUSY. */
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use function Async\delay;
