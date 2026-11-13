@@ -922,6 +922,17 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     only when the watchdog stopped the server, after the HTTP/1.0 answer was
     due. Among the 40 Windows runs since 2026-10-20, 32 are green and the
     other 7 red ones were not checked for it; cause not looked for.
+58. `core/022` (a bootloader that throws in a pool worker) failed under
+    `run-tests.php -j8` of the h1 and core groups on Linux, 2026-11-12: the
+    worker's exception came out as two uncaught fatals and a
+    `ThreadTransferException` instead of "worker did not start". 2 of 5 group
+    runs had one failure, one of them named `core/022`; alone it passed 3 of 3.
+    See item 40 for its macOS failure.
+59. Release 0.19.0 (asked for by Edmond, 2026-11-12): #441, #444, #446 and #439
+    merged as #442, #445, #447 and #449, plus the Windows work of S3 (#450).
+    Needs php-async 0.11.8, which carries the bailout fixes #439 relies on.
+    Version bump, CHANGELOG section, IDE stubs checked against the stubs
+    (isSecure in both; the CoDel default corrected in both), tag `v0.19.0`.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
