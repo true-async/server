@@ -2,7 +2,7 @@
   "totals": {
     "lines": {
       "total": 28025,
-      "hit": 24245
+      "hit": 24243
     },
     "functions": {
       "total": 2004,
@@ -323,7 +323,7 @@
     "src/core/thread_queue.cc": {
       "lines": {
         "total": 122,
-        "hit": 99
+        "hit": 98
       },
       "functions": {
         "total": 30,
@@ -503,7 +503,7 @@
     "src/http3/http3_callbacks.c": {
       "lines": {
         "total": 1004,
-        "hit": 872
+        "hit": 871
       },
       "functions": {
         "total": 57,
