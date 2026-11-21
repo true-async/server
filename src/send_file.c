@@ -266,18 +266,6 @@ static void engine_handle_stat(engine_state_t *state)
 	zend_object *response_obj = state->response_obj;
 	const send_file_config_t *cfg = &state->cfg;
 
-	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
-		const int status = (cfg->on_error == SEND_FILE_ERR_INLINE_500) ? 500 : 404;
-		const char *body = (status == 500) ? "Internal Server Error" : "Not Found";
-		const size_t body_len = (status == 500) ? 21 : 9;
-
-		if (!engine_emit_error_via_op(state, status, body, body_len)) {
-			engine_finalize(state, -1);
-		}
-
-		return;
-	}
-
 	/* === Build derived metadata (cache hit short-circuits) =========== */
 
 	char etag_buf[HTTP_ETAG_BUF_LEN];
@@ -764,6 +752,11 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	 * .br/.gz, ranges, images). Mirrors open_for_policy in http_static_safety.c. */
 	open_flags |= O_BINARY;
 #endif
+#ifdef O_NONBLOCK
+	/* A FIFO without a writer would block open(2) in the event-loop thread.
+	 * Regular files ignore the flag; the S_ISREG check below rejects the rest. */
+	open_flags |= O_NONBLOCK;
+#endif
 #ifdef O_NOFOLLOW
 	/* REJECT mount: reject a final-component symlink atomically (ELOOP). */
 	if (state->cfg.reject_symlinks) {
@@ -791,6 +784,13 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 			(void)close(fd);
 			return engine_arm_and_defer_error(state, 500, "Internal Server Error", 21);
 		}
+	}
+
+	/* open(2) succeeds on a directory. It is not a file to send, so it takes the
+	 * path of a missing one: on_missing: Next hands the request to PHP. */
+	if (UNEXPECTED(!S_ISREG(state->st.st_mode))) {
+		(void)close(fd);
+		return engine_handle_open_failure(state);
 	}
 
 	state->file_io = ZEND_ASYNC_IO_CREATE((zend_file_descriptor_t)fd, ZEND_ASYNC_IO_TYPE_FILE,
