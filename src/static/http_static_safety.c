@@ -30,6 +30,11 @@ static int open_for_policy(const http_static_handler_t *mount, const char *path)
 #ifdef O_BINARY
 	flags |= O_BINARY;
 #endif
+#ifdef O_NONBLOCK
+	/* A FIFO without a writer would block open(2) in the event-loop thread.
+	 * Regular files ignore the flag; the caller's S_ISREG check rejects the rest. */
+	flags |= O_NONBLOCK;
+#endif
 
 #ifdef O_NOFOLLOW
 	/* REJECT: kernel-level — any symlink on the final component fails

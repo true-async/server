@@ -752,6 +752,11 @@ send_file_result_t send_file(struct http_request_t *request, zend_object *respon
 	 * .br/.gz, ranges, images). Mirrors open_for_policy in http_static_safety.c. */
 	open_flags |= O_BINARY;
 #endif
+#ifdef O_NONBLOCK
+	/* A FIFO without a writer would block open(2) in the event-loop thread.
+	 * Regular files ignore the flag; the S_ISREG check below rejects the rest. */
+	open_flags |= O_NONBLOCK;
+#endif
 #ifdef O_NOFOLLOW
 	/* REJECT mount: reject a final-component symlink atomically (ELOOP). */
 	if (state->cfg.reject_symlinks) {

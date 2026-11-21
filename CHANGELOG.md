@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A static mount answered 404 to a directory requested without a trailing slash, even under `on_missing: Next`** (laravel-spawn#85). `GET /docs`, where `docs/` is a directory of the mount, never reached the PHP handler, so a route at the root mount with that path could not answer. `open()` succeeds on a directory, and the send-file engine refused it after the open with a 404 of its own; a directory now takes the path of a missing file, as it already did when the file is sent without the engine. Evidence: `static/026` fails before and passes after.
+- **A FIFO in a static mount blocked the whole event loop.** `open()` for reading on a FIFO without a writer sleeps until one appears, and the static handler opened it in the event-loop thread, so every connection of that thread waited. Static files are now opened with `O_NONBLOCK`: the open returns at once, the file-type check rejects the FIFO, and under `on_missing: Next` the request goes to PHP. Evidence: `static/027` fails before and passes after.
 
 ## [0.19.0] - 2026-11-12
 
