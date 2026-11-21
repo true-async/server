@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`stop()`, `reload()` and `graceful_shutdown()` never returned when a handler or the bootloader left a coroutine that catches its cancellation**, such as a retry loop around `delay()` with `catch (\Throwable)`. The drain of a handler scope and a retiring worker waited for that coroutine to end, and it never did. With php-async's `async.shutdown_grace` (default 5 s), what outlives the grace after the cancellation is terminated; `setShutdownTimeout()` stays the wait before the cancellation. No server code changes. Needs php-async `4ac66b86`. Evidence: `core/133` to `core/136` (pool stop, reload with a bootloader coroutine, single-worker stop, `graceful_shutdown()`) time out before and pass after.
+
 ## [0.19.0] - 2026-11-12
 
 ### Added
