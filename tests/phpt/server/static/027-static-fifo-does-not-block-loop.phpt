@@ -1,5 +1,5 @@
 --TEST--
-StaticHandler: a FIFO in the mount is not opened for reading, so it cannot block the event loop
+StaticHandler: a FIFO in the mount cannot block the event loop
 --EXTENSIONS--
 true_async_server
 true_async
@@ -15,8 +15,8 @@ if ($rc !== 0) die('skip curl CLI not available');
 /* open(O_RDONLY) on a FIFO without a writer sleeps until one appears, and it
  * sleeps in the event-loop thread. The request for the FIFO goes to PHP under
  * on_missing: Next, and a request for a regular file on another connection is
- * answered meanwhile. A helper opens the FIFO for writing after 3 s, so a
- * blocked loop wakes up and the test ends either way. */
+ * answered meanwhile. A helper opens the FIFO read-write after 3 s, which
+ * wakes a blocked open and never blocks itself, so the test ends either way. */
 
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -65,7 +65,7 @@ $wait = static function ($proc): string {
 $client = spawn(function () use ($run, $curl, $wait, $root, $server) {
     // All three start before the FIFO request can block the loop; the file
     // request leaves 0.3 s later on its own clock, not on the loop's.
-    $release = $run(['sh', '-c', 'sleep 3; : > "$0"', "$root/pipe"]);
+    $release = $run(['sh', '-c', 'sleep 3; : 1<>"$0"', "$root/pipe"]);
     $fifo = proc_open($curl('/s/pipe'), [1 => ['pipe', 'w']], $fifo_pipes);
     $file = proc_open(['sh', '-c', 'sleep 0.3; exec "$@"', 'sh', ...$curl('/s/ok.txt')],
         [1 => ['pipe', 'w']], $file_pipes);
