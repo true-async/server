@@ -933,7 +933,12 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     Needs php-async 0.11.8, which carries the bailout fixes #439 relies on.
     Version bump, CHANGELOG section, IDE stubs checked against the stubs
     (isSecure in both; the CoDel default corrected in both), tag `v0.19.0`.
-60. #454 — a handler whose HTTP/1 client had left ran until its next write:
+60. Release 0.19.1 (asked for by Edmond, 2026-11-21): #452 and #453, the
+    termination of coroutines that outlive their cancellation and the static
+    mount's directory and FIFO fixes. Needs php-async 0.12.0, which carries
+    `async.shutdown_grace`. Version bump, CHANGELOG section, tag `v0.19.1`;
+    the stubs did not change since 0.19.0.
+61. #454 — a handler whose HTTP/1 client had left ran until its next write:
     fixed on `claude/wizardly-volta-y5wyqe`. A RST, a FIN or a TLS `close_notify`
     while a handler runs cancels it with HttpException 499
     (`http_connection_cancel_handler_for_peer_gone`); a FIN with requests buffered

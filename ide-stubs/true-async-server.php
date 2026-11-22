@@ -12,7 +12,7 @@
  * and functions the extension registers.
  *
  * @since      8.6
- * @version    0.19.0
+ * @version    0.19.1
  * @link       https://github.com/true-async/server
  */
 
