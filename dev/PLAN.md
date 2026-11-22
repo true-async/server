@@ -933,6 +933,23 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     Needs php-async 0.11.8, which carries the bailout fixes #439 relies on.
     Version bump, CHANGELOG section, IDE stubs checked against the stubs
     (isSecure in both; the CoDel default corrected in both), tag `v0.19.0`.
+60. #454 — a handler whose HTTP/1 client had left ran until its next write:
+    fixed on `claude/wizardly-volta-y5wyqe`. A RST, a FIN or a TLS `close_notify`
+    while a handler runs cancels it with HttpException 499
+    (`http_connection_cancel_handler_for_peer_gone`); a FIN with requests buffered
+    behind it is a half-close and is answered; a body cut short errors its stream.
+    TLS keeps its read armed while a handler runs and its buffer has room.
+    `setIgnoreUserAbort(true)` opts out. Design: Sage verdict and Critic findings
+    on the issue; the TLS read turned out smaller than the Critic estimated, since
+    the decrypt-without-parse gate for pipelining was already there. HTTP/1 does
+    not go through the reactor pool, so the Critic's pool point does not apply.
+    Tests `h1/077`-`081`, `tls/021`; 077, 078 and 021 failed before the fix.
+    `core/082` closed its client during the drain it measures and now waits for
+    the answer (Edmond, 2026-11-22: the test was out of date). Full phpt
+    2026-11-22: 677 tests, 548 run, 541 passed, 6 failed, 129 skipped: `core/133`
+    to `136` fail on `main` as well (the /opt/tas PHP predates php-async#329),
+    `websocket/038` passed 3 of 3 reruns, `core/082` is the one above.
+    Open: a paused read (full buffer) still misses a departure, as on plaintext.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no

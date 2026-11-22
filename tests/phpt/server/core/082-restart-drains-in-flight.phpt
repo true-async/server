@@ -38,6 +38,10 @@ foreach (['first', 'second'] as $run) {
         fwrite($c, "GET /slow HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
         delay(100);
         $server->stop();
+        // The client stays until the answer is in: one that leaves cancels the
+        // handler (#454), and the drain is what is measured here.
+        while (!feof($c) && fread($c, 8192) !== '') {
+        }
         fclose($c);
     });
     $server->start();
