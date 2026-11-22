@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-21
+
 ### Fixed
 
 - **A static mount answered 404 to a directory requested without a trailing slash, even under `on_missing: Next`** (laravel-spawn#85). `GET /docs`, where `docs/` is a directory of the mount, never reached the PHP handler, so a route at the root mount with that path could not answer. `open()` succeeds on a directory, and the send-file engine refused it after the open with a 404 of its own; a directory now takes the path of a missing file, as it already did when the file is sent without the engine. Evidence: `static/026` fails before and passes after.

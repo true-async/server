@@ -933,6 +933,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     Needs php-async 0.11.8, which carries the bailout fixes #439 relies on.
     Version bump, CHANGELOG section, IDE stubs checked against the stubs
     (isSecure in both; the CoDel default corrected in both), tag `v0.19.0`.
+60. Release 0.19.1 (asked for by Edmond, 2026-11-21): #452 and #453, the
+    termination of coroutines that outlive their cancellation and the static
+    mount's directory and FIFO fixes. Needs php-async 0.12.0, which carries
+    `async.shutdown_grace`. Version bump, CHANGELOG section, tag `v0.19.1`;
+    the stubs did not change since 0.19.0.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
