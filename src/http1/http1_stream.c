@@ -481,6 +481,10 @@ static void h1_stream_mark_ended(void *opaque)
 
     http_connection_t *conn = ctx->conn;
 
+    /* Before any write below suspends: the client may read the end and leave
+     * while it is still being written. */
+    ctx->response_finishing = true;
+
     /* A frame can be left half on the wire: above the coalescing threshold it
      * is three writes with a suspension between them, and a cancellation lands
      * in one of those gaps. Sealing that with a terminal chunk would tell the

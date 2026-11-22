@@ -4495,6 +4495,9 @@ static void http_server_start_run(INTERNAL_FUNCTION_PARAMETERS)
     zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "isBodyStreamingEnabled", &retval);
     server->view.body_streaming_enabled = (Z_TYPE(retval) == IS_TRUE);
 
+    zend_call_method_with_0_params(Z_OBJ(server->config), NULL, NULL, "getIgnoreUserAbort", &retval);
+    server->view.ignore_user_abort = (Z_TYPE(retval) == IS_TRUE);
+
     /* Stamps drive CoDel sojourn samples, the telemetry aggregate
      * (sojourn_sum / service_sum / sojourn_max) and the access-log duration.
      * Drain falls back to a fresh hrtime when end_ns is 0, so it does not
