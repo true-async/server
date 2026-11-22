@@ -783,6 +783,23 @@ final class HttpServerConfig
     /** @return bool */
     public function isStatsEnabled(): bool {}
 
+    /**
+     * Whether a handler keeps running when its client leaves (#454). Off by
+     * default: on HTTP/1, a client that resets or closes the connection while
+     * a handler runs cancels the handler with HttpException 499, as a reset
+     * stream does on HTTP/2, so its awaits throw and its finally blocks run.
+     * A client that shuts its write half with more requests already sent is
+     * still answered. On, the handler runs to its end, as under PHP's
+     * ignore_user_abort(), and its writes throw 499. Fixed at server start.
+     *
+     * @param bool $ignore
+     * @return static
+     */
+    public function setIgnoreUserAbort(bool $ignore): static {}
+
+    /** @return bool */
+    public function getIgnoreUserAbort(): bool {}
+
     // === HTTP body compression (issue #8) ===
 
     /**

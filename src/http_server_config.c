@@ -125,6 +125,7 @@ struct _http_server_shared_config_t {
     bool                    http3_pacing;
     bool                    request_scope;
     bool                    stats_enabled;   /* issue #5: opt-in getStats() */
+    bool                    ignore_user_abort; /* #454: a peer that leaves does not cancel the handler */
     http_rl_trusted_t       trusted_proxies; /* plain data, copied by value */
     bool                    telemetry_enabled; /* issue #169: request timings and W3C trace context */
 
@@ -2141,6 +2142,35 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled)
     RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 
+/* {{{ proto HttpServerConfig::setIgnoreUserAbort(bool $ignore): static
+ * Whether a handler keeps running when its peer leaves (#454). */
+ZEND_METHOD(TrueAsync_HttpServerConfig, setIgnoreUserAbort)
+{
+    bool ignore;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(ignore)
+    ZEND_PARSE_PARAMETERS_END();
+
+    http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+
+    if (config_check_locked(config)) {
+        return;
+    }
+
+    config->ignore_user_abort = ignore;
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+}
+/* }}} */
+
+/* {{{ proto HttpServerConfig::getIgnoreUserAbort(): bool */
+ZEND_METHOD(TrueAsync_HttpServerConfig, getIgnoreUserAbort)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    const http_server_config_t *config = Z_HTTP_SERVER_CONFIG_P(ZEND_THIS);
+    RETURN_BOOL(config->ignore_user_abort);
+}
+/* }}} */
+
 /* {{{ proto HttpServerConfig::setTrustedProxies(array $proxies): static
  * Peers whose X-Forwarded-For names the client a rate limit counts.
  * The whole list is validated before any of it replaces the old one. */
@@ -3440,6 +3470,7 @@ static http_server_shared_config_t *http_server_shared_config_freeze(
     shared->http3_pacing                 = src->http3_pacing;
     shared->request_scope                = src->request_scope;
     shared->stats_enabled                = src->stats_enabled;
+    shared->ignore_user_abort            = src->ignore_user_abort;
     shared->trusted_proxies              = src->trusted_proxies;
     shared->telemetry_enabled            = src->telemetry_enabled;
 
@@ -3676,6 +3707,7 @@ static void http_server_config_populate_from_shared(
     dst->http3_pacing                 = src->http3_pacing;
     dst->request_scope                = src->request_scope;
     dst->stats_enabled                = src->stats_enabled;
+    dst->ignore_user_abort            = src->ignore_user_abort;
     dst->trusted_proxies              = src->trusted_proxies;
     dst->telemetry_enabled            = src->telemetry_enabled;
 

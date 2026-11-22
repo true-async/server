@@ -1,5 +1,5 @@
 /* This is a generated file, edit HttpServerConfig.php.stub.php instead.
- * Stub hash: bb6f97f9985c72e4b883475b2cc558d083030177 */
+ * Stub hash: 9585b3894beb68c81b2c3c905f3ae29f578d8d74 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig___construct, 0, 0, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, host, IS_STRING, 1, "null")
@@ -229,6 +229,12 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isStatsEnabled arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_TrueAsync_HttpServerConfig_setIgnoreUserAbort, 0, 1, IS_STATIC, 0)
+	ZEND_ARG_TYPE_INFO(0, ignore, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_TrueAsync_HttpServerConfig_getIgnoreUserAbort arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
+
 #define arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_setHttp3AltSvcEnabled
 
 #define arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled arginfo_class_TrueAsync_HttpServerConfig_getWsPermessageDeflate
@@ -424,6 +430,8 @@ ZEND_METHOD(TrueAsync_HttpServerConfig, setStatsEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setTrustedProxies);
 ZEND_METHOD(TrueAsync_HttpServerConfig, getTrustedProxies);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isStatsEnabled);
+ZEND_METHOD(TrueAsync_HttpServerConfig, setIgnoreUserAbort);
+ZEND_METHOD(TrueAsync_HttpServerConfig, getIgnoreUserAbort);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, isCompressionEnabled);
 ZEND_METHOD(TrueAsync_HttpServerConfig, setCompressionLevel);
@@ -559,6 +567,8 @@ static const zend_function_entry class_TrueAsync_HttpServerConfig_methods[] = {
 	ZEND_ME(TrueAsync_HttpServerConfig, setTrustedProxies, arginfo_class_TrueAsync_HttpServerConfig_setTrustedProxies, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, getTrustedProxies, arginfo_class_TrueAsync_HttpServerConfig_getTrustedProxies, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isStatsEnabled, arginfo_class_TrueAsync_HttpServerConfig_isStatsEnabled, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, setIgnoreUserAbort, arginfo_class_TrueAsync_HttpServerConfig_setIgnoreUserAbort, ZEND_ACC_PUBLIC)
+	ZEND_ME(TrueAsync_HttpServerConfig, getIgnoreUserAbort, arginfo_class_TrueAsync_HttpServerConfig_getIgnoreUserAbort, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_setCompressionEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, isCompressionEnabled, arginfo_class_TrueAsync_HttpServerConfig_isCompressionEnabled, ZEND_ACC_PUBLIC)
 	ZEND_ME(TrueAsync_HttpServerConfig, setCompressionLevel, arginfo_class_TrueAsync_HttpServerConfig_setCompressionLevel, ZEND_ACC_PUBLIC)

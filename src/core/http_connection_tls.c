@@ -74,12 +74,20 @@ static bool tls_arm_one_shot_read(http_connection_t *conn);
 static void tls_advance_state(http_connection_t *conn);
 static bool tls_finalize_if_closing(http_connection_t *conn);
 
-/* Whether the FSM keeps a read armed. An in-flight handler parks the
- * read so the next request's bytes wait in the kernel; a lingering close
- * does not wait for the handler, since the bytes it reads are dropped. */
+/* Whether the FSM keeps a read armed. A lingering close does not wait for
+ * the handler, since the bytes it reads are dropped. An HTTP/1 handler in
+ * flight keeps the read armed while the buffer has room, so that a client
+ * that leaves is seen and its handler cancelled (#454); the next request
+ * waits there decrypted and not yet parsed, and a full buffer parks the read
+ * so the rest waits in the kernel. */
 static inline bool tls_read_wanted(const http_connection_t *conn)
 {
-    return !conn->tls_awaiting_handler || conn->linger_close;
+    if (!conn->tls_awaiting_handler || conn->linger_close) {
+        return true;
+    }
+
+    return conn->protocol_type == HTTP_PROTOCOL_HTTP1
+        && conn->read_buffer_len < conn->read_buffer_size;
 }
 
 /* Producer + drain (issue #23): tls_push (coroutine) → plaintext_bio →
@@ -360,6 +368,7 @@ static void tls_fsm_io_callback_fn(
         if (UNEXPECTED(err || bytes_read <= 0)) {
             /* The peer has stopped: a drain in progress is complete. */
             http_connection_linger_end(conn);
+            http_connection_cancel_handler_for_peer_gone(conn, err, conn->tls_awaiting_handler);
             conn->state = CONN_STATE_CLOSING;
             tls_advance_state(conn);
             (void)tls_finalize_if_closing(conn);
@@ -981,7 +990,9 @@ static void tls_advance_state(http_connection_t *conn)
         tls_drain(conn);
 
         if (conn->state == CONN_STATE_CLOSING) {
-            continue;   /* peer close_notify */
+            /* peer close_notify: the client has left as surely as with a FIN. */
+            http_connection_cancel_handler_for_peer_gone(conn, false, conn->tls_awaiting_handler);
+            continue;
         }
 
         if (conn->read_buffer_len == 0) {

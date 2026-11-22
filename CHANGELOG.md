@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`HttpServerConfig::setIgnoreUserAbort()` keeps a handler running when its client leaves (#454).** Off by default, which gives the cancellation below; on, the handler runs to its end, as under PHP's `ignore_user_abort()`, and its next write throws `HttpException` 499 as before. `getIgnoreUserAbort()` reads it.
+
 ### Fixed
+
+- **On HTTP/1 a handler whose client had left kept running until its next write (#454).** A read error only latched the write failure and a clean EOF only dropped keep-alive, so a handler waiting for something that never comes — an SSE loop that sends on new events, a long poll — lived as long as the worker; over TLS nothing was read at all while a handler ran, so neither a FIN, a RST nor `close_notify` was seen. A client that resets or closes the connection now cancels its handler with `HttpException` 499, as a peer reset already did on HTTP/2: in `h1/077` and `tls/021` the handler's `finally` runs 0.1 to 0.3 ms after it started, where it used to wait out its whole 20 s `delay()`. A TLS connection keeps reading while a handler runs, as long as its buffer has room. A client that shuts its write half with more requests already sent is a half-close, as nginx and Go count it, and is still answered (`h1/079`); nothing is written to a client counted as gone.
+- **A client that closed the connection in the middle of a streamed request body left the handler waiting in `readBody()` for good (#454).** The body stream was never ended on HTTP/1, so the handler did not finish even when the server stopped. The stream now ends in an error and the handler gets `HttpException` 499 (`h1/078`); with `setIgnoreUserAbort(true)` `readBody()` throws instead of waiting (`h1/081`).
 
 - **A static mount answered 404 to a directory requested without a trailing slash, even under `on_missing: Next`** (laravel-spawn#85). `GET /docs`, where `docs/` is a directory of the mount, never reached the PHP handler, so a route at the root mount with that path could not answer. `open()` succeeds on a directory, and the send-file engine refused it after the open with a 404 of its own; a directory now takes the path of a missing file, as it already did when the file is sent without the engine. Evidence: `static/026` fails before and passes after.
 - **A FIFO in a static mount blocked the whole event loop.** `open()` for reading on a FIFO without a writer sleeps until one appears, and the static handler opened it in the event-loop thread, so every connection of that thread waited. Static files are now opened with `O_NONBLOCK`: the open returns at once, the file-type check rejects the FIFO, and under `on_missing: Next` the request goes to PHP. Evidence: `static/027` fails before and passes after.

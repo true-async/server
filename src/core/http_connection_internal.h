@@ -163,4 +163,9 @@ void tls_release_waiters(http_connection_t *conn);
  * fast path; http_protocol_pick_handler holds the precedence. */
 void http_connection_bind_protocol_handler(http_connection_t *conn);
 
+/* Cancels the handler of a peer that has gone; http_connection.c. */
+void http_connection_cancel_handler_for_peer_gone(http_connection_t *conn,
+                                                  bool reset,
+                                                  bool request_complete);
+
 #endif /* HTTP_CONNECTION_INTERNAL_H */

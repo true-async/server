@@ -1322,6 +1322,23 @@ final class HttpServerConfig
     public function isStatsEnabled(): bool {}
 
     /**
+     * Whether a handler keeps running when its client leaves. Off by default:
+     * on HTTP/1, a client that resets or closes the connection while a handler
+     * runs cancels the handler with {@see HttpException} 499, as a reset stream
+     * does on HTTP/2, so its awaits throw and its finally blocks run. A client
+     * that shuts its write half with more requests already sent is still
+     * answered. On, the handler runs to its end, as under PHP's
+     * ignore_user_abort(), and its writes throw 499. Fixed at server start.
+     *
+     * @param bool $ignore
+     * @return static
+     */
+    public function setIgnoreUserAbort(bool $ignore): static {}
+
+    /** @return bool */
+    public function getIgnoreUserAbort(): bool {}
+
+    /**
      * Proxies whose `X-Forwarded-For` names the client a rate limit counts
      * (#414). Each entry is an IPv4 or IPv6 address, optionally with a `/bits`
      * prefix, or the word `unix` for Unix-socket peers; up to 64 entries.

@@ -276,6 +276,7 @@ struct _http_server_config_t {
     bool     http3_pacing;            /* QUIC send pacing — opt-in (#59 Phase 2) */
     bool     request_scope;           /* Per-request child scope (default on) */
     bool     stats_enabled;           /* issue #5: opt-in getStats() aggregate */
+    bool     ignore_user_abort;       /* #454: a peer that leaves does not cancel the handler */
 
     /* setTrustedProxies(): peers whose X-Forwarded-For names the client
      * a rate limit counts. Plain data, copied by value through the frozen
@@ -1157,6 +1158,7 @@ typedef struct {
     bool     request_scope;              /* Per-request child scope (default on) */
     bool     telemetry_enabled;          /* W3C trace context ingestion */
     bool     body_streaming_enabled;     /* Issue #26 */
+    bool     ignore_user_abort;          /* #454: setIgnoreUserAbort() */
     /* Hot-path gate: true iff per-request hrtime stamps (enqueue_ns /
      * start_ns / end_ns) are needed by an active consumer (CoDel or
      * telemetry). Set once at start(); the H1/H2/H3 hot paths read it

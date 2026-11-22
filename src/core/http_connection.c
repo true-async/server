@@ -19,6 +19,7 @@
 #include "http1/http1_stream.h"
 #include "http_connection.h"
 #include "http_connection_internal.h"
+#include "http_body_stream.h"         /* body stream error on a peer gone mid-body */
 #include "http_protocol_handlers.h"  /* handler pick, once the protocol is known */
 #include "conn_arena.h"
 #include "log/http_log.h"           /* http_logf_debug for absorbed-exception sites */
@@ -1370,6 +1371,9 @@ static void http_connection_read_callback_fn(
         if (err) {
             conn->write_failed = true;
         }
+
+        http_connection_cancel_handler_for_peer_gone(conn, err, conn->request_in_flight);
+
         async_plain_event_fire(conn->out_idle_event);
         async_plain_event_fire(conn->out_drain_event);
 
@@ -2609,6 +2613,69 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
                             ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
 
     ZEND_ASYNC_CANCEL(h, exc, true);
+}
+/* }}} */
+
+/* {{{ http_connection_cancel_handler_for_peer_gone
+ *
+ * The peer has gone while a handler runs: cancel the handler with
+ * HttpException 499, as HTTP/2 does on a peer reset, so its awaits throw and
+ * its finally blocks run. Left alone it would learn of the departure only on
+ * its next write, and a handler waiting for an event that never comes would
+ * live as long as the worker.
+ *
+ * reset is a read error (RST, ECONNRESET); otherwise the peer sent a FIN.
+ * request_complete is whether the parser has the whole request: a body that
+ * stops short can never be read to its end, so its stream is errored even when
+ * the handler is left running.
+ *
+ * A FIN after a complete request with more requests buffered behind it is a
+ * half-close: that peer still reads, and the chain is answered. Any other FIN
+ * counts as a disconnect, as nginx and Go count it, and the connection takes
+ * its output as lost (write_failed). setIgnoreUserAbort(true) leaves every
+ * handler running, as PHP's ignore_user_abort() does; its writes still throw
+ * 499. */
+void http_connection_cancel_handler_for_peer_gone(http_connection_t *conn,
+                                                  const bool reset,
+                                                  const bool request_complete)
+{
+    http_request_t *req = conn->current_request;
+
+    if (req == NULL || req->coroutine == NULL
+        || conn->protocol_type != HTTP_PROTOCOL_HTTP1) {
+        return;
+    }
+
+    if (!request_complete) {
+        http_body_stream_error(req);
+    }
+
+    if (conn->view != NULL && conn->view->ignore_user_abort) {
+        return;
+    }
+
+    if (!reset && request_complete && conn->read_buffer_len > 0) {
+        return;
+    }
+
+    zend_coroutine_t *co = req->coroutine;
+    req->coroutine = NULL;
+    conn->write_failed = true;
+
+    zval exception_zv, message_zv, code_zv;
+    object_init_ex(&exception_zv, http_exception_ce);
+    zend_object *exc = Z_OBJ(exception_zv);
+
+    ZVAL_STRING(&message_zv, reset ? "connection reset by peer" : "connection closed by peer");
+    zend_update_property_ex(http_exception_ce, exc,
+                            ZSTR_KNOWN(ZEND_STR_MESSAGE), &message_zv);
+    zval_ptr_dtor(&message_zv);
+
+    ZVAL_LONG(&code_zv, 499);
+    zend_update_property_ex(http_exception_ce, exc,
+                            ZSTR_KNOWN(ZEND_STR_CODE), &code_zv);
+
+    ZEND_ASYNC_CANCEL(co, exc, true);
 }
 /* }}} */
 
