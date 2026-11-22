@@ -2630,7 +2630,8 @@ void http_connection_cancel_handler_for_parse_error(http_connection_t *conn)
  * the handler is left running.
  *
  * A FIN after a complete request with more requests buffered behind it is a
- * half-close: that peer still reads, and the chain is answered. Any other FIN
+ * half-close: that peer still reads, and the chain is answered. A handler past
+ * end() is not cancelled either: the client has its answer. Any other FIN
  * counts as a disconnect, as nginx and Go count it, and the connection takes
  * its output as lost (write_failed). setIgnoreUserAbort(true) leaves every
  * handler running, as PHP's ignore_user_abort() does; its writes still throw
@@ -2651,6 +2652,15 @@ void http_connection_cancel_handler_for_peer_gone(http_connection_t *conn,
     }
 
     if (conn->view != NULL && conn->view->ignore_user_abort) {
+        return;
+    }
+
+    /* The client has its whole answer: what the handler does after end() is
+     * the server's own work, a framework's terminate step among it. */
+    const http1_request_ctx_t *const ctx = (const http1_request_ctx_t *)req->coroutine->extended_data;
+    if (ctx != NULL && (ctx->response_finishing
+        || (Z_TYPE(ctx->response_zv) == IS_OBJECT
+            && http_response_is_closed(Z_OBJ(ctx->response_zv))))) {
         return;
     }
 

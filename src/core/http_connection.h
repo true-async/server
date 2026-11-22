@@ -414,6 +414,10 @@ typedef struct {
                                                   * of its Content-Length: the peer still
                                                   * counts down bytes that will not come,
                                                   * so no message may follow it either. */
+    bool               response_finishing;       /* the handler has finished its streamed
+                                                  * response and its last bytes are being
+                                                  * written: a client that leaves from here on
+                                                  * has its answer and cancels nothing (#454). */
     bool               skip_php_handler;         /* static handler (issue #13) populated the
                                                   * response in C; coroutine entry must NOT
                                                   * call the user PHP handler. Dispose still
