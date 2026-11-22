@@ -46,8 +46,10 @@ $client = spawn(function () use ($port) {
     $sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
     socket_connect($sock, '127.0.0.1', $port);
     socket_write($sock, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    // Up to the terminator: leaving on the body alone races end(), whose
+    // write then fails, and on Windows at once.
     $got = '';
-    while (!str_contains($got, 'done')) {
+    while (!str_contains($got, "\r\n0\r\n\r\n")) {
         $piece = socket_read($sock, 4096);
         if ($piece === false || $piece === '') break;
         $got .= $piece;
