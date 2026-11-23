@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-23
+
+The first stable release. The code is that of 0.20.0; built with php-async 1.0.0.
+
 ## [0.20.0] - 2026-11-23
 
 ### Added
