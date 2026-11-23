@@ -966,6 +966,9 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     `setIgnoreUserAbort()`; minor, since the setter is new API. Built with
     php-async 0.13.0. Version bump, CHANGELOG section, tag `v0.20.0`; the IDE
     stubs already carry the setter.
+63. Release 1.0.0 (asked for by Edmond, 2026-11-23): the first stable
+    release, together with php-async 1.0.0; the code is that of 0.20.0.
+    Version bump, CHANGELOG section, tag `v1.0.0`.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
