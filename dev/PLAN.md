@@ -961,6 +961,11 @@ Added by the health check of 2026-09-30 (`dev/HEALTH.md`), in this order:
     end being written: `response_finishing`) is no longer cancelled; `h1/082`
     failed before that, with `after end cancelled: 499`. This reverses the
     Sage's "code after end() is cancelled too": Laravel runs `terminate()` there.
+62. Release 0.20.0 (asked for by Edmond, 2026-11-23): #454 and #456, the
+    cancellation of an HTTP/1 handler whose client left and
+    `setIgnoreUserAbort()`; minor, since the setter is new API. Built with
+    php-async 0.13.0. Version bump, CHANGELOG section, tag `v0.20.0`; the IDE
+    stubs already carry the setter.
 52. #444 — `HttpRequest::isSecure()`: done, PR 445 (7b4c290). The TLS flag is copied onto the request beside the peer
     (H1 parser, H2 session, H3 stream); the pooled H3 handler reads the
     stream's request, and the sendfile rebuild in `http3_dispatch.c` has no
